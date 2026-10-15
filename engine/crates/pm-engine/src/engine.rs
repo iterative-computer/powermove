@@ -40,6 +40,7 @@ use pm_protocol::version::{
 use serde::Serialize;
 
 use crate::inflight::{FailedItems, InFlightTracker, WorkToken};
+use crate::jobs::{AGENT_REVISION_WAIT_US, JobDocument, JobService, WaitingFrames, WorkNote};
 use crate::lease::{Evict, LeaseBudget, NoEviction};
 use crate::present::{FramePresenter, PresentContext};
 use crate::slicing::JobSlicer;
@@ -167,6 +168,10 @@ enum HostCall {
     Mint {
         token: u64,
     },
+    /// A call the job service asked for, answered to it by its token.
+    Service {
+        token: u64,
+    },
 }
 
 /// The answer to a [`Engine::mint_handle`] call.
@@ -236,6 +241,14 @@ pub struct Engine {
     minted: Vec<MintOutcome>,
     patch_decoder: Option<Box<dyn PatchBodyDecoder>>,
     presenter: Option<Box<dyn FramePresenter>>,
+    /// The job engine's render and export service (`jobs`).
+    jobs: Option<Box<dyn JobService>>,
+    /// Shared snapshots of session mirrors handed to the service, by revision.
+    job_docs: BTreeMap<SessionId, (Revision, std::sync::Arc<pm_model::Document>)>,
+    /// Agent frame requests waiting for their revision.
+    waiting_frames: Vec<WaitingFrames>,
+    /// Breadcrumbs of the service's running work, by its token.
+    job_work: BTreeMap<u64, WorkToken>,
     logged_once: BTreeSet<String>,
     overdue_logged: Option<u64>,
 }
@@ -343,6 +356,10 @@ impl Engine {
             minted: Vec::new(),
             patch_decoder: None,
             presenter: None,
+            jobs: None,
+            job_docs: BTreeMap::new(),
+            waiting_frames: Vec::new(),
+            job_work: BTreeMap::new(),
             logged_once: BTreeSet::new(),
             overdue_logged: None,
         }
@@ -365,6 +382,27 @@ impl Engine {
 
     pub fn has_presenter(&self) -> bool {
         self.presenter.is_some()
+    }
+
+    /// Installs the render and export service (contracts 12 and 13). Only
+    /// the job engine runs jobs and agent frames.
+    pub fn set_job_service(&mut self, service: Box<dyn JobService>) {
+        if self.config.process == EngineProcess::Job {
+            self.jobs = Some(service);
+        }
+    }
+
+    pub fn has_job_service(&self) -> bool {
+        self.jobs.is_some()
+    }
+
+    /// Sends what the job service produced off this thread: its responses,
+    /// status events, and host calls. Its host calls `pump` when the service
+    /// wakes it; `receive` and `tick` pump too.
+    pub fn pump(&mut self) -> Vec<Action> {
+        let mut out = Out::default();
+        self.drain_jobs(&mut out);
+        out.0
     }
 
     /// Runs `f` with the presenter and a context over the lease; its log
@@ -494,6 +532,16 @@ impl Engine {
             self.sessions.remove(id);
         }
         self.with_presenter(out, |p, ctx| p.port_closed(ctx, port));
+        self.waiting_frames.retain(|w| w.port != port);
+        for id in &closed {
+            self.job_docs.remove(id);
+        }
+        if let Some(jobs) = self.jobs.as_mut() {
+            for id in &closed {
+                jobs.session_closed(*id);
+            }
+            jobs.port_closed(port);
+        }
         if !closed.is_empty() {
             out.log(
                 LogLevel::Info,
@@ -561,6 +609,10 @@ impl Engine {
                 }
                 self.dispatch(port, kind, envelope, now, &mut out);
             }
+        }
+        if self.jobs.is_some() {
+            self.release_waiting_frames(now, &mut out);
+            self.drain_jobs(&mut out);
         }
         out.0
     }
@@ -756,6 +808,11 @@ impl Engine {
                 };
                 self.sessions.remove(&sid);
                 self.with_presenter(out, |p, ctx| p.session_closed(ctx, port, sid));
+                self.job_docs.remove(&sid);
+                self.waiting_frames.retain(|w| w.session != sid);
+                if let Some(jobs) = self.jobs.as_mut() {
+                    jobs.session_closed(sid);
+                }
                 self.respond(port, id, Response::Ack, Some(sid), None, out);
             }
             Request::Resync(resync) => self.resync(port, id, session, resync, out),
@@ -834,6 +891,16 @@ impl Engine {
                 if let Err(error) = result {
                     self.send_error(port, id, *error, out);
                 }
+            }
+            Request::SubmitJob(job) if self.jobs.is_some() && kind == PeerKind::Host => {
+                self.submit_job(port, id, job, out)
+            }
+            Request::CancelJobs(cancel) if self.jobs.is_some() && kind == PeerKind::Host => {
+                let cancelled = self.jobs.as_mut().expect("checked").cancel(&cancel);
+                self.respond(port, id, Response::JobsCancelled(cancelled), None, None, out);
+            }
+            Request::AgentFrames(request) if self.jobs.is_some() && kind == PeerKind::Host => {
+                self.agent_frames(port, id, session, revision, request, now, out)
             }
             Request::RenderFrame(_)
             | Request::Evaluate(_)
@@ -1125,7 +1192,12 @@ impl Engine {
                 self.apply_patches(port, session, batch, out)
             }
             (Event::Slicing(policy), PeerKind::Host) => match self.slicer.as_mut() {
-                Some(slicer) => slicer.set_policy(policy),
+                Some(slicer) => {
+                    slicer.set_policy(policy);
+                    if let Some(jobs) = self.jobs.as_mut() {
+                        jobs.policy(&policy);
+                    }
+                }
                 None => self.log_once(out, "slicing policy sent to the interactive engine".into()),
             },
             (Event::Deadline(signal), PeerKind::Host | PeerKind::PeerEngine) => {
@@ -1177,6 +1249,9 @@ impl Engine {
             return;
         };
         slicer.on_signal(signal);
+        if let Some(jobs) = self.jobs.as_mut() {
+            jobs.signal(signal);
+        }
         match signal {
             DeadlineSignal::PlaybackStarted { .. } => self.playing = true,
             DeadlineSignal::PlaybackStopped { .. } => self.playing = false,
@@ -1396,6 +1471,11 @@ impl Engine {
                 token,
                 result: Ok(grant),
             }),
+            (HostCall::Service { token }, body) => {
+                if let Some(jobs) = self.jobs.as_mut() {
+                    jobs.host_answer(token, Ok(body));
+                }
+            }
             (call, body) => out.log(
                 LogLevel::Error,
                 format!("host answered {call:?} with {:?}", body.kind()),
@@ -1422,6 +1502,11 @@ impl Engine {
                 token,
                 result: Err(error),
             }),
+            HostCall::Service { token } => {
+                if let Some(jobs) = self.jobs.as_mut() {
+                    jobs.host_answer(token, Err(error));
+                }
+            }
         }
     }
 
@@ -1583,6 +1668,10 @@ impl Engine {
     /// breadcrumb. Call every 100 ms or so, and after `begin_work`.
     pub fn tick(&mut self, now: HostMicros) -> Vec<Action> {
         let mut out = Out::default();
+        if self.jobs.is_some() {
+            self.release_waiting_frames(now, &mut out);
+            self.drain_jobs(&mut out);
+        }
         self.flush_inflight(&mut out);
         let active = !self.sessions.is_empty();
         if let Some(usage) = self.lease.poll_report(now, active)
@@ -1608,6 +1697,211 @@ impl Engine {
             }
         }
         out.0
+    }
+
+    /// The shared snapshot of a session's mirror at its applied revision.
+    fn job_document(&mut self, sid: SessionId) -> Option<JobDocument> {
+        let session = self.sessions.get(&sid)?;
+        let mirror = session.mirror.as_ref()?;
+        let revision = session.revisions.applied();
+        let document = match self.job_docs.get(&sid) {
+            Some((r, doc)) if *r == revision => doc.clone(),
+            _ => {
+                let doc = std::sync::Arc::new(mirror.clone());
+                self.job_docs.insert(sid, (revision, doc.clone()));
+                doc
+            }
+        };
+        Some(JobDocument {
+            session: sid,
+            revision,
+            document,
+        })
+    }
+
+    fn submit_job(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        job: pm_protocol::priority::SubmitJob,
+        out: &mut Out,
+    ) {
+        if let Err(violation) = pm_protocol::validate::Validate::validate(&job) {
+            let error = request_error(id, ErrorCode::InvalidMessage, &violation.to_string());
+            self.send_error(port, id, error, out);
+            return;
+        }
+        let document = match &job.spec {
+            pm_protocol::priority::JobSpec::Export { session, .. } => {
+                if !self
+                    .sessions
+                    .get(session)
+                    .is_some_and(|s| s.port == port && s.role == SessionRole::JobSnapshot)
+                {
+                    let error = request_error(
+                        id,
+                        ErrorCode::UnknownSession,
+                        "An export renders a job snapshot session this connection opened.",
+                    );
+                    self.send_error(port, id, error, out);
+                    return;
+                }
+                match self.job_document(*session) {
+                    Some(doc) => Some(doc),
+                    None => {
+                        let error = request_error(
+                            id,
+                            ErrorCode::StaleRevision,
+                            "The job snapshot session has no document yet; resync it first.",
+                        )
+                        .with_retry(Retry::AfterResync);
+                        self.send_error(port, id, error, out);
+                        return;
+                    }
+                }
+            }
+            pm_protocol::priority::JobSpec::GenerateProxy { .. } => None,
+        };
+        let result = self
+            .jobs
+            .as_mut()
+            .expect("checked by the caller")
+            .submit(port, job, document);
+        match result {
+            Ok(accepted) => self.respond(port, id, Response::JobAccepted(accepted), None, None, out),
+            Err(error) => {
+                let error = EngineError {
+                    scope: ErrorScope::Request { id },
+                    ..error
+                };
+                self.send_error(port, id, error, out)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn agent_frames(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        session: Option<SessionId>,
+        revision: Option<Revision>,
+        request: pm_protocol::priority::AgentFrameRequest,
+        now: HostMicros,
+        out: &mut Out,
+    ) {
+        let Some(sid) = self.owned_session(port, id, session, out) else {
+            return;
+        };
+        if let Err(violation) = pm_protocol::validate::Validate::validate(&request) {
+            let error = request_error(id, ErrorCode::InvalidMessage, &violation.to_string());
+            self.send_error(port, id, error, out);
+            return;
+        }
+        let wanted = revision.unwrap_or(Revision::ZERO);
+        self.waiting_frames.push(WaitingFrames {
+            port,
+            id,
+            session: sid,
+            revision: wanted,
+            request,
+            deadline_us: now.get().saturating_add(AGENT_REVISION_WAIT_US),
+        });
+        self.release_waiting_frames(now, out);
+    }
+
+    /// Hands agent frame requests whose revision arrived to the service, and
+    /// fails those whose wait bound passed (contract 12 invariant 2).
+    fn release_waiting_frames(&mut self, now: HostMicros, out: &mut Out) {
+        if self.waiting_frames.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.waiting_frames);
+        for w in waiting {
+            let ready = self.sessions.get(&w.session).is_some_and(|s| {
+                s.mirror.is_some() && !s.stale && s.revisions.satisfies(w.revision)
+            });
+            if ready {
+                let Some(document) = self.job_document(w.session) else {
+                    continue;
+                };
+                let result = self
+                    .jobs
+                    .as_mut()
+                    .expect("frames wait only with a service")
+                    .agent_frames(w.port, w.id, document, w.request);
+                if let Err(error) = result {
+                    let error = EngineError {
+                        scope: ErrorScope::Request { id: w.id },
+                        ..error
+                    };
+                    self.send_error(w.port, w.id, error, out);
+                }
+            } else if now.get() >= w.deadline_us {
+                let error = request_error(
+                    w.id,
+                    ErrorCode::StaleRevision,
+                    "The agent's revision did not reach the job engine in time.",
+                )
+                .with_retry(Retry::AfterResync);
+                self.send_error(w.port, w.id, error, out);
+            } else {
+                self.waiting_frames.push(w);
+            }
+        }
+    }
+
+    /// Sends the service's outbox and makes its host calls.
+    fn drain_jobs(&mut self, out: &mut Out) {
+        let Some(jobs) = self.jobs.as_mut() else {
+            return;
+        };
+        let drained = jobs.drain();
+        if drained.is_empty() {
+            return;
+        }
+        for (port, envelope) in drained.messages {
+            self.send_raw(port, envelope, out);
+        }
+        for note in drained.work {
+            match note {
+                WorkNote::Started { token, scopes } => {
+                    let work = self.inflight.enter(&scopes);
+                    self.job_work.insert(token, work);
+                }
+                WorkNote::Ended { token } => {
+                    if let Some(work) = self.job_work.remove(&token) {
+                        self.inflight.leave(work);
+                    }
+                }
+            }
+        }
+        for call in drained.host_requests {
+            let failed = match self.open_host() {
+                Some(host) => match self.call_host(host, call.request, call.session, out) {
+                    Some(id) => {
+                        self.host_calls
+                            .insert(id, HostCall::Service { token: call.token });
+                        None
+                    }
+                    None => Some("The host call could not be sent."),
+                },
+                None => Some("The engine has no host connection."),
+            };
+            if let Some(message) = failed
+                && let Some(jobs) = self.jobs.as_mut()
+            {
+                jobs.host_answer(
+                    call.token,
+                    Err(EngineError::new(
+                        ErrorCode::Internal,
+                        ErrorScope::Connection,
+                        message,
+                    )),
+                );
+            }
+        }
+        self.flush_inflight(out);
     }
 
     fn flush_inflight(&mut self, out: &mut Out) {

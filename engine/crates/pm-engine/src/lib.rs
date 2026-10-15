@@ -6,6 +6,7 @@
 pub mod clock;
 pub mod engine;
 pub mod inflight;
+pub mod jobs;
 pub mod lease;
 pub mod present;
 pub mod priority;
