@@ -78,7 +78,7 @@ fn main() {
                 None => histogram.push((key, 1)),
             }
         }
-        histogram.sort_by(|a, b| b.1.cmp(&a.1));
+        histogram.sort_by_key(|b| std::cmp::Reverse(b.1));
         let histogram = histogram
             .iter()
             .take(4)
