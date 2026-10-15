@@ -864,13 +864,19 @@ V.dispose = disposeRuntime;
    hears about each move before the rAF that would carry it (amendment 18;
    engine-present/raw-gestures.ts). The WebGL path keeps `pointermove`. */
 V.rawGestures = () => !!enginePresentation?.presenting && supportsRawUpdates(V.stage?.ownerDocument?.defaultView ?? window);
+let activeRaw: ReturnType<typeof rawDragMoves> | null = null;
+/** Whether the newest raw update waits for the move interval (the measurement harness attributes it to the next view). */
+V.rawGesturePending = () => !!activeRaw?.pending();
 const beginDrag = (event: any, options: any) => {
   activeDrag?.cancel();
   let control: any;
   const host: Window = event?.view ?? V.stage?.ownerDocument?.defaultView ?? window;
   const raw = options.move && !options.infinite && V.rawGestures() ? rawDragMoves(event, options.move, host) : null;
+  activeRaw = raw;
   const finish = (kind: 'up' | 'cancel', args: any[]) => {
-    raw?.stop();
+    // On up, a waiting raw update lands before the gesture's own up.
+    raw?.stop(kind === 'up');
+    if (activeRaw === raw) activeRaw = null;
     if (activeDrag === control) activeDrag = null;
     return options[kind]?.(...args);
   };

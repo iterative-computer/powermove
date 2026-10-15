@@ -159,7 +159,10 @@ function onPointer(event: PointerEvent): void {
     panSeq = seq;
     inputs.push([seq, seqs, event.timeStamp, handled]);
   } else {
-    inputs.push([viewSeq(), seqs, event.timeStamp, handled]);
+    // A raw update the viewer holds for its move interval (raw-gestures.ts)
+    // shows in the next view, not the current one.
+    const waiting = event.type === 'pointerrawupdate' && viewer()?.rawGesturePending?.() === true;
+    inputs.push([viewSeq() + (waiting ? 1 : 0), seqs, event.timeStamp, handled]);
   }
 }
 // Bubble phase on the window: after the viewer's own (capture-phase) drag
