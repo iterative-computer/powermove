@@ -12,8 +12,9 @@ drawn on the page's main thread and by the viewer's presentation worker)
 and the quality lines. Against the real viewer playing the corpus project
 in the real app, the engine path presented from the worker is better for
 playback, idle and under the gate load (0 to 5 drops a minute against 84
-to 238 under load), and worse on gestures: about a refresh slower at p50
-idle and slower at p99 idle and under load (see
+to 238 under load), and worse on gestures: 5 to 9 ms slower at p50 idle
+in three of four paired runs (r9: 19.5 against 14.5 ms) and slower at p99
+idle and under load (see
 [The amended S1 gate](#the-amended-s1-gate-against-the-real-viewer)).
 Amendment 18's three steps are in and measured; the C′ prototype misses
 the zero-drop line and is not adopted; Electron offers no ProMotion
@@ -266,62 +267,107 @@ is 1195 × 546 CSS px at DPR 2 on the built-in 120 Hz XDR panel. Electron
 - **Display:** every run checks that the main display is awake and the
   session unlocked before and after (with the display asleep nothing is
   scanned out and Chromium's presentation times are its own estimates);
-  runs that saw otherwise are marked invalid. All r8 runs were valid.
+  runs that saw otherwise are marked invalid. All r8 and r9 runs were
+  valid.
 - **Machine:** shared with up to three other agents' builds; the 1-minute
-  load average is in each summary (2.3 to 11.8 across these runs). The
+  load average is in each summary (2.3 to 14.3 across these runs). The
   spread between runs of the same configuration is larger than some
   differences between paths, so every configuration has several runs.
 
-Runs r5 to r8 are the current configuration (presentation worker, raw
-gestures, vsync hint); r8 is after the last merge of `feat/native-engine`.
+Runs r5 to r9 are the current configuration (presentation worker, raw
+gestures, vsync hint); r9 is the branch head after the last merge of
+`feat/native-engine` and the review fixes.
 
 **Playback** (1,793 expected content frames a run):
 
 | Path | Load | Runs | Drops | \|jitter\| p50 (ms) | \|jitter\| p99 (ms) | rAF → present p50 (ms) |
 |---|---|---|---|---|---|---|
-| Today (real WebGL viewer) | idle | r5, r6, r8 | 1, 1, 4 | 0.11, 8.04, 0.28 | 8.48, 16.37, 33.51 | 27.4, 27.1, 20.0 |
-| Engine (worker) | idle | r5, r6, r8 | 0, 0, 0 | 0.08, 0.08, 0.11 | 8.45, 8.45, 8.35 | 18.7, 18.7, 20.3 |
-| Today | gate load | r5, r6, r7, r8 | 84, 139, 113, 238 | 0.14, 0.10, 0.11, 8.21 | 50.04, 33.25, 33.33, 108.25 | 25.1, 10.9, 11.0, 20.8 |
-| Engine (worker) | gate load | r5, r6, r7, r8 | 5, 0, 0, 0 | 0.38, 0.09, 0.09, 0.16 | 11.02, 10.88, 10.82, 14.25 | 18.6, 18.8, 18.6, 20.0 |
+| Today (real WebGL viewer) | idle | r5, r6, r8, r9 | 1, 1, 4, 3 | 0.11, 8.04, 0.28, 4.69 | 8.48, 16.37, 33.51, 12.21 | 27.4, 27.1, 20.0, 19.8 |
+| Engine (worker) | idle | r5, r6, r8, r9 | 0, 0, 0, 0 | 0.08, 0.08, 0.11, 3.70 | 8.45, 8.45, 8.35, 8.36 | 18.7, 18.7, 20.3, 19.6 |
+| Today | gate load | r5, r6, r7, r8, r9 | 84, 139, 113, 238, 91 | 0.14, 0.10, 0.11, 8.21, 4.52 | 50.04, 33.25, 33.33, 108.25, 53.84 | 25.1, 10.9, 11.0, 20.8, 19.9 |
+| Engine (worker) | gate load | r5, r6, r7, r8, r9 | 5, 0, 0, 0, 0 | 0.38, 0.09, 0.09, 0.16, 0.38 | 11.02, 10.88, 10.82, 14.25, 12.08 | 18.6, 18.8, 18.6, 20.0, 19.8 |
 
 Today's drops under load sit inside the live resizes (202 of r8's 238,
-22 more in a long task during a resize). The engine path's 5 drops (r5)
-are its only ones in the nine worker runs (with the phase A/B below).
+22 more in a long task during a resize; 87 of r9's 91). The engine
+path's 5 drops (r5) are its only ones in the eleven worker runs (with the
+phase A/B below). In r9 both paths' idle jitter p50 rose to 3.7 and 4.7
+ms: the engine's rAF → presentation rounded to one refresh for 836 of
+1,793 frames and to two for 957 (r8: 59 and 1,665), so cadence
+alternated between refreshes in that run; the worker canvas has
+no presentation feedback, so the presenter cannot see which it gets.
 Engine frames showed 10.9 to 12.4 ms after their time on the transport
-clock's line at p50 in r6 and r8 and 17.9 ms in r7 (`dueToPresentMs`;
-p99 11.4 to 26.4 ms): outside section 15's ±10 ms, and not yet
-explained (see gaps).
+clock's line at p50 in r6 and r8, 17.9 ms in r7, and 6.1 (idle) and 7.6
+ms (load) in r9 (`dueToPresentMs`; p99 10.8 to 26.4 ms): inside section
+15's ±10 ms in r9 only, and not yet calibrated (see gaps).
 
 **Pointer-to-pixel, pan** (2,401 events a run; ms, p50 / p99):
 
-| Path | Load | r5 | r6 | r7 | r8 | r8 counting inputs whose first frame dropped |
-|---|---|---|---|---|---|---|
-| Today | idle | | 16.5 / 26.0 | 19.5 / 28.5 | 16.0 / 25.2 | 16.0 / 31.8 |
-| Engine (worker) | idle | 28.3 / 36.7 | 25.0 / 33.6 | 15.3 / 31.0 | 23.3 / 56.4 | 23.3 / 56.4 |
-| Today | gate load | 25.0 / 66.7 | 22.3 / 71.7 | 24.1 / 65.4 | 27.9 / 69.9 | 27.9 / 86.4 |
-| Engine (worker) | gate load | 27.6 / 69.2 | 16.9 / 83.3 | 19.1 / 77.5 | 22.7 / 105.9 | 22.7 / 105.9 |
+| Path | Load | r5 | r6 | r7 | r8 | r9 | counting inputs whose first frame dropped (r8, r9) |
+|---|---|---|---|---|---|---|---|
+| Today | idle | | 16.5 / 26.0 | 19.5 / 28.5 | 16.0 / 25.2 | 14.5 / 23.1 | 16.0 / 31.8, 14.5 / 23.1 |
+| Engine (worker) | idle | 28.3 / 36.7 | 25.0 / 33.6 | 15.3 / 31.0 | 23.3 / 56.4 | 19.5 / 32.3 | 23.3 / 56.4, 19.5 / 32.3 |
+| Today | gate load | 25.0 / 66.7 | 22.3 / 71.7 | 24.1 / 65.4 | 27.9 / 69.9 | 22.7 / 67.5 | 27.9 / 86.4, 25.5 / 84.1 |
+| Engine (worker) | gate load | 27.6 / 69.2 | 16.9 / 83.3 | 19.1 / 77.5 | 22.7 / 105.9 | 23.0 / 81.6 | 22.7 / 105.9, 23.0 / 81.6 |
 
-Today's layer drag: 20.6 to 25.4 ms p50 and 33.4 to 36.8 ms p99 idle (r6
-to r8); 32.9 to 34.2 ms p50 and 76.1 to 91.8 ms p99 under load (r5 to
-r8). Today drops the first frame of up to 182 inputs a run, which
+r9 is the current head after the review fixes (raw moves applied at most
+once per 4 ms, which the harness's 120 events a second never reach; the
+skipped WebGL resize; a failing worker's frames handed back). Today's
+layer drag: 20.6 to 25.4 ms p50 and 33.4 to 37.4 ms p99 idle (r6 to r9);
+24.8 to 34.2 ms p50 and 74.7 to 91.8 ms p99 under load (r5 to r9). Today
+drops the first frame of up to 182 inputs a run, which
 `pointerToPixelMs` leaves out; `pointerToPixelWithDropsMs` (added for r8)
 times them to the next presented frame. The engine path dropped none in
-r6 to r8.
+r6 to r9.
+
+**Where the gesture time goes** (r9, `hopsMs` in each latency summary;
+ms, p50 / p99). Every hop is timed per input on one clock: the page's
+handling of the event, the descriptor's arrival on the page, the worker's
+submit, viz receiving the worker canvas's compositor frame, the start of
+viz's `DrawAndSwap` that drew it, and that display frame's presentation.
+
+| Hop | Engine idle | Engine load |
+|---|---|---|
+| input → handled on the page (`pointerrawupdate`) | 1.6 / 6.0 | 1.0 / 41.0 |
+| handled → descriptor on the page (view state out, engine render, descriptor back) | 1.1 / 8.7 | 1.4 / 30.1 |
+| arrival → worker submit (import, transfer, draw) | 0.5 / 0.6 | 0.4 / 0.5 |
+| submit → viz received | 1.1 / 10.9 | 1.6 / 22.2 |
+| received → viz draw starts | 0.1 / 7.8 | 0.1 / 3.9 |
+| viz draw → presented | 11.4 / 20.0 | 14.1 / 26.4 |
+| total | 19.5 / 32.3 | 23.0 / 81.6 |
+
+Today's pan idle: input → handled 7.1 / 11.8 ms (`pointermove` waits for
+the BeginFrame) and that frame's begin → presented 11.6 / 20.5 ms; under
+load 9.8 / 47.1 and 19.9 / 45.4 ms. viz's draws run on the 8.3 ms grid
+(1,781 of 2,452 draw-start intervals 8 ms in the engine idle trace) and
+take about 11 ms to presentation on both paths, so the paths differ
+before the draw: the engine's frame reached viz's draw 8.1 ms after the
+input at p50 (3.5 ms at p10, 11.9 ms at p90). No single hop holds it:
+each is at most 1.6 ms at p50, and their tails, all on threads that do
+other work (the page's main thread twice, the worker's commit, viz),
+add up. Rounded to whole refreshes, the engine's idle pan took one
+refresh for 0.5% of inputs, two for 73%, three for 21%, and four for 5%.
 
 **Quality lines** (absolute): pass, in the Electron integration test in
 both presentation modes (see above).
 
 **Verdict: the amended gate is not met, on pointer-to-pixel.**
 
-- Playback passes, and by a wide margin under load: no drops in three of
-  four runs against 84 to 238, jitter p99 10.8 to 14.3 ms against 33 to
+- Playback passes, and by a wide margin under load: no drops in four of
+  five runs against 84 to 238, jitter p99 10.8 to 14.3 ms against 33 to
   108 ms. Idle the engine path is no worse at p50 or p99 in any run.
-- Pointer-to-pixel idle fails: engine p50 15.3 to 28.3 ms against today's
-  16.0 to 19.5 ms (4 to 12 ms worse in three of four runs, no worse in
-  r7), p99 31 to 56 ms against 25 to 32 ms.
-- Pointer-to-pixel under load: p50 passes (16.9 to 27.6 ms against 22.3 to
-  27.9 ms); p99 fails (69 to 106 ms against 65 to 72 ms, or 86 ms with
-  today's dropped-frame inputs counted in r8).
+- Pointer-to-pixel idle fails: in the runs with both paths (r6 to r9)
+  engine p50 is 5.0 to 8.5 ms worse in three (no worse in r7), and p99
+  is worse in all four (31 to 56 ms against 23 to 29 ms).
+- Pointer-to-pixel under load: p50 is within run-to-run spread (16.9 to
+  27.6 ms against 22.3 to 27.9 ms; r9 23.0 against 22.7 ms, or against
+  25.5 ms with today's dropped-frame inputs counted); p99 fails as
+  `pointerToPixelMs` counts it in all five runs (69 to 106 ms against 65
+  to 72 ms) and is
+  mixed with today's dropped-frame inputs counted (r8 105.9 against 86.4
+  ms, r9 81.6 against 84.1 ms).
+- The gesture gap is before viz draws the frame, not after: both paths
+  take about 11 ms from viz's draw to the panel idle, and the engine's
+  frame reaches that draw 8.1 ms after the input at p50 (hops above).
 - Layer drag, orbit, and walk through the engine are not measurable until
   `pm-render` draws the document.
 
@@ -363,14 +409,17 @@ both presentation modes (see above).
 6. **ProMotion** (section 15): below. Not possible from Electron, and not
    reachable on this panel through public API for 25 fps content.
 
-What is left on gestures is structural, as far as these runs show: an
-engine gesture frame needs the page's main thread twice, once to send the
-view state for the input and again to turn the frame's descriptor into a
-`VideoFrame` (the preload's shared-texture receiver runs there) before
-the worker can draw it, while today's pan needs it once. Under a main
-stall both hops wait. This is the likely cause of the p99 gap, not a
-measured one; moving the receive off main needs Electron to hand shared
-textures to a worker, which Electron 44 cannot.
+What is left on gestures is structural, as far as these runs show. The
+r9 hop split puts it before viz's draw: from viz's draw to the panel
+both paths take about 11 ms idle, while the engine's frame needs five
+asynchronous hops to reach that draw (8.1 ms p50 after the input, against
+about 3 ms from input to today's BeginFrame). Two of them are on the
+page's main thread: sending the view state for the input, and turning
+the frame's descriptor into a `VideoFrame` (the preload's shared-texture
+receiver runs there) before the worker can draw it; today's pan needs
+main once. Under load those two hops have the long tails (p99 41 and 30
+ms). Moving the receive off main needs Electron to hand shared textures
+to a worker, which Electron 44 cannot.
 
 ## C′: playback through a remote Core Animation layer (prototype)
 
@@ -472,9 +521,10 @@ the content rate on ProMotion displays.
 
 The gate reports, as measured against the real viewer after all three of
 amendment 18's steps (plus the presentation worker): playback better than
-today's viewer, idle and under load; pointer-to-pixel about a refresh
-worse at p50 idle and worse at p99 idle and under load; C′ not adopted
-(25 drops a minute under load); no ProMotion request possible. Jude
+today's viewer, idle and under load; pointer-to-pixel 5 to 9 ms worse at
+p50 idle in three of four paired runs, worse at p99 idle, and worse at
+p99 under load as `pointerToPixelMs` counts it; C′ not adopted (25 drops
+a minute under load); no ProMotion request possible. Jude
 decides. The options as they stand:
 
 1. **Proceed on the Chromium path** with the bridge behind the flag,
@@ -663,8 +713,9 @@ outside its ownership to carry them: `pm-engine` (`engine.rs`, `present.rs`,
   the real-app harness play that part (`integration/page-engine.ts`).
 - Pointer-to-pixel fails the amended gate (idle p50 and p99, load p99);
   see [Decision](#decision-before-the-phase-2-gate).
-- Engine playback frames show 10.9 to 17.9 ms after their time on the
-  transport clock's line (p50), outside section 15's ±10 ms. With frames
+- Engine playback frames show 6.1 to 17.9 ms after their time on the
+  transport clock's line (p50, r6 to r9), outside section 15's ±10 ms in
+  every run but r9. With frames
   picked for two refreshes out and rAF to presentation at 18.6 to 20.3 ms,
   a frame shown at its first chance would land 2 to 12 ms after its time
   (about 7 ms on average); the measured p50 sits at the top of that
@@ -685,5 +736,11 @@ outside its ownership to carry them: `pm-engine` (`engine.rs`, `present.rs`,
 - A signed end-to-end run (Team ID through Electron) needs the release
   signing identity; the Team ID check is covered by Rust tests against a
   real Developer ID process.
+- The worker canvas's rAF → presentation is one or two refreshes from run
+  to run (r9: about half each, idle and under load; r5 to r8: mostly
+  two), which costs cadence in such a run (jitter p50 3.7 ms idle in r9)
+  and moves the A/V offset. A worker's WebGPU canvas has no presentation
+  feedback, so the presenter cannot correct it; viz's timing or a
+  feedback path would be needed.
 - The measurements share the machine with other agents' builds (load
-  average 2.3 to 11.8); a quiet-machine round would tighten the spread.
+  average 2.3 to 14.3); a quiet-machine round would tighten the spread.
