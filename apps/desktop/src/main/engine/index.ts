@@ -21,6 +21,7 @@ import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { EngineFontClient, installEngineFontService } from '../engine-fonts';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
+import { AgentJobs } from './agent-jobs';
 import type { ChildLike, PortLike } from './ports';
 
 /** Main's own client id for its font port to the interactive engine (never
@@ -82,6 +83,8 @@ export type InstallNativeEngineOptions = {
   isTrustedSender: (event: IpcMainInvokeEvent | Electron.IpcMainEvent) => boolean;
   userData: string;
   home: string;
+  /** Where agent exports go (default `~/Powermove`). */
+  automaticOutputDirectory?: string;
   appPath: string;
   isPackaged: boolean;
   resourcesPath: string;
@@ -96,6 +99,8 @@ export type InstallNativeEngineOptions = {
 
 export type InstalledNativeEngine = {
   engine: NativeEngine | null;
+  /** Agent exports and frames through the job engine (agent-jobs.ts). */
+  agentJobs: AgentJobs | null;
   /** The frame bridge, when its addon loaded. */
   frameBridge?: FrameBridge | null;
   attachWindow(window: BrowserWindow): void;
@@ -139,7 +144,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   });
 
   if (!options.enabled) {
-    return { engine: null, attachWindow: () => {}, dispose: async () => {} };
+    return { engine: null, agentJobs: null, attachWindow: () => {}, dispose: async () => {} };
   }
 
   const addon = engineAddonPath({ isPackaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env });
@@ -185,7 +190,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     },
     channel: () => new MessageChannelMain() as unknown as { port1: PortLike; port2: PortLike },
     cacheDirectory: path.join(options.userData, 'Engine Cache'),
-    automaticOutputDirectory: path.join(options.home, 'Powermove'),
+    automaticOutputDirectory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
     hostNow: hostNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
@@ -223,6 +228,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     }
   });
 
+  const agentJobs = new AgentJobs({ engine, log });
+
   void engine.start().catch((error: unknown) => log('error', `the engine could not start: ${error instanceof Error ? error.message : String(error)}`));
 
   const attachWindow = (window: BrowserWindow): void => {
@@ -246,7 +253,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       else engine.addClient(id, deliver);
       attached = true;
     });
-    window.once('closed', () => engine?.removeClient(id));
+    window.once('closed', () => {
+      engine?.removeClient(id);
+      void agentJobs.forgetOwner(id);
+    });
     // A page that goes away never reports its frame surfaces released.
     if (frameBridge) {
       const gone = (): void => frameBridge.receiverGone(id);
@@ -260,6 +270,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
 
   return {
     engine,
+    agentJobs,
     frameBridge,
     attachWindow,
     dispose: async () => {
@@ -267,6 +278,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       uninstallFonts();
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
+      agentJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();
     }

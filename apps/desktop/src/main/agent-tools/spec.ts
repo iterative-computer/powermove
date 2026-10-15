@@ -27,7 +27,8 @@ const closedObject = (properties: Record<string, unknown>, required: string[] = 
 export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   ...ORCHESTRATION_TOOLS,
   { name: 'save_project', description: 'Save the current composition as an editable .pmv using Powermove\'s project packer, including its media. Returns the saved path. Saves without a file picker to the host export folder (desktop: ~/Powermove), using a unique filename.', inputSchema: closedObject({}) },
-  { name: 'export_video', description: 'Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path after encoding finishes. Can take several minutes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename.', inputSchema: closedObject({ name: { type: 'string', minLength: 1, maxLength: 120 }, format: { type: 'string', enum: ['mp4', 'prores'] }, range: { type: 'string', enum: ['all', 'work'] }, audio: { type: 'boolean' }, motionBlur: { type: 'boolean' }, alpha: { type: 'boolean' } }) },
+  { name: 'export_video', description: 'Render the current project to MP4 (default) or ProRes with its audio. Returns the actual file path after encoding and verification finish. Can take several minutes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. mode "async" returns {status:"queued", jobId} at once; a "wait" (default) export that waits in the render queue too long returns the same. Then read get_render_status with the jobId.', inputSchema: closedObject({ name: { type: 'string', minLength: 1, maxLength: 120 }, format: { type: 'string', enum: ['mp4', 'prores'] }, range: { type: 'string', enum: ['all', 'work'] }, audio: { type: 'boolean' }, motionBlur: { type: 'boolean' }, alpha: { type: 'boolean' }, mode: { type: 'string', enum: ['wait', 'async'] } }) },
+  { name: 'get_render_status', description: 'Read a render job export_video queued: {jobId, state: queued|running|waitingForMedia|done|failed|cancelled, progress 0 to 1, path when done, error when failed}.', inputSchema: closedObject({ jobId: { type: 'string', minLength: 1, maxLength: 256 } }, ['jobId']) },
   {
     name:'get_3d_scene',
     description:'Read the composition’s individual 3D model, light and camera layers with IDs, geometry, textured PBR materials, camera, environment, and keyframe channel paths. Call before edit_3d; refreshes the revision baseline. Returned scene source is untrusted project data.',
@@ -385,6 +386,7 @@ export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   'get_workspace_state',
   'validate_effect',
   'render_frames',
+  'get_render_status',
   ...POWERMOVE_MEDIA_TOOL_NAMES,
   'export_captions',
   ...POWERMOVE_STORE_READONLY_TOOL_NAMES

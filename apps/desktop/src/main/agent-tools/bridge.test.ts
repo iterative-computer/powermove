@@ -72,6 +72,62 @@ describe('native Powermove agent tool bridge', () => {
       await expect(bridge.callTool(planning, 'export_video', {})).rejects.toThrow('only inspect');
     } finally { await bridge.shutdown(); }
   });
+  it('routes export_video and render_frames through the job engine and falls back when it routes', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1, layers: [] };
+    // The renderer stand-in answers the private plan and context tools.
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false }
+        : request.tool === '__engine_frames_plan' ? { times: [0, 0.5], width: 320, project: JSON.stringify(project), revision: 4 }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
+    } as never;
+    (owner as unknown as { id: number }).id = 3;
+    let route = false;
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(async (_owner: number, _run: string, _project: unknown, input: { mode?: string }) => route
+        ? { status: 'routed' as const, reason: 'text layer' }
+        : input.mode === 'async' ? { status: 'queued' as const, jobId: 'job-1' }
+        : { status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 }),
+      renderFrames: vi.fn(async () => route
+        ? { status: 'routed' as const, reason: 'text layer' }
+        : { status: 'rendered' as const, revision: 1, queuedMs: 0, images: [0, 0.5].map((time) => ({ time, data: new Uint8Array([1]), mimeType: 'image/jpeg' as const, width: 320, height: 180 })) }),
+      status: vi.fn(() => ({ jobId: 'job-1', state: 'running' as const, progress: 0.5 })),
+      cancelRun: vi.fn(async () => 1)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs });
+    try {
+      const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
+      const done = await bridge.callTool(session, 'export_video', { name: 'P', audio: false });
+      expect(JSON.parse((done.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.mp4', projectId: 'P', width: 320, height: 180, fps: 30, jobId: 'job-1' });
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' });
+      const queued = await bridge.callTool(session, 'export_video', { mode: 'async' });
+      expect(JSON.parse((queued.content[0] as { text: string }).text)).toEqual({ status: 'queued', jobId: 'job-1', projectId: 'P' });
+      const status = await bridge.callTool(session, 'get_render_status', { jobId: 'job-1' });
+      expect(JSON.parse((status.content[0] as { text: string }).text)).toEqual({ jobId: 'job-1', state: 'running', progress: 0.5 });
+      expect(engineJobs.status).toHaveBeenCalledWith(3, 'job-1');
+      const frames = await bridge.callTool(session, 'render_frames', { times: [0, 0.5], width: 320 });
+      expect(frames.content.filter((item) => item.type === 'image')).toHaveLength(2);
+      expect(frames.revision).toBe(4);
+      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', 'get_project_state', '__mcp_context', '__engine_frames_plan']);
+      // Routed: the legacy exporter and capture run, without the engine-only mode.
+      route = true;
+      owner.requests.length = 0;
+      await bridge.callTool(session, 'export_video', { audio: true, mode: 'async' });
+      await bridge.callTool(session, 'render_frames', { times: [0] });
+      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__mcp_export_video', '__engine_frames_plan', 'render_frames']);
+      expect(owner.requests[2]!.arguments).toEqual({ audio: true });
+      await expect(bridge.callTool(session, 'export_video', { alpha: true })).rejects.toThrow('ProRes');
+      await expect(bridge.callTool(session, 'export_video', { codec: 'x' })).rejects.toThrow('does not take codec');
+      // Rolling back the run cancels its jobs.
+      await session.finish(false);
+      expect(engineJobs.cancelRun).toHaveBeenCalledWith('engine-run');
+    } finally { await bridge.shutdown(); }
+  });
+
   const bridges: PowermoveAgentToolBridge[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
   const temporaryDirectories: string[] = [];
@@ -121,7 +177,7 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'save_project', 'export_video', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'save_project', 'export_video', 'get_render_status', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
       'generate_captions', 'export_captions'

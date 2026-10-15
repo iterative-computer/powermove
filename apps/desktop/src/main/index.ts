@@ -937,6 +937,11 @@ if (!hasSingleInstanceLock) {
     /* The native engine starts only with "Use New Engine" on (read once at
        launch; flipping it takes a relaunch). Off, nothing below runs. */
     const useNewEngine = newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY));
+    /* Agent exports go to ~/Powermove; a background test names its own folder. */
+    const testExports = process.env['POWERMOVE_AGENT_EXPORTS'];
+    const agentExportDirectory = isBackgroundTest && testExports && path.isAbsolute(testExports)
+      ? testExports
+      : path.join(app.getPath('home'), 'Powermove');
     /* The host media store (section 21): the source of project media bytes
        with the new engine on; read-only fallback for its media with it off. */
     const mediaStore = installMediaStore({
@@ -950,6 +955,7 @@ if (!hasSingleInstanceLock) {
     app.once('will-quit', () => { void mediaStore.dispose(); });
     const nativeEngine = installNativeEngine({
       enabled: useNewEngine,
+      automaticOutputDirectory: agentExportDirectory,
       resolveAsset: (asset) => mediaStore.service.resolveAsset(asset),
       ipc: ipcMain,
       isTrustedSender,
@@ -962,6 +968,7 @@ if (!hasSingleInstanceLock) {
       windows: () => editors.all()
     });
     attachEngineWindow = nativeEngine.attachWindow;
+    const nativeEngineJobs = nativeEngine.agentJobs;
     // e2e reaches the engine host only in an isolated background test profile.
     if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
     app.once('will-quit', () => { void nativeEngine.dispose(); });
@@ -1320,7 +1327,8 @@ if (!hasSingleInstanceLock) {
       agentToolCommand: process.execPath,
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       agentMediaFfmpeg: proxyEncoder,
-      agentExportDirectory: path.join(app.getPath('home'), 'Powermove'),
+      agentExportDirectory,
+      agentEngineJobs: nativeEngineJobs,
       refreshExtensions: refreshRestoredExtensions,
       externalMcp: { getOwner: () => {
         const editor = currentEditor();
