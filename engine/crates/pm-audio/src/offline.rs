@@ -9,7 +9,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use pm_media::audio::Speaker;
+use pm_media::audio::{Speaker, default_speakers};
 use pm_time::TICKS_PER_SECOND;
 
 use crate::error::Result;
@@ -221,20 +221,15 @@ pub fn channel_mask(speakers: &[Speaker]) -> u32 {
 }
 
 /// FFmpeg's default layout for a channel count
-/// (`av_channel_layout_default`), as a WAV channel mask: mono, stereo,
-/// 3.0, 4.0, 5.0, 5.1, 6.1, 7.1; 0 beyond.
+/// (`av_channel_layout_default`, through [`pm_media::audio::default_speakers`])
+/// as a WAV channel mask: mono 0x4, stereo 0x3, 2.1 0xB, 4.0 0x107, 5.0
+/// 0x37, 5.1 0x3F, 6.1 0x70F, 7.1 0x63F; 0 where that layout has a position
+/// the mask cannot name (or none at all).
 pub fn default_channel_mask(channels: u16) -> u32 {
-    match channels {
-        1 => 0x4,
-        2 => 0x3,
-        3 => 0x7,
-        4 => 0x107,
-        5 => 0x607,
-        6 => 0x60F,
-        7 => 0x70F,
-        8 => 0x63F,
-        _ => 0,
+    if channels == 0 {
+        return 0;
     }
+    channel_mask(&default_speakers(channels as usize))
 }
 
 /// A streaming WAV writer. Writes RIFF while the data fits in 4 GiB and
@@ -599,9 +594,12 @@ mod tests {
         assert_eq!(channel_mask(&[FrontRight, FrontLeft]), 0);
         assert_eq!(channel_mask(&[FrontLeft, FrontLeft]), 0);
         assert_eq!(channel_mask(&[StereoLeft, StereoRight]), 0);
-        for n in 1..=8u16 {
-            assert_eq!(default_channel_mask(n).count_ones(), n as u32, "{n}");
+        // What our FFmpeg build's WAV muxer writes for `ffmpeg -ac N`.
+        let ffmpeg = [0x4, 0x3, 0xB, 0x107, 0x37, 0x3F, 0x70F, 0x63F];
+        for (n, mask) in (1..=8u16).zip(ffmpeg) {
+            assert_eq!(default_channel_mask(n), mask, "{n} channels");
         }
+        assert_eq!(default_channel_mask(0), 0);
         let speakers = [FrontLeft, FrontRight, FrontCenter, SideLeft, SideRight];
         let mut w = WavWriter::with_speakers(
             std::io::Cursor::new(Vec::new()),
@@ -617,6 +615,13 @@ mod tests {
         assert_eq!(&bytes[fmt..fmt + 4], b"fmt ");
         let mask = u32::from_le_bytes(bytes[fmt + 8 + 20..fmt + 8 + 24].try_into().unwrap());
         assert_eq!(mask, 0x607);
+        // `new` labels a 3-channel file FFmpeg's 2.1, LFE third.
+        let mut w =
+            WavWriter::new(std::io::Cursor::new(Vec::new()), PcmFormat::F32, 3, 48_000).unwrap();
+        w.write(0, &[0.0; 9]).unwrap();
+        let bytes = w.finish().unwrap().0.into_inner();
+        let mask = u32::from_le_bytes(bytes[fmt + 8 + 20..fmt + 8 + 24].try_into().unwrap());
+        assert_eq!(mask, 0xB);
     }
 
     #[test]

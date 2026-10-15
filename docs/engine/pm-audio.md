@@ -40,6 +40,21 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   the anchors are a function of the file alone. Where no packet length is known (ALAC
   in Matroska has no parser), a seek decodes from the start, and a seek forward
   continues the running decode, so reading in order costs the stream once.
+- **Anchored first frames.** A fresh decoder drops its codec delay (`initial_padding`,
+  Matroska's `CodecDelay`: Opus 312, AC-3 256, MP2 481, HE-AAC 4,224) from the head of
+  its output and moves the frame's timestamp by as much. When the delay is shorter than
+  the anchor packet, the first frame is the anchor packet's last samples; HE-AAC's runs
+  past its 2,048-sample packets, so its first frame is the third packet's and starts
+  4,224 samples into the anchor (checked against the moved timestamp). Until this was
+  handled, every anchored seek on HE-AAC (M4A and Matroska) landed one frame early
+  (measured 0.18 off a tone; now within 2.4e-4, SBR's noise).
+- **Anchor failures.** An anchor that cannot be found again, or whose first frame does
+  not fit it, comes from the demuxer or the codec and repeats for the stream's other
+  anchors: the first failure switches the stream to counting from the start, and reads
+  in order continue that decode (`failed_anchors_fall_back_once`: 30 blocks with every
+  anchor moved off its packet decode the stream once plus one block). A read error in
+  the demux-only scan ends the scan there; seeks resolve against the anchors found
+  before it, and the decode reports the error if it reaches that spot.
 - **Seeks.** `seek(n)` starts a per-codec pre-roll earlier (AAC 4096, MP3 8 × 1152, Opus
   500 ms, Vorbis 8192, AC-3 3072, lossless 0) from a freshly opened decoder and discards
   to `n`. A fresh decoder matters: FFmpeg's AAC decoder keeps its noise-substitution
@@ -51,7 +66,12 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   would begin (the same anchor, or the start of the stream), so a block's samples depend
   on the file and the block index only.
 - **Length.** From the container's duration (Ogg's last granule minus its pre-skip), a
-  pure function of the metadata, never refined while decoding.
+  pure function of the metadata, never refined while decoding. Matroska and WebM round
+  their duration to the millisecond and count Opus's codec delay in it, so their Opus
+  length runs over the decoded length by a few hundred samples (measured: +384 at 10 s,
+  30 s, and 30.5 s; +370 at 10.0123 s; none for a live WebM, which has no duration). Past
+  the decoded end the source reads as silence, so the overrun never cuts audio; a
+  sample-exact length would need the demux-only scan of the whole file at open.
 
 Measured (`pm-media/tests/audio_decode.rs`): every fixture (`tone.wav`, `.flac`, `.m4a`,
 `.mp3`, `.opus`, `h264-aac.mp4`) starts on the first sample of its sine (priming 1024,
@@ -65,26 +85,39 @@ keep every sample on its timestamp (`gaps_are_silence_and_overlaps_are_dropped`)
 Coarse timebases (`coarse_timebase_seeks_start_near_their_target`, 40 s in Matroska and
 WebM): seeks equal the sequential decode exactly for FLAC, PCM, ALAC, Vorbis, and AAC
 without noise substitution; within 2e-7 for Opus, 4e-5 for AC-3, E-AC-3 and MP2, and
-7.2e-3 for AAC with noise substitution (its noise generator runs across frames). A seek
-decodes 4 to 32 packets wherever it lands (ALAC: from the start), and blocks read in
+7.2e-3 for AAC with noise substitution (its noise generator runs across frames), and
+2.4e-4 for HE-AAC (from macOS `afconvert`, in M4A and remuxed to Matroska). A seek
+decodes 3 to 32 packets wherever it lands (ALAC: from the start). Lossless codecs have no
+pre-roll, so a seek up to 2 s ahead of the running decode decodes forward instead (FLAC
+and PCM: 42 packets for the seek to 1 s + 123 after the one at 0.5 s), and blocks read in
 order cost the stream once plus a pre-roll per block.
 
 Long coarse sources (`pm-audio/tests/sources.rs`
 `long_coarse_timebase_sources_decode_in_linear_time`, 10 minutes, release build, the
-lane's `SourceCache`; the earlier code decoded every block from sample 0):
+lane's `SourceCache`; the earlier code decoded every block from sample 0). Measured
+2026-10-14 on Jude's Mac under `nice -n 15` with other lanes building (load average
+about 8); wall times move with load (an earlier run under heavier load measured
+3.2 to 4.0 ms per Opus block and 1.7 s in total), the packet counts do not:
 
 | Source | Block 0 | Block 100 | Block 200 | Block 400 | All 440 in order | Cold block 437 |
 | --- | --- | --- | --- | --- | --- | --- |
 | WebM/Opus, before | 1.5 ms | 92 ms | 185 ms | 365 ms | | |
-| WebM/Opus, now | 3.2 ms | 3.8 ms | 4.0 ms | 3.8 ms | 1.7 s | 20 ms (96 packets) |
+| WebM/Opus, now | 2.1 ms | 2.8 ms | 3.1 ms | 2.7 ms | 1.27 s | 13 ms (96 packets) |
 | MKV/FLAC, before | | | | 206 ms | | |
-| MKV/FLAC, now | 2.1 ms | 1.9 ms | 2.0 ms | 2.1 ms | 0.9 s | 21 ms (64 packets) |
+| MKV/FLAC, now | 1.4 ms | 1.4 ms | 1.3 ms | 1.3 ms | 0.60 s | 16 ms (64 packets) |
 
 The "before" rows are the review's measurement of the earlier code on the same kind of
 file (its whole-file cost grew as N²/2 blocks, about 1.5 minutes for this one). Every
 block in order now decodes 96 to 99 packets (Opus) or 64 (FLAC), the same at the end
 as at the start. A cold block near the end includes the first demux-only scan of the
-file (about 16 ms for 10 minutes); later seeks reuse the anchors.
+file (10 to 15 ms for 10 minutes); later seeks reuse the anchors.
+
+FFmpeg's HE-AAC decoder runs 962 samples (481 core samples) later than Apple's: the
+`afconvert` HE-AAC test file decodes through pm-media and through FFmpeg's own command
+line 962 samples behind its source, and through `afconvert` on the sample. The priming
+(4,224, from the edit list or `CodecDelay`) is honored; the extra delay is the decoder's.
+It is not compensated here; whether legacy (Chromium's decode) shows the same offset is
+unmeasured.
 
 ## Resampling (`kernel`)
 
@@ -237,8 +270,9 @@ consumers ◀───────────── ClockSlot ◀── clock s
 - **Loop.** Chunks end at the loop end and the next starts at the loop start: sample-exact
   wraps. A run from a playhead before the loop plays straight into it and then wraps (as
   legacy `engine.ts`); a run from past the loop end plays to the composition end. The
-  loop range travels with the audio: the transport marks each segment that starts inside
-  the loop and wraps at its end, the ring chunk (and the converter's media run) carries
+  loop range travels with the audio: a segment before the loop start ends exactly at it
+  (so even a loop shorter than a chunk is entered on its first sample), the transport
+  marks each segment that starts inside the loop and wraps at its end, the ring chunk (and the converter's media run) carries
   that range, and the device callback publishes the range of the chunk it hears. So a
   clock sample carries the loop range only while its line is inside the loop; before the
   loop, past it, and when stopped it carries none (contract 6 invariant 1 wraps any line
@@ -329,7 +363,11 @@ missing blocks on the calling thread. `pm_export::Pipeline::push_audio` takes th
 its quantization sits at −144 dBFS), 16-bit with TPDF dither (±1 LSB triangular from a
 counter-based generator keyed by sample index and channel, so chunked and whole renders
 write the same bytes). `WavWriter` writes WAVE_FORMAT_EXTENSIBLE and switches to RF64 past
-4 GiB. AAC through AudioToolbox is the Export lane's encoder.
+4 GiB. Its channel mask names the mix's speakers (`with_speakers`) or, given only a
+channel count (`new`), FFmpeg's default layout for it (`av_channel_layout_default`, the
+layout pm-media reports for unspecified sources): 0x4, 0x3, 0xB (2.1), 0x107, 0x37 (5.0),
+0x3F (5.1), 0x70F, 0x63F for 1 to 8 channels, the masks our FFmpeg build's WAV muxer
+writes for `-ac N`. AAC through AudioToolbox is the Export lane's encoder.
 
 ## Performance (`examples/mix_bench`, release, this Mac, 20 s renders)
 

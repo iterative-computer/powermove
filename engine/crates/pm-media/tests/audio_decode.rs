@@ -46,6 +46,35 @@ fn generated(name: &str, source: &str, args: &[&str]) -> PathBuf {
     out
 }
 
+/// HE-AAC (AAC with SBR) from macOS's `afconvert`, in M4A and remuxed to
+/// Matroska; our LGPL FFmpeg build has no HE-AAC encoder. `None` where
+/// `afconvert` is missing (not macOS).
+fn he_aac(stem: &str, source: &str) -> Option<(PathBuf, PathBuf)> {
+    let wav = generated(&format!("{stem}.wav"), source, &["-c:a", "pcm_s16le"]);
+    let m4a = wav.with_extension("m4a");
+    let mkv = wav.with_extension("mkv");
+    if !m4a.exists() {
+        let status = Command::new("afconvert")
+            .args(["-f", "m4af", "-d", "aach", "-b", "64000"])
+            .arg(&wav)
+            .arg(&m4a)
+            .status()
+            .ok()?;
+        assert!(status.success(), "afconvert could not encode HE-AAC");
+    }
+    if !mkv.exists() {
+        let status = Command::new(ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&m4a)
+            .args(["-c", "copy"])
+            .arg(&mkv)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "ffmpeg could not remux HE-AAC");
+    }
+    Some((m4a, mkv))
+}
+
 fn decode_all(path: &Path) -> (AudioDecoder, Vec<Vec<f32>>) {
     let mut d = AudioDecoder::open(path, None).unwrap();
     let mut out = vec![Vec::new(); d.info().channels()];
@@ -493,10 +522,14 @@ fn gaps_are_silence_and_overlaps_are_dropped() {
 /// the same wherever it lands: the packets it decodes do not grow with the
 /// seek distance. ALAC in Matroska has no parser and no fixed frame size:
 /// its seeks decode from the start, and reads in order continue the running
-/// decode (each packet decoded once).
+/// decode (each packet decoded once). HE-AAC's codec delay (4,224 samples)
+/// is longer than its 2,048-sample packets: a fresh decoder's first frame
+/// is the third packet's, and placing it as the anchor's put every seek one
+/// frame early.
 #[test]
 fn coarse_timebase_seeks_start_near_their_target() {
     let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)|0.3*sin(2*PI*660*t)':s=48000:d=40";
+    let mut files = vec![];
     for (name, args, lossless) in [
         ("c-opus.webm", &["-c:a", "libopus"][..], false),
         (
@@ -518,7 +551,17 @@ fn coarse_timebase_seeks_start_near_their_target() {
         ("c-pcm.mkv", &["-c:a", "pcm_s24le"][..], true),
         ("c-alac.mkv", &["-c:a", "alac"][..], true),
     ] {
-        let file = generated(name, source, args);
+        files.push((name.to_string(), generated(name, source, args), lossless));
+    }
+    match he_aac("c-aac-he", source) {
+        Some((m4a, mkv)) => {
+            files.push(("c-aac-he.m4a".into(), m4a, false));
+            files.push(("c-aac-he.mkv".into(), mkv, false));
+        }
+        None => eprintln!("afconvert is missing: HE-AAC not covered"),
+    }
+    for (name, file, lossless) in files {
+        let name = name.as_str();
         let (d, pcm) = decode_all(&file);
         assert!(!d.info().sample_exact_timestamps, "{name}");
         let total = pcm[0].len() as u64;

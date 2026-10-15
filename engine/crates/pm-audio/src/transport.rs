@@ -342,10 +342,15 @@ impl Transport {
                     }
                     return None;
                 }
-                let n = ((limit - self.position) as usize).min(max);
-                // Only a segment inside the loop wraps; one that starts
-                // before the loop start (a run from an earlier playhead) is
-                // a straight line until the next segment, inside the loop.
+                // A segment before the loop start (a run from an earlier
+                // playhead) ends at it, so the range starts on the first
+                // sample inside the loop, however short the loop.
+                let entry = looping
+                    .filter(|&(a, _)| self.position < a)
+                    .map_or(limit, |(a, _)| a);
+                let n = ((entry.min(limit) - self.position) as usize).min(max);
+                // Only a segment inside the loop wraps; one before it is a
+                // straight line.
                 let loop_range = looping
                     .filter(|&(a, _)| self.position >= a)
                     .map(|(a, b)| self.loop_ticks_of(a, b));
@@ -483,6 +488,30 @@ mod tests {
             expect = s.start + s.frames as i64;
         }
         assert!(wrapped);
+        // A loop shorter than a segment, entered from before it: the
+        // segment before ends exactly at the loop start, and no segment
+        // without the range reaches the loop end.
+        let short = TickRange {
+            start: t(10.0),
+            end: t(10.0 + 100.0 / 48_000.0),
+        };
+        tr.apply(&TransportCommand::SetLoop { range: Some(short) })
+            .unwrap();
+        tr.apply(&TransportCommand::Seek {
+            time: t(10.0 - 30.0 / 48_000.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        let first = tr.next(256).unwrap();
+        assert_eq!((first.start, first.frames), (10 * 48_000 - 30, 30));
+        assert_eq!(first.loop_range, None);
+        for _ in 0..5 {
+            let s = tr.next(256).unwrap();
+            assert_eq!((s.start, s.frames), (10 * 48_000, 100));
+            assert!(s.loop_range.is_some());
+        }
+        tr.apply(&TransportCommand::SetLoop { range: Some(range) })
+            .unwrap();
         // From past the loop end: straight to the composition end.
         tr.apply(&TransportCommand::Seek {
             time: t(15.0),
