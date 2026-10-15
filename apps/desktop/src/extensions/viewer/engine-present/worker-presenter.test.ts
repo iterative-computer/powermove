@@ -106,6 +106,7 @@ class Pair {
   private readonly rafs = new Map<number, (t: number) => void>();
   private nextRaf = 1;
   private toPage: ((event: MessageEvent<FromWorker>) => void)[] = [];
+  private errors: ((event: Event) => void)[] = [];
   private toWorker: ((event: MessageEvent<ToWorker>) => void)[] = [];
 
   constructor(failPainter = false) {
@@ -146,11 +147,22 @@ class Pair {
     },
     addEventListener: ((type: string, listener: (event: MessageEvent<FromWorker>) => void) => {
       if (type === 'message') this.toPage.push(listener);
+      if (type === 'error') this.errors.push(listener as unknown as (event: Event) => void);
     }) as WorkerLike['addEventListener'],
     terminate: () => {
       this.terminated = true;
     }
   };
+
+  /** An uncaught exception in the worker script. */
+  crash(message: string): void {
+    for (const l of this.errors) l(Object.assign(new Event('error'), { message }));
+  }
+
+  /** A message from the worker that reaches the page whatever state it is in. */
+  late(message: FromWorker): void {
+    for (const l of this.toPage) l({ data: message } as MessageEvent<FromWorker>);
+  }
 
   /** Runs the worker's animation frames at worker time `t`. */
   frame(t: number): void {
@@ -313,5 +325,36 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(source.frames[0]!.closed).toBe(true);
     expect(pair.painter.draws).toHaveLength(0);
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
+  it('terminates a worker that threw, hands every frame it held back to the engine once, and posts nothing more to it', async () => {
+    const { pair, host, source, link, presenter, failures } = setup();
+    source.imports.add('1:1');
+    source.imports.add('1:2');
+    source.imports.add('1:3');
+    presenter.receive({ type: 'clock', sample: clock({}) }, 0);
+    // Frame 1 is drawn and handed back; 2 and 3 wait a minute ahead in the worker.
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    presenter.receive({ type: 'frame', frame: desc(2, { pts: 3600 * F, duration: F }) }, 0);
+    presenter.receive({ type: 'frame', frame: desc(3, { pts: 3601 * F, duration: F }) }, 0);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+
+    pair.crash('boom');
+    expect(pair.terminated).toBe(true);
+    expect(failures).toEqual(['presentation worker error: boom']);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }, { poolIndex: 2, seq: 2 }, { poolIndex: 3, seq: 3 }]);
+    expect(presenter.isDisposed).toBe(true);
+    expect(presenter.stats.released).toBe(3);
+    // A release the worker posted before it died is not sent twice.
+    pair.late({ type: 'release', session: 1, release: { poolIndex: 2, seq: 2 } });
+    expect(link.releases).toHaveLength(3);
+    // Nothing more goes to the dead worker, dispose included.
+    const posted = pair.posted.length;
+    presenter.receive({ type: 'frame', frame: desc(4) }, 0);
+    host.dispose();
+    expect(pair.posted).toHaveLength(posted);
   });
 });

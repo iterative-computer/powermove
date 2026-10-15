@@ -12,7 +12,7 @@
  */
 import type { FromWorker, ToWorker } from './present-worker';
 import type { FrameLink, FrameSource, Presenter, PresentedFrame, PresenterStats, TraceRecord } from './presenter';
-import type { EngineFrameMessage, FrameDescriptor, ViewerState, VsyncHint } from './protocol';
+import type { EngineFrameMessage, FrameDescriptor, FrameRelease, ViewerState, VsyncHint } from './protocol';
 
 /** The slice of `Worker` used here (a fake in tests). */
 export interface WorkerLike {
@@ -42,13 +42,15 @@ export class PresentWorker {
   private sessions = new Map<number, WorkerPresenter>();
   private nextSession = 1;
   private disposed = false;
+  /** Terminated after an uncaught error: nothing more is posted to it. */
+  private dead = false;
   private failure: string | null = null;
   private readonly timers: Timers;
 
   constructor(private readonly options: PresentWorkerOptions) {
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
     options.worker.addEventListener('message', (event) => this.onMessage(event.data));
-    options.worker.addEventListener('error', (event) => this.fail(`presentation worker error: ${(event as ErrorEvent).message ?? 'unknown'}`));
+    options.worker.addEventListener('error', (event) => this.crashed(`presentation worker error: ${(event as ErrorEvent).message ?? 'unknown'}`));
     options.worker.postMessage({ type: 'init', canvas: options.canvas, pageTimeOrigin: options.timeOrigin ?? performance.timeOrigin }, [options.canvas]);
   }
 
@@ -58,7 +60,7 @@ export class PresentWorker {
   }
 
   post(message: ToWorker, transfer?: Transferable[]): void {
-    if (this.disposed) return;
+    if (this.disposed || this.dead) return;
     this.options.worker.postMessage(message, transfer);
   }
 
@@ -100,12 +102,29 @@ export class PresentWorker {
     this.options.onFailed?.(message);
   }
 
+  /**
+   * An uncaught error in the worker: it may be in any state, so it is
+   * terminated (its realm closes the VideoFrames it held) and the frames
+   * sent to it that it had not handed back go back to the engine from here,
+   * so their pool slots do not wait for the engine to reclaim them. Then
+   * the viewer replaces the drawing (`onFailed`).
+   */
+  private crashed(message: string): void {
+    if (this.dead || this.disposed) return;
+    this.dead = true;
+    this.options.worker.terminate();
+    for (const presenter of this.sessions.values()) presenter.abandon();
+    this.sessions.clear();
+    this.fail(message);
+  }
+
   /** Ends every session and the worker (its frames go back to the engine first). */
   dispose(): void {
     if (this.disposed) return;
     for (const presenter of this.sessions.values()) presenter.dispose();
-    this.options.worker.postMessage({ type: 'dispose' });
     this.disposed = true;
+    if (this.dead) return;
+    this.options.worker.postMessage({ type: 'dispose' });
     // The worker answers `disposed` and is terminated then; a stuck one is
     // terminated anyway.
     this.timers.set(() => this.options.worker.terminate(), DISPOSE_GRACE_MS);
@@ -146,6 +165,8 @@ export class WorkerPresenter implements Presenter {
    * stats.
    */
   private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0 };
+  /** Frames in the worker that it has not handed back yet, by `poolIndex:seq`. */
+  private readonly inWorker = new Map<string, FrameRelease>();
   private remote: PresenterStats | null = null;
 
   constructor(private readonly options: WorkerPresenterOptions) {
@@ -229,6 +250,7 @@ export class WorkerPresenter implements Presenter {
   }
 
   private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
+    this.inWorker.set(`${desc.poolIndex}:${desc.seq}`, { poolIndex: desc.poolIndex, seq: desc.seq });
     this.options.host.post({ type: 'frame', session: this.options.session, desc, frame, arrivedMs }, [frame as unknown as Transferable]);
   }
 
@@ -273,7 +295,9 @@ export class WorkerPresenter implements Presenter {
       case 'release':
         // Releases keep flowing after the page ended the session: frames the
         // worker held when it closed go back to the engine (as the main
-        // thread presenter releases its queue on dispose).
+        // thread presenter releases its queue on dispose). A frame already
+        // handed back for a crashed worker (`abandon`) is not released twice.
+        if (!this.inWorker.delete(`${message.release.poolIndex}:${message.release.seq}`)) return;
         this.local.released++;
         this.options.link.release(message.release);
         return;
@@ -304,6 +328,19 @@ export class WorkerPresenter implements Presenter {
       this.traces.set(id, resolve);
       this.options.host.post({ type: 'takeTrace', session: this.options.session, id });
     });
+  }
+
+  /**
+   * The worker crashed: every frame it held goes back to the engine (it
+   * will never release them), and the session ends.
+   */
+  abandon(): void {
+    for (const release of this.inWorker.values()) {
+      this.local.released++;
+      this.options.link.release(release);
+    }
+    this.inWorker.clear();
+    this.dispose();
   }
 
   dispose(): void {
