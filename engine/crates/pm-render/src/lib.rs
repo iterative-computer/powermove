@@ -30,6 +30,7 @@ pub mod plan;
 mod renderer;
 mod request;
 pub mod scene3d;
+pub mod stills;
 pub mod three;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};

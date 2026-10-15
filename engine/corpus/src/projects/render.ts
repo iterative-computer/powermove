@@ -214,6 +214,31 @@ function scaled3d(): CorpusProject {
   return project(b, { group: 'Render', title: '3D at another output size', covers: ['3D output scale', 'metallic material'], samples: [0], size: [533, 300] });
 }
 
+/** The tested still classes (docs/engine/pm-render.md, "Image classes"):
+ *  each generated still drawn 1:1 on texel centers (decoding and color
+ *  conversion compared directly) and again minified and rotated (sampling). */
+const STILLS: Array<[string, number, number, boolean]> = [
+  ['corpus-photo-420.jpg', 251, 147, false], ['corpus-photo-422.jpg', 250, 150, false], ['corpus-photo-444.jpg', 250, 150, false],
+  ['corpus-photo-444-tall-mcu.jpg', 251, 147, false], ['corpus-photo-422-tall-mcu.jpg', 251, 147, false],
+  ['corpus-photo-progressive.jpg', 251, 147, false], ['corpus-photo-gray.jpg', 250, 150, false], ['corpus-photo-orientation-6.jpg', 150, 250, false],
+  ['corpus-p3.jpg', 240, 135, false], ['corpus-p3.png', 240, 135, false], ['corpus-p3.heic', 240, 135, false],
+  ['corpus-16bit.png', 200, 120, true], ['corpus-gray-alpha.png', 181, 103, true], ['corpus-indexed.png', 160, 100, true],
+  ['corpus-photo-lossy.webp', 250, 150, false], ['corpus-photo-lossless.webp', 250, 150, true], ['corpus-photo-alpha.webp', 250, 150, true],
+  ['corpus-photo-lossless-opaque.webp', 250, 150, false], ['corpus-photo.tiff', 250, 150, false],
+  ['corpus-photo.avif', 250, 150, false], ['corpus-photo.heic', 250, 150, false],
+];
+
+function stills(): CorpusProject[] {
+  return STILLS.map(([file, w, h, alpha]) => {
+    const stem = file.replace(/^corpus-/, '').replace('.', '-');
+    const b = newProject(`render/still-${stem}`, { name: `Still ${file}`, backgroundFill: DARK, w: 420, h: 280 });
+    // Position is the box center: the 1:1 copy's corner lands on (8, 12), texel centers on pixel centers.
+    b.add(b.layer('image', { name: '1:1', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 8 + w / 2, 'position.y': 12 + h / 2 } }));
+    b.add(b.layer('image', { name: 'Minified and rotated', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 345, 'position.y': 215, 'scale.x': 45, 'scale.y': 45, rotation: 13 } }));
+    return project(b, { group: 'Render', title: `Still ${file}`, covers: ['image decoding', 'image color interpretation', 'image sampling'], samples: [0], alpha });
+  });
+}
+
 export function renderProjects(): CorpusProject[] {
-  return [transforms(), precomps(), groups(), solo(), ...backgrounds(), scaled(), video(), ...scenes3d(), precomp3d(), rig3d(), studio3d(), scaled3d()];
+  return [transforms(), precomps(), groups(), solo(), ...backgrounds(), scaled(), video(), ...scenes3d(), precomp3d(), rig3d(), studio3d(), scaled3d(), ...stills()];
 }

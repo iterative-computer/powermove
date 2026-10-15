@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fixturesDir, repoRoot } from './catalog';
 import { corpusGlb, corpusMaterialsGlb, corpusObj, corpusSvg } from './glb';
+import { GENERATED_STILLS } from './stills';
 
 export const MEDIA_PREFIX = 'media:';
 /** A reference no file satisfies, for the missing-model behavior. */
@@ -40,6 +41,7 @@ export const GENERATED_MEDIA: Record<string, () => Uint8Array> = {
   'corpus-materials.glb': corpusMaterialsGlb,
   'corpus-gem.obj': () => new TextEncoder().encode(corpusObj()),
   'corpus-art.svg': () => new TextEncoder().encode(corpusSvg()),
+  ...GENERATED_STILLS,
 };
 
 export interface MediaSource { name: string; origin: 'fixture' | 'generated'; path: string; bytes: number; sha256: string }
