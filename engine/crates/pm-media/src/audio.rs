@@ -493,11 +493,25 @@ impl PacketIndex {
 /// Program index of the first sample of the first frame (`pts`, `n`
 /// samples) a fresh decoder returns after starting at anchor `a`. Fresh
 /// decoders drop their codec delay from the head of their first output
-/// (Opus its pre-skip, AC-3 256 samples, MP2 481; AAC and Vorbis nothing)
-/// and move its timestamp by as much, rounded to the timebase: a frame of
-/// the anchor packet holds the packet's last `n` samples. A decoder that
-/// holds the anchor packet back returns the next packet's first.
-fn anchored_start(a: &Anchor, pts: i64, n: i64) -> Option<i64> {
+/// (`initial_padding`, Matroska's `CodecDelay`: Opus its pre-skip, AC-3
+/// 256 samples, MP2 481, HE-AAC 4,224; LC-AAC and Vorbis nothing) and move
+/// its timestamp by as much, rounded to the timebase: a frame of the anchor
+/// packet holds the packet's last `n` samples. A decoder that holds the
+/// anchor packet back returns the next packet's first.
+///
+/// `skip` is that codec delay in samples and `skip_ts` the same span in
+/// the stream timebase. A delay as long as the anchor packet or longer
+/// (HE-AAC's over 2,048-sample packets) runs into the packets after it:
+/// the first frame then starts `skip` samples into the anchor's, and its
+/// timestamp, moved by the delay, says so.
+fn anchored_start(a: &Anchor, pts: i64, n: i64, skip: i64, skip_ts: i64) -> Option<i64> {
+    if skip >= a.duration {
+        // Packet timestamps are rounded to the timebase; a frame from a
+        // packet before or after is a whole packet away.
+        let duration_ts = a.next.map_or(0, |(p, _)| p - a.pts);
+        let off = (pts - (a.pts + skip_ts)).abs();
+        return (off <= 1 || 4 * off < duration_ts).then_some(a.start + skip);
+    }
     let next_pts = a.next.map(|(p, _)| p);
     let of_anchor = pts >= a.pts && next_pts.is_none_or(|p| pts < p);
     if of_anchor && n <= a.duration {
@@ -1200,6 +1214,17 @@ impl AudioDecoder {
         }
     }
 
+    /// [`anchored_start`] with this decoder's codec delay: what a fresh
+    /// decoder drops from the head of its output (`initial_padding`).
+    fn place_anchored(&self, a: &Anchor, pts: i64, n: i64) -> Option<i64> {
+        let skip = unsafe { (*self.ctx).initial_padding.max(0) as i64 };
+        // The delay in the timebase, rounded to the nearest tick.
+        let num = skip as i128 * self.tb.1 as i128;
+        let den = self.info.sample_rate as i128 * self.tb.0 as i128;
+        let skip_ts = ((2 * num + den) / (2 * den)) as i64;
+        anchored_start(a, pts, n, skip, skip_ts)
+    }
+
     /// Places the decoded frame on the program timeline and appends what
     /// lies at or after the target to `pending`.
     fn take_frame(&mut self) -> Result<()> {
@@ -1215,7 +1240,7 @@ impl AudioDecoder {
         // The first frame of an anchored seek on a coarse timebase is
         // placed by the anchor the scan counted.
         let anchored = match (self.expected, self.first.take()) {
-            (None, Some(a)) => Some(anchored_start(&a, pts, n as i64).ok_or_else(|| {
+            (None, Some(a)) => Some(self.place_anchored(&a, pts, n as i64).ok_or_else(|| {
                 MediaError::unsupported("the first frame after an anchor is not the anchor's")
             })?),
             _ => None,
