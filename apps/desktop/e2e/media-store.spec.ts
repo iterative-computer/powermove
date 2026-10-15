@@ -566,13 +566,17 @@ test('a reopened video whose first frame probe times out is converted from its b
       await session.page.evaluate(async () => {
         const PM = (window as any).PM;
         for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);
+        // Boot opens another project, so only the file open restores this video.
+        window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Other' }) }));
       });
+      await session.page.waitForFunction(() => (window as any).PM.proj.name === 'Other');
     } finally { await session.close(); }
 
     session = await launchApp({ userData, env: OFF });
     try {
       const { page } = session;
       await page.waitForFunction(() => Boolean((window as any).PM?.openProject));
+      expect(await page.evaluate(() => (window as any).PM.proj.name)).toBe('Other');
       // The first frame probe misses once; everything after behaves normally.
       await page.evaluate(() => {
         const proto = HTMLVideoElement.prototype as any;

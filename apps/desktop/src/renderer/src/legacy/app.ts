@@ -441,6 +441,22 @@ window.setTimeout(() => {
 /* Exposed for the remote host sync: a document that arrives with assets this
    tab has not loaded needs the same restore pass a project open gets. */
 PM.restoreProjectAssets = (project: any, warn: any = true) => restoreProjectAssets(project, warn);
+/* Asset restores in flight. One that recovers media from its source path
+   stores it again under the same storage key with a new revision; landing
+   after a project file's media were restored under that key, it would make
+   the next Save of the opened file upload them again. Opening a file waits
+   for these first (bounded, since a restore can wait on a cloud prompt). */
+const assetRestores = new Set<Promise<unknown>>();
+const ASSET_RESTORE_WAIT_MS = 60_000;
+async function settleAssetRestores(): Promise<void> {
+  if (!assetRestores.size) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled([...assetRestores]),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, ASSET_RESTORE_WAIT_MS); }),
+  ]);
+  clearTimeout(timer);
+}
 async function restoreProjectAssets(project: any, warn: any = true) {
   /* While bytes are being read (or fetched from a remote host) the media
      panel shows loading, not offline: only a finished restore can say a
@@ -448,8 +464,10 @@ async function restoreProjectAssets(project: any, warn: any = true) {
   PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
   PM.bus.emit('assets');
   let result: any;
-  try { result = await PM.assets.restoreProject(project); }
-  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
+  const pass = Promise.resolve().then(() => PM.assets.restoreProject(project));
+  assetRestores.add(pass);
+  try { result = await pass; }
+  finally { assetRestores.delete(pass); PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
   if (result.stale || PM.proj !== project) return result;
   PM.bus.emit('assets');
   inspectorService(PM)?.refresh();
@@ -867,6 +885,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
       const { token, document, media } = file.native;
       try {
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
+        await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }), token);
         o = document; mediaRestored = true;
@@ -885,7 +904,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (requiredReader > CURRENT_READER_VERSION) source.minReaderVersion = requiredReader;
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
-    if (!mediaRestored) await restoreProjectFileMedia(o, PM.MediaStore);
+    if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.

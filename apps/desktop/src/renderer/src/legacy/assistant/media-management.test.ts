@@ -49,7 +49,7 @@ describe('agent media management', () => {
     };
     PM.assets.get = vi.fn(() => ({}));
     let fileHash = h2;
-    const hash = vi.fn(async () => fileHash);
+    const hash = vi.fn(async (_blob: Blob) => fileHash);
     PM.HostMedia = { enabled: true, hash };
     const file = new Blob(['x']);
     // The second asset with the fingerprint is the match, not the first.
