@@ -305,7 +305,7 @@ function traceContext(tracePath, pingOffsetUs) {
     const swap = swaps[firstAtOrAfter(swaps, received, (s) => s.begin)];
     if (!swap?.end) return { begin: toTrace(rafMs), end: null, state: 'VIZ_NOT_DRAWN' };
     if (i + 1 < list.length && list[i + 1] <= swap.begin) return { begin: toTrace(rafMs), end: null, state: 'VIZ_SUPERSEDED' };
-    return { begin: toTrace(rafMs), end: swap.end, state: 'STATE_PRESENTED_ALL' };
+    return { begin: toTrace(rafMs), end: swap.end, received, swapBegin: swap.begin, state: 'STATE_PRESENTED_ALL' };
   };
   return { frames: frames.length, toTrace, hostToTrace, frameAt, sinkFor, vizFrame };
 }
@@ -586,7 +586,11 @@ function analyzeLatency(raw) {
     const page = run.page;
     const revOf = new Map();
     for (const [rev, seqs] of page.inputs) for (const s of seqs) if (!revOf.has(s)) revOf.set(s, rev);
-    const draws = (page.mode === 'engine' ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[6], submitMs: d[5] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    const draws = (page.mode === 'engine' ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[6], submitMs: d[5], arrivedMs: d[4] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    // When the page handled each input (ms, page clock): the first dispatch
+    // that carried it.
+    const handledOf = new Map();
+    for (const [, seqs, , handledMs] of page.inputs) for (const s of seqs) if (!handledOf.has(s)) handledOf.set(s, handledMs);
     const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
     const sink = offMain ? ctx.sinkFor(draws.map((d) => d.submitMs)) : null;
     const lat = [];
@@ -595,6 +599,15 @@ function analyzeLatency(raw) {
     // too): `pointerToPixelMs` leaves those events out, which flatters a
     // path that drops frames during gestures.
     const latAll = [];
+    // Where the time goes, per presented input (ms): input → handled on the
+    // page; then for the engine, handled → the descriptor's arrival on the
+    // page (view state out, engine render, descriptor back), arrival → the
+    // draw's submit (import, transfer, and the worker's draw), submit →
+    // viz received the canvas's frame, received → the display frame that
+    // showed it ended (presentation), split at the start of viz's
+    // DrawAndSwap that drew it; for today, handled → the animation
+    // frame that drew it, and that frame → presentation.
+    const hops = { inputToHandled: [], handledToArrival: [], arrivalToSubmit: [], submitToReceived: [], receivedToPresent: [], receivedToDraw: [], drawToPresent: [], handledToRaf: [], rafToPresent: [] };
     let unmatched = 0;
     let unpresented = 0;
     const presentedOf = (d) => {
@@ -612,6 +625,25 @@ function analyzeLatency(raw) {
       if (pf) {
         lat.push((pf.end - ctx.hostToTrace(tsUs)) / 1000);
         latAll.push(lat[lat.length - 1]);
+        const d = draws[i];
+        const handled = handledOf.get(seq);
+        if (handled != null) {
+          const handledUs = ctx.toTrace(handled);
+          hops.inputToHandled.push((handledUs - ctx.hostToTrace(tsUs)) / 1000);
+          if (page.mode === 'engine' && d.arrivedMs != null) {
+            hops.handledToArrival.push(d.arrivedMs - handled);
+            hops.arrivalToSubmit.push(d.submitMs - d.arrivedMs);
+            if (pf.received != null) {
+              hops.submitToReceived.push((pf.received - ctx.toTrace(d.submitMs)) / 1000);
+              hops.receivedToPresent.push((pf.end - pf.received) / 1000);
+              hops.receivedToDraw.push((pf.swapBegin - pf.received) / 1000);
+              hops.drawToPresent.push((pf.end - pf.swapBegin) / 1000);
+            }
+          } else if (page.mode !== 'engine') {
+            hops.handledToRaf.push(d.rafMs - handled);
+            hops.rafToPresent.push((pf.end - ctx.toTrace(d.rafMs)) / 1000);
+          }
+        }
         continue;
       }
       unpresented++;
@@ -623,7 +655,7 @@ function analyzeLatency(raw) {
         }
       }
     }
-    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, presentation: offMain ? { thread: 'worker', timing: 'viz', sink } : { thread: 'main', timing: 'PipelineReporter' }, pointerToPixelMs: dist(lat, 2), pointerToPixelWithDropsMs: dist(latAll, 2) };
+    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, presentation: offMain ? { thread: 'worker', timing: 'viz', sink } : { thread: 'main', timing: 'PipelineReporter' }, pointerToPixelMs: dist(lat, 2), pointerToPixelWithDropsMs: dist(latAll, 2), hopsMs: Object.fromEntries(Object.entries(hops).filter(([, xs]) => xs.length).map(([k, xs]) => [k, dist(xs, 2)])) };
   }
   return out;
 }
@@ -735,6 +767,7 @@ try {
       process.stdout.write(`   drops ${p.frames.drops}/${p.frames.expected}  |jitter| p50 ${p.jitterAbsMs.p50} p99 ${p.jitterAbsMs.p99} ms  irregular ${p.irregularIntervals}  ${p.rafToPresentMs ? `rAF→present p50 ${p.rafToPresentMs.p50}` : `due→present p50 ${p.dueToPresentMs?.p50}`}\n`);
     } else {
       for (const [mode, l] of Object.entries(summary.latency)) process.stdout.write(`   ${mode}: pointer-to-pixel p50 ${l.pointerToPixelMs.p50} p99 ${l.pointerToPixelMs.p99} ms (${l.pointerToPixelMs.n} of ${l.events}, unmatched ${l.unmatched}, unpresented ${l.unpresented}; with them p50 ${l.pointerToPixelWithDropsMs.p50} p99 ${l.pointerToPixelWithDropsMs.p99} ms)\n`);
+      for (const [mode, l] of Object.entries(summary.latency)) if (l.hopsMs) process.stdout.write(`   ${mode} hops p50/p99: ${Object.entries(l.hopsMs ?? {}).map(([k, d]) => `${k} ${d.p50}/${d.p99}`).join(', ')}\n`);
     }
   }
 } finally {
