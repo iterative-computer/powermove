@@ -141,8 +141,11 @@ async function desktopSmoke() {
   assert.equal(status.progress, 1);
   assert(status.path.startsWith(exportsDir) && status.path.endsWith('.mov'), status.path);
   assert.notEqual(status.path, video.path);
-  const prores = probe(status.path, 'stream=codec_name,profile,pix_fmt,nb_frames');
-  assert.equal(prores.streams[0].codec_name, 'prores'); assert.equal(Number(prores.streams[0].nb_frames), 24);
+  const prores = probe(status.path, 'stream=codec_name,codec_tag_string,profile,pix_fmt,nb_frames:stream_tags=timecode');
+  const pv = prores.streams.find(item => item.codec_name === 'prores');
+  assert(pv, JSON.stringify(prores)); assert.equal(Number(pv.nb_frames), 24);
+  // MOV exports carry a tmcd track naming the first frame.
+  assert(prores.streams.some(item => item.codec_tag_string === 'tmcd' && item.tags?.timecode === '00:00:00:00'), JSON.stringify(prores));
   const other = await rpc('tools/call', { name: 'get_render_status', arguments: { jobId: 'not-a-job' } });
   assert.equal(other.isError, true);
   // Capability routing: text layers are not in the Phase 2 renderer, so the
