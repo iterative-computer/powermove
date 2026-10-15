@@ -590,23 +590,40 @@ function analyzeLatency(raw) {
     const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
     const sink = offMain ? ctx.sinkFor(draws.map((d) => d.submitMs)) : null;
     const lat = [];
+    // Every matched event, an unpresented first frame counted up to the
+    // first later frame that did reach the display (it carries the input
+    // too): `pointerToPixelMs` leaves those events out, which flatters a
+    // path that drops frames during gestures.
+    const latAll = [];
     let unmatched = 0;
     let unpresented = 0;
+    const presentedOf = (d) => {
+      const pf = offMain ? ctx.vizFrame(sink, d.rafMs, d.submitMs) : ctx.frameAt(d.rafMs);
+      return pf && PRESENTED.has(pf.state) ? pf : null;
+    };
     for (const [seq, tsUs] of run.generated) {
       const rev = revOf.get(seq);
-      const d = rev == null ? null : draws.find((x) => x.rev >= rev);
-      if (!d) {
+      const i = rev == null ? -1 : draws.findIndex((x) => x.rev >= rev);
+      if (i < 0) {
         unmatched++;
         continue;
       }
-      const pf = offMain ? ctx.vizFrame(sink, d.rafMs, d.submitMs) : ctx.frameAt(d.rafMs);
-      if (!pf || !PRESENTED.has(pf.state)) {
-        unpresented++;
+      const pf = presentedOf(draws[i]);
+      if (pf) {
+        lat.push((pf.end - ctx.hostToTrace(tsUs)) / 1000);
+        latAll.push(lat[lat.length - 1]);
         continue;
       }
-      lat.push((pf.end - ctx.hostToTrace(tsUs)) / 1000);
+      unpresented++;
+      for (let j = i + 1; j < draws.length; j++) {
+        const later = presentedOf(draws[j]);
+        if (later) {
+          latAll.push((later.end - ctx.hostToTrace(tsUs)) / 1000);
+          break;
+        }
+      }
     }
-    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, presentation: offMain ? { thread: 'worker', timing: 'viz', sink } : { thread: 'main', timing: 'PipelineReporter' }, pointerToPixelMs: dist(lat, 2) };
+    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, presentation: offMain ? { thread: 'worker', timing: 'viz', sink } : { thread: 'main', timing: 'PipelineReporter' }, pointerToPixelMs: dist(lat, 2), pointerToPixelWithDropsMs: dist(latAll, 2) };
   }
   return out;
 }
@@ -717,7 +734,7 @@ try {
       const p = summary.playback;
       process.stdout.write(`   drops ${p.frames.drops}/${p.frames.expected}  |jitter| p50 ${p.jitterAbsMs.p50} p99 ${p.jitterAbsMs.p99} ms  irregular ${p.irregularIntervals}  ${p.rafToPresentMs ? `rAF→present p50 ${p.rafToPresentMs.p50}` : `due→present p50 ${p.dueToPresentMs?.p50}`}\n`);
     } else {
-      for (const [mode, l] of Object.entries(summary.latency)) process.stdout.write(`   ${mode}: pointer-to-pixel p50 ${l.pointerToPixelMs.p50} p99 ${l.pointerToPixelMs.p99} ms (${l.pointerToPixelMs.n} of ${l.events}, unmatched ${l.unmatched}, unpresented ${l.unpresented})\n`);
+      for (const [mode, l] of Object.entries(summary.latency)) process.stdout.write(`   ${mode}: pointer-to-pixel p50 ${l.pointerToPixelMs.p50} p99 ${l.pointerToPixelMs.p99} ms (${l.pointerToPixelMs.n} of ${l.events}, unmatched ${l.unmatched}, unpresented ${l.unpresented}; with them p50 ${l.pointerToPixelWithDropsMs.p50} p99 ${l.pointerToPixelWithDropsMs.p99} ms)\n`);
     }
   }
 } finally {
