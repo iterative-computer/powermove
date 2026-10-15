@@ -234,6 +234,11 @@ pub struct Engine {
     evict: Box<dyn Evict + Send>,
     slicer: Option<JobSlicer>,
     playing: bool,
+    /// Viewer sessions whose transport plays (interactive engine): the
+    /// first to start sends `playbackStarted`, the last to stop sends
+    /// `playbackStopped` (contract 13), so the job engine slices its GPU
+    /// work while the user watches.
+    playing_viewers: BTreeSet<(PortId, SessionId)>,
     inflight: InFlightTracker,
     failed: FailedItems,
     host_calls: BTreeMap<RequestId, HostCall>,
@@ -349,6 +354,7 @@ impl Engine {
             evict: Box::new(NoEviction),
             slicer: (process == EngineProcess::Job).then(|| JobSlicer::new(SlicingPolicy::DEFAULT)),
             playing: false,
+            playing_viewers: BTreeSet::new(),
             inflight: InFlightTracker::default(),
             failed: FailedItems::default(),
             host_calls: BTreeMap::new(),
@@ -532,6 +538,7 @@ impl Engine {
             self.sessions.remove(id);
         }
         self.with_presenter(out, |p, ctx| p.port_closed(ctx, port));
+        self.viewers_stopped(|(p, _)| *p == port, out);
         self.waiting_frames.retain(|w| w.port != port);
         for id in &closed {
             self.job_docs.remove(id);
@@ -808,6 +815,7 @@ impl Engine {
                 };
                 self.sessions.remove(&sid);
                 self.with_presenter(out, |p, ctx| p.session_closed(ctx, port, sid));
+                self.viewers_stopped(|key| *key == (port, sid), out);
                 self.job_docs.remove(&sid);
                 self.waiting_frames.retain(|w| w.session != sid);
                 if let Some(jobs) = self.jobs.as_mut() {
@@ -1224,12 +1232,19 @@ impl Engine {
                     );
                     return;
                 };
+                let transport = match &event {
+                    Event::Transport(command) => Some(*command),
+                    _ => None,
+                };
                 self.with_presenter(out, |p, ctx| match event {
                     Event::Viewer(state) => p.viewer(ctx, port, sid, state, revision),
                     Event::ReleaseFrame(release) => p.release(port, sid, release),
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
                     _ => {}
                 });
+                if let Some(command) = transport {
+                    self.viewer_transport(port, sid, command, now, out);
+                }
             }
             (
                 Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_),
@@ -1244,6 +1259,62 @@ impl Engine {
                 LogLevel::Warn,
                 format!("ignored event {name} from a {kind:?} port {}", port.0),
             ),
+        }
+    }
+
+    /// Frame budget the job engine aligns to while a viewer plays. Viewers do
+    /// not report their display's refresh rate yet; 60 Hz is the common case
+    /// and only bounds how long alignment trusts a silent engine.
+    const VIEWER_FRAME_BUDGET_US: u32 = 16_667;
+
+    /// A viewer's transport changed: tell the job engine when playback
+    /// starts or stops anywhere in this engine (contract 13).
+    fn viewer_transport(
+        &mut self,
+        port: PortId,
+        sid: SessionId,
+        command: pm_protocol::clock::TransportCommand,
+        now: HostMicros,
+        out: &mut Out,
+    ) {
+        use pm_protocol::clock::TransportCommand as T;
+        let rate = match command {
+            T::Play { rate } if rate.num != 0 => Some(rate),
+            T::PlayAround { .. } => Some(pm_protocol::common::PlaybackRate::NORMAL),
+            T::Play { .. } | T::Pause => None,
+            _ => return,
+        };
+        let was = !self.playing_viewers.is_empty();
+        match rate {
+            Some(rate) => {
+                self.playing_viewers.insert((port, sid));
+                if !was {
+                    self.emit_deadline(
+                        DeadlineSignal::PlaybackStarted {
+                            at: now,
+                            rate,
+                            frame_budget_us: Self::VIEWER_FRAME_BUDGET_US,
+                        },
+                        out,
+                    );
+                }
+            }
+            None => {
+                self.playing_viewers.remove(&(port, sid));
+                if was && self.playing_viewers.is_empty() {
+                    self.emit_deadline(DeadlineSignal::PlaybackStopped { at: now }, out);
+                }
+            }
+        }
+    }
+
+    /// Viewers matching `gone` closed: playback stops when none plays.
+    fn viewers_stopped(&mut self, gone: impl Fn(&(PortId, SessionId)) -> bool, out: &mut Out) {
+        let was = !self.playing_viewers.is_empty();
+        self.playing_viewers.retain(|key| !gone(key));
+        if was && self.playing_viewers.is_empty() {
+            let at = crate::clock::host_now();
+            self.emit_deadline(DeadlineSignal::PlaybackStopped { at }, out);
         }
     }
 
@@ -1630,12 +1701,17 @@ impl Engine {
     /// rest go to the host, which relays them and adjusts leases.
     pub fn signal_deadline(&mut self, signal: DeadlineSignal) -> Vec<Action> {
         let mut out = Out::default();
+        self.emit_deadline(signal, &mut out);
+        out.0
+    }
+
+    fn emit_deadline(&mut self, signal: DeadlineSignal, out: &mut Out) {
         if self.config.process != EngineProcess::Interactive {
             out.log(
                 LogLevel::Error,
                 "only the interactive engine sends deadline signals",
             );
-            return out.0;
+            return;
         }
         match signal {
             DeadlineSignal::PlaybackStarted { .. } => self.playing = true,
@@ -1655,9 +1731,8 @@ impl Engine {
             let envelope = Envelope::new(Message::Event {
                 body: Event::Deadline(signal),
             });
-            self.send_raw(port, envelope, &mut out);
+            self.send_raw(port, envelope, out);
         }
-        out.0
     }
 
     /// Starts work on attributable items: refuses items marked failed, and
