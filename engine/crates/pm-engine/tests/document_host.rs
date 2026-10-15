@@ -405,3 +405,52 @@ fn media_resolves_through_host_handles_and_retries_when_offline() {
             .contains(&Seen::Media("logo".into(), None))
     );
 }
+
+#[test]
+fn viewer_playback_is_signalled_to_the_host() {
+    let recorder = Recorder::default();
+    let (mut engine, session) = engine_with(&recorder);
+    let transport = |command| event(Event::Transport(command), session);
+    let out = engine.receive(
+        WINDOW,
+        &transport(pm_protocol::clock::TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        }),
+        at(5),
+    );
+    let deadline = |out: &[pm_engine::Action]| {
+        sent(out, HOST)
+            .into_iter()
+            .filter_map(|e| match e.message {
+                Message::Event {
+                    body: Event::Deadline(signal),
+                } => Some(signal),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(matches!(
+        deadline(&out)[..],
+        [pm_protocol::slicing::DeadlineSignal::PlaybackStarted { .. }]
+    ));
+    assert!(engine.is_playing());
+    // A second Play while playing says nothing new.
+    let out = engine.receive(
+        WINDOW,
+        &transport(pm_protocol::clock::TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        }),
+        at(6),
+    );
+    assert!(deadline(&out).is_empty());
+    let out = engine.receive(
+        WINDOW,
+        &transport(pm_protocol::clock::TransportCommand::Pause),
+        at(7),
+    );
+    assert!(matches!(
+        deadline(&out)[..],
+        [pm_protocol::slicing::DeadlineSignal::PlaybackStopped { .. }]
+    ));
+    assert!(!engine.is_playing());
+}

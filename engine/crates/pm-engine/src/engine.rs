@@ -258,6 +258,10 @@ pub struct Engine {
     overdue_logged: Option<u64>,
 }
 
+/// The frame budget announced with `playbackStarted` (one 60 Hz refresh):
+/// the job engine slices its GPU work around interactive frames.
+const PLAYBACK_FRAME_BUDGET_US: u32 = 16_666;
+
 /// A decoded patch body.
 enum Decoded {
     Ops(std::sync::Arc<[pm_model::Op]>),
@@ -1302,12 +1306,33 @@ impl Engine {
                     );
                     return;
                 };
+                let playback = match &event {
+                    Event::Transport(pm_protocol::clock::TransportCommand::Play { rate }) => {
+                        Some(DeadlineSignal::PlaybackStarted {
+                            at: now,
+                            rate: *rate,
+                            frame_budget_us: PLAYBACK_FRAME_BUDGET_US,
+                        })
+                    }
+                    Event::Transport(pm_protocol::clock::TransportCommand::Pause) => {
+                        Some(DeadlineSignal::PlaybackStopped { at: now })
+                    }
+                    _ => None,
+                };
                 self.with_presenter(out, |p, ctx| match event {
                     Event::Viewer(state) => p.viewer(ctx, port, sid, state, revision),
                     Event::ReleaseFrame(release) => p.release(port, sid, release),
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
                     _ => {}
                 });
+                // The host moves leases and relays the job engine's slicing
+                // around interactive playback (contracts 8 and 13).
+                if let Some(signal) = playback {
+                    let starts = matches!(signal, DeadlineSignal::PlaybackStarted { .. });
+                    if starts != self.playing {
+                        out.0.extend(self.signal_deadline(signal));
+                    }
+                }
             }
             (
                 Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_),
