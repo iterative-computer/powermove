@@ -1,0 +1,122 @@
+{
+  "run": "app-latency-engine-load-move-r2",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.728515625,
+      6.3271484375,
+      6.41650390625
+    ],
+    "after": [
+      6.15576171875,
+      6.31640625,
+      6.40087890625
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 43,
+    "offsetUs": 173228824272.5
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 24,
+      "ms": {
+        "n": 24,
+        "p50": 50.021082999999635,
+        "max": 50.03949999999895
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 446,
+      "replies": 445,
+      "replyBytes": 35017720,
+      "mainMsP50": 0.0701660000049742
+    },
+    "resizes": {
+      "n": 4,
+      "steps": 244
+    },
+    "eventCount": 28
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.1efe24d9f020398d7704ad3a0e58ffe1",
+    "accepted": {
+      "pid": 15709,
+      "pidversion": 2239307
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 1852,
+      "draws": 1851,
+      "unmatched": 0,
+      "unpresented": 50,
+      "pointerToPixelMs": {
+        "n": 2351,
+        "p50": 34.58,
+        "p95": 100.66,
+        "p99": 125.72,
+        "max": 150.73
+      }
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "run": "app-latency-today-idle-r6",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.9052734375,
+      4.1162109375,
+      4.65283203125
+    ],
+    "after": [
+      3.93603515625,
+      4.02197265625,
+      4.54248046875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 52,
+    "offsetUs": 187610924407
+  },
+  "load": null,
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 2371,
+      "draws": 2495,
+      "unmatched": 0,
+      "unpresented": 1,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2400,
+        "p50": 16.5,
+        "p95": 25.07,
+        "p99": 26,
+        "max": 33.7
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 2310,
+      "draws": 2311,
+      "unmatched": 0,
+      "unpresented": 15,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2386,
+        "p50": 20.58,
+        "p95": 29.35,
+        "p99": 36.83,
+        "max": 53.23
+      }
+    }
+  }
+}

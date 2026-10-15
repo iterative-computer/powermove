@@ -1,0 +1,112 @@
+{
+  "run": "app-latency-today-load-r4",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.96923828125,
+      7.01171875,
+      6.330078125
+    ],
+    "after": [
+      3.662109375,
+      5.76318359375,
+      5.91650390625
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 30,
+    "offsetUs": 184311173985
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 46,
+      "ms": {
+        "n": 46,
+        "p50": 50.0135830000072,
+        "max": 50.02125000000524
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 872,
+      "replies": 872,
+      "replyBytes": 68619204,
+      "mainMsP50": 0.06499999998777639
+    },
+    "resizes": {
+      "n": 9,
+      "steps": 549
+    },
+    "eventCount": 55
+  },
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 2041,
+      "draws": 2682,
+      "unmatched": 0,
+      "unpresented": 136,
+      "pointerToPixelMs": {
+        "n": 2265,
+        "p50": 23.5,
+        "p95": 48.6,
+        "p99": 73.27,
+        "max": 100.05
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 1946,
+      "draws": 2016,
+      "unmatched": 0,
+      "unpresented": 21,
+      "pointerToPixelMs": {
+        "n": 2380,
+        "p50": 29.2,
+        "p95": 62.53,
+        "p99": 87.14,
+        "max": 113.35
+      }
+    }
+  }
+}

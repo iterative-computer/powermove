@@ -1,0 +1,140 @@
+{
+  "run": "app-playback-today-idle-r2",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      3.77197265625,
+      5.6552734375,
+      6.23095703125
+    ],
+    "after": [
+      4.55126953125,
+      5.24072265625,
+      5.96826171875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 41,
+    "offsetUs": 172315040287.5
+  },
+  "load": null,
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14806
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 73634.29999998212,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1799,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 1,
+      "notPresented": 0,
+      "drops": 1,
+      "presented": 1792,
+      "offSlot": 576
+    },
+    "jitterAbsMs": {
+      "n": 1792,
+      "p50": 0.326,
+      "p95": 8.726,
+      "p99": 12.455,
+      "max": 92.056
+    },
+    "intervalErrorAbsMs": {
+      "n": 1790,
+      "p50": 0.001,
+      "p95": 8.334,
+      "p99": 8.334,
+      "max": 83.332
+    },
+    "irregularIntervals": 823,
+    "rafToPresentMs": {
+      "n": 1792,
+      "p50": 19.84,
+      "p95": 20.72,
+      "p99": 28.2,
+      "max": 111.55
+    },
+    "rafGapMs": {
+      "n": 7192,
+      "p50": 8.3,
+      "p95": 9.1,
+      "p99": 9.3,
+      "max": 66.2
+    },
+    "rafGapsOver25Ms": 1,
+    "missing": [
+      {
+        "k": 121,
+        "state": "not-drawn",
+        "near": "none"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 533,
+      "2": 1222,
+      "3": 35,
+      "4": 1,
+      "13": 1
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}
