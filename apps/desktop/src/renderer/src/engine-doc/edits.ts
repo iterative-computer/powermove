@@ -421,11 +421,15 @@ export class NativeEdits {
 
 /** The kernel's split layers against the ones the legacy split created
  *  (group membership aside: the new groups have fresh ids on both sides). */
-function compareSplit(plans: Array<{ children: any[] }>, created: unknown, known: Set<string>): string | null {
+export function compareSplit(plans: Array<{ children: any[] }>, created: unknown, known: Set<string>): string | null {
   const strip = (layers: any[]) => layers.map(layer => { const copy = clone(layer); delete copy.group; return copy; });
   const native = strip(plans.flatMap(plan => plan.children));
-  const legacy = Array.isArray(created) ? strip(created) : created;
-  return editDiffers(native, legacy, known);
+  // The legacy split answers `false` (nothing to split) or `PM.Edit.mutate`'s
+  // result, whose `data.result` is the created layers.
+  const result = (created as any)?.data?.result;
+  const layers = Array.isArray(created) ? created : Array.isArray(result) ? result : null;
+  if (!layers) return native.length ? '(nothing split)' : null;
+  return editDiffers(native, strip(layers), known);
 }
 
 /** A short excerpt of a value around a `differs` path, for mismatch reports. */

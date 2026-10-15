@@ -14,7 +14,7 @@ import { makePM } from '../legacy/__tests__/make-pm';
 import { is3DLayer } from '../legacy/core/space-3d';
 import { initializeLayer3D, parseLayer3DData } from '../core/scene3d/layers';
 import { materialPreset } from '../core/scene3d/materials';
-import { adoptKeys, editDiffers, knownIds, timeGrid } from './edits';
+import { adoptKeys, compareSplit, editDiffers, knownIds, timeGrid } from './edits';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode } from './flags';
 
@@ -287,5 +287,17 @@ describe.skipIf(!built)('material peers through pm-edit', () => {
     }
     expect(applied).toBeGreaterThan(0);
     expect(compared).toBeGreaterThan(0);
+  });
+});
+
+describe('split text comparison', () => {
+  it('reads the created layers out of Edit.mutate\'s result and leaves group membership aside', () => {
+    const child = (id: string, text: string, group: string) => ({ id, type: 'text', group, d: { text }, p: {} });
+    const plans = [{ children: [child('Lk1', 'Hello', 'g1'), child('Lk2', 'world', 'g1')] }];
+    const created = { ok: true, message: 'Source updated', data: { result: [child('Lz8', 'Hello', 'g9'), child('Lz9', 'world', 'g9')], revision: 3 } };
+    expect(compareSplit(plans, created, new Set())).toBeNull();
+    expect(compareSplit(plans, [child('Lz8', 'Hello', 'g9'), child('Lz9', 'World', 'g9')], new Set())).not.toBeNull();
+    expect(compareSplit([{ children: [] }], false, new Set())).toBeNull();
+    expect(compareSplit(plans, false, new Set())).toBe('(nothing split)');
   });
 });
