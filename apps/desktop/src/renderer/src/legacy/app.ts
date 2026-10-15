@@ -13,7 +13,7 @@ import { normalizeExportDefaults, type ExportDefaults } from '../core/export-def
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
-import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
+import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
@@ -865,15 +865,12 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
       const { token, document, media } = file.native;
-      try {
+      await withProjectReader(async () => {
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }));
-        o = document; mediaRestored = true;
-      // Closing is cleanup: main closes a reader left idle for 120 s itself
-      // (every byte was read by then, while the media store was still
-      // writing), and a failed close must not fail the open or hide its error.
-      } finally { await bridge.close(token).catch(() => undefined); }
+      }, () => bridge.close(token));
+      o = document; mediaRestored = true;
     } else if (file.native) o = unpackProjectFile(file.native.data);
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
