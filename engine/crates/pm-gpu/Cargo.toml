@@ -19,12 +19,13 @@ objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
 # The viewer's surfaces (bridge_out) and its device helper.
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
-# The C′ prototype (bridge_out::remote_layer): a remote CAMetalLayer.
-objc2-quartz-core = { version = "0.3.2", features = ["objc2-metal", "objc2-core-graphics"] }
-objc2-core-graphics = "0.3.2"
-objc2-foundation = "0.3.2"
-block2 = "0.6"
-libc = "0.2"
+# The C′ prototype (feature `remote-layer`, bridge_out::remote_layer): a
+# remote CAMetalLayer.
+objc2-quartz-core = { version = "0.3.2", features = ["objc2-metal", "objc2-core-graphics"], optional = true }
+objc2-core-graphics = { version = "0.3.2", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+block2 = { version = "0.6", optional = true }
+libc = { version = "0.2", optional = true }
 pollster = "0.4"
 # The GLSL ES pipeline (feature `glsl`): glslang to SPIR-V, rewrites, naga IR.
 glslang = { version = "0.8.1", optional = true }
@@ -40,6 +41,18 @@ default = ["decode-in"]
 decode-in = ["dep:pm-media"]
 # three.js and user GLSL to naga IR (`glsl`).
 glsl = ["dep:glslang", "dep:glslang-sys", "dep:rspirv", "dep:naga", "wgpu/naga-ir"]
+# The C′ prototype (docs/engine/bridge.md): playback through a remote Core
+# Animation layer, with private CAContext and CGSMainConnectionID looked up at
+# run time, and a display-link refresh-rate request (section 15). Measured
+# and not adopted (amendment 5), so measurement builds only, never release
+# builds (the S1 harness builds pm-node with `remote-layer`).
+remote-layer = [
+    "dep:objc2-quartz-core",
+    "dep:objc2-core-graphics",
+    "dep:objc2-foundation",
+    "dep:block2",
+    "dep:libc",
+]
 
 [[test]]
 name = "decode_import"
@@ -48,3 +61,7 @@ required-features = ["decode-in"]
 [[test]]
 name = "deinterlace"
 required-features = ["decode-in"]
+
+[[example]]
+name = "refresh_probe"
+required-features = ["remote-layer"]

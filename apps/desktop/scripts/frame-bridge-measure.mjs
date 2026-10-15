@@ -4,6 +4,7 @@
  * on the same harness, at p50 and p99, idle and under the gate load.
  *
  * Builds the pm-bridge addon with its `harness` feature (synthetic input),
+ * and for C′ runs the pm-node addon with its `remote-layer` feature,
  * bundles src/main/engine/integration/measure-main.ts and measure-page.ts
  * with the real preload and engine process, runs every scenario in its own
  * Electron launch (one at a time, window off every screen, never focused),
@@ -143,6 +144,15 @@ if (!process.argv.includes('--skip-build') && !from) {
   execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge --lib --features harness'], { cwd: engineDir, stdio: 'inherit' });
 }
 fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge.dylib'), harnessAddon);
+// The C′ prototype is compiled into pm-node only with its `remote-layer`
+// feature (never in release builds): its runs load an addon built with it.
+const remoteAddon = path.join(work, 'pm_node_remote_layer.node');
+if (selected.some((run) => run.remoteLayer) && !from) {
+  if (!process.argv.includes('--skip-build')) {
+    execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-node --features node,remote-layer'], { cwd: engineDir, stdio: 'inherit' });
+  }
+  fs.copyFileSync(path.join(engineDir, 'target/release/libpm_node.dylib'), remoteAddon);
+}
 const harness = createRequire(import.meta.url)(harnessAddon);
 const allowAsleep = process.argv.includes('--allow-display-asleep');
 const waitDisplay = process.argv.includes('--wait-display');
@@ -684,7 +694,7 @@ try {
     delete env.ELECTRON_RUN_AS_NODE;
     const remoteTrace = path.join(from ?? work, `${name}.remote.jsonl`);
     if (run.fps && !run.app) env.POWERMOVE_BRIDGE_TEST_FPS = String(run.fps);
-    if (run.remoteLayer) Object.assign(env, { POWERMOVE_BRIDGE_REMOTE_LAYER: '1', POWERMOVE_BRIDGE_REMOTE_TRACE: remoteTrace, POWERMOVE_BRIDGE_LEAD: String(run.lead ?? 2) });
+    if (run.remoteLayer) Object.assign(env, { POWERMOVE_ENGINE_ADDON: remoteAddon, POWERMOVE_BRIDGE_REMOTE_LAYER: '1', POWERMOVE_BRIDGE_REMOTE_TRACE: remoteTrace, POWERMOVE_BRIDGE_LEAD: String(run.lead ?? 2) });
     let args = [path.join(work, 'main.js')];
     let profile = null;
     if (run.app) {

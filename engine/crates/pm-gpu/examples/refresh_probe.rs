@@ -5,7 +5,7 @@
 //! refresh intervals seen. Opens no window.
 //!
 //! ```sh
-//! source engine/env.sh && cd engine && cargo run --release -p pm-gpu --no-default-features --example refresh_probe
+//! source engine/env.sh && cd engine && cargo run --release -p pm-gpu --no-default-features --features remote-layer --example refresh_probe
 //! ```
 
 // NSScreen lives in AppKit, which a plain Rust binary does not load (the

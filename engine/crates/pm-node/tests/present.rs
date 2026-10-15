@@ -16,7 +16,7 @@ use pm_bridge::wire::PixelFormat;
 use pm_engine::Action;
 use pm_engine::engine::testing::hello;
 use pm_node::EngineHost;
-use pm_node::present::{BRIDGE_ENV, SOURCE_ENV};
+use pm_node::present::{BRIDGE_ENV, REMOTE_LAYER_ENV, SOURCE_ENV};
 use pm_protocol::clock::{TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::{ProjectColor, ViewerColorSpace};
@@ -39,6 +39,28 @@ const WINDOW: PortId = PortId(7);
 
 #[test]
 fn the_presenter_hands_pools_to_main_and_frames_to_the_viewer() {
+    present(&[]);
+}
+
+/// The C′ prototype is compiled only with the `remote-layer` feature
+/// (measurement builds). Asked for it, a build without it says so and
+/// presents through the viewer as usual: the child's frames still arrive as
+/// viewer events, and main is never asked to host a remote layer.
+#[test]
+#[cfg(not(feature = "remote-layer"))]
+fn a_build_without_c_prime_presents_through_the_viewer_when_asked_for_it() {
+    let events = present(&[(REMOTE_LAYER_ENV, "1")]);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HostEvent::RemoteLayer { .. })),
+        "{events:?}"
+    );
+}
+
+/// Runs the child engine against this process playing main, checks what
+/// main saw, and returns main's events.
+fn present(extra_env: &[(&str, &str)]) -> Vec<HostEvent> {
     let name = random_service_name(SERVICE_PREFIX).unwrap();
     let server = Rendezvous::register(&name).unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
@@ -52,6 +74,7 @@ fn the_presenter_hands_pools_to_main_and_frames_to_the_viewer() {
         .env(CHILD_ENV, "1")
         .env(BRIDGE_ENV, &name)
         .env(SOURCE_ENV, "test-pattern")
+        .envs(extra_env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -128,6 +151,7 @@ fn the_presenter_hands_pools_to_main_and_frames_to_the_viewer() {
         12,
         "main holds surfaces until Chromium releases them"
     );
+    events
 }
 
 /// Collects the engine's asynchronous actions.
@@ -464,6 +488,15 @@ fn child_engine() {
         presenter["releaseMismatches"].as_u64().unwrap() == 0,
         "{presenter}"
     );
+    if std::env::var(REMOTE_LAYER_ENV).as_deref() == Ok("1") && !cfg!(feature = "remote-layer") {
+        assert_eq!(presenter["remoteFrames"], 0, "{presenter}");
+        assert!(
+            presenter["remoteError"]
+                .as_str()
+                .is_some_and(|e| e.contains("built without the C′ prototype")),
+            "{presenter}"
+        );
+    }
     drop(host);
     println!("CHILD-OK frames={}", timed.len());
 }

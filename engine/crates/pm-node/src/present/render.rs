@@ -18,6 +18,7 @@ use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
+#[cfg(feature = "remote-layer")]
 use pm_gpu::bridge_out::remote_layer::{
     Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device, take_display_ticks,
 };
@@ -39,6 +40,11 @@ use serde::Serialize;
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
+
+/// Stand-in for the C′ prototype's layer in builds without it (feature
+/// `remote-layer`): uninhabited, so a pool never has a remote layer.
+#[cfg(not(feature = "remote-layer"))]
+enum RemoteLayer {}
 
 /// Where the engine's actions go: posted on the utility process's ports by
 /// its JavaScript (pm-node's threadsafe function), or collected by tests.
@@ -263,7 +269,9 @@ struct View {
     retry: Option<PoolRetry>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
+    #[cfg(feature = "remote-layer")]
     rate: Option<RatePreference>,
+    #[cfg(feature = "remote-layer")]
     rate_tried: bool,
 }
 
@@ -536,7 +544,9 @@ impl Thread {
             dirty: true,
             requests: VecDeque::new(),
             retry: None,
+            #[cfg(feature = "remote-layer")]
             rate: None,
+            #[cfg(feature = "remote-layer")]
             rate_tried: false,
         });
         // A new vsync hint alone is not a new view: nothing to redraw.
@@ -721,6 +731,7 @@ impl Thread {
     /// The C′ prototype: a remote layer for `spec`, announced to main. The
     /// previous pool's layer, when there is one, is moved to the new size
     /// and format and keeps its context.
+    #[cfg(feature = "remote-layer")]
     fn make_remote(
         &mut self,
         key: Key,
@@ -790,8 +801,27 @@ impl Thread {
         }
     }
 
+    /// Asked for the C′ prototype in a build without it (feature
+    /// `remote-layer`): says so, and the viewer presents as usual.
+    #[cfg(not(feature = "remote-layer"))]
+    fn make_remote(
+        &mut self,
+        _key: Key,
+        _spec: PoolSpec,
+        _carried: Option<RemoteLayer>,
+    ) -> Option<RemoteLayer> {
+        let error = "this engine was built without the C′ prototype (feature remote-layer)";
+        self.stats().remote_error = Some(error.into());
+        self.log(
+            LogLevel::Error,
+            format!("frame bridge: no remote layer: {error}"),
+        );
+        None
+    }
+
     /// The C′ prototype: hands a rendered timed frame to the remote layer
     /// to show at host µs `shown_from`, then frees its surface.
+    #[cfg(feature = "remote-layer")]
     fn present_remote(&mut self, key: Key, descriptor: &FrameDescriptor, shown_from: f64) {
         let Some(view) = self.views.get_mut(&key) else {
             return;
@@ -827,8 +857,16 @@ impl Thread {
         }
     }
 
+    /// Without the C′ prototype no pool has a remote layer (the type is
+    /// uninhabited), so this is never called.
+    #[cfg(not(feature = "remote-layer"))]
+    fn present_remote(&mut self, _key: Key, _descriptor: &FrameDescriptor, _shown_from: f64) {
+        unreachable!("no remote layer exists without the remote-layer feature")
+    }
+
     /// Collects the remote layers' presentation records into the stats and
     /// the trace file.
+    #[cfg(feature = "remote-layer")]
     fn collect_remote(&mut self) {
         // The refreshes the rate request's display link saw, next to the
         // presentation records (`<trace>.ticks`: host µs of each refresh).
@@ -936,6 +974,7 @@ impl Thread {
         for key in keys {
             self.work_view(key);
         }
+        #[cfg(feature = "remote-layer")]
         if self.config.remote_layer {
             self.collect_remote();
             if self.config.remote_rate {
@@ -946,6 +985,7 @@ impl Thread {
 
     /// Holds a refresh-rate request for each view whose C′ layer plays,
     /// and drops it when playback stops.
+    #[cfg(feature = "remote-layer")]
     fn request_rates(&mut self) {
         let fps = f64::from(self.config.fps);
         let mut asked = None;
