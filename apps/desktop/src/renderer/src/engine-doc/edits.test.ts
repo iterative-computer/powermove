@@ -301,3 +301,38 @@ describe('split text comparison', () => {
     expect(compareSplit(plans, false, new Set())).toBe('(nothing split)');
   });
 });
+
+describe('edit comparison on the tick grid', () => {
+  const TICK = 1 / 705_600_000;
+  const comp = (keys: any[], from = 1.0667) => ({ C1: { fps: 24, layers: [{ id: 'L1', from, p: { mix: { v: 0, kf: keys, expr: null } } }] } });
+  const key = (i: string, t: number, v: number) => ({ i, t, v });
+
+  it('allows created and moved key times the tick rounding of their terms on exact rates', () => {
+    const before = comp([key('k1', 0, 0)]);
+    const known = knownIds(before);
+    const grid = timeGrid(before);
+    expect(grid.drift).toBe(0);
+    // Material peers on a 24 fps composition, layer start 1.0667: the moved
+    // key is -48132983 ticks, 0.86 tick from the float sum.
+    const ours = comp([key('k1', -0.06821567885487528, 0.5)]);
+    const want = comp([key('k1', -0.06821568007580936, 0.5)]);
+    expect(editDiffers(ours, want, known, grid)).toBeNull();
+    expect(editDiffers(ours, want, known)).toBeNull();
+    // Beyond the allowance (three ticks off) it is a mismatch.
+    const far = comp([key('k1', -0.06821568007580936 + 3 * TICK, 0.5)]);
+    expect(editDiffers(far, want, known, grid)).toMatch(/\.kf\[0\]\.t$/);
+  });
+
+  it('allows values of created keys sampled against keys on the tick grid, not of kept ones', () => {
+    const before = comp([key('k1', 0, 0)], 0);
+    const known = knownIds(before);
+    // An ungroup bake on 24 fps: the opacity at 2.4583 s was sampled against
+    // a group baked on the tick grid just before a steep step.
+    const track = (v: number, id: string) => [key('n1', 2.4166666666666665, 71.55407422687858), key(id, 2.4583333333333335, v), key('n3', 2.5, 140.17270896993412)];
+    expect(editDiffers(comp(track(71.55407453068052, 'n2'), 0), comp(track(71.55407422687858, 'n9'), 0), known)).toBeNull();
+    // A key the input already had keeps section 25's tolerance.
+    expect(editDiffers(comp(track(71.55407453068052, 'k1'), 0), comp(track(71.55407422687858, 'k1'), 0), known)).toMatch(/\.kf\[1\]\.v$/);
+    // A created value far beyond the sampling allowance is a mismatch.
+    expect(editDiffers(comp(track(71.6, 'n2'), 0), comp(track(71.55407422687858, 'n9'), 0), known)).toMatch(/\.kf\[1\]\.v$/);
+  });
+});

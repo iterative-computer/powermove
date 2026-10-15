@@ -115,26 +115,47 @@ on the first evaluation of every track.
 
 ## Deliberate differences from today
 
-1. **Exact grid for created and moved key times.** On a composition stored with a
-   float NTSC rate (29.97, 23.976, 59.94), a key time that is a sum of frame times
-   and an off-grid offset is computed on 30000/1001 rather than on the float rate:
-   it differs from the TypeScript `n / 29.97 + from − to` by the float rate's drift
-   (about 1e-6 relative). Frame-aligned results are identical (`n / fps`).
-2. **Off-grid playhead keys.** An ungroup bake's playhead key lands on the
-   playhead's tick (at most half a tick, 0.7 ns, from the float `time − from`);
-   values sampled against a parent baked on the same tick move with it (observed:
-   at most 1e-6 relative, 7 values in the generated vectors).
+1. **Tick grid for created and moved key times.** A key time a kernel creates
+   or moves off the frame grid is a sum of terms (`t + from − to` for a key
+   moved between layers or material peers, `time − from` for a baked key)
+   computed in ticks: each term is rounded to the tick (half a tick at most,
+   0.7 ns), and the result is written as `ticks / TICKS`. TypeScript adds the
+   floats. On exact rates the two differ by up to about 1.5 ticks (observed:
+   0.95 ticks, material peers on 24 fps with layer starts 1.0667 and the like);
+   on a composition stored with a float NTSC rate (29.97, 23.976, 59.94) a sum
+   of frame times is also on 30000/1001 rather than on the float rate, so it
+   differs by the float rate's drift as well (about 1e-6 relative).
+   Frame-aligned results are identical (`n / fps`).
+2. **Values sampled on the tick grid.** A value a bake writes is sampled from
+   the document as the bake left it so far: a parent baked on the same ticks,
+   or a group baked by an earlier group of the same ungroup. Those keys sit up
+   to a tick and a half from where TypeScript put them, so a sample read beside
+   them moves by the sampled track's slope over that time (observed: at most
+   1.4e-7 relative, 26 values in 3,361 cases of one seed; for example an
+   opacity sampled just before a step of a group baked with layer start 1.0189:
+   71.55407453 against 71.55407423). An ungroup bake's playhead key, when the
+   playhead is off the frame grid, likewise lands on the playhead's tick.
 3. **Created keys in native ease.** As described above; equal after adoption.
 4. **Distribute** has no TypeScript counterpart (the strip only aligns). The two
    outermost layers stay; the others move along one axis so the chosen edges or
    centers fall at equal steps, or so the gaps between neighbours are equal.
    Tested against that definition (`tests/distribute.rs`); no UI calls it yet.
 
-Dual-answer mode compares with these allowances: key times within twice the
-compared compositions' drift (scaled by the times and the largest layer start),
-keyframe tracks adopted on both sides first (legacy evaluation adopts stored
-handles as a side effect of the TypeScript edit), created ids by order of first
-appearance, numbers inside rewritten expressions with section 25's tolerance.
+Both comparisons (the parity harness, `tests/edit_parity.rs`, and dual-answer
+mode, `engine-doc/edits.ts` `editDiffers`) use the same allowances, so snapping
+never counts as a mismatch (rule 4):
+
+- key times (`….kf[i].t`): section 25's tolerance plus 2 ticks (three rounded
+  terms, plus the float error of the TypeScript sum), plus twice the compared
+  compositions' drift scaled by the times and the largest layer start on NTSC
+  float rates;
+- values of keys a kernel created (an id the input lacks) or whose time it moved
+  (`….kf[i].v`): the track's slope next to the key over 4 ticks, or 1e-6 of the
+  value's magnitude (a parent track moving up to about 350 times the value's
+  magnitude per second, read 2.8 ns off);
+- keyframe tracks adopted on both sides first (legacy evaluation adopts stored
+  handles as a side effect of the TypeScript edit), created ids by order of first
+  appearance, numbers inside rewritten expressions with section 25's tolerance.
 
 ## Tests and results
 
