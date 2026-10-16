@@ -11,6 +11,14 @@ use pm_model::json::parse;
 use pm_model::{Document, JsString, Node};
 use pm_text::compat::{GlyphLayout, TextContent};
 
+#[path = "support/pm_expr_engine.rs"]
+mod pm_expr_engine;
+
+/// An evaluator that runs expressions through `pm-expr` (legacy dialect).
+fn with_expressions() -> Evaluator {
+    Evaluator::new().with_expressions(std::sync::Arc::new(pm_expr_engine::PmExprEngine))
+}
+
 /// Text measurement that is never called (the documents have no text).
 struct NoText;
 
@@ -284,7 +292,7 @@ fn video(speed: &str) -> String {
 }
 
 #[test]
-fn engine_retiming_integrates_per_composition_frame() {
+fn engine_retiming_integrates_constant_and_linear_speed_exactly() {
     // A keyframed speed that is constant: both steps integrate it exactly.
     let constant = r#"{"v":2,"kf":[{"t":0,"v":2,"i":"a"},{"t":10,"v":2,"i":"b"}],"expr":null}"#;
     let d = doc(&project(&[video(constant)]));
@@ -404,6 +412,111 @@ fn engine_retiming_uses_the_owning_composition_rate() {
             .to_bits(),
         engine.to_bits()
     );
+}
+
+/// A project at `fps` with one video layer whose speed is eased and carries
+/// an expression (the case the corpus lacked: its only variable speed is a
+/// linear ramp, which every midpoint grid integrates exactly).
+fn eased_expression_speed(fps: f64) -> String {
+    let speed = r#"{"v":1,"kf":[{"t":0,"v":0.5,"i":"a","eo":[0.8,0],"ei":[0.2,1]},{"t":4,"v":4,"i":"b","eo":[0.8,0],"ei":[0.2,1]}],"expr":"value * (1 + 0.1 * Math.sin(time * 7))"}"#;
+    format!(
+        r#"{{"id":"P","compId":"C","w":640,"h":360,"fps":{fps},"dur":10,"layers":[{}],"comps":{{}},"params":{{}}}}"#,
+        video(speed)
+    )
+}
+
+#[test]
+fn engine_retiming_matches_today_at_the_root() {
+    // Amendment 16: two midpoint samples per frame of the owning composition,
+    // at no less than 60 Hz. At the root that is today's step, so the engine
+    // answers bit for bit what `retiming.ts` answers, on and off the frame
+    // grid, before the layer starts, and past the eased keys.
+    for fps in [30.0, 24.0, 29.97, 60.0, 120.0] {
+        let d = doc(&eased_expression_speed(fps));
+        let comp = Comp::resolve(&d, "C").unwrap();
+        let mut ev = with_expressions();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let l = &comp.layers()[0];
+        let mut cache = RetimeCache::new();
+        let mut checked = 0;
+        for i in 0..400 {
+            // Frame-aligned, off-grid, and irrational offsets over 0…8 s.
+            let t = match i % 3 {
+                0 => (i / 3) as f64 / fps,
+                1 => i as f64 * 0.0201 + 0.0003,
+                _ => i as f64 * std::f64::consts::E / 136.0,
+            };
+            let engine = scope
+                .source_time_with(l, t, Retiming::Engine, None)
+                .unwrap();
+            let legacy = scope
+                .source_time_with(l, t, Retiming::Legacy, None)
+                .unwrap();
+            let cached = scope
+                .source_time_with(l, t, Retiming::Engine, Some(&mut cache))
+                .unwrap();
+            assert_eq!(
+                engine.to_bits(),
+                legacy.to_bits(),
+                "{fps} fps at t = {t}: engine {engine} legacy {legacy}"
+            );
+            assert_eq!(engine.to_bits(), cached.to_bits(), "the cache changes nothing");
+            checked += 1;
+        }
+        assert_eq!(checked, 400);
+    }
+    // The expression takes part: without it the answers differ.
+    let with = doc(&eased_expression_speed(30.0));
+    let without = doc(&eased_expression_speed(30.0).replace(
+        r#""value * (1 + 0.1 * Math.sin(time * 7))""#,
+        "null",
+    ));
+    let answer = |d: &Document| {
+        let comp = Comp::resolve(d, "C").unwrap();
+        let mut ev = with_expressions();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let l = &comp.layers()[0];
+        scope.source_time_with(l, 3.3, Retiming::Engine, None).unwrap()
+    };
+    assert_ne!(answer(&with), answer(&without));
+}
+
+#[test]
+fn engine_retiming_of_a_nested_composition_is_its_own_rate() {
+    // A 24 fps composition nested in a 60 fps open one integrates at its own
+    // rate: the answer equals today's with the nested composition open, and
+    // differs from today's with the 60 fps composition open (the one allowed
+    // difference of amendment 16).
+    let speed = r#"{"v":1,"kf":[{"t":0,"v":0.5,"i":"a","eo":[0.8,0],"ei":[0.2,1]},{"t":4,"v":4,"i":"b","eo":[0.8,0],"ei":[0.2,1]}],"expr":"value * (1 + 0.1 * Math.sin(time * 7))"}"#;
+    let nested = format!(
+        r#"{{"id":"P","compId":"C","w":640,"h":360,"fps":60,"dur":10,"layers":[],"params":{{}},"comps":{{"N":{{"id":"N","w":640,"h":360,"fps":24,"dur":10,"layers":[{}]}}}}}}"#,
+        video(speed)
+    );
+    let d = doc(&nested);
+    let open = Comp::resolve(&d, "C").unwrap();
+    let inner = Comp::resolve(&d, "N").unwrap();
+    let l = &inner.layers()[0];
+    let mut differs = 0;
+    for i in 0..200 {
+        let t = 0.5 + i as f64 * 0.0373;
+        let mut ev = with_expressions();
+        let engine = Scope::new(&mut ev, &inner, &open)
+            .source_time_with(l, t, Retiming::Engine, None)
+            .unwrap();
+        let mut ev = with_expressions();
+        let own = Scope::open(&mut ev, &inner)
+            .source_time_with(l, t, Retiming::Legacy, None)
+            .unwrap();
+        let mut ev = with_expressions();
+        let legacy = Scope::new(&mut ev, &inner, &open)
+            .source_time_with(l, t, Retiming::Legacy, None)
+            .unwrap();
+        assert_eq!(engine.to_bits(), own.to_bits(), "t = {t}");
+        if engine.to_bits() != legacy.to_bits() {
+            differs += 1;
+        }
+    }
+    assert!(differs > 150, "60 Hz and 120 Hz steps differ: {differs} of 200");
 }
 
 fn bounds_of<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node) -> Option<pm_eval::bounds::Bounds> {
