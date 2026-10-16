@@ -103,7 +103,7 @@ describe('native Powermove agent tool bridge', () => {
       const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
       const done = await bridge.callTool(session, 'export_video', { name: 'P', audio: false });
       expect(JSON.parse((done.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.mp4', projectId: 'P', width: 320, height: 180, fps: 30, jobId: 'job-1' });
-      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' });
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined);
       const queued = await bridge.callTool(session, 'export_video', { mode: 'async' });
       expect(JSON.parse((queued.content[0] as { text: string }).text)).toEqual({ status: 'queued', jobId: 'job-1', projectId: 'P' });
       const status = await bridge.callTool(session, 'get_render_status', { jobId: 'job-1' });
@@ -488,6 +488,45 @@ describe('native Powermove agent tool bridge', () => {
       forkId: 'my-fork', stagingDirectory: '/private/stage/current-run'
     });
     expect(owner.requests).toHaveLength(0);
+  });
+
+  it('restarts an export call\'s socket timeout when its job starts rendering', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const project = { id: 'P', name: 'P', w: 320, h: 180, fps: 30, dur: 1, compId: 'P-root', layers: [], assets: {} };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false } : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 1 }));
+    } as never;
+    let started!: () => void;
+    let finish!: () => void;
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn((_o: number, _r: string, _p: unknown, _i: unknown, onStarted?: () => void) => new Promise<never>((resolve) => {
+        started = () => onStarted?.();
+        finish = () => resolve({ status: 'done', jobId: 'job-9', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 } as never);
+      })),
+      renderFrames: vi.fn(),
+      status: vi.fn(),
+      cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { command: process.execPath, mcpServerPath: path.join(__dirname, 'mcp-server.mjs'), timeoutMs: 500, engineJobs: engineJobs as never });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'export-timeout', owner: owner as never, baseRevision: 1 });
+    const client = net.createConnection({ host: '127.0.0.1', port: Number(session.mcpConfig.env.POWERMOVE_AGENT_TOOL_PORT) });
+    client.setEncoding('utf8');
+    let received = '';
+    client.on('data', (chunk: string) => { received += chunk; });
+    await new Promise<void>((resolve) => client.once('connect', () => resolve()));
+    client.write(`${JSON.stringify({ token: session.mcpConfig.env.POWERMOVE_AGENT_TOOL_TOKEN, runId: 'export-timeout', id: 1, tool: 'export_video', arguments: {}, workspace: os.tmpdir() })}\n`);
+    await vi.waitFor(() => expect(engineJobs.exportVideo, received).toHaveBeenCalled());
+    expect(received).toBe('');
+    started();
+    await vi.waitFor(() => expect(received).toBe(' '));
+    finish();
+    await new Promise<void>((resolve) => client.once('end', () => resolve()));
+    expect(JSON.parse(received.trim())).toMatchObject({ id: 1, ok: true });
+    client.destroy();
   });
 
   it('survives a tool client that resets the connection mid-request', async () => {

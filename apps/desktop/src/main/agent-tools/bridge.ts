@@ -47,7 +47,9 @@ const MAX_TOOL_CONTENT_ITEMS = 8;
 /** Agent renders through the job engine ("Use New Engine"; engine/agent-jobs.ts). */
 export interface AgentEngineJobs {
   readonly available: boolean;
-  exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput): Promise<ExportVideoResult>;
+  /** `onStarted` runs once when the job starts rendering (tool timeouts
+   *  count from then: plan section 17). */
+  exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult>;
   renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult>;
   status(owner: number, jobId: string): RenderStatus;
   cancelRun(run: string): Promise<number>;
@@ -490,7 +492,11 @@ export class PowermoveAgentToolBridge {
     } else if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
-    const response = await this.callTool(session, request.tool, request.arguments, request.workspace);
+    // An export's timeout counts from when its job starts rendering, not
+    // from the call: when it starts, one space on the socket restarts the
+    // idle timeouts on both ends (the client parses the trimmed reply).
+    const response = await this.callTool(session, request.tool, request.arguments, request.workspace,
+      request.tool === 'export_video' && socket ? () => { if (!socket.destroyed) socket.write(' '); } : undefined);
     return {
       id: request.id,
       ok: response.ok,
@@ -503,7 +509,7 @@ export class PowermoveAgentToolBridge {
 
   /** Both native MCP and API providers need main-process capture, input and
    * staging handlers, not just the renderer's editing dispatcher. */
-  async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
+  async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = '', onJobStarted?: () => void): Promise<AgentToolResponseEvent> {
     if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
     if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
@@ -518,7 +524,7 @@ export class PowermoveAgentToolBridge {
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
       const engine = this.options.engineJobs;
       if (engine?.available) {
-        const routed = await this.engineExport(session, engine, input);
+        const routed = await this.engineExport(session, engine, input, onJobStarted);
         if (routed) return routed;
       }
       // The legacy exporter: renderer frames, main's encoder (render-encoder.ts).
@@ -688,11 +694,11 @@ export class PowermoveAgentToolBridge {
 
   /** `export_video` through the job engine; null when the engine routes the
    *  project to the legacy exporter (capability routing, section 26). */
-  private async engineExport(session: PowermoveAgentToolSession, engine: AgentEngineJobs, input: ExportVideoInput): Promise<AgentToolResponseEvent | null> {
+  private async engineExport(session: PowermoveAgentToolSession, engine: AgentEngineJobs, input: ExportVideoInput, onJobStarted?: () => void): Promise<AgentToolResponseEvent | null> {
     const context = await this.rendererValue(session, '__mcp_context', {});
     if (context?.home === true) throw new Error('Open a project before exporting.');
     const project = JSON.parse(String(context?.projectJSON ?? 'null'));
-    const result = await engine.exportVideo(session.owner.id, session.runId, project, input);
+    const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted);
     if (result.status === 'routed') {
       console.info(`[engine] export_video routed to the current engine: ${result.reason}`);
       return null;

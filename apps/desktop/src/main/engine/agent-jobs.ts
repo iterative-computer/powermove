@@ -211,6 +211,8 @@ type JobRecord = {
   /** When the job entered the queue (ms), and when it started running. */
   queuedAt: number;
   startedAt: number | null;
+  /** Runs once when the job starts running (`export_video`'s timeout). */
+  onStarted?: (() => void) | undefined;
   name: string;
   size: { width: number; height: number };
   fps: number;
@@ -263,7 +265,7 @@ export class AgentJobs {
 
   /** Runs an agent export. Resolves `routed` when the engine cannot render
    *  the project (the caller runs the legacy exporter); throws on failure. */
-  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput): Promise<ExportVideoResult> {
+  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult> {
     const project = asProject(projectValue);
     const settings = exportSettingsFor(project, input);
     const extension = input.format === 'prores' ? 'mov' : 'mp4';
@@ -272,7 +274,7 @@ export class AgentJobs {
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
-      queuedAt: this.now(), startedAt: null,
+      queuedAt: this.now(), startedAt: null, onStarted,
       name: suggestedName(project, input.name),
       size: settings.size,
       fps: Number(project['fps']) || settings.frameRate.num / settings.frameRate.den,
@@ -359,7 +361,14 @@ export class AgentJobs {
   private onStatus(status: JobStatus): void {
     const record = this.jobs.get(status.job);
     if (!record) return;
-    if (status.state === 'running' && record.startedAt === null) record.startedAt = this.now();
+    if (status.state === 'running' && record.startedAt === null) {
+      record.startedAt = this.now();
+      try {
+        record.onStarted?.();
+      } catch (error) {
+        this.options.log?.('warn', `an export start callback failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     record.status = status;
     if (status.state === 'done' && status.path) this.options.onDelivered?.(record.owner, status.path);
     if (record.user) {

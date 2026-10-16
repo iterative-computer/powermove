@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalHash, canonicalProject } from '../../shared/canonical-json';
 import type { EngineError, EngineProcess, JobStatus, Request, Response } from '../../shared/engine-protocol';
@@ -103,7 +103,8 @@ describe('agent exports through the job engine', () => {
   it('snapshot the project, submit in the agent export class, and answer with the committed path', async () => {
     const engine = new FakeEngine();
     const jobs = new AgentJobs({ engine });
-    const result = jobs.exportVideo(7, 'run-1', project(), { name: 'Cut', format: 'mp4', range: 'all', audio: true, motionBlur: false, alpha: false });
+    const onStarted = vi.fn();
+    const result = jobs.exportVideo(7, 'run-1', project(), { name: 'Cut', format: 'mp4', range: 'all', audio: true, motionBlur: false, alpha: false }, onStarted);
     await tick(); await tick();
     const [open] = engine.of('openSession');
     expect(open!.body).toMatchObject({ role: 'jobSnapshot', process: 'job' });
@@ -117,7 +118,10 @@ describe('agent exports through the job engine', () => {
     expect(body.run).toBe('run-1');
     expect(body.output).toEqual({ kind: 'agentAutomatic', suggestedName: 'Cut', extension: 'mp4' });
     expect(body.spec).toMatchObject({ kind: 'export', session: 10, composition: 'P1-root' });
+    expect(onStarted).not.toHaveBeenCalled();
     engine.status(body.job, 'running');
+    engine.status(body.job, 'running');
+    expect(onStarted).toHaveBeenCalledTimes(1);
     engine.status(body.job, 'done', { path: '/x/Cut.mp4' });
     await expect(result).resolves.toEqual({ status: 'done', jobId: body.job, path: '/x/Cut.mp4', width: 1280, height: 720, fps: 29.97 });
     // The snapshot session closes once the job ends.
