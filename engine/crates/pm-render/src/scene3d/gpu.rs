@@ -138,7 +138,6 @@ pub struct Scene3dRenderer {
     cache_hits: u64,
     cache_write_failures: u64,
     pub(crate) legacy: super::legacy::MeshRenderer,
-    linear: super::linear::LinearPass,
 }
 
 impl Default for Scene3dRenderer {
@@ -160,7 +159,6 @@ impl Default for Scene3dRenderer {
             cache_hits: 0,
             cache_write_failures: 0,
             legacy: Default::default(),
-            linear: Default::default(),
         }
     }
 }
@@ -1140,19 +1138,6 @@ impl Scene3dRenderer {
                 Ok(Rendered3d { color, depth: None })
             }
         }
-    }
-
-    /// With linear blending on, the resolved E-encoded output becomes
-    /// premultiplied linear light in `format` (section 9).
-    pub fn to_linear(
-        &mut self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        pool: &mut TargetPool,
-        source: &Target,
-        format: wgpu::TextureFormat,
-    ) -> Target {
-        self.linear.convert(device, encoder, pool, source, format)
     }
 
     /// Keeps only the shadow maps `scene`'s casting lights use (at most 4).

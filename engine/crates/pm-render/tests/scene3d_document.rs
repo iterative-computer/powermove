@@ -261,60 +261,56 @@ fn editor_camera_projection_follows_the_contract() {
 }
 
 #[test]
-fn linear_blending_decodes_the_3d_canvas() {
-    use pm_render::scene3d::linear::{LinearPass, reference};
-    let gpu = pm_gpu::Gpu::new("pm-render 3d linear").unwrap();
-    // Every 8-bit code at several alphas, premultiplied (code ≤ alpha).
-    let mut px = Vec::new();
-    for a in [255u8, 200, 128, 17, 1, 0] {
-        for c in 0..=255u8 {
-            let v = (u16::from(c) * u16::from(a) / 255) as u8;
-            px.extend_from_slice(&[v, v / 2, c.min(a), a]);
+fn linear_blending_decodes_the_3d_canvas_once() {
+    // The 3D pass's E-encoded output is decoded once when drawn with linear
+    // blending on, and the frame is encoded with E on output. A single 3D
+    // layer is the bottom of its set and draws the solid 3D background, so
+    // its output is opaque everywhere and comes out as with linear blending
+    // off (a second decode would darken every lit pixel).
+    let frame = |r: &mut Renderer, on: bool| {
+        let mut cam = camera("cam", [0.0, 0.0, 6.0], false, 2.0);
+        cam["d"]["data"]["environment"]["background"] = json!("#203040");
+        let mut doc = project(
+            W,
+            H,
+            2.0,
+            solid_fill("#000000"),
+            vec![
+                cam,
+                sun("sun", [-3.0, 5.0, 4.0], false, 2.0),
+                object3d("a", "sphere", json!({}), "#FF4040", W, H, 2.0),
+            ],
+        );
+        doc["color"] = json!({ "mode": "standard", "linearBlending": on });
+        let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+        let frame = r
+            .render(
+                &load(&doc),
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        r.read_rgba(&frame).unwrap()
+    };
+    let mut r = Renderer::headless().unwrap();
+    let off = frame(&mut r, false);
+    let on = frame(&mut r, true);
+    let (mut lit, mut worst) = (0usize, 0f32);
+    for (a, b) in off.chunks_exact(4).zip(on.chunks_exact(4)) {
+        assert_eq!((a[3], b[3]), (1.0, 1.0));
+        if a[0].max(a[1]).max(a[2]) > 0.1 {
+            lit += 1;
+        }
+        for c in 0..3 {
+            worst = worst.max((a[c] - b[c]).abs());
         }
     }
-    let n = (px.len() / 4) as u32;
-    let texture = wgpu::util::DeviceExt::create_texture_with_data(
-        &gpu.device,
-        &gpu.queue,
-        &wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: n,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        },
-        wgpu::util::TextureDataOrder::LayerMajor,
-        &px,
-    );
-    let source = pm_gpu::Target::wrap(texture);
-    let mut pool = pm_gpu::TargetPool::new();
-    let mut pass = LinearPass::default();
-    let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    let out = pass.convert(
-        &gpu.device,
-        &mut encoder,
-        &mut pool,
-        &source,
-        wgpu::TextureFormat::Rgba32Float,
-    );
-    gpu.queue.submit([encoder.finish()]);
-    let got = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &out.texture).unwrap();
-    let mut worst = 0f64;
-    for (i, p) in px.chunks_exact(4).enumerate() {
-        let want = reference([p[0], p[1], p[2], p[3]]);
-        for c in 0..4 {
-            worst = worst.max((f64::from(got[i * 4 + c]) - want[c]).abs());
-        }
-    }
-    // f32 against the f64 reference.
-    assert!(worst < 2e-6, "worst {worst}");
+    assert!(lit > 1000, "{lit} lit pixels");
+    // f32 decode and encode of 8-bit E values.
+    assert!(worst < 1e-4, "worst {worst}");
 }
 
 const CUBE_OBJ: &str = "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\n\

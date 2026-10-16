@@ -17,15 +17,14 @@
 //!
 //! A 3D layer's output is premultiplied, E-encoded RGBA8 (the WebGL
 //! canvas), drawn into the 2D graph per layer so masks, effects, opacity,
-//! and blending stay per layer; with linear blending on it is converted
-//! by [`linear`] before compositing (section 9).
+//! and blending stay per layer; with linear blending on, the compositor's
+//! draw of it unpremultiplies, decodes, and re-premultiplies (section 9).
 
 pub mod describe;
 pub mod gpu;
 pub mod layers;
 pub mod legacy;
 pub mod lights;
-pub mod linear;
 pub mod model;
 pub mod textures;
 
@@ -37,7 +36,7 @@ pub use model::{
     Projection, Scene3d, Texture3d,
 };
 
-pub(crate) use layers::{Pass3d, check, order_pass, plan_layer};
+pub(crate) use layers::{Pass3d, check, check_legacy_scene, order_pass, plan_layer};
 pub use layers::{View3d, scene_from_json};
 
 /// Planning options of the 3D pass: the view override (editor camera,
