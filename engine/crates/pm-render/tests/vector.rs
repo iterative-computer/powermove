@@ -269,6 +269,127 @@ fn solid_radius_is_honored_on_level2_only() {
     assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
 }
 
+/// The opaque bounds of an alpha frame: `(x0, y0, x1, y1)`.
+fn opaque_bounds(a: &[f32]) -> (u32, u32, u32, u32) {
+    let opaque: Vec<(u32, u32)> = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|(x, y)| a[(y * W + x) as usize] > 0.5)
+        .collect();
+    (
+        opaque.iter().map(|p| p.0).min().unwrap(),
+        opaque.iter().map(|p| p.1).min().unwrap(),
+        opaque.iter().map(|p| p.0).max().unwrap() + 1,
+        opaque.iter().map(|p| p.1).max().unwrap() + 1,
+    )
+}
+
+#[test]
+fn level2_solids_without_radius_have_analytic_edges() {
+    let mut renderer = Renderer::headless().unwrap();
+    // Radius 0, a missing radius, and a negative one are plain rectangles.
+    for d in [
+        json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": 0 }),
+        json!({ "color": "#FFFFFF", "w": 120, "h": 80 }),
+        json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": -5 }),
+    ] {
+        // Where the box sits relative to the layer origin, unrotated.
+        let upright = render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 2, 0.0, 100.0)]);
+        let (x0, y0, x1, y1) = opaque_bounds(&upright);
+        assert_eq!((x1 - x0, y1 - y0), (120, 80), "{d}: the full box");
+        let (bx, by) = (f64::from(x0) - 128.0, f64::from(y0) - 128.0);
+        let (rotation, scale) = (23.0, 115.0);
+        let ours = render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 2, rotation, scale)]);
+        let reference = coverage(|x, y| {
+            let (u, v) = to_layer(x, y, rotation, scale);
+            (bx..=bx + 120.0).contains(&u) && (by..=by + 80.0).contains(&v)
+        });
+        let e = edge_error(&ours, &reference);
+        let partial = ours.iter().filter(|a| **a > 0.02 && **a < 0.98).count();
+        eprintln!(
+            "level 2 solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
+            e.edge_pixels, e.rms, e.psnr_db, e.max_any
+        );
+        assert!(partial * 2 >= e.edge_pixels, "{d}: edges are antialiased, not hard ({partial} of {})", e.edge_pixels);
+        assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03, "{d}: {:.1} dB, max {:.4}", e.psnr_db, e.max_any);
+    }
+    // For contrast: level 1 keeps today's single-sample quad.
+    let level1 = render_alpha(
+        &mut renderer,
+        vec![placed("solid", "solid", json!({ "color": "#FFFFFF", "w": 120, "h": 80 }), 1, 23.0, 115.0)],
+    );
+    assert!(level1.iter().all(|a| *a == 0.0 || *a == 1.0), "level 1 solids are aliased as today");
+}
+
+#[test]
+fn vector_cache_stays_bounded_while_content_animates() {
+    let mut renderer = Renderer::headless().unwrap();
+    let frame = |rotation: f64| {
+        vec![placed("s", "shape", json!({ "shape": "star", "w": 200, "h": 200, "points": 5, "color": "#FFFFFF" }), 2, rotation, 100.0)]
+    };
+    // One frame's working set.
+    render_alpha(&mut renderer, frame(0.0));
+    let one = renderer.vector_cache_bytes();
+    assert!(one > 0);
+    let budget = one * 3;
+    renderer.set_vector_cache_budget(budget, 4096);
+    // A rotating level 2 shape misses on every frame. Without trim (one
+    // work item, or playback), the cache must stay within its budget plus
+    // the frame being drawn.
+    let mut peak = 0;
+    for i in 1..=40 {
+        render_alpha(&mut renderer, frame(f64::from(i) * 3.0));
+        peak = peak.max(renderer.vector_cache_bytes());
+    }
+    eprintln!(
+        "rotating level 2 shape: {one} bytes per frame, budget {budget}, peak {peak} after 40 frames, {} entries",
+        renderer.vector_cache_len()
+    );
+    assert!(peak <= budget + one, "peak {peak} exceeds budget {budget} + one frame {one}");
+    assert!(renderer.vector_cache_len() <= 4);
+    // The entry bound holds as well.
+    renderer.set_vector_cache_budget(u64::MAX, 2);
+    assert!(renderer.vector_cache_len() <= 2);
+    for i in 0..10 {
+        render_alpha(&mut renderer, frame(200.0 + f64::from(i)));
+        assert!(renderer.vector_cache_len() <= 2);
+    }
+    // A frame needing more than the budget keeps its working set and draws
+    // every layer; the next frame evicts it.
+    renderer.set_vector_cache_budget(1, 4096);
+    let many: Vec<Value> = (0..6)
+        .map(|i| {
+            let mut l = placed(&format!("s{i}"), "shape", json!({ "shape": "ellipse", "w": 30, "h": 30, "color": "#FFFFFF" }), 2, 0.0, 100.0);
+            set(&mut l, "position.x", json!(30.0 + 38.0 * f64::from(i)));
+            l
+        })
+        .collect();
+    let drawn = render_alpha(&mut renderer, many);
+    for i in 0..6u32 {
+        let x = 30 + 38 * i;
+        assert_eq!(drawn[(128 * W + x) as usize], 1.0, "layer {i} is drawn");
+    }
+    render_alpha(&mut renderer, frame(300.0));
+    assert!(renderer.vector_cache_len() <= 1, "{} entries", renderer.vector_cache_len());
+}
+
+#[test]
+fn trim_splits_its_budget_with_the_target_pool() {
+    let mut renderer = Renderer::headless().unwrap();
+    let layers = vec![placed("b", "shape", json!({ "shape": "polygon", "w": 200, "h": 200, "points": 6, "color": "#FFFFFF" }), 2, 10.0, 100.0)];
+    render_alpha(&mut renderer, layers);
+    let vector = renderer.vector_cache_bytes();
+    let pool = renderer.pooled_bytes();
+    assert!(vector > 0 && pool > 0);
+    let budget = (vector + pool) / 2;
+    renderer.trim(budget);
+    assert!(
+        renderer.vector_cache_bytes() + renderer.pooled_bytes() <= budget,
+        "vector {} + pool {} > {budget}",
+        renderer.vector_cache_bytes(),
+        renderer.pooled_bytes()
+    );
+}
+
 #[test]
 fn vector_textures_are_accounted_and_trimmed() {
     let mut renderer = Renderer::headless().unwrap();

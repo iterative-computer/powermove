@@ -1,6 +1,6 @@
 # Vector rendering (pm-vector, pm-render::vector)
 
-Design notes for shape layers, editable paths, solids with `radius`, and SVG
+Design notes for shape layers, editable paths, solids (with and without `radius`), and SVG
 images (plan sections 8, 10, and 12; amendment 10). Geometry (shape outlines,
 path evaluation, trims, repeaters) is pm-vector's geometry side and is not
 described here.
@@ -9,7 +9,7 @@ described here.
 |---|---|---|
 | `shape` (rect, ellipse, polygon, star, line) | Today's Canvas2D raster at the quantized scale, emulated (below) | Output resolution, analytic edges |
 | `shape` with editable paths | Same, `rasterPaths` | Same |
-| `solid` with `radius` | Radius ignored (today's quad) | Rounded rectangle, analytic edges |
+| `solid` | Today's single-sample quad (radius ignored) | Rectangle (rounded when `radius > 0`), analytic edges |
 | `image` (SVG) | Routed (resvg rasters are outside the 2D class) | Vectors or resvg at output resolution |
 | SVG with `<text>` | Routed | Routed (SVG text goes through `pm-text`) |
 
@@ -165,6 +165,7 @@ coverage, edge pixels only):
 | Line, stroke 9, round caps | 53.7 dB, max 0.011 | 20.7 dB, max 0.15 |
 | 7-point star | 49.9 dB, max 0.018 | 19.8 dB, max 0.29 |
 | Solid 120 × 80, radius 30 | 48.8 dB, max 0.008 | radius ignored |
+| Solid 120 × 80, radius 0 / missing / −5, rotated 23°, 115% | 54.1 dB, max 0.006 (447 of 516 edge pixels partial) | single-sample quad: only 0 or 1 |
 | SVG rect, rotated 23° | 54.7 dB, max 0.005 | routed |
 
 Vello on the GPU and `vello_cpu` agree on a stroked star and a rounded rect
@@ -211,8 +212,28 @@ network loads).
 `VectorCache` (pm-render) keeps level 1 rasters (`Rgba8Unorm`), level 2
 paint targets (float), and level 2 SVG rasters keyed by a SHA-256 over every
 input that changes the pixels plus the precision, and counts every byte:
-`Renderer::vector_cache_bytes()` is the render cache category of the lease,
-and `Renderer::trim(bytes)` evicts least recently used textures down to the
-budget along with the pool (pm-node trims to 64 MB between work items).
-Switching the coverage backend drops the cache. Coverage atlas pages live
-only while a scene renders.
+`Renderer::vector_cache_bytes()` is the render cache category of the lease.
+
+The key covers every pixel input (a level 2 key includes the world
+transform), so animated content misses on every frame. The cache therefore
+bounds itself while frames render, as today's raster cache does
+(`evict()` in legacy/gl/raster.ts): least recently used entries go when it
+exceeds its standing budget, by default today's 192 MiB and 4096 entries
+(`Renderer::set_vector_cache_budget`). `render_into` starts each frame with
+`begin_frame()`, which makes the previous frame's textures evictable and
+brings the cache within budget, and every miss makes room before inserting.
+A frame's own textures are never evicted while it records, so one frame whose
+working set exceeds the budget still draws every layer and the cache returns
+within budget at the next frame: the bound is budget plus one frame's working
+set, independent of how many frames a work item (a whole export, playback)
+renders. Dropping a texture that recorded commands still use is safe (wgpu
+keeps it alive until they complete). Measured (`tests/vector.rs`): a rotating
+level 2 star, 556 KB per frame, budget 1.67 MB, peaks at 1.14 MB over 40
+frames without any `trim`.
+
+`Renderer::trim(bytes)` (lease pressure, pm-node trims to 64 MB between work
+items) trims the target pool first and gives the vector cache what the pool
+leaves, so together they hold at most `bytes`. Switching the coverage backend
+drops the cache. Coverage atlas pages, paint globals, and vertex buffers live
+only while a scene renders and are not counted; Vello's internal buffer pool
+is not counted either.
