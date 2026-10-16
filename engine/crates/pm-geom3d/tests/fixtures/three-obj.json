@@ -1,0 +1,211 @@
+{
+ "bundles": {
+  "obj-shapes": {
+   "obj": "5591e6710a659165685c17a0d8015ecd76b8687d0f83e30e5fb2e558a8271522",
+   "mtl": "20649876388df4844ed690356c33f115e1046aa86bf3cf09550730baf91770d4",
+   "name": "obj-shapes.glb",
+   "glb": "902653ec134bbeb511bafaa41c88405fd869d932e5431cc13f44c02492c7cea3"
+  },
+  "obj-gem": {
+   "obj": "a8ee0e6dbad52035f315a64f39f92698cb38c1875d62a2eb4c8fb657622f2fde",
+   "mtl": "440dcb880156a44eb17cf81791c90a7edb6b38e5bd6246c68b715bb54a63100d",
+   "name": "obj-gem.glb",
+   "glb": "0069f03c32d9b66cfc0c175f969adab68e330daa63ff8e0d3086a03603491e6c"
+  }
+ },
+ "parseObj": {
+  "obj-shapes.obj": {
+   "sha256": "5591e6710a659165685c17a0d8015ecd76b8687d0f83e30e5fb2e558a8271522",
+   "vertexCount": 36,
+   "triangleCount": 12,
+   "sourceVertexCount": 12,
+   "bounds": {
+    "min": [
+     -1,
+     -1,
+     -1
+    ],
+    "max": [
+     4,
+     1,
+     1
+    ],
+    "center": [
+     1.5,
+     0,
+     0
+    ],
+    "radius": 2.8722813232690143
+   },
+   "positions": "c3f6c9d1413bc093b171180c1fee9af4c1f88514ce5fc2aaf7b28fcc3627d478",
+   "normals": "91c97f80826c042e3418c1ed393e5cca15afaf1c314efd7e9189b1b9c71626ab",
+   "texcoords": "bfab491228627e9f32114c56f077eda4195924c5a1dd44bbd1cb816f17ff4951"
+  },
+  "obj-gem.obj": {
+   "sha256": "a8ee0e6dbad52035f315a64f39f92698cb38c1875d62a2eb4c8fb657622f2fde",
+   "vertexCount": 24,
+   "triangleCount": 8,
+   "sourceVertexCount": 24,
+   "bounds": {
+    "min": [
+     -0.9,
+     -0.9,
+     -0.9
+    ],
+    "max": [
+     0.9,
+     0.9,
+     0.9
+    ],
+    "center": [
+     0,
+     0,
+     0
+    ],
+    "radius": 0.9
+   },
+   "positions": "7a8d9da9840c1842376dbc6d933fc5eeec969fa00a2040be1a5867c418aff5e5",
+   "normals": "a301913ab10d06580c051ee857183dd8aaeb868c2462489b49b558318b93ced9",
+   "texcoords": "5d89f056865052bcb89c910d2d62872e029fb273c3db03f8968a52a41593c1b5"
+  },
+  "corpus-gem.obj": {
+   "sha256": "a8ee0e6dbad52035f315a64f39f92698cb38c1875d62a2eb4c8fb657622f2fde",
+   "vertexCount": 24,
+   "triangleCount": 8,
+   "sourceVertexCount": 24,
+   "bounds": {
+    "min": [
+     -0.9,
+     -0.9,
+     -0.9
+    ],
+    "max": [
+     0.9,
+     0.9,
+     0.9
+    ],
+    "center": [
+     0,
+     0,
+     0
+    ],
+    "radius": 0.9
+   },
+   "positions": "7a8d9da9840c1842376dbc6d933fc5eeec969fa00a2040be1a5867c418aff5e5",
+   "normals": "a301913ab10d06580c051ee857183dd8aaeb868c2462489b49b558318b93ced9",
+   "texcoords": "5d89f056865052bcb89c910d2d62872e029fb273c3db03f8968a52a41593c1b5"
+  }
+ },
+ "sources": [
+  {
+   "source": "",
+   "error": "OBJ file is empty"
+  },
+  {
+   "source": "  \n# only a comment\n",
+   "error": "OBJ does not contain any vertices"
+  },
+  {
+   "source": "v 0 0\n",
+   "error": "OBJ line 1: vertex needs x, y, and z"
+  },
+  {
+   "source": "v 0 0 x\nf 1 1 1\n",
+   "error": "OBJ line 1: expected a finite number"
+  },
+  {
+   "source": "v 0 0 0\nf 1 2 3\n",
+   "error": "OBJ line 2: vertex index is out of range"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 1.5 2\n",
+   "error": "OBJ line 4: invalid vertex index"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\n",
+   "error": "OBJ line 4: face needs at least three vertices"
+  },
+  {
+   "source": "v 0 0 0\n",
+   "error": "OBJ does not contain any faces"
+  },
+  {
+   "source": "v 0 0 0\nf 1 1 1\n",
+   "error": "OBJ geometry has no measurable size"
+  },
+  {
+   "source": "vt 0\n",
+   "error": "OBJ line 1: texture coordinate needs u and v"
+  },
+  {
+   "source": "vn 0 0\n",
+   "error": "OBJ line 1: normal needs x, y, and z"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 0 1 2\n",
+   "error": "OBJ line 4: invalid vertex index"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1/9 2 3\n",
+   "error": "OBJ line 4: texture coordinate index is out of range"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1//4 2 3\n",
+   "error": "OBJ line 4: normal index is out of range"
+  },
+  {
+   "source": "v 0x10 0 0\nv 1e1 .5 -0\nv 5. 1 +2\nvt 0.25 0.75\nvn 0 0 0\nvn 3 4 0\nf -3/1/1 -2/1/2 -1\r\nf 1 2 3 # tail\rv 9 9 9\n",
+   "vertexCount": 6,
+   "triangleCount": 2,
+   "sourceVertexCount": 4,
+   "bounds": {
+    "min": [
+     5,
+     0,
+     0
+    ],
+    "max": [
+     16,
+     9,
+     9
+    ],
+    "center": [
+     10.5,
+     4.5,
+     4.5
+    ],
+    "radius": 8.411301920630361
+   },
+   "positions": "8e12504e38163e5e5b96a7d410503a0c0b16fdffca9ecba68a3babcc26fc5708",
+   "normals": "5e52058d1f98b05d508d061ceebb691afeee845c5e9c379ac25e26f45ea704d2",
+   "texcoords": "d9a612ec85a91d191c348ad0f486a05b2807506f42b6ea3f4c323e8af4e32628"
+  },
+  {
+   "source": "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0.5 1\nf 1 2 3 4 5\nf 1 1 2\n",
+   "vertexCount": 12,
+   "triangleCount": 4,
+   "sourceVertexCount": 5,
+   "bounds": {
+    "min": [
+     0,
+     0,
+     0
+    ],
+    "max": [
+     1,
+     1,
+     1
+    ],
+    "center": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "radius": 0.8660254037844386
+   },
+   "positions": "d5fed2ef2880c6bbdf081c66154f0692118e0dcb3e045d525b30df2d9e7bbd14",
+   "normals": "8dedc057380035e97da4361ba23995cb5192b8bbfe367baca138959331038302",
+   "texcoords": "2ea9ab9198d1638007400cd2c3bef1cc745b864b76011a0e1bc52180ac6452d4"
+  }
+ ]
+}

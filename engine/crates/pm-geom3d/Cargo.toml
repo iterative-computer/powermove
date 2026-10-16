@@ -13,6 +13,12 @@ serde_json.workspace = true
 # glTF 2.0 container and document parsing; accessor data and the extensions
 # the crate does not model are read from the raw JSON (section 13).
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names", "extensions", "extras", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_volume", "KHR_materials_specular", "KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_texture_transform", "KHR_lights_punctual"] }
+# OBJ + MTL + texture packing to GLB (`obj::prepare_import`): textures are
+# decoded, flipped, and stored as PNG; bump maps become normal maps.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"], optional = true }
+
+[features]
+import = ["dep:image"]
 
 [dev-dependencies]
 sha2 = { workspace = true, features = ["std"] }

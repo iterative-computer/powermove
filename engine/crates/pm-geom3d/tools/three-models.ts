@@ -9,6 +9,11 @@
  *   bun engine/crates/pm-geom3d/tools/three-models.ts FILE... > reference.json
  *   bun engine/crates/pm-geom3d/tools/three-models.ts --corpus [DIR]
  *
+ * `--corpus` also writes OBJ bundles (OBJ + MTL) with the GLB the app's
+ * `prepareModelImport` packs from each (`<bundle>.three.glb`), and runs the
+ * kernel's `parseObj` on every corpus OBJ and on malformed sources, into
+ * tests/fixtures/three-obj.json (outputs as SHA-256 of the Float32 buffers).
+ *
  * `--corpus` writes the model corpus into DIR (default
  * ~/Library/Caches/powermove-engine/model-corpus, outside the repository):
  * the parity corpus's GLBs (engine/corpus/src/glb.ts) and synthetic edge
@@ -30,6 +35,12 @@ g.window ??= globalThis;
 g.createImageBitmap ??= async () => ({ width: 1, height: 1, close() {} });
 g.ProgressEvent ??= class ProgressEvent extends Event {
   constructor(type: string, init: Record<string, unknown> = {}) { super(type); Object.assign(this, init); }
+};
+
+// GLTFExporter's binary output goes through FileReader, which Bun lacks.
+g.FileReader ??= class FileReader {
+  result: unknown = null; onloadend: (() => void) | null = null;
+  readAsArrayBuffer(blob: Blob) { blob.arrayBuffer().then((b) => { this.result = b; this.onloadend?.(); }); }
 };
 
 const root = path.resolve(import.meta.dir, '../../../..');
@@ -173,6 +184,92 @@ function edgeCases(): Record<string, string> {
   return out;
 }
 
+/** OBJ bundles: OBJLoader's objects and groups, MTLLoader's parameters, and the material conversion. */
+function objBundles(): Record<string, { obj: string; mtl: string }> {
+  return {
+    'obj-shapes': {
+      obj: [
+        '# Powermove OBJ bundle: objects, groups, quads, negative indices, face normals, vertex colors, lines, points',
+        'mtllib shapes.mtl',
+        'o Crate',
+        'v -1 -1 1', 'v 1 -1 1', 'v 1 1 1', 'v -1 1 1', 'v -1 -1 -1', 'v 1 -1 -1', 'v 1 1 -1', 'v -1 1 -1',
+        'vt 0 0', 'vt 1 0', 'vt 1 1', 'vt 0 1',
+        'vn 0 0 2', 'vn 0 0 -1',
+        'usemtl Wood',
+        'f 1/1/1 2/2/1 3/3/1 4/4/1',
+        'f -4/1/2 -1/2/2 -2/3/2 -3/4/2',
+        'usemtl Paint',
+        'f 1 5 8 4',
+        'f 2 3 7 6',
+        'o Ribbon',
+        'v 3 0 0 1 0 0', 'v 4 0 0 0 1 0', 'v 4 1 0 0 0 1', 'v 3 1 0 1 1 1',
+        'usemtl Glow',
+        'f 9 10 11 12',
+        'g Wire',
+        'l 9 10 11 12',
+        'o Dots',
+        'usemtl Missing',
+        'p 9 10 1',
+        'o Tinted',
+        'usemtl Glass',
+        'f 5/1 6/2 7/3',
+        's off',
+        'f 5/1 7/3 8/4'
+      ].join('\n') + '\n',
+      mtl: [
+        '# Phong parameters MTLLoader reads',
+        'newmtl Wood', 'Kd 0.8 0.5 0.25', 'Ks 0.1 0.1 0.1', 'Ns 96',
+        'newmtl Paint', 'Kd 0.2 0.4 0.9', 'Ke 0.1 0 0', 'd 0.5', 'Ns 0',
+        'newmtl Glow', 'Kd 1 1 1', 'Ke 0.9 0.6 0.1', 'Tr 0.25',
+        'newmtl Glass', 'Kd 0.02 0.03 0.04', 'Ns 900', 'd 0.2'
+      ].join('\n') + '\n'
+    },
+    'obj-gem': { obj: '', mtl: 'newmtl Gem\nKd 0.4 0.1 0.6\nNs 250\n' }
+  };
+}
+
+async function objReference(dir: string) {
+  const { writeFileSync } = await import('node:fs');
+  const { createHash } = await import('node:crypto');
+  const sha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
+  const floats = (a: Float32Array) => sha(new Uint8Array(a.buffer, a.byteOffset, a.byteLength));
+  const { prepareModelImport } = await import(path.join(root, 'apps/desktop/src/renderer/src/core/scene3d/import-bundle.ts'));
+  const { parseObj } = await import(path.join(root, 'apps/desktop/src/renderer/src/kernel/obj.ts'));
+  const parse = (source: string) => {
+    try {
+      const m = parseObj(source);
+      return { vertexCount: m.vertexCount, triangleCount: m.triangleCount, sourceVertexCount: m.sourceVertexCount, bounds: m.bounds, positions: floats(m.positions), normals: floats(m.normals), texcoords: floats(m.texcoords) };
+    } catch (error) { return { error: (error as Error).message }; }
+  };
+  const bundles: Record<string, unknown> = {};
+  const parsed: Record<string, unknown> = {};
+  for (const [name, b] of Object.entries(objBundles())) {
+    const obj = b.obj || readFileSync(path.join(dir, 'corpus-gem.obj'), 'utf8');
+    writeFileSync(path.join(dir, `${name}.obj`), obj);
+    writeFileSync(path.join(dir, `${name}.mtl`), b.mtl);
+    const glb = await prepareModelImport([new File([obj], `${name}.obj`), new File([b.mtl], `${name}.mtl`)]);
+    const bytes = new Uint8Array(await glb.arrayBuffer());
+    writeFileSync(path.join(dir, `${name}.three.glb`), bytes);
+    bundles[name] = { obj: sha(obj), mtl: sha(b.mtl), name: glb.name, glb: sha(bytes) };
+    parsed[`${name}.obj`] = { sha256: sha(obj), ...parse(obj) };
+  }
+  // Malformed and edge sources: the error messages and number handling.
+  const sources = [
+    '', '  \n# only a comment\n', 'v 0 0\n', 'v 0 0 x\nf 1 1 1\n', 'v 0 0 0\nf 1 2 3\n', 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 1.5 2\n',
+    'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\n', 'v 0 0 0\n', 'v 0 0 0\nf 1 1 1\n', 'vt 0\n', 'vn 0 0\n',
+    'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 0 1 2\n', 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1/9 2 3\n', 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1//4 2 3\n',
+    'v 0x10 0 0\nv 1e1 .5 -0\nv 5. 1 +2\nvt 0.25 0.75\nvn 0 0 0\nvn 3 4 0\nf -3/1/1 -2/1/2 -1\r\nf 1 2 3 # tail\rv 9 9 9\n',
+    'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0.5 1\nf 1 2 3 4 5\nf 1 1 2\n'
+  ];
+  const errors = sources.map((source) => ({ source, ...parse(source) }));
+  const corpus = readFileSync(path.join(dir, 'corpus-gem.obj'), 'utf8');
+  parsed['corpus-gem.obj'] = { sha256: sha(corpus), ...parse(corpus) };
+  const out = { bundles, parseObj: parsed, sources: errors };
+  const target = path.join(import.meta.dir, '../tests/fixtures/three-obj.json');
+  writeFileSync(target, JSON.stringify(out, null, 1) + '\n');
+  console.error(`wrote ${target}`);
+}
+
 const args = process.argv.slice(2);
 let files: string[] = args;
 let referencePath: string | null = null;
@@ -187,6 +284,7 @@ if (args[0] === '--corpus') {
   for (const [name, text] of Object.entries(edgeCases())) writeFileSync(path.join(dir, name), text);
   files = ['corpus-model.glb', 'corpus-materials.glb', ...Object.keys(edgeCases())].map((n) => path.join(dir, n));
   referencePath = path.join(import.meta.dir, '../tests/fixtures/three-models.json');
+  await objReference(dir);
 }
 
 const { createHash } = await import('node:crypto');

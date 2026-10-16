@@ -2124,6 +2124,7 @@ name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
  "gltf",
+ "image",
  "libm",
  "serde_json",
  "sha2",

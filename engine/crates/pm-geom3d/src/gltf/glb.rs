@@ -73,7 +73,14 @@ impl GlbWriter {
 
     /// An index accessor (u16 when every index fits, else u32).
     pub fn indices(&mut self, indices: &[u32]) -> usize {
-        let small = indices.iter().all(|&i| i < 65535);
+        let wide = indices.iter().any(|&i| i >= 65535);
+        self.indices_as(indices, wide)
+    }
+
+    /// An index accessor of a chosen width (a range of a larger index keeps
+    /// the whole index's type, as three.js exports group ranges).
+    pub fn indices_as(&mut self, indices: &[u32], wide: bool) -> usize {
+        let small = !wide;
         let bytes: Vec<u8> = if small {
             indices
                 .iter()
