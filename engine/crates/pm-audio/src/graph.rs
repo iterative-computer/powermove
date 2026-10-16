@@ -232,8 +232,12 @@ struct Walk<'a, 'd> {
     doc: &'d Document,
     root: &'d Node,
     ev: &'a mut Evaluator,
-    cache: &'a SourceCache,
-    resolver: &'a dyn AssetResolver,
+    /// The source cache and the media resolver; `None` for [`audible`]'s
+    /// walk, which counts the clips the mix would play without opening
+    /// their media.
+    media: Option<(&'a SourceCache, &'a dyn AssetResolver)>,
+    /// Clips found by a walk without media.
+    candidates: usize,
     comps: Vec<String>,
     comp_slots: HashMap<String, usize>,
     voices: Vec<VoicePlan>,
@@ -464,12 +468,16 @@ impl<'d> Walk<'_, 'd> {
                 VoiceKind::Audio => "Audio".into(),
                 VoiceKind::Embedded => "Video".into(),
             });
-        let Some(file) = self.resolver.resolve(&asset) else {
+        let Some((cache, resolver)) = self.media else {
+            self.candidates += 1;
+            return Ok(());
+        };
+        let Some(file) = resolver.resolve(&asset) else {
             self.problems
                 .push((name, asset, "the media is missing".into()));
             return Ok(());
         };
-        let source = match self.cache.open(&file, None) {
+        let source = match cache.open(&file, None) {
             Ok(s) => s,
             // A video without a soundtrack has nothing to play.
             Err(AudioError::Media(pm_media::MediaError::Invalid(m)))
@@ -530,6 +538,40 @@ impl<'d> Walk<'_, 'd> {
     }
 }
 
+/// Whether the composition `comp_id` of `doc` has anything to play: a clip
+/// the mix would include (audio layers with media, videos with embedded
+/// audio that is not muted, through precomps, solo, and on states, as
+/// [`MixGraph::build`] walks them), without opening any media. Today's
+/// `hasAudibleLayers` asks the same before it warms the audio device.
+pub fn audible(doc: &Document, comp_id: &str, ev: &mut Evaluator) -> Result<bool> {
+    let root = doc
+        .root()
+        .ok_or_else(|| AudioError::invalid("the document is empty"))?;
+    Comp::resolve(doc, comp_id)?;
+    let mut walk = Walk {
+        doc,
+        root,
+        ev,
+        media: None,
+        candidates: 0,
+        comps: vec![],
+        comp_slots: HashMap::new(),
+        voices: vec![],
+        problems: vec![],
+    };
+    walk.slot(comp_id);
+    let start = PathState {
+        levels: vec![],
+        offset: Some(0.0),
+        window: (0.0, f64::INFINITY),
+        animated: false,
+        id: String::new(),
+        strip: None,
+    };
+    walk.visit(comp_id, 0, &start)?;
+    Ok(walk.candidates > 0)
+}
+
 impl MixGraph {
     /// Walks the composition `comp_id` of `doc`. Media that cannot be
     /// resolved or opened is listed in [`MixGraph::problems`] and left out.
@@ -549,8 +591,8 @@ impl MixGraph {
             doc,
             root,
             ev,
-            cache,
-            resolver,
+            media: Some((cache, resolver)),
+            candidates: 0,
             comps: vec![],
             comp_slots: HashMap::new(),
             voices: vec![],
@@ -743,5 +785,53 @@ mod tests {
         assert_eq!(level_of(Some(&JsValue::Number(9.0))), 4.0);
         assert_eq!(finite(&JsValue::Null, 1.0), 0.0);
         assert_eq!(finite(&JsValue::Undefined, 1.0), 1.0);
+    }
+
+    fn document(layers: &str, comps: &str) -> Document {
+        let text = format!(
+            r#"{{"id":"P","compId":"C","w":64,"h":64,"fps":30,"dur":4,"layers":[{layers}],"comps":{{{comps}}},"params":{{}}}}"#
+        );
+        Document::new(Some(pm_model::json::parse(&text).unwrap()), 1)
+    }
+
+    fn layer(id: &str, ty: &str, extra: &str, d: &str) -> String {
+        format!(r#"{{"id":"{id}","type":"{ty}","from":0,"dur":4,"on":true,"p":{{}},"d":{{{d}}}{extra}}}"#)
+    }
+
+    fn audible_in(doc: &Document) -> bool {
+        audible(doc, "C", &mut Evaluator::new()).unwrap()
+    }
+
+    #[test]
+    fn audible_finds_the_clips_the_mix_would_play_without_media() {
+        let solid = layer("s", "solid", "", r##""color":"#ff0000""##);
+        let audio = layer("a", "audio", "", r#""asset":"missing""#);
+        // Nothing to play: solids, an audio layer without media or switched
+        // off, a video without embedded audio or with it muted.
+        assert!(!audible_in(&document(&solid, "")));
+        assert!(!audible_in(&document(&layer("a", "audio", "", ""), "")));
+        assert!(!audible_in(&document(&layer("a", "audio", r#","on":false"#, r#""asset":"x""#), "")));
+        assert!(!audible_in(&document(&layer("v", "video", "", r#""asset":"x""#), "")));
+        assert!(!audible_in(&document(
+            &layer("v", "video", "", r#""asset":"x","embeddedAudio":true,"audioMuted":true"#),
+            ""
+        )));
+        // An audio clip (resolvable or not: no media is opened) and a video's
+        // own sound are audible.
+        assert!(audible_in(&document(&audio, "")));
+        assert!(audible_in(&document(
+            &layer("v", "video", "", r#""asset":"x","embeddedAudio":true"#),
+            ""
+        )));
+        // Solo leaves the audio out.
+        let soloed = layer("s", "solid", r#","solo":true"#, r##""color":"#ff0000""##);
+        assert!(!audible_in(&document(&format!("{soloed},{audio}"), "")));
+        // Through a precomp, unless the precomp is muted.
+        let nested = r#""N":{"id":"N","w":64,"h":64,"fps":30,"dur":4,"layers":[AUDIO]}"#.replace("AUDIO", &audio);
+        assert!(audible_in(&document(&layer("p", "precomp", "", r#""comp":"N""#), &nested)));
+        assert!(!audible_in(&document(
+            &layer("p", "precomp", "", r#""comp":"N","audioMuted":true"#),
+            &nested
+        )));
     }
 }

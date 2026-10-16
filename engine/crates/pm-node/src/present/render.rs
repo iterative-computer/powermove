@@ -276,6 +276,9 @@ pub struct Stats {
     pub device_losses: u64,
     /// Runs that fell back to the host clock (no audio output).
     pub host_clock_runs: u64,
+    /// Runs of a composition with nothing to hear, on the host clock from
+    /// Play (today's playhead does not wait for the audio device either).
+    pub silent_runs: u64,
     /// Audio playback, per view.
     pub audio: BTreeMap<String, AudioStatus>,
     #[serde(skip)]
@@ -708,6 +711,8 @@ impl Thread {
         }
         if let Some(audio) = self.audio.get(&key) {
             audio.send(AudioCtl::Document(update));
+        } else {
+            self.warm_audio(key);
         }
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
@@ -775,7 +780,16 @@ impl Thread {
                 }
                 let from = view.clock.media_at(at);
                 let wants_audio = !host_clock && rate == PlaybackRateValue::NORMAL;
-                if wants_audio && self.audio_for(key).is_some() {
+                // Nothing to hear: the line starts on the host clock at once,
+                // as today's playhead does, instead of waiting for the device
+                // to present its first (silent) buffer.
+                if wants_audio && !self.audible(key) {
+                    self.stats().silent_runs += 1;
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.clock.apply(TransportCommand::Play { rate }, at);
+                    view.schedule.reset();
+                    view.sample_due = true;
+                } else if wants_audio && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
                     let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
                     audio.send(AudioCtl::Play { from, rate });
@@ -865,6 +879,35 @@ impl Thread {
         }
         let link = self.audio.get(&key)?;
         (!link.failed()).then_some(link)
+    }
+
+    /// Whether the composition a view shows has anything to hear
+    /// (`pm_audio::graph::audible`, without opening media).
+    fn audible(&self, key: Key) -> bool {
+        let (Some(doc), Some(view)) = (self.docs.get(&key), self.views.get(&key)) else {
+            return false;
+        };
+        if !doc.has_document() {
+            return false;
+        }
+        let mut ev = pm_eval::Evaluator::new();
+        pm_audio::graph::audible(doc.document(), view.state.composition.as_str(), &mut ev)
+            .unwrap_or(false)
+    }
+
+    /// Starts a document view's audio thread before its first Play, so it
+    /// opens the output device once the document is audible and the editor
+    /// is idle (today's `requestContextWarmup`) and that Play does not wait
+    /// for the device to open.
+    fn warm_audio(&mut self, key: Key) {
+        if self.config.host_clock || !self.config.document || self.audio.contains_key(&key) {
+            return;
+        }
+        let ready = self.views.contains_key(&key)
+            && self.docs.get(&key).is_some_and(|d| d.has_document());
+        if ready && let Some(link) = self.audio_for(key) {
+            link.send(AudioCtl::Warm);
+        }
     }
 
     fn retire(&mut self, mut view: View) {
@@ -970,6 +1013,7 @@ impl Thread {
         if refresh {
             self.refresh_timing(key);
         }
+        self.warm_audio(key);
         let Some(spec) = pool else {
             return;
         };
