@@ -119,7 +119,7 @@ describe('EnginePresenter', () => {
     await flush();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presented).toEqual([
-      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false }
+      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, displayUs: null }
     ]);
   });
 
@@ -170,6 +170,8 @@ describe('EnginePresenter', () => {
     // Refreshes at 60 Hz; the frame drawn at a refresh is predicted to show
     // one refresh later.
     const draws: string[] = [];
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented((p) => shown.push(p));
     for (let i = 0; i < 4; i++) {
       presenter.refresh(100 + i * (1000 / 60));
       draws.push(painter.draws.map((f) => f.id).join(','));
@@ -180,6 +182,17 @@ describe('EnginePresenter', () => {
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(new Set(seqs).size).toBe(seqs.length);
     expect(link.releases).toEqual([]);
+    // Each timed frame carries the display instant it was picked for: one
+    // refresh after its animation frame, on the host clock (the offset the
+    // sample bounds: 899.7 ms); the audio
+    // clock's line at that instant falls inside the frame's interval.
+    for (const p of shown) {
+      expect(p.timed).toBe(true);
+      expect(p.displayUs).toBeCloseTo((p.rafMs + 1000 / 60) * 1000 + 899_700, 3);
+      const heard = ((p.displayUs! - sample.hostTime) / 1e6) * TICKS_PER_SECOND;
+      expect(heard - p.pts).toBeGreaterThanOrEqual(-1);
+      expect(heard - p.pts).toBeLessThan(F + 1);
+    }
     // A long stall: everything left is late.
     presenter.refresh(100 + 30 * (1000 / 60));
     expect(link.releases.length).toBeGreaterThan(0);

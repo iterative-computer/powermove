@@ -57,6 +57,11 @@ export type PresentedFrame = {
   overlay: OverlayGeometry | null;
   rafMs: number;
   timed: boolean;
+  /** Host µs at which this refresh is predicted to reach the display (the
+   *  instant the frame was picked for: the A/V sync measurement compares
+   *  it with the audio clock); null for frames drawn on arrival or before
+   *  the host clock is known. */
+  displayUs: number | null;
 };
 
 export type PresenterOptions = {
@@ -363,7 +368,9 @@ export class EnginePresenter implements Presenter {
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
-    if (show) this.draw(show, rafMs);
+    // The display instant itself, without the shift that puts frame
+    // boundaries halfway between decisions.
+    if (show) this.draw(show, rafMs, this.hostUs(decisionMs - this.offsetUs / 1000));
   }
 
   takeTrace(): Promise<TraceRecord | null> {
@@ -408,7 +415,7 @@ export class EnginePresenter implements Presenter {
     return decision + this.offsetUs / 1000;
   }
 
-  private draw(item: Queued<Payload>, rafMs: number): void {
+  private draw(item: Queued<Payload>, rafMs: number, displayUs: number | null = null): void {
     const { desc } = item;
     const { frame } = item.payload;
     try {
@@ -437,7 +444,8 @@ export class EnginePresenter implements Presenter {
       pts: desc.pts,
       overlay: desc.overlay,
       rafMs,
-      timed: desc.duration !== null
+      timed: desc.duration !== null,
+      displayUs
     };
     for (const listener of this.listeners) listener(presented);
   }
