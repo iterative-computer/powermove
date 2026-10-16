@@ -4,7 +4,7 @@
  * only (never to extension sandbox frames) and handed to the page with
  * `window.postMessage`; everything else here is plain IPC.
  */
-import type { CrashReport, EngineProcess } from './engine-protocol';
+import type { CrashReport, EngineProcess, MediaFacts } from './engine-protocol';
 
 export const ENGINE_IPC = {
   /** main → preload: a `MessagePort` to one engine (`EnginePortMessage`). */
@@ -27,7 +27,10 @@ export const ENGINE_IPC = {
   exportStatus: 'engine:export-status',
   /** renderer → main (send): the editor's transport plays or stopped
    *  (boolean); the job engine slices its GPU work while anything plays. */
-  playback: 'engine:editor-playback'
+  playback: 'engine:editor-playback',
+  /** renderer → main (invoke): Interpret Footage's facts of an asset's file
+   *  (`EngineProbeRequest` → `EngineProbeResult`). */
+  probeMedia: 'engine:probe-media'
 } as const;
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -90,6 +93,16 @@ export type EngineExportStatus = {
 };
 export type StageDocumentResult = { handle: string; length: number };
 
+/** Interpret Footage asks for an asset's facts, read with `interpret` (the
+ *  asset's `interpret` member, or the sheet's draft of it). */
+export type EngineProbeRequest = { asset: string; interpret: Record<string, unknown> | null };
+
+/** `facts`: what the file is and how it reads; `unavailable`: the new engine
+ *  is off or not running, or the asset's file cannot be found. */
+export type EngineProbeResult =
+  | { status: 'facts'; facts: MediaFacts }
+  | { status: 'unavailable'; reason: string };
+
 /** The renderer's view (`window.powermove.nativeEngine`, present on the
  *  desktop host). Ports, crashes, and status arrive as window messages
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
@@ -104,4 +117,6 @@ export interface EngineBridge {
   onExportStatus(listener: (status: EngineExportStatus) => void): () => void;
   /** The editor's transport started (`true`) or stopped playing. */
   playback(playing: boolean): void;
+  /** Interpret Footage's facts of an asset's file (the job engine reads it). */
+  probeMedia(request: EngineProbeRequest): Promise<EngineProbeResult>;
 }

@@ -15,7 +15,7 @@ import path from 'node:path';
 
 import { BrowserWindow, dialog, MessageChannelMain, screen, sharedTexture, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
-import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
+import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
 import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
@@ -24,6 +24,7 @@ import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, ty
 import { EngineFontClient, installEngineFontService } from '../engine-fonts';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { AgentJobError, AgentJobs } from './agent-jobs';
+import { isId } from './protocol';
 import type { ChildLike, PortLike } from './ports';
 
 /** Main's own client id for its font port to the interactive engine (never
@@ -138,6 +139,23 @@ function validStageRequest(value: unknown): value is StageDocumentRequest {
 /** Largest project JSON an export may carry (the largest corpus history is 60 MB). */
 const MAX_EXPORT_PROJECT = 256 * 1024 ** 2;
 
+const MAX_INTERPRET_JSON = 16 * 1024;
+
+function validProbeRequest(value: unknown): value is EngineProbeRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const asset = v['asset'];
+  const interpret = v['interpret'];
+  if (!isId(asset)) return false;
+  if (interpret === null) return true;
+  if (typeof interpret !== 'object' || Array.isArray(interpret)) return false;
+  try {
+    return JSON.stringify(interpret).length <= MAX_INTERPRET_JSON;
+  } catch {
+    return false;
+  }
+}
+
 function validExportRequest(value: unknown): value is EngineExportRequest {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -157,6 +175,19 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   options.ipc.handle(ENGINE_IPC.getStatus, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     return statusMessage(options.enabled, engine?.status() ?? null);
+  });
+  /* Interpret Footage (section 9): the job engine reads the asset's file. */
+  options.ipc.handle(ENGINE_IPC.probeMedia, async (event, request: unknown): Promise<EngineProbeResult> => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!validProbeRequest(request)) throw new Error('A probe names an asset and its interpretation.');
+    if (!engine) return { status: 'unavailable', reason: 'Interpret Footage needs the new engine (Settings › General › Use New Engine).' };
+    if (!engine.isReady('job')) return { status: 'unavailable', reason: 'The engine is starting. Try again in a moment.' };
+    try {
+      const facts = await engine.probeMedia(request.asset, request.interpret ? JSON.stringify(request.interpret) : null);
+      return { status: 'facts', facts };
+    } catch (error) {
+      return { status: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   if (!options.enabled) {
@@ -350,6 +381,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      options.ipc.removeHandler(ENGINE_IPC.probeMedia);
       options.ipc.removeHandler(ENGINE_IPC.exportVideo);
       options.ipc.removeHandler(ENGINE_IPC.cancelExport);
       uninstallFonts();

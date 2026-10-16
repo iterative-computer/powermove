@@ -28,6 +28,7 @@ import type {
   Event,
   InFlight,
   JobStatus,
+  MediaFacts,
   Request,
   Response,
   SlicingPolicy
@@ -317,6 +318,26 @@ export class NativeEngine {
     const launch = this.supervisors.job.current;
     if (!launch) throw new Error('the job engine is not running');
     return this.outputs.chooseDestination(file, job, session, launch.hostPort);
+  }
+
+  /** Interpret Footage's facts of an asset's file. Main resolves the asset
+   *  (the media store) and mints a `mediaRead` handle bound to the job
+   *  engine's host port and session 0; the job engine resolves it, reads
+   *  the file, and answers `mediaFacts`. The handle is revoked after. */
+  async probeMedia(asset: string, interpret: string | null): Promise<MediaFacts> {
+    const launch = this.supervisors.job.current;
+    if (!launch) throw new Error('the job engine is not running');
+    const resolved = await this.options.resolveAsset?.(asset);
+    if (!resolved) throw new Error('The asset’s file is not available.');
+    const handle = this.handles.mint({ kind: { kind: 'mediaRead', asset }, session: 0, port: launch.hostPort, path: resolved.path });
+    try {
+      const answer = await this.request('job', { type: 'probeMedia', handle, interpret });
+      if (answer.type !== 'mediaFacts') throw new Error(`the job engine answered ${answer.type}`);
+      const { type: _type, ...facts } = answer;
+      return facts as MediaFacts;
+    } finally {
+      this.handles.revoke(handle);
+    }
   }
 
   /** Whether an engine's current launch is connected and answering. */
