@@ -40,6 +40,7 @@ pub fn runs<'a>(resolver: &'a dyn FontResolver, runs: &'a [GlyphRun]) -> Vec<Run
             synthetic_bold: r.synthetic_bold,
             synthetic_italic: r.synthetic_italic,
             glyphs: &r.glyphs,
+            bitmap_size: None,
         })
         .collect()
 }

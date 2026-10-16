@@ -187,10 +187,46 @@ export function buildRenderCases(): RenderCase[] {
   return cases;
 }
 
+/** The fitting set (`--set fit`): the profiles are fitted on it and
+    validated on the main set, which it does not share cases with. */
+export function buildFitCases(): RenderCase[] {
+  const cases: RenderCase[] = [];
+  const add = (group: string, d: TextCase['d'], scale = 1) =>
+    cases.push({ id: `${group}-${String(cases.length).padStart(4, '0')}`, group, kind: 'text', d, scale });
+  const families = ['SF Pro Display', 'Helvetica Neue', 'Avenir Next', 'Georgia', 'Times New Roman', 'Menlo',
+    'Arial', 'Futura', 'New York', 'Gill Sans'];
+  const sizes = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24, 28, 32, 40, 48, 64, 96, 128, 160, 200, 240];
+  for (const font of families) {
+    for (const size of sizes) {
+      for (const weight of [400, 700]) add('fit', text({ text: 'Hamburgefonstiv 0123', font, size, weight }));
+    }
+  }
+  // Paint luminance (Skia's glyph masks depend on it).
+  for (const color of ['#000000', '#404040', '#808080', '#C0C0C0', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF']) {
+    for (const size of [10, 12, 14, 18, 24, 48]) add('fit-color', text({ text: 'Hamburgefonstiv 0123', size, color }));
+  }
+  // Emoji placement and scale by size.
+  for (const value of ['😀', '🇰🇷']) {
+    for (let size = 6; size <= 64; size++) add('fit-emoji', text({ text: value, size, weight: 500 }));
+  }
+  // Caption strokes.
+  const caps: RenderCase[] = [];
+  for (const size of [16, 20, 24, 32, 40, 54, 72]) {
+    for (const stroke of [1, 2, 3, 4, 6, 8]) {
+      caps.push({
+        id: `fit-stroke-${String(cases.length + caps.length).padStart(4, '0')}`, group: 'fit-stroke', kind: 'caption',
+        content: { cues: [cue('Stroked words')], style: { ...BASE_STYLE, size, stroke } }, local: 1,
+        compositionWidth: 1920, compositionHeight: 1080, scale: 1,
+      });
+    }
+  }
+  return [...cases, ...caps];
+}
+
 if (import.meta.main) {
   const out = process.argv[2];
-  if (!out) throw new Error('usage: bun render-cases.ts <out.json>');
-  const cases = buildRenderCases();
+  if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit]');
+  const cases = process.argv[3] === 'fit' ? buildFitCases() : buildRenderCases();
   await Bun.write(out, JSON.stringify({ variableSources: VARIABLE_SOURCES, projectFonts: PROJECT_FONTS, cases }));
   const groups = new Map<string, number>();
   for (const item of cases) groups.set(item.group, (groups.get(item.group) ?? 0) + 1);

@@ -142,6 +142,71 @@ pub fn ssim_map(a: &[u8], b: &[u8], w: usize, h: usize) -> Vec<f64> {
     total
 }
 
+/// Section 25's text class score of `test` against `reference`
+/// (premultiplied RGBA8, `w` × `h`): `(ink SSIM, full SSIM, ink ratio)`.
+/// Ink SSIM is the mean of the SSIM map over ink windows, the pixels whose
+/// local mean alpha (the SSIM window) exceeds 1/512 in either image, so
+/// empty background cannot inflate it (spike S4's strict score). The ink
+/// ratio is Σα(test) / Σα(reference). Only the ink's bounding box (grown by
+/// the window) is evaluated; outside it both images are empty and SSIM is 1.
+pub fn text_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+    let (mut ra, mut ta) = (0.0f64, 0.0f64);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let (a, b) = (reference[i + 3], test[i + 3]);
+            ra += f64::from(a);
+            ta += f64::from(b);
+            if a > 0 || b > 0 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    let ratio = if ra > 0.0 {
+        ta / ra
+    } else if ta > 0.0 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+    if x1 <= x0 {
+        return (1.0, 1.0, ratio);
+    }
+    let (bx0, by0) = (x0.saturating_sub(6), y0.saturating_sub(6));
+    let (bx1, by1) = ((x1 + 6).min(w), (y1 + 6).min(h));
+    let (bw, bh) = (bx1 - bx0, by1 - by0);
+    let crop = |img: &[u8]| -> Vec<u8> {
+        let mut out = Vec::with_capacity(bw * bh * 4);
+        for y in by0..by1 {
+            out.extend_from_slice(&img[(y * w + bx0) * 4..(y * w + bx1) * 4]);
+        }
+        out
+    };
+    let (cr, ct) = (crop(reference), crop(test));
+    let map = ssim_map(&cr, &ct, bw, bh);
+    let alpha = |img: &[u8]| -> Vec<f64> {
+        img.chunks_exact(4)
+            .map(|p| f64::from(p[3]) / 255.0)
+            .collect()
+    };
+    let (mr, mt) = (gaussian_blur(&alpha(&cr), bw, bh), gaussian_blur(&alpha(&ct), bw, bh));
+    let (mut sum, mut n) = (0.0, 0usize);
+    for i in 0..bw * bh {
+        if mr[i] > 1.0 / 512.0 || mt[i] > 1.0 / 512.0 {
+            sum += map[i];
+            n += 1;
+        }
+    }
+    let total: f64 = map.iter().sum::<f64>() + (w * h - bw * bh) as f64;
+    let full = total / (w * h) as f64;
+    let ink = if n == 0 { full } else { sum / n as f64 };
+    (ink, full, ratio)
+}
+
 /// Scores `test` against `reference` (both RGBA8, `w` × `h`). `excluded`
 /// marks MSAA edges; `object` marks the object's pixels for SSIM.
 pub fn bar_3d(

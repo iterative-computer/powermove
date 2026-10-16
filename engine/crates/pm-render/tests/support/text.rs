@@ -2,61 +2,9 @@
 
 #![allow(dead_code)]
 
-/// A separable 11-tap Gaussian (σ = 1.5), clamped at the edges, as SSIM's
-/// window.
-fn window_mean(src: &[f64], w: usize, h: usize) -> Vec<f64> {
-    let sigma = 1.5f64;
-    let k: Vec<f64> = (-5i32..=5)
-        .map(|i| (-f64::from(i * i) / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let s: f64 = k.iter().sum();
-    let k: Vec<f64> = k.iter().map(|v| v / s).collect();
-    let mut tmp = vec![0.0; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (i, kv) in k.iter().enumerate() {
-                let sx = (x as i64 + i as i64 - 5).clamp(0, w as i64 - 1) as usize;
-                acc += kv * src[y * w + sx];
-            }
-            tmp[y * w + x] = acc;
-        }
-    }
-    let mut out = vec![0.0; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (i, kv) in k.iter().enumerate() {
-                let sy = (y as i64 + i as i64 - 5).clamp(0, h as i64 - 1) as usize;
-                acc += kv * tmp[sy * w + x];
-            }
-            out[y * w + x] = acc;
-        }
-    }
-    out
-}
-
-/// `(ink SSIM, full SSIM, ink ratio)` of `test` against `reference`
-/// (premultiplied RGBA8). Ink windows: local mean alpha above 1/512 in
-/// either image. Ink ratio: Σα(test) / Σα(reference).
+/// `(ink SSIM, full SSIM, ink ratio)`: `pm_render::parity::text_ssim`.
 pub fn ink_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
-    let map = pm_render::parity::ssim_map(reference, test, w, h);
-    let alpha = |img: &[u8]| -> Vec<f64> { img.chunks_exact(4).map(|p| f64::from(p[3]) / 255.0).collect() };
-    let (ar, at) = (alpha(reference), alpha(test));
-    let (mr, mt) = (window_mean(&ar, w, h), window_mean(&at, w, h));
-    let (mut sum, mut n) = (0.0, 0usize);
-    for i in 0..w * h {
-        if mr[i] > 1.0 / 512.0 || mt[i] > 1.0 / 512.0 {
-            sum += map[i];
-            n += 1;
-        }
-    }
-    let full = map.iter().sum::<f64>() / map.len().max(1) as f64;
-    let ink = if n == 0 { full } else { sum / n as f64 };
-    let ra: f64 = ar.iter().sum();
-    let ta: f64 = at.iter().sum();
-    let ratio = if ra > 0.0 { ta / ra } else if ta > 0.0 { f64::INFINITY } else { 1.0 };
-    (ink, full, ratio)
+    pm_render::parity::text_ssim(reference, test, w, h)
 }
 
 /// Premultiplied RGBA8 to straight (for viewing), or as it is.
@@ -108,5 +56,9 @@ impl pm_render::text::TextFonts for MainThreadFonts {
     fn face(&mut self, id: pm_text::font::FaceId) -> &pm_text::font::FaceInfo {
         use pm_text::font::FontResolver;
         self.0.compat().resolver().face(id)
+    }
+    fn em_advance(&mut self, face: pm_text::font::FaceId, size: f32) -> Option<f32> {
+        use pm_text::font::FontResolver;
+        self.0.compat().resolver_mut().em_advance(face, size)
     }
 }

@@ -127,6 +127,10 @@ pub struct Run<'a> {
     pub synthetic_bold: bool,
     pub synthetic_italic: bool,
     pub glyphs: &'a [PlacedGlyph],
+    /// For color bitmap faces: the size CoreText draws their glyphs at, for
+    /// this run's device size (`FontResolver::em_advance`), when it differs
+    /// from the device size.
+    pub bitmap_size: Option<f32>,
 }
 
 /// What a glyph draw needs: the caches and the profile.
@@ -209,7 +213,8 @@ impl Painter<'_> {
             };
             for g in run.glyphs {
                 let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
-                if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize) {
+                let bsize = run.bitmap_size.unwrap_or(dsize);
+                if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
                     let (x, y) = if place.axis_aligned {
                         self.profile.position(p.x, p.y, device_size, true)
                     } else {
@@ -254,7 +259,7 @@ impl Painter<'_> {
             out.push(Item {
                 content: ItemContent::Coverage {
                     paths,
-                    gamma: self.profile.gamma(gamma_size, false) as f32,
+                    gamma: self.profile.gamma(gamma_size, [color[0], color[1], color[2]]) as f32,
                 },
                 color,
                 opacity,
@@ -300,7 +305,8 @@ impl Painter<'_> {
             };
             let bitmap_face = has_bitmaps(run.face);
             for g in run.glyphs {
-                if bitmap_face && self.bitmaps.get(run.face, g.id, device_size as f32).is_some() {
+                let bsize = run.bitmap_size.unwrap_or(device_size as f32);
+                if bitmap_face && self.bitmaps.get(run.face, g.id, device_size as f32, bsize).is_some() {
                     continue;
                 }
                 let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {

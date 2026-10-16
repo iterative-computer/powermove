@@ -2,7 +2,7 @@
    and runs the hidden Electron host (never shown, never focused, no Dock
    icon), which draws every case with today's Canvas2D code.
 
-   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts [--out <dir>]
+   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts [--set main|fit] [--out <dir>]
      -> <dir>/manifest.json, <dir>/<case>.rgba, <dir>/cases.json
 
    The default directory is a new `text-raster-<UTC stamp>` capture in the
@@ -21,7 +21,8 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
 const corpusRoot = process.env.PM_ENGINE_CORPUS_ROOT ?? join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
-const out = resolve(flag('--out') ?? join(corpusRoot, `text-raster-${stamp}`));
+const set = flag('--set') ?? 'main';
+const out = resolve(flag('--out') ?? join(corpusRoot, `${set === 'fit' ? 'text-fit' : 'text-raster'}-${stamp}`));
 if (out.startsWith(resolve(repo) + '/')) throw new Error('refusing to write captured pixels inside the repository');
 if (existsSync(join(out, 'manifest.json'))) throw new Error(`${out} already holds a capture`);
 mkdirSync(out, { recursive: true });
@@ -34,7 +35,7 @@ const run = async (cmd: string[]) => {
   if (code !== 0) throw new Error(`${cmd.join(' ')} exited ${code}`);
 };
 await run(['bun', join(import.meta.dir, 'build.ts'), work]);
-await run(['bun', join(import.meta.dir, 'render-cases.ts'), join(out, 'cases.json')]);
+await run(['bun', join(import.meta.dir, 'render-cases.ts'), join(out, 'cases.json'), ...(set === 'fit' ? ['fit'] : [])]);
 await run([electron, join(import.meta.dir, 'electron-main.cjs'), `--page=${join(work, 'capture', 'render.html')}`,
   `--corpus=${join(out, 'cases.json')}`, `--out=${out}`, '--timeout=1800']);
 console.log(`captured into ${out}`);

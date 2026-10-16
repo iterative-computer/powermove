@@ -49,6 +49,12 @@ pub trait TextFonts: Send {
     fn text_runs(&mut self, d: &TextContent, text: &str, tracking: f64) -> Vec<GlyphRun>;
     /// The face the runs name.
     fn face(&mut self, id: FaceId) -> &FaceInfo;
+    /// CoreText's advance of a full-em glyph of an `sbix` face at `size`
+    /// (`FontResolver::em_advance`): the size color bitmap glyphs draw at.
+    fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
+        let _ = (face, size);
+        None
+    }
     /// Changes whenever the registry's fonts change (project fonts, sources);
     /// cached rasters of an older generation are dropped.
     fn generation(&self) -> u64 {
@@ -71,6 +77,10 @@ impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<
 
     fn face(&mut self, id: FaceId) -> &FaceInfo {
         self.compat().resolver().face(id)
+    }
+
+    fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
+        self.compat().resolver_mut().em_advance(face, size)
     }
 }
 
@@ -115,8 +125,8 @@ impl TextContext {
         self.profile = profile;
     }
 
-    pub fn profile(&self) -> Profile {
-        self.profile
+    pub fn profile(&self) -> &Profile {
+        &self.profile
     }
 
     /// `PM.captionsHidden`: an export without burned-in captions draws no
@@ -318,7 +328,7 @@ impl TextContext {
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
-                profile: self.profile,
+                profile: self.profile.clone(),
             },
             fonts,
         )
@@ -412,7 +422,7 @@ impl TextContext {
                     let blur = if g.blur > 0.01 { g.blur * density } else { 0.0 };
                     let style = text_content(&g.style);
                     let runs = fonts.text_runs(&style, &g.unit.text, 0.0);
-                    let faces: Vec<FaceInfo> = runs.iter().map(|r| fonts.face(r.face).clone()).collect();
+                    let faces = run_faces(fonts, &runs, m);
                     let refs = run_refs(&runs, &faces);
                     painter.fill_text(
                         &mut scene.items,
@@ -453,7 +463,7 @@ impl TextContext {
         let lines = fonts.line_runs(&tc);
         let m = Affine::scale(density);
         for line in &lines {
-            let faces: Vec<FaceInfo> = line.runs.iter().map(|r| fonts.face(r.face).clone()).collect();
+            let faces = run_faces(fonts, &line.runs, m);
             let refs = run_refs(&line.runs, &faces);
             painter.fill_text(&mut scene.items, &refs, (g.x, g.pad), m, fill, 1.0, 0.0);
         }
@@ -547,7 +557,7 @@ impl TextContext {
                 }
                 let text = word.text.to_string_lossy();
                 let runs = fonts.text_runs(&content, &text, tracking);
-                let faces: Vec<FaceInfo> = runs.iter().map(|r| fonts.face(r.face).clone()).collect();
+                let faces = run_faces(fonts, &runs, m);
                 let refs = run_refs(&runs, &faces);
                 if stroke > 0.0 {
                     painter.stroke_text(
@@ -581,16 +591,38 @@ impl TextContext {
     }
 }
 
-fn run_refs<'a>(runs: &'a [GlyphRun], faces: &'a [FaceInfo]) -> Vec<pm_text::render::scene::Run<'a>> {
+/// The faces of `runs` and, for color bitmap faces, the size their glyphs
+/// draw at under the device transform `m`.
+fn run_faces(fonts: &mut dyn TextFonts, runs: &[GlyphRun], m: Affine) -> Vec<(FaceInfo, Option<f32>)> {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let scale = (a * d - b * c).abs().sqrt();
+    runs.iter()
+        .map(|r| {
+            let info = fonts.face(r.face).clone();
+            let bitmap = if info.facts.has_sbix {
+                fonts.em_advance(r.face, (f64::from(r.size) * scale) as f32)
+            } else {
+                None
+            };
+            (info, bitmap)
+        })
+        .collect()
+}
+
+fn run_refs<'a>(
+    runs: &'a [GlyphRun],
+    faces: &'a [(FaceInfo, Option<f32>)],
+) -> Vec<pm_text::render::scene::Run<'a>> {
     runs.iter()
         .zip(faces)
-        .map(|(r, f)| pm_text::render::scene::Run {
+        .map(|(r, (f, bitmap))| pm_text::render::scene::Run {
             face: pm_text::render::outline::FaceRef::of(f),
             size: r.size,
             coords: &r.coords,
             synthetic_bold: r.synthetic_bold,
             synthetic_italic: r.synthetic_italic,
             glyphs: &r.glyphs,
+            bitmap_size: *bitmap,
         })
         .collect()
 }

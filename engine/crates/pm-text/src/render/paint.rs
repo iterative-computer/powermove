@@ -169,29 +169,39 @@ fn blur(img: &mut Image, rect: [i64; 4], sigma: f64) {
 /// coverage) into a new float target.
 pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) -> Image {
     let mut target = Image::new(scene.width, scene.height);
-    let cells: std::collections::HashMap<usize, &super::atlas::Cell> =
-        atlas.cells.iter().map(|c| (c.item, c)).collect();
+    let mut cells: std::collections::HashMap<usize, Vec<&super::atlas::Cell>> =
+        std::collections::HashMap::new();
+    for c in &atlas.cells {
+        cells.entry(c.item).or_default().push(c);
+    }
     for (i, item) in scene.items.iter().enumerate() {
-        let cell = cells.get(&i).copied();
+        let tiles = cells.get(&i).map(Vec::as_slice).unwrap_or(&[]);
         let coverage = |x: i64, y: i64| -> f32 {
-            let Some(c) = cell else { return 0.0 };
-            let (px, py) = (x - c.device_x, y - c.device_y);
-            if px < 0 || py < 0 || px >= i64::from(c.width) || py >= i64::from(c.height) {
-                return 0.0;
+            for c in tiles {
+                let (px, py) = (x - c.device_x, y - c.device_y);
+                if px < 0 || py < 0 || px >= i64::from(c.width) || py >= i64::from(c.height) {
+                    continue;
+                }
+                let (pw, _, data) = &pages[c.page];
+                let o = ((c.y as usize + py as usize) * *pw as usize + c.x as usize + px as usize) * 4;
+                return f32::from(data[o + 3]) / 255.0;
             }
-            let (pw, _, data) = &pages[c.page];
-            let o = ((c.y as usize + py as usize) * *pw as usize + c.x as usize + px as usize) * 4;
-            f32::from(data[o + 3]) / 255.0
+            0.0
         };
-        let rect = match (&item.content, cell) {
-            (ItemContent::Coverage { .. }, Some(c)) => [
-                c.device_x,
-                c.device_y,
-                c.device_x + i64::from(c.width),
-                c.device_y + i64::from(c.height),
-            ],
-            (ItemContent::Coverage { .. }, None) => continue,
-            (ItemContent::Image { .. }, _) => {
+        let rect = match &item.content {
+            ItemContent::Coverage { .. } if tiles.is_empty() => continue,
+            ItemContent::Coverage { .. } => tiles.iter().fold(
+                [i64::MAX, i64::MAX, i64::MIN, i64::MIN],
+                |r, c| {
+                    [
+                        r[0].min(c.device_x),
+                        r[1].min(c.device_y),
+                        r[2].max(c.device_x + i64::from(c.width)),
+                        r[3].max(c.device_y + i64::from(c.height)),
+                    ]
+                },
+            ),
+            ItemContent::Image { .. } => {
                 let b = item.bounds.inflate(1.0, 1.0);
                 [
                     b.x0.floor() as i64,

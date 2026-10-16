@@ -99,12 +99,26 @@ pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
         .max()
         .unwrap_or(0);
     let page_w = widest.clamp(1024.min(max_page), max_page);
+    // Items larger than a page are split into page-sized tiles, each
+    // clipped to its own rect.
+    let mut tiles = Vec::with_capacity(rects.len());
     for (item, (x0, y0, x1, y1, clip)) in rects {
-        let mut w = (x1 - x0) as u32;
-        let mut h = (y1 - y0) as u32;
-        let clip = clip || w > max_page || h > max_page;
-        w = w.min(max_page);
-        h = h.min(max_page);
+        let step = i64::from(max_page);
+        let split = x1 - x0 > step || y1 - y0 > step;
+        let mut ty = y0;
+        while ty < y1 {
+            let mut tx = x0;
+            while tx < x1 {
+                let (tx1, ty1) = ((tx + step).min(x1), (ty + step).min(y1));
+                tiles.push((item, tx, ty, tx1, ty1, clip || split));
+                tx = tx1;
+            }
+            ty = (ty + step).min(y1);
+        }
+    }
+    for (item, x0, y0, x1, y1, clip) in tiles {
+        let w = (x1 - x0) as u32;
+        let h = (y1 - y0) as u32;
         if page.is_none() || shelf_x + w > page_w {
             shelf_y += shelf_h + if shelf_h > 0 { GUTTER } else { 0 };
             shelf_x = 0;
@@ -173,6 +187,24 @@ mod tests {
             assert_eq!((p.x, p.y), (f64::from(a.x), f64::from(a.y)));
             assert!(!a.clip);
         }
+    }
+
+    #[test]
+    fn large_items_are_tiled() {
+        let scene = TextScene {
+            width: 9000,
+            height: 300,
+            items: vec![
+                fill_path(rounded_rect(10.0, 10.0, 8900.0, 200.0, 0.0), Affine::IDENTITY, [1.0; 4], 1.0)
+                    .unwrap(),
+            ],
+        };
+        let atlas = pack(&scene, 4096);
+        assert_eq!(atlas.cells.len(), 3);
+        let covered: i64 = atlas.cells.iter().map(|c| i64::from(c.width)).sum();
+        assert_eq!(covered, 8902);
+        assert!(atlas.cells.iter().all(|c| c.clip && c.width <= 4096));
+        assert_eq!(atlas.cells[1].device_x, atlas.cells[0].device_x + 4096);
     }
 
     #[test]

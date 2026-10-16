@@ -49,6 +49,7 @@ struct Key {
     index: u32,
     glyph: u32,
     size: u32,
+    requested: u32,
 }
 
 /// Whether a face has color bitmap strikes.
@@ -78,19 +79,30 @@ impl Bitmaps {
         self.map.clear();
     }
 
-    /// The color bitmap of `glyph` at `size` device px, or `None` when the
-    /// glyph has no bitmap at any strike.
-    pub fn get(&mut self, face: FaceRef<'_>, glyph: u32, size: f32) -> Option<Arc<BitmapGlyph>> {
+    /// The color bitmap of `glyph` for a run at `requested` device px,
+    /// drawn at `size` device px, or `None` when the glyph has no bitmap at
+    /// any strike. `size` is the size CoreText draws the glyph at: for
+    /// Apple Color Emoji, the face's full-em advance at the requested size
+    /// (`FontResolver::em_advance`), which exceeds the requested size below
+    /// 24 px.
+    pub fn get(
+        &mut self,
+        face: FaceRef<'_>,
+        glyph: u32,
+        requested: f32,
+        size: f32,
+    ) -> Option<Arc<BitmapGlyph>> {
         let key = Key {
             font: face.id,
             index: face.index,
             glyph,
             size: size.to_bits(),
+            requested: requested.to_bits(),
         };
         if let Some(hit) = self.map.get(&key) {
             return hit.clone();
         }
-        let built = build(face, glyph, size).map(Arc::new);
+        let built = build(face, glyph, requested, size).map(Arc::new);
         if self.map.len() > 4096 {
             self.map.clear();
         }
@@ -172,6 +184,71 @@ fn premultiply(mut img: Rgba8) -> Rgba8 {
     img
 }
 
+/// Lanczos-2 resampling of a premultiplied image by `scale` < 1 (the
+/// kernel widened by 1 / scale); output pixel `o` is centered on source
+/// position `(o + 0.5) / scale`. Larger scales return the image as it is.
+pub fn lanczos2(img: &Rgba8, scale: f64) -> Rgba8 {
+    if !(scale < 1.0) || img.width == 0 || img.height == 0 {
+        return img.clone();
+    }
+    const SUPPORT: f64 = 2.0;
+    let k = |x: f64| -> f64 {
+        let x = x.abs();
+        if x < 1e-9 {
+            1.0
+        } else if x >= SUPPORT {
+            0.0
+        } else {
+            let p = std::f64::consts::PI * x;
+            SUPPORT * p.sin() * (p / SUPPORT).sin() / (p * p)
+        }
+    };
+    let w = ((f64::from(img.width) * scale).ceil() as u32).max(1);
+    let h = ((f64::from(img.height) * scale).ceil() as u32).max(1);
+    let weights = |o: u32, n: u32| -> Vec<(usize, f64)> {
+        let center = (f64::from(o) + 0.5) / scale - 0.5;
+        let r = SUPPORT / scale;
+        let lo = (center - r).floor() as i64;
+        let hi = (center + r).ceil() as i64;
+        // Normalized over the whole kernel: taps outside the image are
+        // transparent, so edges fade.
+        let sum: f64 = (lo..=hi).map(|i| k((i as f64 - center) * scale)).sum();
+        (lo..=hi)
+            .filter(|i| *i >= 0 && *i < i64::from(n))
+            .map(|i| (i as usize, k((i as f64 - center) * scale) / sum))
+            .collect()
+    };
+    let wx: Vec<_> = (0..w).map(|x| weights(x, img.width)).collect();
+    let wy: Vec<_> = (0..h).map(|y| weights(y, img.height)).collect();
+    let sw = img.width as usize;
+    let mut out = vec![0u8; w as usize * h as usize * 4];
+    for (y, ry) in wy.iter().enumerate() {
+        for (x, rx) in wx.iter().enumerate() {
+            let mut acc = [0.0f64; 4];
+            for &(sy, fy) in ry {
+                for &(sx, fx) in rx {
+                    let p = &img.data[(sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4];
+                    for c in 0..4 {
+                        acc[c] += f64::from(p[c]) * fx * fy;
+                    }
+                }
+            }
+            let o = (y * w as usize + x) * 4;
+            // Premultiplied: color never exceeds alpha (the kernel rings).
+            let a = acc[3].round().clamp(0.0, 255.0);
+            out[o + 3] = a as u8;
+            for c in 0..3 {
+                out[o + c] = acc[c].round().clamp(0.0, a) as u8;
+            }
+        }
+    }
+    Rgba8 {
+        width: w,
+        height: h,
+        data: out,
+    }
+}
+
 /// Area-filter resampling of a premultiplied image by `scale` < 1 (larger
 /// scales are left to the paint pass's bilinear filter and return the image
 /// as it is). Output pixel `o` covers source pixels `[o, o + 1) / scale`;
@@ -227,7 +304,25 @@ pub fn resample(img: &Rgba8, scale: f64) -> Rgba8 {
     }
 }
 
-fn build(face: FaceRef<'_>, glyph: u32, size: f32) -> Option<BitmapGlyph> {
+/// Apple Color Emoji's downward shift in whole device pixels for a run at
+/// `requested` px drawn at `size` px. From 20 px up it is `size / 8`
+/// rounded, halves down; below, Canvas2D shifts the (enlarged) glyph
+/// further, by the amounts measured at every size from 6 to 19 px
+/// (`fit-emoji`, two emoji, every pixel equal after the shift).
+pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
+    const SMALL: [f64; 14] = [1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0];
+    let r = f64::from(requested).round();
+    if r < 20.0 {
+        if r >= 6.0 {
+            return SMALL[(r - 6.0) as usize];
+        }
+        // Below the measured range: a quarter of the size, halves down.
+        return (r / 4.0 - 0.5).ceil().max(0.0);
+    }
+    (f64::from(size) / 8.0 - 0.5).ceil()
+}
+
+fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<BitmapGlyph> {
     let font = face.font()?;
     let strikes = font.bitmap_strikes();
     if strikes.is_empty() {
@@ -243,7 +338,7 @@ fn build(face: FaceRef<'_>, glyph: u32, size: f32) -> Option<BitmapGlyph> {
     let scale = f64::from(size / bitmap.ppem_y);
     let units = f64::from(size / upem);
     let outer = if is_apple_color_emoji {
-        Vec2::new(0.0, f64::from(size) / 8.0)
+        Vec2::new(0.0, apple_emoji_shift(requested, size))
     } else {
         Vec2::new(
             f64::from(bitmap.bearing_x) * units,
@@ -259,14 +354,20 @@ fn build(face: FaceRef<'_>, glyph: u32, size: f32) -> Option<BitmapGlyph> {
     if bitmap.placement_origin == Origin::BottomLeft {
         transform *= Affine::translate((0.0, -f64::from(image.height)));
     }
-    // Resample to the device scale; a resampled pixel spans 1 / scale
-    // source pixels.
+    // Downscale to the device scale with a Lanczos-2 filter (closest to
+    // Canvas2D among area, linear, Mitchell, Lanczos-2 and -3 on
+    // `fit-emoji`); a resampled pixel spans 1 / scale source pixels, and
+    // the paint pass samples it bilinearly at the glyph's phase.
     let transform = if scale < 1.0 {
         transform * Affine::scale(1.0 / scale)
     } else {
         transform
     };
-    let image = resample(&image, scale);
+    let image = if scale < 1.0 {
+        lanczos2(&image, scale)
+    } else {
+        image
+    };
     let bounds = transform.transform_rect_bbox(Rect::new(
         0.0,
         0.0,
@@ -285,6 +386,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn emoji_shift_follows_the_measurements() {
+        assert_eq!(apple_emoji_shift(12.0, 15.0), 3.0);
+        assert_eq!(apple_emoji_shift(19.0, 22.0), 4.0);
+        assert_eq!(apple_emoji_shift(20.0, 22.0), 3.0);
+        assert_eq!(apple_emoji_shift(36.0, 36.0), 4.0);
+        assert_eq!(apple_emoji_shift(37.0, 37.0), 5.0);
+        assert_eq!(apple_emoji_shift(4.0, 6.0), 1.0);
+    }
+
+    #[test]
     fn area_resampling_preserves_mean_and_extent() {
         let img = Rgba8 {
             width: 4,
@@ -298,5 +409,19 @@ mod tests {
         assert_eq!(out.data[3], 255);
         let same = resample(&img, 1.5);
         assert_eq!(same, img);
+    }
+
+    #[test]
+    fn lanczos_keeps_flat_interiors_and_premultiplication() {
+        let img = Rgba8 {
+            width: 20,
+            height: 20,
+            data: (0..400).flat_map(|_| [100, 50, 0, 200]).collect(),
+        };
+        let out = lanczos2(&img, 0.4);
+        assert_eq!((out.width, out.height), (8, 8));
+        let mid = &out.data[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4];
+        assert_eq!(mid, &[100, 50, 0, 200]);
+        assert!(out.data.chunks_exact(4).all(|p| p[0] <= p[3] && p[1] <= p[3]));
     }
 }
