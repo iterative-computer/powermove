@@ -13,6 +13,7 @@
 //! opaque black inside the rectangle (today's WebGL canvas is opaque) and
 //! transparent around it, where the viewer's stage shows through.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pm_gpu::Target;
@@ -20,6 +21,7 @@ use pm_gpu::bridge_out::display::{WORKING_FORMAT, WorkingTexture};
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Mat3, PixelRect, Rect, Size, Ticks};
 use pm_protocol::frame::{OverlayGeometry, OverlayLayer, PreviewResolution, ViewerState};
+use pm_render::effects::Effects;
 use pm_render::{LayerFailure, RenderError, RenderRequest, Renderer};
 
 use super::document::MediaMap;
@@ -160,9 +162,18 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
-    /// Whose definitions the renderer holds: the view (hashed) and the set's
-    /// identity and version.
+    /// The view (hashed) whose definition set is in the renderer, and the
+    /// identity and version of the set it was loaded from.
     definitions: Option<(u64, Option<(usize, u64)>)>,
+    /// Every other view's definition set, kept while another view draws:
+    /// each view keeps its own programs and watchdog state, so views
+    /// sharing the device never reset each other's.
+    parked: HashMap<u64, (Effects, Option<(usize, u64)>)>,
+}
+
+fn owner_hash(owner: impl std::hash::Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    BuildHasherDefault::<DefaultHasher>::default().hash_one(owner)
 }
 
 impl Composer {
@@ -257,6 +268,7 @@ impl Composer {
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
             definitions: None,
+            parked: HashMap::new(),
         }
     }
 
@@ -264,30 +276,54 @@ impl Composer {
         &mut self.renderer
     }
 
-    /// Loads a view's definitions into the renderer when they are not the
-    /// ones it holds (translations come from the renderer's cache). Returns
-    /// the definitions' translation failures when it loaded them.
+    /// Puts `owner`'s definition set in the renderer (parking the one it
+    /// held) and brings it up to `definitions` when that set changed: a
+    /// changed set translates only definitions whose source changed, and
+    /// keeps the programs and watchdog records of the rest (an effect the
+    /// watchdog turned off stays off). Returns the translation failures
+    /// when it loaded a changed set.
     pub fn use_definitions(
         &mut self,
         owner: impl std::hash::Hash,
         definitions: Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
     ) -> Option<Vec<pm_protocol::error::EngineError>> {
-        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
-        let owner = BuildHasherDefault::<DefaultHasher>::default().hash_one(owner);
-        let wanted = (
-            owner,
-            definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version)),
-        );
-        if self.definitions == Some(wanted) {
+        let owner = owner_hash(owner);
+        let version = definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version));
+        if self.definitions.map(|d| d.0) != Some(owner) {
+            if let Some((previous, loaded)) = self.definitions.take() {
+                let mut out = self.renderer.effects().sibling();
+                self.renderer.swap_effects(&mut out);
+                self.parked.insert(previous, (out, loaded));
+            }
+            let (mut set, loaded) = self
+                .parked
+                .remove(&owner)
+                .unwrap_or_else(|| (self.renderer.effects().sibling(), None));
+            self.renderer.swap_effects(&mut set);
+            self.definitions = Some((owner, loaded));
+        }
+        let current = self.definitions.as_mut().expect("set above");
+        if current.1 == version {
             return None;
         }
-        self.definitions = Some(wanted);
+        current.1 = version;
         match definitions {
             Some((set, _)) => Some(self.renderer.set_definitions(set).unwrap_or_default()),
             None => {
                 self.renderer.clear_definitions();
                 Some(Vec::new())
             }
+        }
+    }
+
+    /// Drops `owner`'s definition set (its session closed).
+    pub fn forget_definitions(&mut self, owner: impl std::hash::Hash) {
+        let owner = owner_hash(owner);
+        self.parked.remove(&owner);
+        if self.definitions.map(|d| d.0) == Some(owner) {
+            self.definitions = None;
+            let mut empty = self.renderer.effects().sibling();
+            self.renderer.swap_effects(&mut empty);
         }
     }
 

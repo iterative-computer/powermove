@@ -710,6 +710,9 @@ impl Thread {
     fn forget_session(&mut self, key: Key) {
         self.docs.remove(&key);
         self.audio.remove(&key);
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            composer.forget_definitions(key);
+        }
         let mut stats = self.stats();
         stats.routes.remove(&view_name(key));
         stats.audio.remove(&view_name(key));
