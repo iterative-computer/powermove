@@ -93,13 +93,13 @@ const show = (v: unknown): string => {
 };
 
 /** Where `a` and `b` first differ, or null when they agree. */
-export function differs(a: unknown, b: unknown, close: (a: number, b: number) => boolean, unwrap: <T>(v: T) => T = v => v, path = '', seen = new Set<unknown>()): string | null {
+export function differs(a: unknown, b: unknown, close: (a: number, b: number, path: string) => boolean, unwrap: <T>(v: T) => T = v => v, path = '', seen = new Set<unknown>()): string | null {
   a = unwrap(a); b = unwrap(b);
   if (Object.is(a, b)) return null;
   if (typeof a === 'number' && typeof b === 'number') {
     if (Number.isNaN(a) && Number.isNaN(b)) return null;
     // -0 and 0 are equal under the tolerance, as they are to every consumer.
-    return close(a, b) ? null : path || '.';
+    return close(a, b, path) ? null : path || '.';
   }
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return path || '.';
   if (seen.has(a)) return null;

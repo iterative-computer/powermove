@@ -14,8 +14,10 @@
 //! * [`expr`]: the production expression engine (`pm-expr` reading the
 //!   mirror's nodes in place).
 //! * [`reply`]: JSON replies with exact numbers.
+//! * [`edit`]: the `edit.*` requests, `pm-edit`'s kernels over the mirror.
 //! * `abi` (wasm32 only): the module's C ABI exports.
 
+pub mod edit;
 pub mod engine;
 pub mod expr;
 pub mod reply;

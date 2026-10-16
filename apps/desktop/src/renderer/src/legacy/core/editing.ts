@@ -1,12 +1,12 @@
 import { validateFrameRate } from '../../../../shared/frame-rate';
-import {shaderPeers} from '../../core/scene3d/materials';
+import {shaderPeers,synchronizeShaderPeers} from '../../core/scene3d/materials';
 import { generatedModelSchema, render3DSchema, materialKeyframeMinimum } from '../../../../shared/blender';
-import { captureFontAnchor } from './font-anchor';
-import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
+import { captureFontAnchor, fontAnchorReference, rescaleAnchorBounds } from './font-anchor';
+import { captureSizeAnchor, sizeAnchorReference } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
 import { validMatteSource } from './matte';
 import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
-import { preserveParentPose } from './parenting';
+import { reparentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
@@ -202,12 +202,15 @@ function materialPeers(layer:any,channel:string,meta:any){
   for(const peer of peers){if(peer.layer.lock||(PM.groupAncestors?.(peer.layer)||[]).some((g:any)=>g.lock))throw new Error('This material is used by a locked layer. Make it unique first.');if(isGeneratedOrigin(meta.origin)&&lockedIntent(peer.layer,peer.path))throw new Error(`Preserved hand-edited ${peer.path}`);}
   return peers;
 }
-function synchronizePeers(peers:any[],prop:any,source:any){
-  for(const peer of peers)if(peer.prop!==prop){
-    const next=clone(prop),old=peer.prop.kf;
-    next.kf=next.kf.map((key:any)=>{const time=key.t+source.from-peer.layer.from;return {...key,t:time,i:old.find((k:any)=>Math.abs(k.t-time)<1e-8)?.i||PM.uid('k')};});
-    Object.assign(peer.prop,next);
-  }
+/** Copies an edited shader channel to the surfaces sharing its material:
+ *  pm-edit's kernel when the native evaluator is on and the layer is in the
+ *  open composition (engine-doc/edits.ts), the legacy copy otherwise. */
+function synchronizePeers(peers:any[],prop:any,source:any,channel:string){
+  if(!peers.some((peer:any)=>peer.prop!==prop))return;
+  const legacy=()=>synchronizeShaderPeers(PM,peers,prop,source);
+  const edits=PM.EngineDoc?.edits,index=edits?edits.index(source):-1;
+  if(!edits||index<0){legacy();return;}
+  edits.edit('syncPeers',{layer:index,channel},legacy,()=>undefined,{wide:true});
 }
 function setProperty(command: any, meta:any={}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
@@ -239,7 +242,7 @@ function setProperty(command: any, meta:any={}) {
       t: PM.round(time - layer.from, 3),
     };
   }
-  synchronizePeers(peers,prop,layer);
+  synchronizePeers(peers,prop,layer,channel);
   if(command.markIntent)for(const peer of peers){peer.layer.locked_intent||={};peer.layer.locked_intent[peer.path]=clone(layer.locked_intent[channel]);}
   return { id: layer.id, channel, value };
 }
@@ -248,7 +251,7 @@ function offsetProperty(command:any,meta:any={}){
   const layer=findLayer(command.target);if(!layer)throw new Error('Layer not found');const {channel,prop}=property(layer,command.path);if(!prop||typeof prop.v!=='number')throw new Error('Choose a numeric channel');
   const peers=materialPeers(layer,channel,meta);if(lockedIntent(layer,channel)&&command.preserveHandEdits!==false)throw new Error(`Preserved hand-edited ${channel}`);const delta=finite(command.delta,'Offset');
   const next={...prop,v:prop.v+delta,kf:prop.kf.map((k:any)=>({...k,v:k.v+delta}))};validate3DChannel(layer,channel,next);
-  prop.v+=delta;for(const key of prop.kf)key.v+=delta;synchronizePeers(peers,prop,layer);PM.touch();return {id:layer.id,channel,delta};
+  prop.v+=delta;for(const key of prop.kf)key.v+=delta;synchronizePeers(peers,prop,layer,channel);PM.touch();return {id:layer.id,channel,delta};
 }
 function replaceKeyframes(command: any,meta:any={}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
@@ -284,7 +287,7 @@ function replaceKeyframes(command: any,meta:any={}) {
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
   if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling))validate3DChannel(layer,channel,prop);
   PM.touch();
-  synchronizePeers(peers,prop,layer);
+  synchronizePeers(peers,prop,layer,channel);
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
 
@@ -306,7 +309,7 @@ function setEasing(command: any,meta:any={}) {
   const found: any = [],shared:any[]=[];
   for (const layer of projectLayers()) {
     for (const item of PM.allProps(layer)) {
-      if(item.prop.kf.some((key:any)=>ids.has(key.i))){temporalKeys(item.prop.kf);shared.push({layer,prop:item.prop,peers:materialPeers(layer,item.key,meta)});}
+      if(item.prop.kf.some((key:any)=>ids.has(key.i))){temporalKeys(item.prop.kf);shared.push({layer,key:item.key,prop:item.prop,peers:materialPeers(layer,item.key,meta)});}
       for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
     }
   }
@@ -316,7 +319,7 @@ function setEasing(command: any,meta:any={}) {
     key.ei = [curve[2], curve[3]];
     key.hold = false;
   });
-  for(const item of shared)synchronizePeers(item.peers,item.prop,item.layer);
+  for(const item of shared)synchronizePeers(item.peers,item.prop,item.layer,item.key);
   PM.touch();
   return { keyframes: found.length, curve };
 }
@@ -335,7 +338,7 @@ function setExpression(command: any, meta: any = {}) {
   }
   prop.expr = command.expression || null;
   PM.touch();
-  synchronizePeers(peers,prop,layer);
+  synchronizePeers(peers,prop,layer,channel);
   return { id: layer.id, channel, expression: prop.expr };
 }
 
@@ -500,7 +503,7 @@ function setLayer(command: any) {
     if (patch.parent != null && (!parent || parent.id === layer.id)) throw new Error('Invalid parent layer');
     if (parent && PM.TYPE_META[parent.type]?.transform === false) throw new Error('This layer cannot be a parent');
     if (parent && PM.wouldCycle(layer, parent.id)) throw new Error('Parenting would create a cycle');
-    if (layer.parent !== (parent?.id ?? null)) preserveParentPose(PM, layer, parent, PM.time);
+    if (layer.parent !== (parent?.id ?? null)) reparentPose(PM, layer, parent, PM.time);
     layer.parent = parent ? parent.id : null;
   }
   if (patch.color != null) layer.color = String(patch.color);
@@ -928,17 +931,10 @@ function runOne(sourceCommand: any, meta: any = {}) {
   const fontLayer = findLayer(command.target || command.layer || command.targetId);
   captureFontAnchor(PM, fontLayer, command);
   captureSizeAnchor(PM, fontLayer, command);
-  const anchorEdit = fontLayer?.d?.fontAnchorBounds && command.type === 'set_property'
-    && ['anchor.x', 'anchor.y'].includes(command.path || command.channel);
-  const anchorRaster = anchorEdit ? PM.raster(fontLayer, 1, command.time ?? PM.time) : null;
-  const sizeAnchorEdit = fontLayer?.d?.sizeAnchorBounds && command.type === 'set_property'
-    && ['anchor.x', 'anchor.y'].includes(command.path || command.channel);
-  const nativeSizeBounds = sizeAnchorEdit ? sizeBounds(PM, fontLayer, command.time ?? PM.time) : null;
-  const sizeOffset = nativeSizeBounds ? sizeAnchorOffset(PM, fontLayer, command.time ?? PM.time) : null;
-  const sizeAnchorBounds = nativeSizeBounds && sizeOffset ? {
-    x0: nativeSizeBounds.x0 + sizeOffset.x, x1: nativeSizeBounds.x1 + sizeOffset.x,
-    y0: nativeSizeBounds.y0 + sizeOffset.y, y1: nativeSizeBounds.y1 + sizeOffset.y,
-  } : null;
+  const anchorChannel = command.type === 'set_property' && ['anchor.x', 'anchor.y'].includes(command.path || command.channel);
+  const anchorTime = command.time ?? PM.time;
+  const fontReference = anchorChannel && fontLayer?.d?.fontAnchorBounds ? fontAnchorReference(PM, fontLayer, anchorTime) : null;
+  const sizeReference = anchorChannel && fontLayer?.d?.sizeAnchorBounds ? sizeAnchorReference(PM, fontLayer, anchorTime) : null;
   let data: any;
   switch (command.type) {
     case 'offset_property': data = offsetProperty(command,meta); break;
@@ -967,31 +963,10 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'edit_captions': data = editCaptions({ PM, findLayer }, command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
-  if (anchorRaster?.fontOffset && anchorRaster.selection) {
-    // Pan Behind moves the pivot without introducing additional text movement.
-    const ref = fontLayer.d.fontAnchorBounds, bounds = anchorRaster.selection;
-    for (const axis of ['x', 'y']) {
-      const start = axis + '0', end = axis + '1';
-      const span = bounds[end] - bounds[start], referenceSpan = ref[end] - ref[start];
-      if (span <= 0) continue;
-      const anchor = PM.ev(fontLayer, 'anchor.' + axis, command.time ?? PM.time);
-      ref[start] = anchor - (anchor - bounds[start]) / span * referenceSpan;
-      ref[end] = ref[start] + referenceSpan;
-    }
-  }
-  if (sizeAnchorBounds) {
-    // Moving the pivot must preserve the current artwork before the next resize.
-    const ref = fontLayer.d.sizeAnchorBounds;
-    for (const axis of ['x', 'y'] as const) {
-      const start = `${axis}0` as const, end = `${axis}1` as const;
-      const span = sizeAnchorBounds[end] - sizeAnchorBounds[start], referenceSpan = ref[end] - ref[start];
-      if (span <= 0) continue;
-      const anchor = PM.ev(fontLayer, 'anchor.' + axis, command.time ?? PM.time);
-      ref[start] = anchor - (anchor - sizeAnchorBounds[start]) / span * referenceSpan;
-      ref[end] = ref[start] + referenceSpan;
-    }
-    PM.touch();
-  }
+  // Pan Behind moves the pivot without introducing additional text movement,
+  // and must preserve the current artwork before the next resize.
+  if (fontReference) rescaleAnchorBounds(PM, fontLayer, 'font', anchorTime, fontReference);
+  if (sizeReference) { rescaleAnchorBounds(PM, fontLayer, 'size', anchorTime, sizeReference); PM.touch(); }
   const sceneTarget = findLayer(command.target || command.layer || command.targetId);
   if (sceneTarget && command.type==='set_content') validateSceneLayer(sceneTarget,PM);
   if (command.type === 'add_layer') {

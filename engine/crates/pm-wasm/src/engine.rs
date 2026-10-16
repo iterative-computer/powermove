@@ -119,10 +119,10 @@ impl EvalHooks for LabelsRef {
 pub struct Fonts {
     /// Whether the added faces carry outlines (whole fonts rather than
     /// metrics-and-shaping subsets), so ink can be answered.
-    outlines: bool,
+    pub(crate) outlines: bool,
     answers: Answers,
     fonts: Vec<(String, u32, FontBytes)>,
-    measure: CompatMeasure<ReplayResolver>,
+    pub(crate) measure: CompatMeasure<ReplayResolver>,
 }
 
 impl Fonts {
@@ -148,19 +148,19 @@ impl Fonts {
 
     /// Whether the last layout met a query the answers lack, or a face whose
     /// bytes are not loaded.
-    fn incomplete(&mut self) -> bool {
+    pub(crate) fn incomplete(&mut self) -> bool {
         let r = self.measure.compat().resolver();
         !r.misses.is_empty() || !r.pending_blobs.is_empty()
     }
 
-    fn clear_reports(&mut self) {
+    pub(crate) fn clear_reports(&mut self) {
         self.measure.compat().resolver_mut().clear_reports();
     }
 }
 
 /// A query that cannot be answered natively; the renderer answers it with
 /// the legacy code.
-enum Unanswered {
+pub(crate) enum Unanswered {
     /// The question needs today's 3D runtime (three.js) in Phase 1.
     Host,
     /// Text layout met fonts the mirror does not have yet.
@@ -169,14 +169,16 @@ enum Unanswered {
     /// subsets without outlines (docs/engine/pm-eval-layers.md, allowed
     /// difference 6).
     Ink,
+    /// An edit kernel left the edit to the legacy code (`pm_edit::LEGACY_ONLY`).
+    Legacy,
 }
 
 /// Measures through [`CompatMeasure`] and notes whether anything asked for
 /// glyph ink (`measure_lines`); widths, carets, and glyph positions need no
 /// outlines.
-struct InkProbe<'m> {
-    inner: &'m mut CompatMeasure<ReplayResolver>,
-    ink: bool,
+pub(crate) struct InkProbe<'m> {
+    pub(crate) inner: &'m mut CompatMeasure<ReplayResolver>,
+    pub(crate) ink: bool,
 }
 
 impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
@@ -198,7 +200,7 @@ impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
     }
 }
 
-type QueryResult = Result<Result<(), JsThrow>, Unanswered>;
+pub(crate) type QueryResult = Result<Result<(), JsThrow>, Unanswered>;
 
 /// Engine statistics for the renderer's diagnostics.
 #[derive(Clone, Copy, Debug, Default)]
@@ -337,10 +339,10 @@ fn indexes(out: &mut Reply, layers: &[Node], nodes: &[&Node]) {
 
 /// A [`LayerHost`] that refuses every 3D question, so the renderer falls back
 /// to today's three.js answer (section 26, Phase 1).
-struct RefuseHost;
+pub(crate) struct RefuseHost;
 impl LayerHost for RefuseHost {}
 
-fn host_only(e: &JsThrow) -> bool {
+pub(crate) fn host_only(e: &JsThrow) -> bool {
     e.kind == HOST_ONLY
 }
 
@@ -622,6 +624,10 @@ impl Engine {
                 self.stats.unanswered += 1;
                 out.raw("{\"ink\":true}");
             }
+            Err(Unanswered::Legacy) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"legacy\":true}");
+            }
         }
         out
     }
@@ -689,6 +695,10 @@ impl Engine {
             _ => {}
         }
 
+        // The edit kernels (pm-edit): patches the renderer applies.
+        if let Some(name) = op.strip_prefix("edit.") {
+            return crate::edit::dispatch(&self.doc, &mut self.fonts, name, request, out);
+        }
         let Some(root) = self.doc.root() else {
             out.raw("null");
             return Ok(Err(JsThrow::type_error("The mirror holds no document")));

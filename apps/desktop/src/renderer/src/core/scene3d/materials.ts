@@ -295,6 +295,34 @@ export function shaderPeers(
     )
     .filter((peer: any) => peer.prop);
 }
+/**
+ * After an edit of `prop` (a shader channel of `source`): every other surface
+ * sharing the shader gets a copy of the channel, its keys moved by the
+ * difference of the two layers' starts (shared materials keep composition
+ * timing). A peer key keeps its id when it lands on one of the peer's old key
+ * times. pm-edit's `materials` kernel is the native counterpart.
+ */
+export function synchronizeShaderPeers(
+  PM: any,
+  peers: Array<{ layer: any; prop: any }>,
+  prop: any,
+  source: any,
+): void {
+  for (const peer of peers)
+    if (peer.prop !== prop) {
+      const next = JSON.parse(JSON.stringify(prop)),
+        old = peer.prop.kf;
+      next.kf = next.kf.map((key: any) => {
+        const time = key.t + source.from - peer.layer.from;
+        return {
+          ...key,
+          t: time,
+          i: old.find((k: any) => Math.abs(k.t - time) < 1e-8)?.i || PM.uid("k"),
+        };
+      });
+      Object.assign(peer.prop, next);
+    }
+}
 /** Material reuse keeps composition timing while every surface owns its key IDs. */
 export function assignedMaterial(
   PM: any,

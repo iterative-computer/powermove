@@ -961,6 +961,15 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     close: (id: string) => PM.Comps?.close(id) ?? false,
     onChange: (listener: () => void) => PM.bus.on('comps', listener),
   });
+  // pm-edit's kernels for built-in edits that live in extensions (the
+  // alignment strip): the native answer when the native evaluator is on,
+  // the caller's own code otherwise (docs/engine/pm-edit.md).
+  kernel.services.register('editKernels', {
+    align: <T,>(layers: unknown[], mode: string, time: number, legacy: () => T): T => {
+      const edits = PM.EngineDoc?.edits;
+      return edits ? edits.align(layers, mode, time, legacy) : legacy();
+    },
+  });
   for (const location of ['viewer:context', 'timeline:context'] as const) {
     kernel.contributeMenu('core', location, () => [
       { label: 'New Composition…', icon: 'plus', kb: '⌘N', run: () => PM.cmd('newComposition') }

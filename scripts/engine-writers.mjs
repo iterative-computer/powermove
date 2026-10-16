@@ -111,7 +111,7 @@ export const NAMED_SITES = [
   { class: 'agent-media-folders', file: 'renderer/src/legacy/assistant/media-management.ts', scope: /(^| > )importMedia$/, code: /\.folder\s*=/ },
   // The refresh runs inside writeDocument (a barrier writer): the call is the site.
   { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, from: ['doc.write'] },
-  { class: 'material-fanout', file: 'renderer/src/legacy/core/editing.ts', scope: /(^| > )synchronizePeers$/, params: true },
+  { class: 'material-fanout', file: 'renderer/src/core/scene3d/materials.ts', scope: /(^| > )synchronizeShaderPeers$/, params: true },
   { class: 'aim-preserving', file: 'renderer/src/legacy/core/parenting.ts', scope: /(^| > )preserveWorldAim$/, params: true },
 ];
 
