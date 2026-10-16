@@ -113,9 +113,10 @@ pass") into the full pass. The plan stays the authority.
 ## Integration notes
 
 - `Renderer::set_view(Some(&view))` applies contract 2's view override to
-  the following renders; exports and agent captures must pass `None`
-  (`FramePurpose::is_final`). `RenderRequest::from_frame_request` still
-  refuses a request carrying a view, so a caller that does not set the view
+  the following renders. `RenderRequest::from_frame_request_with_view`
+  returns the request and its view (dropped for exports and agent
+  captures, `FramePurpose::is_final`); the plain `from_frame_request` still
+  refuses a request carrying a view, so a caller that does not apply it
   routes instead of drawing the editor view without its override.
 - `Renderer::set_mesh_definitions` registers mesh-layer definition
   snapshots (`assetField`, parameter defaults). The built-in OBJ model
@@ -171,6 +172,7 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
   options; `build_with`; `comp_pass` orders the pass; the extension branch
   plans legacy kinds.
 - `pm-render/src/renderer.rs`: `set_view`, `set_mesh_definitions`.
+- `pm-render/src/request.rs`: `from_frame_request_with_view`.
 - `pm-render/src/exec.rs`: linear conversion of 3D output; nested depth
   for precompositions in the depth and id surface.
 - `pm-render/src/capability.rs`: legacy scene definition accepted; the 3D

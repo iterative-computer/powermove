@@ -518,3 +518,35 @@ fn frame_time_3d_shadows_at_1080p() {
         times[times.len() * 95 / 100]
     );
 }
+
+#[test]
+fn frame_requests_carry_the_view_except_for_final_purposes() {
+    use pm_protocol::frame::FramePurpose;
+    let mut request = pm_protocol::samples::viewer_frame_request();
+    request.view = Some(ViewOverride {
+        camera: None,
+        shading: Shading3d::Wireframe,
+        xray: false,
+        local_view: Vec::new(),
+    });
+    request.region = None;
+    // The plain conversion refuses a view (callers that ignore it route).
+    assert!(RenderRequest::from_frame_request(&request).is_err());
+    let (r, view) = RenderRequest::from_frame_request_with_view(&request).unwrap();
+    assert_eq!(view.unwrap().shading, Shading3d::Wireframe);
+    assert_eq!(r.output_size, request.output_size);
+    // An export never applies the view.
+    let mut export = request.clone();
+    export.purpose = FramePurpose::Export;
+    export.priority = pm_protocol::priority::PriorityClass::UserJob;
+    export.resolution = pm_protocol::frame::PreviewResolution::Full;
+    export.media = pm_protocol::frame::MediaPreference::Originals;
+    export.color = pm_protocol::color::OutputColor::SrgbImage;
+    export.motion_blur = pm_protocol::frame::MotionBlurKind::Export;
+    export.depth_id = false;
+    export.overlay = false;
+    export.draft_3d = false;
+    export.draft_render = false;
+    let (r, view) = RenderRequest::from_frame_request_with_view(&export).unwrap();
+    assert!(view.is_none() && r.export, "exports ignore view overrides");
+}

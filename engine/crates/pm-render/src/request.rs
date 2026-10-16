@@ -64,9 +64,10 @@ impl RenderRequest {
         }
     }
 
-    /// Contract 2's request. The view override and editor looks are not
-    /// rendered by this renderer yet; such requests are refused so the
-    /// caller routes them elsewhere.
+    /// Contract 2's request. A request carrying a view override is refused
+    /// here, so a caller that does not apply the view routes it; callers
+    /// that do use [`RenderRequest::from_frame_request_with_view`] and
+    /// `Renderer::set_view`.
     pub fn from_frame_request(request: &FrameRequest) -> Result<RenderRequest, RenderError> {
         request
             .validate()
@@ -87,6 +88,18 @@ impl RenderRequest {
             background: true,
             export: request.purpose == pm_protocol::frame::FramePurpose::Export,
         })
+    }
+
+    /// Contract 2's request with its view override, for callers that pass
+    /// the view to `Renderer::set_view`: the override is dropped for exports
+    /// and agent captures (`FramePurpose::is_final`), as section 18 requires.
+    pub fn from_frame_request_with_view(
+        request: &FrameRequest,
+    ) -> Result<(RenderRequest, Option<pm_protocol::frame::ViewOverride>), RenderError> {
+        let view = request.view.clone().filter(|_| !request.purpose.is_final());
+        let mut without = request.clone();
+        without.view = None;
+        Ok((RenderRequest::from_frame_request(&without)?, view))
     }
 
     /// The size of the texture a render returns.
