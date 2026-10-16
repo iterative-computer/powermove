@@ -34,9 +34,12 @@
 //!
 //! A seek to program sample `n` starts decoding [`AudioStreamInfo::preroll`]
 //! samples earlier (MDCT overlap, the MP3 bit reservoir, the Opus decoder
-//! state) and discards everything before `n`. Lossless codecs need no
-//! pre-roll and seek bit-exactly; lossy codecs converge to the sequential
-//! decode within the pre-roll.
+//! state), and at least the
+//! codec delay a fresh decoder drops (HE-AAC's 4,224 samples are more than
+//! AAC's pre-roll), and discards everything before `n`. Lossless codecs need
+//! no pre-roll and seek bit-exactly; lossy codecs converge to the sequential
+//! decode within the pre-roll. A seek whose first sample still lands after
+//! its target starts earlier again rather than from the start of the stream.
 
 use crate::error::{MediaError, Result};
 use crate::ff::{Input, check, cstr, err_str};
@@ -539,6 +542,26 @@ enum Run {
     Placed,
 }
 
+/// Why a seek attempt could not be placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeekFault {
+    /// The anchor packet was not found again.
+    AnchorNotFound,
+    /// The decoder's first frame after the anchor is not the anchor's.
+    Misplaced,
+    /// The first sample lands after the target: the attempt started too
+    /// close to it (an earlier start places it).
+    LandedAfter,
+}
+
+/// Anchored seeks failing in a row (for a reason of the stream) before the
+/// stream counts from the start for good; see `AudioDecoder::anchor_failures`.
+const ANCHOR_FAILURE_LIMIT: u32 = 3;
+
+/// Seek attempts that landed after their target, each starting one anchor
+/// (or one lead) earlier, before a seek decodes from the start.
+const LANDED_AFTER_RETRIES: u32 = 2;
+
 /// A streaming decoder for one audio stream.
 pub struct AudioDecoder {
     input: Input,
@@ -546,6 +569,10 @@ pub struct AudioDecoder {
     pkt: *mut ff::AVPacket,
     frame: *mut ff::AVFrame,
     info: AudioStreamInfo,
+    /// What a fresh decoder drops from the head of its output
+    /// (`initial_padding`): a seek must start at least this far before its
+    /// target, or its first sample lands after it.
+    codec_delay: i64,
     /// Stream timebase.
     tb: (i64, i64),
     /// Stream timestamp of program sample 0, in the stream timebase, before
@@ -575,13 +602,19 @@ pub struct AudioDecoder {
     index: Option<PacketIndex>,
     /// No index can be opened for this stream.
     no_index: bool,
-    /// An anchored seek could not be placed (the anchor packet was not
-    /// found again, or the decoder's first frame did not fit it). Such
-    /// failures come from the demuxer or the codec, so they repeat for the
-    /// stream's other anchors: from then on every seek counts from the
-    /// start, and reads in order continue that decode instead of retrying
-    /// an anchor and restarting for every block.
-    anchors_failed: bool,
+    /// Why the last seek attempt could not be placed (set with the
+    /// `Unsupported` error that ends it).
+    fault: Option<SeekFault>,
+    /// Anchored seeks in a row that failed for a reason of the stream (the
+    /// anchor packet was not found again, or the decoder's first frame did
+    /// not fit it). Such failures come from the demuxer or the codec, so
+    /// once [`ANCHOR_FAILURE_LIMIT`] happen in a row every later seek counts
+    /// from the start, and reads in order continue that decode instead of
+    /// retrying an anchor and restarting for every block. A success resets
+    /// the count, so a stray anchor cannot turn random access into a decode
+    /// from the start for good; a seek that landed after its target depends
+    /// on the target, not the stream, and is never counted.
+    anchor_failures: u32,
     /// Packets sent to the decoder (diagnostics).
     packets: u64,
 }
@@ -722,6 +755,7 @@ impl AudioDecoder {
                     preroll: 0,
                     sample_exact_timestamps: false,
                 },
+                codec_delay: 0,
                 tb: (1, 1),
                 start_pts: 0,
                 expected: None,
@@ -740,7 +774,8 @@ impl AudioDecoder {
                 first: None,
                 index: None,
                 no_index: false,
-                anchors_failed: false,
+                fault: None,
+                anchor_failures: 0,
                 packets: 0,
             };
             if out.pkt.is_null() || out.frame.is_null() {
@@ -822,6 +857,7 @@ impl AudioDecoder {
             out.info.extra_priming = extra;
             out.info.length = length;
             out.info.preroll = preroll_for((*par).codec_id, rate);
+            out.codec_delay = (*ctx).initial_padding.max(0) as i64;
             out.info.sample_exact_timestamps = tb.1 as i128 >= tb.0 as i128 * rate as i128;
             out.pending.data = vec![Vec::new(); out.info.channels()];
             out.restart()?;
@@ -988,73 +1024,106 @@ impl AudioDecoder {
         if !self.info.sample_exact_timestamps {
             return self.seek_counted(index);
         }
-        if index <= self.info.preroll as i64 {
-            self.restart()?;
+        let lead = self.lead();
+        // A seek that lands after its target (a demuxer index coarser than
+        // its packets) starts one lead earlier, then from the start.
+        let mut back = lead;
+        for attempt in 0..=LANDED_AFTER_RETRIES {
+            if index <= back {
+                break;
+            }
+            let from = index - back + self.info.extra_priming;
+            let ts = self.start_pts + samples_to_ts(from, self.tb, self.info.sample_rate);
+            unsafe {
+                let r = ff::avformat_seek_file(
+                    self.input.fmt,
+                    self.info.stream as c_int,
+                    i64::MIN,
+                    ts,
+                    ts,
+                    0,
+                );
+                if r < 0 {
+                    break;
+                }
+                self.fresh_codec()?;
+            }
+            self.pending.clear();
+            self.expected = None;
             self.target = index;
-            return self.skip_to_target();
-        }
-        let from = index - self.info.preroll as i64 + self.info.extra_priming;
-        let ts = self.start_pts + samples_to_ts(from, self.tb, self.info.sample_rate);
-        unsafe {
-            let r = ff::avformat_seek_file(
-                self.input.fmt,
-                self.info.stream as c_int,
-                i64::MIN,
-                ts,
-                ts,
-                0,
-            );
-            if r < 0 {
-                self.restart()?;
-                self.target = index;
-                return self.skip_to_target();
+            self.draining = false;
+            self.eof = false;
+            self.position = index;
+            self.run = Run::Placed;
+            self.feed_from = None;
+            self.first = None;
+            self.fault = None;
+            match self.fill() {
+                Ok(_) => return Ok(()),
+                Err(MediaError::Unsupported(_))
+                    if self.fault == Some(SeekFault::LandedAfter)
+                        && attempt < LANDED_AFTER_RETRIES =>
+                {
+                    back += lead;
+                }
+                // Decode from the start.
+                Err(MediaError::Unsupported(_)) => break,
+                Err(e) => return Err(e),
             }
-            self.fresh_codec()?;
         }
-        self.pending.clear();
-        self.expected = None;
+        self.restart()?;
         self.target = index;
-        self.draining = false;
-        self.eof = false;
-        self.position = index;
-        self.run = Run::Placed;
-        self.feed_from = None;
-        self.first = None;
-        if let Err(e) = self.fill() {
-            if matches!(e, MediaError::Unsupported(_)) {
-                // The demuxer landed after the target: decode from the start.
-                self.restart()?;
-                self.target = index;
-                return self.skip_to_target();
-            }
-            return Err(e);
-        }
-        Ok(())
+        self.skip_to_target()
+    }
+
+    /// How far before its target a seek starts decoding: the pre-roll, and
+    /// at least the codec delay a fresh decoder drops, so the first sample
+    /// it returns is at or before the target.
+    fn lead(&self) -> i64 {
+        (self.info.preroll as i64).max(self.codec_delay)
     }
 
     /// A seek on a coarse timebase: from the last anchor packet at least the
-    /// pre-roll before `index` (from the start without one), counting. When
+    /// lead before `index` (from the start without one), counting. When
     /// the running decode began at that same place and has not passed
     /// `index`, it continues: the samples are the same, decoded once.
     fn seek_counted(&mut self, index: i64) -> Result<()> {
-        let from = index - self.info.preroll as i64;
-        let anchor = if from > 0 && !self.anchors_failed {
-            self.anchor_for(from)
-        } else {
-            None
-        };
-        let run = anchor.map_or(Run::Start, |a| Run::Anchor(a.pts));
-        if self.run == run && self.position <= index && self.feed_from.is_none() {
-            self.target = index;
-            return self.skip_to_target();
-        }
-        if let Some(a) = anchor {
+        let mut from = index - self.lead();
+        let mut landed_after = 0;
+        loop {
+            let anchor = if from > 0 && self.anchor_failures < ANCHOR_FAILURE_LIMIT {
+                self.anchor_for(from)
+            } else {
+                None
+            };
+            let run = anchor.map_or(Run::Start, |a| Run::Anchor(a.pts));
+            if self.run == run && self.position <= index && self.feed_from.is_none() {
+                self.target = index;
+                return self.skip_to_target();
+            }
+            let Some(a) = anchor else {
+                break;
+            };
+            self.fault = None;
             match self.seek_to_anchor(a, index) {
-                Ok(()) => return Ok(()),
-                // The anchor could not be found again or did not place the
-                // first frame: decode from the start, as every later seek
-                // will.
-                Err(MediaError::Unsupported(_)) => self.anchors_failed = true,
+                Ok(()) => {
+                    self.anchor_failures = 0;
+                    return Ok(());
+                }
+                Err(MediaError::Unsupported(_)) => match self.fault {
+                    // Depends on the target: start one anchor earlier.
+                    Some(SeekFault::LandedAfter) if landed_after < LANDED_AFTER_RETRIES => {
+                        landed_after += 1;
+                        from = a.start - 1;
+                    }
+                    Some(SeekFault::LandedAfter) => break,
+                    // The anchor could not be found again or did not place
+                    // the first frame: decode from the start, and count it.
+                    _ => {
+                        self.anchor_failures += 1;
+                        break;
+                    }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -1179,6 +1248,7 @@ impl AudioDecoder {
                     || r == ff::averror(libc::EIO) && ff::avio_feof((*self.input.fmt).pb) != 0
                 {
                     if self.feed_from.is_some() {
+                        self.fault = Some(SeekFault::AnchorNotFound);
                         return Err(MediaError::unsupported("the anchor packet was not found"));
                     }
                     self.draining = true;
@@ -1205,6 +1275,7 @@ impl AudioDecoder {
                         if pts != ff::AV_NOPTS_VALUE && pts > from {
                             // The demuxer landed after the anchor.
                             if self.rewound {
+                                self.fault = Some(SeekFault::AnchorNotFound);
                                 return Err(MediaError::unsupported(
                                     "the anchor packet was not found",
                                 ));
@@ -1252,9 +1323,15 @@ impl AudioDecoder {
         // The first frame of an anchored seek on a coarse timebase is
         // placed by the anchor the scan counted.
         let anchored = match (self.expected, self.first.take()) {
-            (None, Some(a)) => Some(self.place_anchored(&a, pts, n as i64).ok_or_else(|| {
-                MediaError::unsupported("the first frame after an anchor is not the anchor's")
-            })?),
+            (None, Some(a)) => match self.place_anchored(&a, pts, n as i64) {
+                Some(start) => Some(start),
+                None => {
+                    self.fault = Some(SeekFault::Misplaced);
+                    return Err(MediaError::unsupported(
+                        "the first frame after an anchor is not the anchor's",
+                    ));
+                }
+            },
             _ => None,
         };
         let start = match (self.expected, by_pts) {
@@ -1272,6 +1349,7 @@ impl AudioDecoder {
         };
         if self.expected.is_none() && start > self.target {
             // A seek that landed past its target.
+            self.fault = Some(SeekFault::LandedAfter);
             return Err(MediaError::unsupported("the seek landed after its target"));
         }
         // A gap (the frame starts after the expected sample) becomes
@@ -1452,13 +1530,14 @@ mod tests {
         out
     }
 
-    /// An anchored seek that cannot be placed falls back to the decode
-    /// from the start once for the stream: blocks read in order after it
-    /// continue that decode (each packet decoded once, the samples exactly
-    /// the sequential decode's) instead of retrying a new anchor and
-    /// restarting for every block.
+    /// Anchored seeks that cannot be placed fall back to the decode from
+    /// the start; after [`ANCHOR_FAILURE_LIMIT`] in a row the stream counts
+    /// from the start for good: blocks read in order continue that decode
+    /// (each packet decoded once, the samples exactly the sequential
+    /// decode's) instead of retrying a new anchor and restarting for every
+    /// block.
     #[test]
-    fn failed_anchors_fall_back_once() {
+    fn failed_anchors_fall_back_after_a_few() {
         let file = webm_opus("failed-anchors.webm", 30);
         let mut d = AudioDecoder::open(&file, None).unwrap();
         let mut pcm = vec![Vec::new()];
@@ -1485,15 +1564,77 @@ mod tests {
             let want = &pcm[0][k * block..(k * block + block).min(pcm[0].len())];
             assert_eq!(&out[0][..], want, "block {k}");
         }
-        assert!(s.anchors_failed);
-        // The first block past the pre-roll fails and decodes from the
-        // start again (one block, 50 packets of 20 ms, twice); every later
-        // block continues it.
+        assert_eq!(s.anchor_failures, ANCHOR_FAILURE_LIMIT);
+        // Blocks 1, 2 and 3 fail and decode from the start again (1, 2 and
+        // 3 blocks of 50 packets of 20 ms decoded twice); every later block
+        // continues the decode.
         let packets = s.packets_decoded();
         assert!(
-            packets <= once + 50 + 4,
+            packets <= once + 6 * 50 + 8,
             "{blocks} blocks decoded {packets} packets (the stream has {once})"
         );
+    }
+
+    /// One anchor that cannot be found again costs one decode from the
+    /// start; the seeks after it use their anchors again.
+    #[test]
+    fn a_stray_failed_anchor_does_not_stick() {
+        let file = webm_opus("stray-anchor.webm", 30);
+        let mut d = AudioDecoder::open(&file, None).unwrap();
+        let mut pcm = vec![Vec::new()];
+        while d.read(&mut pcm, 4096).unwrap() > 0 {}
+
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        let target = 20 * 48_000i64;
+        let a = s.anchor_for(target - s.lead()).unwrap();
+        let index = s.index.as_mut().unwrap();
+        let i = index.anchors.iter().position(|x| *x == a).unwrap();
+        index.anchors[i].pts += 1;
+        index.anchors[i].next = a.next.map(|(p, d)| (p + 1, d));
+        s.seek_anchored(target as u64).unwrap();
+        assert_eq!(s.anchor_failures, 1);
+        let mut out = vec![Vec::new()];
+        s.read(&mut out, 4096).unwrap();
+        let t = target as usize;
+        assert_eq!(&out[0][..], &pcm[0][t..t + 4096]);
+        for at in [25 * 48_000u64, 5 * 48_000, 12 * 48_000 + 77] {
+            let before = s.packets_decoded();
+            s.seek_anchored(at).unwrap();
+            let mut out = vec![Vec::new()];
+            s.read(&mut out, 4096).unwrap();
+            let cost = s.packets_decoded() - before;
+            assert!(cost <= 40, "a seek to {at} decoded {cost} packets");
+            assert_eq!(s.anchor_failures, 0);
+        }
+    }
+
+    /// A seek whose first sample lands after its target starts one anchor
+    /// earlier: no decode from the start, and nothing counted against the
+    /// stream's anchors. With no lead, a target just past an anchor lands
+    /// after it: Opus drops its 312-sample pre-skip from a fresh decoder's
+    /// first frame.
+    #[test]
+    fn a_seek_that_lands_after_its_target_starts_an_anchor_earlier() {
+        let file = webm_opus("landed-after.webm", 30);
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        assert!(s.codec_delay > 100);
+        let a = s.anchor_for(20 * 48_000).unwrap();
+        let target = a.start + 100;
+        let (preroll, delay) = (s.info.preroll, s.codec_delay);
+        s.info.preroll = 0;
+        s.codec_delay = 0;
+        let before = s.packets_decoded();
+        s.seek_anchored(target as u64).unwrap();
+        let cost = s.packets_decoded() - before;
+        // It runs from the anchor before `a`.
+        let earlier = s.anchor_for(a.start - 1).unwrap();
+        assert!(earlier.start < a.start);
+        assert_eq!(s.run, Run::Anchor(earlier.pts));
+        assert_eq!(s.anchor_failures, 0);
+        assert!(cost <= 12, "the seek decoded {cost} packets");
+        assert_eq!(s.position(), target as u64);
+        s.info.preroll = preroll;
+        s.codec_delay = delay;
     }
 
     #[test]

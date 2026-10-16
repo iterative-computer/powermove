@@ -50,29 +50,58 @@ fn generated(name: &str, source: &str, args: &[&str]) -> PathBuf {
 /// Matroska; our LGPL FFmpeg build has no HE-AAC encoder. `None` where
 /// `afconvert` is missing (not macOS).
 fn he_aac(stem: &str, source: &str) -> Option<(PathBuf, PathBuf)> {
+    let files = afconvert_aac(stem, source, "aach", "64000", &["mkv"])?;
+    Some((files[0].clone(), files[1].clone()))
+}
+
+/// `source` encoded by `afconvert -f m4af -d <format> -b <bitrate>` (`aach`
+/// HE-AAC, `aacp` HE-AAC v2), then the M4A remuxed with `-c copy` to each
+/// of `remux` (extensions). Returns the M4A first. `None` where `afconvert`
+/// is missing (not macOS).
+fn afconvert_aac(
+    stem: &str,
+    source: &str,
+    format: &str,
+    bitrate: &str,
+    remux: &[&str],
+) -> Option<Vec<PathBuf>> {
     let wav = generated(&format!("{stem}.wav"), source, &["-c:a", "pcm_s16le"]);
     let m4a = wav.with_extension("m4a");
-    let mkv = wav.with_extension("mkv");
     if !m4a.exists() {
         let status = Command::new("afconvert")
-            .args(["-f", "m4af", "-d", "aach", "-b", "64000"])
+            .args(["-f", "m4af", "-d", format, "-b", bitrate])
             .arg(&wav)
             .arg(&m4a)
             .status()
             .ok()?;
-        assert!(status.success(), "afconvert could not encode HE-AAC");
+        assert!(status.success(), "afconvert could not encode {format}");
     }
-    if !mkv.exists() {
-        let status = Command::new(ffmpeg())
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-            .arg(&m4a)
-            .args(["-c", "copy"])
-            .arg(&mkv)
-            .status()
-            .expect("run ffmpeg");
-        assert!(status.success(), "ffmpeg could not remux HE-AAC");
+    let mut out = vec![m4a.clone()];
+    for ext in remux {
+        let file = wav.with_extension(ext);
+        if !file.exists() {
+            let status = Command::new(ffmpeg())
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+                .arg(&m4a)
+                .args(["-c", "copy"])
+                .arg(&file)
+                .status()
+                .expect("run ffmpeg");
+            assert!(status.success(), "ffmpeg could not remux {format} to {ext}");
+        }
+        out.push(file);
     }
-    Some((m4a, mkv))
+    Some(out)
+}
+
+/// The largest difference between `out` and `want` from sample `at` on, over
+/// every channel.
+fn max_diff(out: &[Vec<f32>], want: &[Vec<f32>], at: usize) -> f32 {
+    out.iter().zip(want).fold(0f32, |m, (o, w)| {
+        o.iter()
+            .zip(&w[at..])
+            .fold(m, |m, (a, b)| m.max((a - b).abs()))
+    })
 }
 
 fn decode_all(path: &Path) -> (AudioDecoder, Vec<Vec<f32>>) {
@@ -585,16 +614,17 @@ fn coarse_timebase_seeks_start_near_their_target() {
             s.seek_anchored(t).unwrap();
             let mut out = vec![Vec::new(); pcm.len()];
             let n = s.read(&mut out, 2_048).unwrap();
-            let want = &pcm[0][t as usize..t as usize + n];
             assert_eq!(n as u64, 2_048.min(total - t), "{name}: read at {t}");
-            let diff = out[0]
-                .iter()
-                .zip(want)
-                .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
             if lossless {
-                assert_eq!(&out[0][..], want, "{name}: seek to {t}");
+                for (o, p) in out.iter().zip(&pcm) {
+                    assert_eq!(
+                        &o[..],
+                        &p[t as usize..t as usize + n],
+                        "{name}: seek to {t}"
+                    );
+                }
             }
-            worst = worst.max(diff);
+            worst = worst.max(max_diff(&out, &pcm, t as usize));
             let cost = s.packets_decoded() - before;
             costs.push(cost);
             if t > 2 * rate {
@@ -615,33 +645,40 @@ fn coarse_timebase_seeks_start_near_their_target() {
         if name != "c-alac.mkv" {
             // Pre-roll, anchor spacing, the 2,048 samples read, and the
             // codec's frame: a few dozen packets, never the 30 s before.
+            let packet_bound = 60 + preroll / 2_048;
             assert!(
-                worst_packets <= 60,
+                worst_packets <= packet_bound,
                 "{name}: a seek decoded {worst_packets} packets ({costs:?})"
             );
             // Blocks read in order (as the source cache decodes them, each
             // from its own anchor) cost the stream once plus a pre-roll and
-            // an anchor spacing per block: linear in the length.
-            let mut s = AudioDecoder::open(&file, None).unwrap();
+            // an anchor spacing per block: linear in the length. Read in
+            // reverse, every block starts a fresh decoder far from the last
+            // one; either way a block is the sequential decode's.
             let block = 65_536u64;
             let blocks = total.div_ceil(block);
-            for k in 0..blocks {
-                s.seek_anchored(k * block).unwrap();
-                let mut out = vec![Vec::new(); pcm.len()];
-                s.read(&mut out, block as usize).unwrap();
-                let want = &pcm[0][(k * block) as usize..(k * block) as usize + out[0].len()];
-                let diff = out[0]
-                    .iter()
-                    .zip(want)
-                    .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-                assert!(diff < bound, "{name}: block {k} differs by {diff}");
+            for reverse in [false, true] {
+                let mut s = AudioDecoder::open(&file, None).unwrap();
+                for k in 0..blocks {
+                    let k = if reverse { blocks - 1 - k } else { k };
+                    s.seek_anchored(k * block).unwrap();
+                    let mut out = vec![Vec::new(); pcm.len()];
+                    s.read(&mut out, block as usize).unwrap();
+                    let diff = max_diff(&out, &pcm, (k * block) as usize);
+                    assert!(
+                        diff < bound,
+                        "{name}: block {k} differs by {diff} (reverse {reverse})"
+                    );
+                }
+                if !reverse {
+                    let once = d.packets_decoded();
+                    let packets = s.packets_decoded();
+                    assert!(
+                        packets <= once + blocks * (45 + preroll / 2_048),
+                        "{name}: {blocks} blocks in order decoded {packets} packets (the stream has {once})"
+                    );
+                }
             }
-            let once = d.packets_decoded();
-            let packets = s.packets_decoded();
-            assert!(
-                packets <= once + blocks * 45,
-                "{name}: {blocks} blocks in order decoded {packets} packets (the stream has {once})"
-            );
         } else {
             // Reads in order continue the running decode.
             let mut s = AudioDecoder::open(&file, None).unwrap();
@@ -657,5 +694,50 @@ fn coarse_timebase_seeks_start_near_their_target() {
             );
         }
         eprintln!("{name}: seeks within {worst:e} of the sequential decode; packets {costs:?}");
+    }
+}
+
+/// HE-AAC's codec delay (4,224 samples) is longer than AAC's pre-roll
+/// (4,096): a seek that started at the last anchor at least the pre-roll
+/// before its target put its first sample after the target for 128 of every
+/// 4,096 targets, and every such seek decoded the stream from the start
+/// (and, before, stopped anchored seeks on the stream for good). Every
+/// target across two anchor spacings now starts from its anchor.
+#[test]
+fn he_aac_seeks_inside_the_codec_delay_window() {
+    let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)|0.3*sin(2*PI*660*t)':s=48000:d=40";
+    let Some((m4a, mkv)) = he_aac("c-aac-he", source) else {
+        eprintln!("afconvert is missing: HE-AAC not covered");
+        return;
+    };
+    for file in [m4a, mkv] {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let (_, pcm) = decode_all(&file);
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        let mut worst = 0f32;
+        let mut worst_cost = 0;
+        let mut seeks = 0;
+        for t in (958_464u64..958_464 + 8_192).step_by(7) {
+            let before = s.packets_decoded();
+            s.seek_anchored(t).unwrap();
+            let mut out = vec![Vec::new(); 2];
+            s.read(&mut out, 256).unwrap();
+            worst = worst.max(max_diff(&out, &pcm, t as usize));
+            let cost = s.packets_decoded() - before;
+            assert!(cost <= 12, "{name}: a seek to {t} decoded {cost} packets");
+            worst_cost = worst_cost.max(cost);
+            seeks += 1;
+        }
+        assert!(worst < 1e-2, "{name}: seeks differ by {worst}");
+        let before = s.packets_decoded();
+        s.seek_anchored(1_440_000).unwrap();
+        let mut out = vec![Vec::new(); 2];
+        s.read(&mut out, 256).unwrap();
+        let cost = s.packets_decoded() - before;
+        assert!(cost <= 12, "{name}: a later seek decoded {cost} packets");
+        eprintln!(
+            "{name}: {seeks} seeks within {worst:e}, at most {worst_cost} packets each; \
+             the next seek {cost}"
+        );
     }
 }
