@@ -107,17 +107,43 @@ fn set_alpha_mode(session: &VTCompressionSession, alpha: AlphaOutput) -> Result<
     }
 }
 
-/// Rate control and GOP of the long-GOP codecs: an average bit rate (today's
-/// quality tiers), B-frames, and a keyframe at least every two seconds so
+/// Rate control and GOP of the long-GOP codecs: variable bit rate at today's
+/// quality tiers, B-frames, and a keyframe at least every two seconds so
 /// exports stay seekable.
-fn set_long_gop(session: &VTCompressionSession, bitrate_bps: u32) -> Result<(), Error> {
+///
+/// VBR, not `AverageBitRate`: with an average target the hardware encoder
+/// undershoots badly on easy and grainy content (measured on this Mac, 1080p
+/// H.264: 0.72 Mbps for a 4 Mbps tier, VMAF 93.4 against x264's 95.1), while
+/// VBR lands on the tier and matches or beats x264 (VMAF 95.6 at 4.16 Mbps;
+/// `tests/measure_delivery.rs`). Encoders without VBR (before macOS 15) take
+/// the average target, and so does HEVC with alpha: its encoder accepts the
+/// VBR property and then fails every frame (-12912, macOS 27).
+fn set_long_gop(
+    session: &VTCompressionSession,
+    bitrate_bps: u32,
+    alpha: AlphaOutput,
+) -> Result<(), Error> {
     unsafe {
-        set(
-            session,
-            kVTCompressionPropertyKey_AverageBitRate,
-            &any_num_i64(bitrate_bps as i64),
-            false,
-        )?;
+        let rate = any_num_i64(bitrate_bps as i64);
+        let st = if alpha == AlphaOutput::None {
+            VTSessionSetProperty(
+                session,
+                kVTCompressionPropertyKey_VariableBitRate,
+                Some(&*(&*rate as *const AnyObject as *const CFType)),
+            )
+        } else {
+            PROPERTY_NOT_SUPPORTED
+        };
+        if st == PROPERTY_NOT_SUPPORTED {
+            set(
+                session,
+                kVTCompressionPropertyKey_AverageBitRate,
+                &rate,
+                false,
+            )?;
+        } else {
+            cf::check(st, "VTSessionSetProperty VariableBitRate")?;
+        }
         set(
             session,
             kVTCompressionPropertyKey_AllowFrameReordering,
@@ -216,7 +242,7 @@ impl Encoder {
                         &any_str(kVTH264EntropyMode_CABAC),
                         true,
                     )?;
-                    set_long_gop(&session, bitrate_bps)?;
+                    set_long_gop(&session, bitrate_bps, AlphaOutput::None)?;
                 }
                 Codec::Hevc {
                     bitrate_bps,
@@ -232,7 +258,7 @@ impl Encoder {
                         }),
                         false,
                     )?;
-                    set_long_gop(&session, bitrate_bps)?;
+                    set_long_gop(&session, bitrate_bps, spec.alpha)?;
                     set_alpha_mode(&session, spec.alpha)?;
                 }
                 Codec::ProRes(_) => set_alpha_mode(&session, spec.alpha)?,
