@@ -1333,6 +1333,14 @@ pub fn pad_struct_spans(module: &mut naga::Module) -> Result<()> {
 }
 
 /// Compiles a three.js program (vertex and fragment sources exactly as WebGL received them).
+/// Step 1 and glslang's preprocessor alone: the source `compile` would
+/// translate, with every directive resolved (callers that rewrite the
+/// program text before compiling it need the code that is actually live).
+/// `compile` accepts the result.
+pub fn preprocess(stage: Stage, source: &str) -> Result<String> {
+    Glslang::get()?.preprocess(stage, &normalize(source))
+}
+
 pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let glslang = Glslang::get()?;
     let vs = glslang
