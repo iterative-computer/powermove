@@ -100,7 +100,16 @@ async function desktopSmoke() {
   assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } })).serverInfo.name, 'powermove');
   const tools = (await rpc('tools/list')).tools.map(tool => tool.name);
   for (const name of ['create_project', 'render_frames', 'export_video', 'get_render_status']) assert(tools.includes(name), name);
-  await tool('create_project', { name: 'MCP desktop engine', width: 320, height: 180, fps: 24, duration: 1 });
+  // A cold start can answer before the hidden editor window has loaded.
+  for (const until = Date.now() + 60000; ;) {
+    try {
+      await tool('create_project', { name: 'MCP desktop engine', width: 320, height: 180, fps: 24, duration: 1 });
+      break;
+    } catch (error) {
+      if (!/No Powermove editor is available/.test(error.message) || Date.now() > until) throw error;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
   await tool('start_session', { prompt: 'Create a red video with an audible tone' });
   const imported = text(await tool('import_media', { path: audio }));
   assert.equal(imported.persisted, true);
@@ -121,7 +130,9 @@ async function desktopSmoke() {
   const h264 = probe(video.path, 'stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,nb_frames,sample_rate,channels');
   const v = h264.streams.find(item => item.codec_name === 'h264'), a = h264.streams.find(item => item.codec_name === 'aac');
   assert(v && a, JSON.stringify(h264));
-  assert.equal(v.pix_fmt, 'yuv420p'); assert.equal(v.color_primaries, 'bt709'); assert.equal(v.color_transfer, 'iec61966-2-1'); // CICP 1-13-1 (amendment 7) assert.equal(v.color_space, 'bt709'); assert.equal(v.color_range, 'tv');
+  // CICP 1-13-1, limited range (amendment 7).
+  assert.equal(v.pix_fmt, 'yuv420p'); assert.equal(v.color_primaries, 'bt709'); assert.equal(v.color_transfer, 'iec61966-2-1');
+  assert.equal(v.color_space, 'bt709'); assert.equal(v.color_range, 'tv');
   assert.equal(Number(v.nb_frames), 24);
   const decodedAudio = execFileSync(ffmpeg, ['-v', 'error', '-i', video.path, '-map', '0:a:0', '-f', 's16le', '-']);
   assert(decodedAudio.length > 40000 && decodedAudio.some(byte => byte !== 0), 'MP4 audio must be present and audible');
@@ -160,13 +171,26 @@ async function desktopSmoke() {
   assert.match(appLog, /export_video routed to the current engine: .*text layers/);
   assert(routed.path.startsWith(exportsDir) && (await stat(routed.path)).size > 1000, routed.path);
   assert(probe(routed.path, 'stream=codec_name').streams.some(item => item.codec_name === 'h264'));
+  // A routed batch never holds the job engine: without the text layer,
+  // render_frames and export_video run in the job engine again, promptly.
+  const title = text(await tool('get_project_state')).layers.find(layer => layer.name === 'Title');
+  assert(title, 'the Title layer');
+  await tool('apply_commands', { label: 'No title', commands: [JSON.stringify({ type: 'delete_layers', targets: [title.id] })] });
+  const routedSoFar = (appLog.match(/render_frames routed/g) ?? []).length;
+  const again = Date.now();
+  const unblocked = await tool('render_frames', { times: [0.75], width: 320 });
+  assert.equal(unblocked.content.filter(item => item.type === 'image').length, 1);
+  assert.equal((appLog.match(/render_frames routed/g) ?? []).length, routedSoFar, 'render_frames ran in the job engine again');
+  assert(Date.now() - again < 30000, `render_frames after a routed batch took ${Date.now() - again} ms`);
+  const after = text(await tool('export_video', { name: 'MCP desktop after routing', audio: false, motionBlur: false }));
+  assert(after.jobId, `export_video after a routed batch did not run in the job engine: ${JSON.stringify(after)}`);
   await tool('finish_session', { commit: true });
   // No temporary or empty files are left behind.
   const left = await readdir(exportsDir);
   assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, a text project routed to the current exporter; ${left.length} verified exports.`);
+  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, a text project routed to the current exporter, and the job engine still serving after it; ${left.length} verified exports.`);
 }
 
 try {
