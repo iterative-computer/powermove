@@ -25,16 +25,6 @@
     "scaleFactor": 2,
     "colorDepth": 30
   },
-  "displayState": {
-    "before": {
-      "asleep": false,
-      "locked": false
-    },
-    "after": {
-      "asleep": false,
-      "locked": false
-    }
-  },
   "machineLoad": {
     "before": [
       7.5283203125,
@@ -171,6 +161,13 @@
     "vizHopsByDepth": {
       "1": {
         "n": 648,
+        "submitted": {
+          "n": 648,
+          "p50": 0.3,
+          "p95": 0.4,
+          "p99": 0.4,
+          "max": 0.6
+        },
         "received": {
           "n": 648,
           "p50": -0.54,
@@ -195,6 +192,13 @@
       },
       "2": {
         "n": 1074,
+        "submitted": {
+          "n": 1074,
+          "p50": 0.3,
+          "p95": 0.9,
+          "p99": 1.5,
+          "max": 2
+        },
         "received": {
           "n": 1074,
           "p50": -0.37,
@@ -219,6 +223,13 @@
       },
       "3": {
         "n": 71,
+        "submitted": {
+          "n": 71,
+          "p50": 0.5,
+          "p95": 1.4,
+          "p99": 1.5,
+          "max": 1.6
+        },
         "received": {
           "n": 71,
           "p50": 0.16,
@@ -240,6 +251,24 @@
           "p99": 27.39,
           "max": 27.4
         }
+      }
+    },
+    "vizLags": {
+      "counts": {
+        "draw": {
+          "0": 726,
+          "1": 1067
+        },
+        "present": {
+          "1": 1644,
+          "2": 149
+        }
+      },
+      "irregular": {
+        "drawChanged": 678,
+        "presentChanged": 135,
+        "both": 46,
+        "neither": 0
       }
     },
     "drawMainThreadMs": {

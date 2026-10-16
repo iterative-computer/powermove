@@ -50,7 +50,7 @@ import { buildSyntheticProject, type SyntheticOptions } from './synthetic-projec
  */
 type Mode = 'today' | 'engine' | 'tracer';
 type InputMode = 'drag' | 'pan';
-type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean; everyRefresh?: boolean | null };
+type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean };
 
 const w = window as any;
 const PM = (): any => w.PM;
@@ -220,7 +220,7 @@ function onPresented(frame: { time: number }): void {
  * kernel's connection (`open` delegates), so the kernel's transport follows
  * it and the window keeps one handshake on its interactive port.
  */
-function startEngine(displayHz: number | null, offMainThread: boolean, everyRefresh: boolean | null, testSource: boolean): void {
+function startEngine(displayHz: number | null, offMainThread: boolean, testSource: boolean): void {
   const connection = PM().EngineConnection;
   if (!connection) throw new Error('the engine connection is not installed (POWERMOVE_NEW_ENGINE=1)');
   const kernel = PM().Kernel.services.get(ENGINE_VIEWER_SERVICE) as EngineViewerService | null;
@@ -230,7 +230,6 @@ function startEngine(displayHz: number | null, offMainThread: boolean, everyRefr
     source: kernel.source,
     trace: true,
     offMainThread,
-    ...(everyRefresh === null ? {} : { presentEveryRefresh: everyRefresh }),
     composition: () => kernel.composition(),
     displayHz: (view) => kernel.displayHz?.(view) ?? displayHz,
     onReady: (listener) => kernel.onReady(listener),
@@ -257,7 +256,7 @@ const api = {
     fps = Number(PM().proj.fps) || 30;
     PM().bus.on('preview:presented', onPresented);
     // `tracer`: the engine draws the document; `engine`: its test source.
-    if (mode === 'engine' || mode === 'tracer') startEngine(options.displayHz, options.offMainThread, options.everyRefresh ?? null, mode === 'engine');
+    if (mode === 'engine' || mode === 'tracer') startEngine(options.displayHz, options.offMainThread, mode === 'engine');
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
     // How long the viewer's layout (pan steps) holds the main thread.
