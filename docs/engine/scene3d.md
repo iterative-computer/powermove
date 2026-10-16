@@ -14,7 +14,7 @@ pass") into the full pass. The plan stays the authority.
 
 | Feature | Status | Evidence |
 |---|---|---|
-| Any number of 3D object layers per composition, depth sets and ordering exactly as section 8 states (inactive layers, lights, cameras, and plain group headers do not end a set; 2D layers and styled groups do; opacity ≤ 0.001 and solo exclusions; runs sorted by the camera depth of the object origin, blocks never reordered) | Drawn | `pm-geom3d` `layering` tests; `tests/scene3d_document.rs`; sweep `depth-sets`, `layer-opacity-and-mask`; corpus `3d/solo-hidden`, `3d/lights`, `3d/primitives` |
+| Any number of 3D object layers per composition, depth sets and ordering exactly as section 8 states (inactive layers, lights, cameras, and plain group headers do not end a set; 2D layers, 3D nulls, and styled groups do; opacity ≤ 0.001 and solo exclusions; runs sorted by the camera depth of the object origin, blocks never reordered) | Drawn | `tests/scene3d_layering.rs` (80 compositions against today's TypeScript); `pm-geom3d` `layering` tests; `tests/scene3d_document.rs`; sweep `depth-sets`, `layer-opacity-and-mask`; corpus `3d/solo-hidden`, `3d/lights`, `3d/primitives` |
 | The shared depth prepass of a set (depth writes only at layer opacity ≥ 0.999 without an enabled mask), recorded once and reused by the set's other layers | Drawn | Sweep (prepass draws matched to three.js's, cached outputs issue only color draws) |
 | The set's bottom layer clears to the solid background (sRGB-encoded, opaque, not tone mapped) | Drawn | Sweep (every case with a background) |
 | Shading: exposure, ACES Filmic with r180's `exposure / 0.6`, E in every fragment shader; blending, back-then-front double-sided transparency, 4× MSAA resolve on E values | Drawn | Sweep `transparency`, `hemisphere-exposure`, `look-xray` |
@@ -27,9 +27,9 @@ pass") into the full pass. The plan stays the authority.
 | Editor looks under the view override only: X-ray (opacity × 0.45, transparent, no depth writes; draft shadings only), Wireframe (1-pixel edges over the wireframe index, shadows included), Local View, the editor camera | Drawn | Sweep `look-*`; `tests/scene3d_document.rs` `view_overrides_change_only_viewer_renders` |
 | Legacy `scene3d` layers: the layer's own scene (its hierarchy, visibility, `o.<id>.` channels) rendered whole at most 4,096 pixels a side with its own background, drawn through the layer's 2D transform | Drawn | Sweep `legacy-scene`; corpus `3d/legacy-scene` |
 | Legacy OBJ mesh layers: the compositor's fixed shading into a half-float target with a 16-bit depth buffer, the checkerboard without a mesh | Drawn: the built-in OBJ model layer (`powermove.3d.obj-model`) always, third-party mesh definitions given their snapshot (`Renderer::set_mesh_definitions`) | `tests/scene3d_mesh.rs` (4 cases against the compositor's own shader); corpus `layers/obj-model` exact |
-| The depth and id surface for every 3D layer: linear view depth and id, upright, 3D inside precompositions and group boundaries included | Drawn | `tests/scene3d_document.rs`; corpus 3D masks |
+| The depth and id surface for every 3D object layer and legacy scene layer: linear view depth and id, upright, 3D inside precompositions and group boundaries included. Legacy OBJ mesh layers report coverage and id only (no depth: their fixed-shading camera has no place in the composition's 3D space) | Drawn | `tests/scene3d_document.rs` (top level and nested, off center); corpus 3D masks |
 | 3D output written per layer into the 2D graph (masks, effects, opacity, blend stay per layer) | Drawn | Unchanged composite path; corpus |
-| Linear blending: the resolved, premultiplied, E-encoded canvas unpremultiplied (guarded), decoded with E⁻¹, re-premultiplied into the working format | Drawn when the working encoding is linear light | `linear_blending_decodes_the_3d_canvas` (all 8-bit codes at 6 alphas, f32 within 2e-6 of `pm_color::linear`) |
+| Linear blending: the resolved, premultiplied, E-encoded canvas unpremultiplied (guarded), decoded with E⁻¹, and re-premultiplied once, where the compositor draws it (`pm_premultiplied_e_to_linear` in `composite.wgsl`, the compositing lane's) | Drawn when the working encoding is linear light | `linear_blending_decodes_the_3d_canvas_once` (an opaque 3D layer equals its linear-blending-off frame within 1e-4 at 32-bit; a second decode fails it by 0.29) |
 | Imported glTF scenes, recipe parts, Blender surfaces, 2.5D (`threeD` on non-3D layers), Studio Cube | Routed (other lanes) | `unsupported` |
 
 ## How a frame draws 3D
@@ -66,8 +66,8 @@ pass") into the full pass. The plan stays the authority.
    RGBA8 target in GL row order. The depth surface pass writes linear view
    depth.
 4. **Composite.** The executor draws the output as a screen-space quad (a
-   legacy scene as a quad through the layer transform), converting it to
-   linear light first when linear blending is on.
+   legacy scene as a quad through the layer transform); with linear
+   blending on, that draw decodes it (the compositing lane's quad shader).
 
 ## Fidelity notes
 
@@ -92,7 +92,22 @@ pass") into the full pass. The plan stays the authority.
   front side), not with the schema default.
 - **Depth and id surface.** Coverage is the layer's own alpha (≥ 0.5/255);
   depth comes from a single-sampled pass, so MSAA-only edge pixels report
-  +inf. Inside a precomposition the depth is the nested camera's.
+  +inf. Inside a precomposition the depth is the nested camera's; a legacy
+  scene layer reports its own camera's depth; a legacy OBJ mesh layer
+  reports coverage only.
+- **Lights in the pass order.** The engine sorts light and camera layers
+  at depth 0 within a 3D run, as section 8 states. Today sorts lights by
+  their world position (`runtime.objects` holds lights, so
+  `compositionOrderedLayers` finds them). Lights draw nothing and never end
+  a depth set, and a stable sort keeps the objects' relative order, so
+  object order and set bottoms are unchanged (`tests/scene3d_layering.rs`
+  compares everything but lights and cameras).
+- **Spot and point shadow cameras** use `far = distance || 500`. three.js
+  r180 computes `light.distance || camera.far`, and `camera.far` keeps the
+  last non-zero distance, so today's long-lived `SceneRuntime` differs from
+  a fresh one after a light's distance is animated through 0. The engine
+  renders each frame from the document alone (a viewer frame equals the
+  export frame); this history dependence is not reproduced.
 - **Content keys.** `Object3dPlan::content_key` hashes everything a render
   depends on, map files by size and modification time included.
 
@@ -113,7 +128,8 @@ pass") into the full pass. The plan stays the authority.
 ## Integration notes
 
 - `Renderer::set_view(Some(&view))` applies contract 2's view override to
-  the following renders. `RenderRequest::from_frame_request_with_view`
+  the following viewer renders; an export request (`RenderRequest::export`)
+  never draws it, whatever was set. `RenderRequest::from_frame_request_with_view`
   returns the request and its view (dropped for exports and agent
   captures, `FramePurpose::is_final`); the plain `from_frame_request` still
   refuses a request carrying a view, so a caller that does not apply it
@@ -124,8 +140,15 @@ pass") into the full pass. The plan stays the authority.
   third-party snapshots and lists those layers until snapshots reach the
   engine.
 - `unsupported` lists, for 3D: imported glTF models, recipe parts, unknown
-  primitives, map images outside the drawn still classes (when the media
-  can be opened), SVG maps, model groups, and Blender rendering.
+  primitives, unknown light types, map images outside the drawn still
+  classes (probed when the media can be opened, by the recorded container
+  otherwise, as for image layers), SVG maps, model groups, and Blender
+  rendering. The objects and lights inside a legacy scene layer meet the
+  same checks (`scene3d::check_legacy_scene`), so a routing decision holds
+  at every frame (`the_static_check_looks_inside_legacy_scenes`: every
+  listed change that the pass cannot build also fails at render time). A
+  legacy scene object's `generation` is listed conservatively although the
+  legacy runtime ignores it.
 
 ## Tests and measurements
 
@@ -136,9 +159,10 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 |---|---|---|
 | `pm-geom3d` `tests/three_geometry.rs` | 34 sources (every primitive with groups, capsule, icosahedron at detail 0 to 5, lathe, extrude with and without bevel, mesh sources) against three.js; 5 OBJ files against `parseObj` in V8 | Buffers, indices, and groups bit-identical |
 | `pm-render` `tests/scene3d.rs` | 31 scenes, 74 outputs against three.js renders through the production `SceneRuntime` (`tools/three-ref/run-scenes.ts`), section 2's 3D bar | All within the bar: every output 100% within 2 CV, max 1 CV everywhere, SSIM ≥ 0.99984 |
-| `tests/scene3d.rs` | Programs and uniforms against the recorded draws | 265 draws matched; 23,831 uniform values equal in f32; every recorded draw that writes color or depth matched |
+| `tests/scene3d.rs` | Programs and uniforms against the recorded draws | 265 draws matched, in three.js's order; 23,831 uniform values compared, all equal as f32 (the test requires bit equality; samplers and the shadow materials' stale `mapTransform` are left to the pixel sweep); every recorded draw that writes color or depth matched |
+| `tests/scene3d_layering.rs` | 80 seeded compositions (objects, 2D solids, 3D nulls, lights, cameras, plain groups, inactive and invisible layers, solo) through today's compositing pass, `compositionOrderedLayers`, and `compositionDepthIds` under bun (`tools/layering/generate.ts`) | 208 object draws: depth sets and set bottoms (103) equal; draw order equal (180 adjacent pairs) |
 | `tests/scene3d_mesh.rs` | Legacy mesh layers (3 OBJ meshes, the checkerboard) against the compositor's shader in WebGL | Max 1 CV |
-| `tests/scene3d_document.rs` | Ordering, depth sets, depth and id surface (upright; in precomps), view overrides, OBJ models, mesh layers, linear blending | Pass |
+| `tests/scene3d_document.rs` | Ordering, depth sets, depth and id surface (upright, also off center in precomps), view overrides (exports ignore them), OBJ models, mesh layers, linear blending end to end, the static check inside legacy scenes | Pass |
 | `tests/corpus.rs` | Every 3D corpus project the renderer supports (`v1-20261012-230504`, `render-20261014-131536`) | 22 3D frames and the render corpus's 3D projects, 0 failures; `layers/obj-model` 3 frames exact; the full corpus 92 frames, 0 failures |
 | Program cache | Cold and warm first frame of `five-casting-lights` (debug build) | 343 ms translating, 18 ms from the disk cache |
 | `frame_time_3d_shadows_at_1080p` (ignored, release) | 7 layers, 3 casting lights (sun, spot, point atlas), 1920 × 1080 | Median 9.7 ms, p95 13.9 ms (CPU plan and GPU); 26 to 36 ms median when re-measured at a load average of about 30 from other workers |
@@ -167,15 +191,31 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 
 ## Changes outside the lane
 
+The lane owns `pm-render/src/scene3d/`, `pm-geom3d`, and this note; the
+tests and tools named above are its own files. Everything else it touched:
+
 - `pm-gpu/src/glsl.rs`: a public `preprocess` (the existing glslang step).
+- `pm-render/src/three/`: `materials.rs` (`getParameters` of the standard,
+  basic, depth, and distance materials), `specialize.rs` (per-call
+  specialization of sampler-taking functions), `cache.rs` (the program
+  cache stores texture bindings; format 2, older entries are misses),
+  `mod.rs` (the modules).
 - `pm-render/src/plan.rs`: `Build` carries the passes' 3D state and
-  options; `build_with`; `comp_pass` orders the pass; the extension branch
-  plans legacy kinds.
-- `pm-render/src/renderer.rs`: `set_view`, `set_mesh_definitions`.
+  options; `build_with` (3D options next to the compositing lane's effect
+  host, merged with `build_with_effects`); `comp_pass` orders the pass; the
+  extension branch plans legacy kinds.
+- `pm-render/src/renderer.rs`: `set_view` (ignored by export requests),
+  `set_mesh_definitions`, the 3D options passed to the plan.
 - `pm-render/src/request.rs`: `from_frame_request_with_view`.
-- `pm-render/src/exec.rs`: linear conversion of 3D output; nested depth
-  for precompositions in the depth and id surface.
-- `pm-render/src/capability.rs`: legacy scene definition accepted; the 3D
+- `pm-render/src/exec.rs`: nested depth for precompositions in the depth
+  and id surface. (The scene pass's own linear conversion was removed when
+  the compositing lane's decode of 3D output merged.)
+- `pm-render/src/capability.rs`: legacy scene layers checked inside
+  (`check_legacy_scene`), the built-in OBJ model layer accepted; the 3D
   check takes the asset resolver.
 - `pm-render/src/shaders/id.wgsl`: 3D layers read upright (a fix).
+- `pm-render/src/scene3d.rs` (the Phase 2 primitive) became the
+  `scene3d/` module.
 - `pm-render/tests/headless.rs`: the capability test's 3D section.
+- `docs/engine/pm-render.md`: its 3D section points here.
+- `engine/Cargo.lock`: `pm-geom3d` in `pm-render`'s dependencies.
