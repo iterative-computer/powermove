@@ -131,7 +131,7 @@ impl fmt::Display for Unsupported {
 }
 
 /// Layer types this renderer draws (or knows draw nothing).
-const DRAWN: [&str; 5] = ["solid", "image", "video", "precomp", "group"];
+const DRAWN: [&str; 6] = ["solid", "image", "video", "precomp", "group", "shape"];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.
@@ -336,7 +336,11 @@ fn check_composition(
         {
             add(layer, Feature::TwoAndAHalfD);
         }
-        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0) {
+        // Level 2 shape and solid content is drawn (crate::vector); other
+        // level 2 content keeps routing.
+        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
+            && !matches!(ty.as_str(), "shape" | "solid")
+        {
             add(layer, Feature::CompatLevel2);
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {

@@ -103,6 +103,7 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
+    vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
 }
@@ -120,6 +121,7 @@ impl Renderer {
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
+            vector: crate::vector::cache::VectorCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -167,9 +169,28 @@ impl Renderer {
             .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
     }
 
-    /// Frees idle intermediate targets down to `bytes` (lease pressure).
+    /// Frees idle intermediate targets down to `bytes` (lease pressure),
+    /// and cached vector textures down to the same budget.
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
+        self.vector.trim(bytes);
+    }
+
+    /// Bytes of cached vector textures (shape rasters and level 2 scenes):
+    /// the render cache category of the lease.
+    pub fn vector_cache_bytes(&self) -> u64 {
+        self.vector.bytes()
+    }
+
+    /// Selects the level 2 coverage backend (Vello on the GPU with the
+    /// `vello_cpu` fallback, or `vello_cpu` always).
+    pub fn set_vector_backend(&mut self, backend: crate::vector::cache::CoverageBackend) {
+        self.vector.set_backend(backend);
+    }
+
+    /// The backend that rendered the last level 2 scene.
+    pub fn last_vector_backend(&self) -> Option<&'static str> {
+        self.vector.last_backend
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
@@ -327,6 +348,7 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                vector: &mut self.vector,
                 precision: request.precision,
                 working: ProjectColor::DEFAULT.working(),
                 export: request.export,

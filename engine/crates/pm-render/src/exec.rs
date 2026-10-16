@@ -42,6 +42,7 @@ pub(crate) struct Exec<'a> {
     pub media: &'a mut MediaCache,
     pub pool: &'a mut TargetPool,
     pub scene3d: &'a mut Scene3dRenderer,
+    pub vector: &'a mut crate::vector::cache::VectorCache,
     pub precision: Precision,
     pub working: WorkingEncoding,
     pub export: bool,
@@ -192,6 +193,12 @@ impl Exec<'_> {
                                 Ok(Some(t)) => r.view = Some(t.view.clone()),
                                 Ok(None) => {}
                                 Err(e) => self.fail(plan, draw, e),
+                            }
+                        }
+                        Source::Vector(v) => {
+                            match self.vector.resolve(self.device, self.queue, v, self.precision) {
+                                Ok(view) => r.view = Some(view),
+                                Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                             }
                         }
                         Source::Object3d(object) => {
