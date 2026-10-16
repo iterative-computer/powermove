@@ -17,6 +17,18 @@ type Stats = { calls: Record<string, number>; applied: Record<string, number>; f
 
 const close = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]!) <= 1e-6 * (1 + Math.abs(b[i]!)));
 
+
+/**
+ * The e2e build bakes `VITE_POWERMOVE_NATIVE_EVALUATOR` from this process's
+ * environment (global setup builds with it), so the page must report that
+ * mode: a build made without the flag would otherwise pass every check below
+ * as if the run were meant to be `off`.
+ */
+function expectBuiltMode(report: { mode: string } | null): void {
+  const raw = (process.env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off').trim().toLowerCase();
+  const want = raw === '1' || raw === 'true' ? 'on' : raw || 'off';
+  expect(report?.mode ?? 'off', 'native evaluator mode of the build').toBe(want);
+}
 test('align, reparent, group, ungroup, anchors and split text through pm-edit keep the artwork in place', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
@@ -159,6 +171,7 @@ test('align, reparent, group, ungroup, anchors and split text through pm-edit ke
     const doc = (window as any).PM.EngineDoc, stats = doc?.stats?.();
     return stats?.enabled === false || !stats ? null : { mode: stats.mode as string, edits: stats.edits as Stats, dual: stats.dual };
   });
+  expectBuiltMode(report);
   if (report) {
     const kernels = ['align', 'reparent', 'groupPlacement', 'ungroup', 'captureSizeAnchor', 'anchorReference', 'anchorMoved', 'captureFontAnchor', 'splitText'];
     for (const name of kernels) expect(report.edits.calls[name] ?? 0, `${name} asked`).toBeGreaterThan(0);
@@ -280,6 +293,7 @@ test('material peers, move to group and Leave all attributes through pm-edit kee
     const doc = (window as any).PM.EngineDoc, stats = doc?.stats?.();
     return stats?.enabled === false || !stats ? null : { mode: stats.mode as string, edits: stats.edits as Stats, dual: stats.dual };
   });
+  expectBuiltMode(report);
   if (report) {
     const kernels = ['syncPeers', 'moveToGroup', 'leaveAttributes'];
     for (const name of kernels) expect(report.edits.calls[name] ?? 0, `${name} asked`).toBeGreaterThan(0);
