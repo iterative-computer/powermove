@@ -23,9 +23,11 @@ use pm_eval::retime::RetimeCache;
 use pm_eval::transform::{Mat2d, mul};
 use pm_eval::{Comp, Evaluator, JsResult, JsValue, Scope};
 use pm_model::{JsString, Node};
+use pm_protocol::color::BlendMode;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
+use crate::composite::{self, EffectHost};
 use crate::error::LayerFailure;
 use crate::js;
 use crate::scene3d::Object3dPlan;
@@ -78,6 +80,10 @@ pub struct Draw {
 pub enum Content {
     /// A premultiplied color.
     Solid([f64; 4]),
+    /// A layer through its own target or an adjustment of the accumulator
+    /// (masks, effects, matte, blend mode; `crate::composite`). Its draw's
+    /// matrix covers the target.
+    Composite(Box<crate::composite::Node>),
     /// A source sampled through a UV window (`u_uv`: offset, scale), hard
     /// edges outside 0..1, multiplied by `alpha`.
     Texture {
@@ -115,6 +121,15 @@ pub struct Build<'r> {
     /// The 3D state of the compositing passes being built (innermost last).
     pass3d: Vec<crate::scene3d::Pass3d>,
     options3d: crate::scene3d::Options3d,
+    /// Prepares effects (`crate::composite::EffectHost`); without one,
+    /// layers with renderable effects are unsupported.
+    effects: Option<&'r dyn EffectHost>,
+    /// Today's `opt.matteDepth`: matte passes entered so far (carried into
+    /// precomps, as `PM._renderOptions3D` carries it).
+    matte_depth: u32,
+    /// The matte source a matte pass renders, which draws even when it is
+    /// switched off (`{ ...source, on: true }`).
+    forced_on: Option<*const Node>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -133,6 +148,25 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
+    build_with_effects(
+        ev, root_comp, project, time, width, height, scale, assets, None,
+    )
+}
+
+/// [`build`] with an effect host for layers with effects and adjustment
+/// layers.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_effects<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    effects: Option<&'r dyn EffectHost>,
+) -> (CompPlan, Build<'r>) {
     build_with(
         ev,
         root_comp,
@@ -142,12 +176,13 @@ pub fn build<'r>(
         height,
         scale,
         assets,
+        effects,
         crate::scene3d::Options3d::default(),
     )
 }
 
-/// [`build`] with the 3D pass's options (view override, mesh layer
-/// definitions).
+/// [`build_with_effects`] with the 3D pass's options (view override, mesh
+/// layer definitions).
 #[allow(clippy::too_many_arguments)]
 pub fn build_with<'r>(
     ev: &mut Evaluator,
@@ -158,6 +193,7 @@ pub fn build_with<'r>(
     height: u32,
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
+    effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
 ) -> (CompPlan, Build<'r>) {
     let mut b = Build {
@@ -168,6 +204,9 @@ pub fn build_with<'r>(
         precomp_depth: 0,
         pass3d: Vec::new(),
         options3d,
+        effects,
+        matte_depth: 0,
+        forced_on: None,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -342,7 +381,12 @@ fn draw_layer<'d>(
     if ty != "group" && matches!(ty.as_str(), "null" | "audio") {
         return Ok(None);
     }
-    if !scope.active(layer, time)? {
+    let active = if b.forced_on.is_some_and(|p| std::ptr::eq(p, layer)) {
+        scope.active_forced_on(layer, time)?
+    } else {
+        scope.active(layer, time)?
+    };
+    if !active {
         return Ok(None);
     }
     let alpha = js::clamp(scope.num(layer, "opacity", time)? / 100.0, 0.0, 1.0);
@@ -350,101 +394,147 @@ fn draw_layer<'d>(
         return Ok(None);
     }
     let comp_id = scope.comp.id().to_string_lossy();
-    // Everything that would leave the fast path is unsupported here; the
-    // capability check lists the same features statically.
-    let mut refuse = |f: Feature| {
+    let refuse = |b: &mut Build<'_>, f: Feature| {
         b.unsupported.push(Unsupported::layer(&comp_id, layer, f));
     };
-    if scope.has_renderable_effects(layer, time)? {
-        refuse(if ty == "adjustment" {
-            Feature::Adjustment
-        } else {
-            Feature::Effects
-        });
-        return Ok(None);
-    }
-    if ty == "adjustment" {
-        // An adjustment layer without an enabled effect is a no-op.
-        return Ok(None);
-    }
-    let mut masked = false;
-    if let Some(masks) = node::array(node::member(Some(layer), "masks")) {
-        for m in masks {
-            let mid = node::to_js_string(node::member(Some(m), "id")).to_string_lossy();
-            let on = scope.evaluated(
-                layer,
-                node::member(Some(m), "on"),
-                time,
-                &format!("m.{mid}.on"),
-            )?;
-            if on != JsValue::Bool(false) {
-                masked = true;
+    let has_fx = scope.has_renderable_effects(layer, time)?;
+    let has_masks = composite::build::has_masks(scope, layer, time)?;
+    let blend = composite::build::blend_mode(scope, layer, time)?;
+    // Effects prepared by the host (the effects lane); without one, a layer
+    // with renderable effects is routed.
+    let effects = if has_fx {
+        let frame = composite::effects::EffectFrame {
+            width,
+            height,
+            scale,
+            time,
+        };
+        match b.effects {
+            None => {
+                refuse(
+                    b,
+                    if ty == "adjustment" {
+                        Feature::Adjustment
+                    } else {
+                        Feature::Effects
+                    },
+                );
+                return Ok(None);
             }
+            Some(host) => match host.prepare(scope, layer, frame) {
+                Ok(e) => e,
+                Err(f) => {
+                    refuse(b, f);
+                    return Ok(None);
+                }
+            },
         }
-    }
-    if masked {
-        refuse(Feature::Masks);
-        return Ok(None);
-    }
-    let blend = scope.evaluated(layer, node::member(Some(layer), "blend"), time, "l.blend")?;
-    if blend.truthy() && blend != JsValue::from("normal") {
-        let name = blend.to_js_string().to_string_lossy();
-        // Unknown names map to normal (`BLEND_ID[...] || 0`).
-        if matches!(
-            name.as_str(),
-            "add"
-                | "screen"
-                | "multiply"
-                | "overlay"
-                | "softlight"
-                | "difference"
-                | "lighten"
-                | "darken"
-        ) {
-            refuse(Feature::BlendMode(name));
+    } else {
+        None
+    };
+    let id = js::layer_id(layer);
+    let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
+    let node = |n: composite::Node| Draw {
+        layer: id.clone(),
+        matrix: full,
+        content: Content::Composite(Box::new(n)),
+    };
+    if ty == "adjustment" {
+        // An adjustment layer without an effect that renders is a no-op.
+        let Some(effects) = effects else {
             return Ok(None);
-        }
+        };
+        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![node(composite::Node::Adjustment(
+            composite::AdjustmentNode {
+                layer: id.clone(),
+                effects,
+                masks,
+                blend,
+                alpha,
+            },
+        ))]));
     }
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
     if mblur.truthy() {
-        refuse(Feature::MotionBlur);
+        refuse(b, Feature::MotionBlur);
         return Ok(None);
     }
     let transition: Option<ActiveTransition<'d>> =
         scope.active_transition(layer, time, &|_| true)?;
     if transition.is_some() {
-        refuse(Feature::Transition);
+        refuse(b, Feature::Transition);
         return Ok(None);
     }
-    if js::flag(layer, "matteSource") {
-        refuse(Feature::TrackMatte);
-        return Ok(None);
-    }
+    let matted = js::flag(layer, "matteSource");
+    // Today's fast path draws straight into the accumulator; anything else
+    // goes through the layer's own target.
+    let slow = has_masks || has_fx || blend != BlendMode::Normal || matted;
+    // The layer's own target: masks, effects, matte, then the composite.
+    let wrap = |scope: &mut Scope<'_, 'd>,
+                b: &mut Build<'_>,
+                content: Vec<Draw>,
+                composite_alpha: f64|
+     -> JsResult<Option<Vec<Draw>>> {
+        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
+            return Ok(None);
+        };
+        let matte = if matted {
+            layer_matte(scope, b, layer, time, width, height, scale)?
+        } else {
+            None
+        };
+        Ok(Some(vec![node(composite::Node::Layer(
+            composite::LayerNode {
+                layer: id.clone(),
+                content,
+                masks,
+                effects: effects.clone(),
+                matte,
+                blend,
+                alpha: composite_alpha,
+            },
+        ))]))
+    };
     if ty == "group" {
-        // A boundary group (only opacity can make it one here): its members
-        // composite into their own target, drawn with the group's opacity.
+        if b.forced_on.is_some_and(|p| std::ptr::eq(p, layer)) {
+            // Today's matte pass of a group renders the group inside itself
+            // until the stack overflows; the matte is empty and the layer
+            // reported. The editor never makes a group a matte source.
+            return Err(pm_eval::JsThrow {
+                kind: "RangeError",
+                message: "Maximum call stack size exceeded (a group used as a track matte)"
+                    .to_owned(),
+            });
+        }
+        // A boundary group: its members composite into their own target,
+        // drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
-        let id = js::layer_id(layer);
-        return Ok(Some(vec![Draw {
-            layer: id,
-            matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+        let draw = |alpha: f64| Draw {
+            layer: id.clone(),
+            matrix: full,
             content: Content::Texture {
-                source: Source::Comp(Box::new(inner)),
+                source: Source::Comp(Box::new(inner.clone())),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha,
             },
-        }]));
+        };
+        if !slow {
+            return Ok(Some(vec![draw(alpha)]));
+        }
+        return wrap(scope, b, vec![draw(1.0)], alpha);
     }
     // 3D object layers draw in screen space (`c.screenSpace`), never as planes.
     if pm_eval::parenting::Role3d::of(layer).is_none() && scope.is_3d_layer(layer)? {
-        refuse(Feature::TwoAndAHalfD);
+        refuse(b, Feature::TwoAndAHalfD);
         return Ok(None);
     }
     let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
     let world = scaled_world(scope, layer, time, scale)?;
-    let id = js::layer_id(layer);
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -456,7 +546,7 @@ fn draw_layer<'d>(
         } => {
             let alpha = alpha * a;
             Draw {
-                layer: id,
+                layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
                 content: Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
             }
@@ -469,13 +559,13 @@ fn draw_layer<'d>(
             ay,
             uv,
         } => Draw {
-            layer: id,
+            layer: id.clone(),
             matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
             content: Content::Texture { source, uv, alpha },
         },
         Quad::Screen { source } => Draw {
-            layer: id,
-            matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+            layer: id.clone(),
+            matrix: full,
             content: Content::Texture {
                 source,
                 uv: [0.0, 0.0, 1.0, 1.0],
@@ -483,7 +573,128 @@ fn draw_layer<'d>(
             },
         },
     };
+    if slow {
+        return wrap(scope, b, vec![draw], 1.0);
+    }
     Ok(Some(vec![draw]))
+}
+
+/// The layer's masks for its node: `Some(None)` when nothing is masked,
+/// `None` when the masks are unsupported (recorded).
+fn layer_masks<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    has_masks: bool,
+) -> JsResult<Option<Option<composite::Masks>>> {
+    if !has_masks {
+        return Ok(Some(None));
+    }
+    if pm_eval::parenting::Role3d::of(layer).is_some() {
+        // Today a masked 3D object layer draws its scene pass turned by
+        // 180° (measured on the composite/3d-mask corpus case); routed
+        // until that is matched (docs/engine/composite.md).
+        let comp_id = scope.comp.id().to_string_lossy();
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Masks));
+        return Ok(None);
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    let plane = if scope.is_3d_layer(layer)? {
+        let h = scope.plane_matrix(layer, time, false)?;
+        let (sx, sy) = scale;
+        Some([
+            h[0] * sx,
+            h[1] * sy,
+            h[2],
+            h[3] * sx,
+            h[4] * sy,
+            h[5],
+            h[6] * sx,
+            h[7] * sy,
+            h[8],
+        ])
+    } else {
+        None
+    };
+    match composite::build::masks(scope, layer, time, world, plane)? {
+        composite::build::MaskRoute::Unmasked => Ok(Some(None)),
+        composite::build::MaskRoute::Parametric(m) => Ok(Some(Some(m))),
+        composite::build::MaskRoute::Path => {
+            let comp_id = scope.comp.id().to_string_lossy();
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::PathMasks));
+            Ok(None)
+        }
+    }
+}
+
+/// `applyTrackMatte`: the matte source rendered alone (`renderProject`
+/// with `mattePass`, `explicitLayers`, and `{ ...source, on: true }`), or
+/// `None` when the source is missing or the matte depth limit is reached.
+#[allow(clippy::too_many_arguments)]
+fn layer_matte<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+) -> JsResult<Option<composite::Matte>> {
+    let source = composite::build::matte_source(scope.layers(), layer);
+    let (luma, inverted) = composite::build::matte_mode(scope, layer, time)?;
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    if b.matte_depth >= composite::MATTE_MAX_DEPTH {
+        return Ok(None);
+    }
+    b.matte_depth += 1;
+    let outer = b.forced_on.replace(source as *const Node);
+    let pass = matte_pass(scope, b, source, time, width, height, scale);
+    b.forced_on = outer;
+    b.matte_depth -= 1;
+    Ok(Some(composite::Matte {
+        luma,
+        inverted,
+        source: Box::new(pass),
+    }))
+}
+
+/// One layer rendered alone into a transparent target in its parent's
+/// pixel space (the matte pass). Solo and matte-source skipping do not
+/// apply.
+fn matte_pass<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    source: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+) -> CompPlan {
+    let mut plan = CompPlan {
+        composition: scope.comp.id().to_string_lossy(),
+        group: true,
+        width,
+        height,
+        background: Background::Transparent,
+        draws: Vec::new(),
+    };
+    let all = [source];
+    let solo = js::flag(source, "solo");
+    match draw_layer(scope, b, source, time, width, height, scale, solo, &all) {
+        Ok(Some(draws)) => plan.draws.extend(draws),
+        Ok(None) => {}
+        Err(e) => {
+            let comp = scope.comp.clone();
+            layer_failure(b, &comp, source, e.to_string());
+        }
+    }
+    plan
 }
 
 /// `scaledWorld(L, T, W, H)` without a preview viewport.

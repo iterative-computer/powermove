@@ -19,6 +19,7 @@
 
 pub mod assets;
 pub mod capability;
+pub mod composite;
 mod error;
 mod exec;
 pub mod expr;

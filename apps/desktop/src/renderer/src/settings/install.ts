@@ -10,6 +10,7 @@ import { viewerService } from '../legacy/core/services';
 import type { CompositionPatch, ProjectSettingsBridge } from '../legacy/ui/project-settings';
 import SettingsScreen, { type SettingsPage } from './SettingsScreen.svelte';
 import { writeDocument } from '../engine-doc/write';
+import { applyProjectColor, projectColorSettings } from './project-color';
 
 function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
   return {
@@ -33,7 +34,10 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
     },
     ...(PM.HostMedia?.enabled ? {
       mediaImport: () => PM.HostMedia.projectStorage(),
-      applyMediaImport: (mode: 'copy' | 'link') => PM.HostMedia.setProjectStorage(mode)
+      applyMediaImport: (mode: 'copy' | 'link') => PM.HostMedia.setProjectStorage(mode),
+      /* Linear blending and 32-bit precision render only in the new engine. */
+      projectColor: () => projectColorSettings(PM),
+      applyProjectColor: (patch) => { applyProjectColor(PM, patch); }
     } : {}),
     exportDefaults: () => PM.exportDefaults.read(),
     applyExportDefaults: (patch) => PM.exportDefaults.write(patch),

@@ -379,11 +379,15 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         ))
     });
     assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
+    // Blend modes, parametric masks, and track mattes are drawn
+    // (`pm_render::composite`); bezier path masks are not.
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["blend"] = json!("multiply");
+        d["layers"][i]["masks"] = json!([{ "id": "m1", "on": true, "shape": "ellipse", "p": {} }]);
+        d["layers"][i]["matteSource"] = json!("over");
     });
-    assert!(f.contains(&Feature::BlendMode("multiply".into())), "{f:?}");
+    assert!(f.is_empty(), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["fx"] = json!([{ "id": "e1", "type": "blur", "on": true, "p": {} }]);
@@ -401,10 +405,16 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     assert!(f.contains(&Feature::TwoAndAHalfD), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "back");
-        d["layers"][i]["masks"] = json!([{ "id": "m1", "on": true }]);
+        d["layers"][i]["masks"] =
+            json!([{ "id": "m1", "on": true, "path": { "id": "p", "vertices": [], "p": {} } }]);
     });
-    assert!(f.contains(&Feature::Masks), "{f:?}");
-    let f = variant(|d| d["color"] = json!({ "mode": "standard", "linearBlending": true }));
+    assert!(f.contains(&Feature::PathMasks), "{f:?}");
+    // Linear blending and 32-bit precision are drawn; unknown settings are not.
+    let f = variant(|d| {
+        d["color"] = json!({ "mode": "standard", "linearBlending": true, "precision": "float32" })
+    });
+    assert!(!f.contains(&Feature::ProjectColor), "{f:?}");
+    let f = variant(|d| d["color"] = json!({ "mode": "aces" }));
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
     // The 3D scene pass draws shadows, every light type, several objects
     // per composition (depth sets), transparency, every primitive and

@@ -54,6 +54,17 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", false),
 ];
 
+/// Frames where today's renderer departs from the exact composite and the
+/// engine does not follow (docs/engine/composite.md, "Today's composite
+/// drift"; proposed appendix A item): `FRAG_COMPOSITE` runs over the whole
+/// frame for every blend layer and sends every pixel through unpremultiply
+/// and re-premultiply, so on a translucent stack the half-float target loses
+/// up to a few code values over many blend layers. The engine passes pixels
+/// outside the layer through exactly. Bounds as measured on the capture
+/// (largest transparent-float and opaque differences, in CV); the rest of the
+/// class still applies.
+const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 5.0, 5)];
+
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -278,7 +289,9 @@ fn corpus_render_parity() {
                     ))
                 );
                 eprintln!("{line}");
-                if max > 1.0 || bar.is_some_and(|b| !b.pass()) {
+                let drift = COMPOSITE_DRIFT.iter().find(|d| d.0 == p.name);
+                let bound = drift.map_or(1.0, |d| d.1);
+                if max > bound || bar.is_some_and(|b| !b.pass()) {
                     failed.push(line);
                 }
             }
@@ -311,7 +324,12 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            if !d.passes() || bar.is_some_and(|b| !b.pass()) {
+            let drift_max = COMPOSITE_DRIFT.iter().find(|x| x.0 == p.name).map(|x| x.2);
+            let class = match drift_max {
+                Some(m) => d.fraction_within_one() >= 0.999 && d.max <= m,
+                None => d.passes(),
+            };
+            if !class || bar.is_some_and(|b| !b.pass()) {
                 failed.push(line);
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();
