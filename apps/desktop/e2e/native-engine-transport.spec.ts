@@ -220,32 +220,40 @@ test.describe('Use New Engine: J/K/L, play around, and audio scrub', () => {
     await page.keyboard.press('Escape');
     expect(await page.evaluate(() => (window as any).PM.audioScrub())).toBe(true);
 
-    // Every clock sample from now on.
-    await page.evaluate(() => {
-      const w = window as any;
-      w.__samples = [];
-      w.__offSamples = w.PM.EngineConnection.onClock((s: any) => w.__samples.push({ state: s.state, media: s.mediaTime / 705_600_000, rate: s.rate.num }));
-    });
-    // A scrub while paused: a grain at the new position (a shuttling line
-    // from there), then the clock stops again where the playhead is.
-    await page.evaluate(() => (window as any).PM.setTime(0.8));
-    await expect.poll(() => page.evaluate(() => (window as any).__samples.filter((s: any) => s.state === 'shuttling').length), { timeout: 10_000 }).toBeGreaterThan(0);
-    const grain = await page.evaluate(() => (window as any).__samples.find((s: any) => s.state === 'shuttling'));
-    expect(Math.abs(grain.media - 0.8)).toBeLessThan(0.07);
-    await expect.poll(() => page.evaluate(() => (window as any).__samples.at(-1)?.state), { timeout: 5_000 }).toBe('stopped');
+    // A grain is heard through the engine's levels: the meters' data while
+    // the device plays it (the viewer's line does not move for a grain).
+    // Returns the loudest message's media time and peak, or null when no
+    // levels came.
+    const grainAt = async (action: string): Promise<{ media: number; peak: number } | null> =>
+      page.evaluate(async (action) => {
+        const PM = (window as any).PM;
+        const heard: { media: number; peak: number }[] = [];
+        const off = PM.EngineConnection.audio.onLevels((l: any) => heard.push({ media: l.mediaTime / 705_600_000, peak: Math.max(...l.master.peak) }));
+        if (action === 'scrub') PM.setTime(0.8);
+        else if (action === 'step') PM.step(3);
+        else PM.setTime(1.2);
+        await new Promise((r) => setTimeout(r, 1000));
+        off();
+        if (!heard.length) return null;
+        return heard.reduce((a, b) => (b.peak > a.peak ? b : a));
+      }, action);
+    // A scrub while paused: an audible grain at the new position; the
+    // playhead and the clock stay.
+    const scrubbed = await grainAt('scrub');
+    expect(scrubbed).not.toBeNull();
+    expect(scrubbed!.peak).toBeGreaterThan(0.05);
+    expect(Math.abs(scrubbed!.media - 0.8)).toBeLessThan(0.1);
     expect(await page.evaluate(() => (window as any).PM.time)).toBeCloseTo(0.8, 6);
+    expect((await status(page)).clock?.state).toBe('stopped');
     // A step plays a grain at the stepped frame.
-    await page.evaluate(() => { const w = window as any; w.__samples.length = 0; w.PM.step(3); });
-    await expect.poll(() => page.evaluate(() => (window as any).__samples.filter((s: any) => s.state === 'shuttling').length), { timeout: 10_000 }).toBeGreaterThan(0);
-    const stepped = await page.evaluate(() => (window as any).__samples.find((s: any) => s.state === 'shuttling'));
-    expect(Math.abs(stepped.media - (0.8 + 3 / 30))).toBeLessThan(0.07);
-
-    // Off: scrubs are silent (no grains).
+    const stepped = await grainAt('step');
+    expect(stepped).not.toBeNull();
+    expect(stepped!.peak).toBeGreaterThan(0.05);
+    expect(Math.abs(stepped!.media - (0.8 + 3 / 30))).toBeLessThan(0.1);
+    // Off: scrubs are silent (no grain, no levels).
     await page.evaluate(() => (window as any).PM.setAudioScrub(false));
     await page.waitForTimeout(200);
-    await page.evaluate(() => { const w = window as any; w.__samples.length = 0; w.PM.setTime(1.2); });
-    await page.waitForTimeout(800);
-    expect(await page.evaluate(() => (window as any).__samples.filter((s: any) => s.state === 'shuttling').length)).toBe(0);
+    expect(await grainAt('silent')).toBeNull();
 
     // While playing, the mixer's meters read the engine's levels of the tone.
     await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0.1); PM.play(); });
@@ -263,7 +271,7 @@ test.describe('Use New Engine: J/K/L, play around, and audio scrub', () => {
       meters.read(meters.MASTER, out);
       return out.peak[0];
     }), { timeout: 5_000 }).toBeLessThan(1e-4);
-    await page.evaluate(() => { const PM = (window as any).PM; PM.Audio.setMonitorSolo([]); PM.pause(); (window as any).__offSamples(); });
+    await page.evaluate(() => { const PM = (window as any).PM; PM.Audio.setMonitorSolo([]); PM.pause(); });
     expect((await status(page)).failures.filter((f) => !f.startsWith('deviceLost'))).toEqual([]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

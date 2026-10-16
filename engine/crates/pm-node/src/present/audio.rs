@@ -130,6 +130,7 @@ impl AudioLink {
                     levels,
                     last_levels: None,
                     levels_running: false,
+                    watch_until: None,
                 }
                 .run()
             },
@@ -198,6 +199,9 @@ struct Control {
     last_levels: Option<Instant>,
     /// Levels went out while playing; one silent message follows the stop.
     levels_running: bool,
+    /// After a play, a scrub, or a play around, the device starts within the
+    /// pre-roll and the output latency: watch for its levels until then.
+    watch_until: Option<Instant>,
 }
 
 impl Control {
@@ -208,8 +212,9 @@ impl Control {
                 (Some(_), true, None) => Duration::ZERO,
                 _ => Duration::from_secs(3600),
             };
-            // Levels while the device plays.
-            let timeout = if self.running() || self.levels_running {
+            // Levels while the device plays (or is about to).
+            let watching = self.watch_until.is_some_and(|w| Instant::now() < w);
+            let timeout = if self.running() || self.levels_running || watching {
                 timeout.min(self.last_levels.map_or(Duration::ZERO, |l| {
                     LEVELS_INTERVAL.saturating_sub(l.elapsed())
                 }))
@@ -379,6 +384,17 @@ impl Control {
         let Some(playback) = &self.playback else {
             return;
         };
+        if matches!(
+            command,
+            TransportCommand::Play { .. }
+                | TransportCommand::PlayAround { .. }
+                | TransportCommand::Seek {
+                    mode: SeekMode::Scrub,
+                    ..
+                }
+        ) {
+            self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
+        }
         if let Err(error) = playback.command(command) {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             status.problems.push(format!("transport: {error}"));

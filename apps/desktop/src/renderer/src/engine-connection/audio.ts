@@ -56,6 +56,9 @@ function copy(levels: ChannelLevels, out: Out): void {
 export class EngineAudio {
   private levels: AudioLevels | null = null;
   private arrived = -Infinity;
+  /** Levels messages received (diagnostics: a scrub grain sends a few). */
+  levelsReceived = 0;
+  private levelListeners = new Set<(levels: AudioLevels) => void>();
   private solo: string[] = [];
   /** The session the solo and the peak requests were sent on. */
   private sentOn: DocumentSession | null = null;
@@ -77,6 +80,8 @@ export class EngineAudio {
         const { audio: _a, ...levels } = message;
         this.levels = levels as AudioLevels;
         this.arrived = this.now();
+        this.levelsReceived++;
+        for (const listener of this.levelListeners) listener(this.levels);
         return;
       }
       case 'peaks': {
@@ -122,6 +127,17 @@ export class EngineAudio {
       }
       session.audio({ audio: 'peaksWanted', asset: id });
     }
+  }
+
+  /** Every levels message (the measurements and tests). */
+  onLevels(listener: (levels: AudioLevels) => void): () => void {
+    this.levelListeners.add(listener);
+    return () => this.levelListeners.delete(listener);
+  }
+
+  /** The newest levels and when they arrived (diagnostics and tests). */
+  latest(): { levels: AudioLevels; arrivedMs: number } | null {
+    return this.levels ? { levels: this.levels, arrivedMs: this.arrived } : null;
   }
 
   /** An asset's file changed (relink, replace): ask again. */
