@@ -1,0 +1,96 @@
+{
+  "run": "app-latency-engine-idle-r2",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      7.27587890625,
+      6.79931640625,
+      6.5849609375
+    ],
+    "after": [
+      5.728515625,
+      6.3271484375,
+      6.41650390625
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 46,
+    "offsetUs": 173126057655.99997
+  },
+  "load": null,
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.1d136af7fd201c529a4fc82191dd8b9d",
+    "accepted": {
+      "pid": 14978,
+      "pidversion": 2238054
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 4785,
+      "draws": 1974,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 30.7,
+        "p95": 39.32,
+        "p99": 39.76,
+        "max": 55.82
+      }
+    }
+  }
+}

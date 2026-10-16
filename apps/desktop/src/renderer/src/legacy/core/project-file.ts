@@ -9,7 +9,9 @@ import { applyEngineStamp } from '../../../../shared/engine-stamp';
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
   getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null>;
   /** Host media store (new engine): bytes main copies into the save itself. */
-  saveSource?(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null> };
+  saveSource?(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null>;
+  /** Host media store (new engine): main copies a range of the open project file into the store. */
+  putProjectRange?(readToken: string, source: ProjectMediaRange, asset: any, onBytes?: (bytes: number) => void): Promise<boolean> };
 
 const isLinkedAsset = (asset: any) => asset?.storage === 'linked' && !!asset?.link && typeof asset.link.path === 'string';
 
@@ -202,65 +204,78 @@ export async function unpackProjectFileBlob(file: Blob): Promise<any> {
 }
 
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */
+/** Runs `work` (restoring a project streamed by main's project reader), then
+ *  closes the reader. Closing is cleanup: main closes a reader left idle for
+ *  120 s itself (every byte can be read by then while the media store is still
+ *  writing), so a failed close neither fails an open that read every byte nor
+ *  hides the restore's own error. */
+export async function withProjectReader<T>(work: () => Promise<T>, close: () => Promise<unknown>): Promise<T> {
+  try { return await work(); } finally { await close().catch(() => undefined); }
+}
+
 export async function restoreProjectFileStream(document: any, media: ProjectMediaRange[], store: MediaStore,
   read: (offset: number, length: number) => Promise<Uint8Array>,
-  onProgress?: (completed: number, total: number) => void): Promise<void> {
+  onProgress?: (completed: number, total: number) => void, readToken?: string): Promise<void> {
   const assets = fileAssets(document);
-  const sources = media.filter(source => assets[source.id]);
+  let sources = media.filter(source => assets[source.id]);
   if (!sources.length) { await restoreProjectFileMedia(document, store); return; }
   const total = sources.reduce((sum, source) => sum + source.length, 0);
   let completed = 0;
   const advance = (bytes: number) => { completed += bytes; onProgress?.(completed, total); };
-  /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
-     context, and current Chromium keeps IndexedDB blobs as references to the
-     staged file, which is gone once staging is cleaned up. */
-  if ((typeof window !== 'undefined' && (hostBridge() as any)?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
+  /* New engine: main copies each range from the open file into the media
+     store itself, verified against the file's checksum, so the bytes never
+     pass through this page (section 21). */
+  if (readToken && store.putProjectRange) {
+    const remaining: ProjectMediaRange[] = [];
     for (const source of sources) {
-      const chunks: Uint8Array[] = [];
-      const digest = source.sha256 ? new Sha256() : null;
-      for (let offset = 0; offset < source.length;) {
-        const length = Math.min(1024 * 1024, source.length - offset);
-        const chunk = await read(source.offset + offset, length);
-        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
-        chunks.push(chunk);
-        digest?.update(chunk);
-        offset += chunk.length;
-        advance(chunk.length);
-      }
-      if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
-      if (!await store.put(source.id, new Blob(chunks as BlobPart[], { type: source.type }), assets[source.id], source.revision)) {
-        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
+      let copied = 0;
+      const stored = await store.putProjectRange(readToken, source, assets[source.id], bytes => { copied += bytes; advance(bytes); })
+        .catch((error: unknown) => {
+          // A checksum mismatch is the file's fault: the page would find the same bytes.
+          if (/checksum/i.test(String((error as Error)?.message))) throw error;
+          return false;
+        });
+      if (stored) continue;
+      completed -= copied;
+      remaining.push(source);
+    }
+    if (!remaining.length) return;
+    sources = remaining;
+  }
+  /* Each range becomes a Blob built from its bytes. Staging in OPFS does not
+     work: Chromium keeps an IndexedDB blob that came from an OPFS file as a
+     reference to that file, so removing the staging file broke the media
+     just stored (the asset was then re-imported from its source path with a
+     new revision, or went missing). Parts are folded into a Blob every
+     64 MiB, so the page never holds a large file as one array; the browser
+     owns the folded Blob's bytes. */
+  for (const source of sources) {
+    const digest = source.sha256 ? new Sha256() : null;
+    let folded = new Blob([], { type: source.type });
+    let parts: Uint8Array[] = [];
+    let partBytes = 0;
+    for (let offset = 0; offset < source.length;) {
+      const length = Math.min(1024 * 1024, source.length - offset);
+      const chunk = await read(source.offset + offset, length);
+      if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
+      parts.push(chunk);
+      partBytes += chunk.length;
+      digest?.update(chunk);
+      offset += chunk.length;
+      advance(chunk.length);
+      if (partBytes >= RESTORE_FOLD_BYTES) {
+        folded = new Blob([folded, ...parts as BlobPart[]], { type: source.type });
+        parts = [];
+        partBytes = 0;
       }
     }
-    return;
-  }
-  const root = await navigator.storage.getDirectory();
-  for (const source of sources) {
-    // crypto.randomUUID needs a secure context; the served app is plain http.
-    const name = 'project-import-' + (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
-    const file = await root.getFileHandle(name, { create: true });
-    let writer: FileSystemWritableFileStream | undefined;
-    const digest = source.sha256 ? new Sha256() : null;
-    try {
-      writer = await file.createWritable();
-      for (let offset = 0; offset < source.length;) {
-        const length = Math.min(1024 * 1024, source.length - offset);
-        const chunk = await read(source.offset + offset, length);
-        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
-        await writer.write(new Uint8Array(chunk));
-        digest?.update(chunk);
-        offset += chunk.length;
-        advance(chunk.length);
-      }
-      await writer.close(); writer = undefined;
-      if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
-      const blob = (await file.getFile()).slice(0, source.length, source.type);
-      if (!await store.put(source.id, blob, assets[source.id], source.revision)) {
-        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
-      }
-    } finally {
-      await writer?.abort().catch(() => undefined);
-      await root.removeEntry(name);
+    if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
+    const blob = new Blob([folded, ...parts as BlobPart[]], { type: source.type });
+    if (!await store.put(source.id, blob, assets[source.id], source.revision)) {
+      throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
     }
   }
 }
+
+/** Bytes of restored media the page holds before folding them into a Blob. */
+const RESTORE_FOLD_BYTES = 64 * 1024 * 1024;

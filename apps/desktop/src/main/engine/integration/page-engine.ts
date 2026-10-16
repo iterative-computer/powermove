@@ -17,7 +17,12 @@ import { completeWelcome, decodeEnvelope, encodeEnvelope, engineRole, envelope, 
 export const log = (message: string): void => console.log(`[bridge-page] ${message}`);
 
 export function frameBridge(): FrameBridgeApi {
-  const bridge = (globalThis as { powermove?: { frameBridge?: FrameBridgeApi } }).powermove?.frameBridge;
+  // The test pages keep `window.powermove`; the real app's kernel takes it
+  // off the page at boot, and hidden test launches publish the same bridge
+  // as the e2e seam (shared/test-bridge.ts), which the real-viewer
+  // measurement uses.
+  const host = globalThis as { powermove?: { frameBridge?: FrameBridgeApi }; __powermoveTestBridge?: { frameBridge?: FrameBridgeApi } };
+  const bridge = host.powermove?.frameBridge ?? host.__powermoveTestBridge?.frameBridge;
   if (!bridge) throw new Error('the preload did not expose the frame bridge receiver');
   return bridge;
 }

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,7 +10,7 @@ import { MEDIA_STORE_IPC } from '../../shared/media-store';
 import { HostServicesCore } from '../engine/services';
 import { CAMERA_CARD_MARKERS, ImportClassifier } from './classify';
 import { InProcessExecutor } from './hasher';
-import { registerMediaStoreIpc } from './ipc';
+import { PROJECT_RANGE_BYTES, registerMediaStoreIpc } from './ipc';
 import { findByContent } from './relink';
 import { MediaStoreService } from './service';
 
@@ -194,6 +195,85 @@ describe('MediaStoreService', () => {
   });
 });
 
+describe('still renditions of kept originals', () => {
+  it('converts a stored or linked TIFF through a link that names its format, never touching the original', async () => {
+    const seen: Array<{ named: string; resolved: string }> = [];
+    const { realpath, readlink } = await import('node:fs/promises');
+    const svc = service({
+      convertStill: async (named) => {
+        seen.push({ named: path.basename(named), resolved: await realpath(named) });
+        expect(await readlink(named)).toBeTruthy();
+        return { token: 'a'.repeat(32), size: 10 };
+      }
+    });
+    const tiff = path.join(media, 'scan.tiff');
+    await settledFile(tiff, bytes(700, 3));
+    const stored = await svc.store.putFile(tiff, { key: 'media:v2:t' });
+    expect(await svc.convertStill({ hash: stored.hash, name: 'original.tiff' })).toEqual({ ok: true, token: 'a'.repeat(32), size: 10, type: 'image/png' });
+    expect(seen[0]).toEqual({ named: 'original.tiff', resolved: await realpath(svc.store.objectPath(stored.hash)) });
+    const link = await svc.link(tiff);
+    expect((await svc.convertStill({ link, name: 'original.tiff' })).ok).toBe(true);
+    expect(seen[1]!.resolved).toBe(await realpath(tiff));
+    // The temporary name is gone afterwards, and the original is untouched.
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(path.join(svc.store.root, 'tmp'))).filter((name) => name.startsWith('still-'))).toEqual([]);
+    expect(blake3Hex(await readFile(tiff))).toBe(stored.hash);
+    // Formats the viewer decodes, and content that is nowhere, are refused.
+    expect(await svc.convertStill({ hash: stored.hash, name: 'original.png' })).toMatchObject({ ok: false, error: /does not need converting/ });
+    expect(await svc.convertStill({ hash: blake3Hex(bytes(5)), name: 'original.tiff' })).toMatchObject({ ok: false, error: /no longer available/ });
+    expect(await service().convertStill({ hash: stored.hash, name: 'original.tiff' })).toMatchObject({ ok: false, error: /unavailable/ });
+    // Content main does not have is reported as missing, so the page can send its bytes.
+    expect(await svc.convertStill({ hash: blake3Hex(bytes(6)), name: 'original.tiff' })).toMatchObject({ missing: true });
+  });
+
+  it('converts a stored or linked video original into the viewer\'s playback proxy', async () => {
+    const seen: string[] = [];
+    const { realpath } = await import('node:fs/promises');
+    const svc = service({ convertVideo: async (named) => { seen.push(`${path.basename(named)}→${await realpath(named)}`); return { token: 'b'.repeat(32), size: 20 }; } });
+    const movie = path.join(media, 'A001.mov');
+    await settledFile(movie, bytes(900, 5));
+    const stored = await svc.store.putFile(movie, { key: 'media:v2:m' });
+    expect(await svc.convertVideo({ hash: stored.hash, name: 'A001.mov' })).toEqual({ ok: true, token: 'b'.repeat(32), size: 20, type: 'video/webm' });
+    expect(seen).toEqual([`original.mov→${await realpath(svc.store.objectPath(stored.hash))}`]);
+    expect(await svc.convertVideo({ hash: stored.hash, name: 'clip.webm' })).toMatchObject({ ok: false, error: /not one Powermove can convert/ });
+    expect(await svc.convertVideo({ hash: blake3Hex(bytes(4)), name: 'A001.mov' })).toMatchObject({ ok: false, missing: true });
+    expect(await service().convertVideo({ hash: stored.hash, name: 'A001.mov' })).toMatchObject({ ok: false, error: /unavailable/ });
+    const failing = service({ convertVideo: async () => { throw new Error('ffmpeg exited 1'); } });
+    await failing.store.putFile(movie, { key: 'media:v2:m' });
+    expect(await failing.convertVideo({ hash: stored.hash, name: 'A001.mov' })).toEqual({ ok: false, error: 'Could not optimize this video for playback · ffmpeg exited 1' });
+  });
+
+  it('converts uploaded bytes it does not have, verified by hash, and keeps none of them', async () => {
+    const { readdir, readFile: read, realpath } = await import('node:fs/promises');
+    const converted: Array<{ named: string; bytes: string }> = [];
+    const convert = async (named: string) => { converted.push({ named: path.basename(named), bytes: blake3Hex(await read(await realpath(named))) }); return { token: 'c'.repeat(32), size: 30 }; };
+    const svc = service({ enabled: false, convertStill: convert, convertVideo: convert });
+    const upload = async (data: Uint8Array) => {
+      const token = await svc.store.beginStream(7, { key: null, type: '', size: data.length });
+      for (let at = 0; at < data.length; at += 4 * 1024 * 1024) await svc.store.chunk(7, token, at, data.subarray(at, at + 4 * 1024 * 1024));
+      return token;
+    };
+    const tiff = bytes(5 * 1024 * 1024 + 9, 11);
+    expect(await svc.convertUpload(7, await upload(tiff), { kind: 'still', name: 'original.tiff', blake3: blake3Hex(tiff) }))
+      .toEqual({ ok: true, token: 'c'.repeat(32), size: 30, type: 'image/png' });
+    const movie = bytes(4096, 12);
+    expect(await svc.convertUpload(7, await upload(movie), { kind: 'video', name: 'A001.mov', blake3: blake3Hex(movie) })).toMatchObject({ ok: true, type: 'video/webm' });
+    expect(converted).toEqual([{ named: 'original.tiff', bytes: blake3Hex(tiff) }, { named: 'original.mov', bytes: blake3Hex(movie) }]);
+    // Bytes that are not what the page hashed are never converted.
+    expect(await svc.convertUpload(7, await upload(movie), { kind: 'video', name: 'A001.mov', blake3: blake3Hex(tiff) })).toMatchObject({ ok: false, error: /does not match/ });
+    // A refused conversion still discards the upload; another window's upload is not this one's.
+    expect(await svc.convertUpload(7, await upload(movie), { kind: 'still', name: 'original.png', blake3: blake3Hex(movie) })).toMatchObject({ ok: false });
+    const theirs = await upload(movie);
+    await expect(svc.convertUpload(8, theirs, { kind: 'video', name: 'A001.mov', blake3: blake3Hex(movie) })).rejects.toThrow(/Unknown media upload/);
+    await svc.store.abortStream(7, theirs);
+    // The store kept nothing: no object, no key, no temporary file.
+    expect(converted).toHaveLength(2);
+    expect(await svc.store.records()).toEqual([]);
+    expect(await readdir(path.join(svc.store.root, 'objects'))).toEqual([]);
+    expect(await readdir(path.join(svc.store.root, 'tmp'))).toEqual([]);
+  });
+});
+
 describe('media store IPC', () => {
   it('serves trusted windows only and reports the flag synchronously', async () => {
     const handlers = new Map<string, (...args: any[]) => any>();
@@ -212,5 +292,41 @@ describe('media store IPC', () => {
     expect(await handlers.get(MEDIA_STORE_IPC.record)!(event, 'k')).toBeNull();
     await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.putFile)!(event, { path: 'relative', key: 'k' }))).rejects.toThrow(/absolute/);
     await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.open)!(event, { link: { path: '/x', hash: 'zz', size: 1 } }))).rejects.toThrow(/Invalid media link/);
+    await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.convertUpload)!(event, { token: 'a'.repeat(32), kind: 'shell', name: 'x.mov', blake3: '' }))).rejects.toThrow(/Invalid conversion/);
+    await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.convertUpload)!(event, { token: '../x', kind: 'video', name: 'x.mov', blake3: '' }))).rejects.toThrow(/Invalid media token/);
+    expect(await handlers.get(MEDIA_STORE_IPC.convertVideo)!(event, { hash: 'a'.repeat(64), name: 'x.mov' })).toMatchObject({ ok: false, error: /unavailable/ });
+  });
+
+  it('copies a range of the project file the window opened straight into the store', async () => {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    const ipc = { handle: (channel: string, fn: any) => handlers.set(channel, fn), on: (channel: string, fn: any) => handlers.set(channel, fn) };
+    const svc = service({ enabled: true });
+    // A project file: 100 bytes of document, then the media range.
+    const media = bytes(3 * 1024 * 1024 + 11, 9);
+    const file = new Uint8Array(100 + media.length);
+    file.set(media, 100);
+    const sender = { id: 4, once: () => undefined };
+    const other = { id: 5, once: () => undefined };
+    const reads: number[] = [];
+    registerMediaStoreIpc(ipc as never, svc, {
+      isTrustedSender: () => true,
+      projectRead: async (owner, token, offset, length) => {
+        if (owner !== sender || token !== 'reader-1') throw new Error('Unknown project read token');
+        reads.push(length);
+        return file.slice(offset, offset + length);
+      }
+    });
+    const call = (channel: string, value: unknown, from: object = sender) => Promise.resolve().then(() => handlers.get(channel)!({ sender: from }, value));
+    const token = await call(MEDIA_STORE_IPC.beginPut, { key: 'media:v2:p', type: 'video/mp4', size: media.length, revision: 'rev-p', origin: 'project' });
+    // Another window's reader, or a range past the limit, is refused.
+    await expect(call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: 10, at: 0 }, other)).rejects.toThrow();
+    await expect(call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: PROJECT_RANGE_BYTES + 1, at: 0 })).rejects.toThrow(/range/);
+    await call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: 2 * 1024 * 1024, at: 0 });
+    await call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100 + 2 * 1024 * 1024, length: media.length - 2 * 1024 * 1024, at: 2 * 1024 * 1024 });
+    expect(Math.max(...reads)).toBeLessThanOrEqual(1024 * 1024);
+    const sha256 = createHash('sha256').update(media).digest('hex');
+    const record = await call(MEDIA_STORE_IPC.finishPut, { token, sha256 });
+    expect(record).toMatchObject({ key: 'media:v2:p', hash: blake3Hex(media), size: media.length, revision: 'rev-p', source: 'project' });
+    expect(Buffer.compare(await readFile(svc.store.objectPath(record.hash)), media)).toBe(0);
   });
 });

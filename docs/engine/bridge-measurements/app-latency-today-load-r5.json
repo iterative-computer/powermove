@@ -1,0 +1,120 @@
+{
+  "run": "app-latency-today-load-r5",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      3.60791015625,
+      4.650390625,
+      5.1767578125
+    ],
+    "after": [
+      3.81005859375,
+      4.279296875,
+      4.94970703125
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 46,
+    "offsetUs": 187227592157.99997
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 46,
+      "ms": {
+        "n": 46,
+        "p50": 50.00591599999461,
+        "max": 50.02395800000522
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 871,
+      "replies": 871,
+      "replyBytes": 68540512,
+      "mainMsP50": 0.0654169999907026
+    },
+    "resizes": {
+      "n": 9,
+      "steps": 549
+    },
+    "eventCount": 55
+  },
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 2020,
+      "draws": 2647,
+      "unmatched": 0,
+      "unpresented": 134,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2267,
+        "p50": 24.96,
+        "p95": 50.26,
+        "p99": 66.69,
+        "max": 93.35
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 1853,
+      "draws": 1925,
+      "unmatched": 0,
+      "unpresented": 96,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2305,
+        "p50": 34.21,
+        "p95": 60.47,
+        "p99": 76.09,
+        "max": 110.11
+      }
+    }
+  }
+}

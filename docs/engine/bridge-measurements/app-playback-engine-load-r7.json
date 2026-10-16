@@ -1,0 +1,221 @@
+{
+  "run": "app-playback-engine-load-r7",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "offMainThread": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.92529296875,
+      4.57421875,
+      4.48486328125
+    ],
+    "after": [
+      5.27978515625,
+      4.82177734375,
+      4.5947265625
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 42,
+    "offsetUs": 189229649670
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00045799999498,
+        "max": 50.03116699999373
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1171,
+      "replies": 1171,
+      "replyBytes": 92148454,
+      "mainMsP50": 0.06429199999547563
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.a623e9176267fa5f69bbf3138b20d820",
+    "accepted": {
+      "pid": 89203,
+      "pidversion": 2712295
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14578
+    },
+    "presentation": {
+      "thread": "worker",
+      "timing": "viz",
+      "sink": "7:2147483648"
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 0,
+      "notPresented": 0,
+      "drops": 0,
+      "presented": 1793,
+      "offSlot": 245
+    },
+    "jitterAbsMs": {
+      "n": 1793,
+      "p50": 0.086,
+      "p95": 8.4,
+      "p99": 10.823,
+      "max": 16.629
+    },
+    "intervalErrorAbsMs": {
+      "n": 1792,
+      "p50": 0,
+      "p95": 8.334,
+      "p99": 19.072,
+      "max": 20.446
+    },
+    "irregularIntervals": 382,
+    "rafToPresentMs": {
+      "n": 1793,
+      "p50": 18.61,
+      "p95": 26.91,
+      "p99": 27.96,
+      "max": 36.81
+    },
+    "dueToPresentMs": {
+      "n": 1793,
+      "p50": 17.91,
+      "p95": 26.2,
+      "p99": 26.35,
+      "max": 34.53
+    },
+    "drawMainThreadMs": {
+      "n": 1800,
+      "p50": 0.2,
+      "p95": 0.3,
+      "p99": 0.4,
+      "max": 5.9
+    },
+    "arrivalLeadMs": {
+      "n": 1800,
+      "p50": -128.13,
+      "p95": -116.47,
+      "p99": -111.23,
+      "max": -96.73
+    },
+    "rafGapMs": {
+      "n": 7197,
+      "p50": 8.3,
+      "p95": 9.7,
+      "p99": 10.2,
+      "max": 16.7
+    },
+    "rafGapsOver25Ms": 0,
+    "missing": [],
+    "pipelineDepthRefreshes": {
+      "1": 101,
+      "2": 1548,
+      "3": 142,
+      "4": 2
+    },
+    "presenter": {
+      "received": 1849,
+      "drawn": 1845,
+      "dropped": {},
+      "released": 1845,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 4,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 548,
+      "offMainThread": true
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 8,
+      "received": 8,
+      "released": 0,
+      "videoFrames": 1849,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

@@ -31,8 +31,9 @@
  * engine's canvas underneath is what the viewer shows.
  */
 import { createWebGpuPainter, type FramePainter } from './gpu';
-import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type PresenterStats } from './presenter';
-import type { EngineFrameMessage, OverlayGeometry, PathCommand, Quad, ViewerState } from './protocol';
+import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
+import { PresentWorker, type WorkerLike } from './worker-presenter';
+import type { EngineFrameMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
 /** The service name the kernel's engine connection registers. */
@@ -79,6 +80,12 @@ export interface EngineViewerService {
   hostOffsetUs?(): number | null;
   /** The refresh rate of the display showing `view`, when main knows it. */
   displayHz?(view: Window): number | null;
+  /** Record per-frame timings in the viewer's presentation (the S1
+   *  measurement harness's connection sets it; the kernel's never does). */
+  readonly trace?: boolean;
+  /** `false`: draw engine frames on the page's main thread rather than in
+   *  a presentation worker (the measurement harness compares the two). */
+  readonly offMainThread?: boolean;
 }
 
 /** What the viewer decides; the presentation adds what the window knows. */
@@ -109,6 +116,14 @@ export type PresentationOptions = {
    *  (a setting, and the harness's comparison); `auto` follows the display. */
   edr?: 'auto' | 'off';
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /**
+   * Starts a presentation worker (present-worker-entry.ts). With it the
+   * canvas hands its drawing to the worker, which presents engine frames
+   * on its own animation frames, independent of this thread's stalls
+   * (present-worker.ts). Without it, or when the worker cannot draw,
+   * frames are drawn on this thread.
+   */
+  createWorker?: () => WorkerLike;
 };
 
 /** Recent viewer states by sequence, so overlay geometry converts with the
@@ -119,10 +134,14 @@ const STATE_HISTORY = 32;
 export const SIZE_SETTLE_MS = 150;
 
 export class ViewerPresentation {
-  readonly canvas: HTMLCanvasElement;
+  private canvasElement: HTMLCanvasElement;
+  /** Draws on this thread (`painter`) or in a presentation worker (`worker`). */
   private painter: FramePainter | null = null;
   private painterFailed = false;
-  private presenter: EnginePresenter | null = null;
+  private worker: PresentWorker | null = null;
+  /** The worker could not present (no WebGPU in workers): stay on this thread. */
+  private workerUnavailable = false;
+  private presenter: Presenter | null = null;
   private channel: EngineViewerChannel | null = null;
   private readonly sequencer = new ViewSequencer();
   private readonly states: ViewerState[] = [];
@@ -131,29 +150,50 @@ export class ViewerPresentation {
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
+  private readonly hiddenListeners = new Set<() => void>();
   private readonly offReady: () => void;
   private sessions = 0;
   private disposed = false;
+  /** Pools and clock samples that came while no presenter existed. */
+  private held: { message: EngineFrameMessage; arrivedMs: number }[] = [];
+  /** Bumped whenever the canvas and its drawing are replaced. */
+  private backendToken = 0;
   /** The CSS size the engine last got, and the pending settle. */
   private appliedSize: { width: number; height: number } | null = null;
   private settleTimer = 0;
   private settleDue = false;
+  /** The display's refresh grid, sent with every state (amendment 18). */
+  private vsync: VsyncHint | null = null;
 
   constructor(private readonly options: PresentationOptions) {
-    const doc = options.stage.ownerDocument;
-    this.canvas = doc.createElement('canvas');
-    this.canvas.id = 'engine-present';
-    this.canvas.setAttribute('aria-hidden', 'true');
-    this.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;visibility:hidden';
+    this.canvasElement = this.makeCanvas(options.stage.ownerDocument);
     const before = options.before && options.before.parentElement === options.stage ? options.before : null;
-    options.stage.insertBefore(this.canvas, before);
+    options.stage.insertBefore(this.canvasElement, before);
     this.offReady = options.service.onReady(() => void this.open());
     void this.open();
   }
 
+  /** The canvas engine frames are drawn into (replaced when presentation moves to another window from a worker). */
+  get canvas(): HTMLCanvasElement {
+    return this.canvasElement;
+  }
+
+  /** Whether frames are drawn by a presentation worker rather than this thread. */
+  get offMainThread(): boolean {
+    return this.worker !== null;
+  }
+
+  private makeCanvas(doc: Document): HTMLCanvasElement {
+    const canvas = doc.createElement('canvas');
+    canvas.id = 'engine-present';
+    canvas.setAttribute('aria-hidden', 'true');
+    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;visibility:hidden';
+    return canvas;
+  }
+
   /** Whether engine frames are on screen now. */
   get presenting(): boolean {
-    return this.canvas.style.visibility === 'visible';
+    return this.canvasElement.style.visibility === 'visible';
   }
 
   /** The newest frame drawn, with its tags and overlay geometry. */
@@ -165,9 +205,9 @@ export class ViewerPresentation {
     return this.sequencer.current;
   }
 
-  stats(): (PresenterStats & { sessions: number; viewSeq: number }) | null {
+  stats(): (PresenterStats & { sessions: number; viewSeq: number; offMainThread: boolean }) | null {
     const stats = this.presenter?.stats;
-    return stats ? { ...stats, sessions: this.sessions, viewSeq: this.sequencer.current?.viewSeq ?? 0 } : null;
+    return stats ? { ...stats, sessions: this.sessions, viewSeq: this.sequencer.current?.viewSeq ?? 0, offMainThread: this.offMainThread } : null;
   }
 
   onPresented(listener: (frame: PresentedFrame) => void): () => void {
@@ -176,16 +216,36 @@ export class ViewerPresentation {
   }
 
   /**
+   * Engine frames left the screen without `dispose` (the session ended, or
+   * the drawing was replaced): what is under the canvas shows again, so the
+   * viewer catches up on what it skipped while the engine presented.
+   */
+  onHidden(listener: () => void): () => void {
+    this.hiddenListeners.add(listener);
+    return () => this.hiddenListeners.delete(listener);
+  }
+
+  /** Hides the canvas; tells `onHidden` listeners when it was showing. */
+  private hide(canvas: HTMLCanvasElement): void {
+    const was = canvas.style.visibility === 'visible';
+    canvas.style.visibility = 'hidden';
+    if (was && !this.disposed) for (const listener of this.hiddenListeners) listener();
+  }
+
+  /**
    * The viewer's layout changed (size, zoom, pan, resolution, view
    * override) or the window did. Sends the state when it differs from the
-   * last one.
+   * last one. `stage` is the stage's size when the caller already knows it
+   * (the viewer keeps it during gestures): reading it here after the
+   * viewer wrote styles would force a synchronous layout of the page in
+   * every pointer event.
    */
-  update(params: ViewParams): void {
+  update(params: ViewParams, stage?: { width: number; height: number }): void {
     if (this.disposed) return;
     this.params = params;
     const view = this.follow();
     if (!view) return;
-    const rect = this.options.stage.getBoundingClientRect();
+    const rect = stage ?? this.options.stage.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
     const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);
@@ -201,7 +261,19 @@ export class ViewerPresentation {
     if (!changed) return;
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
-    this.presenter?.setViewerState(state);
+    this.presenter?.setViewerState(this.withHint(state));
+  }
+
+  /** A state as sent: with the newest vsync hint, which is not part of the view. */
+  private withHint(state: ViewerState): ViewerState {
+    return this.vsync ? { ...state, vsync: this.vsync } : state;
+  }
+
+  /** The presenter fitted a new refresh grid: re-send the current view with it (same `viewSeq`). */
+  private onVsync(hint: VsyncHint): void {
+    this.vsync = hint;
+    const state = this.sequencer.current;
+    if (state) this.presenter?.setViewerState(this.withHint(state));
   }
 
   /** The size to send: a new size only once it held still (live resizes). */
@@ -230,12 +302,9 @@ export class ViewerPresentation {
     else view.clearTimeout(id);
   }
 
-  /** The per-frame trace of the current session (the S1 measurement harness). */
-  takeTrace(): import('./presenter').TraceRecord | null {
-    const trace = this.presenter?.trace ?? null;
-    if (!trace) return null;
-    const copy = { arrivals: trace.arrivals.splice(0), draws: trace.draws.splice(0), drops: trace.drops.splice(0), releases: trace.releases.splice(0), rafs: trace.rafs.splice(0) };
-    return copy;
+  /** The per-frame trace of the current session since the last call (the S1 measurement harness). */
+  takeTrace(): Promise<TraceRecord | null> {
+    return this.presenter?.takeTrace() ?? Promise.resolve(null);
   }
 
   /** The viewer state a frame shows (by its view sequence). */
@@ -255,6 +324,7 @@ export class ViewerPresentation {
   private follow(): Window | null {
     const view = this.options.stage.ownerDocument.defaultView;
     if (!view || view === this.host) return view;
+    const moved = this.host !== null;
     this.host = view;
     for (const off of this.mediaOffs.splice(0)) off();
     const refresh = (): void => {
@@ -269,6 +339,12 @@ export class ViewerPresentation {
       list.addEventListener('change', refresh);
       this.mediaOffs.push(() => list.removeEventListener('change', refresh));
     }
+    if (this.worker && moved) {
+      // A presentation worker draws into the canvas of the window it was
+      // made for: the new window gets a new canvas and worker.
+      void this.replaceDrawing();
+      return view;
+    }
     // Every window has its own time origin: a popout's rAF timestamps are
     // moved onto this realm's performance.now(), the clock the presenter
     // stamps arrivals with and maps to host time.
@@ -281,68 +357,167 @@ export class ViewerPresentation {
     return view;
   }
 
+  /**
+   * Makes the canvas's drawing: a presentation worker when the viewer can
+   * start one and the canvas can hand its drawing over, otherwise a WebGPU
+   * painter on this thread. False when neither works.
+   */
+  private async makeDrawing(): Promise<boolean> {
+    if (this.worker || this.painter) return true;
+    const canvas = this.canvasElement;
+    const createWorker = this.options.createWorker;
+    if (createWorker && !this.workerUnavailable && typeof canvas.transferControlToOffscreen === 'function') {
+      try {
+        const offscreen = canvas.transferControlToOffscreen();
+        const token = this.backendToken;
+        this.worker = new PresentWorker({
+          worker: createWorker(),
+          canvas: offscreen,
+          // This realm's clock: arrivals are stamped with it, and a
+          // popout's worker must decide on it too (timeOriginShift).
+          timeOrigin: performance.timeOrigin,
+          onFailed: (message) => this.workerFailed(token, message)
+        });
+        return true;
+      } catch (error) {
+        this.workerUnavailable = true;
+        this.options.log?.('warn', `engine presentation stays on the main thread: ${error instanceof Error ? error.message : String(error)}`);
+        // The canvas may have handed its drawing over already: use a new one.
+        this.replaceCanvas();
+      }
+    }
+    if (this.painterFailed) return false;
+    const token = this.backendToken;
+    let painter: FramePainter;
+    try {
+      painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
+    } catch (error) {
+      this.painterFailed = true;
+      this.options.log?.('error', `engine presentation is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    if (this.disposed || token !== this.backendToken || this.painter) {
+      painter.dispose();
+      return !this.disposed && token === this.backendToken;
+    }
+    this.painter = painter;
+    return true;
+  }
+
+  private workerFailed(token: number, message: string): void {
+    if (this.disposed || token !== this.backendToken) return;
+    this.workerUnavailable = true;
+    this.options.log?.('warn', `engine presentation worker failed, presenting on the main thread: ${message}`);
+    void this.replaceDrawing();
+  }
+
+  /** A fresh canvas in place of the current one (in the stage's current document), hidden until it presents. */
+  private replaceCanvas(): void {
+    const old = this.canvasElement;
+    const next = this.makeCanvas(this.options.stage.ownerDocument);
+    if (old.parentNode) old.parentNode.replaceChild(next, old);
+    else this.options.stage.insertBefore(next, this.options.before && this.options.before.parentElement === this.options.stage ? this.options.before : null);
+    this.canvasElement = next;
+    this.hide(old);
+  }
+
+  /**
+   * Replaces the canvas and its drawing (worker moved windows, or failed)
+   * and carries the open session over to a new presenter.
+   */
+  private async replaceDrawing(): Promise<void> {
+    const token = ++this.backendToken;
+    const generation = this.presenter?.stats.generation ?? 0;
+    this.presenter?.dispose();
+    this.presenter = null;
+    this.latestFrame = null;
+    this.worker?.dispose();
+    this.worker = null;
+    this.painter?.dispose();
+    this.painter = null;
+    this.replaceCanvas();
+    if (!(await this.makeDrawing()) || token !== this.backendToken || this.disposed) return;
+    const channel = this.channel;
+    if (channel) this.startPresenter(channel, generation);
+  }
+
+  /** A presenter for `channel` on the current drawing, sent the current state. */
+  private startPresenter(channel: EngineViewerChannel, generation = 0): void {
+    const view = this.options.stage.ownerDocument.defaultView;
+    const common = {
+      link: channel,
+      source: this.options.service.source,
+      trace: this.options.trace,
+      generation,
+      hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined,
+      onVsync: (hint: VsyncHint) => this.onVsync(hint)
+    };
+    const presenter: Presenter = this.worker
+      ? this.worker.open({ ...common, displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null })
+      : new EnginePresenter({ ...common, painter: this.painter! });
+    this.presenter = presenter;
+    presenter.onPresented((frame) => {
+      if (this.presenter !== presenter) return;
+      this.latestFrame = frame;
+      if (this.canvasElement.style.visibility !== 'visible') this.canvasElement.style.visibility = 'visible';
+      for (const listener of this.listeners) listener(frame);
+    });
+    this.host = null;
+    if (!this.follow()) presenter.start();
+    // Messages that came while there was no presenter (a replaced drawing).
+    for (const message of this.held.splice(0)) presenter.receive(message.message, message.arrivedMs);
+    // A new presenter knows nothing yet: send the current state.
+    const state = this.sequencer.current;
+    if (state) presenter.setViewerState(this.withHint(state));
+    else if (this.params) this.update(this.params);
+  }
+
   private async open(): Promise<void> {
     if (this.disposed || this.channel) return;
-    if (!this.painter) {
-      if (this.painterFailed) return;
-      try {
-        this.painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvas);
-      } catch (error) {
-        this.painterFailed = true;
-        this.options.log?.('error', `engine presentation is unavailable: ${error instanceof Error ? error.message : String(error)}`);
-        return;
-      }
-      if (this.disposed) {
-        this.painter.dispose();
-        return;
-      }
-      if (this.channel) return;
-    }
-    let presenter: EnginePresenter | null = null;
+    const token = this.backendToken;
+    if (!(await this.makeDrawing())) return;
+    if (this.disposed || this.channel || token !== this.backendToken) return;
     let opened: EngineViewerChannel | null = null;
     const channel = this.options.service.open({
-      message: (message, arrivedMs) => presenter?.receive(message, arrivedMs),
+      message: (message, arrivedMs) => {
+        if (this.channel !== opened) return;
+        if (this.presenter) this.presenter.receive(message, arrivedMs);
+        else this.hold(opened!, message, arrivedMs);
+      },
       closed: (reason) => this.closed(opened, reason)
     });
     if (!channel) return;
     opened = channel;
     this.channel = channel;
     this.sessions++;
-    presenter = new EnginePresenter({
-      link: channel,
-      source: this.options.service.source,
-      painter: this.painter,
-      trace: this.options.trace,
-      hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined
-    });
-    this.presenter = presenter;
-    presenter.onPresented((frame) => {
-      this.latestFrame = frame;
-      if (this.canvas.style.visibility !== 'visible') this.canvas.style.visibility = 'visible';
-      for (const listener of this.listeners) listener(frame);
-    });
-    this.host = null;
-    const view = this.follow();
-    if (!view) presenter.start();
-    // A new session knows nothing yet: send the current state.
-    const state = this.sequencer.current;
-    if (state) presenter.setViewerState(state);
-    else if (this.params) this.update(this.params);
+    this.startPresenter(channel);
+  }
+
+  /**
+   * A message while the drawing is being replaced: a frame goes straight
+   * back to the engine (nothing will draw it), pools and clock samples wait
+   * for the next presenter.
+   */
+  private hold(channel: EngineViewerChannel, message: EngineFrameMessage, arrivedMs: number): void {
+    if (message.type === 'frame') channel.release({ poolIndex: message.frame.poolIndex, seq: message.frame.seq });
+    else this.held.push({ message, arrivedMs });
   }
 
   private closed(channel: EngineViewerChannel | null, reason: string): void {
     if (!channel || channel !== this.channel) return;
     this.options.log?.('info', `engine viewer session ended: ${reason}`);
     this.channel = null;
+    this.held = [];
     this.presenter?.dispose();
     this.presenter = null;
     this.latestFrame = null;
-    this.canvas.style.visibility = 'hidden';
+    this.hide(this.canvasElement);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.backendToken++;
     if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
     this.settleTimer = 0;
     this.offReady();
@@ -351,10 +526,13 @@ export class ViewerPresentation {
     this.presenter = null;
     this.channel?.close();
     this.channel = null;
+    this.worker?.dispose();
+    this.worker = null;
     this.painter?.dispose();
     this.painter = null;
     this.listeners.clear();
-    this.canvas.remove();
+    this.hiddenListeners.clear();
+    this.canvasElement.remove();
   }
 }
 

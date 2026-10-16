@@ -664,25 +664,82 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
-async function playbackProxy(file: any, name: string, onStage?: (label: string) => void, storageKey?: string): Promise<any> {
-  /* With the media store keeping originals (new engine), the browser
-     rendition is generated media kept beside the original: reuse it. */
-  const kept = storageKey ? await PM.MediaStore?.rendition?.get?.(storageKey).catch(() => null) : null;
+/* The BLAKE3 of the original a rendition renders: the asset's content hash,
+   or, while importing, the hash of the original once the store has it. */
+type OriginalHash = string | Promise<string | null> | null | undefined;
+/* The native path behind a File the page holds, when it has one: a picked
+   or dropped file, or a cloud placeholder that was downloaded. Bytes read
+   from IndexedDB or the media store have none. */
+function nativeSource(file: any): string | null {
+  const cloud = cloudSourcePaths.get(file);
+  if (cloud) return cloud;
+  if (typeof File === 'undefined' || !(file instanceof File)) return null;
+  try { return hostBridge()?.media?.sourcePath?.(file) || null; } catch { return null; }
+}
+/**
+ * The browser rendition of a video this viewer cannot decode. `keep` says
+ * the asset's bytes stay the original (the media store keeps originals, or
+ * the asset was imported that way): the rendition is then generated media,
+ * kept by the original's BLAKE3, and converted at most once per profile.
+ */
+async function playbackProxy(file: any, name: string, onStage?: (label: string) => void, original?: OriginalHash,
+  { link = null, keep = false }: { link?: any; keep?: boolean } = {}): Promise<any> {
+  const store = PM.MediaStore;
+  const originalHash = store?.rendition ? await Promise.resolve(original).catch(() => null) : null;
+  const kept = originalHash ? await store.rendition.get(originalHash).catch(() => null) : null;
   if (kept) return kept;
   const media = hostBridge()?.media;
-  if (!media?.createPlaybackProxy) {
+  /* Without a native path (a project file opened on another Mac, media
+     read back from IndexedDB or the store), main converts from the stored
+     object, the linked original, or the bytes this page sends. */
+  const fromStore = !nativeSource(file) && typeof store?.convert === 'function';
+  if (!fromStore && !media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
   }
   if (onStage) onStage('Optimizing video for playback');
   else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000, { error: false });
-  const result = await media.createPlaybackProxy(file, cloudSourcePaths.get(file));
+  const result = fromStore
+    ? await store.convert('video', file, { hash: originalHash, link, name })
+    : await media!.createPlaybackProxy(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');
   const proxy = await readProxyFile(result, name, file.lastModified);
-  if (storageKey && PM.MediaStore?.keepsOriginals) await PM.MediaStore.rendition.put(storageKey, proxy);
+  if (originalHash && (store?.keepsOriginals || keep)) await store.rendition.put(originalHash, proxy);
   return proxy;
 }
-async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
+/* A TIFF or HEIF original the media store keeps (new engine, section 21):
+   this viewer shows its PNG rendition, which is generated media. With Use
+   New Engine off the original may be only in IndexedDB (a project file
+   saved with it on, opened on another Mac); main converts those bytes. */
+const keepsStillOriginal = (kind: any, meta: any) => kind === 'image' && meta?.rendition === true && needsImageConversion(String(meta?.format || ''));
+async function stillRendition(meta: any, original: Blob, onStage?: (label: string) => void): Promise<Blob> {
+  const store = PM.MediaStore;
+  const link = meta.storage === 'linked' && meta.link ? meta.link : null;
+  const hash = typeof meta.contentHash === 'string' ? meta.contentHash : link?.hash ?? null;
+  const kept = hash ? await store?.rendition?.get?.(hash).catch(() => null) : null;
+  if (kept) return kept;
+  const name = `original.${meta.format}`;
+  const lastModified = (original as any).lastModified;
+  let png: Blob;
+  if (typeof store?.convert === 'function') {
+    onStage?.('Converting image');
+    const result = await store.convert('still', original, { hash, link, name });
+    if (!result.ok) throw new Error(result.error);
+    png = await readProxyFile(result, `${String(meta.name || 'image')}.png`, lastModified);
+  } else {
+    // A remote host's browser: its bridge uploads the bytes to convert.
+    png = await convertStillImage(new File([original], name, { type: original.type, ...(lastModified ? { lastModified } : {}) }), { onStage });
+  }
+  if (hash) await store?.rendition?.put?.(hash, png)?.catch?.(() => false);
+  return png;
+}
+async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any): Promise<any> {
+  if (keepsStillOriginal(kind, meta)) {
+    const original = blob;
+    blob = await stillRendition(meta, original, onStage);
+    const prepared: any = await prepareAsset({ id, name, kind, blob, meta: { ...meta, rendition: false }, onStage });
+    return Object.assign(prepared, { size: original.size || meta.size || prepared.size, rendition: true });
+  }
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
@@ -762,7 +819,9 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
           el.load();
         }
         window.URL.revokeObjectURL(url);
-        sourceBlob = await playbackProxy(blob, name, onStage, meta.storageKey);
+        sourceBlob = await playbackProxy(blob, name, onStage, meta.contentHash ?? meta.originalHash, {
+          link: meta.storage === 'linked' && meta.link ? meta.link : null, keep: meta.rendition === true,
+        });
         playbackProxyUsed = true;
         playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
@@ -773,8 +832,9 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
       }
     } else throw new Error('Unsupported media kind');
     /* The new engine plays originals, so its media store keeps them: the
-       playback proxy is only this viewer's rendition (section 21). */
-    const keepOriginal = playbackProxyUsed && meta.playbackProxy !== true && PM.MediaStore?.keepsOriginals === true;
+       playback proxy is only this viewer's rendition (section 21). An asset
+       imported that way stays so with the flag off. */
+    const keepOriginal = playbackProxyUsed && meta.playbackProxy !== true && (PM.MediaStore?.keepsOriginals === true || meta.rendition === true);
     if (keepOriginal) { playbackProxyUsed = false; playbackProxyVersion = 0; }
     const asset: any = {
       id, name, kind, url, el, storageKey: meta.storageKey,
@@ -896,24 +956,40 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
     assertCurrentProject();
     meta = { format: extension };
   }
+  /* With the media store keeping originals (new engine), a converted still
+     stores (or links) the TIFF or HEIF itself; the PNG is this viewer's
+     rendition, kept as generated media (section 21, originals kept). */
+  const keepStillOriginal = kind === 'image' && !resolved.animated && source !== file && PM.MediaStore?.keepsOriginals === true;
   /* Copy into project or Link to files (section 21; new engine only). */
   const decision = PM.HostMedia?.enabled ? await PM.HostMedia.decide({
     kind, sourcePath, requested: storage === 'link' || storage === 'copy' ? storage : undefined,
-    projectSetting: PM.HostMedia.projectStorage(), converted: source !== file,
+    projectSetting: PM.HostMedia.projectStorage(), converted: source !== file && !keepStillOriginal,
   }) : null;
   assertCurrentProject();
   const link = decision?.storage === 'linked' ? decision.link : null;
   onStage?.('Preparing media');
-  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey }, onStage });
+  const keepsOriginals = PM.MediaStore?.keepsOriginals === true;
   /* Images/audio can persist while they decode. Video preparation may replace
      an unsupported source with a much smaller playback proxy, so wait for that
-     decision before writing any video bytes to durable storage. */
+     decision before writing any video bytes to durable storage, unless the
+     media store keeps originals: then the file itself is stored either way. */
   const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
   // Observe storage failures immediately, even while decoding is still pending.
   const persist = (blob: any) => Promise.resolve().then(() => link ? true : PM.MediaStore.put(storageKey, blob, {
     storageKey, fingerprint, type: blob.type || file.type,
   })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
-  const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
+  const eagerBlob = keepStillOriginal ? file : source;
+  const eagerPersist = mayNeedPlaybackProxy && !keepsOriginals ? null : persist(eagerBlob);
+  /* Renditions are named by the BLAKE3 of the original they render (two
+     files can share a storage key): the link's hash, or the stored copy's. */
+  const storedHash = (result: any, blob: any): string | null =>
+    result?.status === 'fulfilled' && result.value === true ? PM.MediaStore.storedRecord?.(blob)?.hash ?? null : null;
+  const originalHash: Promise<string | null> | null = !keepsOriginals ? null
+    : link ? Promise.resolve(link.hash)
+      : eagerPersist ? eagerPersist.then((result) => storedHash(result, eagerBlob)) : null;
+  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey, ...(originalHash ? { originalHash } : {}) }, onStage });
+  const keptRendition = keepStillOriginal && originalHash
+    ? originalHash.then((hash) => hash ? PM.MediaStore.rendition.put(hash, source) : false) : null;
   const preparedResult: any = await Promise.resolve(preparation).then(
     value => ({ status: 'fulfilled', value }),
     reason => ({ status: 'rejected', reason })
@@ -921,6 +997,8 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
   const persistBlob = prepared?.persistBlob || source;
   if (prepared) delete prepared.persistBlob;
+  if (prepared && keepStillOriginal) Object.assign(prepared, { rendition: true, size: file.size || prepared.size });
+  if (keptRendition) await keptRendition;
   if (prepared) onStage?.('Saving media');
   const persistedResult: any = await (eagerPersist || (prepared
     ? persist(persistBlob) : { status: 'fulfilled', value: false }));
@@ -933,8 +1011,9 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const persisted = persistedResult.value;
   if (link) Object.assign(prepared, { storage: 'linked', link, contentHash: link.hash });
   else {
-    const record = PM.MediaStore.recordFor?.(storageKey);
-    if (persisted && record?.hash) prepared.contentHash = record.hash;
+    // The record of these bytes, not of the key: concurrent imports can share a key.
+    const hash = storedHash(persistedResult, eagerPersist ? eagerBlob : persistBlob);
+    if (hash) prepared.contentHash = hash;
   }
   return { prepared, kind, fingerprint, storageKey, sourcePath, persisted };
 }

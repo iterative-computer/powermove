@@ -20,6 +20,46 @@ import { CodeReader, frameBridge, log, PageEngine, verifying } from './page-engi
 
 const params = new URLSearchParams(location.search);
 const displayHz = Number(params.get('hz')) || null;
+/** `worker`: the viewer's presentation worker draws (bridge-worker.ts reads frames back there). */
+const offMain = params.get('present') === 'worker';
+let worker: Worker | null = null;
+type WorkerCheck = { checked: number; ok: number; mismatches: string[]; distinct: number };
+/** The latest checks of every presentation worker this page made. */
+const workerChecks = new Map<Worker, WorkerCheck>();
+
+function makeWorker(): Worker {
+  const w = new Worker('bridge-worker.js', { name: 'engine-present' });
+  w.addEventListener('message', (event) => {
+    if (event.data?.type === 'it-check') workerChecks.set(w, event.data.check as WorkerCheck);
+  });
+  worker = w;
+  return w;
+}
+
+function summedChecks(): WorkerCheck {
+  const sum: WorkerCheck = { checked: 0, ok: 0, mismatches: [], distinct: 0 };
+  for (const c of workerChecks.values()) {
+    sum.checked += c.checked;
+    sum.ok += c.ok;
+    sum.mismatches.push(...c.mismatches);
+    sum.distinct += c.distinct;
+  }
+  return sum;
+}
+
+/** Asks the current presentation worker and waits for its answer. */
+function askWorker<T>(type: 'it-quality', pick: (data: { type: string } & Record<string, unknown>) => T | undefined): Promise<T> {
+  const w = worker!;
+  return new Promise((resolve) => {
+    const listen = (event: MessageEvent): void => {
+      if (event.data?.type !== type) return;
+      w.removeEventListener('message', listen);
+      resolve(pick(event.data)!);
+    };
+    w.addEventListener('message', listen);
+    w.postMessage({ type });
+  });
+}
 const receiver = frameBridge();
 
 /* ── the test API bridge-main.ts calls ─────────────────────────────── */
@@ -34,18 +74,29 @@ let popout: Window | null = null;
 let presented = 0;
 
 async function start(): Promise<void> {
-  reader = await CodeReader.create();
-  presentation = new ViewerPresentation({
-    service: engine,
-    stage,
-    before: overlay,
-    createPainter: async (canvas) => verifying(await createWebGpuPainter(canvas), reader!),
-    log: (level, message) => log(`${level}: ${message}`)
-  });
-  presentation.onPresented((frame) => {
-    presented++;
-    reader!.verify(frame);
-  });
+  if (offMain) {
+    presentation = new ViewerPresentation({
+      service: engine,
+      stage,
+      before: overlay,
+      createWorker: makeWorker,
+      log: (level, message) => log(`${level}: ${message}`)
+    });
+    presentation.onPresented(() => presented++);
+  } else {
+    reader = await CodeReader.create();
+    presentation = new ViewerPresentation({
+      service: engine,
+      stage,
+      before: overlay,
+      createPainter: async (canvas) => verifying(await createWebGpuPainter(canvas), reader!),
+      log: (level, message) => log(`${level}: ${message}`)
+    });
+    presentation.onPresented((frame) => {
+      presented++;
+      reader!.verify(frame);
+    });
+  }
   presentation.update(view);
   new ResizeObserver(() => presentation?.update(view)).observe(stage);
 }
@@ -85,7 +136,7 @@ const api = {
   },
   /** The next drawn frame's ramp and HDR patch rows (a view change forces one). */
   async quality(): Promise<{ format: string; rows: import('./page-engine').QualityRows }> {
-    const rows = reader!.nextQuality();
+    const rows = offMain ? askWorker('it-quality', (d) => d['rows'] as import('./page-engine').QualityRows) : reader!.nextQuality();
     view = { ...view, pan: [view.pan[0] + 1, view.pan[1]] };
     presentation!.update(view);
     return { format: presentation!.state?.edr ? 'rgbaf16' : 'bgra', rows: await rows };
@@ -93,13 +144,14 @@ const api = {
   stats() {
     const latest = presentation?.latest ?? null;
     return {
+      offMainThread: presentation?.offMainThread ?? false,
       presented,
       presenting: presentation?.presenting ?? false,
       presenter: presentation?.stats() ?? null,
       state: presentation?.state ?? null,
       latest: latest && { seq: latest.seq, revision: latest.revision, viewSeq: latest.viewSeq, timed: latest.timed },
       overlayCss: presentation?.overlayInCss() ?? null,
-      code: reader ? { checked: reader.check.checked, ok: reader.check.ok, mismatches: reader.check.mismatches, distinct: reader.check.distinctSeqs.size } : null,
+      code: offMain ? summedChecks() : reader ? { checked: reader.check.checked, ok: reader.check.ok, mismatches: reader.check.mismatches, distinct: reader.check.distinctSeqs.size } : null,
       receiver: receiver.stats(),
       connections: engine.connections,
       connection: engine.connection ? { generation: engine.connection.generation, errors: engine.connection.errors } : null,

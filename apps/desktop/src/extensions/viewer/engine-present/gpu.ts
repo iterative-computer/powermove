@@ -68,13 +68,16 @@ struct Out { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
   return vec4f(textureSampleBaseClampToEdge(src, samp, v.uv).rgb, 1.0);
 }`;
 
-export async function createWebGpuPainter(canvas: HTMLCanvasElement, nav: NavigatorGpu = navigator as unknown as NavigatorGpu): Promise<FramePainter> {
+/** A page canvas, or the `OffscreenCanvas` it handed to the presentation worker. */
+export type PaintTarget = HTMLCanvasElement | OffscreenCanvas;
+
+export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu = navigator as unknown as NavigatorGpu): Promise<FramePainter> {
   const gpu = nav.gpu;
   if (!gpu) throw new Error('WebGPU is not available');
   const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('no WebGPU adapter');
   const device = await adapter.requestDevice();
-  const context = canvas.getContext('webgpu') as unknown as GPUCanvasContextLike | null;
+  const context = (canvas as HTMLCanvasElement).getContext('webgpu') as unknown as GPUCanvasContextLike | null;
   if (!context) throw new Error('no WebGPU canvas context');
   const module = device.createShaderModule({ code: SHADER });
   const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });

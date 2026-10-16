@@ -1,0 +1,738 @@
+{
+  "run": "app-playback-engine-load-r2",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.55126953125,
+      5.24072265625,
+      5.96826171875
+    ],
+    "after": [
+      4.7197265625,
+      5.10546875,
+      5.79443359375
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 43,
+    "offsetUs": 172453726583.5
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00116599998728,
+        "max": 50.04733300000953
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1157,
+      "replies": 1157,
+      "replyBytes": 91046738,
+      "mainMsP50": 0.06775000001653098
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.62bc7ecc69324000b7d761d9daf6165e",
+    "accepted": {
+      "pid": 9949,
+      "pidversion": 2229622
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 13929
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 51,
+      "notPresented": 54,
+      "drops": 105,
+      "presented": 1688,
+      "offSlot": 986
+    },
+    "jitterAbsMs": {
+      "n": 1688,
+      "p50": 8.262,
+      "p95": 24.801,
+      "p99": 33.307,
+      "max": 49.713
+    },
+    "intervalErrorAbsMs": {
+      "n": 1599,
+      "p50": 0,
+      "p95": 24.999,
+      "p99": 33.333,
+      "max": 50
+    },
+    "irregularIntervals": 596,
+    "rafToPresentMs": {
+      "n": 1688,
+      "p50": 28.27,
+      "p95": 36.67,
+      "p99": 45,
+      "max": 78.21
+    },
+    "drawMainThreadMs": {
+      "n": 1749,
+      "p50": 1.3,
+      "p95": 12.8,
+      "p99": 30,
+      "max": 38
+    },
+    "arrivalLeadMs": {
+      "n": 1801,
+      "p50": -123.56,
+      "p95": -92.46,
+      "p99": -78.73,
+      "max": -66.73
+    },
+    "rafGapMs": {
+      "n": 6022,
+      "p50": 8.3,
+      "p95": 25,
+      "p99": 41.7,
+      "max": 58.7
+    },
+    "rafGapsOver25Ms": 300,
+    "missing": [
+      {
+        "k": 76,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 83,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 84,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 89,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 98,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 106,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 110,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 111,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 112,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 113,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 230,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 242,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 252,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 259,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 261,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 263,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 382,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 383,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 396,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 398,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 400,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 403,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 406,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 410,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 527,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 533,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 539,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 545,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 547,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 675,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 676,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 677,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 678,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 681,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 687,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 690,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 697,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 699,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 701,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 707,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 825,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 829,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 831,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 835,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 838,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 849,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 852,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 860,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 861,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 863,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 975,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 982,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 983,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 984,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 985,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 989,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 992,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 996,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 998,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1001,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1011,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1125,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1135,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1139,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1142,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1144,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1149,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1151,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1153,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1162,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1275,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1283,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1284,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1288,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1304,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1307,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1311,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1312,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1425,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1430,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1458,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1459,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1460,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1466,
+        "state": "STATE_DROPPED",
+        "near": "none"
+      },
+      {
+        "k": 1575,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1583,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1585,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1589,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1592,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1600,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1604,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1607,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1609,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1612,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1615,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1725,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1729,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1735,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1738,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1748,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1750,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1752,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1755,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1756,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1758,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "2": 586,
+      "3": 832,
+      "4": 236,
+      "5": 26,
+      "7": 6,
+      "8": 1,
+      "9": 1
+    },
+    "presenter": {
+      "received": 1851,
+      "drawn": 1796,
+      "dropped": {
+        "late": 51
+      },
+      "released": 1846,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 5,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 346
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 8,
+      "received": 8,
+      "released": 0,
+      "videoFrames": 1851,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

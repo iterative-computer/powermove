@@ -1,0 +1,498 @@
+{
+  "run": "app-playback-today-load-behind-r2",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "behind",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.94482421875,
+      6.20263671875,
+      6.41259765625
+    ],
+    "after": [
+      6.580078125,
+      6.2138671875,
+      6.37255859375
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 55,
+    "offsetUs": 174211083192.49997
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00075000000652,
+        "max": 50.032958999989205
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1186,
+      "replies": 1186,
+      "replyBytes": 93328864,
+      "mainMsP50": 0.06591699999989942
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14374
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 77922.90000000596,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1801,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 1,
+      "notPresented": 66,
+      "drops": 67,
+      "presented": 1726,
+      "offSlot": 726
+    },
+    "jitterAbsMs": {
+      "n": 1726,
+      "p50": 0.356,
+      "p95": 25.064,
+      "p99": 41.524,
+      "max": 58.358
+    },
+    "intervalErrorAbsMs": {
+      "n": 1670,
+      "p50": 0,
+      "p95": 16.666,
+      "p99": 33.333,
+      "max": 41.667
+    },
+    "irregularIntervals": 728,
+    "rafToPresentMs": {
+      "n": 1726,
+      "p50": 11.91,
+      "p95": 28.73,
+      "p99": 44.85,
+      "max": 62.43
+    },
+    "rafGapMs": {
+      "n": 6419,
+      "p50": 8.3,
+      "p95": 16.7,
+      "p99": 25.6,
+      "max": 66.7
+    },
+    "rafGapsOver25Ms": 107,
+    "missing": [
+      {
+        "k": 111,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 112,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 113,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 115,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 121,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 123,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 259,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 288,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 413,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 417,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 419,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 421,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 422,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 423,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 435,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 559,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 566,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 567,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 571,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 584,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 585,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 710,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 712,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 715,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 716,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 718,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 720,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 862,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 866,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 867,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 878,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 892,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1013,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1019,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1022,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1029,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1030,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1032,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1034,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1038,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1040,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1159,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1166,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1169,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1181,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1182,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1310,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1314,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1323,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1333,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1456,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1460,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1464,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1469,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1470,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1475,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1476,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1486,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1610,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1624,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1761,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1765,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1767,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1772,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1776,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1781,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1786,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 990,
+      "2": 444,
+      "3": 225,
+      "4": 45,
+      "5": 10,
+      "6": 7,
+      "7": 5
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}
