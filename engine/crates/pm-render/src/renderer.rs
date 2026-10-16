@@ -295,6 +295,7 @@ impl Renderer {
             w,
             h,
             scale,
+            request.video_end,
             assets,
         );
         if !request.background {
@@ -519,6 +520,7 @@ impl Renderer {
             w,
             h,
             scale,
+            request.video_end,
             assets,
         );
         if !build.unsupported.is_empty() {

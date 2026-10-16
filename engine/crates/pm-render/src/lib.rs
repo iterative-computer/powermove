@@ -37,4 +37,4 @@ pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer};
-pub use request::RenderRequest;
+pub use request::{RenderRequest, VideoEnd};

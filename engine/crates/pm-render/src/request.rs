@@ -8,6 +8,34 @@ use pm_protocol::validate::Validate;
 
 use crate::error::RenderError;
 
+/// How close to a video clip's end its source time may go: today's
+/// `videoPlaybackTime(asset, time, endPadding)` keeps a source time at least
+/// `endPadding` before the asset's duration, and the padding depends on the
+/// path that draws the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoEnd {
+    /// The viewer, scrubbing, and thumbnails: the compositor's own seeks,
+    /// `endPadding = 0.04` s.
+    #[default]
+    Preview,
+    /// Exports and agent stills: `prepareFrame` seeks every clip first with
+    /// `endPadding = 1 / fps` of the exported composition, so the last
+    /// frame of a clip that ends with the composition is kept.
+    Final,
+}
+
+impl VideoEnd {
+    /// The output kind of a contract 2 request: exports and agent captures
+    /// are final output.
+    pub const fn of(purpose: pm_protocol::frame::FramePurpose) -> VideoEnd {
+        if purpose.is_final() {
+            VideoEnd::Final
+        } else {
+            VideoEnd::Preview
+        }
+    }
+}
+
 /// A render of one composition at one time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderRequest {
@@ -32,6 +60,8 @@ pub struct RenderRequest {
     /// The frame feeds an export: media decodes at export depth
     /// (amendment 6: ProRes 422 as `v216`).
     pub export: bool,
+    /// The end-of-clip padding of video sources ([`VideoEnd`]).
+    pub video_end: VideoEnd,
 }
 
 impl RenderRequest {
@@ -47,6 +77,7 @@ impl RenderRequest {
             depth_id: false,
             background: true,
             export: false,
+            video_end: VideoEnd::Preview,
         }
     }
 
@@ -61,6 +92,7 @@ impl RenderRequest {
             depth_id: false,
             background: true,
             export: false,
+            video_end: VideoEnd::Preview,
         }
     }
 
@@ -86,6 +118,7 @@ impl RenderRequest {
             depth_id: request.depth_id,
             background: true,
             export: request.purpose == pm_protocol::frame::FramePurpose::Export,
+            video_end: VideoEnd::of(request.purpose),
         })
     }
 

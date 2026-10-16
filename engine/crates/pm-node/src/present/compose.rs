@@ -292,6 +292,7 @@ impl Composer {
                 depth_id: false,
                 background: true,
                 export: false,
+                video_end: pm_render::VideoEnd::Preview,
             };
             let reuse = self
                 .scratch
