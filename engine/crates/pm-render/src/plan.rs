@@ -103,6 +103,8 @@ pub enum Source {
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
+    /// A text or captions raster (`crate::text`).
+    Text(Box<crate::text::TextPlan>),
 }
 
 /// Inputs and outputs of a build.
@@ -112,6 +114,8 @@ pub struct Build<'r> {
     pub unsupported: Vec<Unsupported>,
     retime: RetimeCache,
     precomp_depth: u32,
+    /// Text layout and glyph caches (`None`: text layers are unsupported).
+    text: Option<&'r mut crate::text::TextContext>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -130,12 +134,30 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
+    build_with_text(ev, root_comp, project, time, width, height, scale, assets, None)
+}
+
+/// [`build`] with text layout: text and captions layers draw through
+/// `text` (its fonts and glyph caches).
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_text<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    text: Option<&'r mut crate::text::TextContext>,
+) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
         failures: Vec::new(),
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
         precomp_depth: 0,
+        text,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -667,6 +689,7 @@ fn native_content_quad<'d>(
                 }
             }
         }
+        "text" | "captions" => text_quad(scope, b, layer, &ty, time, scale),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -677,6 +700,45 @@ fn native_content_quad<'d>(
             Ok(None)
         }
     }
+}
+
+/// A text or captions layer's raster quad (`crate::text`), at the density
+/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+fn text_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Option<Quad>> {
+    let comp_id = scope.comp.id().to_string_lossy();
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        b.unsupported.push(Unsupported::layer(
+            &comp_id,
+            layer,
+            Feature::LayerType(format!("{ty} (no fonts configured)")),
+        ));
+        return Ok(None);
+    };
+    if ty == "captions" && text.captions_hidden() {
+        return Ok(None);
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    let raster_scale = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, raster_scale)?
+    } else {
+        text.captions_layer(scope, layer, time, raster_scale)?
+    };
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
+    }))
 }
 
 /// `Math.max(1, Number(d.w || comp.w || W))` before the `max`.

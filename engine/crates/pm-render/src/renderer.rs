@@ -37,6 +37,18 @@ pub struct Frame {
     pub seconds: f64,
 }
 
+/// One layer's text raster ([`Renderer::text_raster`]).
+pub struct TextRaster {
+    /// Premultiplied working values of the plan's crop, top-down.
+    pub pixels: Vec<f32>,
+    /// The whole canvas in device pixels (`plan.crop` is a part of it).
+    pub canvas: (u32, u32),
+    /// The crop's quad in layer pixels and its anchor.
+    pub box_size: (f64, f64),
+    pub anchor: (f64, f64),
+    pub plan: crate::text::TextPlan,
+}
+
 /// A pass-through candidate ([`Renderer::pass_through`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PassThrough {
@@ -105,6 +117,8 @@ pub struct Renderer {
     scene3d: Scene3dRenderer,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
+    text: crate::text::TextContext,
+    text_gpu: crate::text::gpu::TextGpu,
 }
 
 impl Renderer {
@@ -115,7 +129,10 @@ impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Renderer {
         let pipelines = Pipelines::new(&device);
         let media = MediaCache::new(&device);
+        let text_gpu = crate::text::gpu::TextGpu::new(&device);
         Renderer {
+            text: crate::text::TextContext::default(),
+            text_gpu,
             pipelines,
             media,
             pool: TargetPool::new(),
@@ -131,6 +148,30 @@ impl Renderer {
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
         self.bracket = bracket;
+    }
+
+    /// The fonts text and captions layers lay out with (`None`: those
+    /// layers are unsupported and route to the legacy renderer). Dropping
+    /// or replacing them clears the glyph and raster caches.
+    pub fn set_text_fonts(&mut self, fonts: Option<Box<dyn crate::text::TextFonts>>) {
+        self.text.set_fonts(fonts);
+        self.text_gpu.clear();
+    }
+
+    /// Text layout and rendering state (profiles, the captions switch).
+    pub fn text(&mut self) -> &mut crate::text::TextContext {
+        &mut self.text
+    }
+
+    /// The GPU side of text rendering (coverage source, cache, counters).
+    pub fn text_gpu(&mut self) -> &mut crate::text::gpu::TextGpu {
+        &mut self.text_gpu
+    }
+
+    /// `PM.captionsHidden` for the following frames: an export without
+    /// burned-in captions (`captionsBurn: false`) draws no captions layer.
+    pub fn set_captions_hidden(&mut self, hidden: bool) {
+        self.text.set_captions_hidden(hidden);
     }
 
     /// A renderer on its own device (`pm_gpu::Gpu::new`).
@@ -287,7 +328,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build(
+        let (mut plan, build) = plan::build_with_text(
             &mut self.evaluator,
             &comp,
             &project,
@@ -296,6 +337,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            Some(&mut self.text),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -327,6 +369,7 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                text: &mut self.text_gpu,
                 precision: request.precision,
                 working: ProjectColor::DEFAULT.working(),
                 export: request.export,
@@ -489,6 +532,78 @@ impl Renderer {
         }))
     }
 
+    /// The canvas raster of one text or captions layer at composition time
+    /// `seconds`, drawn at raster scale `scale` (what today's `PM.raster(L,
+    /// scale, T)` paints), read back. `None` when the layer draws nothing
+    /// (no cue showing, no ink). For parity tests, `pm-cli`, and debugging.
+    pub fn text_raster(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        seconds: f64,
+        scale: f64,
+        precision: Precision,
+    ) -> Result<Option<TextRaster>, RenderError> {
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let root = document.root().unwrap();
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        if !self.text.has_fonts() {
+            return Err(RenderError::Unsupported(vec![Unsupported::request(
+                "text without configured fonts",
+            )]));
+        }
+        let mut scope = pm_eval::Scope::new(&mut self.evaluator, &comp, &project);
+        let node = scope
+            .layers()
+            .iter()
+            .find(|l| crate::js::layer_id(l) == layer)
+            .ok_or_else(|| RenderError::Request(format!("no layer {layer}")))?;
+        let ty = crate::js::layer_type(node);
+        let quad = match ty.as_str() {
+            "text" => self.text.text_layer(&mut scope, node, seconds, scale),
+            "captions" => self.text.captions_layer(&mut scope, node, seconds, scale),
+            other => return Err(RenderError::Request(format!("layer {layer} is {other}"))),
+        }
+        .map_err(|e| RenderError::Request(e.to_string()))?;
+        let Some(quad) = quad else { return Ok(None) };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text raster"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &quad.plan,
+                precision,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+        Ok(Some(TextRaster {
+            pixels,
+            canvas: (quad.plan.scene.width, quad.plan.scene.height),
+            box_size: (quad.w, quad.h),
+            anchor: (quad.ax, quad.ay),
+            plan: quad.plan,
+        }))
+    }
+
     /// The plan of a frame without rendering it (tests, `pm-cli parity`).
     pub fn plan(
         &mut self,
@@ -511,7 +626,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build(
+        let (plan, build) = plan::build_with_text(
             &mut self.evaluator,
             &comp,
             &project,
@@ -520,6 +635,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            Some(&mut self.text),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

@@ -31,10 +31,11 @@ mod renderer;
 mod request;
 pub mod scene3d;
 pub mod stills;
+pub mod text;
 pub mod three;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
 pub use error::{LayerFailure, RenderError};
-pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer};
+pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer, TextRaster};
 pub use request::RenderRequest;
