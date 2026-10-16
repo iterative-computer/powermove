@@ -33,7 +33,8 @@ import { userInput, type UserInput } from '../user-input';
 import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
 import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
 import type { TranscriptionService } from '../transcription/service';
-import type { AgentFramesResult, ExportVideoInput, ExportVideoResult, FramesPlan, RenderStatus } from '../engine/agent-jobs';
+import { AGENT_PRESETS, type AgentFramesResult, type ExportVideoInput, type ExportVideoResult, type FramesPlan, type RenderStatus } from '../engine/agent-jobs';
+import { isRenderFormat, migrateFormat, supportsAlpha } from '../../shared/delivery';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
 const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
@@ -55,22 +56,52 @@ export interface AgentEngineJobs {
   cancelRun(run: string): Promise<number>;
 }
 
-const EXPORT_FORMATS = new Set(['mp4', 'prores']);
+/** `export_video` formats: today's `mp4` (H.264) and `prores` (ProRes 4444),
+ *  and every delivery format at cutover (plan section 17). */
+export const EXPORT_FORMATS = new Set(['mp4', 'prores', 'prores-proxy', 'prores-lt', 'prores-422', 'prores-hq', 'prores-4444', 'prores-4444xq', 'h264', 'hevc', 'webm-vp9', 'webm-vp8', 'png', 'still']);
+/** Formats the current exporter writes when the new engine routes a project to it. */
+const LEGACY_EXPORT_FORMATS: Readonly<Record<string, 'mp4' | 'prores'>> = { mp4: 'mp4', h264: 'mp4', prores: 'prores', 'prores-4444': 'prores' };
+const EXPORT_PRESETS = new Set(Object.keys(AGENT_PRESETS));
 const EXPORT_RANGES = new Set(['all', 'work']);
 const EXPORT_MODES = new Set(['wait', 'async']);
-const EXPORT_KEYS = new Set(['name', 'format', 'range', 'audio', 'motionBlur', 'alpha', 'mode']);
+const EXPORT_KEYS = new Set(['name', 'format', 'preset', 'range', 'audio', 'motionBlur', 'alpha', 'mode']);
 
 /** `export_video` arguments with the legacy exporter's defaults (mcp-project-tools.ts). */
 export function exportVideoInput(args: Record<string, unknown>): ExportVideoInput {
   for (const key of Object.keys(args)) if (!EXPORT_KEYS.has(key)) throw new Error(`export_video does not take ${key}.`);
-  const { name, format = 'mp4', range = 'all', audio = true, motionBlur = true, alpha = false, mode = 'wait' } = args;
+  const { name, preset, range = 'all', audio = true, motionBlur = true, mode = 'wait' } = args;
+  if (preset !== undefined && !EXPORT_PRESETS.has(preset as string)) throw new Error(`export_video preset is one of ${[...EXPORT_PRESETS].join(', ')}.`);
+  // Without a preset, today's default: MP4 (H.264).
+  const format = args['format'] ?? (preset === undefined ? 'mp4' : '');
+  const alpha = args['alpha'] ?? (preset === 'master-alpha' || preset === 'png');
   if (name !== undefined && (typeof name !== 'string' || !name.length || name.length > 120)) throw new Error('export_video name is 1 to 120 characters.');
-  if (!EXPORT_FORMATS.has(format as string)) throw new Error('export_video format is mp4 or prores.');
+  if (format !== '' && !EXPORT_FORMATS.has(format as string)) throw new Error(`export_video format is one of ${[...EXPORT_FORMATS].join(', ')}.`);
   if (!EXPORT_RANGES.has(range as string)) throw new Error('export_video range is all or work.');
   if (!EXPORT_MODES.has(mode as string)) throw new Error('export_video mode is wait or async.');
   if (typeof audio !== 'boolean' || typeof motionBlur !== 'boolean' || typeof alpha !== 'boolean') throw new Error('export_video audio, motionBlur, and alpha are booleans.');
-  if (alpha && format !== 'prores') throw new Error('Transparent video requires ProRes.');
-  return { ...(name !== undefined ? { name: name as string } : {}), format: format as ExportVideoInput['format'], range: range as ExportVideoInput['range'], audio, motionBlur, alpha, mode: mode as 'wait' | 'async' };
+  const delivery = format === '' ? undefined : migrateFormat(format);
+  if (alpha && delivery && isRenderFormat(delivery) && !supportsAlpha(delivery, { highDepth: false })) {
+    throw new Error('Transparent video requires ProRes 4444, ProRes 4444 XQ, HEVC, WebM, or PNG.');
+  }
+  return {
+    ...(name !== undefined ? { name: name as string } : {}),
+    format: format as string,
+    ...(preset !== undefined ? { preset: preset as string } : {}),
+    range: range as ExportVideoInput['range'], audio, motionBlur, alpha, mode: mode as 'wait' | 'async'
+  };
+}
+
+/** The current exporter's `export_video` arguments for an export the new
+ *  engine routed to it; it writes MP4 (H.264) and ProRes 4444 only. */
+export function legacyExportArgs(input: ExportVideoInput): Record<string, unknown> {
+  const format = LEGACY_EXPORT_FORMATS[input.format || (input.preset === 'master-alpha' ? 'prores' : input.preset ? '' : 'mp4')];
+  if (!format) {
+    throw new Error('This project needs the current exporter, which writes MP4 (H.264) and ProRes 4444; export it as format mp4 or prores.');
+  }
+  return {
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    format, range: input.range, audio: input.audio, motionBlur: input.motionBlur, alpha: input.alpha && format === 'prores'
+  };
 }
 
 interface ToolSocketRequest {
@@ -528,7 +559,7 @@ export class PowermoveAgentToolBridge {
         if (routed) return routed;
       }
       // The legacy exporter: renderer frames, main's encoder (render-encoder.ts).
-      const { mode: _mode, ...legacy } = args;
+      const legacy = legacyExportArgs(input);
       return withAgentExport(session.owner, this.options.exportDirectory, () =>
         this.callRenderer(session, '__mcp_export_video', legacy));
     }

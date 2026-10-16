@@ -66,7 +66,8 @@ describe('native Powermove agent tool bridge', () => {
       await bridge.callTool(session, 'save_project', {});
       await bridge.callTool(session, 'export_video', { audio: true });
       expect(owner.requests.map(request => request.tool)).toEqual(['get_project_state', '__mcp_save_project', 'get_project_state', '__mcp_export_video']);
-      expect(owner.requests.at(-1)?.arguments).toEqual({ audio: true });
+      // The current exporter gets the normalized arguments it understands.
+      expect(owner.requests.at(-1)?.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
       expect(session.mcpConfig.toolTimeoutSec).toBeGreaterThanOrEqual(3600);
       const planning = await bridge.openSession({ runId: 'delivery-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
       await expect(bridge.callTool(planning, 'export_video', {})).rejects.toThrow('only inspect');
@@ -119,7 +120,7 @@ describe('native Powermove agent tool bridge', () => {
       await bridge.callTool(session, 'export_video', { audio: true, mode: 'async' });
       await bridge.callTool(session, 'render_frames', { times: [0] });
       expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__mcp_export_video', '__engine_frames_plan', 'render_frames']);
-      expect(owner.requests[2]!.arguments).toEqual({ audio: true });
+      expect(owner.requests[2]!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
       await expect(bridge.callTool(session, 'export_video', { alpha: true })).rejects.toThrow('ProRes');
       await expect(bridge.callTool(session, 'export_video', { codec: 'x' })).rejects.toThrow('does not take codec');
       // Rolling back the run cancels its jobs.
