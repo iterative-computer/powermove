@@ -30,6 +30,9 @@ export type Launch = {
   control(message: EngineControl, transfer?: PortLike[]): void;
   /** What the engine reported when it started (build, pid, clock check). */
   started?: { build: string; pid: number; clockSkewUs: number | null };
+  /** The engine's status report, or null when it exits first or does not
+   *  answer within `timeoutMs`. */
+  report(timeoutMs?: number): Promise<unknown>;
 };
 
 export type SupervisorOptions = {
@@ -180,11 +183,27 @@ export class EngineSupervisor {
     const hostPort = this.options.nextPortId();
     const launchRef = (): Launch | null => (this.launch?.generation === generation ? this.launch : null);
     const connection = new HostConnection(process, hostPort, port2, this.options.handler(launchRef), this.options.log);
+    const reports = new Map<number, (value: unknown) => void>();
+    let nextReport = 1;
     const launch: Launch = {
       process,
       generation,
       hostPort,
       connection,
+      report: (timeoutMs = 2000) =>
+        new Promise<unknown>((resolve) => {
+          if (exiting || this.child !== child) return resolve(null);
+          const id = nextReport++;
+          const timer = setTimeout(() => {
+            reports.delete(id);
+            resolve(null);
+          }, timeoutMs);
+          reports.set(id, (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          });
+          send({ type: 'status', id });
+        }),
       // Known once the process has spawned.
       get pid() {
         return child.pid;
@@ -198,7 +217,17 @@ export class EngineSupervisor {
     let fatal: string | null = null;
     child.on('message', (notice: unknown) => {
       if (!isEngineNotice(notice)) return;
-      if (notice.type === 'log') this.options.log(notice.level, `[${process} engine] ${notice.message}`);
+      if (notice.type === 'status') {
+        const answer = reports.get(notice.id);
+        reports.delete(notice.id);
+        let value: unknown = null;
+        try {
+          value = JSON.parse(notice.json);
+        } catch {
+          value = null;
+        }
+        answer?.(value);
+      } else if (notice.type === 'log') this.options.log(notice.level, `[${process} engine] ${notice.message}`);
       else if (notice.type === 'fatal') {
         // The engine cannot run in this installation (the addon is missing
         // or does not load): restarting would only repeat it.
@@ -218,6 +247,8 @@ export class EngineSupervisor {
     child.on('exit', (code: number) => {
       hostLoss?.cancel();
       exiting = true;
+      for (const answer of reports.values()) answer(null);
+      reports.clear();
       controlPort.close();
       this.onExit(launch, code, fatal);
     });

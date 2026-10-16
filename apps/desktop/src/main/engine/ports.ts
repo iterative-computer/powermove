@@ -51,18 +51,23 @@ export type EngineControl =
   /** Destroy the viewer presenter's GPU device as a real loss would (the
    *  recovery test; interactive engine). */
   | { type: 'simulateGpuLoss' }
+  /** The engine's status report (sessions, lease, presenter counters,
+   *  routes, audio): diagnostics and measurements. */
+  | { type: 'status'; id: number }
   | { type: 'shutdown' };
 
 /** Messages from an engine process to main (over its parent port). */
 export type EngineNotice =
   | { type: 'started'; build: string; pid: number; clock: number }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string }
-  | { type: 'fatal'; message: string };
+  | { type: 'fatal'; message: string }
+  /** The answer to a `status` control message (pm-node's status JSON). */
+  | { type: 'status'; id: number; json: string };
 
 export function isEngineNotice(value: unknown): value is EngineNotice {
   if (typeof value !== 'object' || value === null) return false;
   const type = (value as { type?: unknown }).type;
-  return type === 'started' || type === 'log' || type === 'fatal';
+  return type === 'started' || type === 'log' || type === 'fatal' || type === 'status';
 }
 
 /** What a client (a renderer window) receives for each engine connection. */

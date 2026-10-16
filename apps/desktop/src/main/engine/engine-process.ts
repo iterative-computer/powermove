@@ -121,6 +121,8 @@ function main(): void {
     } else if (message?.type === 'simulateGpuLoss') {
       const lost = engine.simulateGpuLoss?.() === true;
       notify({ type: 'log', level: 'warn', message: lost ? 'simulated a GPU device loss' : 'this engine does not present; no GPU device to lose' });
+    } else if (message?.type === 'status' && Number.isSafeInteger(message.id)) {
+      notify({ type: 'status', id: message.id, json: engine.status() });
     } else if (message?.type === 'shutdown') {
       shutdown();
     }

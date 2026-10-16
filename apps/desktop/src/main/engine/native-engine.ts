@@ -196,6 +196,15 @@ export class NativeEngine {
     return true;
   }
 
+  /** An engine's own status report (sessions, lease, the presenter's
+   *  counters, routes, and audio): diagnostics, the e2e suite, and the
+   *  measurements. Null when it is not running or does not answer. */
+  async report(process: EngineProcess = 'interactive'): Promise<unknown> {
+    const launch = this.supervisors[process].current;
+    if (!launch || launch.exiting) return null;
+    return launch.report();
+  }
+
   status(): NativeEngineStatus {
     const one = (s: EngineSupervisor): EngineProcessStatus => ({
       state: s.state,
