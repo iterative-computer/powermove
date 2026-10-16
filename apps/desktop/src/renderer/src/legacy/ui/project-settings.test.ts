@@ -292,3 +292,33 @@ describe('Settings › Project › Media (new engine)', () => {
     control.destroy();
   });
 });
+
+describe('Settings › Project › Color (new engine)', () => {
+  it('shows linear blending and precision only with the new engine, and applies each change', () => {
+    let settings: { linearBlending: boolean; precision: 'float16' | 'float32' } = { linearBlending: false, precision: 'float16' };
+    const applyProjectColor = vi.fn((patch: Partial<typeof settings>) => { settings = { ...settings, ...patch }; });
+    const host = bridge({ projectColor: () => settings, applyProjectColor });
+    const control = createProjectSettingsControl(host.api);
+    expect([...control.element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
+      .toEqual(['Composition', 'Color', 'Export']);
+    const linear = field(control, 'Blend in linear light') as HTMLInputElement;
+    const precision = field(control, 'Precision') as HTMLSelectElement;
+    expect(linear.type).toBe('checkbox');
+    expect(linear.checked).toBe(false);
+    expect([...precision.options].map((option) => [option.value, option.textContent])).toEqual([['float16', '16-bit float'], ['float32', '32-bit float']]);
+    expect(precision.value).toBe('float16');
+    linear.checked = true;
+    change(linear);
+    expect(applyProjectColor).toHaveBeenLastCalledWith({ linearBlending: true });
+    precision.value = 'float32';
+    change(precision);
+    expect(applyProjectColor).toHaveBeenLastCalledWith({ precision: 'float32' });
+    expect(applyProjectColor).toHaveBeenCalledTimes(2);
+    // An edit made elsewhere (undo) shows on refresh.
+    settings = { linearBlending: false, precision: 'float16' };
+    control.refresh();
+    expect(linear.checked).toBe(false);
+    expect(precision.value).toBe('float16');
+    control.destroy();
+  });
+});

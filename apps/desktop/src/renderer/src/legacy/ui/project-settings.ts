@@ -9,6 +9,7 @@ import {
   type ExportDefaults
 } from '../../core/export-defaults';
 import { createSettingsSection } from './settings-section';
+import { PRECISION_OPTIONS, type ProjectColorSettings } from '../../../../shared/project-color';
 
 /** Composition fields the Project tab and the New project dialog both edit. */
 export interface CompositionValues {
@@ -47,6 +48,13 @@ export interface ProjectSettingsBridge {
    */
   mediaImport?(): MediaImportMode;
   applyMediaImport?(mode: MediaImportMode): void;
+  /**
+   * Settings › Project › Color (section 9): blending in linear light and
+   * intermediate precision. Present only with the new engine, which renders
+   * them. Each change is one Undo step.
+   */
+  projectColor?(): ProjectColorSettings;
+  applyProjectColor?(patch: Partial<ProjectColorSettings>): void;
 }
 
 /** "When importing": Copy into project (the default) or Link to files. */
@@ -270,6 +278,33 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     );
   }
 
+  let linearLight: HTMLInputElement | null = null;
+  let precision: HTMLSelectElement | null = null;
+  const color = bridge.projectColor && bridge.applyProjectColor ? createSettingsSection('Color') : null;
+  if (color) {
+    linearLight = checkbox('Blend in linear light');
+    precision = select('Precision');
+    fillOptions(precision, PRECISION_OPTIONS);
+    color.body.append(
+      row('Blend in linear light', 'Mix layers, opacity, and soft edges as light adds up. Off keeps the classic look.', linearLight).element,
+      row('Precision', 'Bit depth of the images the project is composited in.', precision).element
+    );
+    linearLight.addEventListener('change', () => {
+      bridge.applyProjectColor?.({ linearBlending: linearLight!.checked });
+      syncColor();
+    });
+    precision.addEventListener('change', () => {
+      bridge.applyProjectColor?.({ precision: precision!.value === 'float32' ? 'float32' : 'float16' });
+      syncColor();
+    });
+  }
+  const syncColor = (): void => {
+    if (!bridge.projectColor) return;
+    const current = bridge.projectColor();
+    if (linearLight) linearLight.checked = current.linearBlending;
+    if (precision) precision.value = current.precision;
+  };
+
   let mediaImport: HTMLSelectElement | null = null;
   const media = bridge.mediaImport && bridge.applyMediaImport ? createSettingsSection('Media') : null;
   if (media) {
@@ -336,7 +371,12 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   note.textContent = 'The Export dialog opens with these settings, and remembers whatever you change there.';
   exports.element.append(note);
 
-  element.append(composition.element, ...(media ? [media.element] : []), exports.element);
+  element.append(
+    composition.element,
+    ...(color ? [color.element] : []),
+    ...(media ? [media.element] : []),
+    exports.element
+  );
 
   const editing = (field: HTMLElement): boolean => document.activeElement === field;
 
@@ -398,7 +438,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
   };
 
-  const refresh = (): void => { syncComposition(); syncMedia(); syncExport(); };
+  const refresh = (): void => { syncComposition(); syncColor(); syncMedia(); syncExport(); };
 
   name.addEventListener('change', () => {
     const next = name.value.trim();
