@@ -2,3 +2,9 @@
 //! (docs/engine/vector.md).
 
 pub mod msaa;
+pub mod blink;
+pub mod skpath;
+pub mod tess;
+pub mod context;
+pub mod shape;
+pub mod stroke;

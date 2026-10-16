@@ -207,6 +207,107 @@ impl MsaaTarget {
     }
 }
 
+/// Debugging aid: for pixel `(px, py)`, each sample's nearest edge distance
+/// in grid units (signed, exact rational as f64) for the given polygons.
+pub fn explain(contours: &[Vec<[f64; 2]>], px: i64, py: i64) -> Vec<(usize, f64, bool)> {
+    let mut out = Vec::new();
+    for (si, s) in SAMPLES_4X.iter().enumerate() {
+        let (sx, sy) = sample_grid(px, py, *s);
+        let mut best = f64::INFINITY;
+        let mut w = 0;
+        for c in contours {
+            for i in 0..c.len() {
+                let (a, b) = (c[i], c[(i + 1) % c.len()]);
+                let (ax, ay, bx, by) = (snap(a[0]), snap(a[1]), snap(b[0]), snap(b[1]));
+                if ay == by {
+                    continue;
+                }
+                let (x0, y0, x1, y1, wd) = if ay < by { (ax, ay, bx, by, 1) } else { (bx, by, ax, ay, -1) };
+                if sy < y0 || sy >= y1 {
+                    continue;
+                }
+                let den = y1 - y0;
+                let num = x0 * den + (x1 - x0) * (sy - y0);
+                let d = (sx * den - num) as f64 / den as f64;
+                if d.abs() < best.abs() {
+                    best = d;
+                }
+                if num <= sx * den {
+                    w += wd;
+                }
+            }
+        }
+        out.push((si, best, w != 0));
+    }
+    out
+}
+
+/// Rasterizes triangles (window coordinates) into `mask` as their union,
+/// with the same snapping and top-left rule as [`fill_polygons`].
+pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
+    let one = 1i64 << SUBPIXEL_BITS;
+    for t in tris {
+        let v: Vec<(i64, i64)> = t.iter().map(|p| (snap(f64::from(p[0])), snap(f64::from(p[1])))).collect();
+        // Zero-area triangles cover nothing.
+        let area = (v[1].0 - v[0].0) * (v[2].1 - v[0].1) - (v[2].0 - v[0].0) * (v[1].1 - v[0].1);
+        if area == 0 {
+            continue;
+        }
+        let (minx, maxx) = (v.iter().map(|p| p.0).min().unwrap(), v.iter().map(|p| p.0).max().unwrap());
+        let (miny, maxy) = (v.iter().map(|p| p.1).min().unwrap(), v.iter().map(|p| p.1).max().unwrap());
+        let px0 = (minx.div_euclid(one)).max(0);
+        let px1 = (maxx.div_euclid(one)).min(i64::from(mask.width) - 1);
+        let py0 = (miny.div_euclid(one)).max(0);
+        let py1 = (maxy.div_euclid(one)).min(i64::from(mask.height) - 1);
+        if px1 < px0 || py1 < py0 {
+            continue;
+        }
+        let edges: Vec<GridEdge> = (0..3)
+            .filter_map(|i| {
+                let (a, b) = (v[i], v[(i + 1) % 3]);
+                if a.1 == b.1 {
+                    return None;
+                }
+                Some(if a.1 < b.1 {
+                    GridEdge { x0: a.0, y0: a.1, x1: b.0, y1: b.1, winding: 1 }
+                } else {
+                    GridEdge { x0: b.0, y0: b.1, x1: a.0, y1: a.1, winding: -1 }
+                })
+            })
+            .collect();
+        for py in py0..=py1 {
+            for (si, s) in SAMPLES_4X.iter().enumerate() {
+                let (_, sy) = sample_grid(0, py, *s);
+                let mut cr: [(i64, i64, i32); 3] = [(0, 1, 0); 3];
+                let mut n = 0;
+                for e in &edges {
+                    if sy < e.y0 || sy >= e.y1 {
+                        continue;
+                    }
+                    let den = e.y1 - e.y0;
+                    cr[n] = (e.x0 * den + (e.x1 - e.x0) * (sy - e.y0), den, e.winding);
+                    n += 1;
+                }
+                if n == 0 {
+                    continue;
+                }
+                for px in px0..=px1 {
+                    let (sx, _) = sample_grid(px, 0, *s);
+                    let mut w = 0;
+                    for &(num, den, wd) in &cr[..n] {
+                        if num <= sx * den {
+                            w += wd;
+                        }
+                    }
+                    if w != 0 {
+                        mask.bits[(py as u32 * mask.width + px as u32) as usize] |= 1 << si;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
