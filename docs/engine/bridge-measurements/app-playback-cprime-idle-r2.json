@@ -1,0 +1,210 @@
+{
+  "run": "app-playback-cprime-idle-r2",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": true,
+    "placement": "behind",
+    "mode": "engine",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.84375,
+      6.6142578125,
+      6.55322265625
+    ],
+    "after": [
+      7.85791015625,
+      6.9140625,
+      6.66357421875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 43,
+    "offsetUs": 173780409808.5
+  },
+  "load": null,
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.d041d91a68adc52e2b3b04de7503fdf4",
+    "accepted": {
+      "pid": 23771,
+      "pidversion": 2253932
+    },
+    "rejections": 0,
+    "surfaces": 6,
+    "imports": 6,
+    "sends": 6,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 6,
+      "bytes": 125798400
+    },
+    "live": 6
+  },
+  "playback": {
+    "path": "cprime",
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "records": 1846
+    },
+    "frames": {
+      "expected": 1793,
+      "notAsked": 0,
+      "notPresented": 2,
+      "drops": 2,
+      "presented": 1791,
+      "offSlot": 1
+    },
+    "jitterAbsMs": {
+      "n": 1791,
+      "p50": 0.137,
+      "p95": 0.26,
+      "p99": 0.279,
+      "max": 8.187
+    },
+    "intervalErrorAbsMs": {
+      "n": 1788,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0.001,
+      "max": 8.333
+    },
+    "irregularIntervals": 2,
+    "dueToPresentMs": {
+      "n": 1791,
+      "p50": 11.99,
+      "p95": 12.23,
+      "p99": 12.25,
+      "max": 20.18
+    },
+    "commitLeadMs": {
+      "n": 1791,
+      "p50": 60.25,
+      "p95": 61.25,
+      "p99": 61.51,
+      "max": 61.74
+    },
+    "drawableWaitMs": {
+      "n": 1791,
+      "p50": 0.03,
+      "p95": 0.04,
+      "p99": 0.05,
+      "max": 0.08
+    },
+    "lateFrames": {
+      "n": 1,
+      "commitLeadMs": {
+        "n": 1,
+        "p50": 59.68,
+        "p95": 59.68,
+        "p99": 59.68,
+        "max": 59.68
+      },
+      "drawableWaitMs": {
+        "n": 1,
+        "p50": 0.02,
+        "p95": 0.02,
+        "p99": 0.02,
+        "max": 0.02
+      }
+    },
+    "skippedSeqs": 0,
+    "missing": [
+      {
+        "k": 763,
+        "state": "not-presented",
+        "near": "none"
+      },
+      {
+        "k": 1269,
+        "state": "not-presented",
+        "near": "none"
+      }
+    ],
+    "remoteLayers": [
+      {
+        "contextId": 210768273,
+        "width": 2390,
+        "height": 1092,
+        "scale": 2,
+        "at": {
+          "left": 364,
+          "top": 58
+        },
+        "hostedUs": 173858443013
+      }
+    ],
+    "refreshIntervalsMs": null,
+    "engineStatus": {
+      "interactive": {
+        "state": "ready",
+        "generation": 1,
+        "pid": 23771,
+        "attempts": 0
+      },
+      "job": {
+        "state": "ready",
+        "generation": 1,
+        "pid": 23772,
+        "attempts": 0
+      }
+    },
+    "presenter": {
+      "received": 1,
+      "drawn": 1,
+      "dropped": {},
+      "released": 1,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 1,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 1
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 6,
+      "received": 6,
+      "released": 0,
+      "videoFrames": 1,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

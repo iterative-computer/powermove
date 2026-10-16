@@ -60,7 +60,7 @@ export const MAX_ENDED_LAUNCHES = 4;
 
 /** One event from pm-bridge's receive thread (`BridgeEvent`). */
 export type BridgeEvent = {
-  kind: 'accepted' | 'rejected' | 'surface' | 'retire' | 'goodbye' | 'gone' | 'error';
+  kind: 'accepted' | 'rejected' | 'surface' | 'retire' | 'remoteLayer' | 'goodbye' | 'gone' | 'error';
   reason?: string | null;
   pid?: number | null;
   pidversion?: number | null;
@@ -75,6 +75,9 @@ export type BridgeEvent = {
   allocBytes?: number | null;
   ioSurface?: Buffer | null;
   receivedUs?: number | null;
+  /** `remoteLayer` (the C′ prototype): the engine's Core Animation context (0: gone) and its scale. */
+  contextId?: number | null;
+  scale?: number | null;
 };
 
 /** pm-bridge's `BridgeHost` (one per launch). */
@@ -347,6 +350,12 @@ export class BridgeLaunch {
         return;
       case 'retire':
         this.retire(event.clientPort ?? -1, event.generation ?? -1);
+        return;
+      case 'remoteLayer':
+        // The C′ prototype (docs/engine/bridge.md): the engine presents
+        // playback through a remote layer. Hosting it needs private API, so
+        // only the measurement harness does (FrameBridge listeners).
+        this.log('info', `frame bridge: remote layer context ${event.contextId} for port ${event.clientPort} (C′ prototype)`);
         return;
       case 'goodbye':
         return;

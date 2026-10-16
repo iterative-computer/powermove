@@ -3,6 +3,8 @@ import { Window as HappyWindow } from 'happy-dom';
 import { describe, expect, it } from 'vitest';
 
 import type { FramePainter } from './gpu';
+import { servePresenter, type FromWorker, type ToWorker } from './present-worker';
+import type { WorkerLike } from './worker-presenter';
 import type { FrameSource } from './presenter';
 import { overlayToCss, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
 import type { FrameDescriptor, FrameRelease, OverlayGeometry, ViewerState } from './protocol';
@@ -148,6 +150,65 @@ function runFrames(rafs: Map<number, (t: number) => void>, t: number): void {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+
+/** A presentation worker run in this thread (messages cross on the task queue), drawing with `painter`. */
+function inProcessWorker(painter: FramePainter | null): WorkerLike & { rafs: Map<number, (t: number) => void>; terminated: boolean; canvases: unknown[]; origins: number[] } {
+  const toPage: ((event: MessageEvent<FromWorker>) => void)[] = [];
+  const toWorker: ((event: MessageEvent<ToWorker>) => void)[] = [];
+  const rafs = new Map<number, (t: number) => void>();
+  let next = 1;
+  const worker = {
+    rafs,
+    terminated: false,
+    canvases: [] as unknown[],
+    origins: [] as number[],
+    postMessage(message: ToWorker) {
+      if (message.type === 'init') {
+        worker.canvases.push(message.canvas);
+        worker.origins.push(message.pageTimeOrigin);
+      }
+      setTimeout(() => toWorker.forEach((l) => l({ data: message } as MessageEvent<ToWorker>)), 0);
+    },
+    addEventListener(type: string, listener: (event: MessageEvent<FromWorker>) => void) {
+      if (type === 'message') toPage.push(listener);
+    },
+    terminate() {
+      worker.terminated = true;
+    }
+  };
+  servePresenter(
+    {
+      postMessage: (message) => setTimeout(() => toPage.forEach((l) => l({ data: message } as MessageEvent<FromWorker>)), 0),
+      addEventListener: (_type, listener) => toWorker.push(listener),
+      requestAnimationFrame: (cb) => (rafs.set(next, cb), next++),
+      cancelAnimationFrame: (id) => rafs.delete(id),
+      performance: { now: () => performance.now(), timeOrigin: performance.timeOrigin }
+    },
+    {
+      createPainter: async () => {
+        if (!painter) throw new Error('no WebGPU in workers');
+        return painter;
+      }
+    }
+  );
+  return worker as never;
+}
+
+/** Lets `canvas.transferControlToOffscreen()` work in happy-dom. */
+function offscreenCanvases(win: Window): { transferred: HTMLCanvasElement[] } {
+  const record = { transferred: [] as HTMLCanvasElement[] };
+  const proto = (win as unknown as { HTMLCanvasElement: { prototype: { transferControlToOffscreen?: () => unknown } } }).HTMLCanvasElement.prototype;
+  proto.transferControlToOffscreen = function (this: HTMLCanvasElement) {
+    record.transferred.push(this);
+    return { offscreenFor: this.id };
+  };
+  return record;
+}
+
+const settleLong = async (): Promise<void> => {
+  for (let i = 0; i < 6; i++) await settle();
+};
+
 describe('ViewerPresentation', () => {
   it('opens a session, sends numbered viewer states, and reveals the canvas at the first frame', async () => {
     const service = new Service();
@@ -186,20 +247,64 @@ describe('ViewerPresentation', () => {
     expect(stage.contains(presentation.canvas)).toBe(false);
   });
 
+  it('re-sends the current view with the vsync hint (same viewSeq) and keeps the hint on later states', async () => {
+    const service = new Service();
+    Object.assign(service, { hostOffsetUs: () => 2_000_000, displayHz: () => 120 });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    expect(channel.states).toHaveLength(1);
+    expect(channel.states[0]!.vsync).toBeUndefined();
+    for (let i = 0, t = 500; i < 30; i++, t += 1000 / 120) runFrames(rafs, t);
+    expect(channel.states).toHaveLength(2);
+    expect(channel.states[1]!.viewSeq).toBe(1);
+    expect(channel.states[1]!.vsync?.periodUs).toBeCloseTo(8333.33, 1);
+    presentation.update({ ...PARAMS, pan: [4, 0] });
+    expect(channel.states[2]).toMatchObject({ viewSeq: 2, vsync: channel.states[1]!.vsync });
+    presentation.dispose();
+  });
+
+  it('takes the stage size from the caller without reading layout (gesture steps)', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    let reads = 0;
+    const read = stage.getBoundingClientRect.bind(stage);
+    stage.getBoundingClientRect = () => {
+      reads++;
+      return read();
+    };
+    presentation.update({ ...PARAMS, pan: [12, 0] }, { width: 640, height: 360 });
+    expect(reads).toBe(0);
+    const channel = service.channels[0]!;
+    expect(channel.states.map((s) => s.viewSeq)).toEqual([1, 2]);
+    presentation.dispose();
+  });
+
   it('hides on a closed session and reopens with the current state when the engine is ready again', async () => {
     const service = new Service();
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    // The viewer catches up on a resize it skipped while the engine presented.
+    const hidden: boolean[] = [];
+    presentation.onHidden(() => hidden.push(presentation.presenting));
     await settle();
     presentation.update(PARAMS);
     const first = service.channels[0]!;
     first.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now());
     expect(presentation.presenting).toBe(true);
+    expect(hidden).toEqual([]);
     service.connected = false;
     first.handlers.closed('the interactive engine restarted');
     expect(presentation.presenting).toBe(false);
     expect(presentation.latest).toBeNull();
+    // Once, after the canvas is hidden (so the viewer's resize is not held back).
+    expect(hidden).toEqual([false]);
     service.fireReady();
     await settle();
     expect(service.channels).toHaveLength(1);
@@ -283,6 +388,114 @@ describe('ViewerPresentation', () => {
     timers.find((t) => t.live)!.fn();
     expect(channel.states.at(-1)!.size).toEqual({ width: 1480, height: 720 });
     presentation.dispose();
+  });
+
+  it('presents from a worker when the viewer can start one: frames, tags, releases, and teardown', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const canvases = offscreenCanvases(window as unknown as Window);
+    const painter = new Painter();
+    const worker = inProcessWorker(painter);
+    const mainPainter = new Painter();
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => worker, createPainter: async () => mainPainter });
+    await settle();
+    expect(presentation.offMainThread).toBe(true);
+    expect(canvases.transferred).toEqual([presentation.canvas]);
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    expect(channel.states).toHaveLength(1);
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    // Drawn by the worker as it arrived (a next-refresh frame).
+    expect(painter.draws).toBe(1);
+    expect(mainPainter.draws).toBe(0);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest).toMatchObject({ seq: 1, viewSeq: 1 });
+    expect(channel.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(presentation.stats()).toMatchObject({ drawn: 1, received: 1, offMainThread: true });
+    presentation.dispose();
+    await settleLong();
+    expect(painter.disposed).toBe(true);
+    expect(worker.terminated).toBe(true);
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('falls back to drawing on this thread in a new canvas when the worker cannot draw, keeping the session', async () => {
+    const service = new Service();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const logs: string[] = [];
+    const mainPainter = new Painter();
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => inProcessWorker(null), createPainter: async () => mainPainter, log: (_l, m) => logs.push(m) });
+    await settle();
+    const first = presentation.canvas;
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    expect(logs).toEqual(['engine presentation worker failed, presenting on the main thread: no WebGPU in workers']);
+    expect(presentation.offMainThread).toBe(false);
+    expect(presentation.canvas).not.toBe(first);
+    expect(presentation.canvas.nextSibling).toBe(overlay);
+    expect(stage.contains(first)).toBe(false);
+    // The frame the worker never drew went back to the engine.
+    expect(channel.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(service.channels).toHaveLength(1);
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(mainPainter.draws).toBe(1);
+    expect(presentation.presenting).toBe(true);
+    presentation.dispose();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('gives a popout a new canvas and worker, carrying the session and pool over', async () => {
+    const service = new Service();
+    const main = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const workers: ReturnType<typeof inProcessWorker>[] = [];
+    const presentation = new ViewerPresentation({
+      service,
+      stage: main.stage,
+      before: main.overlay,
+      sizeSettleMs: 0,
+      createWorker: () => {
+        const w = inProcessWorker(new Painter());
+        workers.push(w);
+        return w;
+      }
+    });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 3, surfaces: [] } }, performance.now());
+    await settleLong();
+
+    const popout = new HappyWindow() as unknown as Window;
+    const target = stageIn(popout, 800, 450);
+    offscreenCanvases(popout);
+    Object.defineProperty(popout, 'performance', { value: { timeOrigin: performance.timeOrigin + 5000, now: () => 0 }, configurable: true });
+    Object.assign(popout, { devicePixelRatio: 1, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
+    popout.document.body.replaceChildren(popout.document.adoptNode(main.stage));
+    main.stage.getBoundingClientRect = target.stage.getBoundingClientRect;
+    presentation.update(PARAMS);
+    await settleLong();
+    expect(workers).toHaveLength(2);
+    expect(workers[0]!.terminated).toBe(true);
+    // The popout's worker decides on this realm's clock, which stamps arrivals.
+    expect(workers[1]!.origins).toEqual([performance.timeOrigin]);
+    expect(presentation.canvas.ownerDocument).toBe(popout.document);
+    expect(presentation.offMainThread).toBe(true);
+    expect(service.channels).toHaveLength(1);
+    expect(presentation.stats()?.generation).toBe(3);
+    expect(channel.states.at(-1)).toMatchObject({ size: { width: 800, height: 450 }, devicePixelRatio: 1 });
+    channel.handlers.message({ type: 'frame', frame: { ...desc(4, channel.states.at(-1)!.viewSeq), poolGeneration: 3 } }, performance.now());
+    await settleLong();
+    expect(presentation.latest?.seq).toBe(4);
+    presentation.dispose();
+    await (popout as unknown as HappyWindow).happyDOM.close();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
   });
 
   it('does nothing without WebGPU and says why', async () => {

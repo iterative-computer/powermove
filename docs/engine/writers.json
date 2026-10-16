@@ -543,13 +543,13 @@
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1658",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1695",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > bindStage > guarded(callback)",
       "code": "api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path...."
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2043",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2080",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > createShape",
       "code": "api.edit.mutate('Draw mask', () => { const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect'); mask.p.x!.v = (first.x + ..."
@@ -699,61 +699,61 @@
       "code": "shaderHooks(PM)?.syncShaderUniforms(L)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:469",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:487",
       "class": "project-swap",
       "scope": "install",
       "code": "PM.proj = loadBootProject()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:490",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:508",
       "class": "doc.write",
       "scope": "install > revalidateContributionPlaceholders",
       "code": "writeDocument(PM, paths, revalidateContributions)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:580",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:598",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1072",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1091",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1076",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1095",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1406",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1425",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1407",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1426",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1418",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1437",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/assistant/media-management.ts:96",
+      "site": "apps/desktop/src/renderer/src/legacy/assistant/media-management.ts:127",
       "class": "agent-media-folders",
       "scope": "importMedia",
       "code": "project.assets[id].folder = args.folderId"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/assistant/media-management.ts:133",
+      "site": "apps/desktop/src/renderer/src/legacy/assistant/media-management.ts:164",
       "class": "hist.do",
       "scope": "manageMedia",
       "code": "PM.hist.do('Manage media', () => { if (operation === 'rename') { project.assets[unique[0]!].name = name(args.name); } if (operation === '..."
@@ -1509,7 +1509,7 @@
       "code": "PM.hist.do('Delete from library', () => { PM.proj.library[kind] = list.filter((x: any) => x.id !== id); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/media.ts:275",
+      "site": "apps/desktop/src/renderer/src/legacy/core/media.ts:295",
       "class": "doc.write",
       "scope": "install > coalesce",
       "code": "writeDocument(PM, [['layers'], ['comps'], ['assets']], () => relink(project, canonicalId, aliases))"
@@ -1635,67 +1635,67 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1001",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1080",
       "class": "doc.write",
       "scope": "install > ingestAsset",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, ...identity, persisted, ...(existingMeta?.folder ? { folder: exist..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1018",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1097",
       "class": "touch",
       "scope": "install > ingestAsset",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1035",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1114",
       "class": "doc.write",
       "scope": "install > recoverSourceAsset",
       "code": "writeDocument(PM, [['assets', meta.id]], () => Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared, importe..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1040",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1119",
       "class": "touch",
       "scope": "install > recoverSourceAsset",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1076",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1155",
       "class": "touch",
       "scope": "install > importBatch",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1140",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1219",
       "class": "doc.write",
       "scope": "install > replace > applyVersion",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = JSON.parse(JSON.stringify(meta)); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1149",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1228",
       "class": "touch",
       "scope": "install > replace > applyVersion",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1163",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1242",
       "class": "history.external",
       "scope": "install > replace",
       "code": "PM.hist.external( `Replace ${currentMeta.name || 'media'}`, () => applyVersion(previousMeta, previousRuntime, previousPoster), () => appl..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1331",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1410",
       "class": "touch",
       "scope": "install > restoreProject",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1368",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1447",
       "class": "touch",
       "scope": "install > restoreProject > setTimeout(callback) > (anonymous)",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1388",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1467",
       "class": "doc.write",
       "scope": "install > gradient",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 }; })"
@@ -1833,37 +1833,37 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:374",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:486",
       "class": "project-write",
       "scope": "installHostMediaStore > relinked",
       "code": "project.edits = compactEditLog([...(Array.isArray(project.edits) ? project.edits : []), { id: PM.uid?.('edit') ?? `edit-${Date.now()}`, r..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:378",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:490",
       "class": "touch",
       "scope": "installHostMediaStore > relinked",
       "code": "PM.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:401",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:515",
       "class": "project-write",
       "scope": "installHostMediaStore > setProjectStorage > apply > (anonymous)",
       "code": "PM.proj.media = media"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:401",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:515",
       "class": "project-write",
       "scope": "installHostMediaStore > setProjectStorage > apply > (anonymous)",
       "code": "delete PM.proj.media"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:403",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:517",
       "class": "hist.do",
       "scope": "installHostMediaStore > setProjectStorage",
       "code": "PM.hist.do('When importing', apply(next))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:404",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:518",
       "class": "touch",
       "scope": "installHostMediaStore > setProjectStorage",
       "code": "PM.touch?.()"

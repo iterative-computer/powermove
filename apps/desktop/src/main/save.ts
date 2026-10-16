@@ -83,6 +83,20 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
   });
 }
 
+/**
+ * Reads a range of a project file `owner` opened (Open…). Other windows'
+ * readers are refused. Used by the project read IPC and by the media store,
+ * which copies embedded media straight from the file (section 21).
+ */
+export async function readProjectRangeFor(projects: ProjectFiles, owner: unknown, token: string, offset: number, length: number): Promise<Uint8Array> {
+  const reader = projectReaderState(projects).readers.get(token);
+  if (!reader || reader.owner !== owner) throw new Error('Unknown project read token');
+  reader.timer.refresh();
+  const data = await projects.read(token, offset, length);
+  reader.timer.refresh();
+  return data;
+}
+
 export async function openProjectForWindow(
   ctx: { projects: ProjectFiles },
   webContents: WebContents,
@@ -303,11 +317,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   ipcMain.handle(IPC.projectRead, async (event, request: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!ctx.projects) throw new Error('Project storage is unavailable');
-    const readers = projectReaderState(ctx.projects).readers;
-    if (!isRecord(request) || typeof request.token !== 'string' || readers.get(request.token)?.owner !== event.sender) throw new Error('Unknown project read token');
-    const reader = readers.get(request.token)!; reader.timer.refresh();
-    const data = await ctx.projects!.read(request.token, request.offset as number, request.length as number);
-    reader.timer.refresh(); return data;
+    if (!isRecord(request) || typeof request.token !== 'string') throw new Error('Unknown project read token');
+    return readProjectRangeFor(ctx.projects, event.sender, request.token, request.offset as number, request.length as number);
   });
   ipcMain.handle(IPC.projectReadClose, async (event, token: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');

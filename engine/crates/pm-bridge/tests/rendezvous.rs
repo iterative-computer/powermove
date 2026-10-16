@@ -313,9 +313,10 @@ fn accept_until_returns_stopped() {
     .unwrap();
     let set = AtomicBool::new(true);
     let started = std::time::Instant::now();
-    let result = Rendezvous::register(&name())
-        .unwrap()
-        .accept_until(&exp, Duration::from_secs(15), &set);
+    let result =
+        Rendezvous::register(&name())
+            .unwrap()
+            .accept_until(&exp, Duration::from_secs(15), &set);
     assert!(matches!(result, Err((BridgeError::Stopped, _))));
     assert!(started.elapsed() < Duration::from_millis(100));
 

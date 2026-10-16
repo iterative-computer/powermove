@@ -42,8 +42,18 @@ type Config = {
   edr?: 'auto' | 'off';
   /** Engine gestures read `pointerrawupdate`. */
   rawInput?: boolean;
+  /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
+   *  main hosts its remote layer over the page. */
+  remoteLayer?: boolean;
+  /** Where the window sits: off every screen (default) or invisible on screen. */
+  placement?: 'offscreen' | 'behind';
   /** Latency: input modes to run, each for `durationMs`. */
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
+  /** Content rate of the engine's test source (default 60). */
+  fps?: number;
+  /** Main asks the display for a multiple of the content rate while playback
+   *  is recorded (section 15, through public API: `requestRefreshRate`). */
+  mainRate?: boolean;
   out: string;
   trace: string;
   /** Agent snapshots during playback (plan section 25, Phase 2 row): main
@@ -75,6 +85,10 @@ function snapshotProject(layers: number, turn: number): Record<string, unknown> 
 
 type HarnessAddon = {
   nowUs(): number;
+  placeBehindDesktop(viewHandle: Buffer): number;
+  hostRemoteLayer(viewHandle: Buffer, contextId: number, x: number, y: number, width: number, height: number): number;
+  removeRemoteLayer(id: number): boolean;
+  requestRefreshRate(hz: number): number[];
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
 };
 
@@ -105,6 +119,24 @@ async function waitFor<T>(label: string, poll: () => Promise<T | null | undefine
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
     await sleep(25);
   }
+}
+
+/**
+ * `behind` placement (C′ runs and the Chromium runs they are compared
+ * with): Core Animation neither shows nor reports, and so never frees, the
+ * drawables of a layer whose window is off every screen or at opacity 0
+ * (measured: every C′ frame unpresented both ways), so the remote layer
+ * needs a window on a display. This one is on the primary display one
+ * level below the desktop picture, which covers it: ignoring the mouse,
+ * never activated, on every Space, out of Mission Control's cycle.
+ */
+function placeBehind(win: BrowserWindow, harness: HarnessAddon, width: number, height: number): number {
+  const area = screen.getPrimaryDisplay().workArea;
+  const level = harness.placeBehindDesktop(win.getNativeWindowHandle());
+  win.setIgnoreMouseEvents(true);
+  // The same 1920 × 1080 points as off screen (frameless, larger than the screen allowed).
+  win.setBounds({ x: area.x, y: area.y, width, height });
+  return level;
 }
 
 function offscreen(width: number, height: number): Electron.Rectangle {
@@ -148,6 +180,31 @@ async function main(): Promise<void> {
     if (cfg.agentSnapshots) await waitFor('the job engine', async () => engine.status().job.state === 'ready');
     const playbackSignals: Array<[number, boolean]> = [];
     engine.listen({ playback: (playing) => playbackSignals.push([performance.now(), playing]) });
+    // The C′ prototype: host the engine's remote layer over the page.
+    const layerHosts = new Map<number, number>();
+    const remoteLayers: Record<string, unknown>[] = [];
+    installed.frameBridge?.listen((event) => {
+      if (event.kind !== 'remoteLayer' || !cfg.remoteLayer || !win || win.isDestroyed()) return;
+      const port = event.clientPort ?? -1;
+      // The new host goes in before the old one leaves: a new pool keeps
+      // its context (a resize), and it must not be unhosted in between.
+      const old = layerHosts.get(port);
+      layerHosts.delete(port);
+      if (!event.contextId || !event.width || !event.height || !event.scale) {
+        if (old !== undefined) harness.removeRemoteLayer(old);
+        return;
+      }
+      try {
+        const id = harness.hostRemoteLayer(win.getNativeWindowHandle(), event.contextId, 0, 0, event.width / event.scale, event.height / event.scale);
+        layerHosts.set(port, id);
+        if (old !== undefined) harness.removeRemoteLayer(old);
+        remoteLayers.push({ contextId: event.contextId, width: event.width, height: event.height, scale: event.scale, hostedUs: harness.nowUs() });
+        log(`hosted remote layer ${event.contextId} (${event.width}x${event.height} at ${event.scale}x)`);
+      } catch (error) {
+        log(`could not host remote layer ${event.contextId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    result['remoteLayers'] = remoteLayers;
 
     win = new BrowserWindow({
       show: false,
@@ -163,8 +220,17 @@ async function main(): Promise<void> {
     win.webContents.on('console-message', (event) => log(`page ${event.level}: ${event.message}`));
     installed.attachWindow(win);
     await win.loadFile(path.join(outDir, 'measure.html'), { query: { hz: String(hz), edr: cfg.edr ?? 'auto', raw: cfg.rawInput ? '1' : '0' } });
-    win.showInactive();
-    win.setBounds(offscreen(1920, 1080));
+    let level: number | null = null;
+    if (cfg.placement === 'behind') {
+      placeBehind(win, harness, 1920, 1080);
+      win.showInactive();
+      // Showing must not lift it: set again and check.
+      level = harness.placeBehindDesktop(win.getNativeWindowHandle());
+    } else {
+      win.showInactive();
+      win.setBounds(offscreen(1920, 1080));
+    }
+    result['placement'] = { kind: cfg.placement ?? 'offscreen', bounds: win.getBounds(), level };
     const page = win;
     const call = <T>(expression: string): Promise<T> => page.webContents.executeJavaScript(expression) as Promise<T>;
     await call(`window.__measure.start(${JSON.stringify(cfg.mode)})`);
@@ -207,9 +273,18 @@ async function main(): Promise<void> {
     }
 
     if (cfg.scenario === 'playback') {
+      // Section 15: the largest multiple of the content rate the panel can show.
+      const panelHz = screen.getPrimaryDisplay().displayFrequency || 60;
+      const fps = cfg.fps ?? 60;
+      const rateHz = fps >= panelHz ? panelHz : Math.floor(panelHz / fps + 1e-9) * fps;
+      if (cfg.mainRate) {
+        harness.requestRefreshRate(rateHz);
+        log(`main asks the display for ${rateHz} Hz`);
+      }
       await call(`window.__measure.transport({ command: 'play', rate: { num: 1, den: 1 } })`);
       await sleep(1500);
       await call('window.__measure.reset()');
+      if (cfg.mainRate) harness.requestRefreshRate(rateHz);
       const startMs = await call<number>(`window.__measure.mark('pm-record-start')`);
       const agentRun = cfg.agentSnapshots ? agentSnapshots(installed, cfg.agentSnapshots) : null;
       await sleep(cfg.durationMs);
@@ -217,6 +292,16 @@ async function main(): Promise<void> {
       // Counted at the end of the window; a batch still waiting then is
       // reported, and settles after playback stops.
       const agentStats = agentRun?.stop();
+      if (cfg.mainRate) {
+        // The refresh times main's display link saw while recording.
+        const ticks = harness.requestRefreshRate(0);
+        const histogram: Record<string, number> = {};
+        for (let i = 1; i < ticks.length; i++) {
+          const ms = ((ticks[i]! - ticks[i - 1]!) * 1000).toFixed(1);
+          histogram[ms] = (histogram[ms] ?? 0) + 1;
+        }
+        result['mainRate'] = { requestedHz: rateHz, panelHz, callbacks: ticks.length, intervalsMs: histogram };
+      }
       result['window'] = { startMs, endMs };
       result['page'] = await call('window.__measure.collect()');
       await call(`window.__measure.transport({ command: 'pause' })`);

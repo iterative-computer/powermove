@@ -1,0 +1,443 @@
+{
+  "run": "app-playback-today-load",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      3.67626953125,
+      3.373046875,
+      3.89599609375
+    ],
+    "after": [
+      2.97216796875,
+      3.51904296875,
+      3.87841796875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 62,
+    "offsetUs": 133564855794
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.000417000002926,
+        "max": 50.03766699999687
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1186,
+      "replies": 1186,
+      "replyBytes": 93328864,
+      "mainMsP50": 0.0956669999868609
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14047
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 113909.5,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1783,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 17,
+      "notPresented": 38,
+      "drops": 55,
+      "presented": 1738,
+      "offSlot": 1042
+    },
+    "jitterAbsMs": {
+      "n": 1738,
+      "p50": 8.216,
+      "p95": 41.608,
+      "p99": 58.346,
+      "max": 141.921
+    },
+    "intervalErrorAbsMs": {
+      "n": 1687,
+      "p50": 8.333,
+      "p95": 25,
+      "p99": 33.334,
+      "max": 133.327
+    },
+    "irregularIntervals": 1007,
+    "rafToPresentMs": {
+      "n": 1738,
+      "p50": 19.86,
+      "p95": 44.89,
+      "p99": 69.89,
+      "max": 161.53
+    },
+    "rafGapMs": {
+      "n": 6148,
+      "p50": 8.3,
+      "p95": 24.9,
+      "p99": 41.6,
+      "max": 124.9
+    },
+    "rafGapsOver25Ms": 215,
+    "missing": [
+      {
+        "k": 107,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 115,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 121,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 122,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 130,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 132,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 133,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 267,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 270,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 281,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 409,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 443,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 568,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 570,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 572,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 578,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 581,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 582,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 583,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 585,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 708,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 709,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 711,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 723,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 730,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 738,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 861,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 866,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 884,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 887,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1024,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1026,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1036,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1162,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1168,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1171,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1190,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1309,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1335,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1339,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1343,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1456,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1459,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1466,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1472,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1480,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1607,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1618,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1628,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1756,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1759,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1766,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1771,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1781,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1783,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 573,
+      "2": 709,
+      "3": 212,
+      "4": 126,
+      "5": 41,
+      "6": 17,
+      "7": 24,
+      "8": 25,
+      "9": 7,
+      "10": 2,
+      "12": 1,
+      "19": 1
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}

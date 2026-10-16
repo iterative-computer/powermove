@@ -73,7 +73,11 @@ function offscreen(width: number, height: number): Electron.Rectangle {
   return { x: right + 4000, y: -6000, width, height };
 }
 
+/** Where the viewer draws engine frames: `main` (the page's main thread) or `worker` (its presentation worker). */
+const PRESENT = process.env['PM_IT_PRESENT'] === 'worker' ? 'worker' : 'main';
+
 type PageStats = {
+  offMainThread: boolean;
   presented: number;
   presenting: boolean;
   presenter: { received: number; drawn: number; dropped: Record<string, number>; released: number; generation: number; sessions: number; viewSeq: number; parkTimeouts: number } | null;
@@ -151,7 +155,7 @@ async function main(): Promise<void> {
       child.setBounds(offscreen(480, 270));
     });
     installed.attachWindow(win);
-    await win.loadFile(path.join(outDir, 'page.html'), { query: { hz: String(hz) } });
+    await win.loadFile(path.join(outDir, 'page.html'), { query: { hz: String(hz), present: PRESENT } });
     win.showInactive();
     win.setBounds(offscreen(640, 360));
     check(!win.isFocused(), 'the test window never takes focus');
@@ -169,8 +173,10 @@ async function main(): Promise<void> {
     check(launch.imports === launch.surfaces && launch.sends === launch.imports, `every surface imported once and sent once (${JSON.stringify(launch)})`);
     check(first.receiver.received === launch.imports, `the preload received each import once (${first.receiver.received} of ${launch.imports})`);
     check(first.state!.size.width === Math.round(640 * first.dpr) || first.dpr > 2, `the pool is at viewer device pixels (${JSON.stringify(first.state!.size)} at DPR ${first.dpr})`);
+    check(first.offMainThread === (PRESENT === 'worker'), `frames are drawn ${PRESENT === 'worker' ? 'by the presentation worker' : 'on the page\'s main thread'} (offMainThread ${first.offMainThread})`);
     const retainAtFirst = bridge.launch!.retainCount(first.presenter!.generation, 0);
     step('surfaces imported once, sent once, and received once; the first frame presented', {
+      present: PRESENT,
       retainCount: retainAtFirst,
       pool: launch.imports,
       size: first.state!.size,
@@ -366,7 +372,7 @@ async function main(): Promise<void> {
     win?.destroy();
     await installed?.dispose().catch(() => {});
     await rm(home, { recursive: true, force: true });
-    process.stdout.write(`${JSON.stringify({ steps, totalMs: Math.round(performance.now() - started), versions: { electron: process.versions.electron, chrome: process.versions.chrome }, log: logs.slice(-120) })}\n`);
+    process.stdout.write(`${JSON.stringify({ present: PRESENT, steps, totalMs: Math.round(performance.now() - started), versions: { electron: process.versions.electron, chrome: process.versions.chrome }, log: logs.slice(-120) })}\n`);
   }
 }
 

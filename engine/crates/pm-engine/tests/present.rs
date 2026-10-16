@@ -199,6 +199,7 @@ fn viewer_state(view_seq: u64) -> ViewerState {
         play_every_frame: false,
         edr: false,
         view_seq: Seq::new(view_seq).unwrap(),
+        vsync: None,
     }
 }
 

@@ -26,6 +26,8 @@ pub const ID_CHECKIN_REPLY: i32 = 0x504D_0002;
 pub const ID_SURFACE: i32 = 0x504D_0003;
 pub const ID_RETIRE: i32 = 0x504D_0004;
 pub const ID_GOODBYE: i32 = 0x504D_0005;
+/// The C′ prototype: the engine's remote layer for one viewer (docs/engine/bridge.md).
+pub const ID_REMOTE_LAYER: i32 = 0x504D_0006;
 
 pub const HEADER_LEN: usize = 24;
 pub const BODY_LEN: usize = 4;
@@ -43,6 +45,8 @@ pub const SURFACE_PAYLOAD: usize = 4 + SurfaceInfo::WORDS * 4;
 pub const RETIRE_PAYLOAD: usize = 12;
 /// magic.
 pub const GOODBYE_PAYLOAD: usize = 4;
+/// magic, client port, generation, context id, width, height (device pixels), scale × 1000.
+pub const REMOTE_LAYER_PAYLOAD: usize = 28;
 
 pub const fn complex_len(payload: usize) -> usize {
     HEADER_LEN + BODY_LEN + PORT_DESC_LEN + payload
@@ -55,7 +59,7 @@ pub const fn simple_len(payload: usize) -> usize {
 /// Largest message the bridge accepts, plus the audit trailer and slack.
 pub const MAX_RECEIVE: usize = {
     let a = complex_len(SURFACE_PAYLOAD);
-    let b = simple_len(RETIRE_PAYLOAD);
+    let b = simple_len(REMOTE_LAYER_PAYLOAD);
     (if a > b { a } else { b }) + AUDIT_TRAILER_LEN + 64
 };
 
@@ -156,6 +160,18 @@ pub enum Incoming {
         client_port: u32,
         generation: u32,
     },
+    /// The C′ prototype: the engine presents playback for the viewer on
+    /// `client_port` through the remote Core Animation context
+    /// `context_id` (0: the layer is gone). Main hosts it in that viewer's
+    /// window. `scale_milli` is device pixels per point × 1000.
+    RemoteLayer {
+        client_port: u32,
+        generation: u32,
+        context_id: u32,
+        width: u32,
+        height: u32,
+        scale_milli: u32,
+    },
     Goodbye,
 }
 
@@ -227,6 +243,7 @@ pub fn parse(buf: &[u8]) -> Result<(Incoming, audit_token_t), ParseError> {
         ID_SURFACE => (true, SURFACE_PAYLOAD),
         ID_RETIRE => (false, RETIRE_PAYLOAD),
         ID_GOODBYE => (false, GOODBYE_PAYLOAD),
+        ID_REMOTE_LAYER => (false, REMOTE_LAYER_PAYLOAD),
         other => return Err(ParseError::UnknownId(other)),
     };
     if complex != want_complex {
@@ -305,6 +322,33 @@ pub fn parse(buf: &[u8]) -> Result<(Incoming, audit_token_t), ParseError> {
             generation: rd_u32(p, 4),
         },
         ID_GOODBYE => Incoming::Goodbye,
+        ID_REMOTE_LAYER => {
+            let layer = Incoming::RemoteLayer {
+                client_port: rd_u32(p, 0),
+                generation: rd_u32(p, 4),
+                context_id: rd_u32(p, 8),
+                width: rd_u32(p, 12),
+                height: rd_u32(p, 16),
+                scale_milli: rd_u32(p, 20),
+            };
+            if let Incoming::RemoteLayer {
+                context_id,
+                width,
+                height,
+                scale_milli,
+                ..
+            } = layer
+                && context_id != 0
+                && (width == 0
+                    || height == 0
+                    || width > MAX_DIMENSION
+                    || height > MAX_DIMENSION
+                    || !(500..=8000).contains(&scale_milli))
+            {
+                return Err(ParseError::Field("remote layer geometry"));
+            }
+            layer
+        }
         _ => return Err(ParseError::UnknownId(id)),
     };
     Ok((incoming, audit))
@@ -460,6 +504,31 @@ pub fn encode_retire(bridge: mach_port_t, client_port: u32, generation: u32) -> 
     simple(bridge, ID_RETIRE, &[MAGIC, client_port, generation])
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn encode_remote_layer(
+    bridge: mach_port_t,
+    client_port: u32,
+    generation: u32,
+    context_id: u32,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+) -> OutMessage {
+    simple(
+        bridge,
+        ID_REMOTE_LAYER,
+        &[
+            MAGIC,
+            client_port,
+            generation,
+            context_id,
+            width,
+            height,
+            scale_milli,
+        ],
+    )
+}
+
 pub fn encode_goodbye(bridge: mach_port_t) -> OutMessage {
     simple(bridge, ID_GOODBYE, &[MAGIC])
 }
@@ -555,6 +624,44 @@ pub(crate) mod tests {
         ] {
             let rx = as_received(&encode_surface(5, 0x1003, &bad), [0; 8]);
             assert_eq!(parse(&rx).unwrap_err(), ParseError::Field(field));
+        }
+    }
+
+    #[test]
+    fn remote_layer_round_trips_and_checks_its_geometry() {
+        let rx = as_received(
+            &encode_remote_layer(5, 9, 3, 0xabcd, 2400, 1300, 2000),
+            [0; 8],
+        );
+        assert_eq!(
+            parse(&rx).unwrap().0,
+            Incoming::RemoteLayer {
+                client_port: 9,
+                generation: 3,
+                context_id: 0xabcd,
+                width: 2400,
+                height: 1300,
+                scale_milli: 2000
+            }
+        );
+        // A layer that went away carries no geometry.
+        let rx = as_received(&encode_remote_layer(5, 9, 3, 0, 0, 0, 0), [0; 8]);
+        assert!(matches!(
+            parse(&rx).unwrap().0,
+            Incoming::RemoteLayer { context_id: 0, .. }
+        ));
+        for (w, h, s) in [
+            (0, 10, 1000),
+            (10, 0, 1000),
+            (20_000, 10, 1000),
+            (10, 10, 100),
+            (10, 10, 9000),
+        ] {
+            let rx = as_received(&encode_remote_layer(5, 9, 3, 7, w, h, s), [0; 8]);
+            assert_eq!(
+                parse(&rx).unwrap_err(),
+                ParseError::Field("remote layer geometry")
+            );
         }
     }
 

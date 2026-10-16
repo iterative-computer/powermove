@@ -28,7 +28,7 @@ fn err(e: impl std::fmt::Display) -> Error {
 #[napi(object)]
 #[derive(Default)]
 pub struct BridgeEvent {
-    /// `accepted`, `rejected`, `surface`, `retire`, `goodbye`, `gone`, or `error`.
+    /// `accepted`, `rejected`, `surface`, `retire`, `remoteLayer`, `goodbye`, `gone`, or `error`.
     pub kind: String,
     pub reason: Option<String>,
     pub pid: Option<i32>,
@@ -48,6 +48,10 @@ pub struct BridgeEvent {
     pub io_surface: Option<Buffer>,
     /// `CLOCK_UPTIME_RAW` µs when the native thread received the message.
     pub received_us: Option<f64>,
+    /// `remoteLayer` (the C′ prototype): the Core Animation context id (0:
+    /// gone) and its scale (device pixels per point).
+    pub context_id: Option<u32>,
+    pub scale: Option<f64>,
 }
 
 impl BridgeEvent {
@@ -94,6 +98,24 @@ impl BridgeEvent {
                 kind: "retire".into(),
                 client_port: Some(client_port),
                 generation: Some(generation),
+                received_us,
+                ..Default::default()
+            },
+            HostEvent::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
+            } => Self {
+                kind: "remoteLayer".into(),
+                client_port: Some(client_port),
+                generation: Some(generation),
+                context_id: Some(context_id),
+                width: Some(width),
+                height: Some(height),
+                scale: Some(f64::from(scale_milli) / 1000.0),
                 received_us,
                 ..Default::default()
             },
@@ -423,6 +445,360 @@ mod harness {
         pub current: f64,
         pub potential: f64,
         pub reference: f64,
+    }
+
+    /// Lets the window owning `view_handle` (`getNativeWindowHandle()`, an
+    /// `NSView*`) sit off every screen even though it has a title bar.
+    /// AppKit constrains titled windows onto a screen when they are shown
+    /// or moved; the real-app measurement must keep the editor window off
+    /// screen while Jude uses the machine, so this replaces
+    /// `constrainFrameRect:toScreen:` on the window's class with one that
+    /// returns the frame unchanged. Measurement processes only (the
+    /// `harness` feature is never in release builds). Call on the main
+    /// thread before showing the window.
+    #[napi]
+    pub fn allow_offscreen_window(view_handle: napi::bindgen_prelude::Buffer) -> Result<String> {
+        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::{msg_send, sel};
+        use objc2_foundation::NSRect;
+
+        extern "C-unwind" fn unconstrained(
+            _this: &AnyObject,
+            _cmd: Sel,
+            frame: NSRect,
+            _screen: *mut AnyObject,
+        ) -> NSRect {
+            frame
+        }
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        // SAFETY: `getNativeWindowHandle()` returns the window's live content
+        // NSView; we are on the main thread.
+        let window: *const AnyObject = unsafe { msg_send![&*view, window] };
+        if window.is_null() {
+            return Err(err("the view has no window"));
+        }
+        let class: &AnyClass = unsafe { &*window }.class();
+        let method = class
+            .instance_method(sel!(constrainFrameRect:toScreen:))
+            .ok_or_else(|| err("no constrainFrameRect:toScreen:"))?;
+        let imp = unconstrained
+            as extern "C-unwind" fn(&AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect;
+        // SAFETY: the replacement has the method's exact signature
+        // (`- (NSRect)constrainFrameRect:(NSRect)r toScreen:(NSScreen*)s`).
+        unsafe {
+            method.set_implementation(std::mem::transmute::<
+                extern "C-unwind" fn(&AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect,
+                Imp,
+            >(imp))
+        };
+        Ok(class.name().to_string_lossy().into_owned())
+    }
+
+    /// Puts the window owning `view_handle` behind the desktop picture: one
+    /// window level below `kCGDesktopWindowLevel`, on every Space,
+    /// stationary in Mission Control, out of the window cycle, ignoring the
+    /// mouse. It is on a display (Core Animation presents its layers and
+    /// reports their presentation times, which it does not for a window off
+    /// every screen or at opacity 0) but the desktop picture covers it, so
+    /// nothing shows while Jude uses the machine. Returns the level. Call
+    /// on the main thread before showing the window. Measurement processes
+    /// only.
+    #[napi]
+    pub fn place_behind_desktop(view_handle: napi::bindgen_prelude::Buffer) -> Result<i64> {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+
+        unsafe extern "C" {
+            /// CoreGraphics (public): the level for a `CGWindowLevelKey`.
+            fn CGWindowLevelForKey(key: i32) -> i32;
+        }
+        /// `kCGDesktopWindowLevelKey`.
+        const DESKTOP_LEVEL_KEY: i32 = 2;
+        /// NSWindowCollectionBehavior: CanJoinAllSpaces | Stationary | IgnoresCycle.
+        const BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6);
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        // SAFETY: `getNativeWindowHandle()` returns the window's live content
+        // NSView; main thread; documented NSWindow setters.
+        unsafe {
+            let window: *const AnyObject = msg_send![&*view, window];
+            if window.is_null() {
+                return Err(err("the view has no window"));
+            }
+            let level = isize::try_from(CGWindowLevelForKey(DESKTOP_LEVEL_KEY))
+                .map_err(|_| err("window level"))?
+                - 1;
+            let _: () = msg_send![&*window, setLevel: level];
+            let _: () = msg_send![&*window, setCollectionBehavior: BEHAVIOR];
+            let _: () = msg_send![&*window, setIgnoresMouseEvents: true];
+            let set: isize = msg_send![&*window, level];
+            if set != level {
+                return Err(err("the window level did not take"));
+            }
+            Ok(set as i64)
+        }
+    }
+
+    thread_local! {
+        /// The C′ prototype's `CALayerHost`s by id (main thread only).
+        static LAYER_HOSTS: std::cell::RefCell<std::collections::HashMap<u32, objc2::rc::Retained<objc2::runtime::AnyObject>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static NEXT_HOST: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    }
+
+    /// The C′ prototype (docs/engine/bridge.md): hosts the engine's remote
+    /// Core Animation context `context_id` in the window owning
+    /// `view_handle` (`getNativeWindowHandle()`), as a `CALayerHost` over
+    /// the web contents at `x, y, width, height` points from the content
+    /// view's top left. `CALayerHost` is private API, which is why this is
+    /// a harness function: the prototype is measured, not shipped. Returns
+    /// an id for [`remove_remote_layer`].
+    #[napi]
+    pub fn host_remote_layer(
+        view_handle: napi::bindgen_prelude::Buffer,
+        context_id: u32,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Result<u32> {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        let class =
+            AnyClass::get(c"CALayerHost").ok_or_else(|| err("CALayerHost is unavailable"))?;
+        // SAFETY: main thread; the view is the window's live content view.
+        unsafe {
+            let parent: *const AnyObject = msg_send![&*view, layer];
+            if parent.is_null() {
+                return Err(err("the content view has no layer"));
+            }
+            let flipped: bool = msg_send![&*parent, isGeometryFlipped];
+            let bounds: NSRect = msg_send![&*parent, bounds];
+            let host: Retained<AnyObject> = msg_send![class, new];
+            let _: () = msg_send![objc2_quartz_core_transaction(), begin];
+            let _: () = msg_send![objc2_quartz_core_transaction(), setDisableActions: true];
+            let _: () = msg_send![&*host, setContextId: context_id];
+            let top = if flipped {
+                y
+            } else {
+                bounds.size.height - y - height
+            };
+            let frame = NSRect::new(NSPoint::new(x, top), NSSize::new(width, height));
+            let _: () = msg_send![&*host, setFrame: frame];
+            let _: () = msg_send![&*host, setZPosition: 1000.0f64];
+            let _: () = msg_send![&*parent, addSublayer: &*host];
+            let _: () = msg_send![objc2_quartz_core_transaction(), commit];
+            let id = NEXT_HOST.with(|n| {
+                let id = n.get();
+                n.set(id + 1);
+                id
+            });
+            LAYER_HOSTS.with(|hosts| hosts.borrow_mut().insert(id, host));
+            Ok(id)
+        }
+    }
+
+    /// Removes a `CALayerHost` made by [`host_remote_layer`].
+    #[napi]
+    pub fn remove_remote_layer(id: u32) -> Result<bool> {
+        use objc2::msg_send;
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let host = LAYER_HOSTS.with(|hosts| hosts.borrow_mut().remove(&id));
+        Ok(match host {
+            Some(host) => {
+                // SAFETY: main thread; a layer we added.
+                let _: () = unsafe { msg_send![&*host, removeFromSuperlayer] };
+                true
+            }
+            None => false,
+        })
+    }
+
+    fn objc2_quartz_core_transaction() -> &'static objc2::runtime::AnyClass {
+        objc2::runtime::AnyClass::get(c"CATransaction").expect("CATransaction")
+    }
+
+    #[napi(object)]
+    pub struct DisplayState {
+        /// The main display is asleep (`CGDisplayIsAsleep`): nothing is
+        /// scanned out, so Core Animation presents no remote layer drawable
+        /// and Chromium's presentation times are its own estimates, not
+        /// the panel's.
+        pub asleep: bool,
+        /// The login session's screen is locked (`CGSSessionScreenIsLocked`
+        /// in `CGSessionCopyCurrentDictionary`).
+        pub locked: bool,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayIsAsleep(display: u32) -> u32;
+        fn CGSessionCopyCurrentDictionary() -> *mut objc2::runtime::AnyObject;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+
+    /// `CAFrameRateRange` (QuartzCore, macOS 12).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FrameRateRange {
+        minimum: f32,
+        maximum: f32,
+        preferred: f32,
+    }
+
+    // SAFETY: the layout and encoding of `CAFrameRateRange`.
+    unsafe impl objc2::Encode for FrameRateRange {
+        const ENCODING: objc2::Encoding = objc2::Encoding::Struct(
+            "CAFrameRateRange",
+            &[
+                objc2::Encoding::Float,
+                objc2::Encoding::Float,
+                objc2::Encoding::Float,
+            ],
+        );
+    }
+
+    /// Display link callbacks seen while a main-process rate request lives
+    /// (`targetTimestamp - timestamp` would be the link's own period; the
+    /// spacing of `timestamp`s is the panel's).
+    static RATE_TICKS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+    objc2::define_class!(
+        /// The main-process display link's target: records refresh times.
+        #[unsafe(super(objc2_foundation::NSObject))]
+        struct RateTicker;
+
+        impl RateTicker {
+            #[unsafe(method(tick:))]
+            fn tick(&self, link: &objc2::runtime::AnyObject) {
+                // SAFETY: CADisplayLink's timestamp property.
+                let now: f64 = unsafe { objc2::msg_send![link, timestamp] };
+                if let Ok(mut ticks) = RATE_TICKS.lock()
+                    && ticks.len() < 100_000
+                {
+                    ticks.push(now);
+                }
+            }
+        }
+    );
+
+    thread_local! {
+        /// The live main-process rate request (main thread only).
+        static RATE_LINK: std::cell::RefCell<Option<objc2::rc::Retained<objc2::runtime::AnyObject>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Section 15's ProMotion request from Electron's main process, through
+    /// public API: a display link on the main screen
+    /// (`-[NSScreen displayLinkWithTarget:selector:]`, macOS 14) whose
+    /// `preferredFrameRateRange` is exactly `hz`, on main's run loop.
+    /// Electron has no refresh-rate request for its compositor
+    /// (`webContents.setFrameRate` is offscreen rendering only), so this is
+    /// the measurement of whether an app-level request reaches the panel
+    /// while Chromium draws. `hz` 0 removes the request. Returns the refresh
+    /// times recorded since the previous call (seconds, host clock).
+    #[napi]
+    pub fn request_refresh_rate(hz: f64) -> Result<Vec<f64>> {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let ticks = std::mem::take(&mut *RATE_TICKS.lock().unwrap_or_else(|e| e.into_inner()));
+        RATE_LINK.with(|slot| -> Result<()> {
+            if let Some(old) = slot.borrow_mut().take() {
+                // SAFETY: a link we made on this thread.
+                let _: () = unsafe { msg_send![&*old, invalidate] };
+            }
+            if hz <= 0.0 {
+                return Ok(());
+            }
+            // SAFETY: AppKit and Core Animation on the main thread.
+            unsafe {
+                let screen: Option<Retained<AnyObject>> =
+                    msg_send![AnyClass::get(c"NSScreen").ok_or_else(|| err("no AppKit"))?, mainScreen];
+                let screen = screen.ok_or_else(|| err("no main screen"))?;
+                let target: Retained<RateTicker> = msg_send![<RateTicker as objc2::ClassType>::class(), new];
+                let link: Option<Retained<AnyObject>> = msg_send![&*screen, displayLinkWithTarget: &*target, selector: objc2::sel!(tick:)];
+                let link = link.ok_or_else(|| err("no display link"))?;
+                let range = FrameRateRange {
+                    minimum: hz as f32,
+                    maximum: hz as f32,
+                    preferred: hz as f32,
+                };
+                let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
+                let run_loop: Retained<AnyObject> =
+                    msg_send![AnyClass::get(c"NSRunLoop").ok_or_else(|| err("no NSRunLoop"))?, mainRunLoop];
+                let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: objc2_foundation::NSRunLoopCommonModes];
+                *slot.borrow_mut() = Some(link);
+            }
+            Ok(())
+        })?;
+        Ok(ticks)
+    }
+
+    /// Whether a measurement can see the panel: the main display awake and
+    /// the session unlocked (S1 harness runs record it and refuse to
+    /// measure otherwise).
+    #[napi]
+    pub fn display_state() -> DisplayState {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        // SAFETY: public CoreGraphics calls; the session dictionary is a
+        // CFDictionary (toll-free bridged to NSDictionary) we own and release.
+        unsafe {
+            let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0;
+            let session = CGSessionCopyCurrentDictionary();
+            let locked = if session.is_null() {
+                false
+            } else {
+                let key = objc2_foundation::NSString::from_str("CGSSessionScreenIsLocked");
+                let value: *mut AnyObject = msg_send![&*session, objectForKey: &*key];
+                let locked = !value.is_null() && {
+                    let b: bool = msg_send![&*value, boolValue];
+                    b
+                };
+                CFRelease(session.cast());
+                locked
+            };
+            DisplayState { asleep, locked }
+        }
     }
 
     /// EDR headroom per screen. Call on the main thread.

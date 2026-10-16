@@ -21,13 +21,17 @@ export const MEDIA_STORE_IPC = {
   putChunk: 'media-store:put-chunk',
   finishPut: 'media-store:finish-put',
   abortPut: 'media-store:abort-put',
+  putProjectRange: 'media-store:put-project-range',
   link: 'media-store:link',
   open: 'media-store:open',
   read: 'media-store:read',
   close: 'media-store:close',
   relink: 'media-store:relink',
   bind: 'media-store:bind',
-  removeKey: 'media-store:remove-key'
+  removeKey: 'media-store:remove-key',
+  convertStill: 'media-store:convert-still',
+  convertVideo: 'media-store:convert-video',
+  convertUpload: 'media-store:convert-upload'
 } as const;
 
 /** Where a store record's bytes came from. */
@@ -84,6 +88,16 @@ export type MediaReadOpen =
 
 export type MediaPutFileResult = MediaStoreRecord & { link?: MediaLink };
 
+/** What a kept original becomes for the page's viewer. */
+export type ConversionKind = 'still' | 'video';
+
+/** A rendition main made; the page reads it with `media.readPlaybackProxy`.
+ *  `missing` means main has neither the stored object nor the linked file,
+ *  so the page sends the bytes it has (`convertUpload`). */
+export type MediaConversion =
+  | { ok: true; token: string; size: number; type: 'image/png' | 'video/webm' }
+  | { ok: false; error: string; missing?: true };
+
 export type MediaBinding = { key?: string; hash?: string; link?: MediaLink };
 
 /** `window.powermove.mediaStore` (preload). */
@@ -95,7 +109,12 @@ export interface MediaStoreBridge {
   putFile(request: { path: string; key: string | null; type?: string; revision?: string | null }): Promise<MediaStoreRecord>;
   beginPut(request: { key: string | null; type: string; size: number; revision?: string | null; origin?: MediaRecordSource }): Promise<string>;
   putChunk(token: string, offset: number, data: Uint8Array): Promise<void>;
-  finishPut(token: string, expected: { blake3: string }): Promise<MediaStoreRecord & { sha256: string }>;
+  /** Commits an upload when the bytes on disk match the sender's BLAKE3,
+   *  or (for project ranges) the file's recorded SHA-256. */
+  finishPut(token: string, expected: { blake3?: string; sha256?: string }): Promise<MediaStoreRecord & { sha256: string }>;
+  /** Main copies `length` bytes (at most 64 MiB) at `offset` of the project
+   *  file this window opened (`readToken`) into upload `token` at `at`. */
+  putProjectRange?(token: string, readToken: string, offset: number, length: number, at: number): Promise<void>;
   abortPut(token: string): Promise<void>;
   /** Hashes a file in place for Link to files. */
   link(path: string): Promise<MediaLink>;
@@ -107,6 +126,15 @@ export interface MediaStoreBridge {
   /** The open project's media in this window, for the engine's handles. */
   bind(projectId: string, assets: Record<string, MediaBinding>): Promise<void>;
   removeKey(key: string): Promise<boolean>;
+  /** A PNG for the page's viewer from a stored (`hash`) or linked TIFF or
+   *  HEIF original; read it with `media.readPlaybackProxy`. */
+  convertStill?(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion>;
+  /** A playback proxy (VP9 WebM) of a stored or linked video original the
+   *  viewer cannot decode. */
+  convertVideo?(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion>;
+  /** Converts an upload (`beginPut` with no key, then `putChunk`) without
+   *  storing it, when main lacks the original; the upload is consumed. */
+  convertUpload?(token: string, request: { kind: ConversionKind; name: string; blake3: string }): Promise<MediaConversion>;
 }
 
 /** Shown when a legacy-engine build opens a project stamped for the new engine. */

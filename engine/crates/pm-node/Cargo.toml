@@ -41,6 +41,9 @@ pm-media = { path = "../pm-media" }
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]
+# The C′ prototype (pm-gpu `remote-layer`): measurement builds only. Without
+# it, POWERMOVE_BRIDGE_REMOTE_LAYER=1 reports that this build has no C′.
+remote-layer = ["pm-gpu/remote-layer"]
 
 [dev-dependencies]
 pm-model = { path = "../pm-model" }

@@ -55,6 +55,13 @@ export class JitterBuffer<T> {
     return [];
   }
 
+  /** The frame shown at the next refresh, taken out (drawn on arrival instead). */
+  takeImmediate(): Queued<T> | null {
+    const item = this.immediate;
+    this.immediate = null;
+    return item;
+  }
+
   /** Every queued frame, emptied (mode changes, teardown, a new pool). */
   clear(filter: (item: Queued<T>) => boolean = () => true): Queued<T>[] {
     const out: Queued<T>[] = [];

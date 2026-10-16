@@ -368,10 +368,19 @@ mod tests {
     fn developer_id_process_passes_its_team_and_fails_another() {
         let bun = which("bun").expect("bun must be on PATH (repository package manager)");
         let mut child = std::process::Command::new(bun)
-            .args(["-e", "setTimeout(() => {}, 3000)"])
+            .args(["-e", "console.log('ready'); setTimeout(() => {}, 3000)"])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Take the token once bun runs: before its exec the child is still
+        // this test binary (a fixed sleep raced exec on a loaded machine).
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        assert_eq!(line.trim(), "ready");
         let token = AuditToken::of_pid(child.id() as i32).unwrap();
         let ok = check_signature(&token, &SignaturePolicy::TeamId("7FRXF46ZSN".into()));
         let wrong = check_signature(&token, &SignaturePolicy::TeamId("ABCDE12345".into()));

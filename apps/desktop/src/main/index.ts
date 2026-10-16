@@ -73,7 +73,7 @@ import { MediaProxyService, playbackConverter, previewConverter, imageSequenceCo
 import { registerNativeEditIpc } from './native-edit';
 import { registerMediaPasteIpc } from './media-paste';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
-import { openProjectForWindow, registerProjectOpenPathIpc, registerSaveIpc } from './save';
+import { openProjectForWindow, readProjectRangeFor, registerProjectOpenPathIpc, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { registerRemoteMediaIpc } from './remote-media';
@@ -949,7 +949,12 @@ if (!hasSingleInstanceLock) {
       isTrustedSender,
       userData: app.getPath('userData'),
       mainDirectory: __dirname,
-      enabled: useNewEngine
+      enabled: useNewEngine,
+      convertStill: (sourcePath) => mediaProxies.createStillImage(sourcePath),
+      convertVideo: (sourcePath) => mediaProxies.create(sourcePath),
+      projectRead: (sender, token, offset, length) => projects
+        ? readProjectRangeFor(projects, sender, token, offset, length)
+        : Promise.reject(new Error('Project files are unavailable.'))
     });
     if (isBackgroundTest) (globalThis as { __powermoveMediaStore?: unknown }).__powermoveMediaStore = mediaStore.service;
     app.once('will-quit', () => { void mediaStore.dispose(); });

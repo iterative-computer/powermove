@@ -75,6 +75,22 @@ describe('portable web export', () => {
     expect(result.scene.assets.image).toMatch(/\.svg$/);
   });
 
+  it('takes the browser rendition of media whose original the new engine keeps', async () => {
+    const PM = fixture();
+    PM.proj.assets = { clip: { id: 'clip', kind: 'video', name: 'A001.mov', storageKey: 'media:v2:p', contentHash: 'c'.repeat(64), rendition: true, playbackProxy: false } };
+    PM.proj.layers.push(PM.mkLayer('video', { d: { asset: 'clip' } }, PM.proj));
+    const originals: string[] = [];
+    PM.MediaStore.get = async (meta: any) => { originals.push(meta.id); return new Blob(['prores'], { type: 'video/quicktime' }); };
+    (PM.MediaStore as any).rendition = { get: async (hash: string) => (hash === 'c'.repeat(64) ? new Blob(['vp9'], { type: 'video/webm' }) : null) };
+    const result = await buildWebExport(PM);
+    expect(originals).toEqual([]);
+    expect(result.scene.assets.clip).toMatch(/\.webm$/);
+    expect(new TextDecoder().decode(result.files.get(result.scene.assets.clip!))).toBe('vp9');
+    // No rendition and nothing on screen: say so instead of shipping an unplayable original.
+    (PM.MediaStore as any).rendition = { get: async () => null };
+    await expect(buildWebExport(PM)).rejects.toThrow('browser-playable');
+  });
+
   it('keeps native 3D geometry while excluding packed Blender sources and explaining rendering limits',async()=>{
     const PM=fixture();
     PM.Kernel.layerTypes.register('test',{id:'powermove.3d.object',label:'3D',version:1,params:[],defaults:{},renderer:{kind:'layer3d',role:'object'}});
