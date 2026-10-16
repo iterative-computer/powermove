@@ -75,11 +75,15 @@ const RUNS = [
   { name: 'playback-engine-lead8-load', ...playback, mode: 'engine', load: true, lead: 8 },
   // Agent snapshots during playback (section 25 Phase 2 row): 4 frames at
   // 720 px per agent turn, a turn every 2 s, a 24-layer 4K project.
-  { name: 'playback-engine-agent-snapshots', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 2000, frames: 4, width: 720, layers: 24 } },
-  { name: 'playback-engine-agent-snapshots-busy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 720, layers: 24 } },
-  // An over-bound pass: the layers in a full-size 4K precomposition, which
-  // renders whole for every band, at 1920 px stills (contract 13's 2 ms bound).
-  { name: 'playback-engine-agent-snapshots-heavy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 1920, layers: 96, heavy: 'precomp' }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  { name: 'playback-engine-agent-snapshots', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 2000, frames: 4, width: 720, layers: 24 }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  { name: 'playback-engine-agent-snapshots-busy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 720, layers: 24 }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  // An over-bound pass (contract 13's 2 ms bound): 1500 solids in a
+  // full-size 4K precomposition, which renders whole for every band, at
+  // 3840 px stills; a 16-row band takes about 6.6 ms of GPU time idle
+  // (pm-export measure_heavy_precomp_band_cost). Cold: first met during
+  // playback; warm: one agent turn before playback.
+  { name: 'playback-engine-agent-snapshots-heavy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 2, width: 3840, layers: 1500, heavy: 'precomp' }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  { name: 'playback-engine-agent-snapshots-heavy-warm', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 2, width: 3840, layers: 1500, heavy: 'precomp', warm: true }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
   { name: 'latency-today-idle', ...latency, mode: 'today', load: false, inputModes: ['baseline'] },
   { name: 'latency-engine-idle', ...latency, mode: 'engine', load: false, inputModes: ['drag', 'orbit', 'walk'] },
   { name: 'latency-engine-raw-idle', ...latency, mode: 'engine', load: false, rawInput: true, inputModes: ['drag', 'orbit', 'walk'] },
@@ -766,6 +770,7 @@ try {
         clock: raw.clock,
         load: raw.load ? { ...raw.load, events: undefined, eventCount: raw.load.events?.length } : null,
         bridge: raw.bridge,
+        ...(raw.agentWarmup ? { agentWarmup: raw.agentWarmup } : {}),
         ...(raw.agentSnapshots ? { agentSnapshots: { ...raw.agentSnapshots, queuedMs: undefined, queuedMsMax: Math.max(0, ...(raw.agentSnapshots.queuedMs ?? [])), jobEngineLog: (raw.log ?? []).filter((l) => /job engine/.test(l)).slice(-20) } } : {}),
         ...(raw.mainRate ? { mainRate: raw.mainRate } : {}),
         ...(run.scenario === 'playback'

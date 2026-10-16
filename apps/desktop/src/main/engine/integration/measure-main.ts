@@ -63,8 +63,9 @@ type Config = {
    *  new revision, so the job engine resyncs as it does after agent edits).
    *  `heavy: 'precomp'` puts the layers in a full-size 4K precomposition,
    *  which pm-render draws whole for every band of rows: a band costs about
-   *  as much as the whole frame (an over-bound pass when the frame is). */
-  agentSnapshots?: { turnMs: number; frames: number; width: number; layers: number; heavy?: 'precomp' };
+   *  as much as the whole frame (an over-bound pass when the frame is).
+   *  `warm` runs one agent turn before playback starts. */
+  agentSnapshots?: { turnMs: number; frames: number; width: number; layers: number; heavy?: 'precomp'; warm?: boolean };
 };
 
 /** A 3840 × 2160, 24 fps project of solid layers, one color per turn; with
@@ -312,6 +313,14 @@ async function main(): Promise<void> {
       if (cfg.mainRate) {
         harness.requestRefreshRate(rateHz);
         log(`main asks the display for ${rateHz} Hz`);
+      }
+      if (cfg.agentSnapshots?.warm && installed.agentJobs) {
+        // One agent turn before playback: the job engine knows the pass's
+        // uncontended cost when playback starts.
+        const o = cfg.agentSnapshots;
+        const t0 = performance.now();
+        const r = await installed.agentJobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(o.layers, 0, o.heavy), times: Array.from({ length: o.frames }, (_, i) => i / 24), width: o.width, revision: 0 });
+        result['agentWarmup'] = { status: r.status, ms: +(performance.now() - t0).toFixed(1), ...(r.status === 'routed' ? { reason: r.reason } : {}) };
       }
       await call(`window.__measure.transport({ command: 'play', rate: { num: 1, den: 1 } })`);
       await sleep(1500);
