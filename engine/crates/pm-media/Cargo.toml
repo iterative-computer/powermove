@@ -19,6 +19,8 @@ blake3 = "1.8"
 md-5 = "0.10"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "ico", "gif", "webp"] }
+# SVG stills (section 13 "Images": usvg). Text in SVG uses the system fonts.
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 
 [dev-dependencies]
 proptest.workspace = true

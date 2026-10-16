@@ -1080,6 +1080,34 @@ fn stills() {
     }
     let s = image::read(&dir.join("dpx8.dpx"), &pool).unwrap();
     assert_eq!(s.bit_depth, 8);
+    // SVG: rasterized at its intrinsic size, premultiplied; and at any size.
+    let s = image::read(&dir.join("vector.svg"), &pool).unwrap();
+    assert_eq!(s.format, ImageFormat::Svg);
+    assert_eq!((s.frame.format.width, s.frame.format.height), (320, 180));
+    let px = still_rgba(&s);
+    let at = |x: usize, y: usize| px[y * 320 + x];
+    // The gradient runs red to blue across the top half.
+    assert!(
+        at(1, 45)[0] > 0.98 && at(1, 45)[2] < 0.02,
+        "{:?}",
+        at(1, 45)
+    );
+    assert!(
+        at(318, 45)[2] > 0.98 && at(318, 45)[0] < 0.02,
+        "{:?}",
+        at(318, 45)
+    );
+    // The half-transparent green circle, premultiplied.
+    let c = at(80, 135);
+    assert!(
+        (c[1] - 0.5).abs() < 0.01 && (c[3] - 0.5).abs() < 0.01 && c[0] == 0.0,
+        "{c:?}"
+    );
+    // Outside every shape: transparent.
+    assert_eq!(at(310, 175), [0.0; 4]);
+    let doc = image::svg::SvgDocument::open(&dir.join("vector.svg")).unwrap();
+    let big = doc.render(1280, 720, &pool).unwrap();
+    assert_eq!(big.frame.format.width, 1280);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

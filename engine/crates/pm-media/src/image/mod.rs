@@ -16,6 +16,7 @@ pub mod imageio;
 pub mod jpeg;
 pub mod raster;
 pub mod sequence;
+pub mod svg;
 
 use crate::error::{MediaError, Result};
 use crate::frame::{
@@ -36,6 +37,7 @@ pub enum ImageBackend {
     ImageIo,
     OpenExr,
     Ffmpeg,
+    Resvg,
 }
 
 /// Formats recognized from the first bytes of a file.
@@ -53,6 +55,7 @@ pub enum ImageFormat {
     Dpx,
     Heif,
     Avif,
+    Svg,
     Other,
 }
 
@@ -84,6 +87,8 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
         } else {
             ImageFormat::Heif
         }
+    } else if svg::sniff(head) {
+        ImageFormat::Svg
     } else {
         ImageFormat::Other
     }
@@ -132,7 +137,7 @@ pub struct Animation {
 
 /// Reads a still (the first frame of an animation).
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
-    let mut head = [0u8; 64];
+    let mut head = [0u8; 512];
     let n = {
         use std::io::Read;
         std::fs::File::open(path)?.read(&mut head)?
@@ -141,6 +146,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     match format {
         ImageFormat::Exr => exr::read(path, pool),
         ImageFormat::Jpeg => jpeg::read(path, pool),
+        ImageFormat::Svg => svg::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
         ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
             imageio::read_frame(path, 0, pool, format)
