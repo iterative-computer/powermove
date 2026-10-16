@@ -367,7 +367,8 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             .position(|l| l["id"] == id)
             .unwrap()
     };
-    // Layer types and effects.
+    // Layer types and effects. Text and captions are drawn (with fonts
+    // configured; tests/text_raster.rs and tests/text_corpus.rs).
     let f = variant(|d| {
         d["layers"].as_array_mut().unwrap().push(layer(
             "t",
@@ -378,7 +379,18 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             2.0,
         ))
     });
-    assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
+    assert!(!f.iter().any(|f| matches!(f, Feature::LayerType(_))), "{f:?}");
+    let f = variant(|d| {
+        d["layers"].as_array_mut().unwrap().push(layer(
+            "s",
+            "shape",
+            json!({ "shape": "rect", "w": 10, "h": 10 }),
+            0.0,
+            0.0,
+            2.0,
+        ))
+    });
+    assert!(f.contains(&Feature::LayerType("shape".into())), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["blend"] = json!("multiply");

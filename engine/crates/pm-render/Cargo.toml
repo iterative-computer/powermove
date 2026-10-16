@@ -44,3 +44,8 @@ harness = false
 # Runs on the main thread (the CoreText font registry).
 name = "text_corpus"
 harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_gpu"
+harness = false
