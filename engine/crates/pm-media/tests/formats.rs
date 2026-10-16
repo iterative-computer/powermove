@@ -824,6 +824,10 @@ fn still_rgba(s: &image::StillImage) -> Vec<[f64; 4]> {
     .unwrap()
 }
 
+/// (file, format, bit depth, float, alpha, max |Δ| in 8-bit CV against the
+/// reference decode, or None).
+type StillCase = (&'static str, ImageFormat, u8, bool, bool, Option<f64>);
+
 /// Stills at native depth. Lossless files equal our FFmpeg build's decode
 /// exactly; JPEG and WebP equal libjpeg-turbo's and libwebp's decodes (what
 /// today's viewer shows); float files equal the generator's values.
@@ -833,7 +837,7 @@ fn stills() {
     let dir = formats().join("image");
     let pool = FramePool::new(0);
     // (file, format, bit depth, float, alpha, max |Δ| in 8-bit CV against FFmpeg, or None)
-    let table: &[(&str, ImageFormat, u8, bool, bool, Option<f64>)] = &[
+    let table: &[StillCase] = &[
         ("png8-rgb.png", ImageFormat::Png, 8, false, false, Some(0.0)),
         ("png8-rgba.png", ImageFormat::Png, 8, false, true, Some(0.0)),
         (

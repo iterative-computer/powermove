@@ -86,10 +86,11 @@ pub fn exif_orientation(bytes: &[u8]) -> u8 {
         }
         let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
         let seg = &bytes[(i + 4).min(bytes.len())..(i + 2 + len).min(bytes.len())];
-        if marker == 0xE1 && seg.starts_with(b"Exif\0\0") {
-            if let Some(o) = tiff_orientation(&seg[6..]) {
-                return o;
-            }
+        if marker == 0xE1
+            && seg.starts_with(b"Exif\0\0")
+            && let Some(o) = tiff_orientation(&seg[6..])
+        {
+            return o;
         }
         i += 2 + len;
     }
@@ -198,7 +199,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
                     bytes.len(),
                     px.as_mut_ptr(),
                     pitch,
-                    tj::TJPF_RGBA as i32,
+                    tj::TJPF_RGBA,
                 )
             };
             if r != 0 && unsafe { tj::tj3GetErrorCode(h.0) } == tj::TJERR_FATAL as i32 {
@@ -218,7 +219,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
                         bytes.len(),
                         px.as_mut_ptr().cast(),
                         pitch,
-                        tj::TJPF_RGBA as i32,
+                        tj::TJPF_RGBA,
                     )
                 } else {
                     tj::tj3Decompress16(
@@ -227,7 +228,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
                         bytes.len(),
                         px.as_mut_ptr(),
                         pitch,
-                        tj::TJPF_RGBA as i32,
+                        tj::TJPF_RGBA,
                     )
                 }
             };
