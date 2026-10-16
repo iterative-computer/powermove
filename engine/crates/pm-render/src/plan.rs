@@ -85,6 +85,9 @@ pub enum Content {
         uv: [f64; 4],
         alpha: f64,
     },
+    /// A layer drawn into its own buffer, through its effect pass and
+    /// transition nodes, then composited (`crate::effects`).
+    Staged(Box<crate::effects::plan::Stage>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +111,8 @@ pub enum Source {
 /// Inputs and outputs of a build.
 pub struct Build<'r> {
     pub assets: &'r dyn AssetResolver,
+    /// Effect and transition definitions; without them both are routed.
+    pub effects: Option<&'r crate::effects::Effects>,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
     retime: RetimeCache,
@@ -130,8 +135,28 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
+    build_with(
+        ev, root_comp, project, time, width, height, scale, assets, None,
+    )
+}
+
+/// [`build`] with effect and transition definitions: layers with effects or
+/// an active transition become staged draws instead of being routed.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    effects: Option<&'r crate::effects::Effects>,
+) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
+        effects,
         failures: Vec::new(),
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
@@ -190,7 +215,9 @@ fn comp_pass<'d>(
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
-        let known = |_: &JsString| true;
+        let effects = b.effects;
+        let known =
+            |ty: &JsString| effects.is_none_or(|e| crate::effects::plan::transition_known(e, ty));
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
             s.group_creates_compositing_boundary(l, time, true, &known)
         };
@@ -292,19 +319,37 @@ fn draw_layer<'d>(
         return Ok(None);
     }
     let comp_id = scope.comp.id().to_string_lossy();
-    // Everything that would leave the fast path is unsupported here; the
-    // capability check lists the same features statically.
+    // Effects and transitions: staged with definitions, routed without.
+    let mut stage = crate::effects::plan::Staging::None;
+    if ty == "adjustment" || b.effects.is_none() {
+        if scope.has_renderable_effects(layer, time)? {
+            let feature = if ty == "adjustment" {
+                Feature::Adjustment
+            } else {
+                Feature::Effects
+            };
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, feature));
+            return Ok(None);
+        }
+    } else if let Some(effects) = b.effects {
+        stage = crate::effects::plan::staging(
+            scope,
+            effects,
+            &comp_id,
+            layer,
+            time,
+            &mut b.unsupported,
+        )?;
+        if matches!(stage, crate::effects::plan::Staging::Refused) {
+            return Ok(None);
+        }
+    }
+    // Everything else that would leave the fast path is unsupported here;
+    // the capability check lists the same features statically.
     let mut refuse = |f: Feature| {
         b.unsupported.push(Unsupported::layer(&comp_id, layer, f));
     };
-    if scope.has_renderable_effects(layer, time)? {
-        refuse(if ty == "adjustment" {
-            Feature::Adjustment
-        } else {
-            Feature::Effects
-        });
-        return Ok(None);
-    }
     if ty == "adjustment" {
         // An adjustment layer without an enabled effect is a no-op.
         return Ok(None);
@@ -352,11 +397,13 @@ fn draw_layer<'d>(
         refuse(Feature::MotionBlur);
         return Ok(None);
     }
-    let transition: Option<ActiveTransition<'d>> =
-        scope.active_transition(layer, time, &|_| true)?;
-    if transition.is_some() {
-        refuse(Feature::Transition);
-        return Ok(None);
+    if b.effects.is_none() {
+        let transition: Option<ActiveTransition<'d>> =
+            scope.active_transition(layer, time, &|_| true)?;
+        if transition.is_some() {
+            refuse(Feature::Transition);
+            return Ok(None);
+        }
     }
     if js::flag(layer, "matteSource") {
         refuse(Feature::TrackMatte);
@@ -367,6 +414,17 @@ fn draw_layer<'d>(
         // composite into their own target, drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
         let id = js::layer_id(layer);
+        if let crate::effects::plan::Staging::Stage {
+            effects,
+            transition,
+        } = stage
+        {
+            // The group's members are the layer's pixels; its opacity
+            // applies at the composite (`compositeAlpha`).
+            return Ok(Some(vec![staged(
+                id, width, height, inner, effects, transition, alpha, time,
+            )]));
+        }
         return Ok(Some(vec![Draw {
             layer: id,
             matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
@@ -425,7 +483,50 @@ fn draw_layer<'d>(
             },
         },
     };
+    if let crate::effects::plan::Staging::Stage {
+        effects,
+        transition,
+    } = stage
+    {
+        let content = CompPlan {
+            composition: comp_id,
+            group: true,
+            width,
+            height,
+            background: Background::Transparent,
+            draws: vec![draw],
+        };
+        let id = js::layer_id(layer);
+        return Ok(Some(vec![staged(
+            id, width, height, content, effects, transition, 1.0, time,
+        )]));
+    }
     Ok(Some(vec![draw]))
+}
+
+/// A staged draw covering the level.
+#[allow(clippy::too_many_arguments)]
+fn staged(
+    layer: String,
+    width: u32,
+    height: u32,
+    content: CompPlan,
+    effects: Vec<crate::effects::plan::EffectStep>,
+    transition: Option<crate::effects::plan::TransitionStep>,
+    alpha: f64,
+    time: f64,
+) -> Draw {
+    Draw {
+        layer,
+        matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+        content: Content::Staged(Box::new(crate::effects::plan::Stage {
+            content,
+            effects,
+            transition,
+            alpha,
+            time,
+        })),
+    }
 }
 
 /// `scaledWorld(L, T, W, H)` without a preview viewport.

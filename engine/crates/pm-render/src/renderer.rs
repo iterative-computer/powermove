@@ -13,6 +13,7 @@ use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
+use crate::effects::Effects;
 use crate::error::{LayerFailure, RenderError};
 use crate::exec::{Exec, Region};
 use crate::expr::PmExprEngine;
@@ -73,6 +74,7 @@ pub struct Renderer {
     scene3d: Scene3dRenderer,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
+    effects: Effects,
 }
 
 impl Renderer {
@@ -89,10 +91,171 @@ impl Renderer {
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
+            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
             device,
             queue,
             bracket: None,
         }
+    }
+
+    /// Replaces the effect, transition, and layer definitions with an
+    /// embedded set (an export job's, a collected project's, `pm-cli`'s;
+    /// contract 10) and translates them. Returns per-definition failures.
+    /// Without definitions, layers with effects or transitions are routed.
+    pub fn set_definitions(
+        &mut self,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.set_snapshot(set)
+    }
+
+    /// Applies a kernel update (`pushDefinitions`); the failures are
+    /// `DefinitionsApplied.failures`. In force for every later frame.
+    pub fn apply_definitions(
+        &mut self,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.apply(update)
+    }
+
+    /// The definitions in force (what an export job embeds).
+    pub fn definitions(&self) -> pm_protocol::definitions::DefinitionSetSnapshot {
+        self.effects.snapshot()
+    }
+
+    pub fn effects(&self) -> &Effects {
+        &self.effects
+    }
+
+    pub fn effects_mut(&mut self) -> &mut Effects {
+        &mut self.effects
+    }
+
+    fn exec<'a>(&'a mut self, precision: Precision) -> Exec<'a> {
+        Exec {
+            device: &self.device,
+            queue: &self.queue,
+            pipelines: &self.pipelines,
+            media: &mut self.media,
+            pool: &mut self.pool,
+            scene3d: &mut self.scene3d,
+            effects: &mut self.effects,
+            timer: None,
+            precision,
+            working: ProjectColor::DEFAULT.working(),
+            export: false,
+            depth_id: false,
+            taken: Vec::new(),
+            failures: Vec::new(),
+            unsupported: Vec::new(),
+        }
+    }
+
+    /// Runs effect pass nodes on `input` as the compositor's `runEffects`
+    /// does (harnesses and the shader parity tests): every buffer the size
+    /// of `input`, in GL row order. `region` places the buffer in a level
+    /// of `full` pixels (`effectViewportCoordinates`); `backdrop` is
+    /// `u_backdrop` (an empty unit without one). Returns a new working
+    /// target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_effects(
+        &mut self,
+        input: &Target,
+        backdrop: Option<&Target>,
+        steps: &[crate::effects::plan::EffectStep],
+        time: f64,
+        region: Option<(u32, u32)>,
+        full: (u32, u32),
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm effects"),
+            });
+        let (w, h) = (input.width(), input.height());
+        let region = region.map(|(x, y)| Region {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
+        let (out, taken, unsupported) = {
+            let mut exec = self.exec(precision);
+            let mut current = exec.pool.take_working(exec.device, w, h, precision);
+            encoder.copy_texture_to_texture(
+                input.texture.as_image_copy(),
+                current.texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            for step in steps {
+                if let Some(next) = exec.run_effect(
+                    &mut encoder,
+                    "",
+                    step,
+                    &current,
+                    backdrop,
+                    time,
+                    coordinates,
+                ) {
+                    exec.taken.push(std::mem::replace(&mut current, next));
+                }
+            }
+            (current, exec.taken, exec.unsupported)
+        };
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        if !unsupported.is_empty() {
+            return Err(RenderError::Unsupported(unsupported));
+        }
+        Ok(out)
+    }
+
+    /// Runs a transition node from `from` to `to` (`runTransition`).
+    pub fn run_transition(
+        &mut self,
+        from: &Target,
+        to: &Target,
+        step: &crate::effects::plan::TransitionStep,
+        time: f64,
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm transition"),
+            });
+        let mut step = step.clone();
+        step.edge_in = true;
+        let (out, taken, unsupported) = {
+            let mut exec = self.exec(precision);
+            let out = exec.run_transition(&mut encoder, "", &step, from, to, time);
+            (out, exec.taken, exec.unsupported)
+        };
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        match out {
+            Some(t) if unsupported.is_empty() => Ok(t),
+            _ => Err(RenderError::Unsupported(unsupported)),
+        }
+    }
+
+    /// Reads finished watchdog timestamps (`wait`: every submitted frame)
+    /// and returns the overruns reported since the last call.
+    pub fn watchdog_reports(&mut self, wait: bool) -> Vec<pm_protocol::error::EngineError> {
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, wait);
+        self.effects.watchdog.take_reports()
     }
 
     /// Records `bracket` around every following frame's commands (`None`:
@@ -255,7 +418,11 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build(
+        // Overruns measured on earlier frames disable their effects now.
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
+        let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -264,6 +431,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.effects.configured().then_some(&self.effects),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -286,7 +454,8 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        let (legend, taken, unsupported, exec_failures) = {
+        let timer = self.effects.watchdog.frame_timer(&self.device);
+        let (legend, taken, unsupported, exec_failures, timer) = {
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -294,6 +463,8 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                effects: &mut self.effects,
+                timer,
                 precision: request.precision,
                 working: ProjectColor::DEFAULT.working(),
                 export: request.export,
@@ -340,12 +511,19 @@ impl Renderer {
                 exec.taken.push(id_rows);
             }
             let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
-            (legend, exec.taken, exec.unsupported, exec.failures)
+            let timer = exec.timer.take();
+            (legend, exec.taken, exec.unsupported, exec.failures, timer)
         };
+        if let Some(timer) = timer {
+            self.effects
+                .watchdog
+                .finish(&self.device, &mut encoder, timer);
+        }
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
         self.queue.submit([encoder.finish()]);
+        self.effects.watchdog.submitted();
         for t in taken {
             self.pool.give(t);
         }
@@ -477,7 +655,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build(
+        let (plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -486,6 +664,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.effects.configured().then_some(&self.effects),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

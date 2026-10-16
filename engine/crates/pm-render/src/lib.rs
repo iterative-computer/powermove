@@ -16,9 +16,12 @@
 //! - [`unsupported`], [`unsupported_with_media`]: capability routing.
 //! - [`plan`]: the render graph of a frame, built through `pm-eval`.
 //! - [`RenderRequest`]: contract 2's request as the graph sees it.
+//! - [`effects`]: effects and transitions through the GLSL pipeline, with
+//!   definition snapshots (contract 10) and the GPU watchdog.
 
 pub mod assets;
 pub mod capability;
+pub mod effects;
 mod error;
 mod exec;
 pub mod expr;
@@ -34,7 +37,10 @@ pub mod stills;
 pub mod three;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
-pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
+pub use capability::{
+    Feature, Unsupported, unsupported, unsupported_with_definitions, unsupported_with_media,
+};
+pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{CommandBracket, Frame, PassThrough, Rendered, Renderer};
 pub use request::RenderRequest;

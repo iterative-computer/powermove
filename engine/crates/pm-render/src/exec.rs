@@ -5,6 +5,8 @@ use pm_gpu::{Target, TargetPool};
 use pm_protocol::color::{Precision, WorkingEncoding};
 
 use crate::capability::Unsupported;
+use crate::effects::Effects;
+use crate::effects::watchdog::FrameTimer;
 use crate::error::LayerFailure;
 use crate::media::{MediaCache, MediaFailure};
 use crate::pipelines::{FillUniform, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
@@ -42,6 +44,10 @@ pub(crate) struct Exec<'a> {
     pub media: &'a mut MediaCache,
     pub pool: &'a mut TargetPool,
     pub scene3d: &'a mut Scene3dRenderer,
+    /// Effect and transition definitions and programs.
+    pub effects: &'a mut Effects,
+    /// This frame's watchdog timestamps (devices with `TIMESTAMP_QUERY`).
+    pub timer: Option<FrameTimer>,
     pub precision: Precision,
     pub working: WorkingEncoding,
     pub export: bool,
@@ -112,15 +118,16 @@ impl Exec<'_> {
         }
     }
 
-    /// Resolves every draw's source, recording any passes it needs.
+    /// Resolves the draws' sources, recording any passes they need.
     fn resolve(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
+        draws: &[Draw],
         region: Option<Region>,
     ) -> Vec<Resolved> {
-        let mut out = Vec::with_capacity(plan.draws.len());
-        for draw in &plan.draws {
+        let mut out = Vec::with_capacity(draws.len());
+        for draw in draws {
             let mut r = Resolved {
                 matrix: draw.matrix,
                 view: None,
@@ -133,6 +140,8 @@ impl Exec<'_> {
             };
             match &draw.content {
                 Content::Solid(c) => r.solid = Some(*c),
+                // Staged layers are drawn by `render_staged`, never in a run.
+                Content::Staged(_) => {}
                 Content::Texture { source, uv, alpha } => {
                     r.uv = *uv;
                     r.alpha = *alpha;
@@ -234,7 +243,29 @@ impl Exec<'_> {
         region: Option<Region>,
         target: &Target,
     ) -> Vec<Resolved> {
-        let resolved = self.resolve(encoder, plan, region);
+        if plan
+            .draws
+            .iter()
+            .any(|d| matches!(d.content, Content::Staged(_)))
+        {
+            return self.render_staged(encoder, plan, region, target);
+        }
+        self.render_run(encoder, plan, &plan.draws, region, target, false)
+    }
+
+    /// Draws `draws` of `plan` into `target` in one render pass. `load`
+    /// keeps what the target holds (a run after a staged layer); otherwise
+    /// the pass clears it and draws the level's background.
+    pub(crate) fn render_run(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+        target: &Target,
+        load: bool,
+    ) -> Vec<Resolved> {
+        let resolved = self.resolve(encoder, plan, draws, region);
         let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
         let (th, format) = (target.height(), target.format());
         // Draws keep full-frame coordinates; a region of interest moves the
@@ -285,7 +316,7 @@ impl Exec<'_> {
             }],
         });
         let fill_bind = match &plan.background {
-            Background::Gradient(g) => {
+            Background::Gradient(g) if !load => {
                 let mut u = FillUniform::default();
                 for (i, (rgb, pos)) in g.stops.iter().take(8).enumerate() {
                     u.stops[i] = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, *pos as f32];
@@ -340,6 +371,7 @@ impl Exec<'_> {
             })
             .collect();
         let clear = match &plan.background {
+            _ if load => wgpu::Color::TRANSPARENT,
             Background::Transparent => wgpu::Color::TRANSPARENT,
             Background::Solid(c) => wgpu::Color {
                 r: c[0],
@@ -356,7 +388,11 @@ impl Exec<'_> {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
+                    load: if load {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(clear)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
