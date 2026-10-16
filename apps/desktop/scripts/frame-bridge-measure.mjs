@@ -912,8 +912,9 @@ try {
         POWERMOVE_USER_DATA: profile,
         POWERMOVE_DEVTOOLS: '0',
         POWERMOVE_NEW_ENGINE: run.mode === 'engine' || run.mode === 'tracer' ? '1' : '0',
-        // The engine's per-frame trace (render start, GPU done, sent), for the hops.
-        POWERMOVE_BRIDGE_TRACE: '1',
+        // The engine's per-frame trace (render start, GPU done, sent), for
+        // the hops (PM_MEASURE_ENGINE_TRACE=0 leaves it off).
+        POWERMOVE_BRIDGE_TRACE: process.env.PM_MEASURE_ENGINE_TRACE === '0' ? '0' : '1',
         // The engine's test source at the project's rate (the Powermove ad is 30 fps).
         POWERMOVE_BRIDGE_TEST_FPS: String(run.fps ?? 30),
         CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),

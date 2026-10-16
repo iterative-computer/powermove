@@ -1,0 +1,249 @@
+{
+  "run": "tracer-drag-engine-500-load-bf9phase1",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "env": {
+      "POWERMOVE_ENGINE_FRAME_SOURCE": "document"
+    },
+    "mode": "tracer",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "offMainThread": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "drag"
+    ],
+    "synthetic": {
+      "layers": 500,
+      "images": 2
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 30,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      10.83056640625,
+      8.31298828125,
+      7.71142578125
+    ],
+    "after": [
+      13.82666015625,
+      9.322265625,
+      8.10009765625
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 10,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 51,
+    "offsetUs": 336232293045.50006
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 24,
+      "ms": {
+        "n": 24,
+        "p50": 50.0223339999975,
+        "max": 50.03600000000006
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 451,
+      "replies": 451,
+      "replyBytes": 35489872,
+      "mainMsP50": 0.12200000000120781
+    },
+    "resizes": {
+      "n": 4,
+      "steps": 244
+    },
+    "eventCount": 28
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.5b03716e1f80ff2dae4bacfe50086301",
+    "accepted": {
+      "pid": 71604,
+      "pidversion": 5189673
+    },
+    "rejections": 0,
+    "surfaces": 24,
+    "imports": 24,
+    "sends": 24,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 16,
+    "allReleased": 8,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 16,
+      "bytes": 398655488
+    },
+    "live": 8
+  },
+  "latency": {
+    "drag": {
+      "events": 2401,
+      "dispatches": 3315,
+      "draws": 928,
+      "unmatched": 0,
+      "unpresented": 113,
+      "presentation": {
+        "thread": "worker",
+        "timing": "viz",
+        "sink": "7:2147483650"
+      },
+      "pointerToPixelMs": {
+        "n": 2288,
+        "p50": 74.09,
+        "p95": 150.39,
+        "p99": 175.32,
+        "max": 206.99
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 74.19,
+        "p95": 158.24,
+        "p99": 198.77,
+        "max": 290.29
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2288,
+          "p50": 6.58,
+          "p95": 47.84,
+          "p99": 62.46,
+          "max": 97.64
+        },
+        "handledToArrival": {
+          "n": 2288,
+          "p50": 45.7,
+          "p95": 86.5,
+          "p99": 105.8,
+          "max": 167.5
+        },
+        "arrivalToSubmit": {
+          "n": 2288,
+          "p50": 0.7,
+          "p95": 1,
+          "p99": 1.1,
+          "max": 2.3
+        },
+        "submitToReceived": {
+          "n": 2288,
+          "p50": 0.29,
+          "p95": 4.51,
+          "p99": 7.36,
+          "max": 8.05
+        },
+        "receivedToPresent": {
+          "n": 2288,
+          "p50": 21.31,
+          "p95": 29.78,
+          "p99": 33.2,
+          "max": 45.65
+        },
+        "receivedToDraw": {
+          "n": 2288,
+          "p50": 7.07,
+          "p95": 11.26,
+          "p99": 12.65,
+          "max": 13.36
+        },
+        "drawToPresent": {
+          "n": 2288,
+          "p50": 14.79,
+          "p95": 23.34,
+          "p99": 27.01,
+          "max": 37.67
+        },
+        "handledToRenderStart": {
+          "n": 2288,
+          "p50": 10.76,
+          "p95": 24.96,
+          "p99": 33.01,
+          "max": 79.51
+        },
+        "renderStartToGpuDone": {
+          "n": 2288,
+          "p50": 16.69,
+          "p95": 23.89,
+          "p99": 30.65,
+          "max": 35.74
+        },
+        "gpuDoneToSent": {
+          "n": 2288,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "sentToArrival": {
+          "n": 2288,
+          "p50": 15.52,
+          "p95": 62.24,
+          "p99": 72.9,
+          "max": 131.1
+        }
+      }
+    }
+  }
+}
