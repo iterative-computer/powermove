@@ -120,6 +120,21 @@ pub fn asset_ids(document: &Document) -> Vec<String> {
     }
 }
 
+/// Each asset of `document` with the digest of its record (canonical JSON):
+/// a relink or a replaced file changes the record, so hosts that keep
+/// resolved paths can tell when to resolve an asset again.
+pub fn asset_records(document: &Document) -> Vec<(String, [u8; 32])> {
+    let assets = pm_eval::node::member(document.root(), "assets");
+    asset_ids(document)
+        .into_iter()
+        .map(|asset| {
+            let digest = pm_eval::node::member(assets, &asset)
+                .map_or([0; 32], pm_model::hash::canonical_digest);
+            (asset, digest)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // GPU time slicing
 // ---------------------------------------------------------------------------

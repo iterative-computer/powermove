@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
-    ExportJob, JobError, MediaPaths, Progress, StillRouting, asset_ids, encode_jpeg, encode_png,
-    plan_export, render_still, run_export_into, to_rgba8,
+    ExportJob, JobError, MediaPaths, Progress, StillRouting, asset_records, encode_jpeg,
+    encode_png, plan_export, render_still, run_export_into, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -114,8 +114,9 @@ struct State {
     outbox: Drained,
     next_token: u64,
     answers: HashMap<u64, Result<Response, EngineError>>,
-    /// Media paths resolved per session (handles are bound to the session).
-    media: HashMap<SessionId, MediaPaths>,
+    /// Media paths resolved per session (handles are bound to the session),
+    /// each with the digest of the asset record it was resolved for.
+    media: HashMap<SessionId, HashMap<String, ([u8; 32], PathBuf)>>,
     /// The run of each queued or running frame batch, for run cancels.
     frame_runs: Vec<(AgentRunId, Arc<AtomicBool>)>,
     shutdown: bool,
@@ -712,18 +713,28 @@ fn fail_work(shared: &Shared, work: Work, code: ErrorCode, message: &str) {
 /// Media paths for `document`'s assets, resolved through host services:
 /// a `mediaRead` handle per asset, then its path. Assets the host cannot
 /// resolve are offline (the capability check routes what needs them).
+/// The media of `document`'s assets, through host services. Paths are kept
+/// per session while the asset's record is unchanged: a relink or a replaced
+/// file changes the record, and the asset is resolved again.
 fn resolve_media(shared: &Shared, document: &JobDocument) -> MediaPaths {
     let session = document.session;
-    let mut known = shared
-        .lock()
-        .media
-        .get(&session)
-        .cloned()
-        .unwrap_or_default();
-    let missing: Vec<String> = asset_ids(&document.document)
-        .into_iter()
-        .filter(|a| !known.paths.contains_key(a))
-        .collect();
+    let records = asset_records(&document.document);
+    let mut known = MediaPaths::default();
+    let missing: Vec<String> = {
+        let st = shared.lock();
+        let cached = st.media.get(&session);
+        records
+            .iter()
+            .filter(|(asset, digest)| match cached.and_then(|c| c.get(asset)) {
+                Some((d, path)) if d == digest => {
+                    known.insert(asset.clone(), path.clone());
+                    false
+                }
+                _ => true,
+            })
+            .map(|(asset, _)| asset.clone())
+            .collect()
+    };
     if missing.is_empty() {
         return known;
     }
@@ -773,7 +784,15 @@ fn resolve_media(shared: &Shared, document: &JobDocument) -> MediaPaths {
             known.insert(asset, PathBuf::from(r.path));
         }
     }
-    shared.lock().media.insert(session, known.clone());
+    // Only the document's current assets stay cached.
+    let cache: HashMap<String, ([u8; 32], PathBuf)> = records
+        .into_iter()
+        .filter_map(|(asset, digest)| {
+            let path = known.paths.get(&asset)?.clone();
+            Some((asset, (digest, path)))
+        })
+        .collect();
+    shared.lock().media.insert(session, cache);
     known
 }
 

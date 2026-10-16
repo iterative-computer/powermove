@@ -442,6 +442,12 @@ impl Host {
         else {
             panic!("no session")
         };
+        self.resync(session, doc, revision);
+        session
+    }
+
+    /// Replaces `session`'s document at `revision`.
+    fn resync(&mut self, session: SessionId, doc: &Value, revision: u64) {
         let text = doc.to_string();
         let value = pm_model::json::parse(&text).unwrap();
         let id = self.send_request(
@@ -461,7 +467,6 @@ impl Host {
             self.answers.remove(&id),
             Some(Message::Response { .. })
         ));
-        session
     }
 
     fn files(&self) -> Vec<String> {
@@ -965,4 +970,58 @@ fn a_render_that_fails_after_admission_releases_the_shared_gate() {
         user.finished(7, granted.unwrap(), 50.0);
     }
     assert_eq!(gate.stats().abandoned, 2);
+}
+
+/// A relinked asset (its record changed) is resolved again within the same
+/// session; an unchanged one is not.
+#[test]
+fn a_relinked_asset_is_resolved_again_in_the_same_session() {
+    let mut host = Host::new("relink", &[]);
+    let doc = project(false);
+    let sid = host.snapshot(&doc, SessionRole::Job, 1);
+    let mints = |h: &Host| {
+        h.host_requests
+            .iter()
+            .filter(|r| **r == "mintHandle")
+            .count()
+    };
+    let id = host.send_request(Request::AgentFrames(frames_request(1)), Some(sid), Some(1));
+    assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+    let first = mints(&host);
+    assert_eq!(first, 3, "still, clip, tone");
+    // The same document at a new revision: nothing is resolved again.
+    host.resync(sid, &doc, 2);
+    let id = host.send_request(Request::AgentFrames(frames_request(1)), Some(sid), Some(2));
+    assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+    assert_eq!(mints(&host), first);
+    // Relink the still to another file: only it is resolved again, and the
+    // frame shows the new file.
+    let mut relinked = doc.clone();
+    relinked["assets"]["still"]["name"] = json!("still-relinked.png");
+    let before = frame_images(&host.answers[&id]).remove(0).2;
+    host.media.insert("still".into(), fixture("still-red.png"));
+    host.resync(sid, &relinked, 3);
+    let id = host.send_request(Request::AgentFrames(frames_request(1)), Some(sid), Some(3));
+    assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+    assert_eq!(mints(&host), first + 1);
+    let after = frame_images(&host.answers[&id]).remove(0).2;
+    // The image layer (80 × 45 around 250, 40) shows the other file.
+    let pixels = |jpeg: &[u8]| {
+        image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8()
+    };
+    let (a, b) = (pixels(&before), pixels(&after));
+    let changed = (215..285)
+        .flat_map(|x| (22..58).map(move |y| (x, y)))
+        .map(|(x, y)| {
+            let (p, q) = (a.get_pixel(x, y).0, b.get_pixel(x, y).0);
+            (0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap()
+        })
+        .max()
+        .unwrap();
+    assert!(
+        changed > 40,
+        "the relinked still did not change the frame ({changed})"
+    );
 }
