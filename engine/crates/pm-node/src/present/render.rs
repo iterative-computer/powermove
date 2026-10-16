@@ -1833,6 +1833,22 @@ impl Thread {
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    drop(stats);
+                    // Effects the GPU watchdog turned off (measured on an
+                    // earlier frame): reported at this frame's revision.
+                    for error in composer.renderer().watchdog_reports(false) {
+                        let report = pm_protocol::error::FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
