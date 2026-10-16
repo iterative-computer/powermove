@@ -319,7 +319,27 @@ pub struct JobStatus {
     /// into place (host services fill it in; the engine never sees paths).
     pub path: Option<String>,
     pub error: Option<EngineError>,
+    /// The latest encoded frame, small, for the export progress sheet
+    /// ([`DeliveryOptions::preview`]).
+    #[serde(default)]
+    pub preview: Option<JobPreview>,
 }
+
+/// A preview of an export's latest encoded frame: a JPEG at most
+/// [`JOB_PREVIEW_MAX_EDGE`] pixels on its long edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct JobPreview {
+    /// The export frame it shows (0-based).
+    pub frame: u32,
+    pub width: u32,
+    pub height: u32,
+    pub jpeg: crate::common::Bytes,
+}
+
+/// The longest edge of a job preview.
+pub const JOB_PREVIEW_MAX_EDGE: u32 = 640;
 
 // ---------------------------------------------------------------------------
 // Jobs: exports, agent exports, generated media
@@ -474,6 +494,73 @@ pub struct ExportSettings {
     pub dither: bool,
     /// "Render using: Proxies (draft)", chosen explicitly (section 14.6).
     pub draft_from_proxies: bool,
+    /// Phase 3b delivery options; absent in Phase 2 senders (today's defaults).
+    #[serde(default)]
+    pub delivery: DeliveryOptions,
+}
+
+/// How an export's audio is coded (section 16, "Export"). WebM is always Opus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum AudioCoding {
+    /// 16-bit LPCM with deterministic TPDF dither (MOV).
+    Pcm16,
+    /// 24-bit LPCM (MOV; today's ProRes audio).
+    Pcm24,
+    /// 32-bit float LPCM (MOV).
+    PcmFloat,
+    /// AAC through AudioToolbox with an edit list for its priming.
+    Aac,
+}
+
+/// The `tmcd` track's label for the first frame (section 17, "Comfort": start
+/// timecode and reel name). MOV outputs only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ExportTimecode {
+    /// `HH:MM:SS:FF`, or `HH:MM:SS;FF` drop-frame, at the export rate.
+    pub start: String,
+    /// Drop-frame counting (29.97 and 59.94 only).
+    pub drop_frame: bool,
+    /// Reel (source reference) name, at most 255 bytes.
+    pub reel: Option<String>,
+}
+
+/// Delivery options added in Phase 3b. The defaults are today's behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeliveryOptions {
+    /// `None`: 24-bit PCM in MOV, AAC in MP4, Opus in WebM.
+    pub audio_coding: Option<AudioCoding>,
+    /// `None`: the composition's own timecode at the export's first frame
+    /// (drop-frame at 29.97 and 59.94), no reel.
+    pub timecode: Option<ExportTimecode>,
+    /// Leaves captions layers out of the picture (a caption file is delivered
+    /// instead); captions are burned in otherwise, as today.
+    pub hide_captions: bool,
+    /// Job statuses carry a small preview of the latest encoded frame (the
+    /// export progress sheet's live preview).
+    pub preview: bool,
+    /// PNG sequences: the name frame files start with (`<name>_00000.png`),
+    /// usually the destination folder's name. A bare name.
+    pub sequence_name: Option<String>,
+}
+
+impl ExportFormat {
+    /// Whether the output is a QuickTime movie (MOV).
+    pub const fn is_mov(self) -> bool {
+        matches!(
+            self,
+            ExportFormat::ProRes { .. }
+                | ExportFormat::Hevc {
+                    container: Container::Mov,
+                    ..
+                }
+        )
+    }
 }
 
 /// Longest export edge.
@@ -517,7 +604,59 @@ impl Validate for ExportSettings {
         })?;
         ensure(image_tag == self.format.is_image(), C, || {
             "images use image tags and video uses video tags".into()
-        })
+        })?;
+        let d = &self.delivery;
+        if let Some(coding) = d.audio_coding {
+            ensure(self.audio && !self.format.is_image(), C, || {
+                "an audio coding needs an export with audio".into()
+            })?;
+            ensure(!matches!(self.format, ExportFormat::Webm { .. }), C, || {
+                "WebM audio is Opus".into()
+            })?;
+            ensure(
+                coding == AudioCoding::Aac || self.format.is_mov(),
+                C,
+                || "PCM audio goes in MOV".into(),
+            )?;
+        }
+        if let Some(name) = &d.sequence_name {
+            ensure(
+                !name.is_empty()
+                    && name.len() <= 200
+                    && !name.contains(['/', '\\', '\0', ':'])
+                    && name != "."
+                    && name != "..",
+                C,
+                || "a sequence name is a bare file name".into(),
+            )?;
+        }
+        if let Some(tc) = &d.timecode {
+            ensure(self.format.is_mov(), C, || {
+                "timecode tracks are written to MOV".into()
+            })?;
+            ensure(
+                !tc.start.is_empty() && tc.start.len() <= 16 && tc.start.is_ascii(),
+                C,
+                || "start timecode must be HH:MM:SS:FF".into(),
+            )?;
+            ensure(
+                tc.reel
+                    .as_ref()
+                    .is_none_or(|r| r.len() <= 255 && !r.chars().any(char::is_control)),
+                C,
+                || "reel name is at most 255 bytes of printable text".into(),
+            )?;
+            let (num, den) = (
+                u64::from(self.frame_rate.num),
+                u64::from(self.frame_rate.den),
+            );
+            ensure(
+                !tc.drop_frame || num * 1001 == den * 30000 || num * 1001 == den * 60000,
+                C,
+                || "drop-frame timecode needs 29.97 or 59.94 fps".into(),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -839,6 +978,7 @@ mod tests {
             precision: Precision::Float32,
             dither: false,
             draft_from_proxies: false,
+            delivery: Default::default(),
         }
     }
 
@@ -905,6 +1045,91 @@ mod tests {
     }
 
     #[test]
+    fn delivery_options_fit_their_containers() {
+        let with = |format, delivery: DeliveryOptions| ExportSettings {
+            format,
+            alpha: AlphaOutput::None,
+            delivery,
+            ..export_settings()
+        };
+        let prores = ExportFormat::ProRes {
+            profile: ProResProfile::Hq,
+        };
+        let pcm = |coding| DeliveryOptions {
+            audio_coding: Some(coding),
+            ..DeliveryOptions::default()
+        };
+        assert!(with(prores, pcm(AudioCoding::PcmFloat)).validate().is_ok());
+        assert!(with(prores, pcm(AudioCoding::Aac)).validate().is_ok());
+        assert!(
+            with(ExportFormat::H264, pcm(AudioCoding::Pcm16))
+                .validate()
+                .is_err(),
+            "PCM in MP4"
+        );
+        assert!(
+            with(ExportFormat::H264, pcm(AudioCoding::Aac))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with(
+                ExportFormat::Webm {
+                    codec: WebmCodec::Vp9
+                },
+                pcm(AudioCoding::Aac)
+            )
+            .validate()
+            .is_err(),
+            "WebM is Opus"
+        );
+        let tc = |start: &str, drop_frame| DeliveryOptions {
+            timecode: Some(ExportTimecode {
+                start: start.into(),
+                drop_frame,
+                reel: Some("A001".into()),
+            }),
+            ..DeliveryOptions::default()
+        };
+        assert!(with(prores, tc("01:00:00:00", false)).validate().is_ok());
+        assert!(
+            with(prores, tc("01:00:00;00", true)).validate().is_err(),
+            "drop-frame at 23.976"
+        );
+        assert!(
+            ExportSettings {
+                frame_rate: FrameRate::new(30000, 1001),
+                ..with(prores, tc("01:00:00;00", true))
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            with(ExportFormat::H264, tc("01:00:00:00", false))
+                .validate()
+                .is_err(),
+            "timecode in MP4"
+        );
+        assert!(
+            with(
+                ExportFormat::Hevc {
+                    ten_bit: true,
+                    container: Container::Mov
+                },
+                tc("00:00:10:00", false)
+            )
+            .validate()
+            .is_ok(),
+            "HEVC in MOV takes timecode"
+        );
+        // Phase 2 senders omit `delivery`; it reads as today's defaults.
+        let mut json = serde_json::to_value(export_settings()).unwrap();
+        json.as_object_mut().unwrap().remove("delivery");
+        let back: ExportSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(back.delivery, DeliveryOptions::default());
+    }
+
+    #[test]
     fn job_submission_rules() {
         assert!(agent_export().validate().is_ok());
         let user_choosing_agent_output = SubmitJob {
@@ -963,6 +1188,7 @@ mod tests {
             progress: 0.0,
             path: path.map(str::to_owned),
             error: None,
+            preview: None,
         };
         let wait = AgentExportMode::Wait;
         assert_eq!(

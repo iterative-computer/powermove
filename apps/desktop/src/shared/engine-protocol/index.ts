@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-ec2dc3a830649ec9";
+export const PROTOCOL_BUILD = "protocol-c90e74f6dccc4ffd";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -15,6 +15,7 @@ export type { AgentImageFormat } from "./AgentImageFormat";
 export type { AgentRunId } from "./AgentRunId";
 export type { AlphaOutput } from "./AlphaOutput";
 export type { AssetId } from "./AssetId";
+export type { AudioCoding } from "./AudioCoding";
 export type { Background } from "./Background";
 export type { BlendDomain } from "./BlendDomain";
 export type { BlendMode } from "./BlendMode";
@@ -63,6 +64,7 @@ export type { DefinitionRemoval } from "./DefinitionRemoval";
 export type { DefinitionSnapshot } from "./DefinitionSnapshot";
 export type { DefinitionsApplied } from "./DefinitionsApplied";
 export type { DefinitionsUpdate } from "./DefinitionsUpdate";
+export type { DeliveryOptions } from "./DeliveryOptions";
 export type { DepthIdSurface } from "./DepthIdSurface";
 export type { DepthSet } from "./DepthSet";
 export type { DocumentEncoding } from "./DocumentEncoding";
@@ -85,6 +87,7 @@ export type { EvaluatedTransition } from "./EvaluatedTransition";
 export type { Event } from "./Event";
 export type { ExportFormat } from "./ExportFormat";
 export type { ExportSettings } from "./ExportSettings";
+export type { ExportTimecode } from "./ExportTimecode";
 export type { ExtensionId } from "./ExtensionId";
 export type { ExtensionRegistered } from "./ExtensionRegistered";
 export type { ExtensionSource } from "./ExtensionSource";
@@ -109,6 +112,7 @@ export type { InFlight } from "./InFlight";
 export type { InstanceId } from "./InstanceId";
 export type { JobAccepted } from "./JobAccepted";
 export type { JobId } from "./JobId";
+export type { JobPreview } from "./JobPreview";
 export type { JobSpec } from "./JobSpec";
 export type { JobState } from "./JobState";
 export type { JobStatus } from "./JobStatus";

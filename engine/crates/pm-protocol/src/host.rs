@@ -235,6 +235,10 @@ pub struct OutputDestinationRequest {
     pub job: JobId,
     pub choice: OutputChoice,
     pub overwrite: OverwritePolicy,
+    /// The output is a folder of files (PNG sequences): the host creates an
+    /// empty owner-only temporary folder instead of a file.
+    #[serde(default)]
+    pub folder: bool,
 }
 
 /// The host's answer: a handle to a temporary file in the destination folder.
@@ -611,6 +615,7 @@ mod tests {
                 extension: "mp4".into(),
             },
             overwrite: OverwritePolicy::UniqueName,
+            folder: false,
         };
         assert!(request.validate().is_err());
         let request = OutputDestinationRequest {
