@@ -59,6 +59,14 @@ export type SessionOptions = {
   onRoute?: (route: Route, reason: string | null) => void;
   /** Every clock sample of the session. */
   onClock?: (sample: ClockSample) => void;
+  /**
+   * The window replaced its document (a `load` batch: another project, or
+   * `PM.proj` assigned outright) and the engine has it now. The viewer's
+   * state still names the old document's composition until the viewer
+   * lays out again; opening a project lays out, assigning `PM.proj` does
+   * not, so the connection asks for that layout here.
+   */
+  onLoaded?: () => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
 };
@@ -194,8 +202,18 @@ export class DocumentSession {
 
   private onBatch(batch: StreamBatch): void {
     if (this.closed || this.id === null) return;
-    if (batch.origin === 'load' || batch.body.length > MAX_PATCH_BODY_BYTES || batch.body.length === 0) {
-      void this.resync(batch.origin === 'load' ? 'load' : 'large batch');
+    if (batch.origin === 'load') {
+      const loaded = (): void => {
+        if (!this.closed) this.options.onLoaded?.();
+      };
+      this.resync('load').then(loaded, (error: unknown) => {
+        this.options.log('warn', `engine resync (load) failed: ${error instanceof Error ? error.message : String(error)}`);
+        loaded();
+      });
+      return;
+    }
+    if (batch.body.length > MAX_PATCH_BODY_BYTES || batch.body.length === 0) {
+      void this.resync('large batch');
       return;
     }
     if (this.resyncing) {

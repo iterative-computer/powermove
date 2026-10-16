@@ -176,6 +176,40 @@ describe('the engine connection', () => {
     expect(session.resyncs).toBe(4);
   });
 
+  it('asks the viewer for its state again once another document is loaded', async () => {
+    const { connection, port } = await connected();
+    const doc = stream();
+    let id = 'P1';
+    const loaded: number[] = [];
+    const session = new DocumentSession({
+      connection, stream: doc, documentId: () => id, log: () => {},
+      handlers: { message: () => {}, closed: () => {} },
+      onLoaded: () => loaded.push(port.requests('resync').length)
+    });
+    await session.start();
+    await flush();
+    // Edits and gaps keep the document: no new layout.
+    doc.emit({ revision: 4 });
+    doc.emit({ revision: 6, baseRevision: 5 });
+    await flush();
+    expect(loaded).toEqual([]);
+    // `PM.proj = PM.mkProject(…)`: the mirror loads another document. The
+    // viewer is asked again only after the engine has it.
+    id = 'P2';
+    doc.emit({ revision: 7, origin: 'load' });
+    expect(loaded).toEqual([]);
+    await flush();
+    const last = port.requests('resync').at(-1)!.message as { body: { document: string } };
+    expect(last.body.document).toBe('P2');
+    expect(loaded).toEqual([3]);
+    expect(session.applied).toBe(7);
+    // A closed session asks for nothing.
+    session.close();
+    doc.emit({ revision: 8, origin: 'load' });
+    await flush();
+    expect(loaded).toEqual([3]);
+  });
+
   it('ends its sessions when the engine connection closes (an engine restart)', async () => {
     const { connection, port } = await connected();
     const closed = vi.fn();
