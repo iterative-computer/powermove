@@ -269,7 +269,26 @@ impl Tracked {
 /// members while anything is animated is baked: the members' transform
 /// channels get linear keys at every composition frame (and at `time`).
 /// Returns the members' ids, as `{ ids }` reports them.
+///
+/// Baked keys are written at TypeScript's float times (`time - from`) while
+/// the edit runs, so every later sample (a child reading its baked parent, a
+/// group reading a group baked earlier in the same ungroup) reads them where
+/// evaluation puts them, exactly as the legacy edit does. Once every group
+/// is done the keys move to their times on the tick grid ([`settle_times`],
+/// section 5, rule 4 with amendment 1).
 pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec<JsValue>> {
+    let mut placed: HashMap<String, f64> = HashMap::new();
+    let children = ungroup_each(edit, groups, time, &mut placed)?;
+    settle_times(edit, &placed)?;
+    Ok(children)
+}
+
+fn ungroup_each(
+    edit: &mut Edit<'_>,
+    groups: &[usize],
+    time: f64,
+    placed: &mut HashMap<String, f64>,
+) -> JsResult<Vec<JsValue>> {
     let mut tracked = Tracked {
         alive: (0..edit.layers().len()).collect(),
     };
@@ -447,7 +466,7 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
             fade(edit, m, factor)?;
         }
         if animated {
-            bake(edit, &members, &poses, &samples, &clock)?;
+            bake(edit, &members, &poses, &samples, &clock, placed)?;
         } else {
             rebase(edit, &members, &poses, time)?;
             for &m in &members {
@@ -616,6 +635,7 @@ fn bake(
     poses: &HashMap<Key, WorldPose>,
     samples: &[(f64, HashMap<Key, Sampled>)],
     clock: &Clock,
+    placed: &mut HashMap<String, f64>,
 ) -> JsResult<()> {
     let ordered = bake_order(edit, members)?;
     // Reset the baked channels: `{ v: layer.p[key].v, kf: [], expr: null }`.
@@ -693,8 +713,11 @@ fn bake(
             })?;
             values.push(("opacity", JsValue::Number(source.opacity)));
             values.push(("perspective", JsValue::Number(source.perspective)));
+            // `sample.time - layer.from` now; `clock.local` once the
+            // ungroup is done.
             let from = node::get(layer(edit, m)?, b"from").to_js().to_number();
-            let t = clock.local(time, from);
+            let t = time - from;
+            let settled = clock.local(time, from);
             let base = edit.layer_path(m);
             let mut patches = Vec::new();
             for name in channels_for(poses.get(&k)) {
@@ -717,6 +740,7 @@ fn bake(
                 let path = join(&base, &[key("p"), key(name)]);
                 let n = keys.len();
                 let kf = channel::linear_key(t, channel::to_value(&value), &mut edit.ids);
+                place(&kf, settled, placed);
                 patches.push(Patch::set(join(&path, &[key("kf"), at(n)]), kf));
                 patches.push(Patch {
                     path: join(&path, &[key("v")]),
@@ -743,6 +767,7 @@ fn bake(
                     for (i, n) in lengths.into_iter().enumerate() {
                         let path = aim_path(&base, role, AIM_KEYS[i]);
                         let kf = channel::linear_key(t, num(values[i]), &mut edit.ids);
+                        place(&kf, settled, placed);
                         patches.push(Patch::set(join(&path, &[key("kf"), at(n)]), kf));
                         patches.push(Patch::set(
                             join(&path, &[key("v")]),
@@ -755,6 +780,63 @@ fn bake(
         }
     }
     Ok(())
+}
+
+/// Notes the time on the tick grid of a baked key (by its created id).
+fn place(kf: &Value, settled: f64, placed: &mut HashMap<String, f64>) {
+    if let Value::Object(m) = kf
+        && let Some(id) = m.get("i").and_then(Value::as_js_string)
+    {
+        placed.insert(id.to_string_lossy(), settled);
+    }
+}
+
+/// Moves every baked key of the edited composition (found by its created
+/// id, wherever an ungroup left it) to its time on the tick grid.
+fn settle_times(edit: &mut Edit<'_>, placed: &HashMap<String, f64>) -> JsResult<()> {
+    fn walk(
+        node: &Node,
+        path: &mut Vec<pm_model::PathPart>,
+        placed: &HashMap<String, f64>,
+        out: &mut Vec<Patch>,
+    ) {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                if let Some(NodeKind::String(id)) =
+                    map.get(&pm_model::JsString::from("i")).map(Node::kind)
+                    && let Some(&t) = placed.get(&id.to_string_lossy())
+                    && let Some(NodeKind::Number(was)) =
+                        map.get(&pm_model::JsString::from("t")).map(Node::kind)
+                    && was.to_bits() != t.to_bits()
+                {
+                    out.push(Patch::set(join(path, &[key("t")]), Value::Number(t)));
+                }
+                for (k, child) in map {
+                    path.push(pm_model::PathPart::Key(k.clone()));
+                    walk(child, path, placed, out);
+                    path.pop();
+                }
+            }
+            NodeKind::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    path.push(at(i));
+                    walk(child, path, placed, out);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    if placed.is_empty() {
+        return Ok(());
+    }
+    let mut path = edit.comp_path();
+    path.push(key("layers"));
+    let mut patches = Vec::new();
+    if let Some(layers) = edit.node(&path) {
+        walk(layers, &mut path.clone(), placed, &mut patches);
+    }
+    edit.write(patches)
 }
 
 /// The pivot of a new group: `PM.groupBounds(group, time)`'s center becomes
