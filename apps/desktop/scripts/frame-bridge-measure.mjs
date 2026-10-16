@@ -18,7 +18,7 @@
  * (bun run build) and the project at --project (default: the corpus perf
  * copy of the Powermove ad project, kept outside the repository).
  *
- *   node scripts/frame-bridge-measure.mjs [--only run,run] [--seconds 60] [--skip-build] [--tag r2] [--project file.pmv] [--keep]
+ *   node scripts/frame-bridge-measure.mjs [--only run,run] [--seconds 60] [--skip-build] [--tag r2] [--project file.pmv] [--keep] [--every-refresh on|off]
  *   node scripts/frame-bridge-measure.mjs --only run --tag r2 --from <dir --keep left>   (analysis only)
  *
  * Runs need the main display awake and the session unlocked: with the
@@ -170,7 +170,11 @@ function tracerRuns() {
     { name: 'tracer-playback-engine-30-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0, env: doc }
   ];
 }
-const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
+// --every-refresh on|off: whether the viewer's presentation submits a frame
+// at every refresh during playback, for every selected app run (default:
+// the presentation's own choice).
+const everyRefresh = arg('every-refresh', '');
+const selected = RUNS.filter((run) => !only.length || only.includes(run.name)).map((run) => (run.app && everyRefresh ? { ...run, everyRefresh: everyRefresh === 'on' } : run));
 
 /* ── build ─────────────────────────────────────────────────────────── */
 
@@ -255,6 +259,7 @@ function traceContext(tracePath, pingOffsetUs) {
   const begins = frames.map((f) => f.begin);
   const toTrace = (ms) => traceOffsetUs + ms * 1000;
   const hostToTrace = (us) => us - pingOffsetUs + traceOffsetUs;
+  const traceToHost = (us) => us - traceOffsetUs + pingOffsetUs;
   const frameAt = (rafMs) => {
     const t = toTrace(rafMs);
     let lo = 0;
@@ -353,7 +358,7 @@ function traceContext(tracePath, pingOffsetUs) {
     if (i + 1 < list.length && list[i + 1] <= swap.begin) return { begin: toTrace(rafMs), end: null, state: 'VIZ_SUPERSEDED' };
     return { begin: toTrace(rafMs), end: swap.end, received, swapBegin: swap.begin, state: 'STATE_PRESENTED_ALL' };
   };
-  return { frames: frames.length, toTrace, hostToTrace, frameAt, sinkFor, vizFrame };
+  return { frames: frames.length, toTrace, hostToTrace, traceToHost, frameAt, sinkFor, vizFrame };
 }
 
 /**
@@ -455,7 +460,7 @@ function analyzePlayback(raw) {
       per.push(null);
       continue;
     }
-    per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfK(k)), rafToPresentUs: pf.end - ctx.toTrace(rafMs) });
+    per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfK(k)), rafToPresentUs: pf.end - ctx.toTrace(rafMs), pf, rafUs: ctx.toTrace(rafMs) });
   }
   const missing = [];
   for (let k = kFirst, i = 0; k <= kLast; k++, i++) {
@@ -506,6 +511,14 @@ function analyzePlayback(raw) {
     // Presentation minus due time on the clock line (the A/V offset the
     // jitter numbers remove; section 15 keeps A/V sync within ±10 ms).
     dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
+    // A/V sync (section 15): each frame's presentation against the audio
+    // clock's line in effect at that instant (the newest clock sample made
+    // before it), rather than the run's last sample: the engine re-anchors
+    // its line to the audio device every 100 ms, and an output glitch moves
+    // it, so one line for the whole run charges such a jump to every frame
+    // before it.
+    ...(line && page.clocks?.length && line.hostTime != null ? { avSync: avSync(page, presented, ctx, fps) } : {}),
+    ...(offMain ? { vizHopsByDepth: vizHopsByDepth(presented, periodUs) } : {}),
     ...(page.edits?.length ? { edits: analyzeEdits(page, ctx, sink, offMain) } : {}),
     ...(engineLike
       ? (() => {
@@ -530,6 +543,62 @@ function analyzePlayback(raw) {
     presenter: page.presenter,
     receiver: page.receiver
   };
+}
+
+/**
+ * Presentation minus the frame's start on the audio clock's line in effect
+ * at the presentation (ms): signed, absolute, and the share within ±10 ms.
+ */
+function avSync(page, presented, ctx, fps) {
+  const samples = page.clocks.filter((c) => c.state === 'playing' && c.rate.num !== 0).sort((a, b) => a.hostTime - b.hostTime);
+  const frameTicks = TICKS / fps;
+  const out = [];
+  for (const p of presented) {
+    const host = ctx.traceToHost(p.presentUs);
+    let lo = 0;
+    let hi = samples.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (samples[mid].hostTime <= host) lo = mid + 1;
+      else hi = mid;
+    }
+    const sample = samples[Math.max(0, lo - 1)];
+    out.push((host - hostOfMedia(sample, p.k * frameTicks)) / 1000);
+  }
+  return {
+    offsetMs: dist(out, 2),
+    absOffsetMs: dist(out.map(Math.abs), 2),
+    p5Ms: out.length ? +pct(out, 0.05).toFixed(2) : null,
+    within10Ms: out.filter((o) => Math.abs(o) <= 10).length,
+    n: out.length
+  };
+}
+
+/**
+ * Where a worker canvas's timed frames spend the time from their animation
+ * frame to the panel, grouped by how many refreshes that took (ms after the
+ * animation frame's timestamp): the draw's submit, viz receiving the
+ * canvas's compositor frame, the start and end of viz's DrawAndSwap that
+ * showed it.
+ */
+function vizHopsByDepth(presented, periodUs) {
+  const groups = {};
+  for (const p of presented) {
+    if (p.pf?.received == null) continue;
+    const depth = Math.round(p.rafToPresentUs / periodUs);
+    (groups[depth] ??= []).push(p);
+  }
+  return Object.fromEntries(
+    Object.entries(groups).map(([depth, ps]) => [
+      depth,
+      {
+        n: ps.length,
+        received: dist(ps.map((p) => (p.pf.received - p.rafUs) / 1000), 2),
+        drawBegin: dist(ps.map((p) => (p.pf.swapBegin - p.rafUs) / 1000), 2),
+        presented: dist(ps.map((p) => (p.pf.end - p.rafUs) / 1000), 2)
+      }
+    ])
+  );
 }
 
 /**
@@ -811,7 +880,7 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, app: !!run.app, mainRate: run.mainRate || undefined, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode !== 'today' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode !== 'today' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes, synthetic: run.synthetic, edits: run.edits },
+        config: { scenario: run.scenario, app: !!run.app, mainRate: run.mainRate || undefined, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode !== 'today' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode !== 'today' ? run.offMainThread !== false : undefined, everyRefresh: run.everyRefresh, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes, synthetic: run.synthetic, edits: run.edits },
         ...(raw.synthetic ? { synthetic: raw.synthetic } : {}),
         versions: raw.versions,
         display: raw.display,

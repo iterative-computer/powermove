@@ -27,7 +27,7 @@
  * This module is the worker's side; `present-worker-entry.ts` is the
  * worker script.
  */
-import { createWebGpuPainter, type FramePainter, type PaintTarget } from './gpu';
+import { createWebGpuPainter, type FramePainter, type PainterOptions, type PaintTarget } from './gpu';
 import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
@@ -38,6 +38,8 @@ export type ToWorker =
       canvas: OffscreenCanvas;
       /** The page's `performance.timeOrigin`, to put worker times on its clock. */
       pageTimeOrigin: number;
+      /** Submit a frame at every refresh while the clock runs (`PresenterOptions.presentEveryRefresh`). */
+      everyRefresh?: boolean;
     }
   | { type: 'open'; session: number; displayHz: number | null; trace: boolean; generation: number }
   | { type: 'close'; session: number }
@@ -76,7 +78,7 @@ export interface WorkerScope {
 }
 
 export type ServeOptions = {
-  createPainter?: (canvas: PaintTarget) => Promise<FramePainter>;
+  createPainter?: (canvas: PaintTarget, options: PainterOptions) => Promise<FramePainter>;
   /** Wraps the painter (the integration test reads drawn frames back). */
   wrapPainter?: (painter: FramePainter) => Promise<FramePainter> | FramePainter;
   /** Every frame drawn, in the worker (the integration test checks its pixels). */
@@ -96,6 +98,7 @@ type Session = { id: number; presenter: EnginePresenter; hostOffsetUs: number | 
 
 export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): void {
   let painter: FramePainter | null = null;
+  let everyRefresh = false;
   let session: Session | null = null;
   let shift = 0;
   let disposed = false;
@@ -157,6 +160,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // 80% of frames, 18.7 ms at 120 Hz), so timed frames are picked for
         // that instant and stay on the audio clock's line.
         latencyRefreshes: WORKER_LATENCY_REFRESHES,
+        presentEveryRefresh: everyRefresh,
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,
@@ -243,8 +247,9 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
 
   const init = async (message: Extract<ToWorker, { type: 'init' }>): Promise<void> => {
     shift = scope.performance.timeOrigin - message.pageTimeOrigin;
+    everyRefresh = message.everyRefresh === true;
     try {
-      const made = await (options.createPainter ?? createWebGpuPainter)(message.canvas);
+      const made = options.createPainter ? await options.createPainter(message.canvas, { retain: everyRefresh }) : await createWebGpuPainter(message.canvas, undefined, { retain: everyRefresh });
       painter = options.wrapPainter ? await options.wrapPainter(made) : made;
     } catch (error) {
       failed = true;

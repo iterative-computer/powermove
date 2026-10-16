@@ -15,14 +15,18 @@
  *   content time it drew, and the playback line's offset, so each content
  *   frame's due time is known exactly (the legacy clock is
  *   `PM.time = base + (rAF − origin) / 1000`).
- * - `engine`: the page plays the kernel's part (the engine connection is
- *   not in the kernel yet): it registers `engine.viewer` with the bridge's
- *   page engine connection, so the real viewer attaches its
- *   `ViewerPresentation` over the stage and presents the interactive
- *   engine's frames. The WebGL compositor's draw is turned off (with the
- *   new engine on it would not draw), and the legacy transport still plays,
- *   so the timeline, playhead, and panels do their per-frame work as they
- *   would with the engine's clock.
+ * - `engine`: the kernel's engine connection (Use New Engine on) with the
+ *   interactive engine drawing its test source at the project's rate
+ *   (`POWERMOVE_ENGINE_FRAME_SOURCE=test-pattern`; the 884-layer corpus
+ *   project routes to the current engine, so the engine-side render cost
+ *   is the test source's). The page wraps the kernel's `engine.viewer` to
+ *   ask for the per-frame trace and the presentation thread, and shares the
+ *   kernel's connection: the window's interactive port allows one
+ *   handshake, so a second connection of the harness's own was refused
+ *   (phase2-gate.md, H2). The real viewer attaches its `ViewerPresentation`
+ *   over the stage, and the transport runs on the engine's clock, so the
+ *   timeline, playhead, and panels do their per-frame work as they do with
+ *   the engine presenting.
  *
  * Gestures. `drag` (today) presses on a layer with the Select tool and
  * moves it; each draw is tagged with the newest handled pointer event whose
@@ -34,9 +38,7 @@
  * numbers.
  */
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
-import type { TransportCommand } from '../../../shared/engine-protocol';
 import type { ClockSample } from '../../../extensions/viewer/engine-present/protocol';
-import { PageEngine } from './page-engine';
 import { buildSyntheticProject, type SyntheticOptions } from './synthetic-project';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -48,7 +50,7 @@ import { buildSyntheticProject, type SyntheticOptions } from './synthetic-projec
  */
 type Mode = 'today' | 'engine' | 'tracer';
 type InputMode = 'drag' | 'pan';
-type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean };
+type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean; everyRefresh?: boolean | null };
 
 const w = window as any;
 const PM = (): any => w.PM;
@@ -80,7 +82,6 @@ window.requestAnimationFrame = (callback: FrameRequestCallback): number =>
 let draws: [number, number, number, number, number, number, number][] = [];
 let fps = 30;
 let mode: Mode = 'today';
-let engine: PageEngine | null = null;
 const clocks: ClockSample[] = [];
 /** Inspector edits during playback (tracer): [revision, call ms, returned ms]. */
 let edits: [number, number, number][] = [];
@@ -213,40 +214,39 @@ function onPresented(frame: { time: number }): void {
 
 /* ── the engine path in the real viewer ───────────────────────────── */
 
-function startEngine(displayHz: number | null, offMainThread: boolean): void {
-  engine = new PageEngine(displayHz);
-  const source = engine;
-  const service: EngineViewerService & { trace: boolean } = {
-    source: source.source,
+/**
+ * The kernel's `engine.viewer`, asking for the per-frame trace and the
+ * presentation thread the run measures. Every session opens on the
+ * kernel's connection (`open` delegates), so the kernel's transport follows
+ * it and the window keeps one handshake on its interactive port.
+ */
+function startEngine(displayHz: number | null, offMainThread: boolean, everyRefresh: boolean | null, testSource: boolean): void {
+  const connection = PM().EngineConnection;
+  if (!connection) throw new Error('the engine connection is not installed (POWERMOVE_NEW_ENGINE=1)');
+  const kernel = PM().Kernel.services.get(ENGINE_VIEWER_SERVICE) as EngineViewerService | null;
+  if (!kernel) throw new Error('the kernel did not register engine.viewer');
+  connection.onClock((sample: ClockSample) => clocks.push(sample));
+  const service: EngineViewerService = {
+    source: kernel.source,
     trace: true,
     offMainThread,
-    composition: () => source.composition(),
-    displayHz: () => source.displayHz(),
-    onReady: (listener) => source.onReady(listener),
-    open: (handlers) =>
-      source.open({
-        message: (message, arrivedMs) => {
-          if (message.type === 'clock') clocks.push(message.sample);
-          handlers.message(message, arrivedMs);
-        },
-        closed: handlers.closed
-      })
+    ...(everyRefresh === null ? {} : { presentEveryRefresh: everyRefresh }),
+    composition: () => kernel.composition(),
+    displayHz: (view) => kernel.displayHz?.(view) ?? displayHz,
+    onReady: (listener) => kernel.onReady(listener),
+    open: (handlers) => kernel.open(handlers),
+    ...(kernel.hostOffsetUs ? { hostOffsetUs: () => kernel.hostOffsetUs!() } : {}),
+    ...(kernel.revision ? { revision: () => kernel.revision!() } : {})
   };
   PM().Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
   window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
-  // With the new engine on, the WebGL compositor does not draw the viewer.
-  const gl = PM().GL;
-  gl.render = () => true;
-}
-
-/* ── the tracer: the app's own engine connection ───────────────────── */
-
-function startTracer(): void {
-  const connection = PM().EngineConnection;
-  if (!connection) throw new Error('the engine connection is not installed (POWERMOVE_NEW_ENGINE=1)');
-  connection.onClock((sample: ClockSample) => clocks.push(sample));
-  // A new presentation with a per-frame trace.
-  connection.setTrace(true);
+  // The engine draws its test source over a project it does not route:
+  // the WebGL compositor would draw underneath, which it does not with the
+  // engine presenting.
+  if (testSource) {
+    const gl = PM().GL;
+    gl.render = () => true;
+  }
 }
 
 /* ── the API measure-app-main.ts calls ────────────────────────────── */
@@ -256,8 +256,8 @@ const api = {
     mode = options.mode;
     fps = Number(PM().proj.fps) || 30;
     PM().bus.on('preview:presented', onPresented);
-    if (mode === 'engine') startEngine(options.displayHz, options.offMainThread);
-    if (mode === 'tracer') startTracer();
+    // `tracer`: the engine draws the document; `engine`: its test source.
+    if (mode === 'engine' || mode === 'tracer') startEngine(options.displayHz, options.offMainThread, options.everyRefresh ?? null, mode === 'engine');
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
     // How long the viewer's layout (pan steps) holds the main thread.
@@ -278,7 +278,7 @@ const api = {
     return buildSyntheticProject(options);
   },
   ready(): boolean {
-    if (mode === 'engine') return !!viewer()?.enginePresentation?.presenting;
+    if (mode === 'engine') return !!viewer()?.enginePresentation?.presenting && PM().EngineConnection.status().route === 'engine';
     if (mode === 'tracer') return !!viewer()?.enginePresentation?.presenting && PM().EngineConnection.status().route === 'engine';
     return draws.length > 0 || rafs.length > 30;
   },
@@ -287,23 +287,12 @@ const api = {
     const pm = PM();
     pm.setTime(fromS);
     pm.play();
-    if (mode === 'tracer') return PM().EngineConnection.status().driving === true;
-    if (mode === 'engine') {
-      const channel = engine?.channels.at(-1);
-      if (!channel || channel.session() === null) return false;
-      channel.transport({ command: 'play', rate: { num: 1, den: 1 } });
-    }
+    // Both engine modes play through the kernel's transport driver.
+    if (mode === 'tracer' || mode === 'engine') return PM().EngineConnection.status().driving === true;
     return true;
   },
   pause(): void {
     PM().pause();
-    if (mode === 'engine') engine?.channels.at(-1)?.transport({ command: 'pause' });
-  },
-  transport(command: TransportCommand): boolean {
-    const channel = engine?.channels.at(-1);
-    if (!channel || channel.session() === null) return false;
-    channel.transport(command);
-    return true;
   },
   /**
    * One inspector edit (tracer): the Edit command the Properties panel
@@ -394,7 +383,7 @@ const api = {
       layoutMs,
       dragLayer: dragLayer ? { id: dragLayer.id, type: dragLayer.type } : null,
       state: presentation?.state ?? null,
-      receiver: engine?.source.stats() ?? null,
+      receiver: (PM().Kernel.services.get(ENGINE_VIEWER_SERVICE)?.source as { stats?: () => unknown } | undefined)?.stats?.() ?? null,
       rawGestures: !!viewer()?.rawGestures?.(),
       stage: (() => {
         const r = viewer()?.stage?.getBoundingClientRect();

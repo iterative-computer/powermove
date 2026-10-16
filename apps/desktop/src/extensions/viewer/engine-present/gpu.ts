@@ -15,14 +15,18 @@
 import type { SurfaceFormat, ViewerColorSpace } from './protocol';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+type GPUTextureLike = { createView(): unknown; destroy(): void };
+
 type GPUDeviceLike = {
   queue: { submit(buffers: unknown[]): void; onSubmittedWorkDone(): Promise<void> };
+  createTexture(d: any): GPUTextureLike;
   createShaderModule(d: { code: string }): unknown;
   createRenderPipeline(d: any): { getBindGroupLayout(i: number): unknown };
   createSampler(d: any): unknown;
   createBindGroup(d: any): unknown;
   createCommandEncoder(): {
     beginRenderPass(d: any): { setPipeline(p: unknown): void; setBindGroup(i: number, g: unknown): void; draw(n: number): void; end(): void };
+    copyTextureToTexture(source: any, destination: any, size: any): void;
     finish(): unknown;
   };
   importExternalTexture(d: { source: VideoFrame; colorSpace?: 'srgb' | 'display-p3' }): unknown;
@@ -32,7 +36,7 @@ type GPUDeviceLike = {
 
 type GPUCanvasContextLike = {
   configure(d: any): void;
-  getCurrentTexture(): { createView(): unknown };
+  getCurrentTexture(): GPUTextureLike;
 };
 
 type NavigatorGpu = {
@@ -62,6 +66,12 @@ export interface FramePainter {
   draw(frame: VideoFrame): void;
   /** Resolves when the GPU work submitted so far completed. */
   workDone(): Promise<void>;
+  /**
+   * Draws the last frame again from the painter's own copy (no surface is
+   * read), so the canvas submits a frame at this refresh; false when it
+   * keeps no copy (`retain` off, or nothing drawn since configure).
+   */
+  redraw?(): boolean;
   /**
    * Resolves with the reason when the painter's device is lost (the GPU
    * process restarted, or the device was destroyed under it). The drawing
@@ -93,7 +103,16 @@ struct Out { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 /** A page canvas, or the `OffscreenCanvas` it handed to the presentation worker. */
 export type PaintTarget = HTMLCanvasElement | OffscreenCanvas;
 
-export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu = navigator as unknown as NavigatorGpu): Promise<FramePainter> {
+export type PainterOptions = {
+  /**
+   * Keeps a copy of the last frame in the painter's own texture, so
+   * `redraw` can submit it again at any refresh (one extra copy per frame
+   * drawn, one per redraw).
+   */
+  retain?: boolean;
+};
+
+export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu = navigator as unknown as NavigatorGpu, options: PainterOptions = {}): Promise<FramePainter> {
   const gpu = nav.gpu;
   if (!gpu) throw new Error('WebGPU is not available');
   const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -119,6 +138,10 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
   };
   let canvasFormat = gpu.getPreferredCanvasFormat();
   let configured = '';
+  let size = { width: 0, height: 0 };
+  /** The last frame drawn (`retain`), and whether it holds one. */
+  let held: GPUTextureLike | null = null;
+  let holding = false;
   let disposed = false;
   let lostReason: string | null = null;
   // `dispose` destroys the device, which also settles `lost`: only a loss
@@ -140,6 +163,10 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
       configured = key;
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
+      size = { width, height };
+      held?.destroy();
+      held = options.retain ? device.createTexture({ size: [width, height], format: canvasFormat, usage: 0x10 | 0x01 }) : null; // RENDER_ATTACHMENT | COPY_SRC
+      holding = false;
       context.configure({
         device,
         format: canvasFormat,
@@ -149,7 +176,7 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
         alphaMode: 'premultiplied',
         colorSpace: colorSpace === 'displayP3' ? 'display-p3' : 'srgb',
         toneMapping: { mode: f16 ? 'extended' : 'standard' },
-        usage: 0x10 | 0x01 // RENDER_ATTACHMENT | COPY_SRC
+        usage: 0x10 | 0x01 | 0x02 // RENDER_ATTACHMENT | COPY_SRC | COPY_DST
       });
       pipelineFor(canvasFormat);
     },
@@ -165,18 +192,31 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
         ]
       });
       const encoder = device.createCommandEncoder();
+      const current = context.getCurrentTexture();
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }]
+        colorAttachments: [{ view: (held ?? current).createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }]
       });
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, group);
       pass.draw(3);
       pass.end();
+      if (held) {
+        encoder.copyTextureToTexture({ texture: held }, { texture: current }, [size.width, size.height]);
+        holding = true;
+      }
       device.queue.submit([encoder.finish()]);
+    },
+    redraw() {
+      if (lostReason !== null || !held || !holding) return false;
+      const encoder = device.createCommandEncoder();
+      encoder.copyTextureToTexture({ texture: held }, { texture: context.getCurrentTexture() }, [size.width, size.height]);
+      device.queue.submit([encoder.finish()]);
+      return true;
     },
     workDone: () => device.queue.onSubmittedWorkDone(),
     dispose: () => {
       disposed = true;
+      held?.destroy();
       device.destroy();
     }
   };

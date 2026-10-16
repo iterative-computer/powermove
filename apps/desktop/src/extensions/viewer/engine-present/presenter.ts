@@ -103,6 +103,14 @@ export type PresenterOptions = {
    * frame anyway.
    */
   drawOnArrival?: boolean;
+  /**
+   * While the clock runs, submit a frame at every refresh: the painter
+   * draws its copy of the last frame again (`FramePainter.redraw`) at
+   * refreshes that show no new one, so the canvas's compositor frames reach
+   * viz at the same point of every refresh (docs/engine/bridge.md,
+   * "Cadence").
+   */
+  presentEveryRefresh?: boolean;
 };
 
 type Payload = { frame: VideoFrame };
@@ -117,6 +125,8 @@ export type PresenterStats = {
   staleGeneration: number;
   maxQueued: number;
   generation: number;
+  /** Refreshes that drew the last frame again (`presentEveryRefresh`). */
+  redrawn?: number;
 };
 
 export type TraceRecord = {
@@ -371,6 +381,9 @@ export class EnginePresenter implements Presenter {
     // The display instant itself, without the shift that puts frame
     // boundaries halfway between decisions.
     if (show) this.draw(show, rafMs, this.hostUs(decisionMs - this.offsetUs / 1000));
+    else if (this.options.presentEveryRefresh && this.clock && this.clock.state !== 'stopped' && this.stats.drawn > 0 && this.options.painter.redraw?.()) {
+      this.stats.redrawn = (this.stats.redrawn ?? 0) + 1;
+    }
   }
 
   takeTrace(): Promise<TraceRecord | null> {

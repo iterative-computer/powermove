@@ -33,6 +33,8 @@ export type PresentWorkerOptions = {
   canvas: OffscreenCanvas;
   /** The page's `performance.timeOrigin`. */
   timeOrigin?: number;
+  /** Submit a frame at every refresh while the clock runs. */
+  everyRefresh?: boolean;
   /** The worker could not draw (no WebGPU in workers): present on the main thread instead. */
   onFailed?: (message: string) => void;
   /** The worker's device was lost (the GPU process restarted): replace the worker. */
@@ -55,7 +57,7 @@ export class PresentWorker {
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
     options.worker.addEventListener('message', (event) => this.onMessage(event.data));
     options.worker.addEventListener('error', (event) => this.crashed(`presentation worker error: ${(event as ErrorEvent).message ?? 'unknown'}`));
-    options.worker.postMessage({ type: 'init', canvas: options.canvas, pageTimeOrigin: options.timeOrigin ?? performance.timeOrigin }, [options.canvas]);
+    options.worker.postMessage({ type: 'init', canvas: options.canvas, pageTimeOrigin: options.timeOrigin ?? performance.timeOrigin, everyRefresh: options.everyRefresh === true }, [options.canvas]);
   }
 
   /** Why the worker cannot present, once it said so. */
@@ -231,7 +233,8 @@ export class WorkerPresenter implements Presenter {
       parkTimeouts: this.local.parkTimeouts,
       staleGeneration: this.local.staleGeneration,
       maxQueued: r?.maxQueued ?? 0,
-      generation: this.generation
+      generation: this.generation,
+      redrawn: r?.redrawn ?? 0
     };
   }
 

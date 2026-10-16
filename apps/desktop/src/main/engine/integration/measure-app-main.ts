@@ -14,9 +14,9 @@
  * 2. opens a copy of the corpus project through the app's own Open
  *    Project path (the dialog answers with the copy);
  * 3. injects measure-app-page.ts, which records compositor draws (today)
- *    or registers `engine.viewer` so the real viewer presents the
- *    interactive engine's frames (engine; main hands the page fresh engine
- *    ports);
+ *    or wraps the kernel's `engine.viewer` so the real viewer presents the
+ *    interactive engine's frames over the kernel's own engine connection
+ *    (engine, tracer);
  * 4. applies S1's load (the main-thread autosave is left out with the
  *    `no-autosave` profile, as the app runs since autosave serialization
  *    moved to a worker), traces Chromium's PipelineReporter, and plays or
@@ -50,6 +50,8 @@ type AppConfig = {
   rawGestures?: boolean;
   /** `false`: the viewer draws engine frames on the page's main thread, not in its presentation worker. */
   offMainThread?: boolean;
+  /** Overrides whether the presentation submits a frame at every refresh during playback. */
+  everyRefresh?: boolean;
   /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
    *  main hosts its remote layer over the viewer's stage. */
   remoteLayer?: boolean;
@@ -259,14 +261,7 @@ async function run(config: AppConfig): Promise<void> {
       : null;
 
     if (!pageInjected) await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
-    await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false, offMainThread: config.offMainThread !== false })})`);
-    if (config.mode === 'engine') {
-      const installed = (globalThis as { __powermoveNativeEngine?: { engine?: { reconnectClient(id: number): void } } }).__powermoveNativeEngine;
-      if (!installed?.engine) throw new Error('the native engine is not installed (POWERMOVE_NEW_ENGINE=1)');
-      // The page loaded before the measurement's engine connection existed:
-      // give it fresh ports, as main does after a reload.
-      installed.engine.reconnectClient(contents.id);
-    }
+    await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false, offMainThread: config.offMainThread !== false, everyRefresh: config.everyRefresh ?? null })})`);
     await run('seek', `window.PM.setTime(${config.startS ?? 0})`);
     await waitFor('the viewer to present', () => call<boolean>('window.__measureApp.ready()'), 60_000);
     log('presenting');
