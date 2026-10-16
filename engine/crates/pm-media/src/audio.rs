@@ -639,6 +639,13 @@ pub struct AudioDecoder {
     anchor_failures: u32,
     /// Packets sent to the decoder (diagnostics).
     packets: u64,
+    /// Timestamp and byte position of the stream's first packet, read when
+    /// the file was opened: a rewind must land there.
+    head: Option<(i64, i64)>,
+    /// A seek to the start did not land on the first packet (the AVI
+    /// demuxer stamps PCM after a seek to entry 0 one packet late), so
+    /// rewinds reopen the file instead.
+    reopen_to_rewind: bool,
 }
 
 // The FFmpeg contexts are used from one thread at a time.
@@ -800,6 +807,8 @@ impl AudioDecoder {
                 fault: None,
                 anchor_failures: 0,
                 packets: 0,
+                head: None,
+                reopen_to_rewind: false,
             };
             if out.pkt.is_null() || out.frame.is_null() {
                 return Err(MediaError::OutOfMemory(0));
@@ -927,6 +936,7 @@ impl AudioDecoder {
                     break;
                 }
                 if (*self.pkt).stream_index as usize == s {
+                    self.head = Some(((*self.pkt).pts, (*self.pkt).pos));
                     let mut size = 0usize;
                     let data = ff::av_packet_get_side_data(
                         self.pkt,
@@ -983,6 +993,25 @@ impl AudioDecoder {
 
     /// Moves the demuxer to the stream's first packet.
     fn rewind(&mut self) -> Result<()> {
+        if self.reopen_to_rewind {
+            return self.reopen();
+        }
+        self.seek_to_head()?;
+        // The demuxer must hand out the first packet again, with the same
+        // timestamp: check, then seek once more to put it back.
+        let Some(head) = self.head else {
+            return Ok(());
+        };
+        let next = self.peek_packet();
+        if next == Some(head) {
+            self.seek_to_head()
+        } else {
+            self.reopen_to_rewind = true;
+            self.reopen()
+        }
+    }
+
+    fn seek_to_head(&mut self) -> Result<()> {
         unsafe {
             // Aim well before program sample 0, so the demuxer lands on the
             // stream's first packet (an MP4 edit list's priming packet sits
@@ -1010,6 +1039,39 @@ impl AudioDecoder {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// Timestamp and position of the stream's next packet (consumed).
+    fn peek_packet(&mut self) -> Option<(i64, i64)> {
+        unsafe {
+            loop {
+                if ff::av_read_frame(self.input.fmt, self.pkt) < 0 {
+                    return None;
+                }
+                let mine = (*self.pkt).stream_index as usize == self.info.stream;
+                let at = ((*self.pkt).pts, (*self.pkt).pos);
+                ff::av_packet_unref(self.pkt);
+                if mine {
+                    return Some(at);
+                }
+            }
+        }
+    }
+
+    /// Opens the file again: the demuxer starts at the first packet.
+    fn reopen(&mut self) -> Result<()> {
+        let input = Input::open(&self.info.path)?;
+        unsafe {
+            for i in 0..input.streams() {
+                (*input.st(i)).discard = if i == self.info.stream {
+                    ff::AVDISCARD_DEFAULT
+                } else {
+                    ff::AVDISCARD_ALL
+                };
+            }
+        }
+        self.input = input;
         Ok(())
     }
 
