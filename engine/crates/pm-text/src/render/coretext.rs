@@ -144,7 +144,24 @@ impl CoreTextReference {
             let dict: CFRetained<CFDictionary<CFString, CFNumber>> = CFDictionary::from_slices(&nr, &vr);
             cg = unsafe { CGFont::new_copy_with_variations(Some(&cg), Some(dict.as_opaque())) }?;
         }
-        Some(unsafe { CTFont::with_graphics_font(&cg, f64::from(run.size), std::ptr::null(), None) })
+        // CoreText sets the optical size from the point size unless the font
+        // is created with an explicit one (the attribute the registry's
+        // `sbix_em_advance` uses); keep the run's.
+        let opsz = run
+            .coords
+            .iter()
+            .find(|(t, _)| *t == u32::from_be_bytes(*b"opsz"))
+            .map(|(_, v)| *v);
+        let attrs = opsz.map(|v| {
+            let key = CFString::from_str("NSCTFontOpticalSizeAttribute");
+            let value = CFNumber::new_f64(f64::from(v));
+            let dict: CFRetained<CFDictionary<CFString, CFType>> =
+                CFDictionary::from_slices(&[&*key], &[value.as_ref() as &CFType]);
+            unsafe { CTFontDescriptor::with_attributes(dict.as_opaque()) }
+        });
+        Some(unsafe {
+            CTFont::with_graphics_font(&cg, f64::from(run.size), std::ptr::null(), attrs.as_deref())
+        })
     }
 
     /// Draws `runs` in order into a transparent `width` × `height` bitmap;

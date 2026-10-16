@@ -31,7 +31,10 @@ pub fn png_rgba(px: &[u8], unpremultiply: bool) -> Vec<u8> {
 /// main-thread only). Hosts give the renderer a `Send` resolver (recorded
 /// registry answers over full fonts).
 #[cfg(target_os = "macos")]
-pub struct MainThreadFonts(pub pm_eval::text_measure::CompatMeasure<pm_text::registry::CoreTextRegistry>);
+pub struct MainThreadFonts(
+    pub pm_eval::text_measure::CompatMeasure<pm_text::registry::CoreTextRegistry>,
+    pub Option<pm_render::text::Level2Fonts>,
+);
 
 // SAFETY: see the type's documentation; the value stays on the main thread.
 #[cfg(target_os = "macos")]
@@ -61,6 +64,58 @@ impl pm_render::text::TextFonts for MainThreadFonts {
         use pm_text::font::FontResolver;
         self.0.compat().resolver_mut().em_advance(face, size)
     }
+    fn level2(&mut self) -> Option<&mut pm_render::text::Level2Fonts> {
+        self.1.as_mut()
+    }
+}
+
+/// One face of a font file as its own font (collections split).
+#[cfg(target_os = "macos")]
+fn single_face(data: &[u8], index: u32) -> Vec<u8> {
+    let file = read_fonts::FileRef::new(data).unwrap();
+    if matches!(file, read_fonts::FileRef::Font(_)) {
+        return data.to_vec();
+    }
+    let font = file.fonts().nth(index as usize).unwrap().unwrap();
+    let mut tables: Vec<(u32, Vec<u8>)> = font
+        .table_directory()
+        .table_records()
+        .iter()
+        .filter_map(|r| {
+            Some((
+                u32::from_be_bytes(r.tag().to_be_bytes()),
+                font.table_data(r.tag())?.as_bytes().to_vec(),
+            ))
+        })
+        .collect();
+    pm_text::sfnt::build_sfnt(&mut tables)
+}
+
+/// Level 2 fonts from the CoreText registry: the `system-ui` fallback
+/// manifest's faces and every face of `families`, full fonts.
+#[cfg(target_os = "macos")]
+pub fn level2_fonts(
+    registry: &mut pm_text::registry::CoreTextRegistry,
+    families: &[&str],
+) -> pm_render::text::Level2Fonts {
+    let manifest = registry.fallback_manifest("system-ui");
+    let mut l2 = pm_render::text::Level2Fonts::default();
+    let mut add = |registry: &pm_text::registry::CoreTextRegistry, family: &str, blob: &str, index: u32| {
+        if let Some(bytes) = registry.blob(blob) {
+            let data = single_face(bytes.as_slice(), index);
+            l2.add_font(&format!("{blob}#{index}"), pm_text::font::FontBytes::new(data), family);
+        }
+    };
+    for f in &manifest.faces {
+        add(registry, &f.family, &f.source.blob, f.source.index);
+    }
+    for family in families {
+        for source in registry.family_faces(family) {
+            add(registry, family, &source.blob, source.index);
+        }
+    }
+    l2.set_manifest(&manifest);
+    l2
 }
 
 fn layer_lists(root: &mut pm_model::Value) -> Vec<&mut Vec<pm_model::Value>> {

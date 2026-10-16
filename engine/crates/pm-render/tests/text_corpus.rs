@@ -68,7 +68,7 @@ fn main() {
                     .collect(),
             );
         }
-        renderer.set_text_fonts(Some(Box::new(text::MainThreadFonts(measure))));
+        renderer.set_text_fonts(Some(Box::new(text::MainThreadFonts(measure, None))));
         for dir in projects(capture) {
             let p = load_project(capture, &dir);
             if only.as_deref().is_some_and(|o| !p.name.starts_with(o)) {

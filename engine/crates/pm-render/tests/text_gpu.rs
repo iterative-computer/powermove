@@ -20,9 +20,7 @@ fn main() {
     use support::doc::{ch, layer, no_fill, project};
 
     let fonts = || {
-        Box::new(support::text::MainThreadFonts(
-            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
-        ))
+        Box::new(support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()), None))
     };
     let blur = json!({
         "text": "Blur in\nsecond line", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),

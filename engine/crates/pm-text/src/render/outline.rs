@@ -42,6 +42,11 @@ pub struct Outline {
     pub path: Arc<BezPath>,
     /// Control-point bounds of `path` (a superset of the ink).
     pub bounds: Rect,
+    /// When set, `path` is the outline before expansion and the expansion
+    /// is drawn as a stroke of this width (round joins) over the fill: the
+    /// exact dilation, used where `kurbo::expand_path` fails on a glyph
+    /// (cusps in Marker Felt grow points tens of pixels away).
+    pub dilate: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -52,7 +57,7 @@ struct Key {
     size: u32,
     coords: Vec<(u32, u32)>,
     bold: (u64, u64),
-    italic: bool,
+    skew: u64,
     ex: u64,
     ey: u64,
 }
@@ -88,6 +93,24 @@ pub struct Outlines {
     locations: HashMap<(usize, u32, Vec<(u32, u32)>), Arc<Vec<skrifa::instance::NormalizedCoord>>>,
 }
 
+/// A run's variation location.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Coords<'a> {
+    /// User-space `(tag, value)` pairs (level 1 layout).
+    User(&'a [(u32, f32)]),
+    /// Normalized F2Dot14 coordinates in `fvar` axis order (level 2 layout).
+    Normalized(&'a [i16]),
+}
+
+impl Coords<'_> {
+    fn key(&self) -> Vec<(u32, u32)> {
+        match self {
+            Coords::User(c) => c.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+            Coords::Normalized(c) => c.iter().map(|v| (u32::MAX, *v as u16 as u32)).collect(),
+        }
+    }
+}
+
 /// How a glyph is drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphStyle {
@@ -95,7 +118,8 @@ pub struct GlyphStyle {
     /// Fake-bold outset per side in device px, x and y (0: not
     /// synthesized bold).
     pub synthetic_bold: (f64, f64),
-    pub synthetic_italic: bool,
+    /// Synthesized oblique: `x' = x + skew × y` (y down; 0 for none).
+    pub skew: f64,
     /// Outline expansion per side in device px.
     pub expand: (f64, f64),
 }
@@ -149,8 +173,18 @@ impl Outlines {
     fn location(
         &mut self,
         face: FaceRef<'_>,
-        coords: &[(u32, f32)],
+        coords: Coords<'_>,
     ) -> Arc<Vec<skrifa::instance::NormalizedCoord>> {
+        let coords = match coords {
+            Coords::Normalized(c) => {
+                return Arc::new(
+                    c.iter()
+                        .map(|v| skrifa::instance::NormalizedCoord::from_bits(*v))
+                        .collect(),
+                );
+            }
+            Coords::User(c) => c,
+        };
         let key = (
             face.id,
             face.index,
@@ -178,7 +212,7 @@ impl Outlines {
     pub fn get(
         &mut self,
         face: FaceRef<'_>,
-        coords: &[(u32, f32)],
+        coords: Coords<'_>,
         glyph: u32,
         style: GlyphStyle,
     ) -> Option<Arc<Outline>> {
@@ -187,9 +221,9 @@ impl Outlines {
             index: face.index,
             glyph,
             size: style.size.to_bits(),
-            coords: coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+            coords: coords.key(),
             bold: (style.synthetic_bold.0.to_bits(), style.synthetic_bold.1.to_bits()),
-            italic: style.synthetic_italic,
+            skew: style.skew.to_bits(),
             ex: style.expand.0.to_bits(),
             ey: style.expand.1.to_bits(),
         };
@@ -234,27 +268,47 @@ fn build(
             EXPAND_TOLERANCE,
         );
     }
-    if style.synthetic_italic {
-        path.apply_affine(Affine::new([1.0, 0.0, SYNTHETIC_ITALIC_SKEW, 1.0, 0.0, 0.0]));
+    if style.skew != 0.0 {
+        path.apply_affine(Affine::new([1.0, 0.0, style.skew, 1.0, 0.0, 0.0]));
     }
     let (ex, ey) = style.expand;
+    let mut dilate = None;
     if ex != 0.0 || ey != 0.0 {
         // Contours without area (a hairline drawn as two coincident edges)
         // cover nothing, also under font smoothing; expanded they would
         // become visible slivers.
         path = without_degenerate_contours(&path);
-        path = kurbo::expand_path(
+        let before = path.bounding_box();
+        let expanded = kurbo::expand_path(
             &path,
             Diagonal2::new(ex, ey),
             Join::Round,
             EXPAND_MITER_LIMIT,
             EXPAND_TOLERANCE,
         );
+        // A dilation stays within the outline's bounds grown by the
+        // expansion (plus the tolerance).
+        let limit = before.inflate(ex + 0.25, ey + 0.25);
+        let after = expanded.bounding_box();
+        let sane = after.x0 >= limit.x0
+            && after.y0 >= limit.y0
+            && after.x1 <= limit.x1
+            && after.y1 <= limit.y1
+            && after.is_finite();
+        if sane {
+            path = expanded;
+        } else {
+            dilate = Some(ex + ey);
+        }
     }
-    let bounds = path.bounding_box();
+    let bounds = match dilate {
+        Some(w) => path.bounding_box().inflate(w / 2.0, w / 2.0),
+        None => path.bounding_box(),
+    };
     Some(Outline {
         path: Arc::new(path),
         bounds,
+        dilate,
     })
 }
 

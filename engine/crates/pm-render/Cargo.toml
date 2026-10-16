@@ -18,7 +18,7 @@ pm-geom3d = { path = "../pm-geom3d" }
 pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
 pm-media = { path = "../pm-media" }
 # Glyph rendering (text and captions, docs/engine/text-render.md).
-pm-text = { path = "../pm-text", default-features = false, features = ["render"] }
+pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2"] }
 vello = { version = "0.11", default-features = false, features = ["wgpu"] }
 kurbo = "0.13.1"
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
@@ -32,6 +32,7 @@ serde_json.workspace = true
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 flate2 = "1.1"
+read-fonts = "0.45"
 png = "0.18"
 
 [[test]]

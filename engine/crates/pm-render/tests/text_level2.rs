@@ -45,7 +45,7 @@ fn main() {
     }))
     .unwrap();
     let registry = pm_text::corpus::native_registry(&corpus).expect("registry");
-    let mut fonts = support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(registry));
+    let mut fonts = support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(registry), None);
     let mut renderer = Renderer::headless().expect("a Metal device");
     let mut reference = CoreTextReference::new();
     let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
@@ -107,9 +107,10 @@ fn main() {
                 .map(|(r, f)| Run {
                     face: FaceRef::of(f),
                     size: r.size,
-                    coords: &r.coords,
+                    coords: pm_text::render::outline::Coords::User(&r.coords),
                     synthetic_bold: false,
                     synthetic_italic: false,
+                    oblique: 0.0,
                     glyphs: &r.glyphs,
                     bitmap_size: None,
                 })
@@ -138,6 +139,14 @@ fn main() {
         groups.entry(group.to_owned()).or_default().push(ink);
         if ink < 0.98 {
             failed.push(format!("{id} {ink:.4}"));
+            if let Ok(d) = std::env::var("PM_TEXT_DIFFS") {
+                let d = std::path::PathBuf::from(d);
+                std::fs::create_dir_all(&d).unwrap();
+                for (name, px) in [("coretext", &theirs), ("engine", &ours)] {
+                    let rgba: Vec<u8> = px.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+                    support::write_png(&d.join(format!("{id}-{name}.png")), w, h, &support::text::png_rgba(&rgba, true));
+                }
+            }
         }
     }
     println!("\n{:<16} {:>5} {:>8} {:>8}", "group", "cases", "min", "mean");
@@ -148,10 +157,115 @@ fn main() {
         all.extend(v);
     }
     println!("{} cases, {} below 0.98", all.len(), failed.len());
+    failed.extend(level2_layers());
     for f in &failed {
         println!("  FAILED {f}");
     }
     assert!(failed.is_empty(), "{} cases below 0.98 against CoreText", failed.len());
+}
+
+/// `compat` level 2 text layers through the whole renderer (level 2
+/// layout, output resolution, the CoreText profile, the layer transform),
+/// against CoreText drawing the same layout through the same transform.
+#[cfg(target_os = "macos")]
+fn level2_layers() -> Vec<String> {
+    use pm_protocol::color::Precision;
+    use pm_protocol::common::Size;
+    use pm_render::{RenderRequest, Renderer};
+    use pm_text::render::coretext::{CoreTextReference, RefRun};
+    use serde_json::json;
+    use support::doc::{layer, no_fill, project, set};
+
+    let families = ["SF Pro Display", "Georgia", "Helvetica Neue", "Avenir Next"];
+    let mut registry = pm_text::registry::CoreTextRegistry::new();
+    let l2 = support::text::level2_fonts(&mut registry, &families);
+    let mut l2_layout = support::text::level2_fonts(&mut registry, &families);
+    let measure = pm_eval::text_measure::CompatMeasure::new(registry);
+    let mut renderer = Renderer::headless().expect("a Metal device");
+    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(measure, Some(l2)))));
+    let mut reference = CoreTextReference::new();
+    let mut failed = Vec::new();
+    let mut n = 0;
+    for font in families {
+        for (size, scale, align, color) in [
+            (14.0, 1.0, "left", "#FFFFFF"),
+            (32.0, 1.0, "center", "#FFFFFF"),
+            (24.0, 1.5, "left", "#FFD43B"),
+            (72.0, 0.75, "right", "#FFFFFF"),
+            (18.0, 2.0, "center", "#000000"),
+        ] {
+            n += 1;
+            let d = json!({
+                "text": "Level two: Quick brown fox, 0123", "font": font, "weight": 500, "size": size,
+                "tracking": 0, "leading": 1.2, "align": align, "italic": false, "color": color,
+                "boxWidth": 0, "boxHeight": 0
+            });
+            let (px, py) = (320.25, 140.6);
+            let mut l = layer("t", "text", d.clone(), px, py, 10.0);
+            l["compat"] = json!(2);
+            set(&mut l, "scale.x", json!(scale * 100.0));
+            set(&mut l, "scale.y", json!(scale * 100.0));
+            let doc = project(640, 360, 10.0, no_fill(), vec![l]);
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1);
+            let mut request = RenderRequest::sized(Size::new(640, 360), Precision::Float32);
+            request.background = false;
+            let frame = match renderer.render(&doc, "Ptest-root", support::ticks(0.0), &request, &pm_render::MapResolver::default()) {
+                Ok(f) => f,
+                Err(e) => {
+                    failed.push(format!("level 2 layer {font} {size}: {e}"));
+                    continue;
+                }
+            };
+            let ours = renderer.read_rgba(&frame).unwrap();
+            // The same layout through the same transform, drawn by CoreText.
+            let tc = pm_text::compat::TextContent::from_json(&d);
+            let layout = l2_layout.engine.layout(&tc);
+            let color = pm_text::render::color::parse_or(color, [0.0, 0.0, 0.0, 1.0]);
+            let faces: Vec<_> = layout.runs.iter().map(|r| l2_layout.face(&r.font).cloned().unwrap()).collect();
+            let runs: Vec<RefRun<'_>> = layout
+                .runs
+                .iter()
+                .zip(&faces)
+                .map(|(r, data)| {
+                    let user: Vec<(u32, f32)> = {
+                        use read_fonts::TableProvider;
+                        let f = read_fonts::FontRef::new(data.as_slice()).unwrap();
+                        let axes: Vec<_> = f.fvar().ok().and_then(|v| v.axes().ok().map(|a| a.iter().cloned().collect())).unwrap_or_default();
+                        axes.iter()
+                            .zip(&r.coords)
+                            .map(|(a, c)| {
+                                let n = f32::from(*c) / 16384.0;
+                                let v = if n < 0.0 {
+                                    a.default_value().to_f32() + n * (a.default_value().to_f32() - a.min_value().to_f32())
+                                } else {
+                                    a.default_value().to_f32() + n * (a.max_value().to_f32() - a.default_value().to_f32())
+                                };
+                                (u32::from_be_bytes(a.axis_tag().into_bytes()), v)
+                            })
+                            .collect()
+                    };
+                    (r, data, user)
+                })
+                .map(|(r, data, user)| RefRun {
+                    data: data.as_slice(),
+                    index: 0,
+                    size: (f64::from(r.size) * scale) as f32,
+                    coords: Box::leak(user.into_boxed_slice()),
+                    glyphs: r.glyphs.iter().map(|g| (g.id as u16, px + g.x * scale, py + g.y * scale)).collect(),
+                    color,
+                })
+                .collect();
+            let theirs = reference.render(&runs, 640, 360, true);
+            let to8 = |p: &[f32]| -> Vec<u8> { p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect() };
+            let (ink, _, ratio) = pm_render::parity::text_ssim(&to8(&theirs), &to8(&ours), 640, 360);
+            println!("level 2 layer {font:<16} {size:>4}px ×{scale:<4} {align:<6} {}  ink SSIM {ink:.4} ink ratio {ratio:.3}", if color[0] == 0.0 { "black" } else { "light" });
+            if ink < 0.98 {
+                failed.push(format!("level 2 layer {font} {size} ×{scale}: {ink:.4}"));
+            }
+        }
+    }
+    println!("{n} level 2 layers, {} below 0.98", failed.len());
+    failed
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -446,6 +446,15 @@ fn draw_layer<'d>(
                 alpha,
             },
         },
+        Quad::Device { source, rect } => Draw {
+            layer: id,
+            matrix: [rect[2] - rect[0], 0.0, 0.0, rect[3] - rect[1], rect[0], rect[1]],
+            content: Content::Texture {
+                source,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                alpha,
+            },
+        },
     };
     Ok(Some(vec![draw]))
 }
@@ -488,6 +497,9 @@ enum Quad {
     },
     /// Screen-space content covering the whole target (3D layers).
     Screen { source: Source },
+    /// Content in target pixels over `rect` (x0, y0, x1, y1): level 2 text
+    /// drawn at output resolution.
+    Device { source: Source, rect: [f64; 4] },
 }
 
 /// `contentQuad(L, T, W, H)`: `nativeContentQuad` plus the size anchor.
@@ -504,7 +516,7 @@ fn content_quad<'d>(
     let Some(mut quad) = quad else {
         return Ok(None);
     };
-    if matches!(quad, Quad::Screen { .. }) {
+    if matches!(quad, Quad::Screen { .. } | Quad::Device { .. }) {
         return Ok(Some(quad));
     }
     let offset = scope.size_anchor_offset(layer, time)?;
@@ -514,7 +526,7 @@ fn content_quad<'d>(
                 *ax -= offset.x;
                 *ay -= offset.y;
             }
-            Quad::Screen { .. } => {}
+            Quad::Screen { .. } | Quad::Device { .. } => {}
         }
     }
     Ok(Some(quad))
@@ -689,7 +701,7 @@ fn native_content_quad<'d>(
                 }
             }
         }
-        "text" | "captions" => text_quad(scope, b, layer, &ty, time, scale),
+        "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -704,12 +716,14 @@ fn native_content_quad<'d>(
 
 /// A text or captions layer's raster quad (`crate::text`), at the density
 /// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+#[allow(clippy::too_many_arguments)]
 fn text_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     layer: &'d Node,
     ty: &str,
     time: f64,
+    target: (u32, u32),
     scale: (f64, f64),
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
@@ -725,6 +739,28 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let world = scaled_world(scope, layer, time, scale)?;
+    // `compat` level 2: drawn at output resolution, no raster.
+    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 {
+        let offset = scope.size_anchor_offset(layer, time)?;
+        let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
+        let m = kurbo::Affine::new(m);
+        let plan = if ty == "text" {
+            text.text_layer_level2(scope, layer, time, m, target)?
+        } else {
+            text.captions_layer_level2(scope, layer, time, m, target)?
+        };
+        for what in text.take_unsupported() {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        return Ok(plan.map(|p| {
+            let rect = p.crop.map(f64::from);
+            Quad::Device {
+                source: Source::Text(Box::new(p)),
+                rect,
+            }
+        }));
+    }
     let raster_scale = crate::text::continuous_raster_scale(&world);
     let quad = if ty == "text" {
         text.text_layer(scope, layer, time, raster_scale)?

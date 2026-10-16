@@ -60,6 +60,44 @@ pub trait TextFonts: Send {
     fn generation(&self) -> u64 {
         0
     }
+    /// Level 2 layout for `compat` ≥ 2 text layers, when the host provides
+    /// it (`None`: such layers are refused).
+    fn level2(&mut self) -> Option<&mut Level2Fonts> {
+        None
+    }
+}
+
+/// Level 2 layout (Parley, `pm_text::level2`) over full fonts the host
+/// added: the engine lays out and draws from the same bytes.
+pub struct Level2Fonts {
+    pub engine: pm_text::level2::Level2,
+    faces: std::collections::HashMap<String, pm_text::font::FontBytes>,
+}
+
+impl Default for Level2Fonts {
+    fn default() -> Self {
+        Level2Fonts {
+            engine: pm_text::level2::Level2::new(),
+            faces: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Level2Fonts {
+    /// Adds one face (a single-face font file) under `key` for `family`.
+    pub fn add_font(&mut self, key: &str, data: pm_text::font::FontBytes, family: &str) -> usize {
+        let n = self.engine.add_font(key, data.clone(), family);
+        self.faces.insert(key.to_owned(), data);
+        n
+    }
+
+    pub fn set_manifest(&mut self, manifest: &pm_text::registry::FallbackManifest) {
+        self.engine.set_manifest(manifest);
+    }
+
+    pub fn face(&self, key: &str) -> Option<&pm_text::font::FontBytes> {
+        self.faces.get(key)
+    }
 }
 
 impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<R> {
@@ -496,6 +534,118 @@ impl TextContext {
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
     }
 
+    /// A `compat` level 2 text layer at output resolution: level 2 layout
+    /// (Parley) drawn with the CoreText profile at exact positions through
+    /// `m` (layer pixels to target pixels, size anchor included) into a
+    /// `target`-sized scene, cropped to its ink.
+    pub(crate) fn text_layer_level2<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        let stored = pm_eval::node::member(Some(layer), "d");
+        let has = |key: &str| {
+            pm_eval::node::member(stored, key)
+                .map(|n| pm_eval::node::get(n, b"length").truthy())
+                .unwrap_or(false)
+        };
+        if has("animators") || has("styles") {
+            self.unsupported.push("animated or range-styled text at compat level 2".into());
+            return Ok(None);
+        }
+        if pm_eval::node::member(stored, "fontAnchorBounds").is_some_and(|b| pm_eval::node::truthy(Some(b))) {
+            self.unsupported.push("typography anchoring at compat level 2".into());
+            return Ok(None);
+        }
+        let d = scope.resolved_text_content(layer, time)?;
+        let tc = text_content(&d);
+        let fill = {
+            let c = get(&d, "color");
+            let fallback = JsValue::from("#fff");
+            fill_style(if c.truthy() { c } else { &fallback }, color::BLACK)
+        };
+        let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+        let Some(l2) = fonts.level2() else {
+            self.unsupported.push("compat level 2 text without level 2 fonts".into());
+            return Ok(None);
+        };
+        let layout = l2.engine.layout(&tc);
+        if layout.missing_glyphs > 0 {
+            self.unsupported.push("compat level 2 text whose fonts are not loaded".into());
+            return Ok(None);
+        }
+        let faces: Vec<Option<pm_text::font::FontBytes>> =
+            layout.runs.iter().map(|r| l2.face(&r.font).cloned()).collect();
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        let mut painter = Painter {
+            outlines: &mut self.outlines,
+            bitmaps: &mut self.bitmaps,
+            profile: Profile::CORETEXT,
+            unsupported: Vec::new(),
+        };
+        for (run, data) in layout.runs.iter().zip(&faces) {
+            let Some(data) = data else {
+                self.unsupported.push(format!("compat level 2 font {} not loaded", run.font));
+                return Ok(None);
+            };
+            let face = pm_text::render::outline::FaceRef {
+                data: data.as_slice(),
+                index: 0,
+                id: data.ptr_id(),
+            };
+            let refs = [pm_text::render::scene::Run {
+                face,
+                size: run.size,
+                coords: pm_text::render::outline::Coords::Normalized(&run.coords),
+                synthetic_bold: run.synthetic_bold,
+                synthetic_italic: false,
+                oblique: f64::from(run.skew),
+                glyphs: &run.glyphs,
+                bitmap_size: None,
+            }];
+            painter.fill_text(&mut scene.items, &refs, (0.0, 0.0), m, fill, 1.0, 0.0);
+        }
+        self.unsupported.append(&mut painter.unsupported);
+        Ok(self.finish(scene))
+    }
+
+    /// A `compat` level 2 captions layer at output resolution: the same
+    /// frame (layout, word states, box) drawn with the CoreText profile at
+    /// exact positions through `m` (layer pixels to target pixels).
+    pub(crate) fn captions_layer_level2<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.caption_frame(layer, time, fonts.measure())?
+        };
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let base = m * Affine::translate((frame.block.x0, frame.block.y0));
+        let saved = std::mem::replace(&mut self.profile, Profile::CORETEXT);
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        self.caption_items(&frame, base, &mut scene);
+        self.profile = saved;
+        Ok(self.finish(scene))
+    }
+
     /// A captions layer at `time` drawn at raster scale `scale`.
     pub(crate) fn captions_layer<'d>(
         &mut self,
@@ -518,8 +668,6 @@ impl TextContext {
     /// The captions rasterizer's `draw(frame, scale)` as a scene, with the
     /// raster box and anchor.
     pub fn caption_scene(&mut self, f: &CaptionFrame, scale: f64) -> (TextScene, f64, f64, f64, f64) {
-        let style = &f.style;
-        let layout = &f.layout;
         let block = f.block;
         let margin = f.margin;
         let w = block.x1 - block.x0 + margin * 2.0;
@@ -531,6 +679,16 @@ impl TextContext {
             items: Vec::new(),
         };
         let m0 = Affine::new([density, 0.0, 0.0, density, 0.0, 0.0]) * Affine::translate((margin, margin));
+        self.caption_items(f, m0, &mut scene);
+        (scene, w, h, margin - block.x0, margin - block.y0)
+    }
+
+    /// The captions rasterizer's draws of frame `f` through `m0` (block
+    /// pixels, origin at the block's top-left corner, to device pixels).
+    fn caption_items(&mut self, f: &CaptionFrame, m0: Affine, scene: &mut TextScene) {
+        let style = &f.style;
+        let layout = &f.layout;
+        let block = f.block;
         let pad = if style.boxed { style.box_padding } else { 0.0 };
         if style.boxed && style.box_opacity > 0.0 {
             let fill = hex_to_rgba(&style.box_color.to_string_lossy(), style.box_opacity / 100.0);
@@ -612,7 +770,6 @@ impl TextContext {
             }
         }
         unsupported.append(&mut painter.unsupported);
-        (scene, w, h, margin - block.x0, margin - block.y0)
     }
 }
 
@@ -643,9 +800,10 @@ fn run_refs<'a>(
         .map(|(r, (f, bitmap))| pm_text::render::scene::Run {
             face: pm_text::render::outline::FaceRef::of(f),
             size: r.size,
-            coords: &r.coords,
+            coords: pm_text::render::outline::Coords::User(&r.coords),
             synthetic_bold: r.synthetic_bold,
             synthetic_italic: r.synthetic_italic,
+            oblique: 0.0,
             glyphs: &r.glyphs,
             bitmap_size: *bitmap,
         })

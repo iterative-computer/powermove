@@ -57,9 +57,7 @@ fn main() {
     .unwrap();
     let registry = pm_text::corpus::native_registry(&corpus).expect("registry");
     let mut renderer = Renderer::headless().expect("a Metal device");
-    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
-        pm_eval::text_measure::CompatMeasure::new(registry),
-    ))));
+    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(registry), None))));
     if let Ok(p) = std::env::var("PM_TEXT_PROFILE") {
         let profile: pm_text::render::profile::Profile =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or(p)).expect("profile json");

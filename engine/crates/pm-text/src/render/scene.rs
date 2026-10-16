@@ -15,7 +15,7 @@ use kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 
 use super::bitmap::{Bitmaps, Rgba8, has_bitmaps};
 use super::color::Rgba;
-use super::outline::{FaceRef, GlyphStyle, Outline, Outlines};
+use super::outline::{Coords, FaceRef, GlyphStyle, Outline, Outlines};
 use super::profile::Profile;
 use crate::compat::PlacedGlyph;
 
@@ -123,9 +123,12 @@ impl TextScene {
 pub struct Run<'a> {
     pub face: FaceRef<'a>,
     pub size: f32,
-    pub coords: &'a [(u32, f32)],
+    pub coords: Coords<'a>,
     pub synthetic_bold: bool,
+    /// Skia's synthetic italic (level 1).
     pub synthetic_italic: bool,
+    /// Synthesized oblique angle in degrees (level 2, Parley's), 0 for none.
+    pub oblique: f64,
     pub glyphs: &'a [PlacedGlyph],
     /// For color bitmap faces: the size CoreText draws their glyphs at, for
     /// this run's device size (`FontResolver::em_advance`), when it differs
@@ -231,7 +234,7 @@ impl Painter<'_> {
             let style = GlyphStyle {
                 size: dsize,
                 synthetic_bold: bold,
-                synthetic_italic: run.synthetic_italic,
+                skew: skew_of(run),
                 expand: (ex, ey),
             };
             let plain = GlyphStyle {
@@ -305,6 +308,10 @@ impl Painter<'_> {
                 let target = if as_path || large { &mut path } else { &mut mask };
                 union(&mut target.1, t.transform_rect_bbox(outline.bounds));
                 target.0.push(placed(&outline, t, PathStyle::Fill));
+                if let Some(width) = outline.dilate {
+                    let stroke = Stroke::new(width).with_join(kurbo::Join::Round);
+                    target.0.push(placed(&outline, t, PathStyle::Stroke(stroke)));
+                }
                 if !as_path {
                     curve_size = curve_size.max(device_size);
                 }
@@ -374,7 +381,7 @@ impl Painter<'_> {
             let style = GlyphStyle {
                 size: device_size as f32,
                 synthetic_bold: self.fake_bold(run.synthetic_bold, device_size),
-                synthetic_italic: run.synthetic_italic,
+                skew: skew_of(run),
                 expand: (0.0, 0.0),
             };
             let bitmap_face = has_bitmaps(run.face);
@@ -412,6 +419,17 @@ impl Painter<'_> {
                 bounds,
             });
         }
+    }
+}
+
+/// The shear of a run's synthesized italic or oblique.
+fn skew_of(run: &Run<'_>) -> f64 {
+    if run.synthetic_italic {
+        super::outline::SYNTHETIC_ITALIC_SKEW
+    } else if run.oblique != 0.0 {
+        -run.oblique.to_radians().tan()
+    } else {
+        0.0
     }
 }
 

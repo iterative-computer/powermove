@@ -38,9 +38,10 @@ pub fn runs<'a>(resolver: &'a dyn FontResolver, runs: &'a [GlyphRun]) -> Vec<Run
         .map(|r| Run {
             face: FaceRef::of(resolver.face(r.face)),
             size: r.size,
-            coords: &r.coords,
+            coords: outline::Coords::User(&r.coords),
             synthetic_bold: r.synthetic_bold,
             synthetic_italic: r.synthetic_italic,
+            oblique: 0.0,
             glyphs: &r.glyphs,
             bitmap_size: None,
         })
