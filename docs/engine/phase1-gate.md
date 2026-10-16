@@ -347,3 +347,28 @@ project, so the barrier adds under a tenth to it. Recorded as measured; not an S
   `transparent-sequence-scrubbing`, `video-frame-integrity`, `viewer-tools`.
   `export-dialog.spec.ts:5` waits for the squircle clip paths, which
   `settings/squircle.ts` paints only once the element has a layout size.
+
+## Fixed after the gate
+
+Notes appended on 2026-10-16 (`feat/ne-correct`, `docs/engine/gate-fixes.md`); the
+measured results above are as they were.
+
+- **T3, fixed after the gate (2026-10-16).** `pm-eval/src/retime.rs` takes the verified
+  patch: two midpoint samples per frame of the owning composition, at least 60 Hz. The
+  layer vectors now check the engine step against the TypeScript at the root (183
+  cases, which fail without the fix); an eased speed with an expression is bit-identical
+  to the legacy step at 30, 24, 29.97, 60, and 120 fps over 400 times each; `pm-cli
+  parity eval` natively gives the same counts (1,891,448 compared, 0 mismatched, the
+  810 T2 questions) with the `sourceTime` maximum relative error 0. The corpus source
+  gains `retiming/variable-speed` (eased and expression speeds at the root and nested);
+  corpus v1 predates it, so the next capture records it.
+- **T5 and T6, fixed after the gate (2026-10-16).** Both verified patches are in
+  (`legacy/gl/raster.ts`, `media/host-media-store.ts`), each with a unit test that fails
+  without it. `import-svg.spec.ts` and `media-store.spec.ts` in `audit` with
+  `--repeat-each=2`, serially under the lock: 30 of 30 passed, 937 audits, **0
+  failures**, 31,648 dual answers, 0 mismatched. The full suite was not rerun.
+- **T7 (`import-image-sequence.spec.ts:7`), fixed after the gate (2026-10-16)** as the
+  Phase 2 gate's R1: the export raced the viewer's mount for the compositor's WebGL
+  context; `prepareFrame` now waits for it. 24 of 24 runs pass with the flag off and 24
+  of 24 with it on (`--repeat-each=12`). `chatgpt-connection.spec.ts:5` is unchanged
+  (environment, Phase 2 gate).
