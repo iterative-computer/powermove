@@ -148,6 +148,11 @@ impl<'a, 'd> Scope<'a, 'd> {
         self.ev.active(self.comp, Some(layer), time)
     }
 
+    /// `PM.active({ ...L, on: true }, T)` (a track matte source).
+    pub fn active_forced_on(&mut self, layer: &'d Node, time: f64) -> JsResult<bool> {
+        self.ev.active_forced_on(self.comp, Some(layer), time)
+    }
+
     /// `Number(PM.proj.w)` and `Number(PM.proj.h)`.
     pub fn project_size(&self) -> (f64, f64) {
         (
