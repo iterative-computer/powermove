@@ -219,6 +219,43 @@ describe.skipIf(!built)('pm-edit in the edit pipeline', () => {
       expect(compared[`edit.${name}`], `edit.${name} compared`).toBeGreaterThan(0);
     }
   });
+
+  it('runs the legacy edit for a camera reparented into a space that moves with it', async () => {
+    // A keyframed camera, and a group parented to it holding a solid: putting
+    // the camera under the solid (which `PM.wouldCycle` allows) makes its
+    // parent space read its own transform, which pm-edit leaves to the
+    // legacy edit (`{legacy}`).
+    const source = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    source.proj = source.mkProject({ dur: 3, fps: 29.97 });
+    const camera = source.mkLayer('null', { name: 'Camera', from: 0, dur: 3 });
+    Object.assign(camera, { type: 'extension', threeD: true, d: { definition: 'powermove.3d.camera', data: { camera: { p: { targetX: source.P(10), targetY: source.P(20), targetZ: source.P(-30) } } } } });
+    camera.p['position.x'].kf = [source.KF(0, 0, 'linear'), source.KF(2, 400, 'linear')];
+    const solid = source.mkLayer('solid', { name: 'Solid', from: 0, dur: 3 });
+    solid.p['position.x'].v = 40;
+    source.proj.layers = [camera, solid];
+    source.ProjectIndex.invalidate();
+    const group = source.groupLayers([solid.id], 'Rig');
+    group.p.rotation.v = 30;
+    group.parent = camera.id;
+    const json = JSON.stringify(own(source.proj));
+    const known = knownIds(JSON.parse(json));
+    const reparent = (PM: any) => {
+      PM.time = 0.5;
+      return ok(PM, { type: 'set_layer', target: byName(PM, 'Camera').id, patch: { parent: byName(PM, 'Solid').id } });
+    };
+    const legacy = await editor('off', json);
+    reparent(legacy.PM);
+    const native = await editor('on', json);
+    reparent(native.PM);
+    const stats = native.doc.edits!.stats;
+    expect(stats.calls.reparent).toBe(1);
+    expect(stats.fallbacks).toEqual({ 'reparent:legacy': 1 });
+    expect(stats.applied.reparent ?? 0).toBe(0);
+    expect(byName(native.PM, 'Camera').parent).toBe(byName(native.PM, 'Solid').id);
+    expect(editDiffers(canonical(native.PM, known), canonical(legacy.PM, known), known)).toBeNull();
+    // The legacy edit did rewrite the camera's aim.
+    expect(byName(native.PM, 'Camera').d.data.camera.p.targetX.v).not.toBe(10);
+  });
 });
 
 /** Two compositions whose 3D objects share shader materials (base and slot). */
