@@ -33,6 +33,7 @@ pub mod mixer;
 pub mod offline;
 pub mod playback;
 pub mod ring;
+pub mod shuttle;
 pub mod source;
 pub mod stretch;
 pub mod transport;
