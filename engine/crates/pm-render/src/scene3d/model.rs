@@ -443,6 +443,36 @@ pub trait TextureSource {
     fn image(&self, asset: &str) -> Option<PathBuf>;
 }
 
+/// What an object's `assetId` resolves to (`makeObject`).
+#[derive(Debug, Clone)]
+pub enum ModelLookup {
+    /// No usable asset (absent, offline, or without geometry): the orange
+    /// wireframe box.
+    Missing,
+    /// An OBJ model asset (`asset.mesh`): its triangles with a
+    /// `MeshStandardMaterial` the object's material then configures.
+    Obj {
+        key: u64,
+        mesh: Arc<pm_geom3d::obj::ObjMesh>,
+    },
+    /// A glTF scene (`asset.object3d`): drawn by the glTF lane's loader.
+    Imported,
+}
+
+/// How a scene finds model assets.
+pub trait ModelSource {
+    fn model(&self, asset: &str) -> ModelLookup;
+}
+
+/// No model assets: every `assetId` is missing.
+pub struct NoModels;
+
+impl ModelSource for NoModels {
+    fn model(&self, _asset: &str) -> ModelLookup {
+        ModelLookup::Missing
+    }
+}
+
 /// No textures (`() => null`).
 pub struct NoTextures;
 
@@ -799,9 +829,9 @@ impl SceneBuilder {
     }
 
     /// Builds the scene. `facts` holds each object's layer opacity and
-    /// masks (absent: opacity 1, occluding). `None` from `assets` for an
-    /// imported model draws the missing-model box; an imported model that
-    /// exists is the glTF lane's (unsupported here).
+    /// masks (absent: opacity 1, occluding). Model assets come from
+    /// `models`: a missing one draws the orange box, an OBJ model its mesh,
+    /// and an imported glTF scene is the glTF lane's (unsupported here).
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         &mut self,
@@ -812,7 +842,7 @@ impl SceneBuilder {
         facts: &HashMap<String, LayerFacts>,
         channels: &mut dyn Channels,
         textures: &dyn TextureSource,
-        model_exists: &dyn Fn(&str) -> bool,
+        models: &dyn ModelSource,
     ) -> Result<Scene3d, Unsupported> {
         let mut warnings = Vec::new();
         let environment = obj(scene, "environment").ok_or("the 3D environment")?;
@@ -845,12 +875,15 @@ impl SceneBuilder {
             let receive = boolean(node, "receiveShadow") != Some(false);
             let mut missing = false;
             let materials = if let Some(asset) = text(source, "assetId") {
-                if model_exists(&asset) {
-                    return Err("imported models".into());
+                match models.model(&asset) {
+                    ModelLookup::Imported => return Err("imported models".into()),
+                    ModelLookup::Missing => {
+                        warnings.push(format!("Missing model: {asset}"));
+                        missing = true;
+                        None
+                    }
+                    ModelLookup::Obj { key, mesh } => Some(obj_geometry(key, &mesh)),
                 }
-                warnings.push(format!("Missing model: {asset}"));
-                missing = true;
-                None
             } else {
                 Some(self.geometry(&source_of(source)?))
             };
@@ -1074,6 +1107,25 @@ impl SceneBuilder {
             look: Look::default(),
             warnings,
         })
+    }
+}
+
+/// An OBJ model asset's geometry (`new BufferGeometry()` with the parsed
+/// positions, normals, and texture coordinates; not indexed).
+pub fn obj_geometry(key: u64, mesh: &pm_geom3d::obj::ObjMesh) -> Geometry3d {
+    let g = Geometry {
+        positions: mesh.positions.clone(),
+        normals: mesh.normals.clone(),
+        uvs: mesh.texcoords.clone(),
+        indices: (0..mesh.vertex_count as u32).collect(),
+        indexed: false,
+        groups: Vec::new(),
+    };
+    let sphere = bounding_sphere(&g);
+    Geometry3d {
+        key,
+        geometry: Arc::new(g),
+        sphere,
     }
 }
 

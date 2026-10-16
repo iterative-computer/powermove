@@ -19,7 +19,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { cases } from './cases';
+import { readFileSync } from 'node:fs';
+import { cases, meshCases } from './cases';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
@@ -31,7 +32,20 @@ const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').sl
 const out = path.resolve(flag('--out') || path.join(homedir(), 'Library/Application Support/Powermove Engine Corpus', `scene3d-${stamp}-${commit}`));
 if (out.startsWith(path.resolve(repo) + path.sep)) throw new Error('references never go inside the repository');
 const all = cases();
-writeFileSync(path.join(crate, 'tests/fixtures/scene3d-cases.json'), JSON.stringify({ three: '0.180.0', cases: all }, null, 1) + '\n');
+const meshes = meshCases();
+writeFileSync(path.join(crate, 'tests/fixtures/scene3d-cases.json'), JSON.stringify({ three: '0.180.0', cases: all, meshes }, null, 1) + '\n');
+// The compositor's own mesh and placeholder shaders (template literals in the sources).
+const source = (file: string) => readFileSync(path.join(repo, 'apps/desktop/src/renderer/src/legacy/gl', file), 'utf8');
+const literal = (text: string, name: string) => {
+  const m = new RegExp(`${name.replace('.', '\\.')} = \`([\\s\\S]*?)\`;`).exec(text);
+  if (!m) throw new Error(`${name} not found`);
+  return m[1]!;
+};
+const compositor = source('compositor.ts'), shaderLib = source('shaders.ts');
+const missing = /const missing = `([\s\S]*?)`;/.exec(compositor)?.[1];
+if (!missing) throw new Error('missing placeholder not found');
+const shaders = { meshVertex: literal(compositor, 'const MESH_VERTEX'), meshFragment: literal(compositor, 'const MESH_FRAGMENT'),
+  vert: literal(shaderLib, 'PM.VERT'), header: literal(shaderLib, 'PM.SHADER_HEADER'), missing };
 const only = flag('--only');
 const selected = only ? all.filter(c => c.id.startsWith(only)) : all;
 
@@ -119,6 +133,10 @@ try {
   for (const c of selected) {
     const info = await page.evaluate(([c]: [any]) => (globalThis as any).ThreeRef.renderCase(c), [c]);
     console.log(`${c.id}: ${info.outputs.map((o: any) => o.draws).join(', ')} draws`);
+  }
+  for (const c of meshes.filter(m => !only || m.id.startsWith(only))) {
+    await page.evaluate(([c, s]: [any, any]) => (globalThis as any).ThreeRef.renderMesh(c, s), [c, shaders]);
+    console.log(`${c.id}: mesh layer`);
   }
   writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ three: '0.180.0', chromium: browser.version(), commit, cases: selected.map(c => c.id) }, null, 1));
 } finally {

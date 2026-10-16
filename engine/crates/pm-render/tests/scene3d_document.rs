@@ -316,3 +316,109 @@ fn linear_blending_decodes_the_3d_canvas() {
     // f32 against the f64 reference.
     assert!(worst < 2e-6, "worst {worst}");
 }
+
+const CUBE_OBJ: &str = "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\n\
+f 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
+
+#[test]
+fn obj_models_and_mesh_layers_render() {
+    let dir = std::env::temp_dir().join(format!("pm-render-obj-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cube.obj");
+    std::fs::write(&path, CUBE_OBJ).unwrap();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("cube".into(), path.clone());
+    let record = json!({ "id": "cube", "kind": "model", "format": "obj", "name": "cube.obj" });
+    // A 3D object whose source is an OBJ model asset: its parsed triangles
+    // with the object's material.
+    let mut obj = object3d("o", "box", json!({}), "#FF4040", W, H, 2.0);
+    obj["d"]["data"]["object"]["source"] = json!({ "assetId": "cube" });
+    let mut doc = project(
+        W,
+        H,
+        2.0,
+        solid_fill("#000000"),
+        vec![
+            camera("cam", [0.0, 0.0, 6.0], false, 2.0),
+            sun("sun", [-3.0, 5.0, 4.0], false, 2.0),
+            obj,
+        ],
+    );
+    doc["assets"]["cube"] = record.clone();
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let frame = r
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let color = r.read_rgba(&frame).unwrap();
+    let center = ((H / 2 * W + W / 2) * 4) as usize;
+    assert!(
+        color[center] > 0.2 && color[center + 3] == 1.0,
+        "the red cube is drawn"
+    );
+    // Without the asset record the object is the orange wireframe box, whose
+    // center is empty.
+    doc["assets"] = json!({});
+    let frame = r
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    let missing = r.read_rgba(&frame).unwrap();
+    let lit = |c: &[f32]| c.chunks_exact(4).filter(|p| p[0] > 0.2).count();
+    assert!(lit(&missing) > 0, "the box's edges are drawn");
+    assert!(
+        lit(&missing) * 2 < lit(&color),
+        "missing models draw only edges: {} vs {}",
+        lit(&missing),
+        lit(&color)
+    );
+
+    // A legacy mesh layer: routed without a definition snapshot, drawn with
+    // its fixed shading given one.
+    let mut layer = layer(
+        "m",
+        "extension",
+        json!({
+            "definition": "acme.obj-viewer", "version": 1, "w": 160, "h": 90, "params": {},
+            "data": { "model": "cube" }
+        }),
+        f64::from(W) / 2.0,
+        f64::from(H) / 2.0,
+        2.0,
+    );
+    layer["p"]["anchor.x"] = ch(json!(80));
+    layer["p"]["anchor.y"] = ch(json!(45));
+    let mut doc = project(W, H, 2.0, solid_fill("#000000"), vec![layer]);
+    doc["assets"]["cube"] = record;
+    let doc = load(&doc);
+    let mut r = Renderer::headless().unwrap();
+    assert!(
+        r.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .is_err()
+    );
+    let mut defs = std::collections::HashMap::new();
+    defs.insert(
+        "acme.obj-viewer".to_owned(),
+        pm_render::scene3d::legacy::MeshDefinition {
+            asset_field: "model".into(),
+            defaults: Default::default(),
+        },
+    );
+    r.set_mesh_definitions(defs);
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let c = r.read_rgba(&frame).unwrap();
+    // Inside the layer: the background #0C0D12 or the shaded mesh; outside:
+    // the composition background.
+    let px = |x: u32, y: u32| {
+        let i = ((y * W + x) * 4) as usize;
+        [c[i], c[i + 1], c[i + 2]]
+    };
+    let corner = px(W / 2 - 78, H / 2 - 43);
+    assert!((corner[2] - 0x12 as f32 / 255.0).abs() < 2e-3, "{corner:?}");
+    assert!(px(W / 2, H / 2)[0] > 0.2, "the mesh shading at the center");
+    assert_eq!(px(2, 2), [0.0, 0.0, 0.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

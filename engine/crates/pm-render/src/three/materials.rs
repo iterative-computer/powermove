@@ -149,8 +149,10 @@ pub fn basic(
 
 /// `MeshDepthMaterial({ depthPacking: RGBADepthPacking })` drawn into a
 /// shadow map (a render target: linear output, no tone mapping). `side` is
-/// already the shadow side.
-pub fn depth_rgba(side: Side, lights: &LightCounts) -> Result<Parameters, String> {
+/// already the shadow side; `map` is whether the caster's material has a
+/// color map (`getDepthMaterial` copies `material.map`; the depth fragment
+/// samples it but packs only depth).
+pub fn depth_rgba(side: Side, map: bool, lights: &LightCounts) -> Result<Parameters, String> {
     let mut p = Parameters {
         shader_type: "MeshDepthMaterial".into(),
         shader_name: String::new(),
@@ -161,6 +163,8 @@ pub fn depth_rgba(side: Side, lights: &LightCounts) -> Result<Parameters, String
         output_srgb: false,
         use_depth_packing: true,
         depth_packing: 3201,
+        map,
+        map_uv: uv(map),
         ..Parameters::default()
     };
     apply_side(&mut p, side);
@@ -168,8 +172,9 @@ pub fn depth_rgba(side: Side, lights: &LightCounts) -> Result<Parameters, String
     Ok(p)
 }
 
-/// `MeshDistanceMaterial` drawn into a point light's shadow atlas.
-pub fn distance(side: Side, lights: &LightCounts) -> Result<Parameters, String> {
+/// `MeshDistanceMaterial` drawn into a point light's shadow atlas (`map` as
+/// for [`depth_rgba`]).
+pub fn distance(side: Side, map: bool, lights: &LightCounts) -> Result<Parameters, String> {
     let mut p = Parameters {
         shader_type: "MeshDistanceMaterial".into(),
         shader_name: String::new(),
@@ -182,6 +187,8 @@ pub fn distance(side: Side, lights: &LightCounts) -> Result<Parameters, String> 
         tone_mapping: ToneMapping::None,
         opaque: true,
         output_srgb: false,
+        map,
+        map_uv: uv(map),
         ..Parameters::default()
     };
     apply_side(&mut p, side);
@@ -229,8 +236,8 @@ mod tests {
         assert!(f.contains("rectAreaLights[ 0 ]"));
         for p in [
             basic("", Side::Front, false, &lights).unwrap(),
-            depth_rgba(Side::Double, &lights).unwrap(),
-            distance(Side::Back, &lights).unwrap(),
+            depth_rgba(Side::Double, true, &lights).unwrap(),
+            distance(Side::Back, false, &lights).unwrap(),
         ] {
             let (v, f) = sources(&p).unwrap();
             assert!(!v.contains("#include") && !f.contains("#include"));

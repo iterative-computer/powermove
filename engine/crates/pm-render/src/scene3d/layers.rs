@@ -117,6 +117,44 @@ impl TextureSource for DocumentTextures<'_> {
     }
 }
 
+/// Model assets as the asset store holds them: `kind: 'model'` records
+/// with `format` `obj` (parsed meshes), `gltf` or `glb` (imported scenes),
+/// or `blend` (no geometry in the 3D pass).
+pub(crate) struct DocumentModels<'a> {
+    pub root: &'a Node,
+    pub assets: &'a dyn AssetResolver,
+}
+
+impl super::model::ModelSource for DocumentModels<'_> {
+    fn model(&self, asset: &str) -> super::model::ModelLookup {
+        use super::model::ModelLookup;
+        let Some(record) = node::member(node::member(Some(self.root), "assets"), asset) else {
+            return ModelLookup::Missing;
+        };
+        let format = str_member(Some(record), "format").unwrap_or_default();
+        let name = str_member(Some(record), "name")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match format.as_str() {
+            "gltf" | "glb" => return ModelLookup::Imported,
+            "obj" => {}
+            _ if name.ends_with(".glb") || name.ends_with(".gltf") => return ModelLookup::Imported,
+            _ if name.ends_with(".obj") => {}
+            _ => return ModelLookup::Missing,
+        }
+        let Some(path) = self.assets.path(asset, Some(record)) else {
+            return ModelLookup::Missing;
+        };
+        match super::legacy::obj_mesh(&path) {
+            Ok(mesh) => ModelLookup::Obj {
+                key: Arc::as_ptr(&mesh) as u64,
+                mesh,
+            },
+            Err(_) => ModelLookup::Missing,
+        }
+    }
+}
+
 /// Any enabled mask (`userData.layerOccludes` is its negation).
 fn masked<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64) -> JsResult<bool> {
     for m in node::array(node::member(Some(layer), "masks")).unwrap_or(&[]) {
@@ -195,8 +233,7 @@ fn composition_scene<'d>(
     };
     let root = scope.comp.root();
     let textures = DocumentTextures { root, assets };
-    let model_exists =
-        |asset: &str| node::member(node::member(Some(root), "assets"), asset).is_some();
+    let models = DocumentModels { root, assets };
     let mut builder = SceneBuilder::default();
     let built = builder.build(
         scene,
@@ -206,7 +243,7 @@ fn composition_scene<'d>(
         &facts,
         &mut Evaluated,
         &textures,
-        &model_exists,
+        &models,
     );
     let mut scene = match built {
         Ok(s) => s,
@@ -420,10 +457,19 @@ pub(crate) fn check(
         let object = node::member(node::member(node::member(Some(l), "d"), "data"), "object");
         let source = node::member(object, "source");
         if let Some(a) = str_member(source, "assetId")
-            && asset(&a).is_some()
+            && let Some(record) = asset(&a)
         {
-            // An existing imported model is the glTF lane's.
-            out.push((Some(id(l)), "imported models".to_owned()));
+            // An imported glTF scene is the glTF lane's; OBJ models draw
+            // here, other assets as the missing-model box.
+            let format = str_member(Some(record), "format").unwrap_or_default();
+            let name = str_member(Some(record), "name")
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(format.as_str(), "gltf" | "glb")
+                || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
+            {
+                out.push((Some(id(l)), "imported models".to_owned()));
+            }
         }
         if let Some(p) = str_member(source, "primitive")
             && !matches!(
@@ -561,8 +607,7 @@ pub(crate) fn legacy_scene<'d>(
     }
     let root = scope.comp.root();
     let textures = DocumentTextures { root, assets };
-    let model_exists =
-        |asset: &str| node::member(node::member(Some(root), "assets"), asset).is_some();
+    let models = DocumentModels { root, assets };
     let mut evaluator = Layered {
         scope,
         layer,
@@ -578,7 +623,7 @@ pub(crate) fn legacy_scene<'d>(
         &HashMap::new(),
         &mut evaluator,
         &textures,
-        &model_exists,
+        &models,
     );
     if let Some(e) = evaluator.error {
         return Err(e);
@@ -611,6 +656,6 @@ pub fn scene_from_json(
         &HashMap::new(),
         &mut Evaluated,
         &NoTextures,
-        &|_| false,
+        &super::model::NoModels,
     )
 }

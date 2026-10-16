@@ -252,3 +252,41 @@ export function cases(): Case[] {
     outputs: [{}] });
   return out;
 }
+
+/** A legacy OBJ mesh layer render (`meshExtensionQuad`). */
+export type MeshCase = {
+  id: string; width: number; height: number;
+  /** The OBJ text (absent: the missing-definition checkerboard). */
+  obj?: string;
+  /** u_yaw, u_pitch, u_distance, u_rotationX, u_rotationY, u_rotationZ, u_scale, u_roughness, u_metalness. */
+  values: number[];
+  objectColor: string; lightColor: string; background: string;
+};
+
+/** A deterministic OBJ: a lumpy UV sphere with quads, normals, and texture coordinates. */
+function lumpyObj(rings: number, segments: number, normals: boolean): string {
+  const lines = ['# generated', 'o lumpy'];
+  for (let r = 0; r <= rings; r++) for (let s = 0; s < segments; s++) {
+    const t = r / rings * Math.PI, p = s / segments * Math.PI * 2;
+    const k = 1 + 0.15 * Math.sin(3 * p) * Math.sin(2 * t);
+    lines.push(`v ${(k * Math.sin(t) * Math.cos(p) * 2 + 3).toFixed(5)} ${(k * Math.cos(t) * 2 - 1).toFixed(5)} ${(k * Math.sin(t) * Math.sin(p) * 2).toFixed(5)}`);
+    if (normals) lines.push(`vn ${(Math.sin(t) * Math.cos(p)).toFixed(4)} ${Math.cos(t).toFixed(4)} ${(Math.sin(t) * Math.sin(p)).toFixed(4)}`);
+  }
+  for (let r = 0; r < rings; r++) for (let s = 0; s < segments; s++) {
+    const a = r * segments + s + 1, b = r * segments + (s + 1) % segments + 1, c = a + segments, d = b + segments;
+    lines.push(normals ? `f ${a}//${a} ${b}//${b} ${d}//${d} ${c}//${c}` : `f ${a} ${b} ${d} ${c}`);
+  }
+  return lines.join('\n');
+}
+
+export function meshCases(): MeshCase[] {
+  const base = [28, 18, 4.8, 0, 25, 0, 1.35, 0.25, 0.7];
+  return [
+    { id: 'mesh-defaults', width: 640, height: 360, obj: lumpyObj(16, 24, true), values: base, objectColor: '#C7C4FF', lightColor: '#FFB36B', background: '#0C0D12' },
+    { id: 'mesh-face-normals', width: 480, height: 480, obj: lumpyObj(10, 14, false),
+      values: [-40, 35, 3.5, 20, 70, -15, 1.1, 0.8, 0.1], objectColor: '#FF6B1A', lightColor: '#A0C8FF', background: '#202830' },
+    { id: 'mesh-rough-metal', width: 512, height: 288, obj: lumpyObj(20, 32, true),
+      values: [120, -10, 6, 0, 0, 0, 2, 1, 1], objectColor: '#88FFEE', lightColor: '#FFFFFF', background: '#000000' },
+    { id: 'mesh-missing', width: 400, height: 300, values: base, objectColor: '#C7C4FF', lightColor: '#FFB36B', background: '#0C0D12' },
+  ];
+}

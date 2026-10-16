@@ -371,10 +371,11 @@ fn shadow_draw(
     let mesh = &scene.objects[item.object].meshes[item.mesh];
     let side = item.material.side.shadow();
     let point = light.kind == LightKind::Point;
+    let map = item.material.maps.color.as_ref();
     let params = if point {
-        materials::distance(side, &ls.counts)?
+        materials::distance(side, map.is_some(), &ls.counts)?
     } else {
-        materials::depth_rgba(side, &ls.counts)?
+        materials::depth_rgba(side, map.is_some(), &ls.counts)?
     };
     let mut u = Vec::new();
     let v = view.view();
@@ -383,6 +384,11 @@ fn shadow_draw(
     u.push(("modelViewMatrix".into(), model_view.to_vec()));
     u.push(("modelMatrix".into(), mesh.world.to_vec()));
     u.push(("opacity".into(), vec![1.0]));
+    let mut textures = Vec::new();
+    if let Some(map) = map {
+        textures.push(("map".to_owned(), TextureRef::Map(map.clone())));
+        u.push(("mapTransform".into(), map.transform.to_vec()));
+    }
     if point {
         u.push(("referencePosition".into(), light.position().to_vec()));
         u.push(("nearDistance".into(), vec![view.near]));

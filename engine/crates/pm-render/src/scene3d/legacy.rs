@@ -254,21 +254,23 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 }
 struct Quad {
     @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
 };
+// `PM.VERT` over the unit quad (a triangle strip): `v_uv = a_pos`, GL clip
+// y = 1 − 2·a.y, negated for GL row order. The varying is interpolated as
+// WebGL interpolates it, so cell edges fall on the same pixels.
 @vertex
 fn vs_quad(@builtin(vertex_index) i: u32) -> Quad {
-    let a = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
     var o: Quad;
-    o.pos = vec4<f32>(a * 2.0 - 1.0, 0.0, 1.0);
+    o.pos = vec4<f32>(a.x * 2.0 - 1.0, a.y * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = a;
     return o;
 }
-// The missing-definition checkerboard (`void main(){ vec2 q=floor(uv*24.0); … }`):
-// `uv` is the content-space coordinate (0 at the top of the layer); the
-// target keeps GL row order, so GL's `gl_FragCoord.y` is this row's.
+// The missing-definition checkerboard (`void main(){ vec2 q=floor(uv*24.0); … }`).
 @fragment
 fn fs_missing(in: Quad) -> @location(0) vec4<f32> {
-    let uv = vec2<f32>(in.pos.x / u.resolution.x, 1.0 - in.pos.y / u.resolution.y);
-    let q = floor(uv * 24.0);
+    let q = floor(in.uv * 24.0);
     let checker = (q.x + q.y) - 2.0 * floor((q.x + q.y) / 2.0);
     let a = vec3<f32>(0.055, 0.05, 0.07);
     let b = vec3<f32>(0.16, 0.09, 0.15);
@@ -376,7 +378,10 @@ impl MeshRenderer {
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
-                primitive: wgpu::PrimitiveState::default(),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     depth_write_enabled: Some(false),
                     depth_compare: Some(wgpu::CompareFunction::Always),
@@ -518,7 +523,7 @@ impl MeshRenderer {
                 }
                 None => {
                     pass.set_pipeline(&p.missing);
-                    pass.draw(0..3, 0..1);
+                    pass.draw(0..4, 0..1);
                 }
             }
         }

@@ -5,9 +5,11 @@
 //! is rendered by the pass and compared with three.js's own render of the
 //! same scene through the production `SceneRuntime`
 //! (`tools/three-ref/run-scenes.ts`, captured outside the repository).
-//! Also checks that every program the pass generates equals the program
-//! WebGL received, byte for byte, and that every uniform value equals the
-//! value three.js uploaded for the same draw.
+//! Also checks that the draws are three.js's: every draw of ours has a
+//! recorded draw with the same program (byte for byte, but for what
+//! three.js's program cache makes history-dependent; see `normalized`) and
+//! equal uniform values in f32, and every recorded draw that writes color
+//! or depth is one of ours.
 //!
 //! `PM_SCENE3D_REF=<dir>` picks a capture (default: the newest
 //! `scene3d-*`); `PM_SCENE3D_ONLY=<prefix>` limits the cases;
@@ -195,7 +197,7 @@ fn case(c: &Value, tex: &Path) -> Case {
             &facts,
             &mut Evaluated,
             &textures,
-            &|_| false,
+            &pm_render::scene3d::model::NoModels,
         )
         .unwrap_or_else(|e| panic!("{id}: {e}"));
     let mut scenes: Vec<(String, Arc<Scene3d>)> = Vec::new();
@@ -603,7 +605,11 @@ fn programs_and_uniforms_equal_three_js() {
                             "ltc_2",
                         ]
                         .contains(&base);
-                    if sampler {
+                    // The shared shadow materials keep the uniforms of the
+                    // last refresh (three.js refreshes a material's uniforms
+                    // only when it changes program or version), and their
+                    // fragment samples `map` without using it.
+                    if sampler || (shadow && name == "mapTransform") {
                         continue;
                     }
                     let theirs = f32s(value);
@@ -669,12 +675,10 @@ fn programs_and_uniforms_equal_three_js() {
             for (i, r) in recorded.iter().enumerate() {
                 if !used[i] && effective(r) {
                     unmatched_recorded += 1;
-                    if std::env::var_os("PM_SCENE3D_STRICT").is_some() {
-                        problems.push(format!(
-                            "{} output {k}: recorded draw {i} (program {}) has no counterpart",
-                            c.id, r["program"]
-                        ));
-                    }
+                    problems.push(format!(
+                        "{} output {k}: recorded draw {i} (program {}) has no counterpart",
+                        c.id, r["program"]
+                    ));
                 }
             }
         }
