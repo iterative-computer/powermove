@@ -33,14 +33,19 @@
 //! - Banding by rows does not make every pass cheaper: a precomposition or a
 //!   3D layer renders whole for any region, so its bands cost about as much
 //!   as its whole frame while whole-frame calibration predicts a fraction.
-//!   A pass whose GPU-timed submissions measure over the bound
-//!   [`OVER_BOUND_LIMIT`] times in one playback (its first submission
-//!   aside) waits until playback stops.
+//!   A GPU-timed submission during playback measured over the bound is a
+//!   strike against its pass, unless the pass's uncontended whole frame
+//!   fits the bound (no band costs more than its whole frame, so the excess
+//!   was other GPU clients' work interleaved inside the span). After a
+//!   strike the pass waits [`OVER_BOUND_BACKOFF`], doubling with each
+//!   further strike up to [`OVER_BOUND_BACKOFF_MAX`]; a submission measured
+//!   within the bound clears its strikes.
 //!
-//! So a pass submits at most `OVER_BOUND_LIMIT` measured over-bound units
-//! per playback besides its cold first submission, and none once its
-//! uncontended frame is known to be over the bound and its unit predicted
-//! over it. Without GPU timestamps only the probe limit applies.
+//! Measured during engine playback (docs/engine/export.md): isolated
+//! over-bound submissions, up to 18 ms of GPU span, dropped no frame (the
+//! interactive engine renders ahead), and GPU spans of cheap bands taken
+//! during 4K playback reached 6 ms, so a strike only slows a pass down; it
+//! never stops it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,17 +72,21 @@ const POLL: Duration = Duration::from_millis(20);
 pub const OVERSIZE_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// One-unit probes of a pass predicted over the bound per playback.
 pub const OVERSIZE_PROBE_LIMIT: u32 = 4;
-/// GPU-timed submissions of a pass measured over the bound per playback
-/// before the pass waits for playback to stop.
-pub const OVER_BOUND_LIMIT: u32 = 3;
+/// How long a pass waits after its first strike (a GPU-timed submission
+/// over the bound during playback); doubling with each further strike.
+pub const OVER_BOUND_BACKOFF: Duration = Duration::from_millis(100);
+/// The longest back-off after strikes.
+pub const OVER_BOUND_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// One pass in the current playback.
 #[derive(Debug, Clone, Copy, Default)]
 struct PlaybackPass {
     probes: u32,
     last_probe: Option<Instant>,
-    /// GPU-timed submissions measured over the bound.
-    over_bound: u32,
+    /// Strikes since the pass last measured within the bound.
+    strikes: u32,
+    /// After a strike: no submission before then.
+    hold_until: Option<Instant>,
 }
 
 impl PlaybackPass {
@@ -146,7 +155,7 @@ pub struct GateStats {
     pub over_bound_during_playback: u64,
     /// Largest GPU-timed submission during playback, in µs.
     pub max_playback_gpu_us: f64,
-    /// Submissions that waited for playback to stop.
+    /// Submissions that were held (for playback to stop, or a back-off).
     pub waited_for_stop: u64,
     /// The last corrected unit cost that was above the bound, in µs.
     pub last_unit_too_large_us: f64,
@@ -158,8 +167,8 @@ pub struct GateStats {
     /// Admissions that waited for playback to stop because the pass used its
     /// probes for this playback.
     pub probe_limit_reached: u64,
-    /// Admissions that waited for playback to stop because the pass measured
-    /// over the bound `OVER_BOUND_LIMIT` times in this playback.
+    /// Admissions that waited out a back-off after their pass measured over
+    /// the bound during playback.
     pub measured_over_bound: u64,
     /// Admissions released without a measurement (the render failed).
     pub abandoned: u64,
@@ -263,14 +272,14 @@ impl Gate {
                 continue;
             }
             if st.playing
-                && st
-                    .playback
-                    .get(&pass)
-                    .is_some_and(|p| p.over_bound >= OVER_BOUND_LIMIT)
+                && let Some(until) = st.playback.get(&pass).and_then(|p| p.hold_until)
             {
-                hold(&mut st, Held::MeasuredOverBound);
-                st = self.wait(st, POLL);
-                continue;
+                let left = until.saturating_duration_since(Instant::now());
+                if !left.is_zero() {
+                    hold(&mut st, Held::MeasuredOverBound);
+                    st = self.wait(st, POLL.min(left));
+                    continue;
+                }
             }
             let now = host_now();
             let decision = st.slicer.decide(
@@ -418,12 +427,29 @@ impl Gate {
         }
         if st.playing {
             st.stats.max_playback_us = st.stats.max_playback_us.max(measured);
-            if gpu_timed {
+            if gpu_timed && adm.sliced {
                 st.stats.max_playback_gpu_us = st.stats.max_playback_gpu_us.max(measured);
-                if adm.sliced && measured > f64::from(st.policy.max_command_buffer_us) {
+                let bound = f64::from(st.policy.max_command_buffer_us);
+                // A pass whose uncontended whole frame fits the bound cannot
+                // have a band over it: the excess was contention.
+                let fits_uncontended = st
+                    .uncontended_frame_us
+                    .get(&pass)
+                    .is_some_and(|&us| us <= bound);
+                if measured > bound {
                     st.stats.over_bound_during_playback += 1;
-                    if !first {
-                        st.playback.entry(pass).or_default().over_bound += 1;
+                }
+                if !first && !fits_uncontended {
+                    let entry = st.playback.entry(pass).or_default();
+                    if measured > bound {
+                        entry.strikes += 1;
+                        let backoff = OVER_BOUND_BACKOFF
+                            .saturating_mul(1u32 << (entry.strikes - 1).min(16))
+                            .min(OVER_BOUND_BACKOFF_MAX);
+                        entry.hold_until = Some(Instant::now() + backoff);
+                    } else {
+                        entry.strikes = 0;
+                        entry.hold_until = None;
                     }
                 }
             }
@@ -699,50 +725,88 @@ mod tests {
         );
     }
 
+    /// Admits and reports how long the admission waited.
+    fn timed_admit(g: &LaneGate, pass: u64, units: u32) -> (u32, Duration) {
+        let t = Instant::now();
+        let n = g.admit(pass, units, &AtomicBool::new(false)).unwrap();
+        (n, t.elapsed())
+    }
+
     /// Bands of a pass that renders whole for any region (a precomposition)
-    /// cost far more than whole-frame calibration predicts: after
-    /// OVER_BOUND_LIMIT GPU-timed submissions over the bound, the pass waits
-    /// for playback to stop. Wall-time measurements never count.
+    /// cost about its whole frame while whole-frame calibration predicts a
+    /// fraction: each GPU-timed band over the bound backs the pass off,
+    /// doubling; one within the bound clears it.
     #[test]
-    fn passes_measured_over_the_bound_wait_for_playback_to_stop() {
+    fn strikes_back_a_pass_off_and_a_band_within_the_bound_clears_them() {
         let gate = Arc::new(Gate::new());
         let g = lane(&gate, SNAPSHOT_LANE);
         let no = AtomicBool::new(false);
-        // Idle: 68 units in 1.36 ms, 20 µs a unit by whole frames.
+        // Idle: 68 units in 6.8 ms (over the bound), 100 µs a unit.
         for _ in 0..2 {
             assert_eq!(g.admit(9, 68, &no), Some(68));
-            g.finished_timed(9, 68, 1360.0, true);
+            g.finished_timed(9, 68, 6800.0, true);
         }
         gate.signal(&started());
-        // Wall time over the bound (contention) does not count.
-        let n = g.admit(9, 68, &no).unwrap();
+        // The first sliced band after the governor's wait for a frame.
+        let (n, _) = timed_admit(&g, 9, 68);
+        g.finished_timed(9, n, 1500.0, true);
+        // Wall time over the bound (no GPU timestamps) is not a strike.
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert!(waited < Duration::from_millis(50), "{waited:?}");
         g.finished(9, n, 2600.0);
-        assert_eq!(gate.stats().over_bound_during_playback, 0);
-        // Every band costs 3 ms of GPU time, whatever its size.
-        for _ in 0..OVER_BOUND_LIMIT {
-            let n = g.admit(9, 68, &no).unwrap();
-            g.finished_timed(9, n, 3000.0, true);
-        }
-        assert_eq!(
-            gate.stats().over_bound_during_playback,
-            u64::from(OVER_BOUND_LIMIT)
+        // Three bands of 3 ms each: 100, then 200 ms of back-off.
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert!(waited < Duration::from_millis(50), "{waited:?}");
+        g.finished_timed(9, n, 3000.0, true);
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert!(
+            waited >= OVER_BOUND_BACKOFF - Duration::from_millis(5),
+            "{waited:?}"
         );
-        let g2 = gate.clone();
-        let (granted, waited) = admit_while(&g, 9, 68, Duration::from_millis(300), move || {
-            g2.signal(&DeadlineSignal::PlaybackStopped { at: host_now() });
-        });
-        assert_eq!(granted, Some(68), "whole frames once playback stopped");
-        assert!(waited >= Duration::from_millis(300), "{waited:?}");
-        g.finished_timed(9, 68, 1360.0, true);
+        g.finished_timed(9, n, 3000.0, true);
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert!(
+            waited >= 2 * OVER_BOUND_BACKOFF - Duration::from_millis(5),
+            "{waited:?}"
+        );
+        // Within the bound: the strikes are cleared.
+        g.finished_timed(9, n, 900.0, true);
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert!(waited < Duration::from_millis(50), "{waited:?}");
+        g.finished_timed(9, n, 900.0, true);
         let stats = gate.stats();
-        assert_eq!(stats.measured_over_bound, 1);
-        assert_eq!(stats.waited_for_stop, 1);
+        assert_eq!(stats.over_bound_during_playback, 2);
+        assert_eq!(stats.measured_over_bound, 2);
         assert!(stats.max_playback_gpu_us >= 3000.0);
-        // A new playback starts the count again.
+        // Playback stops: whole frames at once.
+        gate.signal(&DeadlineSignal::PlaybackStopped { at: host_now() });
+        let (n, waited) = timed_admit(&g, 9, 68);
+        assert_eq!(n, 68);
+        assert!(waited < Duration::from_millis(50));
+        g.finished_timed(9, 68, 6800.0, true);
+    }
+
+    /// A pass whose uncontended whole frame fits the bound gets no strikes:
+    /// a band over the bound during playback was other clients' work.
+    #[test]
+    fn contended_bands_of_a_pass_within_the_bound_are_not_strikes() {
+        let gate = Arc::new(Gate::new());
+        let g = lane(&gate, SNAPSHOT_LANE);
+        for _ in 0..2 {
+            let (n, _) = timed_admit(&g, 4, 68);
+            g.finished_timed(4, n, 1360.0, true);
+        }
         gate.signal(&started());
-        let n = g.admit(9, 68, &no).unwrap();
-        g.finished_timed(9, n, 500.0, true);
-        assert_eq!(gate.stats().measured_over_bound, 1);
+        timed_admit(&g, 4, 68);
+        g.finished_timed(4, 1, 6000.0, true);
+        for _ in 0..3 {
+            let (n, waited) = timed_admit(&g, 4, 68);
+            assert!(waited < Duration::from_millis(50), "{waited:?}");
+            g.finished_timed(4, n, 6000.0, true);
+        }
+        let stats = gate.stats();
+        assert_eq!(stats.over_bound_during_playback, 4);
+        assert_eq!(stats.measured_over_bound, 0);
     }
 
     /// A pass whose uncontended whole frame fits the bound but whose
