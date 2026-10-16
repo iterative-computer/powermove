@@ -131,6 +131,13 @@ impl JsEngineHost {
         self.inner.status_json()
     }
 
+    /// Destroys the viewer presenter's GPU device as a real loss would (the
+    /// recovery test); false when this engine does not present.
+    #[napi]
+    pub fn simulate_gpu_loss(&self) -> bool {
+        self.inner.simulate_gpu_loss()
+    }
+
     /// The viewer presenter's per-frame trace as JSON, emptied (the S1
     /// harness; recorded only with `POWERMOVE_BRIDGE_TRACE=1`).
     #[napi]

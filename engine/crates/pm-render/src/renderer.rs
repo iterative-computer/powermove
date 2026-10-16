@@ -52,6 +52,38 @@ pub struct Rendered {
     pub legend: Vec<String>,
     pub failures: Vec<LayerFailure>,
     pub seconds: f64,
+    /// Where each top-level layer was drawn: its content quad in output
+    /// pixels, top-down, corners in the order (0,0), (1,0), (1,1), (0,1)
+    /// of the layer's unit quad (the viewer's overlay geometry, section 18
+    /// item 6). A layer drawn as several quads (a flattened group) reports
+    /// each of them.
+    pub quads: Vec<LayerQuad>,
+}
+
+/// One drawn quad of a top-level layer ([`Rendered::quads`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerQuad {
+    pub layer: String,
+    pub corners: [[f64; 2]; 4],
+}
+
+impl LayerQuad {
+    /// The quads of a plan's top-level draws, in output pixels top-down.
+    /// Plan matrices map the unit quad in the frame's own (top-down)
+    /// composition space scaled to output pixels.
+    pub fn of_plan(plan: &CompPlan) -> Vec<LayerQuad> {
+        plan.draws
+            .iter()
+            .map(|draw| {
+                let m = draw.matrix;
+                let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+                LayerQuad {
+                    layer: draw.layer.clone(),
+                    corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+                }
+            })
+            .collect()
+    }
 }
 
 /// Commands recorded around each frame's own commands, in the frame's
@@ -436,6 +468,7 @@ impl Renderer {
         if !request.background {
             plan.background = Background::Transparent;
         }
+        let quads = LayerQuad::of_plan(&plan);
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
@@ -531,6 +564,7 @@ impl Renderer {
             return Err(RenderError::Unsupported(unsupported));
         }
         Ok(Rendered {
+            quads,
             legend,
             failures,
             seconds,

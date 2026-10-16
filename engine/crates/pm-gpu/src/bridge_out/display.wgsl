@@ -15,6 +15,11 @@
 //   an rgba16float working texture lands up to one step off; Apple GPUs
 //   truncate on render-target writes), so flat 8-bit colors are not
 //   dithered.
+// - Coverage passes through: the viewer canvas is premultiplied, so where
+//   the working frame is transparent (around a document composition) the
+//   viewer's stage shows, as around today's WebGL canvas. Frames are
+//   opaque wherever they draw (the presenter composites the composition
+//   over black, as today's opaque canvas does).
 
 struct Params {
     flags: u32,          // bit0: 8-bit target, bit1: linear-light input, bit2: P3 canvas
@@ -65,7 +70,9 @@ const BT709_TO_P3 = mat3x3f(
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let xy = vec2u(pos.xy);
-    var c = textureLoad(src, vec2i(xy), 0).rgb;
+    let texel = textureLoad(src, vec2i(xy), 0);
+    var c = texel.rgb;
+    let coverage = clamp(texel.a, 0.0, 1.0);
     let eight_bit = (p.flags & 1u) != 0u;
     let linear_in = (p.flags & 2u) != 0u;
     let p3 = (p.flags & 4u) != 0u;
@@ -87,5 +94,5 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     } else {
         c = quantizeToF16(c);
     }
-    return vec4f(c, 1.0);
+    return vec4f(c * coverage, coverage);
 }

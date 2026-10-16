@@ -924,3 +924,94 @@ fn a_video_replaced_on_disk_is_reopened() {
     assert!(replaced == fresh);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The overlay geometry a render reports (section 18 item 6): each
+/// top-level layer's quad in output pixels, top-down, where its pixels are.
+#[test]
+fn layer_quads_cover_the_drawn_pixels_top_down() {
+    let solid = layer(
+        "box",
+        "solid",
+        json!({ "color": "#FF0000", "w": 40, "h": 20 }),
+        70.0,
+        30.0,
+        2.0,
+    );
+    let mut rotated = layer(
+        "tilt",
+        "solid",
+        json!({ "color": "#00FF00", "w": 30, "h": 30 }),
+        240.0,
+        130.0,
+        2.0,
+    );
+    set(&mut rotated, "rotation", json!(30));
+    let doc = load(&project(W, H, 2.0, no_fill(), vec![solid, rotated]));
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(W, H), 2.0, Precision::Float16);
+    let size = request.target_size();
+    let target = pm_gpu::Target::new(
+        r.device(),
+        "quads",
+        size.width,
+        size.height,
+        wgpu::TextureFormat::Rgba16Float,
+        pm_gpu::target::working_usage(),
+    );
+    let out = r
+        .render_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+            &target,
+            None,
+        )
+        .unwrap();
+    let frame = r
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    let rgba = r.read_rgba(&frame).unwrap();
+    assert_eq!(out.quads.len(), 2, "{:?}", out.quads);
+    for (quad, channel) in out.quads.iter().map(|q| {
+        let channel = if q.layer == "box" { 0 } else { 1 };
+        (q, channel)
+    }) {
+        // Pixels where the layer's color is fully drawn.
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let i = ((y * size.width + x) * 4) as usize;
+                if rgba[i + channel] > 0.99 && rgba[i + 3] > 0.99 {
+                    x0 = x0.min(f64::from(x));
+                    y0 = y0.min(f64::from(y));
+                    x1 = x1.max(f64::from(x) + 1.0);
+                    y1 = y1.max(f64::from(y) + 1.0);
+                }
+            }
+        }
+        let qx0 = quad.corners.iter().map(|c| c[0]).fold(f64::MAX, f64::min);
+        let qx1 = quad.corners.iter().map(|c| c[0]).fold(f64::MIN, f64::max);
+        let qy0 = quad.corners.iter().map(|c| c[1]).fold(f64::MAX, f64::min);
+        let qy1 = quad.corners.iter().map(|c| c[1]).fold(f64::MIN, f64::max);
+        // Fully covered pixels lie inside the quad's box, within the
+        // antialiased edge (1.5 output pixels).
+        assert!(
+            qx0 - 1.5 <= x0 && x1 <= qx1 + 1.5 && qy0 - 1.5 <= y0 && y1 <= qy1 + 1.5,
+            "{}: pixels {x0},{y0}..{x1},{y1}, quad {qx0},{qy0}..{qx1},{qy1}",
+            quad.layer
+        );
+        assert!(
+            (x0 - qx0).abs() < 3.0 && (y0 - qy0).abs() < 3.0 || quad.layer == "tilt",
+            "{}: pixels start at {x0},{y0}, the quad at {qx0},{qy0}",
+            quad.layer
+        );
+    }
+}

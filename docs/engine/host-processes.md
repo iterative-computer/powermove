@@ -15,8 +15,8 @@ starts no engine process and behaves as before.
 - Off: main registers one read-only IPC handler (`engine:status`) that
   answers `enabled: false`. No utility process, no ports. The e2e spec
   `e2e/native-engine.spec.ts` checks both states.
-- There is no Settings row yet; the switch is for development and the
-  Phase 2 gate.
+- Settings › General › Engine has the "Use New Engine" switch (the
+  tracer lane, [tracer.md](tracer.md)); it writes the same store key.
 
 ## Processes and ports
 

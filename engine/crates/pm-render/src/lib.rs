@@ -42,5 +42,5 @@ pub use capability::{
 };
 pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
-pub use renderer::{CommandBracket, Frame, PassThrough, Rendered, Renderer};
+pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer};
 pub use request::RenderRequest;

@@ -86,9 +86,10 @@ export class PresentWorker {
         this.fail(message.message);
         return;
       case 'disposed':
-        this.options.worker.terminate();
+        this.terminate();
         return;
       case 'closed':
+        this.sessions.get(message.session)?.dropHeld();
         this.sessions.delete(message.session);
         return;
       default:
@@ -127,7 +128,13 @@ export class PresentWorker {
     this.options.worker.postMessage({ type: 'dispose' });
     // The worker answers `disposed` and is terminated then; a stuck one is
     // terminated anyway.
-    this.timers.set(() => this.options.worker.terminate(), DISPOSE_GRACE_MS);
+    this.timers.set(() => this.terminate(), DISPOSE_GRACE_MS);
+  }
+
+  private terminate(): void {
+    this.options.worker.terminate();
+    for (const presenter of this.sessions.values()) presenter.dropHeld();
+    this.sessions.clear();
   }
 }
 
@@ -165,8 +172,21 @@ export class WorkerPresenter implements Presenter {
    * stats.
    */
   private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0 };
-  /** Frames in the worker that it has not handed back yet, by `poolIndex:seq`. */
-  private readonly inWorker = new Map<string, FrameRelease>();
+  /**
+   * Frames in the worker that it has not handed back yet, by
+   * `poolIndex:seq`, with the page's own reference to each.
+   *
+   * The worker gets a clone; the page keeps the frame it imported and
+   * closes it only after the worker handed its clone back. Electron runs a
+   * shared texture's release callback (a function of the preload's realm)
+   * from the GPU sync-token signal of the thread that drops the last
+   * reference: dropped in the worker, that callback ran on the worker's
+   * thread outside its realm and V8 aborted the renderer ("Cannot create a
+   * handle without a HandleScope"; measured 2 crashes in 6 playback runs
+   * before this). Keeping the last reference here keeps it on the page's
+   * thread.
+   */
+  private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame }>();
   private remote: PresenterStats | null = null;
 
   constructor(private readonly options: WorkerPresenterOptions) {
@@ -250,8 +270,19 @@ export class WorkerPresenter implements Presenter {
   }
 
   private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
-    this.inWorker.set(`${desc.poolIndex}:${desc.seq}`, { poolIndex: desc.poolIndex, seq: desc.seq });
-    this.options.host.post({ type: 'frame', session: this.options.session, desc, frame, arrivedMs }, [frame as unknown as Transferable]);
+    const k = `${desc.poolIndex}:${desc.seq}`;
+    this.inWorker.get(k)?.frame.close();
+    let clone: VideoFrame;
+    try {
+      clone = frame.clone();
+    } catch {
+      // A frame that cannot be cloned (closed under us): nothing reads it.
+      frame.close();
+      this.releaseUndrawn(desc);
+      return;
+    }
+    this.inWorker.set(k, { release: { poolIndex: desc.poolIndex, seq: desc.seq }, frame });
+    this.options.host.post({ type: 'frame', session: this.options.session, desc, frame: clone, arrivedMs }, [clone as unknown as Transferable]);
   }
 
   private unpark(generation: number, poolIndex: number): void {
@@ -297,7 +328,14 @@ export class WorkerPresenter implements Presenter {
         // worker held when it closed go back to the engine (as the main
         // thread presenter releases its queue on dispose). A frame already
         // handed back for a crashed worker (`abandon`) is not released twice.
-        if (!this.inWorker.delete(`${message.release.poolIndex}:${message.release.seq}`)) return;
+        {
+          const k = `${message.release.poolIndex}:${message.release.seq}`;
+          const held = this.inWorker.get(k);
+          if (!held) return;
+          this.inWorker.delete(k);
+          // The worker closed its clone; this is the last reference.
+          held.frame.close();
+        }
         this.local.released++;
         this.options.link.release(message.release);
         return;
@@ -335,12 +373,23 @@ export class WorkerPresenter implements Presenter {
    * will never release them), and the session ends.
    */
   abandon(): void {
-    for (const release of this.inWorker.values()) {
+    for (const { release, frame } of this.inWorker.values()) {
+      frame.close();
       this.local.released++;
       this.options.link.release(release);
     }
     this.inWorker.clear();
     this.dispose();
+  }
+
+  /**
+   * The worker was terminated without handing everything back (a stuck
+   * worker after dispose): its clones went with its realm, so the page's
+   * references close too. The engine reclaims the slots with the session.
+   */
+  dropHeld(): void {
+    for (const { frame } of this.inWorker.values()) frame.close();
+    this.inWorker.clear();
   }
 
   dispose(): void {

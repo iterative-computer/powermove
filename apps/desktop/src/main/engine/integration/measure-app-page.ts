@@ -37,9 +37,16 @@ import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerService 
 import type { TransportCommand } from '../../../shared/engine-protocol';
 import type { ClockSample } from '../../../extensions/viewer/engine-present/protocol';
 import { PageEngine } from './page-engine';
+import { buildSyntheticProject, type SyntheticOptions } from './synthetic-project';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Mode = 'today' | 'engine';
+/**
+ * `tracer`: the app's own engine connection (the Phase 2 tracer bullet,
+ * "Use New Engine" on): the engine draws the document, the transport runs
+ * on its clock, and gestures edit the document; frames are tagged with
+ * the document revision they show.
+ */
+type Mode = 'today' | 'engine' | 'tracer';
 type InputMode = 'drag' | 'pan';
 type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean };
 
@@ -75,6 +82,9 @@ let fps = 30;
 let mode: Mode = 'today';
 let engine: PageEngine | null = null;
 const clocks: ClockSample[] = [];
+/** Inspector edits during playback (tracer): [revision, call ms, returned ms]. */
+let edits: [number, number, number][] = [];
+let editSeq = 0;
 
 /* ── input ─────────────────────────────────────────────────────────── */
 
@@ -150,7 +160,15 @@ function onPointer(event: PointerEvent): void {
     return seq;
   });
   const seq = seqs[seqs.length - 1]!;
-  if (inputMode === 'drag') {
+  if (inputMode === 'drag' && mode === 'tracer') {
+    // The drag's edit is in the document revision the barrier holds after
+    // this event (the connection flushes at the end of each task; a raw
+    // update the viewer holds for its move interval shows in the next).
+    const doc = PM().EngineDoc;
+    doc?.barrier?.flush();
+    const waiting = event.type === 'pointerrawupdate' && viewer()?.rawGesturePending?.() === true;
+    inputs.push([(doc?.barrier?.revision ?? 0) + (waiting ? 1 : 0), seqs, event.timeStamp, handled]);
+  } else if (inputMode === 'drag') {
     positions.push([seq, positionKey()]);
     inputs.push([seq, seqs, event.timeStamp, handled]);
   } else if (mode === 'today') {
@@ -171,7 +189,7 @@ window.addEventListener('pointermove', (event) => onPointer(event));
 window.addEventListener('pointerrawupdate' as 'pointermove', (event) => {
   // The viewer reads raw updates during engine gestures (step 2); tag them
   // the same way so the view sequence they produce is attributed.
-  if (inputMode === 'pan' && viewer()?.rawGestures?.()) onPointer(event as PointerEvent);
+  if ((inputMode === 'pan' || (inputMode === 'drag' && mode === 'tracer')) && viewer()?.rawGestures?.()) onPointer(event as PointerEvent);
 });
 
 /** The rev a today draw shows: the newest handled seq whose position it has. */
@@ -221,6 +239,16 @@ function startEngine(displayHz: number | null, offMainThread: boolean): void {
   gl.render = () => true;
 }
 
+/* ── the tracer: the app's own engine connection ───────────────────── */
+
+function startTracer(): void {
+  const connection = PM().EngineConnection;
+  if (!connection) throw new Error('the engine connection is not installed (POWERMOVE_NEW_ENGINE=1)');
+  connection.onClock((sample: ClockSample) => clocks.push(sample));
+  // A new presentation with a per-frame trace.
+  connection.setTrace(true);
+}
+
 /* ── the API measure-app-main.ts calls ────────────────────────────── */
 
 const api = {
@@ -229,6 +257,7 @@ const api = {
     fps = Number(PM().proj.fps) || 30;
     PM().bus.on('preview:presented', onPresented);
     if (mode === 'engine') startEngine(options.displayHz, options.offMainThread);
+    if (mode === 'tracer') startTracer();
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
     // How long the viewer's layout (pan steps) holds the main thread.
@@ -244,8 +273,13 @@ const api = {
       }
     };
   },
+  /** Builds a synthetic project of slice features (synthetic-project.ts). */
+  async synthetic(options: SyntheticOptions): Promise<unknown> {
+    return buildSyntheticProject(options);
+  },
   ready(): boolean {
     if (mode === 'engine') return !!viewer()?.enginePresentation?.presenting;
+    if (mode === 'tracer') return !!viewer()?.enginePresentation?.presenting && PM().EngineConnection.status().route === 'engine';
     return draws.length > 0 || rafs.length > 30;
   },
   /** Plays from `fromS`: the legacy transport, and the engine's when on. */
@@ -253,6 +287,7 @@ const api = {
     const pm = PM();
     pm.setTime(fromS);
     pm.play();
+    if (mode === 'tracer') return PM().EngineConnection.status().driving === true;
     if (mode === 'engine') {
       const channel = engine?.channels.at(-1);
       if (!channel || channel.session() === null) return false;
@@ -269,6 +304,23 @@ const api = {
     if (!channel || channel.session() === null) return false;
     channel.transport(command);
     return true;
+  },
+  /**
+   * One inspector edit (tracer): the Edit command the Properties panel
+   * applies, on a layer of the open composition. Records the revision it
+   * made and how long the renderer took to apply it and hand the batch to
+   * the engine (the connection flushes at the end of the task).
+   */
+  async edit(): Promise<void> {
+    const pm = PM();
+    const layers = pm.proj.layers.filter((l: any) => l.type === 'solid' || l.type === 'image');
+    if (!layers.length) return;
+    const layer = layers[editSeq++ % layers.length];
+    const t0 = performance.now();
+    pm.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 30 + (editSeq % 70) }, { label: 'Opacity', origin: 'inspector' });
+    await Promise.resolve();
+    const t1 = performance.now();
+    edits.push([pm.EngineDoc?.barrier?.revision ?? 0, t0, t1]);
   },
   mark(name: string): number {
     performance.mark(name);
@@ -288,6 +340,7 @@ const api = {
     positions = [];
     layoutMs = [];
     clocks.length = 0;
+    edits = [];
   },
   /**
    * Prepares a gesture and returns where to press (client pixels) and with
@@ -336,6 +389,7 @@ const api = {
       engineTrace: trace,
       today: { draws, rafs: [...rafs] },
       clocks: clocks.splice(0),
+      edits,
       inputs,
       layoutMs,
       dragLayer: dragLayer ? { id: dragLayer.id, type: dragLayer.type } : null,

@@ -26,6 +26,8 @@ import { install as installSelection } from './core/selection';
 import { install as installAnim } from './core/anim';
 import { install as installHistory } from './core/history';
 import { installEngineDoc } from '../engine-doc/install';
+import { rendererMode, withNewEngine } from '../engine-doc/flags';
+import { installEngineConnection } from '../engine-connection/install';
 import { install as installLibrary } from './core/library';
 import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
@@ -67,6 +69,19 @@ declare global {
 // Reuse the registry when present, otherwise create it.
 const PM: PMRegistry = (window.PM = window.PM || {});
 
+/** Whether this launch runs the new engine (main decides at launch). */
+function newEngineOn(): boolean {
+  try {
+    return (hostBridge() as { nativeEngine?: { enabledSync?(): boolean } } | undefined)?.nativeEngine?.enabledSync?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+function safeRendererMode(): ReturnType<typeof rendererMode> {
+  try { return rendererMode(); } catch { return withNewEngine({ evaluator: false, audit: false, dual: false, proxy: false, name: 'off' }, false); }
+}
+
 // Engine dependency order — do not reorder.
 const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/diag', installDiag],
@@ -89,7 +104,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The native evaluator's document mirror and write barrier (behind the
      "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
      PM.touch and PM.proj, so it follows anim and history. */
-  ['engine-doc', (PM) => void installEngineDoc(PM)],
+  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), newEngineOn()) })],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
@@ -107,6 +122,9 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
      on only). Follows the GLSL preambles and GL.compileError. */
   ['kernel/engine-definitions', (PM) => void installEngineDefinitions(PM, hostBridge() as never)],
   ['core/engine', installEngine],
+  /* The kernel's engine connection (behind "Use New Engine"): the viewer's
+     engine frames, the patch stream, and the transport (section 18). */
+  ['engine/connection', (PM) => void installEngineConnection(PM, hostBridge() as never)],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],
