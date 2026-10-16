@@ -138,18 +138,6 @@ const TICK = 1 / 705_600_000;
  * amendment 1), plus the float error of the TypeScript sum.
  */
 const KEY_TIME_TICKS = 2;
-/**
- * A value in a key a kernel created (or whose time it moved) may have been
- * sampled against other keys on the tick grid (a parent baked on the same
- * ticks, a group baked by an earlier group of the same ungroup), read within
- * `KEY_TIME_TICKS` of their stored time: allowed are the key's own track
- * slope over `KEY_VALUE_TICKS` ticks, or `KEY_VALUE_RELATIVE` of the value's
- * magnitude (a parent track moving up to ~350 times the value's magnitude
- * per second).
- */
-const KEY_VALUE_TICKS = 4;
-const KEY_VALUE_RELATIVE = 1e-6;
-
 /** Whether two key times differ only by the tick rounding of a created or
  *  moved time, or (with a `grid`) the float NTSC rate's drift. */
 export function keyTimeNear(a: number, b: number, grid?: TimeGrid): boolean {
@@ -158,58 +146,21 @@ export function keyTimeNear(a: number, b: number, grid?: TimeGrid): boolean {
   return !!grid && grid.drift > 0 && e <= 2 * grid.drift * (Math.abs(a) + Math.abs(b) + grid.span + 1) + base;
 }
 
-/** `|Δv / Δt|` toward each neighbour of every key of a track (0 where it has
- *  none, or where times or values are not finite numbers). */
-function keySlopes(keys: any[]): number[] {
-  const tv = (k: any) => (k && Number.isFinite(k.t) && Number.isFinite(k.v) ? k as { t: number; v: number } : null);
-  const slope = (a: any, b: any) => (a && b && a.t !== b.t ? Math.abs((b.v - a.v) / (b.t - a.t)) : 0);
-  return keys.map((k, i) => Math.max(i > 0 ? slope(tv(keys[i - 1]), tv(k)) : 0, i + 1 < keys.length ? slope(tv(k), tv(keys[i + 1])) : 0));
-}
-
-/**
- * The `differs` paths of key values (`….kf[i].v`) a kernel created (a
- * `#created` id after `normalizeEdit`) or whose time it moved on the tick
- * grid, with their track's slope in the legacy result `b`.
- */
-function sampledKeyValues(a: any, b: any, grid: TimeGrid | undefined, path = '', out = new Map<string, number>()): Map<string, number> {
-  if (Array.isArray(a) && Array.isArray(b)) {
-    a.forEach((x, i) => sampledKeyValues(x, b[i], grid, `${path}[${i}]`, out));
-    return out;
-  }
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return out;
-  if (Array.isArray(a.kf) && Array.isArray(b.kf) && a.kf.length === b.kf.length) {
-    const slopes = keySlopes(b.kf);
-    b.kf.forEach((kb: any, i: number) => {
-      const ka = a.kf[i];
-      const created = typeof kb?.i === 'string' && kb.i.startsWith('#created');
-      const moved = typeof ka?.t === 'number' && typeof kb?.t === 'number' && !Object.is(ka.t, kb.t) && keyTimeNear(ka.t, kb.t, grid);
-      if (created || moved) out.set(`${path}.kf[${i}].v`, slopes[i]!);
-    });
-  }
-  for (const k of Object.keys(a)) if (k in b) sampledKeyValues(a[k], b[k], grid, `${path}.${k}`, out);
-  return out;
-}
-
 /**
  * Where an edit's expected and actual results differ beyond the tolerances,
  * or null. Key times a kernel created or moved may differ by the tick
  * rounding of their terms: pm-edit computes them in ticks (section 5, rule 4
  * with amendment 1) where the TypeScript edit adds floats (`t + from − to`,
  * `time − from`); with a `grid`, also by the float rate's drift on NTSC
- * compositions (`n / 29.97` against 30000/1001). Values of keys a kernel
- * created or moved may differ by the sampling allowance above. Snapping never
- * counts as a mismatch.
+ * compositions (`n / 29.97` against 30000/1001). Snapping never counts as a
+ * mismatch. Values have no such allowance: an ungroup bake samples its own
+ * keys at the legacy float times and moves them to the tick grid only once
+ * it is done, so they equal the legacy values within section 25's tolerance.
  */
 export function editDiffers(expected: any, actual: any, before: any, grid?: TimeGrid): string | null {
   const known = before instanceof Set ? before as Set<string> : knownIds(before);
   const a = normalizeEdit(expected, known), b = normalizeEdit(actual, known);
-  const sampled = sampledKeyValues(a, b, grid);
-  const near = (x: number, y: number, path: string) => {
-    if (close(x, y)) return true;
-    if (KEY_TIME.test(path)) return keyTimeNear(x, y, grid);
-    const slope = sampled.get(path);
-    return slope !== undefined && Math.abs(x - y) <= KEY_VALUE_TICKS * TICK * slope + KEY_VALUE_RELATIVE * (1 + Math.abs(y));
-  };
+  const near = (x: number, y: number, path: string) => close(x, y) || (KEY_TIME.test(path) && keyTimeNear(x, y, grid));
   return differs(a, b, near);
 }
 
@@ -323,6 +274,7 @@ export class NativeEdits {
     if (reply?.host) return { fallback: 'host' };
     if (reply?.fonts) return { fallback: 'fonts' };
     if (reply?.ink) return { fallback: 'ink' };
+    if (reply?.legacy) return { fallback: 'legacy' };
     return { fallback: `error:${reply?.error ?? 'unknown'}` };
   }
 

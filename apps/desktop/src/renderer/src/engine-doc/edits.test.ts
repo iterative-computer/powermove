@@ -323,16 +323,30 @@ describe('edit comparison on the tick grid', () => {
     expect(editDiffers(far, want, known, grid)).toMatch(/\.kf\[0\]\.t$/);
   });
 
-  it('allows values of created keys sampled against keys on the tick grid, not of kept ones', () => {
+  it('holds values of created keys to section 25\'s tolerance', () => {
     const before = comp([key('k1', 0, 0)], 0);
     const known = knownIds(before);
-    // An ungroup bake on 24 fps: the opacity at 2.4583 s was sampled against
-    // a group baked on the tick grid just before a steep step.
-    const track = (v: number, id: string) => [key('n1', 2.4166666666666665, 71.55407422687858), key(id, 2.4583333333333335, v), key('n3', 2.5, 140.17270896993412)];
-    expect(editDiffers(comp(track(71.55407453068052, 'n2'), 0), comp(track(71.55407422687858, 'n9'), 0), known)).toBeNull();
-    // A key the input already had keeps section 25's tolerance.
-    expect(editDiffers(comp(track(71.55407453068052, 'k1'), 0), comp(track(71.55407422687858, 'k1'), 0), known)).toMatch(/\.kf\[1\]\.v$/);
-    // A created value far beyond the sampling allowance is a mismatch.
-    expect(editDiffers(comp(track(71.6, 'n2'), 0), comp(track(71.55407422687858, 'n9'), 0), known)).toMatch(/\.kf\[1\]\.v$/);
+    const grid = timeGrid(before);
+    const track = (v: number, id: string, t = 2.4583333333333335) => [key('n1', 2.4166666666666665, 71.55407422687858), key(id, t, v), key('n3', 2.5, 140.17270896993412)];
+    // A created key on its tick (0.9 tick from the float sum) with the
+    // legacy value: equal.
+    expect(editDiffers(comp(track(71.55407422687858, 'n2', 2.4583333333333335 + 0.9 * TICK), 0), comp(track(71.55407422687858, 'n9'), 0), known, grid)).toBeNull();
+    // Values get no sampling allowance, even next to a steep step.
+    expect(editDiffers(comp(track(71.55407453068052, 'n2'), 0), comp(track(71.55407422687858, 'n9'), 0), known, grid)).toMatch(/\.kf\[1\]\.v$/);
+    expect(editDiffers(comp(track(71.55407453068052, 'k1'), 0), comp(track(71.55407422687858, 'k1'), 0), known, grid)).toMatch(/\.kf\[1\]\.v$/);
+  });
+
+  it('allows NTSC key times the float rate\'s drift, not their values', () => {
+    const ntsc = (keys: any[]) => ({ C1: { fps: 29.97, layers: [{ id: 'L1', from: 0.43333333333333335, p: { 'position.x': { v: 0, kf: keys, expr: null } } }] } });
+    const before = ntsc([key('k1', 0, 0)]);
+    const known = knownIds(before);
+    const grid = timeGrid(before);
+    expect(grid.drift).toBeGreaterThan(9e-7);
+    // Frame 28 of 29.97 less an off-grid start: the tick time is 28 frames
+    // of 30000/1001 (0.93 µs before 28 / 29.97).
+    const legacy = 28 / 29.97 - 0.43333333333333335, ticked = 28 * 1001 / 30000 - 0.43333333333333335;
+    expect(editDiffers(ntsc([key('n2', ticked, 1493.745000595005)]), ntsc([key('n9', legacy, 1493.745000595005)]), known, grid)).toBeNull();
+    expect(editDiffers(ntsc([key('n2', ticked, 1493.745000595005)]), ntsc([key('n9', legacy, 1493.745000595005)]), known)).toMatch(/\.kf\[0\]\.t$/);
+    expect(editDiffers(ntsc([key('n2', ticked, 1493.746950608196)]), ntsc([key('n9', legacy, 1493.745000595005)]), known, grid)).toMatch(/\.kf\[0\]\.v$/);
   });
 });
