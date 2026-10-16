@@ -409,18 +409,26 @@ impl Timeline {
         let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
         let unit = den * i128::from(TICKS_PER_SECOND);
         let frames = ((2 * span * num + unit) / (2 * unit)).max(1);
-        Ok(Timeline {
+        let timeline = Timeline {
             start,
             rate,
             frames: u64::try_from(frames)
                 .map_err(|_| JobError::Invalid("too many frames".into()))?,
-        })
+        };
+        // Every frame's time and the end of the last one (its audio) must be
+        // representable ticks.
+        let end_tick = i128::from(start.get()) + timeline.offset(timeline.frames);
+        if i64::try_from(end_tick).map_or(true, |v| Ticks::new(v).is_err()) {
+            return Err(JobError::Invalid(
+                "the export range ends past the latest representable time".into(),
+            ));
+        }
+        Ok(timeline)
     }
 
-    /// The composition time of export frame `n`: `start + n / rate`, rounded
-    /// half to even onto the tick grid (exact for rates that divide the
-    /// flick).
-    pub fn tick(&self, n: u64) -> Ticks {
+    /// Ticks from `start` to frame `n`: `n / rate`, rounded half to even
+    /// onto the tick grid (exact for rates that divide the flick).
+    fn offset(&self, n: u64) -> i128 {
         let (num, den) = (i128::from(self.rate.num()), i128::from(self.rate.den()));
         let x = i128::from(n) * den * i128::from(TICKS_PER_SECOND);
         let (q, r) = (x.div_euclid(num), x.rem_euclid(num));
@@ -429,8 +437,14 @@ impl Timeline {
             std::cmp::Ordering::Equal => q % 2 != 0,
             std::cmp::Ordering::Less => false,
         };
-        let offset = q + i128::from(up);
-        Ticks::new(self.start.get() + offset as i64).unwrap_or(self.start)
+        q + i128::from(up)
+    }
+
+    /// The composition time of export frame `n` (`0 ..= frames`; `new`
+    /// checked that these are representable): `start + n / rate`. Past
+    /// `frames` it saturates at the latest representable time.
+    pub fn tick(&self, n: u64) -> Ticks {
+        Ticks::saturating_from_i128(i128::from(self.start.get()) + self.offset(n))
     }
 
     /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
@@ -981,6 +995,14 @@ mod tests {
             let want = s.get() as i128 + n as i128 * 1001 * TICKS_PER_SECOND as i128 / 24000;
             assert_eq!(t.tick(n).get() as i128, want);
         }
+        // A range whose end frame is past the latest tick is refused, not
+        // wrapped back to the start.
+        let late = Ticks::new(Ticks::MAX.get() - TICKS_PER_SECOND).unwrap();
+        // 24 frames at 23.976 end 1.001 s after `late`: past the latest tick.
+        assert!(Timeline::new(late, Ticks::MAX, Rate::FPS_23_976).is_err());
+        let t = Timeline::new(late, Ticks::MAX, Rate::FPS_30).unwrap();
+        assert!(t.tick(t.frames) <= Ticks::MAX && t.tick(t.frames) > t.tick(0));
+        assert_eq!(t.tick(u64::MAX >> 8), Ticks::MAX);
         let one = Timeline::new(Ticks::ZERO, Ticks::new(1).unwrap(), Rate::FPS_30).unwrap();
         assert_eq!(one.frames, 1, "at least one frame");
         assert!(Timeline::new(e, s, Rate::FPS_30).is_err());
