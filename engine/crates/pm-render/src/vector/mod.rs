@@ -5,10 +5,12 @@
 //! produced by `pm_vector::canvas2d` (an emulation of Chromium's Graphite
 //! Canvas2D) and drawn exactly as the compositor draws the uploaded canvas.
 //! Level 2 content is rendered at output resolution with analytic area
-//! coverage ([`level2`]).
+//! coverage ([`level2`]); level 2 SVG images are vectors or resvg rasters
+//! at output resolution ([`svg`]).
 
 pub mod cache;
 pub mod level2;
+pub mod svg;
 
 use pm_eval::transform::Mat2d;
 use pm_eval::{JsResult, JsValue, Scope};
@@ -30,6 +32,15 @@ pub enum VectorSource {
     Paths { nodes: Vec<PathNode>, colors: Vec<PathColors>, scale: f64 },
     /// Level 2: a coverage scene in target pixels, rendered into `rect`.
     Scene { scene: CoverageScene, rect: PixelRect },
+    /// Level 2: an SVG drawn by resvg under `transform` (user units to
+    /// target pixels) into `rect`, clipped to the polygon `clip`.
+    SvgRaster {
+        path: std::path::PathBuf,
+        stamp: svg::Stamp,
+        transform: [f64; 6],
+        rect: PixelRect,
+        clip: [[f64; 2]; 4],
+    },
 }
 
 impl VectorSource {
@@ -60,6 +71,17 @@ impl VectorSource {
             VectorSource::Scene { scene, rect } => {
                 h.update(b"scene");
                 h.update(format!("{scene:?}{rect:?}").as_bytes());
+            }
+            VectorSource::SvgRaster { path, stamp, transform, rect, clip } => {
+                h.update(b"svg");
+                h.update(path.to_string_lossy().as_bytes());
+                h.update([0]);
+                h.update(stamp.0.to_le_bytes());
+                h.update(stamp.1.to_le_bytes());
+                for v in transform.iter().chain(clip.iter().flatten()) {
+                    h.update(v.to_bits().to_le_bytes());
+                }
+                h.update(format!("{rect:?}").as_bytes());
             }
         }
         h.finalize().into()

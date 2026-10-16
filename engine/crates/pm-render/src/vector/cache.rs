@@ -5,6 +5,8 @@
 //! - Level 1 rasters are computed on the CPU by `pm_vector::canvas2d` and
 //!   uploaded as premultiplied `Rgba8Unorm`, the texture today's compositor
 //!   samples (Standard color: the canvas's sRGB values are working values).
+//! - Level 2 SVG images that are not plain vectors are drawn by resvg at
+//!   output resolution and uploaded like level 1 rasters.
 //! - Level 2 scenes get analytic area coverage from Vello's GPU compute
 //!   renderer (or `vello_cpu` when Vello is unavailable or forced) in an
 //!   8-bit atlas; the float paint pass then composites `paint × coverage`
@@ -247,6 +249,12 @@ impl VectorCache {
                 (upload_rgba8(device, queue, b.width, b.height, &b.rgba), u64::from(b.width) * u64::from(b.height) * 4)
             }
             VectorSource::Scene { scene, rect } => self.render_scene(device, queue, scene, *rect, precision)?,
+            VectorSource::SvgRaster { path, transform, rect, clip, .. } => {
+                let (doc, _) = super::svg::document(path)?;
+                let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
+                let b = doc.raster_device(pm_vector::kurbo::Affine::new(*transform), *rect, Some(&clip));
+                (upload_rgba8(device, queue, b.width, b.height, &b.rgba), u64::from(b.width) * u64::from(b.height) * 4)
+            }
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.bytes += bytes;

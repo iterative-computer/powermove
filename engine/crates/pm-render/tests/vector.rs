@@ -11,7 +11,7 @@ mod support;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_render::vector::cache::CoverageBackend;
-use pm_render::{MapResolver, RenderRequest, Renderer};
+use pm_render::{Feature, MapResolver, RenderRequest, Renderer, unsupported_with_media};
 use serde_json::{Value, json};
 use support::doc::*;
 use support::ticks;
@@ -33,14 +33,20 @@ fn placed(id: &str, ty: &str, d: Value, compat: u32, rotation: f64, scale: f64) 
 }
 
 fn render_alpha(renderer: &mut Renderer, layers: Vec<Value>) -> Vec<f32> {
-    let doc = load(&project(W, H, 2.0, no_fill(), layers));
+    render_rgba(renderer, project(W, H, 2.0, no_fill(), layers), &MapResolver::default())
+        .chunks(4)
+        .map(|p| p[3])
+        .collect()
+}
+
+fn render_rgba(renderer: &mut Renderer, doc: Value, resolver: &MapResolver) -> Vec<f32> {
+    let doc = load(&doc);
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
     let frame = renderer
-        .render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+        .render(&doc, "Ptest-root", ticks(0.0), &request, resolver)
         .expect("render");
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
-    let rgba = renderer.read_rgba(&frame).unwrap();
-    rgba.chunks(4).map(|p| p[3]).collect()
+    renderer.read_rgba(&frame).unwrap()
 }
 
 /// Exact coverage of each pixel by `inside` (composition pixels), with
@@ -286,4 +292,73 @@ fn vector_textures_are_accounted_and_trimmed() {
     assert_eq!(renderer.vector_cache_bytes(), 0);
     let rebuilt = render_alpha(&mut renderer, layers);
     assert_eq!(first, rebuilt);
+}
+
+/// An SVG image layer (`d.asset` → `path`), `compat` level `compat`.
+fn svg_project(svg: &str, name: &str, w: u32, h: u32, d: Value, compat: u32, rotation: f64) -> (Value, MapResolver) {
+    let dir = std::env::temp_dir().join(format!("pm-render-vector-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, svg).unwrap();
+    let mut doc = project(W, H, 2.0, no_fill(), vec![placed("svg", "image", d, compat, rotation, 100.0)]);
+    asset(&mut doc, "art", "image", "svg", w, h, 0.0);
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("art".into(), path);
+    (doc, resolver)
+}
+
+const SOLID_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#FFFFFF"/><circle cx="50" cy="25" r="8" fill="#000000"/></svg>"##;
+
+#[test]
+fn level2_svg_images_are_vectors_at_output_resolution() {
+    let mut renderer = Renderer::headless().unwrap();
+    let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
+    let (doc, resolver) = svg_project(SOLID_SVG, "solid.svg", 100, 50, d.clone(), 2, 23.0);
+    assert_eq!(unsupported_with_media(&load(&doc), "Ptest-root", &resolver), vec![]);
+    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let alpha: Vec<f32> = rgba.chunks(4).map(|p| p[3]).collect();
+    // The 200 × 100 box centered at (128, 128) rotated 23°: user units ×2.
+    let reference = coverage(|x, y| {
+        let (u, v) = to_layer(x, y, 23.0, 100.0);
+        let (sx, sy) = ((u + 100.0) / 2.0, (v + 50.0) / 2.0);
+        (10.0..=90.0).contains(&sx) && (10.0..=40.0).contains(&sy)
+    });
+    let e = edge_error(&alpha, &reference);
+    eprintln!("SVG rect: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}", e.edge_pixels, e.rms, e.psnr_db, e.max_any);
+    assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
+    // The circle is black and opaque over the white rect.
+    let center = (128 * W + 128) as usize * 4;
+    assert!(rgba[center] < 1e-3 && (rgba[center + 3] - 1.0).abs() < 1e-3, "{:?}", &rgba[center..center + 4]);
+    // Level 1 SVG images stay routed.
+    let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
+    let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
+    assert_eq!(u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(), vec![Feature::SvgImage]);
+}
+
+#[test]
+fn level2_svg_fallbacks_and_text() {
+    let mut renderer = Renderer::headless().unwrap();
+    // A gradient is drawn by resvg; `cover` crops the 2:1 SVG to the
+    // square box.
+    let gradient = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><defs><linearGradient id="g"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.5"/></linearGradient></defs><rect width="100" height="50" fill="url(#g)"/></svg>"##;
+    let d = json!({ "asset": "art", "fit": "cover", "w": 100, "h": 100 });
+    let (doc, resolver) = svg_project(gradient, "gradient.svg", 100, 50, d, 2, 0.0);
+    assert_eq!(unsupported_with_media(&load(&doc), "Ptest-root", &resolver), vec![]);
+    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let a = |x: u32, y: u32| rgba[((y * W + x) * 4 + 3) as usize];
+    // Covered exactly over the 100 × 100 box at (78..178, 78..178).
+    assert_eq!(a(77, 128), 0.0);
+    assert_eq!(a(178, 128), 0.0);
+    assert!(a(78, 128) > 0.5 && a(177, 128) > 0.5);
+    assert_eq!(a(128, 77), 0.0);
+    assert!(a(128, 78) > 0.5);
+    // The gradient's middle half shows: alpha 0.875 at the left edge,
+    // 0.625 at the right.
+    assert!((a(79, 128) - 0.87).abs() < 0.02, "{}", a(79, 128));
+    assert!((a(176, 128) - 0.63).abs() < 0.02, "{}", a(176, 128));
+    // SVG text is routed.
+    let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30">Powermove</text></svg>"##;
+    let (doc, resolver) = svg_project(text, "text.svg", 100, 50, json!({ "asset": "art", "w": 100, "h": 50 }), 2, 0.0);
+    let u = unsupported_with_media(&load(&doc), "Ptest-root", &resolver);
+    assert_eq!(u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(), vec![Feature::SvgImage]);
 }

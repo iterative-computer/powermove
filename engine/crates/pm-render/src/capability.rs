@@ -336,10 +336,11 @@ fn check_composition(
         {
             add(layer, Feature::TwoAndAHalfD);
         }
-        // Level 2 shape and solid content is drawn (crate::vector); other
-        // level 2 content keeps routing.
+        // Level 2 shape, solid, and SVG image content is drawn
+        // (crate::vector); other level 2 content keeps routing.
         if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
             && !matches!(ty.as_str(), "shape" | "solid")
+            && !(ty == "image" && asset_format(root, layer).as_deref() == Some("svg"))
         {
             add(layer, Feature::CompatLevel2);
         }
@@ -402,6 +403,14 @@ fn has_effects(layer: &Node) -> bool {
     })
 }
 
+/// The lowercase `format` of a layer's asset record, if it has one.
+fn asset_format(root: &Node, layer: &Node) -> Option<String> {
+    let asset = node::member(node::member(Some(layer), "d"), "asset")?;
+    let asset_id = node::js_value_opt(Some(asset)).to_js_string().to_string_lossy();
+    let record = node::member(node::member(Some(root), "assets"), &asset_id)?;
+    Some(js::member_string(record, "format").unwrap_or_default().to_ascii_lowercase())
+}
+
 fn check_media(
     root: &Node,
     layer: &Node,
@@ -424,7 +433,18 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        add(layer, Feature::SvgImage);
+        // Level 1 SVG images (today's `<img>` buckets) are routed; level 2
+        // ones are drawn unless they have text (crate::vector::svg).
+        if !crate::vector::level2(layer) {
+            add(layer, Feature::SvgImage);
+        } else if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
+            match crate::vector::svg::document(&path) {
+                Ok((doc, _)) if doc.has_text() => add(layer, Feature::SvgImage),
+                Ok(_) => {}
+                Err(m) => add(layer, Feature::Media(m)),
+            }
+        }
+        return;
     }
     if ty == "video"
         && (node::member(Some(record), "imageSequence").is_some_and(|s| node::truthy(Some(s)))

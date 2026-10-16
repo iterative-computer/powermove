@@ -580,9 +580,36 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
-                return Ok(None);
+                // Level 2 SVG images draw at output resolution
+                // (crate::vector::svg); level 1 and SVG text stay routed.
+                if !crate::vector::level2(layer) {
+                    b.unsupported
+                        .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    return Ok(None);
+                }
+                let sw = js::or_number(&rec("w"), 1.0);
+                let sh = js::or_number(&rec("h"), 1.0);
+                let bw = js::or_number(js::get(&d, "w"), wf);
+                let bh = js::or_number(js::get(&d, "h"), hf);
+                let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                let world = vector_world(scope, layer, time, scale)?;
+                let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
+                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => Ok(quad.map(|q| device_quad(*q))),
+                    Ok(crate::vector::svg::SvgPlan::Text) => {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                        Ok(None)
+                    }
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        Ok(None)
+                    }
+                };
             }
             if ty == "video"
                 && (rec("imageSequence").truthy()

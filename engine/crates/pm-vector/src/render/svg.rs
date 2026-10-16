@@ -15,7 +15,8 @@
 //!   solid fills and strokes become coverage items rendered at output
 //!   resolution; anything else (gradients, patterns, clips, masks, filters,
 //!   group opacity, blend modes, embedded images) is drawn by resvg at
-//!   output resolution ([`SvgDocument::raster_device`]).
+//!   output resolution ([`SvgDocument::raster_device`]), clipped as the
+//!   image's box and viewport clip it.
 //!
 //! usvg parses without its `text` feature: SVG text is not converted here.
 //! [`SvgDocument::has_text`] reports it so the renderer routes such SVGs
@@ -90,21 +91,51 @@ impl SvgDocument {
     pub fn raster(&self, width: u32, height: u32) -> Bitmap {
         let (sw, sh) = self.size();
         let t = Affine::scale_non_uniform(f64::from(width) / sw, f64::from(height) / sh);
-        self.raster_device(t, PixelRect::new(0, 0, width, height))
+        self.raster_device(t, PixelRect::new(0, 0, width, height), None)
     }
 
     /// The SVG under `transform` (user units to device pixels), drawn by
     /// resvg into the device rectangle `rect`: premultiplied RGBA8,
-    /// top-down, `rect.width` × `rect.height`.
-    pub fn raster_device(&self, transform: Affine, rect: PixelRect) -> Bitmap {
+    /// top-down, `rect.width` × `rect.height`. `clip` (a closed polygon in
+    /// device pixels) limits it, antialiased.
+    pub fn raster_device(&self, transform: Affine, rect: PixelRect, clip: Option<&[kurbo::Point]>) -> Bitmap {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
+        let empty = || Bitmap { width: w, height: h, rgba: vec![0; (w * h * 4) as usize] };
         let Some(mut pixmap) = tiny_skia::Pixmap::new(w, h) else {
-            return Bitmap { width: w, height: h, rgba: vec![0; (w * h * 4) as usize] };
+            return empty();
         };
-        let t = Affine::translate((-f64::from(rect.x), -f64::from(rect.y))) * transform;
-        let c = t.as_coeffs().map(|v| v as f32);
+        let to_rect = Affine::translate((-f64::from(rect.x), -f64::from(rect.y)));
+        let c = (to_rect * transform).as_coeffs().map(|v| v as f32);
         resvg::render(&self.tree, tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]), &mut pixmap.as_mut());
+        if let Some(points) = clip {
+            let mut pb = tiny_skia::PathBuilder::new();
+            for (i, p) in points.iter().enumerate() {
+                let q = to_rect * *p;
+                if i == 0 {
+                    pb.move_to(q.x as f32, q.y as f32);
+                } else {
+                    pb.line_to(q.x as f32, q.y as f32);
+                }
+            }
+            pb.close();
+            let (Some(path), Some(mut mask)) = (pb.finish(), tiny_skia::Mask::new(w, h)) else {
+                return empty();
+            };
+            mask.fill_path(&path, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+            pixmap.apply_mask(&mask);
+        }
         Bitmap { width: w, height: h, rgba: pixmap.take() }
+    }
+
+    /// User-space bounds of everything the SVG draws (strokes and filter
+    /// regions included), or `None` when it draws nothing.
+    pub fn user_bounds(&self) -> Option<kurbo::Rect> {
+        let root = self.tree.root();
+        if !root.has_children() {
+            return None;
+        }
+        let b = root.abs_layer_bounding_box();
+        Some(kurbo::Rect::new(f64::from(b.left()), f64::from(b.top()), f64::from(b.right()), f64::from(b.bottom())))
     }
 
     /// The SVG as coverage items under `transform` (user units to device
@@ -114,19 +145,6 @@ impl SvgDocument {
         let mut scene = CoverageScene::default();
         push_group(self.tree.root(), transform, &mut scene)?;
         Some(scene)
-    }
-
-    /// Device bounds of everything the SVG draws under `transform`, or
-    /// `None` when it draws nothing. Filters can draw outside their
-    /// element's bounds, so they extend to the filter regions.
-    pub fn device_bounds(&self, transform: Affine) -> Option<kurbo::Rect> {
-        let root = self.tree.root();
-        if !root.has_children() {
-            return None;
-        }
-        let b = root.abs_layer_bounding_box();
-        let r = kurbo::Rect::new(f64::from(b.left()), f64::from(b.top()), f64::from(b.right()), f64::from(b.bottom()));
-        Some(transform.transform_rect_bbox(r))
     }
 }
 
