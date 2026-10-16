@@ -34,6 +34,7 @@ options:
   --json <file>           write the full report as JSON
   --verbose               list every mismatch
   --samples <n>           mismatches listed per category (default 8)
+  --help, -h              print this text
 
 exit status: 0 every compared value within tolerance or allowed and native and
 wasm identical; 1 a mismatch or an identity difference; 2 only tolerance
@@ -46,7 +47,13 @@ fn list(v: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse(args: &[String]) -> Result<parity::Options, String> {
+/// What the `parity eval` arguments ask for.
+enum Parsed {
+    Run(Box<parity::Options>),
+    Help,
+}
+
+fn parse(args: &[String]) -> Result<Parsed, String> {
     let mut o = parity::Options {
         capture: None,
         only: Vec::new(),
@@ -81,6 +88,7 @@ fn parse(args: &[String]) -> Result<parity::Options, String> {
             "--node" => o.node = value(&mut i, "--node")?,
             "--json" => o.json = Some(PathBuf::from(value(&mut i, "--json")?)),
             "--verbose" => o.verbose = true,
+            "--help" | "-h" => return Ok(Parsed::Help),
             "--samples" => {
                 o.max_samples = value(&mut i, "--samples")?
                     .parse()
@@ -93,7 +101,7 @@ fn parse(args: &[String]) -> Result<parity::Options, String> {
     if !o.native && !o.wasm {
         return Err("--no-native needs --wasm".into());
     }
-    Ok(o)
+    Ok(Parsed::Run(Box::new(o)))
 }
 
 fn main() {
@@ -107,7 +115,11 @@ fn main() {
         ["parity", "eval", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| (*s).to_owned()).collect();
             match parse(&rest) {
-                Ok(opts) => match parity::run(&opts) {
+                Ok(Parsed::Help) => {
+                    println!("{USAGE}");
+                    0
+                }
+                Ok(Parsed::Run(opts)) => match parity::run(&opts) {
                     Ok(report) => {
                         parity::print_report(&report);
                         parity::status(&report)
@@ -123,7 +135,7 @@ fn main() {
                 }
             }
         }
-        ["--help" | "-h" | "help", ..] | [] => {
+        ["--help" | "-h" | "help", ..] | ["parity", "--help" | "-h" | "help", ..] | [] => {
             println!("{USAGE}");
             0
         }
@@ -143,12 +155,16 @@ mod tests {
         s.split_whitespace().map(str::to_owned).collect()
     }
 
+    fn options(s: &str) -> parity::Options {
+        match parse(&args(s)).unwrap() {
+            Parsed::Run(o) => *o,
+            Parsed::Help => panic!("{s}: help, not a run"),
+        }
+    }
+
     #[test]
     fn options_parse() {
-        let o = parse(&args(
-            "--only text/,captions/ --exclude real/ --wasm --wasm-subsets --samples 3",
-        ))
-        .unwrap();
+        let o = options("--only text/,captions/ --exclude real/ --wasm --wasm-subsets --samples 3");
         assert_eq!(o.only, ["text/", "captions/"]);
         assert_eq!(o.exclude, ["real/"]);
         assert!(o.wasm && o.wasm_subsets && o.native);
@@ -156,5 +172,7 @@ mod tests {
         assert!(parse(&args("--no-native")).is_err());
         assert!(parse(&args("--corpus")).is_err());
         assert!(parse(&args("--bogus")).is_err());
+        assert!(matches!(parse(&args("--wasm --help")), Ok(Parsed::Help)));
+        assert!(matches!(parse(&args("-h")), Ok(Parsed::Help)));
     }
 }
