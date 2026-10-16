@@ -288,6 +288,13 @@ fn check_composition(
         if is_property(masks) || (node::truthy(masks) && node::array(masks).is_none()) {
             add(layer, Feature::Masks);
         }
+        // Masks on 3D object layers (today's slow path turns the scene
+        // pass; not matched yet).
+        if pm_eval::parenting::Role3d::of(layer).is_some()
+            && node::array(masks).is_some_and(|m| !m.is_empty())
+        {
+            add(layer, Feature::Masks);
+        }
         if node::array(masks).is_some_and(|m| {
             m.iter()
                 .any(|mask| node::truthy(node::member(Some(mask), "path")))

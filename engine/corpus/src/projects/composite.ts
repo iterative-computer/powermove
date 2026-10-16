@@ -198,16 +198,18 @@ function scaled(): CorpusProject {
   return project(b, { group: 'Compositing', title: 'Masks, mattes, and blends at another output scale', covers: ['output scale with masks', 'output scale with mattes', 'output scale with blend modes'], samples: [0], size: [397, 223] });
 }
 
-function threeD(): CorpusProject {
-  const b = newProject('composite/3d-blend-mask', { name: '3D layer blended and masked', backgroundFill: GRADIENT, w: 480, h: 270 });
+function threeD(blend: boolean, mask: boolean): CorpusProject {
+  const slug = `composite/3d-${[blend ? 'blend' : '', mask ? 'mask' : ''].filter(Boolean).join('-')}`;
+  const b = newProject(slug, { name: '3D layer composited', backgroundFill: GRADIENT, w: 480, h: 270 });
   b.add(b.layer('image', { name: 'Photo', d: { asset: ref('corpus-photo.tiff'), fit: 'cover', w: 480, h: 270 }, p: { 'position.x': 240, 'position.y': 135 } }));
-  const object = b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: 1, segments: 48 } }, material: { p: { color: '#E8E2CF', roughness: .5, metalness: .1 } } }, { name: 'Sphere', blend: 'multiply' }));
-  object.masks.push(b.mask('ellipse', { x: 0, y: 0, w: 300, h: 200, feather: 40 }));
+  const object = b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: 1, segments: 48 } }, material: { p: { color: '#4C8DFF', roughness: .5, metalness: .1 } } }, { name: 'Sphere', ...(blend ? { blend: 'multiply' } : {}) }));
+  // Layer pixels of a 3D layer map through its projected plane (`is3DLayer`).
+  if (mask) object.masks.push(b.mask('ellipse', { x: 200, y: 135, w: 160, h: 300, feather: 30 }));
   b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 2.5, color: '#FFFFFF' } }, { position: [-4, 6, 4] }));
   b.add(b.camera3d({ camera: { p: { targetX: 0, targetY: 0, targetZ: 0 } }, environment: { shadows: false } }, { position: [0, 1, 4] }));
-  return project(b, { group: 'Compositing', title: 'A 3D layer with a blend mode and a mask', covers: ['blend mode on a 3D layer', 'mask on a 3D layer (projected plane inverse)'], samples: [0] });
+  return project(b, { group: 'Compositing', title: 'A composited 3D layer', covers: [blend ? 'blend mode on a 3D layer' : '', mask ? 'mask on a 3D layer (projected plane inverse)' : ''].filter(Boolean), samples: [0] });
 }
 
 export function compositeProjects(): CorpusProject[] {
-  return [blendModes(false), blendModes(true), blendAnimated(), masks(), mattes(), groups(), precomps(), scaled(), threeD()];
+  return [blendModes(false), blendModes(true), blendAnimated(), masks(), mattes(), groups(), precomps(), scaled(), threeD(true, false), threeD(false, true), threeD(true, true)];
 }

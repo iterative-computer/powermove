@@ -145,7 +145,7 @@ impl Exec<'_> {
             ids.append(&mut pending);
             match node.as_ref() {
                 Node::Layer(n) => {
-                    let Some(res) = self.layer_node(encoder, plan, n, rect, &acc) else {
+                    let Some((res, depth)) = self.layer_node(encoder, plan, n, rect, &acc) else {
                         continue;
                     };
                     // The finished layer covers the pass rectangle.
@@ -159,7 +159,7 @@ impl Exec<'_> {
                             f64::from(rect.y),
                         ],
                         view: Some(res.view.clone()),
-                        depth: None,
+                        depth,
                         alpha: n.alpha,
                         solid: None,
                         from_fbo: true,
@@ -330,11 +330,18 @@ impl Exec<'_> {
         n: &LayerNode,
         rect: Region,
         acc: &Target,
-    ) -> Option<Target> {
+    ) -> Option<(Target, Option<wgpu::TextureView>)> {
         let full = (plan.width, plan.height);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
         let content = self.take_rect(rect);
         let resolved = self.resolve_draws(encoder, plan, &n.content, pass_region);
+        // A 3D layer keeps its linear view depth in the depth and id
+        // surface. Its depth covers the full output, as the finished layer
+        // image does when the pass is not a region.
+        let depth = match resolved.as_slice() {
+            [only] if pass_region.is_none() => only.depth.clone(),
+            _ => None,
+        };
         let layer_plan = CompPlan {
             composition: plan.composition.clone(),
             group: plan.group,
@@ -380,7 +387,7 @@ impl Exec<'_> {
                 }
             }
         }
-        Some(res)
+        Some((res, depth))
     }
 
     /// An adjustment node: the accumulator through the effects, masked, and

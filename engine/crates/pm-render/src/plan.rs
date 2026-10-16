@@ -532,6 +532,15 @@ fn layer_masks<'d>(
     if !has_masks {
         return Ok(Some(None));
     }
+    if pm_eval::parenting::Role3d::of(layer).is_some() {
+        // Today a masked 3D object layer draws its scene pass turned by
+        // 180° (measured on the composite/3d-mask corpus case); routed
+        // until that is matched (docs/engine/composite.md).
+        let comp_id = scope.comp.id().to_string_lossy();
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Masks));
+        return Ok(None);
+    }
     let world = scaled_world(scope, layer, time, scale)?;
     let plane = if scope.is_3d_layer(layer)? {
         let h = scope.plane_matrix(layer, time, false)?;
