@@ -224,8 +224,11 @@ impl Renderer {
     }
 
     /// Frees idle intermediate targets down to `bytes` (lease pressure).
+    /// Also trims the text raster cache to `bytes` (it is kept apart from
+    /// the pool: `text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
+        self.text_gpu.trim(bytes);
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {

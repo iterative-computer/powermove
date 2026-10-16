@@ -542,19 +542,27 @@ impl TextGpu {
         Ok(raster.view)
     }
 
+    /// Evicts least recently used rasters until the cache holds at most
+    /// `bytes` (lease pressure).
+    pub fn trim(&mut self, bytes: u64) {
+        while self.cache_bytes > bytes {
+            let Some((&k, _)) = self.cache.iter().min_by_key(|(_, c)| c.used) else {
+                break;
+            };
+            // Dropped, not destroyed: a command encoder of the frame being
+            // recorded may still read it (wgpu keeps it alive until then).
+            if let Some(c) = self.cache.remove(&k) {
+                self.cache_bytes = self.cache_bytes.saturating_sub(c.target.bytes());
+            }
+        }
+    }
+
     fn insert(&mut self, plan: &TextPlan, precision: Precision, target: Target) {
         let bytes = target.bytes();
         if bytes > CACHE_BYTES / 2 {
             return;
         }
-        while self.cache_bytes + bytes > CACHE_BYTES {
-            let Some((&k, _)) = self.cache.iter().min_by_key(|(_, c)| c.used) else {
-                break;
-            };
-            if let Some(c) = self.cache.remove(&k) {
-                self.cache_bytes = self.cache_bytes.saturating_sub(c.target.bytes());
-            }
-        }
+        self.trim(CACHE_BYTES.saturating_sub(bytes));
         self.cache_bytes += bytes;
         self.cache.insert(
             (plan.key, precision),
