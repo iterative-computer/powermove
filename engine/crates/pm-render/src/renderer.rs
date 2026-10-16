@@ -8,11 +8,12 @@ use std::sync::Arc;
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
-use pm_protocol::color::{Precision, ProjectColor};
+use pm_protocol::color::Precision;
 use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
+use crate::composite::{ColorSettings, EffectHost};
 use crate::effects::Effects;
 use crate::error::{LayerFailure, RenderError};
 use crate::exec::{Exec, Region};
@@ -106,7 +107,11 @@ pub struct Renderer {
     scene3d: Scene3dRenderer,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
+    /// Effect, transition, and layer definitions and their programs
+    /// (`crate::effects`, contract 10): the renderer's own effect host.
     effects: Effects,
+    /// Another effect host in place of the renderer's own (tests).
+    effect_host: Option<Arc<dyn EffectHost>>,
 }
 
 impl Renderer {
@@ -123,17 +128,25 @@ impl Renderer {
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
-            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
             device,
             queue,
             bracket: None,
+            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
+            effect_host: None,
         }
+    }
+
+    /// Runs layer effects and adjustment layers through `host` instead of
+    /// the renderer's definitions; `None` goes back to them.
+    pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
+        self.effect_host = host;
     }
 
     /// Replaces the effect, transition, and layer definitions with an
     /// embedded set (an export job's, a collected project's, `pm-cli`'s;
-    /// contract 10) and translates them. Returns per-definition failures.
-    /// Without definitions, layers with effects or transitions are routed.
+    /// contract 10) and translates what changed. Returns per-definition
+    /// failures. Without definitions, layers with effects or transitions
+    /// are routed.
     pub fn set_definitions(
         &mut self,
         set: &pm_protocol::definitions::DefinitionSetSnapshot,
@@ -168,30 +181,57 @@ impl Renderer {
         &mut self.effects
     }
 
-    fn exec<'a>(&'a mut self, precision: Precision) -> Exec<'a> {
-        Exec {
-            device: &self.device,
-            queue: &self.queue,
-            pipelines: &self.pipelines,
-            media: &mut self.media,
-            pool: &mut self.pool,
-            scene3d: &mut self.scene3d,
-            effects: &mut self.effects,
-            timer: None,
-            precision,
-            working: ProjectColor::DEFAULT.working(),
-            export: false,
-            depth_id: false,
-            taken: Vec::new(),
-            failures: Vec::new(),
-            unsupported: Vec::new(),
+    /// Swaps in another definition set (one per view of a shared renderer:
+    /// each keeps its programs and watchdog state); returns the previous.
+    pub fn swap_effects(&mut self, effects: &mut Effects) {
+        std::mem::swap(&mut self.effects, effects);
+    }
+
+    /// Runs `f` with an effect context over the renderer's own definitions,
+    /// then submits and gives the intermediates back.
+    fn with_gpu<T>(
+        &mut self,
+        label: &str,
+        precision: Precision,
+        full: (u32, u32),
+        f: impl FnOnce(&mut crate::effects::exec::Gpu<'_>) -> T,
+    ) -> (T, Vec<Unsupported>) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let mut taken = Vec::new();
+        let mut unsupported = Vec::new();
+        let out = {
+            let mut cx = crate::composite::effects::EffectContext {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                pool: &mut self.pool,
+                precision,
+                working: pm_protocol::color::WorkingEncoding::Standard,
+                full,
+                taken: &mut taken,
+                native: Some(crate::effects::exec::Native {
+                    effects: &mut self.effects,
+                    timer: None,
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut unsupported,
+                }),
+            };
+            let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
+            f(&mut gpu)
+        };
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
         }
+        (out, unsupported)
     }
 
     /// Runs effect pass nodes on `input` as the compositor's `runEffects`
     /// does (harnesses and the shader parity tests): every buffer the size
-    /// of `input`, in GL row order. `region` places the buffer in a level
-    /// of `full` pixels (`effectViewportCoordinates`); `backdrop` is
+    /// of `input`, in GL row order, E-encoded. `region` places the buffer in
+    /// a level of `full` pixels (`effectViewportCoordinates`); `backdrop` is
     /// `u_backdrop` (an empty unit without one). Returns a new working
     /// target.
     #[allow(clippy::too_many_arguments)]
@@ -205,11 +245,6 @@ impl Renderer {
         full: (u32, u32),
         precision: Precision,
     ) -> Result<Target, RenderError> {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("pm effects"),
-            });
         let (w, h) = (input.width(), input.height());
         let region = region.map(|(x, y)| Region {
             x,
@@ -218,37 +253,18 @@ impl Renderer {
             height: h,
         });
         let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
-        let (out, taken, unsupported) = {
-            let mut exec = self.exec(precision);
-            let mut current = exec.pool.take_working(exec.device, w, h, precision);
-            encoder.copy_texture_to_texture(
-                input.texture.as_image_copy(),
-                current.texture.as_image_copy(),
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
-            for step in steps {
-                if let Some(next) = exec.run_effect(
-                    &mut encoder,
-                    "",
-                    step,
-                    &current,
-                    backdrop,
-                    time,
-                    coordinates,
-                ) {
-                    exec.taken.push(std::mem::replace(&mut current, next));
-                }
-            }
-            (current, exec.taken, exec.unsupported)
-        };
-        self.queue.submit([encoder.finish()]);
-        for t in taken {
-            self.pool.give(t);
-        }
+        let (out, unsupported) = self.with_gpu("pm effects", precision, full, |gpu| {
+            gpu.chain(
+                "",
+                steps,
+                time,
+                input,
+                backdrop,
+                coordinates,
+                pm_protocol::color::WorkingEncoding::Standard,
+            )
+            .unwrap_or_else(|| gpu.copy_of(input))
+        });
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
         }
@@ -264,22 +280,12 @@ impl Renderer {
         time: f64,
         precision: Precision,
     ) -> Result<Target, RenderError> {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("pm transition"),
-            });
         let mut step = step.clone();
         step.edge_in = true;
-        let (out, taken, unsupported) = {
-            let mut exec = self.exec(precision);
-            let out = exec.run_transition(&mut encoder, "", &step, from, to, time);
-            (out, exec.taken, exec.unsupported)
-        };
-        self.queue.submit([encoder.finish()]);
-        for t in taken {
-            self.pool.give(t);
-        }
+        let full = (from.width(), from.height());
+        let (out, unsupported) = self.with_gpu("pm transition", precision, full, |gpu| {
+            gpu.run_transition("", &step, from, to, time)
+        });
         match out {
             Some(t) if unsupported.is_empty() => Ok(t),
             _ => Err(RenderError::Unsupported(unsupported)),
@@ -358,12 +364,16 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
+        let precision = match document.root().map(project_settings) {
+            Some(Ok(c)) => effective_precision(request.precision, c.precision),
+            _ => request.precision,
+        };
         let target = Target::new(
             &self.device,
             "pm frame",
             size.width,
             size.height,
-            working_format(request.precision),
+            working_format(precision),
             pm_gpu::target::working_usage(),
         );
         let depth_id = request.depth_id.then(|| {
@@ -413,7 +423,12 @@ impl Renderer {
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
-        if !self.supports_precision(request.precision) {
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let color = project_settings(root)?;
+        let precision = effective_precision(request.precision, color.precision);
+        if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
             )]));
@@ -427,21 +442,6 @@ impl Renderer {
                 size.width,
                 size.height
             )));
-        }
-        let root = document
-            .root()
-            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
-        if let Some(color) = pm_eval::node::member(Some(root), "color")
-            && !pm_eval::node::is_nullish(Some(color))
-            && capability::unsupported(document, composition)
-                .iter()
-                .any(|u| u.feature == Feature::ProjectColor)
-        {
-            return Err(RenderError::Unsupported(vec![Unsupported {
-                composition: None,
-                layer: None,
-                feature: Feature::ProjectColor,
-            }]));
         }
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
@@ -459,7 +459,7 @@ impl Renderer {
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
-        let (mut plan, build) = plan::build_with(
+        let (mut plan, build) = plan::build_with_effects(
             &mut self.evaluator,
             &comp,
             &project,
@@ -468,7 +468,7 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.configured().then_some(&self.effects),
+            effect_host(&self.effect_host, &self.effects),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -492,8 +492,8 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        // Only renderers with definitions draw effects (and so time them).
-        let timer = if self.effects.configured() {
+        // Only renderers drawing their own definitions time effects.
+        let timer = if self.effects.configured() && self.effect_host.is_none() {
             self.effects.watchdog.frame_timer(&self.device)
         } else {
             None
@@ -508,8 +508,9 @@ impl Renderer {
                 scene3d: &mut self.scene3d,
                 effects: &mut self.effects,
                 timer,
-                precision: request.precision,
-                working: ProjectColor::DEFAULT.working(),
+                precision,
+                working: color.working,
+                blend_domain: color.blend_domain,
                 export: request.export,
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
@@ -532,7 +533,7 @@ impl Renderer {
             // so media caches filled by this encoder stay valid.
             let complete = exec.unsupported.is_empty();
             if complete {
-                exec.flip(&mut encoder, &gl_rows, target);
+                exec.flip_color(&mut encoder, &gl_rows, target);
             }
             exec.taken.push(gl_rows);
             if let Some(ids) = depth_id.filter(|_| complete) {
@@ -697,7 +698,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build_with(
+        let (plan, build) = plan::build_with_effects(
             &mut self.evaluator,
             &comp,
             &project,
@@ -706,11 +707,49 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.configured().then_some(&self.effects),
+            effect_host(&self.effect_host, &self.effects),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         Ok((plan, build.failures))
+    }
+}
+
+/// The effect host plans are built with: another host when one is set,
+/// else the renderer's definitions once it has any (without either, layers
+/// with effects or transitions are routed).
+fn effect_host<'a>(
+    host: &'a Option<Arc<dyn EffectHost>>,
+    effects: &'a Effects,
+) -> Option<&'a dyn EffectHost> {
+    match host {
+        Some(h) => Some(h.as_ref()),
+        None => effects.configured().then_some(effects as &dyn EffectHost),
+    }
+}
+
+/// The project's color settings, or the routing answer for settings this
+/// build cannot render.
+fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError> {
+    crate::composite::project_color(root)
+        .map(|c| ColorSettings::of(&c))
+        .map_err(|_| {
+            RenderError::Unsupported(vec![Unsupported {
+                composition: None,
+                layer: None,
+                feature: Feature::ProjectColor,
+            }])
+        })
+}
+
+/// The precision intermediates use: the request's, raised to the project's
+/// (Settings › Project › Color › Precision is a floor for every render of
+/// the project; exports raise it further by amendment 8).
+pub fn effective_precision(request: Precision, project: Precision) -> Precision {
+    if request == Precision::Float32 || project == Precision::Float32 {
+        Precision::Float32
+    } else {
+        Precision::Float16
     }
 }

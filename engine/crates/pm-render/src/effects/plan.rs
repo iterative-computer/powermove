@@ -10,8 +10,8 @@ use pm_model::{JsString, Node};
 use pm_protocol::definitions::{DefinitionKind, DefinitionSnapshot, ParamSpec};
 
 use super::{Effects, Status};
-use crate::capability::{Feature, Unsupported};
-use crate::plan::CompPlan;
+use crate::capability::Feature;
+use crate::composite::Padding;
 
 /// A parameter value as the compositor binds it (`setParam`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,34 +59,6 @@ pub struct TransitionStep {
     pub edge_in: bool,
     pub progress: f64,
     pub params: Vec<Param>,
-}
-
-/// A layer drawn into its own buffer (`lf`), processed, then composited:
-/// today's path for layers with effects or an active transition.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Stage {
-    /// The layer's pixels: its draws, or a group's members, into a
-    /// transparent target the size of the level.
-    pub content: CompPlan,
-    pub effects: Vec<EffectStep>,
-    pub transition: Option<TransitionStep>,
-    /// Opacity of the final composite: a group's opacity (`compositeAlpha`);
-    /// 1 for other layers, whose opacity is in their draws.
-    pub alpha: f64,
-    /// `u_time`: the level's time in seconds.
-    pub time: f64,
-}
-
-/// What a layer needs at this frame.
-pub enum Staging {
-    /// The fast path: no renderable effect and no active transition.
-    None,
-    Stage {
-        effects: Vec<EffectStep>,
-        transition: Option<TransitionStep>,
-    },
-    /// Something here cannot be drawn (it was added to `unsupported`).
-    Refused,
 }
 
 /* ── setParam's value conversion ─────────────────────────────────────── */
@@ -264,122 +236,123 @@ pub fn transition_known(effects: &Effects, ty: &JsString) -> bool {
         || !effects.is_missing(DefinitionKind::Transition, &id)
 }
 
-/// The staging of `layer` at `time` (`renderProject`'s choice between the
-/// fast path and the layer buffer). Adjustment layers are not staged here.
-pub fn staging<'d>(
+/// `runEffects`' effect pass nodes for `layer` at `time`: every enabled
+/// effect that is not marked missing, whose definition is registered and
+/// draws, and that the watchdog has not turned off, in order. `Err` names
+/// what the engine cannot draw (an unknown definition, one that needs the
+/// fallback runner).
+pub fn effect_steps<'d>(
     scope: &mut Scope<'_, 'd>,
     effects: &Effects,
-    comp_id: &str,
     layer: &'d Node,
     time: f64,
-    unsupported: &mut Vec<Unsupported>,
-) -> JsResult<Staging> {
-    let mut refused = false;
-    let mut refuse = |feature: Feature, out: &mut Vec<Unsupported>| {
-        out.push(Unsupported::layer(comp_id, layer, feature));
-        refused = true;
-    };
-    let has_fx = scope.has_renderable_effects(layer, time)?;
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
-    if has_fx {
-        // `runEffects`: every enabled effect that is not marked missing and
-        // whose definition is registered, in order.
-        for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
-            let fx_id = node::to_js_string(node::member(Some(fx), "id")).to_string_lossy();
-            let on = node::member_checked(Some(fx), "on")?;
-            if !scope
-                .evaluated(layer, on, time, &format!("{fx_id}.$enabled"))?
-                .truthy()
-                || node::truthy(node::member(Some(fx), "missing"))
-            {
+    let mut refused = None;
+    for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
+        let fx_id = node::to_js_string(node::member(Some(fx), "id")).to_string_lossy();
+        let on = node::member_checked(Some(fx), "on")?;
+        if !scope
+            .evaluated(layer, on, time, &format!("{fx_id}.$enabled"))?
+            .truthy()
+            || node::truthy(node::member(Some(fx), "missing"))
+        {
+            continue;
+        }
+        let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        let Some(def) = effects.get(DefinitionKind::Effect, &ty) else {
+            if !effects.is_missing(DefinitionKind::Effect, &ty) {
+                refused.get_or_insert(Feature::Definition(format!("effect {ty}")));
+            }
+            continue;
+        };
+        match effects.status(DefinitionKind::Effect, &ty) {
+            Some(Status::Ready) => {}
+            Some(Status::NeedsFallback(_)) => {
+                refused.get_or_insert(Feature::ShaderFallback(ty.clone()));
                 continue;
             }
-            let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
-            let Some(def) = effects.get(DefinitionKind::Effect, &ty) else {
-                if !effects.is_missing(DefinitionKind::Effect, &ty) {
-                    refuse(Feature::Definition(format!("effect {ty}")), unsupported);
-                }
-                continue;
+            // Refused programs render nothing today: skipped.
+            Some(Status::Refused(_)) | None => continue,
+        }
+        if effects.watchdog.is_disabled(DefinitionKind::Effect, &ty) {
+            continue;
+        }
+        // `effectParamValue`: no property (falsy) or a nullish value falls
+        // back to the definition's default.
+        let p = node::member(Some(fx), "p");
+        let mut values = Vec::with_capacity(def.params.len());
+        for spec in &def.params {
+            let value = match node::member(p, spec.key()).filter(|n| node::truthy(Some(n))) {
+                None => None,
+                Some(prop) => Some(scope.channel_p(layer, Some(prop), time, spec.key())?),
             };
-            match effects.status(DefinitionKind::Effect, &ty) {
-                Some(Status::Ready) => {}
-                Some(Status::NeedsFallback(_)) => {
-                    refuse(Feature::ShaderFallback(ty.clone()), unsupported);
-                    continue;
-                }
-                // Refused programs render nothing today: skipped.
-                Some(Status::Refused(_)) | None => continue,
-            }
-            if effects.watchdog.is_disabled(DefinitionKind::Effect, &ty) {
-                continue;
-            }
-            // `effectParamValue`: no property (falsy) or a nullish value
-            // falls back to the definition's default.
-            let p = node::member(Some(fx), "p");
-            let mut values = Vec::with_capacity(def.params.len());
-            for spec in &def.params {
-                let value = match node::member(p, spec.key()).filter(|n| node::truthy(Some(n))) {
-                    None => None,
-                    Some(prop) => Some(scope.channel_p(layer, Some(prop), time, spec.key())?),
-                };
-                values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
-            }
-            steps.push(effect_step(def, &fx_id, &values));
+            values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
+        steps.push(effect_step(def, &fx_id, &values));
     }
+    Ok(match refused {
+        Some(f) => Err(f),
+        None => Ok(steps),
+    })
+}
+
+/// The transition node of `layer` at `time` (`activeTransition`,
+/// `runTransition`'s parameter reads): `Ok(None)` when none is active or
+/// its program does not draw (today the layer then composites without it).
+pub fn transition_at<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+) -> JsResult<Result<Option<TransitionStep>, Feature>> {
     let known = |ty: &JsString| transition_known(effects, ty);
-    let active = scope.active_transition(layer, time, &known)?;
-    let mut transition = None;
-    if let Some(active) = &active {
-        let ty =
-            node::to_js_string(node::member(Some(active.transition), "type")).to_string_lossy();
-        match effects.get(DefinitionKind::Transition, &ty) {
-            None => refuse(Feature::Definition(format!("transition {ty}")), unsupported),
-            Some(def) => match effects.status(DefinitionKind::Transition, &ty) {
-                Some(Status::NeedsFallback(_)) => {
-                    refuse(Feature::ShaderFallback(ty.clone()), unsupported)
-                }
-                Some(Status::Ready)
-                    if !effects
-                        .watchdog
-                        .is_disabled(DefinitionKind::Transition, &ty) =>
-                {
-                    // `runTransition`: `prop ? PM.evP(L, prop, T, pd.k) : pd.def`.
-                    let p = node::member(Some(active.transition), "p");
-                    let mut values = Vec::with_capacity(def.params.len());
-                    for spec in &def.params {
-                        values.push(
-                            match node::member(p, spec.key()).filter(|n| node::truthy(Some(n))) {
-                                None => None,
-                                Some(prop) => {
-                                    Some(scope.channel_p(layer, Some(prop), time, spec.key())?)
-                                }
-                            },
-                        );
-                    }
-                    transition = Some(transition_step(
-                        def,
-                        active.edge_in,
-                        active.progress,
-                        &values,
-                    ));
-                }
-                // A program that does not link: `runTransition` returns
-                // null and the layer composites without the transition (on
-                // the layer-buffer path).
-                _ => {}
+    let Some(active) = scope.active_transition(layer, time, &known)? else {
+        return Ok(Ok(None));
+    };
+    let ty = node::to_js_string(node::member(Some(active.transition), "type")).to_string_lossy();
+    let Some(def) = effects.get(DefinitionKind::Transition, &ty) else {
+        return Ok(Err(Feature::Definition(format!("transition {ty}"))));
+    };
+    match effects.status(DefinitionKind::Transition, &ty) {
+        Some(Status::NeedsFallback(_)) => return Ok(Err(Feature::ShaderFallback(ty))),
+        Some(Status::Ready)
+            if !effects
+                .watchdog
+                .is_disabled(DefinitionKind::Transition, &ty) => {}
+        // A program that does not link: `runTransition` returns null and
+        // the layer composites without the transition.
+        _ => return Ok(Ok(None)),
+    }
+    // `runTransition`: `prop ? PM.evP(L, prop, T, pd.k) : pd.def`.
+    let p = node::member(Some(active.transition), "p");
+    let mut values = Vec::with_capacity(def.params.len());
+    for spec in &def.params {
+        values.push(
+            match node::member(p, spec.key()).filter(|n| node::truthy(Some(n))) {
+                None => None,
+                Some(prop) => Some(scope.channel_p(layer, Some(prop), time, spec.key())?),
             },
-        }
+        );
     }
-    if refused {
-        return Ok(Staging::Refused);
-    }
-    if !has_fx && active.is_none() {
-        return Ok(Staging::None);
-    }
-    Ok(Staging::Stage {
-        effects: steps,
-        transition,
+    Ok(Ok(Some(transition_step(
+        def,
+        active.edge_in,
+        active.progress,
+        &values,
+    ))))
+}
+
+/// How far a chain reads beyond each output pixel: a viewport-safe effect
+/// its `viewportPadding` values, any other the whole frame; chained reads
+/// add up.
+pub fn chain_padding(steps: &[EffectStep]) -> Padding {
+    steps.iter().fold(Padding::NONE, |acc, step| {
+        acc.then(if step.viewport_safe {
+            Padding::Pixels(step.padding.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32)
+        } else {
+            Padding::Full
+        })
     })
 }
 

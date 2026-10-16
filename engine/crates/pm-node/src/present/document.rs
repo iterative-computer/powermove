@@ -237,6 +237,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::Scene3d(s) => format!("3D: {s}"),
         Feature::Effects => "effects".into(),
         Feature::Masks => "masks".into(),
+        Feature::PathMasks => "path masks".into(),
         Feature::TrackMatte => "track mattes".into(),
         Feature::Transition => "transitions".into(),
         Feature::BlendMode(m) => format!("blend mode {m}"),

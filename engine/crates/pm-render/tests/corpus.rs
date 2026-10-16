@@ -54,7 +54,14 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", false),
 ];
 
-/// Whether any effect in the document is in `pm_render::effects::WEBGL_UNSTABLE`.
+/// The effects whose corpus frames are listed apart rather than failed:
+/// the part of `pm_render::effects::WEBGL_UNSTABLE` the app corpus has
+/// shown departing (Posterize's one-level boundary flips). Levels and Color
+/// are unstable at the shader level only; a corpus frame of theirs that
+/// departs fails.
+const CORPUS_UNSTABLE: &[&str] = &["posterize"];
+
+/// Whether any effect in the document is in [`CORPUS_UNSTABLE`].
 fn webgl_unstable(document: &pm_model::Document) -> bool {
     fn walk(n: &pm_model::Node) -> bool {
         match n.kind() {
@@ -63,7 +70,7 @@ fn webgl_unstable(document: &pm_model::Document) -> bool {
                     k.to_string_lossy() == "fx"
                         && matches!(v.kind(), pm_model::NodeKind::Array(items) if items.iter().any(|e| {
                             e.get("type").is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s)
-                                if pm_render::effects::WEBGL_UNSTABLE.contains(&s.to_string_lossy().as_str())))
+                                if CORPUS_UNSTABLE.contains(&s.to_string_lossy().as_str())))
                         }))
                 });
                 unstable_fx || map.iter().any(|(_, v)| walk(v))
@@ -89,6 +96,17 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
         .count();
     within as f64 / pixels.max(1) as f64
 }
+
+/// Frames where today's renderer departs from the exact composite and the
+/// engine does not follow (docs/engine/composite.md, "Today's composite
+/// drift"; proposed appendix A item): `FRAG_COMPOSITE` runs over the whole
+/// frame for every blend layer and sends every pixel through unpremultiply
+/// and re-premultiply, so on a translucent stack the half-float target loses
+/// up to a few code values over many blend layers. The engine passes pixels
+/// outside the layer through exactly. Bounds as measured on the capture
+/// (largest transparent-float and opaque differences, in CV); the rest of the
+/// class still applies.
+const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 5.0, 5)];
 
 #[test]
 fn corpus_render_parity() {
@@ -327,8 +345,11 @@ fn corpus_render_parity() {
                     ))
                 );
                 eprintln!("{line}");
-                if max > 1.0 || bar.as_ref().is_some_and(|b| !b.pass()) {
+                let drift = COMPOSITE_DRIFT.iter().find(|d| d.0 == p.name);
+                let bound = drift.map_or(1.0, |d| d.1);
+                if max > bound || bar.as_ref().is_some_and(|b| !b.pass()) {
                     if bar.is_none()
+                        && drift.is_none()
                         && webgl_unstable(&p.document)
                         && float_fraction_within_one(&ours, &reference) >= 0.999
                     {
@@ -367,8 +388,16 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            if !d.passes() || bar.as_ref().is_some_and(|b| !b.pass()) {
-                if bar.is_none() && webgl_unstable(&p.document) && d.fraction_within_one() >= 0.999
+            let drift_max = COMPOSITE_DRIFT.iter().find(|x| x.0 == p.name).map(|x| x.2);
+            let class = match drift_max {
+                Some(m) => d.fraction_within_one() >= 0.999 && d.max <= m,
+                None => d.passes(),
+            };
+            if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
+                if bar.is_none()
+                    && drift_max.is_none()
+                    && webgl_unstable(&p.document)
+                    && d.fraction_within_one() >= 0.999
                 {
                     unstable.push(line);
                     continue;

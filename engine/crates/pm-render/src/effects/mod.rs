@@ -89,17 +89,38 @@ pub struct Effects {
     pub watchdog: Watchdog,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
-    clamp: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
 }
 
-const CLAMP_WGSL: &str = "
+/// Per-pixel passes around legacy programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SimpleOp {
+    /// `clamp: true`: the effect's output limited to 0..1.
+    Clamp,
+    /// Premultiplied linear light to premultiplied E (a legacy program's
+    /// input with linear blending on).
+    EncodeE,
+    /// Premultiplied E back to premultiplied linear light.
+    DecodeE,
+}
+
+const SIMPLE_WGSL: &str = "
 @group(0) @binding(0) var src: texture_2d<f32>;
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
   let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
   return vec4<f32>(a * 2.0 - 1.0, 0.0, 1.0);
 }
-@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  return clamp(textureLoad(src, vec2<i32>(p.xy), 0), vec4<f32>(0.0), vec4<f32>(1.0));
+fn texel(p: vec4<f32>) -> vec4<f32> {
+  return textureLoad(src, vec2<i32>(p.xy), 0);
+}
+@fragment fn clamp01(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+  return clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0));
+}
+@fragment fn encode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+  return pm_premultiplied_linear_to_e(texel(p));
+}
+@fragment fn decode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+  return pm_premultiplied_e_to_linear(texel(p));
 }
 ";
 
@@ -192,7 +213,7 @@ impl Effects {
             cache: pm_glsl::Cache::new(context, None),
             watchdog: Watchdog::default(),
             dummies: Default::default(),
-            clamp: Default::default(),
+            simple: Default::default(),
         }
     }
 
@@ -397,19 +418,22 @@ impl Effects {
             .clone()
     }
 
-    /// The `clamp: true` pass.
-    pub(crate) fn clamp_pipeline(
+    /// The pipeline of a per-pixel pass.
+    pub(crate) fn simple_pipeline(
         &mut self,
         device: &wgpu::Device,
+        op: SimpleOp,
         format: wgpu::TextureFormat,
     ) -> &wgpu::RenderPipeline {
-        self.clamp.entry(format).or_insert_with(|| {
+        self.simple.entry((op, format)).or_insert_with(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("pm effect clamp"),
-                source: wgpu::ShaderSource::Wgsl(CLAMP_WGSL.into()),
+                label: Some("pm effect pixel pass"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!("{}\n{SIMPLE_WGSL}", pm_color::wgsl::COLOR).into(),
+                ),
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("pm effect clamp"),
+                label: Some("pm effect pixel pass"),
                 layout: None,
                 vertex: wgpu::VertexState {
                     module: &module,
@@ -425,7 +449,11 @@ impl Effects {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(match op {
+                        SimpleOp::Clamp => "clamp01",
+                        SimpleOp::EncodeE => "encode",
+                        SimpleOp::DecodeE => "decode",
+                    }),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -483,6 +511,64 @@ impl Effects {
             return Err(f);
         }
         Ok(entry.program.as_mut().expect("still built"))
+    }
+}
+
+impl crate::composite::EffectHost for Effects {
+    fn prepare<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+    ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
+        let steps = match plan::effect_steps(scope, self, layer, frame.time)? {
+            Ok(steps) => steps,
+            Err(f) => return Ok(Err(f)),
+        };
+        if steps.is_empty() {
+            return Ok(Ok(None));
+        }
+        let sources = steps
+            .iter()
+            .map(|s| self.source_key(DefinitionKind::Effect, &s.definition))
+            .collect();
+        Ok(Ok(Some(crate::composite::PreparedEffects {
+            padding: plan::chain_padding(&steps),
+            backdrop: steps.iter().any(|s| s.backdrop),
+            passes: exec::chain_passes(exec::Chain {
+                layer: crate::js::layer_id(layer),
+                steps,
+                time: frame.time,
+                sources,
+            }),
+        })))
+    }
+
+    fn transition_known(&self, ty: &pm_model::JsString) -> bool {
+        plan::transition_known(self, ty)
+    }
+
+    fn prepare_transition<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+    ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedTransition>, crate::Feature>>
+    {
+        let step = match plan::transition_at(scope, self, layer, frame.time)? {
+            Ok(Some(step)) => step,
+            Ok(None) => return Ok(Ok(None)),
+            Err(f) => return Ok(Err(f)),
+        };
+        let source = self.source_key(DefinitionKind::Transition, &step.definition);
+        Ok(Ok(Some(crate::composite::PreparedTransition {
+            passes: exec::transition_passes(exec::Transition {
+                layer: crate::js::layer_id(layer),
+                step,
+                time: frame.time,
+                source,
+            }),
+        })))
     }
 }
 

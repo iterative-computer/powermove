@@ -2,7 +2,7 @@
 //! then one render pass per target with every draw blended in stack order.
 
 use pm_gpu::{Target, TargetPool};
-use pm_protocol::color::{Precision, WorkingEncoding};
+use pm_protocol::color::{BlendDomain, Precision, WorkingEncoding};
 
 use crate::capability::Unsupported;
 use crate::effects::Effects;
@@ -13,14 +13,7 @@ use crate::pipelines::{FillUniform, Pipelines, QuadUniform, UNIFORM_STRIDE, byte
 use crate::plan::{Background, CompPlan, Content, Draw, Source};
 use crate::scene3d::Scene3dRenderer;
 
-/// A region of a target in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Region {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
+pub use crate::composite::region::Region;
 
 /// A draw with its source resolved to textures.
 pub(crate) struct Resolved {
@@ -33,6 +26,9 @@ pub(crate) struct Resolved {
     pub solid: Option<[f64; 4]>,
     /// The texture is a target in GL row order (`u_fromFbo`).
     pub from_fbo: bool,
+    /// The texture holds premultiplied E values whatever the working
+    /// encoding (the 3D pass output, section 9 "3D layers").
+    pub encoded: bool,
     pub uv: [f64; 4],
     pub layer: String,
 }
@@ -50,6 +46,8 @@ pub(crate) struct Exec<'a> {
     pub timer: Option<FrameTimer>,
     pub precision: Precision,
     pub working: WorkingEncoding,
+    /// Where screen, overlay, and soft light run with linear blending on.
+    pub blend_domain: BlendDomain,
     pub export: bool,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
@@ -118,8 +116,18 @@ impl Exec<'_> {
         }
     }
 
-    /// Resolves the draws' sources, recording any passes they need.
+    /// Resolves every draw's source, recording any passes it needs.
     fn resolve(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        region: Option<Region>,
+    ) -> Vec<Resolved> {
+        self.resolve_draws(encoder, plan, &plan.draws, region)
+    }
+
+    /// Resolves `draws` (of `plan`), recording any passes they need.
+    pub(crate) fn resolve_draws(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
@@ -135,13 +143,19 @@ impl Exec<'_> {
                 alpha: 1.0,
                 solid: None,
                 from_fbo: false,
+                encoded: false,
                 uv: [0.0, 0.0, 1.0, 1.0],
                 layer: draw.layer.clone(),
             };
             match &draw.content {
-                Content::Solid(c) => r.solid = Some(*c),
-                // Staged layers are drawn by `render_staged`, never in a run.
-                Content::Staged(_) => {}
+                Content::Solid(c) => {
+                    r.solid = Some(crate::composite::color::premultiplied_to_working(
+                        *c,
+                        self.working,
+                    ))
+                }
+                // Drawn by `composite::exec`, never resolved as a quad.
+                Content::Composite(_) => continue,
                 Content::Texture { source, uv, alpha } => {
                     r.uv = *uv;
                     r.alpha = *alpha;
@@ -216,6 +230,8 @@ impl Exec<'_> {
                                     // The pass renders in GL row order.
                                     r.view = Some(out.color.view.clone());
                                     r.from_fbo = true;
+                                    // E-encoded: linear light decodes it.
+                                    r.encoded = true;
                                     r.depth = out.depth.as_ref().map(|d| d.view.clone());
                                     self.taken.push(out.color);
                                     if let Some(d) = out.depth {
@@ -243,29 +259,25 @@ impl Exec<'_> {
         region: Option<Region>,
         target: &Target,
     ) -> Vec<Resolved> {
-        if plan
-            .draws
-            .iter()
-            .any(|d| matches!(d.content, Content::Staged(_)))
-        {
-            return self.render_staged(encoder, plan, region, target);
+        if crate::composite::has_nodes(plan) {
+            return self.render_comp_nodes(encoder, plan, region, target);
         }
-        self.render_run(encoder, plan, &plan.draws, region, target, false)
+        let resolved = self.resolve(encoder, plan, region);
+        self.draw_pass(encoder, plan, &resolved, region, target, true);
+        resolved
     }
 
-    /// Draws `draws` of `plan` into `target` in one render pass. `load`
-    /// keeps what the target holds (a run after a staged layer); otherwise
-    /// the pass clears it and draws the level's background.
-    pub(crate) fn render_run(
+    /// Records one render pass of `resolved` into `target`: cleared to the
+    /// plan's background first when `clear`, else drawn over its contents.
+    pub(crate) fn draw_pass(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
-        draws: &[Draw],
+        resolved: &[Resolved],
         region: Option<Region>,
         target: &Target,
-        load: bool,
-    ) -> Vec<Resolved> {
-        let resolved = self.resolve(encoder, plan, draws, region);
+        clear: bool,
+    ) {
         let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
         let (th, format) = (target.height(), target.format());
         // Draws keep full-frame coordinates; a region of interest moves the
@@ -289,9 +301,13 @@ impl Exec<'_> {
         );
         data[..size_of::<QuadUniform>()].copy_from_slice(bytes_of(&background));
         for (i, r) in resolved.iter().enumerate() {
-            let color = r
-                .solid
-                .unwrap_or([r.alpha, if r.from_fbo { 1.0 } else { 0.0 }, 0.0, 0.0]);
+            let decode = r.encoded && self.working == WorkingEncoding::LinearLight;
+            let color = r.solid.unwrap_or([
+                r.alpha,
+                if r.from_fbo { 1.0 } else { 0.0 },
+                if decode { 1.0 } else { 0.0 },
+                0.0,
+            ]);
             let u = quad(r.matrix, r.uv, color);
             let at = (i + 1) * UNIFORM_STRIDE as usize;
             data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
@@ -316,7 +332,7 @@ impl Exec<'_> {
             }],
         });
         let fill_bind = match &plan.background {
-            Background::Gradient(g) if !load => {
+            Background::Gradient(g) if clear => {
                 let mut u = FillUniform::default();
                 for (i, (rgb, pos)) in g.stops.iter().take(8).enumerate() {
                     u.stops[i] = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, *pos as f32];
@@ -331,6 +347,16 @@ impl Exec<'_> {
                     th as f32,
                 ];
                 u.view = [ox as f32, oy as f32, plan.width as f32, plan.height as f32];
+                u.flags = [
+                    if self.working == WorkingEncoding::LinearLight {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                    0.0,
+                    0.0,
+                ];
                 let b = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pm fill"),
                     size: size_of::<FillUniform>() as u64,
@@ -370,16 +396,22 @@ impl Exec<'_> {
                 })
             })
             .collect();
-        let clear = match &plan.background {
-            _ if load => wgpu::Color::TRANSPARENT,
-            Background::Transparent => wgpu::Color::TRANSPARENT,
-            Background::Solid(c) => wgpu::Color {
-                r: c[0],
-                g: c[1],
-                b: c[2],
-                a: c[3],
-            },
-            Background::Gradient(_) => wgpu::Color::BLACK,
+        let load = if clear {
+            wgpu::LoadOp::Clear(match &plan.background {
+                Background::Transparent => wgpu::Color::TRANSPARENT,
+                Background::Solid(c) => {
+                    let c = crate::composite::color::premultiplied_to_working(*c, self.working);
+                    wgpu::Color {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                        a: c[3],
+                    }
+                }
+                Background::Gradient(_) => wgpu::Color::BLACK,
+            })
+        } else {
+            wgpu::LoadOp::Load
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm composite"),
@@ -388,11 +420,7 @@ impl Exec<'_> {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: if load {
-                        wgpu::LoadOp::Load
-                    } else {
-                        wgpu::LoadOp::Clear(clear)
-                    },
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -422,7 +450,6 @@ impl Exec<'_> {
             }
         }
         drop(pass);
-        resolved
     }
 
     /// Records the depth and id surface of the top-level draws.

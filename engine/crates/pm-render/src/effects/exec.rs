@@ -1,27 +1,29 @@
-//! Executes staged layers (`renderProject`'s layer-buffer path): the
-//! layer's pixels into its own buffer (`lf`), the effect chain
-//! (`runEffects`: 1 to 8 ping-pong passes per effect, `u_orig`,
-//! `u_backdrop` = the accumulated lower stack, blending off), and the
-//! composite onto the stack, through a transition (`runTransition`) when one
-//! is active. Every buffer is the size of the level (composition-sized),
-//! in GL row order, at the frame's precision.
+//! Records effect pass and transition nodes (`runEffects`: 1 to 8
+//! ping-pong passes per effect, `u_orig`, `u_backdrop` = the accumulated
+//! stack beneath the layer, blending off; `runTransition`). The compositor
+//! (`crate::composite`) decides where they run: a layer's chain after its
+//! masks and before its matte, an adjustment layer's on the accumulator,
+//! and a transition after the layer's composite. Every buffer covers the
+//! pass rectangle, in GL row order, at the frame's precision.
 //!
-//! A level holding staged layers is drawn in runs: the draws before a
-//! staged layer go into the target in one render pass (the first clears
-//! and fills the background, later ones load), so the accumulated stack a
-//! staged layer reads as its backdrop is exactly today's `acc`.
+//! Legacy GLSL receives E-encoded values (section 11, "Color domain"): with
+//! linear blending on, the chain's inputs are encoded with E first and its
+//! output decoded after.
 
-use pm_gpu::Target;
+use std::sync::Arc;
+
+use pm_gpu::{Target, TargetPool};
+use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_protocol::common::{DefinitionId, EffectInstanceId, LayerId};
 use pm_protocol::definitions::DefinitionKind;
 
-use super::plan::{Binding, EffectStep, Param, Stage, TransitionStep};
+use super::plan::{Binding, EffectStep, Param, TransitionStep};
 use super::program::{Call, GpuProgram, active};
-use super::watchdog::Span;
+use super::watchdog::{FrameTimer, Span};
+use super::{Effects, SimpleOp};
 use crate::capability::{Feature, Unsupported};
-use crate::exec::{Exec, Region, Resolved};
-use crate::pipelines::{QuadUniform, UNIFORM_STRIDE, bytes_of};
-use crate::plan::{CompPlan, Content, Draw};
+use crate::composite::effects::{Covered, EffectContext, EffectPasses, TransitionPasses};
+use crate::exec::Region;
 
 /// `fullQuad(w, h)` as the column-major mat3 uniform.
 fn full_quad(w: u32, h: u32) -> [f32; 9] {
@@ -50,12 +52,15 @@ fn f(values: &[f64]) -> Call {
     Call::F(values.iter().map(|v| *v as f32).collect())
 }
 
-/// `setParam`: the named uniform when the program has it active, else the
-/// positional alias.
+/// `setParam`: the named uniform when the program has it active (GL's
+/// `getUniformLocation` is program-wide: either stage), else the positional
+/// alias.
 fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, Call)>) {
     for (index, p) in params.iter().enumerate() {
         let named = format!("u_{}", p.key);
-        let name = if active(program.fragment_block.as_ref(), &named) {
+        let name = if active(program.fragment_block.as_ref(), &named)
+            || active(program.vertex_block.as_ref(), &named)
+        {
             named
         } else {
             format!("{}{index}", if p.color { "u_c" } else { "u_p" })
@@ -68,263 +73,114 @@ fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, 
     }
 }
 
-/// Where a level holding staged layers is drawn: a viewport-safe level
-/// under a region of interest draws a region grown by its effects'
-/// padding (as today's cropped viewer does, with the crop's effect
-/// coordinates); any other staged level draws in full and is cropped.
-fn work_region(plan: &CompPlan, region: Option<Region>) -> Option<Region> {
-    let region = region?;
-    let mut padding = 0.0f64;
-    for draw in &plan.draws {
-        if let Content::Staged(stage) = &draw.content {
-            if stage.transition.is_some() || stage.effects.iter().any(|e| !e.viewport_safe) {
-                return None;
-            }
-            padding += stage.effects.iter().map(|e| e.padding).sum::<f64>();
-        }
-    }
-    // The viewer's overscan (128 px) plus the effects' own reach.
-    let pad = (128.0 + padding).ceil().min(f64::from(u32::MAX / 4)) as u32;
-    let x0 = region.x.saturating_sub(pad);
-    let y0 = region.y.saturating_sub(pad);
-    let x1 = (region.x + region.width)
-        .saturating_add(pad)
-        .min(plan.width);
-    let y1 = (region.y + region.height)
-        .saturating_add(pad)
-        .min(plan.height);
-    if x0 == 0 && y0 == 0 && x1 == plan.width && y1 == plan.height {
-        return None;
-    }
-    Some(Region {
-        x: x0,
-        y: y0,
-        width: x1 - x0,
-        height: y1 - y0,
-    })
+/// The renderer's own effect state, lent to the chains it prepared.
+pub(crate) struct Native<'a> {
+    pub effects: &'a mut Effects,
+    pub timer: Option<&'a mut FrameTimer>,
+    pub linear: &'a wgpu::Sampler,
+    /// A program WebGL draws that the engine cannot build routes the frame.
+    pub unsupported: &'a mut Vec<Unsupported>,
 }
 
-impl Exec<'_> {
-    /// A level with staged layers into `target` (the region's size).
-    pub(crate) fn render_staged(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        plan: &CompPlan,
-        region: Option<Region>,
-        target: &Target,
-    ) -> Vec<Resolved> {
-        let work = work_region(plan, region);
-        if work == region {
-            return self.render_staged_into(encoder, plan, region, target);
-        }
-        let (w, h) = work.map_or((plan.width, plan.height), |g| (g.width, g.height));
-        let scratch = self.pool.take_working(self.device, w, h, self.precision);
-        let resolved = self.render_staged_into(encoder, plan, work, &scratch);
-        let r = region.expect("a work region differs only under a region");
-        let (wx, wy, wh) = work.map_or((0, 0, plan.height), |g| (g.x, g.y, g.height));
-        // GL row order: memory row k of a target is picture row (top + height − 1 − k).
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &scratch.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: r.x - wx,
-                    y: wy + wh - r.y - r.height,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+/// Everything a chain records with.
+pub(crate) struct Gpu<'c> {
+    device: &'c wgpu::Device,
+    queue: &'c wgpu::Queue,
+    encoder: &'c mut wgpu::CommandEncoder,
+    pool: &'c mut TargetPool,
+    precision: Precision,
+    /// Intermediates, given back after the frame is submitted.
+    taken: &'c mut Vec<Target>,
+    effects: &'c mut Effects,
+    timer: Option<&'c mut FrameTimer>,
+    linear: &'c wgpu::Sampler,
+    unsupported: &'c mut Vec<Unsupported>,
+}
+
+impl<'c> Gpu<'c> {
+    pub(crate) fn of(cx: &'c mut EffectContext<'_>) -> Option<Gpu<'c>> {
+        let native = cx.native.as_mut()?;
+        Some(Gpu {
+            device: cx.device,
+            queue: cx.queue,
+            encoder: &mut *cx.encoder,
+            pool: &mut *cx.pool,
+            precision: cx.precision,
+            taken: &mut *cx.taken,
+            effects: &mut *native.effects,
+            timer: native.timer.as_deref_mut(),
+            linear: native.linear,
+            unsupported: &mut *native.unsupported,
+        })
+    }
+
+    fn take(&mut self, w: u32, h: u32) -> Target {
+        self.pool.take_working(self.device, w, h, self.precision)
+    }
+
+    /// An exact copy of `source` in a new working target.
+    pub(crate) fn copy_of(&mut self, source: &Target) -> Target {
+        let out = self.take(source.width(), source.height());
+        self.encoder.copy_texture_to_texture(
+            source.texture.as_image_copy(),
+            out.texture.as_image_copy(),
             wgpu::Extent3d {
-                width: r.width,
-                height: r.height,
+                width: out.width(),
+                height: out.height(),
                 depth_or_array_layers: 1,
             },
         );
-        self.taken.push(scratch);
-        resolved
+        out
     }
 
-    fn render_staged_into(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        plan: &CompPlan,
-        region: Option<Region>,
-        target: &Target,
-    ) -> Vec<Resolved> {
-        let mut resolved = Vec::with_capacity(plan.draws.len());
-        let mut start = 0;
-        let mut drawn = false;
-        for (i, draw) in plan.draws.iter().enumerate() {
-            let Content::Staged(stage) = &draw.content else {
-                continue;
-            };
-            resolved.extend(self.render_run(
-                encoder,
-                plan,
-                &plan.draws[start..i],
-                region,
-                target,
-                drawn,
-            ));
-            drawn = true;
-            resolved.push(self.run_stage(encoder, plan, draw, stage, region, target));
-            start = i + 1;
+    /// `input` in E (a new target), or `input` itself in Standard.
+    fn encode_e(&mut self, input: &Target, working: WorkingEncoding) -> Target {
+        if working == WorkingEncoding::Standard {
+            return input.clone();
         }
-        if start < plan.draws.len() {
-            resolved.extend(self.render_run(
-                encoder,
-                plan,
-                &plan.draws[start..],
-                region,
-                target,
-                true,
-            ));
-        }
-        resolved
+        let out = self.take(input.width(), input.height());
+        self.simple_pass(SimpleOp::EncodeE, input, &out);
+        self.taken.push(out.clone());
+        out
     }
 
-    /// One staged layer onto `target`.
-    fn run_stage(
+    /// `result` (in E) back in the working encoding.
+    fn decode_e(&mut self, result: Target, working: WorkingEncoding) -> Target {
+        if working == WorkingEncoding::Standard {
+            return result;
+        }
+        let out = self.take(result.width(), result.height());
+        self.simple_pass(SimpleOp::DecodeE, &result, &out);
+        self.taken.push(result);
+        out
+    }
+
+    /// The chain on `input`: the last output, or `None` when no effect ran.
+    /// Intermediates go to `taken`; the result does not.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn chain(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        plan: &CompPlan,
-        draw: &Draw,
-        stage: &Stage,
-        region: Option<Region>,
-        target: &Target,
-    ) -> Resolved {
-        let (w, h) = (target.width(), target.height());
-        let lf = self.pool.take_working(self.device, w, h, self.precision);
-        self.render_comp(encoder, &stage.content, region, &lf);
-        let coordinates = effect_coordinates(region, (plan.width, plan.height), (w, h));
-        let mut current = lf;
-        for step in &stage.effects {
-            if let Some(next) = self.run_effect(
-                encoder,
-                &draw.layer,
-                step,
-                &current,
-                Some(target),
-                stage.time,
-                coordinates,
-            ) {
-                self.taken.push(std::mem::replace(&mut current, next));
+        layer: &str,
+        steps: &[EffectStep],
+        time: f64,
+        input: &Target,
+        backdrop: Option<&Target>,
+        coordinates: ([f64; 4], [f64; 2], [f64; 2]),
+        working: WorkingEncoding,
+    ) -> Option<Target> {
+        let input = self.encode_e(input, working);
+        let backdrop = backdrop.map(|b| self.encode_e(b, working));
+        let mut current: Option<Target> = None;
+        for step in steps {
+            let from = current.as_ref().unwrap_or(&input).clone();
+            if let Some(next) =
+                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates)
+                && let Some(previous) = current.replace(next)
+            {
+                self.taken.push(previous);
             }
         }
-        match &stage.transition {
-            None => self.composite(encoder, &current, target, stage.alpha),
-            Some(t) => {
-                // `withLayer = copyFbo(acc)`, the layer composited onto it.
-                let with_layer = self.pool.take_working(self.device, w, h, self.precision);
-                copy(encoder, target, &with_layer);
-                self.composite(encoder, &current, &with_layer, stage.alpha);
-                match self.run_transition(encoder, &draw.layer, t, target, &with_layer, stage.time)
-                {
-                    Some(out) => {
-                        copy(encoder, &out, target);
-                        self.taken.push(out);
-                    }
-                    // A program that cannot run: `acc = withLayer`.
-                    None => copy(encoder, &with_layer, target),
-                }
-                self.taken.push(with_layer);
-            }
-        }
-        let matrix = match region {
-            Some(g) => [
-                f64::from(g.width),
-                0.0,
-                0.0,
-                f64::from(g.height),
-                f64::from(g.x),
-                f64::from(g.y),
-            ],
-            None => [
-                f64::from(plan.width),
-                0.0,
-                0.0,
-                f64::from(plan.height),
-                0.0,
-                0.0,
-            ],
-        };
-        let resolved = Resolved {
-            matrix,
-            view: Some(current.view.clone()),
-            depth: None,
-            alpha: stage.alpha,
-            solid: None,
-            from_fbo: true,
-            uv: [0.0, 0.0, 1.0, 1.0],
-            layer: draw.layer.clone(),
-        };
-        self.taken.push(current);
-        resolved
-    }
-
-    /// `drawFbo(res, W, H, alpha)`: premultiplied source-over, 1:1.
-    fn composite(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        source: &Target,
-        target: &Target,
-        alpha: f64,
-    ) {
-        let (w, h) = (target.width(), target.height());
-        let u = QuadUniform {
-            m: [
-                [w as f32, 0.0, 0.0, 0.0],
-                [0.0, h as f32, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ],
-            res: [w as f32, h as f32, 0.0, 0.0],
-            uv: [0.0, 0.0, 1.0, 1.0],
-            color: [alpha as f32, 1.0, 0.0, 0.0],
-        };
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm stage composite"),
-            size: UNIFORM_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&buffer, 0, bytes_of(&u));
-        let quad = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm stage composite"),
-            layout: &self.pipelines.quad_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<QuadUniform>() as u64),
-                }),
-            }],
-        });
-        let tex = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm stage composite source"),
-            layout: &self.pipelines.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.pipelines.linear),
-                },
-            ],
-        });
-        let mut pass = begin(encoder, target, "pm stage composite", wgpu::LoadOp::Load);
-        pass.set_pipeline(self.pipelines.draw(target.format()));
-        pass.set_bind_group(0, &quad, &[0]);
-        pass.set_bind_group(1, &tex, &[]);
-        pass.draw(0..4, 0..1);
+        current.map(|r| self.decode_e(r, working))
     }
 
     fn fallback(&mut self, layer: &str, definition: &str) {
@@ -337,10 +193,8 @@ impl Exec<'_> {
 
     /// `runEffects` for one effect: its passes from `input`; the output, or
     /// `None` when the effect is skipped.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
         layer: &str,
         step: &EffectStep,
         input: &Target,
@@ -356,12 +210,12 @@ impl Exec<'_> {
             .program(device, DefinitionKind::Effect, &step.definition, format)
             .is_err()
         {
-            // The plan only stages ready programs; a build failure here is
+            // The plan only prepares ready programs; a build failure here is
             // engine-only (WebGL draws it): route the frame.
             self.fallback(layer, &step.definition);
             return None;
         }
-        let span = self.timer.as_mut().and_then(|t| {
+        let span = self.timer.as_deref_mut().and_then(|t| {
             t.begin(Span {
                 kind: DefinitionKind::Effect,
                 definition: DefinitionId::from(step.definition.as_str()),
@@ -369,8 +223,8 @@ impl Exec<'_> {
                 instance: Some(EffectInstanceId::from(step.instance.as_str())),
             })
         });
-        if let (Some(timer), Some((b, _))) = (&self.timer, span) {
-            timer.mark(device, encoder, &input.view, b);
+        if let (Some(timer), Some((b, _))) = (self.timer.as_deref(), span) {
+            timer.mark(device, self.encoder, &input.view, b);
         }
         let mut outputs: Vec<Target> = Vec::new();
         for pass in 0..step.passes {
@@ -397,15 +251,14 @@ impl Exec<'_> {
                 .program(device, DefinitionKind::Effect, &step.definition, format)
                 .expect("built above");
             param_calls(program, &step.params, &mut calls);
-            let previous = outputs.last().unwrap_or(input);
+            let previous = outputs.last().unwrap_or(input).clone();
             let units: [Option<&Target>; 3] = [
-                Some(previous),
+                Some(&previous),
                 step.keep_orig.then_some(input),
                 backdrop.filter(|_| step.backdrop),
             ];
-            let out = self.pool.take_working(device, w, h, self.precision);
+            let out = self.take(w, h);
             self.legacy_pass(
-                encoder,
                 DefinitionKind::Effect,
                 &step.definition,
                 &calls,
@@ -414,23 +267,25 @@ impl Exec<'_> {
             );
             outputs.push(out);
         }
-        if let (Some(timer), Some((_, e)), Some(last)) = (&self.timer, span, outputs.last()) {
-            timer.mark(device, encoder, &last.view, e);
+        if let (Some(timer), Some((_, e)), Some(last)) =
+            (self.timer.as_deref(), span, outputs.last())
+        {
+            timer.mark(device, self.encoder, &last.view, e);
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
         if step.clamp {
-            let clamped = self.pool.take_working(device, w, h, self.precision);
-            self.clamp_pass(encoder, &result, &clamped);
+            let clamped = self.take(w, h);
+            self.simple_pass(SimpleOp::Clamp, &result, &clamped);
             self.taken.push(std::mem::replace(&mut result, clamped));
         }
         Some(result)
     }
 
-    /// `runTransition`: the output, or `None` when the program cannot run.
+    /// `runTransition` from `before` and `with_layer` (both in E): the
+    /// output, or `None` when the program cannot run.
     pub(crate) fn run_transition(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
         layer: &str,
         step: &TransitionStep,
         before: &Target,
@@ -448,7 +303,7 @@ impl Exec<'_> {
             self.fallback(layer, &step.definition);
             return None;
         }
-        let span = self.timer.as_mut().and_then(|t| {
+        let span = self.timer.as_deref_mut().and_then(|t| {
             t.begin(Span {
                 kind: DefinitionKind::Transition,
                 definition: DefinitionId::from(step.definition.as_str()),
@@ -479,20 +334,19 @@ impl Exec<'_> {
             .program(device, DefinitionKind::Transition, &step.definition, format)
             .expect("built above");
         param_calls(program, &step.params, &mut calls);
-        let out = self.pool.take_working(device, w, h, self.precision);
-        if let (Some(timer), Some((b, _))) = (&self.timer, span) {
-            timer.mark(device, encoder, &from.view, b);
+        let out = self.take(w, h);
+        if let (Some(timer), Some((b, _))) = (self.timer.as_deref(), span) {
+            timer.mark(device, self.encoder, &from.view, b);
         }
         self.legacy_pass(
-            encoder,
             DefinitionKind::Transition,
             &step.definition,
             &calls,
             &[Some(from), Some(to)],
             &out,
         );
-        if let (Some(timer), Some((_, e))) = (&self.timer, span) {
-            timer.mark(device, encoder, &out.view, e);
+        if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
+            timer.mark(device, self.encoder, &out.view, e);
         }
         Some(out)
     }
@@ -500,10 +354,8 @@ impl Exec<'_> {
     /// One draw of a legacy program into `out` (cleared to transparent,
     /// blending off), with the compositor's uniform calls and texture
     /// units.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn legacy_pass(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
         kind: DefinitionKind,
         definition: &str,
         calls: &[(String, Call)],
@@ -514,7 +366,7 @@ impl Exec<'_> {
         let queue = self.queue;
         let format = out.format();
         let dummy = self.effects.dummy(device, queue, format);
-        let linear = &self.pipelines.linear;
+        let linear = self.linear;
         let program = self
             .effects
             .program(device, kind, definition, format)
@@ -582,7 +434,7 @@ impl Exec<'_> {
             .expect("built above")
             .clone();
         let mut pass = begin(
-            encoder,
+            self.encoder,
             out,
             "pm legacy glsl",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -593,15 +445,16 @@ impl Exec<'_> {
         pass.draw(0..4, 0..1);
     }
 
-    /// `clamp: true`: the effect's output limited to 0..1.
-    fn clamp_pass(&mut self, encoder: &mut wgpu::CommandEncoder, source: &Target, out: &Target) {
+    /// A per-pixel pass of `source` into `out`: `clamp: true` (0..1), or
+    /// the E encode and decode around legacy programs.
+    fn simple_pass(&mut self, op: SimpleOp, source: &Target, out: &Target) {
         let pipeline = self
             .effects
-            .clamp_pipeline(self.device, out.format())
+            .simple_pipeline(self.device, op, out.format())
             .clone();
         let layout = pipeline.get_bind_group_layout(0);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm effect clamp"),
+            label: Some("pm effect pixel pass"),
             layout: &layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -609,15 +462,115 @@ impl Exec<'_> {
             }],
         });
         let mut pass = begin(
-            encoder,
+            self.encoder,
             out,
-            "pm effect clamp",
+            "pm effect pixel pass",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..4, 0..1);
     }
+}
+
+/// An effect chain prepared by [`Effects`] (the compositor's
+/// `PreparedEffects::passes`).
+pub(crate) struct Chain {
+    pub layer: String,
+    pub steps: Vec<EffectStep>,
+    /// `u_time`: the level's time in seconds.
+    pub time: f64,
+    /// The steps' program sources (a hot reload changes the key).
+    pub sources: Vec<Option<pm_glsl::Key>>,
+}
+
+impl EffectPasses for Chain {
+    fn key(&self) -> Vec<u8> {
+        format!(
+            "effects|{}|{:?}|{:?}|{:?}",
+            self.layer,
+            self.time.to_bits(),
+            self.steps,
+            self.sources
+        )
+        .into_bytes()
+    }
+
+    fn record(
+        &self,
+        cx: &mut EffectContext<'_>,
+        input: Covered<'_>,
+        backdrop: Option<Covered<'_>>,
+    ) -> Result<Option<Target>, String> {
+        let full = cx.full;
+        let working = cx.working;
+        let rect = input.rect;
+        let region = (rect != Region::full(full.0, full.1)).then_some(rect);
+        let coordinates = effect_coordinates(region, full, (rect.width, rect.height));
+        let mut gpu = Gpu::of(cx).ok_or("the effect chain needs the renderer that prepared it")?;
+        let out = gpu.chain(
+            &self.layer,
+            &self.steps,
+            self.time,
+            input.target,
+            backdrop.map(|b| b.target),
+            coordinates,
+            working,
+        );
+        if let Some(t) = &out {
+            gpu.taken.push(t.clone());
+        }
+        Ok(out)
+    }
+}
+
+/// A transition prepared by [`Effects`].
+pub(crate) struct Transition {
+    pub layer: String,
+    pub step: TransitionStep,
+    pub time: f64,
+    pub source: Option<pm_glsl::Key>,
+}
+
+impl TransitionPasses for Transition {
+    fn key(&self) -> Vec<u8> {
+        format!(
+            "transition|{}|{:?}|{:?}|{:?}",
+            self.layer,
+            self.time.to_bits(),
+            self.step,
+            self.source
+        )
+        .into_bytes()
+    }
+
+    fn record(
+        &self,
+        cx: &mut EffectContext<'_>,
+        before: Covered<'_>,
+        with_layer: Covered<'_>,
+    ) -> Result<Option<Target>, String> {
+        let working = cx.working;
+        let mut gpu = Gpu::of(cx).ok_or("the transition needs the renderer that prepared it")?;
+        let b = gpu.encode_e(before.target, working);
+        let w = gpu.encode_e(with_layer.target, working);
+        let Some(out) = gpu.run_transition(&self.layer, &self.step, &b, &w, self.time) else {
+            return Ok(None);
+        };
+        let out = gpu.decode_e(out, working);
+        gpu.taken.push(out.clone());
+        Ok(Some(out))
+    }
+}
+
+/// Shares a prepared chain with the compositor.
+pub(crate) fn chain_passes(chain: Chain) -> Arc<dyn EffectPasses> {
+    Arc::new(chain)
+}
+
+/// Shares a prepared transition with the compositor.
+pub(crate) fn transition_passes(t: Transition) -> Arc<dyn TransitionPasses> {
+    Arc::new(t)
 }
 
 fn begin<'e>(
@@ -642,19 +595,6 @@ fn begin<'e>(
         occlusion_query_set: None,
         multiview_mask: None,
     })
-}
-
-/// `copyFbo`: an exact copy (same size and format).
-fn copy(encoder: &mut wgpu::CommandEncoder, source: &Target, target: &Target) {
-    encoder.copy_texture_to_texture(
-        source.texture.as_image_copy(),
-        target.texture.as_image_copy(),
-        wgpu::Extent3d {
-            width: target.width(),
-            height: target.height(),
-            depth_or_array_layers: 1,
-        },
-    );
 }
 
 #[cfg(test)]

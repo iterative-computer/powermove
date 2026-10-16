@@ -2154,6 +2154,7 @@ dependencies = [
  "pm-model",
  "pm-protocol",
  "pm-time",
+ "pm-vector",
  "png",
  "pollster",
  "regex",

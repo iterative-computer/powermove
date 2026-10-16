@@ -577,9 +577,18 @@ fn effects_on_groups_and_inside_precomps() {
     let staged = plan
         .draws
         .iter()
-        .filter(|d| matches!(d.content, pm_render::plan::Content::Staged(_)))
+        .filter(|d| match &d.content {
+            pm_render::plan::Content::Composite(n) => matches!(
+                n.as_ref(),
+                pm_render::composite::Node::Layer(l) if l.effects.is_some()
+            ),
+            _ => false,
+        })
         .count();
-    assert_eq!(staged, 2, "the group and the precomp layer are staged");
+    assert_eq!(
+        staged, 2,
+        "the group and the precomp layer go through their own targets with effects"
+    );
 }
 
 #[test]
