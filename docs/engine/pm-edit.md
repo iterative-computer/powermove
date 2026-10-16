@@ -159,25 +159,42 @@ never counts as a mismatch (rule 4):
 
 ## Tests and results
 
-All measured on 2026-10-14 at this branch.
+All measured on 2026-10-14 and 2026-10-15 at this branch.
 
 - **Generated vectors** (`tests/vectors/generate-edit-vectors.ts` under bun, the
   TypeScript edits on seeded random documents; `tests/edit_parity.rs` replays them
-  with pm-wasm's production expression adapter): 1,717 cases (reparent 323, move
-  to group 238, ungroup 180, group placement 164, align 236, size anchor capture
-  166, anchor reference 27, anchor moved 27, leave attributes 89, material peers
-  207, split text 60), 916,325 numbers, 896,977 bit-identical, max relative error
-  9.5e-10; 3,159 key times in difference 1 and 7 values in difference 2; 257 error
-  messages identical; 0 mismatches.
+  with pm-wasm's production expression adapter). Text is measured on both sides
+  through the same synthetic canvas (widths and Blink-style ink derived from the
+  font string, tracking, alignment, and text): the generator runs
+  `legacy/gl/raster.ts`'s `PM.raster` and `PM.textLayout` over it, the harness
+  passes the same functions to pm-text's wrapping and glyph units, so font anchor
+  capture, the font anchor reference, its Pan Behind rescale, and split text's
+  `font_offset` are compared end to end. The committed set (default seed):
+  2,359 cases (reparent 323, move to group 238, ungroup 180, group placement 164,
+  align 236, size anchor capture 166, anchor reference 27 and font 214, anchor
+  moved 27 and font 106, font anchor capture 242, leave attributes 89, material
+  peers 207, split text 60 and measured 80), 1,104,794 numbers, 1,085,446
+  bit-identical, max relative error 9.5e-10; 3,159 key times in difference 1 and
+  7 values in difference 2 (max 1.5e-8 relative); 257 error messages identical;
+  0 mismatches.
+- **Other seeds** (`PM_EDIT_SEED`, `PM_EDIT_SCALE=2`, written outside the
+  repository and replayed with `PM_EDIT_VECTORS`): seeds 7, 99, 4242, 1, 31337,
+  and 2026, 4,555 to 4,834 cases each (28,206 in all), 0 mismatches in each. Key
+  times in difference 1 at most 1.07 ticks off outside the NTSC drift (seed
+  2026; 0.95 on seed 7, 0.77 on seed 4242); values in difference 2 at most
+  1.4e-7 relative (26 values, seed 99); max relative error elsewhere 1.0e-9.
 - **Corpus v1** (`PM_EDIT_CORPUS` over the 132 `loaded.json` of
-  `v1-20261012-230504-ae47a3b3`, vectors written outside the repository): 2,038
+  `v1-20261012-230504-ae47a3b3`, vectors written outside the repository): 3,154
   cases (reparent 416, move to group 443, ungroup 9, group placement 203, align
-  467, size anchor capture 354, leave attributes 146), 2,269,537 numbers,
-  2,267,949 bit-identical, max relative error 2.8e-14, 0 mismatches. Not compared:
-  163 align cases on text (the bun harness has no canvas fonts), 103 cases on 3D
-  objects and model groups (host-only in Phase 1), 3 align cases whose TypeScript
-  bounds rasterize vector paths (no canvas in the harness). The corpus has no
-  shared materials or split text; those kernels are covered by the generated set.
+  467, size anchor capture 354, leave attributes 146, and on the corpus's text
+  layers font anchor capture 834, font anchor reference 170, font Pan Behind 2,
+  measured split text 110), 9,480,351 numbers, 9,478,763 bit-identical, max
+  relative error 2.8e-14, 0 mismatches. Not compared: 163 align cases on text
+  (the TypeScript bounds need a real canvas font), 103 cases on 3D objects and
+  model groups (host-only in Phase 1), 3 align cases whose TypeScript bounds
+  rasterize vector paths (no canvas in the harness). The corpus has no shared
+  materials; that kernel is covered by the generated sets, the pipeline test, and
+  the e2e spec.
 - **Pipeline** (`engine-doc/edits.test.ts`, vitest with the real pm-wasm module):
   the same edit script (reparent, unparent, group, move in and out, two ungroups
   with bakes, size anchor capture and Pan Behind, align, Leave all attributes, and
@@ -204,6 +221,21 @@ All measured on 2026-10-14 at this branch.
   `PM.Edit.mutate`'s result object instead of its created layers (fixed; the
   split text, font anchor, and pm-edit specs rerun in `audit`: 0 mismatches,
   `edit.splitText` compared 2).
+- **e2e rerun on 2026-10-15** (after the comparator, dispatch, and font parity
+  fixes; same conditions): `native-edit-kernels.spec.ts` gained a second test
+  (a shared shader channel keyed on a 24 fps composition with an off-grid layer
+  start, its peer's keys within 2 ticks of the shifted source keys; move to group
+  into a rotated, scaled group and out with the world pose kept; Leave all
+  attributes keeping the pixels) and its Pan Behind step now checks the artwork's
+  box. 10 specs (19 tests: pm-edit, font and size anchors, split text, group
+  transforms, 2.5D groups, alignment, pre-compose, compositions, anchor
+  indicators) with the flag `on`, `audit`, and `off`: 18 passed, 1 failed in each
+  mode, the failure the quarantined `precomp.spec.ts:46`. `audit`: 39,980 dual
+  answers over 21 page sessions, 32 of them `edit.*` (align 1, anchor moved 2,
+  anchor reference 1, size anchor capture 2, group placement 10, leave attributes
+  2, move to group 2, reparent 3, split text 2, material peers 2, ungroup 3), 0
+  mismatches; 173 audits, 0 failures, 0 mirror mismatches. Edit fallbacks: `ink`
+  7 and `fonts` 6, nothing else.
 - **What fell back in the e2e runs**: `ink` (glyph ink, below), `fonts` (the first
   text question of a page, before the registry's answers arrive), and one `host`
   (a 3D group's bounds).
@@ -218,5 +250,6 @@ All measured on 2026-10-14 at this branch.
   placement and align around text, split text's font offset) needs outlines, and
   the Phase 1 registry serves metrics-and-shaping subsets only
   (`pm_fonts_outlines` stays off), so those questions answer `{ink}` and run the
-  TypeScript edit. The kernels themselves are parity-tested over given layouts and
-  offsets; they switch on in the app when the text lane serves outlines.
+  TypeScript edit. The kernels themselves are parity-tested end to end on a
+  synthetic canvas (generated and corpus text, above); they switch on in the app
+  when the text lane serves outlines.
