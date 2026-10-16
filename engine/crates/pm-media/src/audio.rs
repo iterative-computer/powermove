@@ -34,7 +34,7 @@
 //!
 //! A seek to program sample `n` starts decoding [`AudioStreamInfo::preroll`]
 //! samples earlier (MDCT overlap, the MP3 bit reservoir, the Opus decoder
-//! state), and at least the
+//! state, HE-AAC v2's wait for a Parametric Stereo header), and at least the
 //! codec delay a fresh decoder drops (HE-AAC's 4,224 samples are more than
 //! AAC's pre-roll), and discards everything before `n`. Lossless codecs need
 //! no pre-roll and seek bit-exactly; lossy codecs converge to the sequential
@@ -161,6 +161,9 @@ pub struct AudioStreamInfo {
     pub length: Option<u64>,
     /// Samples decoded and discarded before a seek target.
     pub preroll: u64,
+    /// AAC with Parametric Stereo (HE-AAC v2): seeks pre-roll
+    /// [`PS_PREROLL_SECONDS`].
+    pub parametric_stereo: bool,
     /// The timebase places frames to the sample (see the module notes).
     pub sample_exact_timestamps: bool,
 }
@@ -176,9 +179,28 @@ impl AudioStreamInfo {
     }
 }
 
-/// Decode pre-roll per codec, in samples at the stream rate.
-fn preroll_for(codec: ff::AVCodecID, sample_rate: u32) -> u64 {
+/// Pre-roll of AAC with Parametric Stereo (HE-AAC v2), in seconds. A
+/// fresh decoder applies no stereo until a frame carries a PS header
+/// (FFmpeg copies the mono core to both channels before it, and the core's
+/// PS processing changes the left channel too), and encoders repeat that
+/// header only every so often. Measured on `afconvert -d aacp` encodes (32,
+/// 44.1 and 48 kHz; tones, swept and gated tones, noise, mono content; 24 to
+/// 48 kbit/s; fresh starts every 0.25 s): a fresh decoder is off by up to
+/// the full signal for as long as 1.86 s, then within the sequential
+/// decode's SBR noise. A block that started inside that window would differ
+/// from legacy (one decode from the start) by the signal's level, so the
+/// pre-roll is about twice the longest wait.
+pub const PS_PREROLL_SECONDS: u64 = 4;
+
+/// Decode pre-roll per codec, in samples at the stream rate. `profile` is
+/// FFmpeg's (`AV_PROFILE_*`, from the container or the probe's decode).
+fn preroll_for(codec: ff::AVCodecID, profile: c_int, sample_rate: u32) -> u64 {
     match codec {
+        ff::AV_CODEC_ID_AAC | ff::AV_CODEC_ID_AAC_LATM
+            if profile == ff::AV_PROFILE_AAC_HE_V2 as c_int =>
+        {
+            sample_rate as u64 * PS_PREROLL_SECONDS
+        }
         // Lossless and PCM: every packet decodes on its own.
         ff::AV_CODEC_ID_FLAC
         | ff::AV_CODEC_ID_ALAC
@@ -753,6 +775,7 @@ impl AudioDecoder {
                     extra_priming: 0,
                     length: None,
                     preroll: 0,
+                    parametric_stereo: false,
                     sample_exact_timestamps: false,
                 },
                 codec_delay: 0,
@@ -856,7 +879,19 @@ impl AudioDecoder {
             out.info.priming = ffmpeg_skip + extra;
             out.info.extra_priming = extra;
             out.info.length = length;
-            out.info.preroll = preroll_for((*par).codec_id, rate);
+            // The decoder reads the profile from the codec configuration
+            // (explicit PS signalling); the probe's decode finds implicit PS.
+            let profile = if (*ctx).profile == ff::AV_PROFILE_AAC_HE_V2 as c_int {
+                (*ctx).profile
+            } else {
+                (*par).profile
+            };
+            out.info.preroll = preroll_for((*par).codec_id, profile, rate);
+            out.info.parametric_stereo = profile == ff::AV_PROFILE_AAC_HE_V2 as c_int
+                && matches!(
+                    (*par).codec_id,
+                    ff::AV_CODEC_ID_AAC | ff::AV_CODEC_ID_AAC_LATM
+                );
             out.codec_delay = (*ctx).initial_padding.max(0) as i64;
             out.info.sample_exact_timestamps = tb.1 as i128 >= tb.0 as i128 * rate as i128;
             out.pending.data = vec![Vec::new(); out.info.channels()];

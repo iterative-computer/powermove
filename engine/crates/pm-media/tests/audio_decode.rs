@@ -589,6 +589,15 @@ fn coarse_timebase_seeks_start_near_their_target() {
         }
         None => eprintln!("afconvert is missing: HE-AAC not covered"),
     }
+    // HE-AAC v2: a fresh decoder has no stereo until a Parametric Stereo
+    // header, which Apple's encoder repeats about every 1.8 s.
+    match afconvert_aac("c-aac-ps", source, "aacp", "32000", &["mkv"]) {
+        Some(ps) => {
+            files.push(("c-aac-ps.m4a".into(), ps[0].clone(), false));
+            files.push(("c-aac-ps.mkv".into(), ps[1].clone(), false));
+        }
+        None => eprintln!("afconvert is missing: HE-AAC v2 not covered"),
+    }
     for (name, file, lossless) in files {
         let name = name.as_str();
         let (d, pcm) = decode_all(&file);
@@ -632,10 +641,12 @@ fn coarse_timebase_seeks_start_near_their_target() {
             }
         }
         // Lossy decoders converge within the pre-roll; an off-by-a-frame
-        // placement would differ by the signal's full swing (about 1). AAC's
-        // noise substitution is random by design (its generator runs across
-        // frames): up to 7.2e-3 where the tone stops at the end. The same
-        // AAC encoded without it seeks onto the sequential decode exactly.
+        // placement would differ by the signal's full swing (about 1), and
+        // HE-AAC v2 from a decoder that has not seen a Parametric Stereo
+        // header yet by the signal's level (0.3). AAC's noise substitution
+        // is random by design (its generator runs across frames): up to
+        // 7.2e-3 where the tone stops at the end. The same AAC encoded
+        // without it seeks onto the sequential decode exactly.
         let bound = if name.starts_with("c-aac") {
             1e-2
         } else {
@@ -644,7 +655,8 @@ fn coarse_timebase_seeks_start_near_their_target() {
         assert!(worst < bound, "{name}: seek differs by {worst}");
         if name != "c-alac.mkv" {
             // Pre-roll, anchor spacing, the 2,048 samples read, and the
-            // codec's frame: a few dozen packets, never the 30 s before.
+            // codec's frame: a few dozen packets, never the 30 s before
+            // (HE-AAC v2's 4 s pre-roll is 94 packets of 2,048 samples).
             let packet_bound = 60 + preroll / 2_048;
             assert!(
                 worst_packets <= packet_bound,
@@ -694,6 +706,80 @@ fn coarse_timebase_seeks_start_near_their_target() {
             );
         }
         eprintln!("{name}: seeks within {worst:e} of the sequential decode; packets {costs:?}");
+    }
+}
+
+/// HE-AAC v2 (AAC with SBR and Parametric Stereo) from `afconvert -d aacp`
+/// at 32, 44.1 and 48 kHz, in M4A and Matroska (coarse timebases, seeks from
+/// scanned anchors) and in MP4 and ADTS (placed by timestamps): every
+/// 65,536-sample block read in reverse, each from a fresh decoder, matches
+/// the sequential decode on both channels. A fresh decoder applies no
+/// stereo until a frame carries a PS header (Apple's encoder repeats it
+/// about every 1.8 s), so with AAC's 4,096-sample pre-roll almost every
+/// block differed by about 0.3 (the signal's level) for its first 1.2 to
+/// 1.9 s.
+#[test]
+fn he_aac_v2_blocks_match_the_sequential_decode() {
+    let mut covered = 0;
+    for rate in [32_000, 44_100, 48_000] {
+        let source =
+            format!("aevalsrc=exprs='0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)':s={rate}:d=40");
+        let Some(files) = afconvert_aac(
+            &format!("ps-{rate}"),
+            &source,
+            "aacp",
+            "32000",
+            &["mkv", "mp4", "aac"],
+        ) else {
+            eprintln!("afconvert is missing: HE-AAC v2 not covered");
+            return;
+        };
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            let (d, pcm) = decode_all(&file);
+            let info = d.info();
+            assert_eq!(info.sample_rate, rate, "{name}");
+            assert_eq!(info.channels(), 2, "{name}");
+            assert!(info.parametric_stereo, "{name}: PS not detected");
+            assert_eq!(info.preroll, 4 * rate as u64, "{name}");
+            let total = pcm[0].len() as u64;
+            let block = 65_536u64;
+            let blocks = total.div_ceil(block);
+            let mut s = AudioDecoder::open(&file, None).unwrap();
+            let mut worst = 0f32;
+            let mut worst_cost = 0;
+            for k in (0..blocks).rev() {
+                let before = s.packets_decoded();
+                s.seek_anchored(k * block).unwrap();
+                let mut out = vec![Vec::new(); 2];
+                s.read(&mut out, block as usize).unwrap();
+                assert_eq!(out[0].len() as u64, block.min(total - k * block), "{name}");
+                let diff = max_diff(&out, &pcm, (k * block) as usize);
+                assert!(diff < 1e-3, "{name}: block {k} differs by {diff}");
+                worst = worst.max(diff);
+                worst_cost = worst_cost.max(s.packets_decoded() - before);
+            }
+            // The 4 s pre-roll, an anchor spacing and the block: 2,048
+            // samples a packet.
+            let bound = (4 * rate as u64 + 4_096 + block) / 2_048 + 8;
+            assert!(
+                worst_cost <= bound,
+                "{name}: a block decoded {worst_cost} packets"
+            );
+            eprintln!(
+                "{name}: {blocks} blocks in reverse within {worst:e} of the sequential decode, \
+                 at most {worst_cost} packets each"
+            );
+            covered += 1;
+        }
+    }
+    assert_eq!(covered, 12);
+    // HE-AAC v1 keeps AAC's short pre-roll.
+    let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)':s=48000:d=5";
+    if let Some((m4a, _)) = he_aac("he-v1-short", source) {
+        let d = AudioDecoder::open(&m4a, None).unwrap();
+        assert!(!d.info().parametric_stereo);
+        assert_eq!(d.info().preroll, 4_096);
     }
 }
 
