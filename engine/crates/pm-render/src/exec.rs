@@ -135,15 +135,17 @@ impl Exec<'_> {
         }
     }
 
-    /// Resolves every draw's source, recording any passes it needs.
+    /// Resolves the sources of `draws` (of `plan`), recording any passes
+    /// they need.
     fn resolve(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
+        draws: &[Draw],
         region: Option<Region>,
     ) -> Vec<Resolved> {
-        let mut out = Vec::with_capacity(plan.draws.len());
-        for draw in &plan.draws {
+        let mut out = Vec::with_capacity(draws.len());
+        for draw in draws {
             let mut r = Resolved {
                 matrix: draw.matrix,
                 view: None,
@@ -194,12 +196,17 @@ impl Exec<'_> {
                             None => (child.width, child.height),
                         };
                         let target = self.pool.take_working(self.device, w, h, self.precision);
-                        let blend = if matches!(source, Source::Accumulate(_)) {
-                            PassBlend::Additive
+                        if matches!(source, Source::Accumulate(_)) {
+                            self.render_accumulation(encoder, child, child_region, &target);
                         } else {
-                            PassBlend::Over
-                        };
-                        self.render_comp_with(encoder, child, child_region, &target, blend);
+                            self.render_comp_with(
+                                encoder,
+                                child,
+                                child_region,
+                                &target,
+                                PassBlend::Over,
+                            );
+                        }
                         r.view = Some(target.view.clone());
                         self.prepare_level2(encoder, r, &target.texture, false);
                         r.from_fbo = true;
@@ -313,8 +320,49 @@ impl Exec<'_> {
         self.render_comp_with(encoder, plan, region, target, PassBlend::Over)
     }
 
-    /// [`Self::render_comp`] with the pass's blending: source-over, or
-    /// additive for motion-blur samples (`drawSample(true)`: `ONE, ONE`).
+    /// Motion-blur samples (`crate::motion`) accumulated additively
+    /// (`drawSample(true)`: `ONE, ONE`) into a cleared target, one pass per
+    /// sample: each sample's sources (nested compositions, group passes)
+    /// go back to the pool once its pass is recorded, so a blurred precomp
+    /// holds one sample's targets at a time, as today's `free(sample)`.
+    pub fn render_accumulation(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        region: Option<Region>,
+        target: &Target,
+    ) {
+        if plan.draws.is_empty() {
+            self.render_draws(
+                encoder,
+                plan,
+                &[],
+                region,
+                target,
+                PassBlend::Additive,
+                true,
+            );
+            return;
+        }
+        for (i, draw) in plan.draws.iter().enumerate() {
+            let mark = self.taken.len();
+            self.render_draws(
+                encoder,
+                plan,
+                std::slice::from_ref(draw),
+                region,
+                target,
+                PassBlend::Additive,
+                i == 0,
+            );
+            let done: Vec<Target> = self.taken.drain(mark..).collect();
+            for t in done {
+                self.pool.give(t);
+            }
+        }
+    }
+
+    /// [`Self::render_comp`] with the pass's blending.
     pub fn render_comp_with(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -323,7 +371,23 @@ impl Exec<'_> {
         target: &Target,
         blend: PassBlend,
     ) -> Vec<Resolved> {
-        let resolved = self.resolve(encoder, plan, region);
+        self.render_draws(encoder, plan, &plan.draws, region, target, blend, true)
+    }
+
+    /// Records `draws` of `plan` into `target` in one pass: cleared to the
+    /// plan's background first (`clear`), or drawn over what it holds.
+    #[allow(clippy::too_many_arguments)]
+    fn render_draws(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+        target: &Target,
+        blend: PassBlend,
+        clear_first: bool,
+    ) -> Vec<Resolved> {
+        let resolved = self.resolve(encoder, plan, draws, region);
         let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
         let (th, format) = (target.height(), target.format());
         // Draws keep full-frame coordinates; a region of interest moves the
@@ -480,7 +544,11 @@ impl Exec<'_> {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
+                    load: if clear_first {
+                        wgpu::LoadOp::Clear(clear)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -490,7 +558,7 @@ impl Exec<'_> {
             multiview_mask: None,
         });
         region_viewport(&mut pass, region, fw, fh, th);
-        if let Some(fill) = &fill_bind {
+        if let Some(fill) = fill_bind.as_ref().filter(|_| clear_first) {
             pass.set_pipeline(self.pipelines.background(format));
             pass.set_bind_group(0, &quad_bind, &[0]);
             pass.set_bind_group(1, fill, &[]);

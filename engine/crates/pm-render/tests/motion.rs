@@ -723,3 +723,49 @@ fn painter_sort_and_coplanar_order() {
     // Bottom to top: far, then the coplanar surface (lower, upper), then near.
     assert_eq!(order, ["far", "lower", "upper", "near"]);
 }
+
+#[test]
+fn blurred_precomps_hold_one_sample_at_a_time() {
+    // A 400 × 300 precomp sliding with 20 samples: today's compositor frees
+    // each sample's target after accumulating it; so does the engine.
+    let mut inner = layer(
+        "i",
+        "solid",
+        json!({ "color": "#FF6B1A", "w": 100.0, "h": 100.0 }),
+        10.0,
+        10.0,
+        4.0,
+    );
+    set(
+        &mut inner,
+        "rotation",
+        keys(json!(0), &[(0.0, json!(0)), (2.0, json!(180))]),
+    );
+    let mut pc = layer(
+        "pc",
+        "precomp",
+        json!({ "comp": "K", "w": 400, "h": 300 }),
+        0.0,
+        0.0,
+        4.0,
+    );
+    set(
+        &mut pc,
+        "position.x",
+        keys(json!(0), &[(0.0, json!(0)), (2.0, json!(200))]),
+    );
+    pc["mblur"] = json!(true);
+    let mut doc = project(600, 300, 4.0, no_fill(), vec![pc]);
+    composition(&mut doc, "K", 400, 300, 4.0, vec![inner]);
+    let doc = load(&doc);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut request = RenderRequest::sized(Size::new(600, 300), Precision::Float16);
+    request.motion_blur = MotionBlur::Samples(20);
+    let _ = render(&mut renderer, &doc, 0.5, &request);
+    let sample = 400 * 300 * 8;
+    let frame = 600 * 300 * 8;
+    let pooled = renderer.pooled_bytes();
+    eprintln!("pooled {pooled} bytes; one sample target {sample}, one frame target {frame}");
+    // The frame's row-order target, the accumulation, and one sample.
+    assert!(pooled <= (2 * frame + 2 * sample) as u64, "{pooled}");
+}
