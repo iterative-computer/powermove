@@ -42,9 +42,9 @@
 //!   within the bound clears its strikes.
 //!
 //! Measured during engine playback (docs/engine/export.md): isolated
-//! over-bound submissions, up to 18 ms of GPU span, dropped no frame (the
+//! over-bound submissions, up to 24 ms of GPU span, dropped no frame (the
 //! interactive engine renders ahead), and GPU spans of cheap bands taken
-//! during 4K playback reached 6 ms, so a strike only slows a pass down; it
+//! during 4K playback reached 9 ms, so a strike only slows a pass down; it
 //! never stops it.
 
 use std::collections::{HashMap, HashSet};

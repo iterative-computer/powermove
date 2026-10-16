@@ -150,7 +150,7 @@ previous span's end). Idle, spans match the work (a 16-row band of the
 heavy test below: 0.98 ms span, 1.6 ms wall; whole frame 5.4 ms span,
 6.3 ms wall). During 4K engine playback they still include the interactive
 engine's work that the GPU interleaves inside the span: cheap 720 px bands
-measured up to 6 ms. Devices without `TIMESTAMP_QUERY` fall back to wall
+measured up to 9.2 ms. Devices without `TIMESTAMP_QUERY` fall back to wall
 time.
 
 **Calibration.** Per-unit costs come from whole frames submitted while
@@ -302,7 +302,7 @@ measured.
 | e2e `engine-export.spec.ts` | Pass: the export sheet's H.264 and ProRes 4444 with alpha (`yuva444p12le`) come from the job engine (AVAssetWriter, no `Lavf` encoder tag), a text project from the current exporter (`Lavf`), one save panel each, nothing left beside them. `native-engine`, `export-mp4`, `export-destination` specs still pass |
 | Agent snapshots during 4K engine playback (Phase 2 row), 60 s per run, frame bridge test pattern at 60 fps on the 120 Hz panel, final code (r4 and r5, 2026-10-15) | Baselines: 0 drops of 3,587, jitter p99 0.24 and 0.23 ms. Light, 4 frames at 720 px every 2 s on a 24-layer 4K project: 0 drops of 3,587, 30 batches, batch p50 274 ms, p95 406 ms, max 462 ms, jitter p99 4.40 ms; 39 strikes, because GPU spans of these cheap bands reached 9.2 ms under contention. Back-to-back batches: r4 0 drops of 3,587, 534 batches (2,136 frames), jitter p50 4.04 ms, p99 8.34 ms, 1,222 irregular intervals; r5 0 drops of 3,587, 556 batches (2,224 frames), batch p95 103 ms, jitter p99 4.39 ms, 15 irregular intervals (the first pre-review busy run had 589 batches, jitter p99 8.11 ms, 41 irregular intervals) |
 | Over-bound passes during the same playback (r4): 2 frames at 3840 px of 1,500 solids in a full-size 4K precomposition, whose 16-row band takes about 6.7 ms of GPU time idle | Cold (first met during playback): 0 drops of 3,588, jitter p99 4.39 ms; 6 submissions during playback (the cold one, the calibration probe, 4 probes, then the probe limit), the largest GPU span 18.0 ms; no batch finished during playback, and it finished 428 ms after the stop. Warm (one agent turn before playback, 461 ms): 0 drops of 3,588, jitter p99 0.22 ms; 17 sliced submissions during playback, every one over the bound (the largest span 24.4 ms), each striking the pass and backing it off up to 5 s; the batch finished 345 ms after the stop |
-| Earlier rounds, same harness | Pre-review (wall time, unlimited 100 ms probes): light 30 batches, busy 589, 0 drops; the playback runs used solid layers only. r2 (wall time, probe limit, 96 solids at 1920 px in a precomposition, whose band is 0.3 to 0.6 ms of GPU time idle): 0 drops, but wall-time probes measured over the bound and the batch waited for the stop. r3 (GPU spans, a hard stop after 3 strikes): 0 drops in every run, but light snapshots finished 3 batches and busy 31, because contended spans of cheap bands crossed the bound. Summaries in `bridge-measurements/*-jobexport*.json` |
+| Earlier rounds, same harness | Pre-review (wall time, unlimited 100 ms probes): light 30 batches, busy 589, 0 drops; the playback runs used solid layers only. r2 (wall time, probe limit, 96 solids at 1920 px in a precomposition, whose band is 0.2 to 0.5 ms of GPU time idle): 0 drops, but wall-time probes measured over the bound and the batch waited for the stop. r3 (GPU spans, a hard stop after 3 strikes): 0 drops in every run, but light snapshots finished 3 batches and busy 31, because contended spans of cheap bands crossed the bound. Summaries in `bridge-measurements/*-jobexport*.json` |
 | Pipeline transparency (section 2, amendment 8), media corpus | ProRes 4444 XQ → `y416`: 1,148,760 samples, 0 differ (3,240 color samples under α = 0 not compared); ProRes 422 HQ → `v216`: 576,000 samples, 0 differ |
 | Codec generation, ProRes 422 from 422 HQ | Engine vs Apple's re-encode: max 0.000 CV at 10 bits; Y′CbCr PSNR 63.549 dB both (Δ 0.000) |
 | Codec generation, ProRes 4444 with alpha (premultiplied, amendment 8) | Max 1.603 CV at 10 bits overall, 0.000 beyond 8 px of α = 0; Y′CbCr PSNR Δ −0.184 dB, Y′ Δ −0.004 dB. Not met within 8 px of α = 0, as S2 found: Apple keeps the source's color under α = 0, a premultiplied pipeline cannot, and the 8 × 8 DCT carries it into the block |
@@ -362,7 +362,7 @@ It also changed, minimally:
   frame completions, so the job engine slices reactively.
 - **GPU spans under contention.** Spans leave out the queue wait but still
   include other clients' work the GPU interleaves inside them (cheap bands
-  measured up to 6 ms during 4K playback). Per-pass Metal command buffer
+  measured up to 9.2 ms during 4K playback). Per-pass Metal command buffer
   times (`gpuStartTime`/`gpuEndTime`) are not reachable through wgpu.
 - **The interactive engine's playback budget** stays a fixed 60 Hz
   (`pm-engine` `VIEWER_FRAME_BUDGET_US`) because viewers do not report
