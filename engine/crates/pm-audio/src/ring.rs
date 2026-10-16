@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use pm_protocol::clock::TransportState;
+use pm_protocol::common::TickRange;
 
 /// Frames per chunk.
 pub const CHUNK: usize = 256;
@@ -28,6 +29,9 @@ pub struct Tag {
     pub state: TransportState,
     /// Valid frames in the chunk.
     pub frames: u32,
+    /// The loop the clock line wraps by from this chunk on (`None` outside
+    /// a loop: before it, past it, in a grain).
+    pub loop_range: Option<TickRange>,
 }
 
 impl Default for Tag {
@@ -37,6 +41,7 @@ impl Default for Tag {
             epoch: 0,
             state: TransportState::Stopped,
             frames: 0,
+            loop_range: None,
         }
     }
 }
@@ -229,6 +234,7 @@ mod tests {
             epoch,
             state: TransportState::Playing,
             frames,
+            loop_range: None,
         }
     }
 

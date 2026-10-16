@@ -58,8 +58,6 @@ pub struct ClockCore {
     /// callback and the control side), so `seq` only grows.
     seq: Arc<AtomicU64>,
     last: Option<ClockSample>,
-    /// The loop range the transport set (published with the samples).
-    pub loop_range: Option<TickRange>,
 }
 
 impl ClockCore {
@@ -68,7 +66,6 @@ impl ClockCore {
             sample_rate,
             seq,
             last: None,
-            loop_range: None,
         }
     }
 
@@ -83,6 +80,10 @@ impl ClockCore {
     /// The device presents the first frame of a buffer at host time
     /// `presented_us` and it plays `heard`. Returns a sample to publish when
     /// the line changed or is due for a refresh.
+    ///
+    /// The line wraps by the loop range of the chunk heard (its tag), not by
+    /// the transport's: a run from before the loop start is a straight line
+    /// until it reaches the loop, and a run past the loop end never wraps.
     pub fn observe(
         &mut self,
         heard: Heard,
@@ -91,6 +92,7 @@ impl ClockCore {
     ) -> Option<ClockSample> {
         let media = heard.tag.media_ticks + heard.offset as i64 * ticks_per_frame(self.sample_rate);
         let state = heard.tag.state;
+        let loop_range: Option<TickRange> = heard.tag.loop_range;
         let rate = if state == TransportState::Stopped {
             PlaybackRate::STOPPED
         } else {
@@ -104,7 +106,7 @@ impl ClockCore {
                 (last.media_time_at(at).get() - media).abs() <= TICKS_PER_SECOND / 1000
             });
             // A new loop range changes how the line wraps: publish it at once.
-            let same_loop = last.loop_range == self.loop_range;
+            let same_loop = last.loop_range == loop_range;
             if same_line && same_loop && on_line && presented_us < last.host_time.get() + REFRESH_US
             {
                 return None;
@@ -120,14 +122,15 @@ impl ClockCore {
             rate,
             output_latency_us: latency_us,
             sample_rate: self.sample_rate,
-            loop_range: self.loop_range,
+            loop_range,
         };
         self.last = Some(sample);
         Some(sample)
     }
 
     /// A stopped line at `media` (pause, seek while paused), published by
-    /// the control side.
+    /// the control side. A stopped line does not loop, so it carries no
+    /// loop range.
     pub fn stopped(&mut self, epoch: u32, media: i64, now_us: u64, latency_us: u32) -> ClockSample {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let sample = ClockSample {
@@ -139,7 +142,7 @@ impl ClockCore {
             rate: PlaybackRate::STOPPED,
             output_latency_us: latency_us,
             sample_rate: self.sample_rate,
-            loop_range: self.loop_range,
+            loop_range: None,
         };
         self.last = Some(sample);
         sample
@@ -205,12 +208,17 @@ mod tests {
     use crate::ring::Tag;
 
     fn heard(media: i64, epoch: u32, offset: usize) -> Heard {
+        looped(media, epoch, offset, None)
+    }
+
+    fn looped(media: i64, epoch: u32, offset: usize, loop_range: Option<TickRange>) -> Heard {
         Heard {
             tag: Tag {
                 media_ticks: media,
                 epoch,
                 state: TransportState::Playing,
                 frames: 256,
+                loop_range,
             },
             offset,
         }
@@ -258,16 +266,39 @@ mod tests {
         assert!(a.loop_range.is_none());
         // Same line, too soon: nothing new.
         assert!(core.observe(heard(0, 1, 100), 1_002_083, 5000).is_none());
-        // The loop range changes; the media is still on the line.
-        core.loop_range = Some(pm_protocol::common::TickRange {
+        // The chunks heard enter a loop; the media is still on the line.
+        let range = Some(TickRange {
             start: Ticks::new(0).unwrap(),
             end: Ticks::new(TICKS_PER_SECOND).unwrap(),
         });
-        let b = core.observe(heard(0, 1, 200), 1_004_166, 5000).unwrap();
+        let b = core
+            .observe(looped(0, 1, 200, range), 1_004_166, 5000)
+            .unwrap();
         assert_eq!(b.epoch, a.epoch, "a loop range keeps the epoch");
         assert!(b.seq > a.seq);
-        assert_eq!(b.loop_range, core.loop_range);
-        assert!(core.observe(heard(0, 1, 300), 1_006_250, 5000).is_none());
+        assert_eq!(b.loop_range, range);
+        assert!(
+            core.observe(looped(0, 1, 300, range), 1_006_250, 5000)
+                .is_none()
+        );
+    }
+
+    /// The end of a run: the stopped sample is published once the ring has
+    /// played out, on the transport's next epoch. A callback that observed
+    /// the run's last chunk just before, and stores its sample after (a
+    /// higher `seq`, on the run's epoch), must not replace the stop.
+    #[test]
+    fn a_late_sample_of_an_ended_run_does_not_replace_the_stop() {
+        let seq = Arc::new(AtomicU64::new(0));
+        let mut device = ClockCore::new(48_000, seq.clone());
+        let mut control = ClockCore::new(48_000, seq);
+        let slot = ClockSlot::default();
+        let stop = control.stopped(4, TICKS_PER_SECOND, 2_000_000, 5000);
+        slot.store(stop);
+        let late = device.observe(heard(0, 3, 0), 2_000_100, 5000).unwrap();
+        assert!(late.seq > stop.seq);
+        assert!(slot.try_store(late));
+        assert_eq!(slot.latest(), Some(stop));
     }
 
     trait ValidateOk {
