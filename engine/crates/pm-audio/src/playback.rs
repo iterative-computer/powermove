@@ -1027,6 +1027,7 @@ impl RenderThread {
                 wait: !self.mixer.cache().has_workers(),
                 monitor_solo: self.solo.clone(),
                 meters: true,
+                no_stretch: false,
             };
             match self
                 .mixer

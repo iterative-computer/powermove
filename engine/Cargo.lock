@@ -1863,6 +1863,7 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-protocol",
+ "pm-stretch",
  "pm-time",
  "proptest",
  "rubato",

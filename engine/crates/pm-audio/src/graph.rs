@@ -24,7 +24,10 @@
 //! * Speed and time remapping are followed (appendix A item 10: today
 //!   speed is ignored and remapped clips are silent). Source time is
 //!   `pm_eval`'s `sourceTime` at every level, so audio stays with the
-//!   picture. Pitch follows speed (Phase 2; preservation is Phase 3b).
+//!   picture. The pitch is preserved by default (Signalsmith Stretch) or
+//!   follows the speed per clip (`pitch`, [`crate::conform::Pitch`]); a
+//!   conformed frame rate (Interpret Footage) scales the soundtrack's time
+//!   with the picture's.
 //! * A negative layer start plays from the right source time (the legacy
 //!   walk clamps `from` to 0 and shifts the clip).
 //! * Animated `audioMuted`, precomposition `on`, and groups enclosing a
@@ -38,6 +41,7 @@ use pm_eval::retime::RetimeCache;
 use pm_eval::{Comp, Evaluator, JsValue, Scope, node};
 use pm_model::{Document, JsString, Node, NodeKind};
 
+use crate::conform::{self, Pitch};
 use crate::error::{AudioError, Result};
 use crate::source::{Source, SourceCache};
 
@@ -110,6 +114,21 @@ pub struct VoicePlan {
     pub static_point: Option<Point>,
     /// The master time [`Self::static_point`] was evaluated at.
     pub static_at: f64,
+    /// How the pitch follows a speed change (`d.pitch`).
+    pub pitch: Pitch,
+    /// Source seconds per clip second from a conformed frame rate
+    /// (Interpret Footage on a video asset); 1 otherwise. Applied in
+    /// [`Point::source_time`].
+    pub conform: f64,
+    /// The read rate (source seconds per master second) when it is the
+    /// same everywhere: a static speed, no remap, static trims along the
+    /// path. `None` when the rate varies over time.
+    pub constant_rate: Option<f64>,
+    /// A digest of every input of the voice's time map (the source, the
+    /// path's spans, trims, speeds, remaps, rates, the conform factor, and
+    /// the pitch choice): two revisions with the same key read the source
+    /// identically, so a time stretch in progress carries over a live edit.
+    pub map_key: u64,
 }
 
 /// One evaluation of a voice at a master time.
@@ -123,7 +142,8 @@ pub struct Point {
     pub in_span: bool,
     /// Level before fades (clip, precompositions, compositions).
     pub gain: f64,
-    /// Source program time, seconds.
+    /// Source program time, seconds (a conformed clip's clip time scaled by
+    /// [`VoicePlan::conform`]).
     pub source_time: f64,
     /// The clip's local time (`t − from` in its composition), seconds.
     pub local: f64,
@@ -488,10 +508,35 @@ impl<'d> Walk<'_, 'd> {
         let trim = static_number(node::member(d, "trim"))
             .filter(|t| t.is_finite())
             .unwrap_or(0.0);
+        let pitch = Pitch::of(node::member(d, "pitch"));
+        // A conformed video plays its soundtrack with its frames (also
+        // through an audio layer of the same asset).
+        let record = node::member(node::member(Some(self.root), "assets"), asset.as_str());
+        let conform = match conform::conformed_rate(record) {
+            Some(rate) => conform::conform_factor(Some(rate), conform::native_rate(&file)),
+            None => 1.0,
+        };
         let offset = match (path.offset, linear) {
-            (Some(o), true) => Some(o + from - trim),
+            (Some(o), true) if conform == 1.0 => Some(o + from - trim),
             _ => None,
         };
+        // A static speed along a linear path reads at one rate everywhere.
+        let remap = node::member(d, "timeRemap");
+        let constant_rate = match path.offset {
+            Some(_)
+                if static_number(node::member(d, "trim")).is_some()
+                    && !(node::truthy(remap) || node::is_property(remap)) =>
+            {
+                let speed = if node::is_nullish(node::member(d, "speed")) {
+                    Some(1.0)
+                } else {
+                    static_number(node::member(d, "speed"))
+                };
+                speed.filter(|s| s.is_finite()).map(|s| s * conform)
+            }
+            _ => None,
+        };
+        let map_key = self.map_key(&levels, kind, &asset, &file, &source, conform, pitch);
         let mut plan = VoicePlan {
             id,
             strip,
@@ -505,6 +550,10 @@ impl<'d> Walk<'_, 'd> {
             animated: path.animated || dynamic,
             static_point: None,
             static_at: 0.0,
+            pitch,
+            conform,
+            constant_rate,
+            map_key,
         };
         if !plan.animated {
             // Every input is static: evaluate once, inside the window.
@@ -527,6 +576,53 @@ impl<'d> Walk<'_, 'd> {
         }
         self.voices.push(plan);
         Ok(())
+    }
+}
+
+impl Walk<'_, '_> {
+    /// [`VoicePlan::map_key`]: every field the voice's time map reads.
+    #[allow(clippy::too_many_arguments)]
+    fn map_key(
+        &self,
+        levels: &[Level],
+        kind: VoiceKind,
+        asset: &str,
+        file: &std::path::Path,
+        source: &Source,
+        conform: f64,
+        pitch: Pitch,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (kind == VoiceKind::Embedded).hash(&mut h);
+        asset.hash(&mut h);
+        file.hash(&mut h);
+        source.id().hash(&mut h);
+        conform.to_bits().hash(&mut h);
+        pitch.hash(&mut h);
+        let digest = |h: &mut std::collections::hash_map::DefaultHasher, n: Option<&Node>| match n {
+            Some(n) => pm_model::hash::canonical_digest(n).hash(h),
+            None => 0u8.hash(h),
+        };
+        for level in levels {
+            let comp_id = &self.comps[level.comp];
+            comp_id.hash(&mut h);
+            let Ok(comp) = Comp::in_root(self.root, comp_id, self.doc.revision()) else {
+                continue;
+            };
+            digest(&mut h, comp.member("fps"));
+            digest(&mut h, comp.member("fpsRational"));
+            let Some(layer) = comp.layers().get(level.layer) else {
+                continue;
+            };
+            digest(&mut h, node::member(Some(layer), "id"));
+            digest(&mut h, node::member(Some(layer), "from"));
+            let d = node::member(Some(layer), "d");
+            for key in ["trim", "speed", "timeRemap", "sourceTime"] {
+                digest(&mut h, node::member(d, key));
+            }
+        }
+        h.finish()
     }
 }
 
@@ -689,7 +785,9 @@ impl VoicePlan {
             }
             out.source_time = match self.offset {
                 Some(offset) => t - offset,
-                None => Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?,
+                None => {
+                    Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))? * self.conform
+                }
             };
             // Where the source runs out, for linear maps: the clip stops there
             // and the fade out ends there (`audibleDuration`).
@@ -702,7 +800,7 @@ impl VoicePlan {
                             !node::truthy(node::member(node::member(Some(layer), "d"), "timeRemap"))
                         }),
                 };
-                if let Some(speed) = speed {
+                if let Some(speed) = speed.map(|s| s * self.conform) {
                     let start = out.source_time - out.local * speed;
                     out.audible = out.audible.min((len - start) / speed);
                 }

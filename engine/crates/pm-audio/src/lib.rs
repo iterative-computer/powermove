@@ -22,6 +22,7 @@
 //! See docs/rust-engine.md section 16 and docs/engine/pm-audio.md.
 
 pub mod clock;
+pub mod conform;
 pub mod device;
 pub mod error;
 pub mod graph;
@@ -33,6 +34,7 @@ pub mod offline;
 pub mod playback;
 pub mod ring;
 pub mod source;
+pub mod stretch;
 pub mod transport;
 pub mod waveform;
 
