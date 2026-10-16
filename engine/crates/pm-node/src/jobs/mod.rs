@@ -111,6 +111,10 @@ struct State {
     agent_exports: VecDeque<Work>,
     user: Option<Scheduler<Work>>,
     jobs: HashMap<JobId, JobRecord>,
+    /// Ended jobs, oldest first: their records are kept for the last
+    /// `FINISHED_KEPT` (cancels and resubmissions of recent jobs answer
+    /// correctly), older ones are dropped.
+    finished: VecDeque<JobId>,
     outbox: Drained,
     next_token: u64,
     answers: HashMap<u64, Result<Response, EngineError>>,
@@ -121,6 +125,23 @@ struct State {
     frame_runs: Vec<(AgentRunId, Arc<AtomicBool>)>,
     shutdown: bool,
     stats: ServiceStats,
+}
+
+/// Ended job records kept.
+pub const FINISHED_KEPT: usize = 256;
+
+impl State {
+    /// `job` ended: keep its record among the last `FINISHED_KEPT`.
+    fn retire(&mut self, job: JobId) {
+        self.finished.push_back(job);
+        while self.finished.len() > FINISHED_KEPT {
+            if let Some(old) = self.finished.pop_front()
+                && self.jobs.get(&old).is_some_and(|r| r.state.is_terminal())
+            {
+                self.jobs.remove(&old);
+            }
+        }
+    }
 }
 
 /// Counters for status and tests.
@@ -502,6 +523,7 @@ impl JobService for JobEngineService {
                 let status = status_of(&job, record, None, None);
                 st.outbox.messages.push((host, status_event(status)));
                 st.stats.exports_cancelled += 1;
+                st.retire(job);
             }
         }
         drop(st);
@@ -703,6 +725,7 @@ fn fail_work(shared: &Shared, work: Work, code: ErrorCode, message: &str) {
                 record.state = JobState::Failed;
                 let status = status_of(&job, record, None, Some(error));
                 st.outbox.messages.push((host, status_event(status)));
+                st.retire(job);
             }
             drop(st);
             (shared.wake)();
@@ -1070,6 +1093,7 @@ fn run_job(
             }
             let status = status_of(job, record, path, error);
             st.outbox.messages.push((host, status_event(status)));
+            st.retire(job.clone());
         }
         drop(st);
         (shared.wake)();
@@ -1217,5 +1241,48 @@ fn run_job(
             discard(shared);
             finish(JobState::Failed, None, Some(engine_error(job, &e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(state: JobState) -> JobRecord {
+        JobRecord {
+            class: PriorityClass::AgentExport,
+            run: None,
+            host: PortId(1),
+            state,
+            progress: 0.0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn ended_job_records_are_kept_for_the_last_few_hundred_jobs() {
+        let mut st = State::default();
+        st.jobs.insert("live".into(), record(JobState::Running));
+        for i in 0..FINISHED_KEPT + 50 {
+            let id = JobId::from(format!("job-{i}").as_str());
+            st.jobs.insert(id.clone(), record(JobState::Done));
+            st.retire(id);
+        }
+        assert_eq!(st.jobs.len(), FINISHED_KEPT + 1);
+        assert!(!st.jobs.contains_key(&JobId::from("job-0")));
+        assert!(st.jobs.contains_key(&JobId::from("job-50")));
+        assert!(
+            st.jobs.contains_key(&JobId::from("live")),
+            "running jobs stay"
+        );
+        // A resubmitted id that runs again is not dropped by its old entry.
+        let reused = JobId::from(format!("job-{}", 60).as_str());
+        st.jobs.get_mut(&reused).unwrap().state = JobState::Running;
+        for i in 0..FINISHED_KEPT {
+            let id = JobId::from(format!("more-{i}").as_str());
+            st.jobs.insert(id.clone(), record(JobState::Failed));
+            st.retire(id);
+        }
+        assert!(st.jobs.contains_key(&reused));
     }
 }
