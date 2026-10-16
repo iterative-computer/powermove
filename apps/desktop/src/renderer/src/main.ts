@@ -9,6 +9,7 @@ import '../../../css/account.css';
 import '../../../css/vars.css';
 import '../../../css/publish.css';
 import '../../../css/transcription.css';
+import '../../../css/interpret.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
 import { installPointerFocus } from './controls/pointer-focus';

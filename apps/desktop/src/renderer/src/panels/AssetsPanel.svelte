@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { canInterpret, openInterpretSheet } from '../media/interpret-sheet';
   import { doc } from '../state/document.svelte';
   import Icon from './Icon.svelte';
   import type { PanelProps } from './registerSveltePanel';
@@ -206,6 +207,7 @@
         { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
+      ...(!offline && canInterpret(asset) ? [{ label: 'Interpret Footage…', run: () => openInterpretSheet(PM, asset.id) }] : []),
       { label: offline ? 'Locate File…' : convertedCopy(asset) ? 'Locate Original…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
