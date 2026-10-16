@@ -213,8 +213,12 @@ fn check(
             feature: Feature::ProjectColor,
         });
     }
+    // The stamp (section 6) marks native-only features. The ones this
+    // renderer draws are linked media and Interpret Footage overrides; a
+    // stamp with neither stands for a feature it does not know.
     if let Some(r) = node::member(Some(root), "requiresEngine")
         && node::truthy(Some(r))
+        && !native_features_drawn(root)
     {
         out.insert(Unsupported {
             composition: None,
@@ -385,6 +389,30 @@ fn check_composition(
     }
 }
 
+/// Whether the document's native-only features (the `requiresEngine`
+/// stamp's reasons, `shared/engine-stamp.ts`) are ones this renderer
+/// draws: linked media (`storage: "linked"` or `link`) and Interpret
+/// Footage overrides (`interpret`). False when the stamp has neither reason.
+fn native_features_drawn(root: &Node) -> bool {
+    let Some(assets) = node::member(Some(root), "assets") else {
+        return false;
+    };
+    let mut any = false;
+    let mut visit = |asset: &Node| {
+        let linked = js::member_string(asset, "storage").as_deref() == Some("linked")
+            || node::member(Some(asset), "link").is_some_and(|l| node::truthy(Some(l)));
+        let interpreted =
+            node::member(Some(asset), "interpret").is_some_and(|i| node::truthy(Some(i)));
+        any |= linked || interpreted;
+    };
+    match assets.kind() {
+        NodeKind::Object(map) => map.values().for_each(&mut visit),
+        NodeKind::Array(list) => list.iter().for_each(&mut visit),
+        _ => {}
+    }
+    any
+}
+
 /// `L.fx` holds an effect that is not marked missing (enabled or not: the
 /// enable is animatable).
 fn has_effects(layer: &Node) -> bool {
@@ -449,7 +477,11 @@ fn check_media(
             Err(crate::media::ProbeIssue::Unreadable(m)) => add(layer, Feature::Media(m)),
         },
         _ => {
-            if let Err(m) = crate::media::probe_video(&path) {
+            let probed = match crate::footage::interpretation(record) {
+                Some(i) => crate::media::probe_interpreted_video(&path, &i),
+                None => crate::media::probe_video(&path),
+            };
+            if let Err(m) = probed {
                 add(layer, Feature::Media(m));
             }
         }

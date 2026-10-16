@@ -92,12 +92,19 @@ pub enum Source {
     Image {
         asset: String,
         path: PathBuf,
+        /// The asset's Interpret Footage overrides (section 9).
+        interpret: Option<pm_media::interpret::Interpretation>,
     },
     Video {
         asset: String,
         path: PathBuf,
         /// Source time in seconds after retiming and today's end clamp.
         time: f64,
+        /// The asset's Interpret Footage overrides (section 9).
+        interpret: Option<pm_media::interpret::Interpretation>,
+        /// The rate of the composition the layer is in: field-rate or
+        /// frame-rate deinterlacing depends on it (section 13).
+        composition_rate: pm_time::Rate,
     },
     /// A nested composition (precomp) or a group's compositing boundary.
     Comp(Box<CompPlan>),
@@ -560,6 +567,7 @@ fn native_content_quad<'d>(
             let bh = js::or_number(js::get(&d, "h"), hf);
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
+            let interpret = crate::footage::interpretation(record);
             let source = if ty == "video" {
                 let st = scope.source_time(layer, time, Some(&mut b.retime))?;
                 let dur = rec("dur").to_number();
@@ -567,11 +575,14 @@ fn native_content_quad<'d>(
                     asset: asset_id,
                     path,
                     time: playback_time(st, dur),
+                    interpret,
+                    composition_rate: scope.comp.rate().map_or(pm_time::Rate::FPS_30, |r| r.rate),
                 }
             } else {
                 Source::Image {
                     asset: asset_id,
                     path,
+                    interpret,
                 }
             };
             Ok(Some(Quad::Texture {

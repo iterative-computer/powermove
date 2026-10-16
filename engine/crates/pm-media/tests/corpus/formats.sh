@@ -143,6 +143,12 @@ cp meta-pasp.mov meta-clap.mov
 ff -f lavfi -i "$(src 30 $S)" -frames:v 30 -c:v h264_videotoolbox -b:v 2M rotate-base.mov
 ff -display_rotation 90 -i rotate-base.mov -c copy meta-rotate90.mov
 rm rotate-base.mov
+# Geometry: one bitstream with display rotations (stream copy) and a clean
+# aperture (300×160 at offset −4, +2: the rectangle x 6, y 12).
+ff -f lavfi -i "$(src 25 $S)" -frames:v 10 -c:v h264_videotoolbox -b:v 4M -g 5 geom-base.mov
+for r in 90 180 270; do ff -display_rotation $r -i geom-base.mov -c copy "geom-rot$r.mov"; done
+cp geom-base.mov geom-clap.mov
+"${TOOLS[@]}" mov-boxes geom-clap.mov "clap=$("${TOOLS[@]}" clap 300 160 -4 2)"
 # Interlaced: top field first ProRes (fiel), bottom field first MPEG-2 in MXF.
 ff -f lavfi -i "$(src 25 720x576 p210le),setfield=tff" -frames:v 25 -c:v prores_videotoolbox -profile:v standard \
   -field_order tt -flags +ilme+ildct interlaced-tff.mov

@@ -176,7 +176,13 @@ impl Exec<'_> {
                                 Err(e) => self.fail(plan, draw, e),
                             }
                         }
-                        Source::Video { path, time, .. } => {
+                        Source::Video {
+                            path,
+                            time,
+                            interpret,
+                            composition_rate,
+                            ..
+                        } => {
                             match self.media.video(
                                 self.device,
                                 self.queue,
@@ -188,6 +194,8 @@ impl Exec<'_> {
                                 self.export,
                                 self.working,
                                 self.precision,
+                                interpret.as_ref(),
+                                *composition_rate,
                             ) {
                                 Ok(Some(t)) => r.view = Some(t.view.clone()),
                                 Ok(None) => {}

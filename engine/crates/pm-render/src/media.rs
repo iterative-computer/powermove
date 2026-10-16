@@ -14,12 +14,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pm_color::alpha::{shader_code, source_plan};
 use pm_color::chroma::{Factors, Filter, filters, sample_origin};
 use pm_color::ycbcr::Matrix;
+use pm_gpu::decode_in::deinterlace::{CodeSpace, Deinterlacer, FieldPass};
 use pm_gpu::decode_in::{DecodeImporter, Normalized};
 use pm_gpu::{Target, working_format};
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::image::icc::IccClass;
+use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
-use pm_media::probe::FieldOrder;
+use pm_media::probe::color::HdrFormat;
 use pm_media::vt::DecodePurpose;
 use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
@@ -27,6 +29,7 @@ use pm_protocol::color::{
 };
 
 use crate::capability::Feature;
+use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 
 /// Why a media file cannot be drawn.
@@ -44,6 +47,8 @@ pub struct SourceColor {
     pub matrix: MatrixCoefficients,
     pub siting: ChromaSiting,
     pub alpha: AlphaMode,
+    /// HDR input tone mapping (PQ and HLG sources in Standard, section 9).
+    pub tone_map: Option<ToneMap>,
 }
 
 fn stamp(path: &Path) -> Option<(u64, u128)> {
@@ -86,6 +91,7 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
         matrix: MatrixCoefficients::Identity,
         siting: ChromaSiting::Center,
         alpha: c.alpha,
+        tone_map: None,
     })
 }
 
@@ -125,50 +131,74 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
     result
 }
 
-/// Whether a video file can be drawn: it opens and indexes, is progressive,
-/// unrotated, square-pixel, without a cropping clean aperture, SDR, with
-/// Rec.709 or BT.601 primaries.
+/// Whether a video file is drawn without routing: it opens and indexes,
+/// the renderer can draw it ([`video_drawable`]), and its colors are ones
+/// the renderer has matched with today's viewer (Rec.709 or BT.601
+/// primaries, or an HDR source, which section 9 tone maps with BT.2446
+/// Method A where today's viewer differs: an appendix A difference by
+/// design). Display rotations, the clean aperture (shown uncropped by
+/// default, as today), non-square pixels (the layer box carries the
+/// display aspect), and interlacing (bwdif, equal to FFmpeg's) are drawn.
+/// Wide-gamut SDR footage (Display P3, BT.2020) converts without clipping
+/// where today's viewer clips at upload, the same open decision as Display
+/// P3 stills: it is drawn when its asset carries Interpret Footage
+/// overrides, which only this engine reads.
 pub fn probe_video(path: &Path) -> Result<(), String> {
     let src = MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     video_supported(&src)
 }
 
+/// [`probe_video`] for an asset with Interpret Footage overrides: only what
+/// the renderer cannot draw at all is refused.
+pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(), String> {
+    let src = MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    video_drawable(&src, interp)
+}
+
 fn video_supported(src: &MediaSource) -> Result<(), String> {
+    video_drawable(src, &Interpretation::default())?;
+    let c = &src.color;
+    let hdr = matches!(c.transfer, Transfer::Pq | Transfer::Hlg);
+    // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
+    // (`standard_video_primaries`); HDR sources are BT.2020 by definition.
+    if !hdr
+        && !matches!(
+            c.primaries,
+            Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
+        )
+    {
+        return Err(format!(
+            "{:?} primaries (wide-gamut footage is drawn when interpreted)",
+            c.primaries
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the renderer can draw a video source as interpreted: every
+/// reading except display rotations off the quarter turns and Dolby Vision
+/// without a base layer other decoders can show.
+pub fn video_drawable(src: &MediaSource, interp: &Interpretation) -> Result<(), String> {
     let Some(v) = src.probe.video.as_ref() else {
         return Err("no video stream".into());
     };
-    if matches!(
-        v.fields.order,
-        FieldOrder::TopFirst | FieldOrder::BottomFirst
-    ) {
-        return Err("interlaced video (deinterlacing is not wired yet)".into());
+    let r = v.rotation.unwrap_or(0.0);
+    if ((r / 90.0).round() * 90.0 - r).abs() > 0.01 {
+        return Err(format!("a display rotation of {r}°"));
     }
-    if v.rotation.is_some_and(|r| r % 360.0 != 0.0) {
-        return Err("rotated video".into());
-    }
-    if v.pixel_aspect.0 != v.pixel_aspect.1 {
-        return Err("non-square pixels".into());
-    }
-    if let Some(clap) = v.clean_aperture
-        && (clap.width != f64::from(v.width)
-            || clap.height != f64::from(v.height)
-            || clap.horizontal_offset != 0.0
-            || clap.vertical_offset != 0.0)
+    if let Some(HdrFormat::DolbyVision {
+        base_compatibility: 0,
+        profile,
+        ..
+    }) = v.color.hdr
     {
-        return Err("a cropping clean aperture".into());
+        return Err(format!(
+            "Dolby Vision profile {profile} (no base layer other decoders show)"
+        ));
     }
-    let c = &src.color;
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) {
-        return Err("HDR video".into());
-    }
-    // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
-    // (`standard_video_primaries`). Wide gamut sources wait for Interpret
-    // and wide-gamut projects.
-    if !matches!(
-        c.primaries,
-        Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
-    ) {
-        return Err(format!("{:?} primaries", c.primaries));
+    let reading = resolve_video(v, interp);
+    if reading.primaries.value == Primaries::Unspecified {
+        return Err("unknown color primaries".into());
     }
     Ok(())
 }
@@ -194,26 +224,38 @@ fn source_uniform(
     precision: Precision,
     chroma: Option<(Factors, u32, u32)>,
 ) -> SourceUniform {
-    let transfer = match color.transfer {
-        Transfer::DisplayE => 0,
-        Transfer::Bt1886 => 1,
-        Transfer::SceneReferredBt709 => 2,
-        Transfer::Linear => 3,
-        Transfer::Gamma22 => 4,
-        // Refused before this point.
-        Transfer::Pq | Transfer::Hlg => 0,
+    // HDR signals are tone mapped (section 9); without a tone map (a still
+    // reaching here) they read as E, as refused stills never do.
+    let tone = color
+        .tone_map
+        .filter(|t| matches!(t.transfer, Transfer::Pq | Transfer::Hlg));
+    let transfer = match (color.transfer, tone) {
+        (_, Some(t)) if t.transfer == Transfer::Pq => 5,
+        (_, Some(_)) => 6,
+        (Transfer::DisplayE, _) => 0,
+        (Transfer::Bt1886, _) => 1,
+        (Transfer::SceneReferredBt709, _) => 2,
+        (Transfer::Linear, _) => 3,
+        (Transfer::Gamma22, _) => 4,
+        (Transfer::Pq | Transfer::Hlg, None) => 0,
     };
-    let primaries = pm_color::primaries::conversion(
-        if color.primaries == Primaries::Unspecified {
-            Primaries::Bt709
-        } else {
-            color.primaries
-        },
-        Primaries::Bt709,
-    )
-    .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-    let convert_primaries =
-        color.primaries != Primaries::Bt709 && color.primaries != Primaries::Unspecified;
+    let primaries = if tone.is_some() {
+        // Method A works in BT.2020; its SDR result converts to Rec.709.
+        pm_color::tonemap::bt2020_to_709()
+    } else {
+        pm_color::primaries::conversion(
+            if color.primaries == Primaries::Unspecified {
+                Primaries::Bt709
+            } else {
+                color.primaries
+            },
+            Primaries::Bt709,
+        )
+        .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    };
+    let convert_primaries = tone.is_none()
+        && color.primaries != Primaries::Bt709
+        && color.primaries != Primaries::Unspecified;
     let identity = transfer == 0 && working == WorkingEncoding::Standard && !convert_primaries;
     let plan = source_plan(color.alpha, identity);
     let matte = match color.alpha {
@@ -236,6 +278,7 @@ fn source_uniform(
             u32::from(convert_primaries),
         ],
         matte,
+        hdr: [tone.map_or(0.0, |t| t.peak_nits as f32), 0.0, 0.0, 0.0],
         ..Default::default()
     };
     // Primaries columns (the matrix is row-major).
@@ -369,8 +412,12 @@ struct ImageKey {
 struct FrameKey {
     path: PathBuf,
     frame: usize,
+    /// The second field (field-rate deinterlacing).
+    second: bool,
     precision: u8,
     export: bool,
+    /// The interpretation the frame was converted with (a digest).
+    reading: u64,
 }
 
 /// Media state kept across frames: decoded and converted stills, video
@@ -387,6 +434,10 @@ pub struct MediaCache {
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
     interpretations: BTreeMap<PathBuf, ColorDescription>,
+    /// bwdif on normalized planes (interlaced sources), made on first use.
+    deinterlacer: Option<Deinterlacer>,
+    /// The display geometry pass (clean aperture, rotation), made on first use.
+    orient: Option<Orient>,
     /// Bytes of converted textures held (stills and frames).
     pub bytes: u64,
 }
@@ -411,6 +462,8 @@ impl MediaCache {
             sources: BTreeMap::new(),
             frames: BTreeMap::new(),
             interpretations: BTreeMap::new(),
+            deinterlacer: None,
+            orient: None,
             bytes: 0,
         }
     }
@@ -500,14 +553,18 @@ impl MediaCache {
         }
         let src = MediaSource::open(path)
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-        video_supported(&src).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
         self.sources
             .insert(path.to_path_buf(), (stamp, src.clone()));
         Ok(src)
     }
 
-    /// The working texture of the video frame showing at `seconds` (source
-    /// time), or `None` before the first frame.
+    /// The working texture of the video picture showing at `seconds` (source
+    /// time), or `None` before the first frame: the frame section 5 rule 7
+    /// selects (or the conformed rate's frame), deinterlaced to the field
+    /// or frame rate the composition needs (section 13), converted with the
+    /// source's reading (the probe and section 9's defaults, `interpret`'s
+    /// overrides), tone mapped when HDR, and cropped and rotated for
+    /// display.
     #[allow(clippy::too_many_arguments)]
     pub fn video(
         &mut self,
@@ -521,17 +578,44 @@ impl MediaCache {
         export: bool,
         working: WorkingEncoding,
         precision: Precision,
+        interpret: Option<&Interpretation>,
+        composition: pm_time::Rate,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
+        let none = Interpretation::default();
+        match interpret {
+            Some(i) => video_drawable(&src, i),
+            None => video_supported(&src),
+        }
+        .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        let interp = interpret.unwrap_or(&none);
+        let v = src
+            .probe
+            .video
+            .as_ref()
+            .ok_or_else(|| MediaFailure::Failed("no video stream".into()))?;
+        let reading = resolve_video(v, interp);
+        let timing = Timing::new(&src, &reading, composition);
         let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
-        let Some(n) = src.select(ticks) else {
+        let Some(Pick { frame: n, second }) = timing.pick(&src, ticks) else {
             return Ok(None);
         };
         let key = FrameKey {
             path: path.to_path_buf(),
             frame: n,
+            second,
             precision: precision as u8,
             export,
+            reading: {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{interp:?}{composition:?}").hash(&mut h);
+                self.interpretations
+                    .get(path)
+                    .map(|c| format!("{c:?}"))
+                    .hash(&mut h);
+                h.finish()
+            },
         };
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
@@ -541,25 +625,75 @@ impl MediaCache {
         } else {
             DecodePurpose::Display
         };
-        let frame = {
+        // The current frame, and for deinterlacing its neighbors (random
+        // access includes neighboring fields).
+        let (frame, fields) = {
             let mut session = self
                 .service
                 .session(&src, instance, purpose)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-            session
-                .frame(n)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+            if timing.deinterlaced() {
+                let f = session
+                    .fields(n)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                (f.cur.clone(), Some(f))
+            } else {
+                let f = session
+                    .frame(n)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                (f, None)
+            }
         };
+        if self.deinterlacer.is_none() && fields.is_some() {
+            self.deinterlacer = Some(Deinterlacer::new(device));
+        }
         let importer = self.importer()?;
-        let imported = importer
-            .import(&frame)
-            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-        let normalized = importer
-            .normalize(queue, encoder, &imported)
-            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        let import = |f: &pm_media::frame::DecodedFrame| {
+            importer
+                .import(f)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))
+        };
+        let imported = import(&frame)?;
+        let mut held = vec![];
+        let normalized = match &fields {
+            Some(f) => {
+                let prev = import(&f.prev)?;
+                let next = import(&f.next)?;
+                let norm = |i: &pm_gpu::decode_in::ImportedFrame, e: &mut wgpu::CommandEncoder| {
+                    importer
+                        .normalize(queue, e, i)
+                        .map_err(|e| MediaFailure::Failed(e.to_string()))
+                };
+                let (np, nc, nn) = (
+                    norm(&prev, encoder)?,
+                    norm(&imported, encoder)?,
+                    norm(&next, encoder)?,
+                );
+                held.push(prev);
+                held.push(next);
+                let pass = FieldPass::new(timing.fields.top_field_first(), second, f.first, f.last);
+                self.deinterlacer
+                    .as_ref()
+                    .expect("made above")
+                    .run(
+                        queue,
+                        encoder,
+                        &np,
+                        &nc,
+                        &nn,
+                        pass,
+                        &CodeSpace::of(&frame.format),
+                    )
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?
+            }
+            None => importer
+                .normalize(queue, encoder, &imported)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+        };
         let desc: ColorDescription = match self.interpretations.get(path) {
             Some(d) => *d,
-            None => frame.color.unwrap_or(src.color),
+            None if !interp.is_empty() => reading.color,
+            None => frame.color.unwrap_or(reading.color),
         };
         let color = SourceColor {
             transfer: desc.transfer,
@@ -568,15 +702,22 @@ impl MediaCache {
             siting: desc.siting,
             alpha: if frame.format.has_alpha() {
                 match desc.alpha {
-                    AlphaMode::Opaque => AlphaMode::Straight,
+                    AlphaMode::Opaque if interp.alpha.is_none() => AlphaMode::Straight,
                     other => other,
                 }
             } else {
                 AlphaMode::Opaque
             },
+            tone_map: match desc.transfer {
+                Transfer::Pq | Transfer::Hlg => reading.tone_map.or(Some(ToneMap {
+                    transfer: desc.transfer,
+                    peak_nits: 1000.0,
+                })),
+                _ => None,
+            },
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
-        let target = convert(
+        let converted = convert(
             device,
             queue,
             pipelines,
@@ -587,7 +728,15 @@ impl MediaCache {
             precision,
             factors,
         );
+        let geometry = Geometry::of(&reading, (converted.width(), converted.height()));
+        let target = if geometry.is_identity() {
+            converted
+        } else {
+            let orient = self.orient.get_or_insert_with(|| Orient::new(device));
+            orient.run(device, queue, encoder, &converted, geometry, precision)
+        };
         drop(imported);
+        drop(held);
         // Keep only the newest frame per source and precision.
         self.frames.retain(|k, _| {
             k.path != key.path || k.precision != key.precision || k.export != key.export
