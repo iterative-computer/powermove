@@ -399,6 +399,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             .dither
             .unwrap_or(matches!(format, ExportFormat::H264)),
         draft_from_proxies: false,
+        delivery: Default::default(),
     })
 }
 
