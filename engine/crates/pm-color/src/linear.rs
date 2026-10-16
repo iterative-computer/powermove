@@ -140,6 +140,91 @@ pub fn legacy_composite(mode: BlendMode, src: [f64; 4], dst: [f64; 4], alpha: f6
     out
 }
 
+/// Today's `BLEND_ID` table: the mode a layer's `blend` names. Any other
+/// value (including `normal`) composites normally (`BLEND_ID[...] || 0`).
+pub fn blend_mode_from_name(name: &str) -> BlendMode {
+    match name {
+        "add" => BlendMode::Add,
+        "screen" => BlendMode::Screen,
+        "multiply" => BlendMode::Multiply,
+        "overlay" => BlendMode::Overlay,
+        "softlight" => BlendMode::SoftLight,
+        "difference" => BlendMode::Difference,
+        "lighten" => BlendMode::Lighten,
+        "darken" => BlendMode::Darken,
+        _ => BlendMode::Normal,
+    }
+}
+
+/// The mode's number in today's `BLEND_ID` (the shaders' `u_blend`).
+pub fn blend_id(mode: BlendMode) -> i32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Add => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Multiply => 3,
+        BlendMode::Overlay => 4,
+        BlendMode::SoftLight => 5,
+        BlendMode::Difference => 6,
+        BlendMode::Lighten => 7,
+        BlendMode::Darken => 8,
+    }
+}
+
+/// [`legacy_composite`] in a project's setup: premultiplied source and
+/// destination in the working encoding, the blend per [`blend_channel`],
+/// and today's compositing formula (unpremultiply guarded at α > 0.0001,
+/// mix by source alpha, re-premultiply by the union alpha) in the working
+/// encoding. Standard equals [`legacy_composite`].
+pub fn composite(
+    mode: BlendMode,
+    working: WorkingEncoding,
+    domain: BlendDomain,
+    src: [f64; 4],
+    dst: [f64; 4],
+    alpha: f64,
+) -> [f64; 4] {
+    let s = src.map(|v| v * alpha);
+    let un = |p: [f64; 4]| -> [f64; 3] {
+        if p[3] > 0.0001 {
+            [p[0] / p[3], p[1] / p[3], p[2] / p[3]]
+        } else {
+            [0.0; 3]
+        }
+    };
+    let sc = un(s);
+    let dc = un(dst);
+    let a = s[3] + dst[3] * (1.0 - s[3]);
+    let mut out = [0.0; 4];
+    for i in 0..3 {
+        let bc = blend_channel(mode, working, domain, dc[i], sc[i]);
+        out[i] = (dc[i] * (1.0 - s[3]) + bc * s[3]) * a;
+    }
+    out[3] = a;
+    out
+}
+
+/// A track matte's value at a pixel of the matte pass (premultiplied, in
+/// the working encoding): alpha, or Rec.709 luma of the premultiplied
+/// E-encoded values (contract 4 invariant 7; in linear light the pixel is
+/// encoded with E first), complemented for the inverted modes and clamped
+/// to 0..1 (`applyTrackMatte`).
+pub fn matte_value(matte: [f64; 4], luma: bool, inverted: bool, working: WorkingEncoding) -> f64 {
+    let m = match working {
+        WorkingEncoding::Standard => matte,
+        WorkingEncoding::LinearLight => premultiplied_linear_to_e(matte),
+    };
+    let mut a = if luma {
+        m[0] * 0.2126 + m[1] * 0.7152 + m[2] * 0.0722
+    } else {
+        m[3]
+    };
+    if inverted {
+        a = 1.0 - a;
+    }
+    a.clamp(0.0, 1.0)
+}
+
 /// Premultiplied source-over (the fixed-function `ONE, ONE_MINUS_SRC_ALPHA`
 /// blend the normal-mode fast path uses).
 pub fn over(src: [f64; 4], dst: [f64; 4]) -> [f64; 4] {
@@ -202,5 +287,52 @@ mod tests {
             display_encode(0.4),
         ));
         assert_eq!(v, e);
+    }
+
+    #[test]
+    fn standard_composite_is_todays_formula() {
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Add,
+            BlendMode::Screen,
+            BlendMode::Multiply,
+            BlendMode::Overlay,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Lighten,
+            BlendMode::Darken,
+        ];
+        let src = [0.3, 0.1, 0.25, 0.6];
+        let dst = [0.2, 0.35, 0.1, 0.5];
+        for m in modes {
+            let a = composite(
+                m,
+                WorkingEncoding::Standard,
+                BlendDomain::HdrSafe,
+                src,
+                dst,
+                0.7,
+            );
+            assert_eq!(a, legacy_composite(m, src, dst, 0.7), "{m:?}");
+            assert_eq!(blend_mode_from_name(&format!("{m:?}").to_lowercase()), m);
+        }
+        assert_eq!(blend_mode_from_name("hard-mix"), BlendMode::Normal);
+        assert_eq!(blend_id(BlendMode::Darken), 8);
+    }
+
+    #[test]
+    fn mattes_read_alpha_or_e_luma() {
+        let m = [0.4, 0.2, 0.1, 0.5];
+        assert_eq!(matte_value(m, false, false, WorkingEncoding::Standard), 0.5);
+        assert_eq!(matte_value(m, false, true, WorkingEncoding::Standard), 0.5);
+        let luma = 0.4 * 0.2126 + 0.2 * 0.7152 + 0.1 * 0.0722;
+        assert!((matte_value(m, true, false, WorkingEncoding::Standard) - luma).abs() < 1e-15);
+        // Linear light reads the same E values.
+        let lin = premultiplied_e_to_linear(m);
+        assert!((matte_value(lin, true, false, WorkingEncoding::LinearLight) - luma).abs() < 1e-12);
+        assert_eq!(
+            matte_value([2.0; 4], false, false, WorkingEncoding::Standard),
+            1.0
+        );
     }
 }

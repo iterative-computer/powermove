@@ -1,5 +1,7 @@
 // The 2D compositing passes (plan section 8; legacy `legacy/gl/shaders.ts`).
 //
+// Prepended with `pm_color::wgsl::COLOR`.
+//
 // One quad per draw, as today's `PM.VERT`: the unit quad (0,0) (1,0) (0,1)
 // (1,1) through a 3×3 matrix to target pixels, projective (w = p.z), with
 // the content UV window `uv.xy + a · uv.zw`.
@@ -24,7 +26,8 @@ struct Quad {
     // Content UV window: offset (xy), scale (zw).
     uv: vec4<f32>,
     // Solid: premultiplied color. Texture: x = alpha, y = 1 when the source
-    // is in GL row order.
+    // is in GL row order, z = 1 when it holds premultiplied E values to be
+    // read into linear light.
     color: vec4<f32>,
 };
 
@@ -60,6 +63,9 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         c = vec4<f32>(0.0);
     }
+    if (q.color.z > 0.5) {
+        c = pm_premultiplied_e_to_linear(c);
+    }
     return c * q.color.x;
 }
 
@@ -77,6 +83,9 @@ struct Fill {
     params: vec4<f32>,
     // Region origin (xy) and full output size (zw) in pixels.
     view: vec4<f32>,
+    // x: 1 when the working encoding is linear light (the gradient is
+    // interpolated in E, as today, then decoded).
+    flags: vec4<f32>,
 };
 
 @group(1) @binding(2) var<uniform> fill: Fill;
@@ -113,6 +122,9 @@ fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
         let right = fill.stops[i + 1];
         let amount = step_amount(left.a, right.a, t);
         color = mix(color, right.rgb, amount);
+    }
+    if (fill.flags.x > 0.5) {
+        color = pm_e_decode3(color);
     }
     return vec4<f32>(color, 1.0);
 }
