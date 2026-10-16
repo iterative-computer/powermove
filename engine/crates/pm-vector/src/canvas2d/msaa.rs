@@ -8,6 +8,9 @@
 /// pixels from the pixel's top-left corner, y down.
 pub const SAMPLES_4X: [[f64; 2]; 4] = [[0.375, 0.125], [0.875, 0.375], [0.125, 0.625], [0.625, 0.875]];
 
+/// A single sample at the pixel center (a render pass without MSAA).
+pub const SAMPLES_1X: [[f64; 2]; 1] = [[0.5, 0.5]];
+
 /// Subpixel bits of vertex snapping (8 bits: 1/256 pixel).
 pub const SUBPIXEL_BITS: u32 = 8;
 
@@ -36,18 +39,21 @@ pub enum Rule {
 }
 
 /// A coverage mask: 4 sample bits per pixel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SampleMask {
     pub width: u32,
     pub height: u32,
+    /// The sample positions (4× or 1×).
+    pub pattern: &'static [[f64; 2]],
     pub bits: Vec<u8>,
 }
 
 impl SampleMask {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, pattern: &'static [[f64; 2]]) -> Self {
         Self {
             width,
             height,
+            pattern,
             bits: vec![0; (width * height) as usize],
         }
     }
@@ -108,7 +114,7 @@ pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Ru
     let py1 = (maxy.div_euclid(one) + 1).min(i64::from(mask.height) - 1);
     let mut crossings: Vec<(i64, i64, i32)> = Vec::new();
     for py in py0..=py1 {
-        for (si, s) in SAMPLES_4X.iter().enumerate() {
+        for (si, s) in mask.pattern.iter().enumerate() {
             let (_, sy) = sample_grid(0, py, *s);
             crossings.clear();
             for e in &edges {
@@ -152,7 +158,9 @@ pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Ru
 pub struct MsaaTarget {
     pub width: u32,
     pub height: u32,
-    /// Four samples per pixel, RGBA8 each.
+    /// The sample positions (4× or 1×).
+    pub pattern: &'static [[f64; 2]],
+    /// `pattern.len()` samples per pixel, RGBA8 each.
     pub samples: Vec<[u8; 4]>,
 }
 
@@ -165,12 +173,18 @@ pub fn unorm8(v: f32) -> u8 {
 }
 
 impl MsaaTarget {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, pattern: &'static [[f64; 2]]) -> Self {
         Self {
             width,
             height,
-            samples: vec![[0; 4]; (width * height * 4) as usize],
+            pattern,
+            samples: vec![[0; 4]; (width * height) as usize * pattern.len()],
         }
+    }
+
+    /// A mask matching this target's sample pattern.
+    pub fn mask(&self) -> SampleMask {
+        SampleMask::new(self.width, self.height, self.pattern)
     }
 
     /// Source-over blends premultiplied `color` into every covered sample.
@@ -179,11 +193,12 @@ impl MsaaTarget {
             if *bits == 0 {
                 continue;
             }
-            for s in 0..4 {
+            let n = self.pattern.len();
+            for s in 0..n {
                 if bits & (1 << s) == 0 {
                     continue;
                 }
-                let d = &mut self.samples[p * 4 + s];
+                let d = &mut self.samples[p * n + s];
                 let inv = 1.0 - color[3];
                 for c in 0..4 {
                     let dst = f32::from(d[c]) / 255.0;
@@ -193,14 +208,30 @@ impl MsaaTarget {
         }
     }
 
+    /// Source-over blends `color × coverage` into each sample an analytic
+    /// draw covers.
+    pub fn blend_coverage(&mut self, samples: &super::analytic::Samples, color: [f32; 4]) {
+        for (i, c) in samples.coverage.iter().enumerate() {
+            let Some(c) = *c else { continue };
+            let src = [color[0] * c, color[1] * c, color[2] * c, color[3] * c];
+            let d = &mut self.samples[i];
+            let inv = 1.0 - src[3];
+            for k in 0..4 {
+                let dst = f32::from(d[k]) / 255.0;
+                d[k] = unorm8(src[k] + dst * inv);
+            }
+        }
+    }
+
     /// Box resolve to RGBA8 (premultiplied): the mean of the four samples,
     /// rounded half up (measured: a 26 in one sample resolves to 7).
     pub fn resolve(&self) -> Vec<u8> {
         let mut out = vec![0u8; (self.width * self.height * 4) as usize];
+        let n = self.pattern.len();
         for p in 0..(self.width * self.height) as usize {
             for c in 0..4 {
-                let sum: u32 = (0..4).map(|s| u32::from(self.samples[p * 4 + s][c])).sum();
-                out[p * 4 + c] = ((sum + 2) / 4) as u8;
+                let sum: u32 = (0..n).map(|s| u32::from(self.samples[p * n + s][c])).sum();
+                out[p * 4 + c] = ((sum + n as u32 / 2) / n as u32) as u8;
             }
         }
         out
@@ -276,7 +307,7 @@ pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
             })
             .collect();
         for py in py0..=py1 {
-            for (si, s) in SAMPLES_4X.iter().enumerate() {
+            for (si, s) in mask.pattern.iter().enumerate() {
                 let (_, sy) = sample_grid(0, py, *s);
                 let mut cr: [(i64, i64, i32); 3] = [(0, 1, 0); 3];
                 let mut n = 0;
@@ -314,7 +345,7 @@ mod tests {
 
     #[test]
     fn half_pixel_square_covers_two_samples() {
-        let mut m = SampleMask::new(4, 4);
+        let mut m = SampleMask::new(4, 4, &SAMPLES_4X);
         // x from 1.5 to 3: pixel 1 has samples at x 0.625 and 0.875 inside.
         fill_polygons(&mut m, &[vec![[1.5, 0.0], [3.0, 0.0], [3.0, 4.0], [1.5, 4.0]]], Rule::NonZero);
         assert_eq!(m.count(1, 1), 2);
@@ -324,8 +355,8 @@ mod tests {
 
     #[test]
     fn resolve_rounds_like_the_gpu() {
-        let mut t = MsaaTarget::new(1, 1);
-        let mut m = SampleMask::new(1, 1);
+        let mut t = MsaaTarget::new(1, 1, &SAMPLES_4X);
+        let mut m = SampleMask::new(1, 1, &SAMPLES_4X);
         m.bits[0] = 0b0001;
         t.blend(&m, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(t.resolve()[3], 64);

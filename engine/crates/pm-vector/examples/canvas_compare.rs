@@ -117,6 +117,16 @@ fn main() {
             worse += 1;
             continue;
         }
+        if let Ok(row) = std::env::var("ROW") {
+            let y: u32 = row.parse().unwrap();
+            let a: Vec<u8> = (0..w).map(|x| ours[((y * w + x) * 4 + 3) as usize]).collect();
+            let b: Vec<u8> = (0..w).map(|x| reference[((y * w + x) * 4 + 3) as usize]).collect();
+            println!("ours {:?}\nref  {:?}", &a[..a.len().min(40)], &b[..b.len().min(40)]);
+            let col: u32 = std::env::var("COL").ok().and_then(|c| c.parse().ok()).unwrap_or(w / 2);
+            let a: Vec<u8> = (0..h).map(|y| ours[((y * w + col) * 4 + 3) as usize]).collect();
+            let b: Vec<u8> = (0..h).map(|y| reference[((y * w + col) * 4 + 3) as usize]).collect();
+            println!("col {col} ours {:?}\ncol {col} ref  {:?}", a, b);
+        }
         let (mut diff, mut over1, mut max) = (0usize, 0usize, 0i32);
         let mut shown = 0;
         for (i, (a, b)) in ours.iter().zip(&reference).enumerate() {

@@ -8,3 +8,4 @@ pub mod tess;
 pub mod context;
 pub mod shape;
 pub mod stroke;
+pub mod analytic;

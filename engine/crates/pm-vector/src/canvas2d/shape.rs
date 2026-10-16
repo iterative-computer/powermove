@@ -136,8 +136,8 @@ fn rr(c: &mut Context, x: f64, y: f64, w: f64, h: f64, r: f64) -> Result<(), Ras
 
 fn finish(c: &Context) -> Bitmap {
     Bitmap {
-        width: c.target.width,
-        height: c.target.height,
+        width: c.width(),
+        height: c.height(),
         rgba: c.finish(),
     }
 }
@@ -187,11 +187,7 @@ pub fn raster_paths(layer: &PathLayer, colors: &[PathColors], scale: f64) -> Res
         c.restore();
     }
     Ok((
-        Bitmap {
-            width: c.target.width,
-            height: c.target.height,
-            rgba: c.finish(),
-        },
+        finish(&c),
         raster,
     ))
 }

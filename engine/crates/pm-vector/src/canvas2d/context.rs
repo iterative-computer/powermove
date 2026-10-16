@@ -4,8 +4,9 @@
 //! bitmap the legacy compositor uploads.
 
 use super::blink::{CanvasPath, Drawn, sat_f32};
-use super::msaa::{MsaaTarget, Rule, SampleMask, fill_polygons};
+use super::msaa::{MsaaTarget, Rule, SAMPLES_1X, SAMPLES_4X, fill_polygons};
 use super::skpath::{Mat, P, SkPath};
+use super::analytic;
 use super::stroke::{self, Cap, StrokeParams};
 use super::tess;
 use crate::render::color::{CanvasColor, StyleSlot};
@@ -71,9 +72,24 @@ impl Default for State {
     }
 }
 
+/// One recorded draw, rasterized when the canvas is finished.
+#[derive(Debug, Clone)]
+enum Op {
+    /// Closed polygons in window coordinates with the nonzero rule: the
+    /// tessellated fill renderers (which require MSAA) or the non-AA bounds
+    /// renderer (which does not).
+    Polygons { polys: Vec<Vec<[f64; 2]>>, color: [f32; 4], msaa: bool },
+    /// The union of triangles (the tessellated stroke renderer, MSAA).
+    Triangles { tris: Vec<[P; 3]>, color: [f32; 4] },
+    /// One `AnalyticRRectRenderStep` instance (no MSAA requirement).
+    Analytic { inst: analytic::Instance, color: [f32; 4] },
+}
+
 /// A Canvas2D context on a `width` × `height` canvas.
 pub struct Context {
-    pub target: MsaaTarget,
+    width: u32,
+    height: u32,
+    ops: Vec<Op>,
     state: State,
     stack: Vec<State>,
     pub path: CanvasPath,
@@ -105,7 +121,9 @@ fn m44_concat(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 impl Context {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            target: MsaaTarget::new(width, height),
+            width,
+            height,
+            ops: Vec::new(),
             state: State::default(),
             stack: Vec::new(),
             path: CanvasPath::new(),
@@ -277,15 +295,13 @@ impl Context {
             return Ok(());
         }
         let m = self.matrix();
-        if p.is_rect().is_some() {
-            return Err(Unsupported("filled rectangles (analytic rect renderer)"));
-        }
         let color = self.paint(self.state.fill.0);
+        if let Some((r, _)) = p.is_rect() {
+            return self.fill_rect(r, &m, color);
+        }
         let local = tess::fill_polygons_local(p, &m);
-        let device = tess::to_device(&local, &m, self.target.width, self.target.height);
-        let mut mask = SampleMask::new(self.target.width, self.target.height);
-        fill_polygons(&mut mask, &device, Rule::NonZero);
-        self.target.blend(&mask, color);
+        let polys = tess::to_device(&local, &m, self.width, self.height);
+        self.ops.push(Op::Polygons { polys, color, msaa: true });
         Ok(())
     }
 
@@ -299,8 +315,41 @@ impl Context {
         }
     }
 
-    fn stroke_line(&mut self, _a: P, _b: P) -> Result<(), Unsupported> {
-        Err(Unsupported("stroked lines (analytic line renderer)"))
+    fn stroke_line(&mut self, a: P, b: P) -> Result<(), Unsupported> {
+        let m = self.matrix();
+        let (params, cap) = self.stroke_params();
+        let color = self.paint(self.state.stroke.0);
+        let g = analytic::Geometry::StrokeLine { line: [a[0], a[1], b[0], b[1]], radius: params.radius, cap };
+        self.draw_analytic(&g, &m, color);
+        Ok(())
+    }
+
+    /// `Device::drawRect` with a fill: the non-AA bounds renderer when the
+    /// device rectangle is pixel aligned (within `kDefaultPixelTolerance`),
+    /// else the analytic renderer.
+    fn fill_rect(&mut self, r: [f32; 4], m: &Mat, color: [f32; 4]) -> Result<(), Unsupported> {
+        if r[2] - r[0] <= 0.0 || r[3] - r[1] <= 0.0 {
+            return Ok(());
+        }
+        let rect_stays_rect = (m.kx == 0.0 && m.ky == 0.0) || (m.sx == 0.0 && m.sy == 0.0);
+        if rect_stays_rect {
+            let a = [m.sx * r[0] + m.kx * r[1] + m.tx, m.ky * r[0] + m.sy * r[1] + m.ty];
+            let b = [m.sx * r[2] + m.kx * r[3] + m.tx, m.ky * r[2] + m.sy * r[3] + m.ty];
+            let near = |v: f32| (v - libm::roundf(v)).abs() <= 0.0039;
+            if near(a[0]) && near(a[1]) && near(b[0]) && near(b[1]) {
+                let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+                let polys = tess::to_device(&[corners.to_vec()], m, self.width, self.height);
+                self.ops.push(Op::Polygons { polys, color, msaa: false });
+                return Ok(());
+            }
+        }
+        self.draw_analytic(&analytic::Geometry::FillRect(r), m, color);
+        Ok(())
+    }
+
+    fn draw_analytic(&mut self, g: &analytic::Geometry, m: &Mat, color: [f32; 4]) {
+        let inst = analytic::instance(g, m);
+        self.ops.push(Op::Analytic { inst, color });
     }
 
     /// The stroke parameters Graphite receives (`StrokeStyle`).
@@ -324,26 +373,58 @@ impl Context {
         if let Some([a, b]) = p.is_line() {
             return self.stroke_line(a, b);
         }
-        if let Some((_, true)) = p.is_rect() {
-            return Err(Unsupported("stroked rectangles (analytic rect renderer)"));
-        }
         let m = self.matrix();
         let (params, cap) = self.stroke_params();
+        if let Some((r, true)) = p.is_rect() {
+            let color = self.paint(self.state.stroke.0);
+            let g = analytic::Geometry::StrokeRect { rect: r, radius: params.radius, join: params.join };
+            self.draw_analytic(&g, &m, color);
+            return Ok(());
+        }
         let color = self.paint(self.state.stroke.0);
         let tris = stroke::stroke_triangles(p, &m, params, cap);
-        let mut mask = SampleMask::new(self.target.width, self.target.height);
-        let (w, h) = (self.target.width, self.target.height);
-        let window: Vec<[P; 3]> = tris
-            .iter()
-            .map(|t| t.map(|v| { let d = tess::window_device(v, w, h); [d[0] as f32, d[1] as f32] }))
-            .collect();
-        super::msaa::fill_triangles(&mut mask, &window);
-        self.target.blend(&mask, color);
+        self.ops.push(Op::Triangles { tris, color });
         Ok(())
     }
 
-    /// The resolved canvas: premultiplied RGBA8, top-down.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The resolved canvas: premultiplied RGBA8, top-down. Graphite
+    /// multisamples the render pass only when one of its draws requires MSAA
+    /// (the tessellating renderers); otherwise every draw is rasterized once
+    /// per pixel at its center.
     pub fn finish(&self) -> Vec<u8> {
-        self.target.resolve()
+        let msaa = self.ops.iter().any(|o| match o {
+            Op::Polygons { msaa, .. } => *msaa,
+            Op::Triangles { .. } => true,
+            Op::Analytic { .. } => false,
+        });
+        let pattern: &'static [[f64; 2]] = if msaa { &SAMPLES_4X } else { &SAMPLES_1X };
+        let mut target = MsaaTarget::new(self.width, self.height, pattern);
+        for op in &self.ops {
+            match op {
+                Op::Polygons { polys, color, .. } => {
+                    let mut mask = target.mask();
+                    fill_polygons(&mut mask, polys, Rule::NonZero);
+                    target.blend(&mask, *color);
+                }
+                Op::Triangles { tris, color } => {
+                    let mut mask = target.mask();
+                    super::msaa::fill_triangles(&mut mask, tris);
+                    target.blend(&mask, *color);
+                }
+                Op::Analytic { inst, color } => {
+                    let samples = analytic::rasterize(inst, self.width, self.height, pattern);
+                    target.blend_coverage(&samples, *color);
+                }
+            }
+        }
+        target.resolve()
     }
 }
