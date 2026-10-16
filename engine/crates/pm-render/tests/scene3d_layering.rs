@@ -103,7 +103,10 @@ fn depth_sets_and_ordering_equal_today() {
                 ..
             } = &o.kind
             else {
-                problems.push(format!("case {n}: {} is not a composition 3D layer", o.layer));
+                problems.push(format!(
+                    "case {n}: {} is not a composition 3D layer",
+                    o.layer
+                ));
                 continue;
             };
             let set: BTreeSet<&str> = depth_set
@@ -112,7 +115,10 @@ fn depth_sets_and_ordering_equal_today() {
                 .collect();
             let want = &case["sets"][o.layer.as_str()];
             if want.is_null() {
-                problems.push(format!("case {n}: {} draws but is not active today", o.layer));
+                problems.push(format!(
+                    "case {n}: {} draws but is not active today",
+                    o.layer
+                ));
                 continue;
             }
             let want_set: BTreeSet<&str> = want["set"]
@@ -156,7 +162,6 @@ fn depth_sets_and_ordering_equal_today() {
             problems.push(format!("case {n}: order {ours:?}, today {today:?}"));
         }
         ordered_pairs += ours.len().saturating_sub(1);
-
     }
     eprintln!(
         "{objects} 3D object draws compared ({backgrounds} set bottoms), {ordered_pairs} adjacent draw pairs ordered"

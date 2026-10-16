@@ -541,14 +541,7 @@ fn check_object(
     if let Some(p) = str_member(source, "primitive")
         && !matches!(
             p.as_str(),
-            "box"
-                | "sphere"
-                | "plane"
-                | "cylinder"
-                | "cone"
-                | "torus"
-                | "capsule"
-                | "icosahedron"
+            "box" | "sphere" | "plane" | "cylinder" | "cone" | "torus" | "capsule" | "icosahedron"
         )
     {
         out.push(format!("{p} primitives"));

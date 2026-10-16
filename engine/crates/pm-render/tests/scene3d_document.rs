@@ -199,9 +199,19 @@ fn view_overrides_change_only_viewer_renders() {
     let mut export = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
     export.export = true;
     let frame = r
-        .render(&load(&doc), "Ptest-root", ticks(0.0), &export, &MapResolver::default())
+        .render(
+            &load(&doc),
+            "Ptest-root",
+            ticks(0.0),
+            &export,
+            &MapResolver::default(),
+        )
         .unwrap();
-    assert_eq!(r.read_rgba(&frame).unwrap(), plain, "exports ignore the view");
+    assert_eq!(
+        r.read_rgba(&frame).unwrap(),
+        plain,
+        "exports ignore the view"
+    );
     assert_eq!(render(&mut r, &doc), wire, "the viewer keeps it");
     r.set_view(Some(&view(Shading3d::Solid, true, None)));
     let xray = render(&mut r, &doc);
@@ -594,8 +604,14 @@ fn the_static_check_looks_inside_legacy_scenes() {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
     let mut r = Renderer::headless().unwrap();
     let mut render = |doc: &pm_model::Document| {
-        r.render(doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
-            .map(|f| f.failures.is_empty())
+        r.render(
+            doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .map(|f| f.failures.is_empty())
     };
     let base = || project(W, H, 2.0, solid_fill("#000000"), vec![legacy_scene_layer()]);
     // As captured: nothing listed, and it renders.
@@ -606,12 +622,13 @@ fn the_static_check_looks_inside_legacy_scenes() {
     // Each change is listed, and the ones the 3D pass cannot build also
     // fail at render time: the routing decision holds at every frame.
     let scene = "/layers/0/d/data/scene";
-    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>, bool)> = vec![
+    type Change = Box<dyn Fn(&mut Value)>;
+    let cases: Vec<(&str, Change, bool)> = vec![
         (
             "3D: imported models (legacy scene object cube)",
-            Box::new(|doc: &mut Value| {
-                *doc.pointer_mut(&format!("{scene}/objects/0/source")).unwrap() =
-                    json!({ "assetId": "m" });
+            Box::new(move |doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/0/source"))
+                    .unwrap() = json!({ "assetId": "m" });
                 doc["assets"]["m"] =
                     json!({ "id": "m", "kind": "model", "format": "glb", "name": "m.glb" });
             }),
@@ -619,33 +636,36 @@ fn the_static_check_looks_inside_legacy_scenes() {
         ),
         (
             "3D: knot primitives (legacy scene object ring)",
-            Box::new(|doc: &mut Value| {
-                *doc.pointer_mut(&format!("{scene}/objects/1/source")).unwrap() =
-                    json!({ "primitive": "knot" });
+            Box::new(move |doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/1/source"))
+                    .unwrap() = json!({ "primitive": "knot" });
             }),
             true,
         ),
         (
             "3D: hemisphere lights (legacy scene light key)",
-            Box::new(|doc: &mut Value| {
+            Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/lights/0/type")).unwrap() = json!("hemisphere");
             }),
             true,
         ),
         (
             "3D: model-group recipe parts (legacy scene object cube)",
-            Box::new(|doc: &mut Value| {
+            Box::new(move |doc: &mut Value| {
                 doc.pointer_mut(&format!("{scene}/objects/0"))
                     .unwrap()
                     .as_object_mut()
                     .unwrap()
-                    .insert("generation".into(), json!({ "groupId": "g", "partId": "p" }));
+                    .insert(
+                        "generation".into(),
+                        json!({ "groupId": "g", "partId": "p" }),
+                    );
             }),
             false,
         ),
         (
             "3D: SVG texture maps (legacy scene object ring)",
-            Box::new(|doc: &mut Value| {
+            Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
                     .unwrap() = json!({ "color": "i" });
                 doc["assets"]["i"] =
@@ -655,7 +675,7 @@ fn the_static_check_looks_inside_legacy_scenes() {
         ),
         (
             "3D: 3D texture map image (media: an image of unrecorded format) (legacy scene object ring)",
-            Box::new(|doc: &mut Value| {
+            Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
                     .unwrap() = json!({ "roughness": "i" });
                 doc["assets"]["i"] = json!({ "id": "i", "kind": "image", "name": "i" });
@@ -664,7 +684,7 @@ fn the_static_check_looks_inside_legacy_scenes() {
         ),
         (
             "3D: a legacy 3D scene without a scene object",
-            Box::new(|doc: &mut Value| {
+            Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut("/layers/0/d/data/scene").unwrap() = json!(null);
             }),
             true,
@@ -684,7 +704,8 @@ fn the_static_check_looks_inside_legacy_scenes() {
     }
     // A model asset without a record draws the orange box: not listed.
     let mut doc = base();
-    *doc.pointer_mut(&format!("{scene}/objects/0/source")).unwrap() = json!({ "assetId": "gone" });
+    *doc.pointer_mut(&format!("{scene}/objects/0/source"))
+        .unwrap() = json!({ "assetId": "gone" });
     let doc = load(&doc);
     assert_eq!(features(&doc), Vec::<String>::new());
     assert!(render(&doc).unwrap());
