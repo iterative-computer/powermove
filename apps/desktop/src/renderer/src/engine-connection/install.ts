@@ -152,6 +152,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
     if (connection !== next) return;
     connections++;
+    if (connections === 1) performance.mark?.('powermove:engine-connected');
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
     for (const listener of [...ready]) listener();
@@ -173,12 +174,20 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   native.requestPorts?.();
 
   const clockListeners = new Set<(sample: ClockSample) => void>();
+  /** Whether a first engine frame arrived (the cold start mark). */
+  let firstFrame = false;
   let trace = false;
   const makeService = (): EngineViewerService & { trace?: boolean } => ({
     trace,
     source,
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
+    revision: () => {
+      const barrier = PM.EngineDoc?.barrier;
+      if (!barrier) return null;
+      barrier.flush();
+      return barrier.revision;
+    },
     onReady(listener) {
       ready.add(listener);
       return () => ready.delete(listener);
@@ -198,7 +207,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         documentId: () => String(PM.proj?.id ?? ''),
         stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
         handlers: {
-          message: (message, arrivedMs) => handlers.message(message as never, arrivedMs),
+          message: (message, arrivedMs) => {
+            if (message.type === 'frame' && !firstFrame) {
+              firstFrame = true;
+              performance.mark?.('powermove:engine-first-frame');
+            }
+            handlers.message(message as never, arrivedMs);
+          },
           closed: (reason) => {
             if (session) forget(session);
             handlers.closed(reason);

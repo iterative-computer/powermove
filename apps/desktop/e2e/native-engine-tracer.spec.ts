@@ -206,7 +206,19 @@ test.describe('Use New Engine: the tracer bullet', () => {
     const startY = stage.y + (view.layer.y0 + view.layer.y1) / 2;
     await page.mouse.move(startX, startY);
     await page.mouse.down();
-    for (let i = 1; i <= 10; i++) await page.mouse.move(startX + i * 4, startY + i * 2);
+    // While the drag's edits stream to the engine, the selection box and
+    // handles are drawn at a revision the frame on screen includes: they
+    // never lead the pixels.
+    let lagged = 0;
+    for (let i = 1; i <= 10; i++) {
+      await page.mouse.move(startX + i * 4, startY + i * 2);
+      const tags = await page.evaluate(() => {
+        const V = (window as any).PM.Kernel.services.get('viewer');
+        return { overlay: V.overlayRevision as number | null, frame: V.engineFrame()?.revision ?? null, mirror: (window as any).PM.EngineDoc.barrier.revision as number };
+      });
+      if (tags.overlay !== null && tags.frame !== null) expect(tags.overlay).toBeLessThanOrEqual(tags.frame);
+      if (tags.frame !== null && tags.frame < tags.mirror) lagged++;
+    }
     await page.mouse.up();
     const dragged = await page.evaluate(() => {
       const bar = (window as any).PM.proj.layers.find((l: any) => l.id === 'bar');
@@ -217,6 +229,9 @@ test.describe('Use New Engine: the tracer bullet', () => {
     await expect.poll(async () => (await engineFrame(page))?.revision ?? -1, { timeout: 10_000 }).toBeGreaterThanOrEqual(wanted);
     const after = await viewerGeometry(page, 'bar');
     const engineBar = quadBox((await engineFrame(page)).overlay.layers.find((l: any) => l.layer === 'bar').bounds);
+    // Caught up: the handles are at the document's revision again.
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').overlayRevision), { timeout: 5000 }).toBe(wanted);
+    test.info().annotations.push({ type: 'drag', description: `${lagged} of 10 moves sampled while the frame lagged the document` });
     for (const key of ['x0', 'y0', 'x1', 'y1'] as const) expect(Math.abs(engineBar[key] - after.layer[key])).toBeLessThanOrEqual(0.75);
     // Undo reaches the engine too.
     await page.evaluate(() => (window as any).PM.hist.undo());

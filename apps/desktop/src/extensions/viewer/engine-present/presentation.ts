@@ -79,6 +79,9 @@ export interface EngineViewerService {
   onReady(listener: () => void): () => void;
   /** performance.now() ms to host µs, when the connection measured it. */
   hostOffsetUs?(): number | null;
+  /** The document revision the engine's frames are tagged with, now (the
+   *  overlay draws the geometry of the revision on screen). */
+  revision?(): number | null;
   /** The refresh rate of the display showing `view`, when main knows it. */
   displayHz?(view: Window): number | null;
   /** Record per-frame timings in the viewer's presentation (the S1
