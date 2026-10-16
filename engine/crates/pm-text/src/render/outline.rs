@@ -29,7 +29,10 @@ pub fn synthetic_bold_width(size: f64) -> f64 {
     size * (1.0 / 24.0 + (1.0 / 32.0 - 1.0 / 24.0) * t)
 }
 
-/// Kurbo's expansion settings as Vello's `FontEmbolden` defaults them.
+/// Outline expansion: round joins (a true dilation, as font smoothing
+/// is; miter joins grew spikes several pixels long at the acute corners of
+/// fonts such as Marker Felt). The miter limit only matters for synthetic
+/// bold, which keeps miters like Skia's fake bold.
 pub const EXPAND_MITER_LIMIT: f64 = 4.0;
 pub const EXPAND_TOLERANCE: f64 = 0.1;
 
@@ -236,10 +239,14 @@ fn build(
     }
     let (ex, ey) = style.expand;
     if ex != 0.0 || ey != 0.0 {
+        // Contours without area (a hairline drawn as two coincident edges)
+        // cover nothing, also under font smoothing; expanded they would
+        // become visible slivers.
+        path = without_degenerate_contours(&path);
         path = kurbo::expand_path(
             &path,
             Diagonal2::new(ex, ey),
-            Join::Miter,
+            Join::Round,
             EXPAND_MITER_LIMIT,
             EXPAND_TOLERANCE,
         );
@@ -249,6 +256,26 @@ fn build(
         path: Arc::new(path),
         bounds,
     })
+}
+
+/// `path` without its subpaths whose area is below 0.01 square pixels.
+fn without_degenerate_contours(path: &BezPath) -> BezPath {
+    let mut out = BezPath::new();
+    let mut current = BezPath::new();
+    let flush = |current: &mut BezPath, out: &mut BezPath| {
+        if !current.elements().is_empty() && current.area().abs() >= 0.01 {
+            out.extend(current.elements().iter().copied());
+        }
+        *current = BezPath::new();
+    };
+    for el in path.elements() {
+        if matches!(el, kurbo::PathEl::MoveTo(_)) {
+            flush(&mut current, &mut out);
+        }
+        current.push(*el);
+    }
+    flush(&mut current, &mut out);
+    out
 }
 
 /// Units per em of a face (1000 when the `head` table is unreadable).
@@ -261,6 +288,24 @@ pub fn units_per_em(face: FaceRef<'_>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degenerate_contours_are_dropped_before_expansion() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.line_to((10.0, 0.0));
+        p.line_to((10.0, 10.0));
+        p.line_to((0.0, 10.0));
+        p.close_path();
+        // A hairline: out and back along the same segment.
+        p.move_to((20.0, 0.0));
+        p.line_to((20.0, 10.0));
+        p.line_to((20.0, 0.0));
+        p.close_path();
+        let q = without_degenerate_contours(&p);
+        assert_eq!(q.elements().len(), 5);
+        assert!((q.area().abs() - 100.0).abs() < 1e-9);
+    }
 
     #[test]
     fn fake_bold_follows_skias_interpolation() {

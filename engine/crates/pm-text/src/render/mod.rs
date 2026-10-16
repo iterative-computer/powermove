@@ -17,6 +17,8 @@
 pub mod atlas;
 pub mod bitmap;
 pub mod color;
+#[cfg(all(target_os = "macos", feature = "coretext-reference"))]
+pub mod coretext;
 pub mod cpu;
 pub mod outline;
 pub mod paint;

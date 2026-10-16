@@ -30,7 +30,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
-pm-text = { path = "../pm-text", features = ["system", "render"] }
+pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 flate2 = "1.1"
 png = "0.18"
 
@@ -48,4 +48,9 @@ harness = false
 [[test]]
 # Runs on the main thread (the CoreText font registry).
 name = "text_gpu"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry and reference).
+name = "text_level2"
 harness = false

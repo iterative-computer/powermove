@@ -193,6 +193,12 @@ const CANVAS2D_DARK: Curve = [
     0.0, 0.0558, 0.1121, 0.1687, 0.22, 0.2836, 0.3418, 0.4007, 0.46, 0.5209, 0.5823, 0.6448, 0.72, 0.7746, 0.8429, 0.9152, 1.0,
 ];
 
+/// CoreText's coverage for black paint relative to plain coverage:
+/// `1 − (1 − c)^0.55`.
+const CORETEXT_DARK: Curve = [
+    0.0, 0.0349, 0.0708, 0.1079, 0.1463, 0.1862, 0.2278, 0.2713, 0.317, 0.3653, 0.4169, 0.4726, 0.5335, 0.6018, 0.6814, 0.7824, 1.0,
+];
+
 impl Profile {
     /// Plain outline coverage at exact positions.
     pub const PLAIN: Profile = Profile {
@@ -222,8 +228,10 @@ impl Profile {
         large_above: None,
         large: p(0.0, 0.0, 0.0, 0.0, 1.0),
         light: Cow::Borrowed(&LINEAR),
-        dark: Cow::Borrowed(&LINEAR),
-        mix: 1.0,
+        // Dark paint is lighter under CoreGraphics smoothing: measured
+        // against CoreText on the `colors` cases (`tests/text_level2.rs`).
+        dark: Cow::Borrowed(&CORETEXT_DARK),
+        mix: 1.4,
         fake_bold: 0.00875,
         fake_bold_y: 0.925,
         stroke: StrokeProfile {

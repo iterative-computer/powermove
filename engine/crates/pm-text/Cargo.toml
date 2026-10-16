@@ -21,6 +21,8 @@ corpus-tools = ["system", "level2", "dep:flate2"]
 # the renderer paints, and the `vello_cpu` coverage fallback. Off for
 # `pm-wasm` and `pm-eval`, which only lay text out.
 render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu"]
+# The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
+coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider"]
 
 [dependencies]
 harfrust = "0.14"

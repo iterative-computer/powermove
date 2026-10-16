@@ -165,6 +165,17 @@ impl PartialEq for TextPlan {
 }
 
 impl TextPlan {
+    /// A plan of a whole scene (no crop).
+    pub fn whole(scene: TextScene) -> TextPlan {
+        let crop = [0, 0, scene.width.max(1), scene.height.max(1)];
+        let key = scene_key(&scene, crop, u64::MAX);
+        TextPlan {
+            scene: Arc::new(scene),
+            crop,
+            key,
+        }
+    }
+
     pub fn width(&self) -> u32 {
         self.crop[2] - self.crop[0]
     }

@@ -604,6 +604,44 @@ impl Renderer {
         }))
     }
 
+    /// Paints a text scene (the whole scene) through the GPU text path and
+    /// reads it back: premultiplied working values, top-down. For the level
+    /// 2 gate, review sheets, and tools that build scenes themselves.
+    pub fn paint_text_scene(
+        &mut self,
+        scene: pm_text::render::scene::TextScene,
+        precision: Precision,
+    ) -> Result<Vec<f32>, RenderError> {
+        let plan = crate::text::TextPlan::whole(scene);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text scene"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &plan,
+                precision,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        Ok(pm_gpu::readback::read_f32(
+            &self.device,
+            &self.queue,
+            view.texture(),
+        )?)
+    }
+
     /// The plan of a frame without rendering it (tests, `pm-cli parity`).
     pub fn plan(
         &mut self,
