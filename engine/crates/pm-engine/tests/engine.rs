@@ -675,14 +675,14 @@ fn patch_batches_follow_the_applied_revision() {
             Some(session),
         )
     };
-    // Without a decoder the engine says so once and keeps its document.
+    // The built-in decoder reads canonicalV1 (pm-model's binary patches):
+    // a body that is not one is refused, and the session waits for a resync.
     let out = engine.receive(WINDOW, &batch(1, 2), at(1));
     let failure = sent(&out, WINDOW).remove(0);
     assert!(matches!(
         failure.message,
-        Message::Event { body: Event::Failure(ref f) } if f.error.code == ErrorCode::Unsupported
+        Message::Event { body: Event::Failure(ref f) } if f.error.code == ErrorCode::InvalidMessage
     ));
-    assert!(sent(&engine.receive(WINDOW, &batch(1, 2), at(1)), WINDOW).is_empty());
     assert!(engine.status().sessions[0].stale);
 
     engine.set_patch_decoder(Box::new(JsonPatches));

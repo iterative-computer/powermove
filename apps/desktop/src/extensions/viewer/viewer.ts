@@ -24,6 +24,7 @@ import { drawEditablePaths, startPathEdit } from './path-editing';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
 import { viewParamsFor } from './engine-present/view-params';
 import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
+import { GeometryAtRevision } from './engine-present/revision-geometry';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -798,6 +799,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The service went away (engine off) or was replaced: detach; the
     // current engine's canvas underneath shows until a new one presents.
     enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+    if (V.el) V.el.style.visibility = '';
     // The WebGL canvas takes the size it skipped while the engine presented.
     commitPendingResize();
   }
@@ -813,6 +815,9 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // Overlays redraw at each new frame tag (revision, view sequence), so
     // handles drawn from the frame's geometry never lead its pixels.
     presentation.onPresented((frame) => {
+      // Engine frames cover the composition; the WebGL canvas underneath
+      // rests (and must not show around a frame that lags a pan).
+      if (V.el && V.el.style.visibility !== 'hidden') V.el.style.visibility = 'hidden';
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
@@ -821,6 +826,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The WebGL canvas shows again (the engine session ended): it takes the
     // size it skipped while the engine presented, and draws.
     presentation.onHidden(() => {
+      if (V.el) V.el.style.visibility = '';
       commitPendingResize();
       schedulePresentation();
     });
@@ -1184,6 +1190,28 @@ listen('frame:rendered', (frame: { viewport: PreviewViewport | null; time: numbe
 });
 listen('overlay', () => drawOverlay());
 
+/* While the engine presents, the selection box, handles, and anchor are
+   drawn at the revision of the frame on screen (section 18, item 6): a
+   drag's newest edit may still be on its way to the engine, and the
+   handles must not lead the pixels. The geometry drawn for each document
+   revision is kept, and the newest one the presented frame includes is
+   drawn; hit-testing and transforms keep using the current geometry. */
+const selectionHistory = new GeometryAtRevision<SelectionGeometry | null>();
+function selectionOnScreen(current: SelectionGeometry | null, sels: any[]): SelectionGeometry | null {
+  const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
+  const revision = frame ? engineService?.revision?.() ?? null : null;
+  if (!frame || revision === null) {
+    selectionHistory.clear();
+    V.overlayRevision = null;
+    return current;
+  }
+  const key = `${sels.map((layer: any) => layer.id).join(',')}@${api.transport.time()}`;
+  selectionHistory.record(revision, key, current);
+  const shown = selectionHistory.at(frame.revision, key, current);
+  V.overlayRevision = shown.revision;
+  return shown.value;
+}
+
 function drawOverlay() {
   /* The compositor paints synchronously at the end of its frame. Consume the
      fallback requested by the time event instead of repainting it next RAF.
@@ -1262,7 +1290,7 @@ function drawOverlay() {
   }
 
   const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
-  const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
+  const selection = selectionOnScreen(resolveSelectionGeometry(api, sels, api.transport.time(), space3d), sels);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
   if (sels.length > 1 || !selection) for (const L of sels) {
@@ -1285,7 +1313,8 @@ function drawOverlay() {
   const anchorUnit = 1 / Math.max(.02, V.shown);
   for (const layer of sels) {
     if (!layerBounds(api, layer, api.transport.time())) continue;
-    const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
+    // A single selection's anchor moves with its box (the geometry on screen).
+    const pivot = sels.length === 1 && selection?.mode === 'single' ? selection.pivotWorld : layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
     c.beginPath();
     c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
