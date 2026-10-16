@@ -55,6 +55,12 @@ class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   disposed = false;
   private pending: (() => void)[] = [];
+  private loseDevice: (reason: string) => void = () => {};
+  readonly lost = new Promise<string>((resolve) => (this.loseDevice = resolve));
+  /** The device goes away (the GPU process restarted). */
+  lose(reason: string): void {
+    this.loseDevice(reason);
+  }
   configure(): void {}
   draw(frame: VideoFrame): void {
     const fake = frame as unknown as FakeFrame;
@@ -194,14 +200,15 @@ const settle = async (): Promise<void> => {
 function setup(options: { failPainter?: boolean; trace?: boolean } = {}) {
   const pair = new Pair(options.failPainter);
   const failures: string[] = [];
-  const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0, onFailed: (m) => failures.push(m) });
+  const losses: string[] = [];
+  const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0, onFailed: (m) => failures.push(m), onLost: (m) => losses.push(m) });
   const source = new Source();
   const link = new Link();
   const hints: VsyncHint[] = [];
   const presenter = host.open({ link, source, trace: options.trace, displayHz: 120, onVsync: (h) => hints.push(h) });
   const presented: PresentedFrame[] = [];
   presenter.onPresented((f) => presented.push(f));
-  return { pair, host, source, link, presenter, presented, failures, hints };
+  return { pair, host, source, link, presenter, presented, failures, hints, losses };
 }
 
 describe('WorkerPresenter and the presentation worker', () => {
@@ -373,5 +380,28 @@ describe('WorkerPresenter and the presentation worker', () => {
     presenter.receive({ type: 'frame', frame: desc(4) }, 0);
     host.dispose();
     expect(pair.posted).toHaveLength(posted);
+  });
+
+  it('a lost device ends the worker presenting: every frame it held goes back to the engine, later ones too, and the page is told', async () => {
+    const { pair, source, link, presenter, losses } = setup();
+    for (const k of ['1:1', '1:2', '1:3']) source.imports.add(k);
+    presenter.receive({ type: 'clock', sample: clock({}) }, 0);
+    // Frame 1 is drawn (its GPU work never finishes: the device is gone);
+    // frame 2 waits a minute ahead in the jitter buffer.
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    presenter.receive({ type: 'frame', frame: desc(2, { pts: 3600 * F, duration: F }) }, 0);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    pair.painter.lose('A valid external Instance reference no longer exists.');
+    await settle();
+    expect(losses).toEqual(['A valid external Instance reference no longer exists.']);
+    // Both came back: the queued one from the worker, the drawn one when the worker closed the session.
+    expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2]);
+    expect(source.frames.every((f) => f.closed)).toBe(true);
+    // A frame that arrives afterwards is handed back undrawn.
+    presenter.receive({ type: 'frame', frame: desc(3) }, 0);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2, 3]);
   });
 });

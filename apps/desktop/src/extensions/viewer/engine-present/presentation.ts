@@ -137,6 +137,10 @@ const STATE_HISTORY = 32;
 /** How long a new viewer size must hold before the engine gets it. */
 export const SIZE_SETTLE_MS = 150;
 
+/** Device losses tolerated within `DEVICE_LOSS_WINDOW_MS` before the presentation gives up. */
+export const MAX_DEVICE_LOSSES = 3;
+export const DEVICE_LOSS_WINDOW_MS = 30_000;
+
 export class ViewerPresentation {
   private canvasElement: HTMLCanvasElement;
   /** Draws on this thread (`painter`) or in a presentation worker (`worker`). */
@@ -168,6 +172,8 @@ export class ViewerPresentation {
   private settleDue = false;
   /** The display's refresh grid, sent with every state (amendment 18). */
   private vsync: VsyncHint | null = null;
+  /** When the drawing's device was lost recently (performance.now ms). */
+  private losses: number[] = [];
 
   constructor(private readonly options: PresentationOptions) {
     this.canvasElement = this.makeCanvas(options.stage.ownerDocument);
@@ -380,7 +386,8 @@ export class ViewerPresentation {
           // This realm's clock: arrivals are stamped with it, and a
           // popout's worker must decide on it too (timeOriginShift).
           timeOrigin: performance.timeOrigin,
-          onFailed: (message) => this.workerFailed(token, message)
+          onFailed: (message) => this.workerFailed(token, message),
+          onLost: (message) => this.deviceLost(token, message)
         });
         return true;
       } catch (error) {
@@ -405,7 +412,33 @@ export class ViewerPresentation {
       return !this.disposed && token === this.backendToken;
     }
     this.painter = painter;
+    void painter.lost?.then((message) => {
+      if (this.painter === painter) this.deviceLost(token, message);
+    });
     return true;
+  }
+
+  /**
+   * The drawing's WebGPU device was lost (the GPU process restarted): a
+   * new canvas and device (a new worker when presenting from one), and the
+   * session carries on. Losses that keep coming back off the drawing are
+   * given up after `MAX_DEVICE_LOSSES` within `DEVICE_LOSS_WINDOW_MS`, so a
+   * broken GPU cannot spin the viewer; the current engine's canvas shows.
+   */
+  private deviceLost(token: number, message: string): void {
+    if (this.disposed || token !== this.backendToken) return;
+    const now = performance.now();
+    this.losses = this.losses.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
+    this.losses.push(now);
+    if (this.losses.length > MAX_DEVICE_LOSSES) {
+      this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
+      this.painterFailed = true;
+      this.workerUnavailable = true;
+      void this.replaceDrawing();
+      return;
+    }
+    this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
+    void this.replaceDrawing();
   }
 
   private workerFailed(token: number, message: string): void {

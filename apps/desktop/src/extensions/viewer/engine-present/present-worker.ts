@@ -53,6 +53,9 @@ export type ToWorker =
 export type FromWorker =
   | { type: 'ready' }
   | { type: 'failed'; message: string }
+  /** The painter's device was lost: this worker draws nothing more (its
+   *  session's frames went back to the engine); the page replaces it. */
+  | { type: 'lost'; message: string }
   | { type: 'release'; session: number; release: FrameRelease }
   /** A frame drawn, with the session's stats after it. */
   | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
@@ -171,7 +174,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   };
 
   const handle = (message: ToWorker): void => {
-    if (disposed || failed) {
+    // A worker that failed still answers `dispose`, so the page can end it at once.
+    if (disposed || (failed && message.type !== 'dispose')) {
       if (message.type === 'frame') giveBack(message);
       return;
     }
@@ -254,6 +258,14 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       painter = null;
       return;
     }
+    void painter.lost?.then((message) => {
+      if (disposed || failed) return;
+      // Nothing may touch the lost device again: the session's frames go
+      // back to the engine, later ones are handed back as they come.
+      failed = true;
+      post({ type: 'lost', message });
+      close();
+    });
     const queued = pending ?? [];
     pending = null;
     post({ type: 'ready' });

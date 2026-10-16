@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { FramePainter } from './gpu';
+import { DeviceLostError, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
 import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
@@ -42,11 +42,13 @@ class Source implements FrameSource {
 class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   configured: string[] = [];
+  lostReason: string | null = null;
   private pending: (() => void)[] = [];
   configure(format: string, colorSpace: string, width: number, height: number): void {
     this.configured.push(`${format}:${colorSpace}:${width}x${height}`);
   }
   draw(frame: VideoFrame): void {
+    if (this.lostReason !== null) throw new DeviceLostError(this.lostReason);
     const fake = frame as unknown as FakeFrame;
     expect(fake.closed).toBe(false);
     this.draws.push(fake);
@@ -313,5 +315,17 @@ describe('EnginePresenter', () => {
     presenter.receive({ type: 'frame', frame: desc(3, { pts: 0, duration: F }) }, 102);
     expect(painter.draws).toHaveLength(2);
     presenter.dispose();
+  });
+
+  it('releases a frame its lost device cannot draw, without throwing', () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1);
+    painter.lostReason = 'GPU process restarted';
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    expect(() => presenter.refresh(16)).not.toThrow();
+    expect(painter.draws).toHaveLength(0);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(presenter.stats.dropped['device-lost']).toBe(1);
   });
 });
