@@ -59,8 +59,8 @@
     "edit.mutate": 37,
     "history.transaction": 12,
     "history.external": 5,
-    "project-replace": 7,
-    "touch": 54,
+    "project-replace": 8,
+    "touch": 55,
     "touch.paths": 1,
     "doc.write": 16,
     "doc.touched": 5,
@@ -70,7 +70,7 @@
     "project-swap": 4,
     "revision": 1,
     "asset-metadata": 3,
-    "project-write": 70,
+    "project-write": 72,
     "render-queue-swap": 3,
     "home-composition-match": 1,
     "blender-source-asset": 1,
@@ -543,16 +543,40 @@
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1695",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1724",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > bindStage > guarded(callback)",
       "code": "api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path...."
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2080",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2109",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > createShape",
       "code": "api.edit.mutate('Draw mask', () => { const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect'); mask.p.x!.v = (first.x + ..."
+    },
+    {
+      "site": "apps/desktop/src/main/engine/integration/synthetic-project.ts:67",
+      "class": "project-replace",
+      "scope": "buildSyntheticProject",
+      "code": "PM.replaceProject(project)"
+    },
+    {
+      "site": "apps/desktop/src/main/engine/integration/synthetic-project.ts:152",
+      "class": "project-write",
+      "scope": "buildSyntheticProject",
+      "code": "root.comps[sub.id] = sub"
+    },
+    {
+      "site": "apps/desktop/src/main/engine/integration/synthetic-project.ts:207",
+      "class": "project-write",
+      "scope": "buildSyntheticProject",
+      "code": "root.layers = layers.slice(1).concat([backdrop])"
+    },
+    {
+      "site": "apps/desktop/src/main/engine/integration/synthetic-project.ts:208",
+      "class": "touch",
+      "scope": "buildSyntheticProject",
+      "code": "PM.touch?.()"
     },
     {
       "site": "apps/desktop/src/renderer/src/captions/commands.ts:220",
@@ -711,37 +735,37 @@
       "code": "writeDocument(PM, paths, revalidateContributions)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:598",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:602",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1091",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1095",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1095",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1099",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1425",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1429",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1426",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1430",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1437",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1441",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
