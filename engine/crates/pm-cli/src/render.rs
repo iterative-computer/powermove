@@ -194,11 +194,26 @@ fn install_interrupt() {
 }
 
 /// The project, its media, and the composition facts a render needs.
-struct Loaded {
-    document: Arc<Document>,
-    composition: String,
-    media: MediaPaths,
+pub(crate) struct Loaded {
+    pub(crate) document: Arc<Document>,
+    pub(crate) composition: String,
+    pub(crate) media: MediaPaths,
     _scratch: Scratch,
+}
+
+/// A project file with its media unpacked (`pm-cli scope` shares the
+/// render command's loading).
+pub(crate) fn load_project(
+    input: &Path,
+    composition: Option<&str>,
+    media: &[(String, PathBuf)],
+) -> Result<Loaded, Failure> {
+    load(&Options {
+        input: input.to_path_buf(),
+        composition: composition.map(str::to_owned),
+        media: media.to_vec(),
+        ..Options::default()
+    })
 }
 
 fn load(options: &Options) -> Result<Loaded, Failure> {

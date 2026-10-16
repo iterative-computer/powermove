@@ -5,6 +5,7 @@
 //! pm-cli render <project.pmv|.json> -o <out.mov|.mp4> [options]
 //! pm-cli parity render [--capture <dir>]... [--only <prefix>] [--diffs <dir>] [--json <file>]
 //! pm-cli parity eval [options]
+//! pm-cli scope <project.pmv|.json> -o <dir> [options] | --frame <file> -o <dir>
 //! ```
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
@@ -18,6 +19,7 @@ mod corpus;
 mod parity;
 mod render;
 mod render_parity;
+mod scope;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -67,7 +69,13 @@ const USAGE: &str = "usage:
       compares engine renders with the legacy captures of the parity corpus
       (default: the newest v1-* and render-* captures)
   pm-cli parity eval [options]
-      evaluation parity against the corpus (see pm-cli parity eval --help)";
+      evaluation parity against the corpus (see pm-cli parity eval --help)
+  pm-cli scope <project.pmv|.json> -o <dir> [options]
+  pm-cli scope --frame <capture.rgba32f|frame.png> -o <dir>
+      waveform, RGB parade, and vectorscope of a 32-bit working render (or a
+      captured frame): waveform.png, parade.png, vectorscope.png, scope.json
+      --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
+      --motion-blur off|export|N (default export)  --transparent  --columns N";
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -209,6 +217,62 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
     Ok(o)
 }
 
+fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
+    let mut o = scope::Options::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-o" | "--output" => o.output = PathBuf::from(value(args, &mut i, a)?),
+            "--frame" => o.frame = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--time" => {
+                let v = value(args, &mut i, a)?;
+                o.time = v.parse().map_err(|_| format!("time {v:?}"))?;
+            }
+            "--composition" => o.composition = Some(value(args, &mut i, a)?.into()),
+            "--size" => {
+                let v = value(args, &mut i, a)?;
+                let (w, h) = v
+                    .split_once('x')
+                    .ok_or_else(|| format!("size {v:?} (WxH)"))?;
+                let p = |s: &str| s.parse::<u32>().map_err(|_| format!("size {v:?}"));
+                o.size = Some((p(w)?, p(h)?));
+            }
+            "--scale" => {
+                let v = value(args, &mut i, a)?;
+                o.scale = Some(v.parse().map_err(|_| format!("scale {v:?}"))?);
+            }
+            "--media" => {
+                let v = value(args, &mut i, a)?;
+                let (asset, file) = v
+                    .split_once('=')
+                    .ok_or_else(|| format!("media {v:?} (ASSET=FILE)"))?;
+                o.media.push((asset.into(), PathBuf::from(file)));
+            }
+            "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
+            "--transparent" => o.transparent = true,
+            "--columns" => {
+                let v = value(args, &mut i, a)?;
+                o.columns = Some(v.parse().map_err(|_| format!("columns {v:?}"))?);
+            }
+            other if other.starts_with('-') => return Err(format!("unknown option {other}")),
+            other => {
+                if o.input.replace(PathBuf::from(other)).is_some() {
+                    return Err("one project at a time".into());
+                }
+            }
+        }
+        i += 1;
+    }
+    if o.output.as_os_str().is_empty() {
+        return Err("no output directory (-o)".into());
+    }
+    if o.input.is_some() == o.frame.is_some() {
+        return Err("a project or --frame (not both)".into());
+    }
+    Ok(o)
+}
+
 fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
     let mut o = render_parity::Options {
         captures: vec![],
@@ -313,6 +377,33 @@ fn main() -> ExitCode {
             }
             _ => fail_usage("parity takes `render` or `eval`"),
         },
+        Some("scope") => {
+            let options = match parse_scope(&args[1..]) {
+                Ok(o) => o,
+                Err(e) => return fail_usage(&e),
+            };
+            match scope::run(&options) {
+                Ok(stats) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&stats).unwrap_or_default()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(render::Failure::Usage(m)) => fail_usage(&m),
+                Err(render::Failure::Unsupported(reasons)) => {
+                    eprintln!("pm-cli: the new engine cannot render this project yet:");
+                    for r in reasons {
+                        eprintln!("  {r}");
+                    }
+                    ExitCode::from(3)
+                }
+                Err(render::Failure::Failed(m)) => {
+                    eprintln!("pm-cli: {m}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -392,6 +483,34 @@ mod tests {
         assert!(parse_render(&s(&["-o", "x.mov"])).is_err(), "no input");
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--bogus"])).is_err());
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--size", "12"])).is_err());
+    }
+
+    #[test]
+    fn scope_options_parse() {
+        let o = parse_scope(&s(&[
+            "p.pmv",
+            "-o",
+            "/tmp/s",
+            "--time",
+            "1.5",
+            "--size",
+            "640x360",
+            "--motion-blur",
+            "off",
+            "--columns",
+            "320",
+        ]))
+        .unwrap();
+        assert_eq!(o.input, Some(PathBuf::from("p.pmv")));
+        assert_eq!(o.time, 1.5);
+        assert_eq!(o.size, Some((640, 360)));
+        assert_eq!(o.columns, Some(320));
+        let f = parse_scope(&s(&["--frame", "t1.rgba32f", "-o", "/tmp/s"])).unwrap();
+        assert_eq!(f.frame, Some(PathBuf::from("t1.rgba32f")));
+        assert!(parse_scope(&s(&["p.pmv"])).is_err(), "no output");
+        assert!(parse_scope(&s(&["-o", "/tmp/s"])).is_err(), "no input");
+        assert!(parse_scope(&s(&["p.pmv", "--frame", "f.png", "-o", "/tmp/s"])).is_err());
+        assert!(parse_scope(&s(&["p.pmv", "-o", "/tmp/s", "--bogus"])).is_err());
     }
 
     #[test]
