@@ -363,6 +363,8 @@ struct ImageKey {
     len: u64,
     modified: u128,
     precision: u8,
+    /// Converted textures hold working values: linear light differs.
+    linear: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -371,6 +373,7 @@ struct FrameKey {
     frame: usize,
     precision: u8,
     export: bool,
+    linear: bool,
 }
 
 /// Media state kept across frames: decoded and converted stills, video
@@ -440,6 +443,7 @@ impl MediaCache {
             len,
             modified,
             precision: precision as u8,
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
@@ -478,8 +482,9 @@ impl MediaCache {
         drop(imported);
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
-        self.images
-            .retain(|k, _| k.path != key.path || k.precision != key.precision);
+        self.images.retain(|k, _| {
+            k.path != key.path || k.precision != key.precision || k.linear != key.linear
+        });
         self.images.insert(key, target.clone());
         self.recount();
         Ok(target)
@@ -532,6 +537,7 @@ impl MediaCache {
             frame: n,
             precision: precision as u8,
             export,
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
@@ -590,7 +596,10 @@ impl MediaCache {
         drop(imported);
         // Keep only the newest frame per source and precision.
         self.frames.retain(|k, _| {
-            k.path != key.path || k.precision != key.precision || k.export != key.export
+            k.path != key.path
+                || k.precision != key.precision
+                || k.export != key.export
+                || k.linear != key.linear
         });
         self.frames.insert(key, target.clone());
         self.recount();

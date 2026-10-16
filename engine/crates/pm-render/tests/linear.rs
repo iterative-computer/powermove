@@ -111,3 +111,36 @@ fn checkerboard_downscaled_2x_is_188() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// One renderer drawing the same still for a Standard and a linear-light
+/// project keeps each project's converted texture (working values differ).
+#[test]
+fn converted_media_follow_the_working_encoding() {
+    let dir = std::env::temp_dir().join(format!("pm-render-linear-cache-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("checker.png");
+    checkerboard(&path);
+    let mut r = Renderer::headless().unwrap();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("checker".into(), path.clone());
+    let doc = |on: bool| {
+        let mut image = layer(
+            "img",
+            "image",
+            json!({ "asset": "checker", "fit": "stretch", "w": 64, "h": 64 }),
+            16.0,
+            16.0,
+            1.0,
+        );
+        set(&mut image, "scale.x", json!(50));
+        set(&mut image, "scale.y", json!(50));
+        let mut d = project(32, 32, 1.0, solid_fill("#000000"), vec![image]);
+        asset(&mut d, "checker", "image", "png", 64, 64, 1.0);
+        with_linear(d, on)
+    };
+    for (on, code) in [(false, 128), (true, 188), (false, 128), (true, 188)] {
+        let rgba = render(&mut r, &doc(on), (32, 32), &resolver);
+        assert_eq!(unit_to_code(f64::from(rgba[0]), 8), code, "linear {on}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
