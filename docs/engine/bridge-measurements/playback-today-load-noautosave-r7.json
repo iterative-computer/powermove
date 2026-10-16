@@ -1,0 +1,162 @@
+{
+  "run": "playback-today-load-noautosave-r7",
+  "config": {
+    "scenario": "playback",
+    "app": false,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 60,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      5.24755859375,
+      4.57275390625,
+      4.65478515625
+    ],
+    "after": [
+      4.2861328125,
+      4.46142578125,
+      4.60791015625
+    ]
+  },
+  "clock": {
+    "rttUs": 62,
+    "offsetUs": 176308623621.99997
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.01987500000541,
+        "max": 50.047082999997656
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1202,
+      "replies": 1202,
+      "replyBytes": 94587968,
+      "mainMsP50": 0.0947500000038417
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.e4b2a23757a87e55883801d7da519998",
+    "accepted": {
+      "pid": 67856,
+      "pidversion": 2335452
+    },
+    "rejections": 5640,
+    "surfaces": 128,
+    "imports": 128,
+    "sends": 128,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 128,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 128,
+      "bytes": 9428586496
+    },
+    "live": 0
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 60,
+      "reporterFrames": 7718
+    },
+    "frames": {
+      "expected": 3587,
+      "notDrawn": 0,
+      "notPresented": 1,
+      "drops": 1,
+      "presented": 3586,
+      "offSlot": 1153
+    },
+    "jitterAbsMs": {
+      "n": 3586,
+      "p50": 4.033,
+      "p95": 8.395,
+      "p99": 8.575,
+      "max": 12.632
+    },
+    "intervalErrorAbsMs": {
+      "n": 3584,
+      "p50": 0.001,
+      "p95": 8.334,
+      "p99": 8.4,
+      "max": 16.723
+    },
+    "irregularIntervals": 1154,
+    "rafToPresentMs": {
+      "n": 3586,
+      "p50": 11.67,
+      "p95": 20.23,
+      "p99": 20.9,
+      "max": 21
+    },
+    "rafGapMs": {
+      "n": 7205,
+      "p50": 8.3,
+      "p95": 9.3,
+      "p99": 9.4,
+      "max": 16.6
+    },
+    "rafGapsOver25Ms": 0,
+    "missing": [
+      {
+        "k": 2595,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 2949,
+      "2": 573,
+      "3": 64
+    },
+    "presenter": null,
+    "receiver": {
+      "launch": 1,
+      "held": 128,
+      "received": 128,
+      "released": 0,
+      "videoFrames": 0,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

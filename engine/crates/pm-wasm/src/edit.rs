@@ -34,7 +34,9 @@ fn get<'v>(request: &'v Value, key: &str) -> Option<&'v Value> {
 }
 
 fn number(request: &Value, key: &str) -> f64 {
-    get(request, key).and_then(Value::as_f64).unwrap_or(f64::NAN)
+    get(request, key)
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::NAN)
 }
 
 /// A layer index of the edited composition.
@@ -62,7 +64,11 @@ fn optional_index(v: Option<&Value>, count: usize) -> Result<Option<usize>, JsTh
 }
 
 fn rect(v: Option<&Value>) -> Result<Rect, JsThrow> {
-    let read = |k: &str| v.and_then(|b| get(b, k)).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    let read = |k: &str| {
+        v.and_then(|b| get(b, k))
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NAN)
+    };
     if v.is_none() {
         return Err(JsThrow::type_error("bounds are required"));
     }
@@ -124,7 +130,9 @@ pub(crate) fn dispatch(
     let t = number(request, "t");
     let uid = get(request, "uid");
     let ids = IdSource::new(
-        uid.and_then(|u| get(u, "base")).and_then(Value::as_str).unwrap_or(""),
+        uid.and_then(|u| get(u, "base"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
         uid.and_then(|u| get(u, "start"))
             .and_then(Value::as_f64)
             .filter(|n| *n >= 0.0 && n.fract() == 0.0)
@@ -144,146 +152,156 @@ pub(crate) fn dispatch(
     let mut host = RefuseHost;
     // Members of the reply after `ops` and `next`, each starting with a comma.
     let mut extra = Reply::new();
-    let result: Result<(), JsThrow> = (|| {
-        match name {
-            "reparent" => {
-                let layer = index(get(request, "layer"), count)?;
-                let parent = optional_index(get(request, "parent"), count)?;
-                pose::reparent(&mut edit, layer, parent, t)
-            }
-            "moveToGroup" => {
-                let roots = indexes(get(request, "roots"), count)?;
-                let target = optional_index(get(request, "target"), count)?;
-                groups::move_to_group(&mut edit, &roots, target, t)
-            }
-            "ungroup" => {
-                let gs = indexes(get(request, "groups"), count)?;
-                let children = groups::ungroup(&mut edit, &gs, t)?;
-                extra.raw(",\"ids\":[");
-                for (i, id) in children.iter().enumerate() {
-                    if i > 0 {
-                        extra.raw(",");
-                    }
-                    extra.js(id);
-                }
-                extra.raw("]");
-                Ok(())
-            }
-            "groupPlacement" => {
-                let group = index(get(request, "group"), count)?;
-                let b = groups::group_placement(&mut edit, group, t, &mut probe, &mut host)?;
-                extra.raw(",\"bounds\":");
-                match b {
-                    Some(b) => rect_reply(&mut extra, &b.rect()),
-                    None => extra.raw("null"),
-                }
-                Ok(())
-            }
-            "align" => {
-                let layers = indexes(get(request, "layers"), count)?;
-                let mode = get(request, "mode")
-                    .and_then(Value::as_str)
-                    .and_then(Mode::parse)
-                    .ok_or_else(|| JsThrow::type_error("Unknown alignment"))?;
-                let moves = align::align(&mut edit, &layers, mode, t, &mut probe, &mut host)?;
-                moves_reply(&mut extra, &moves);
-                Ok(())
-            }
-            "distribute" => {
-                let layers = indexes(get(request, "layers"), count)?;
-                let spread = get(request, "spread")
-                    .and_then(Value::as_str)
-                    .and_then(Spread::parse)
-                    .ok_or_else(|| JsThrow::type_error("Unknown distribution"))?;
-                let moves = align::distribute(&mut edit, &layers, spread, t, &mut probe, &mut host)?;
-                moves_reply(&mut extra, &moves);
-                Ok(())
-            }
-            "captureFontAnchor" | "captureSizeAnchor" => {
-                let layer = index(get(request, "layer"), count)?;
-                let fields: Vec<JsString> = get(request, "fields")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().map(Value::to_js_string).collect())
-                    .unwrap_or_default();
-                if name == "captureFontAnchor" {
-                    anchor::capture_font_anchor(&mut edit, layer, &fields, t, &mut probe)
-                } else {
-                    anchor::capture_size_anchor(&mut edit, layer, &fields, t)
-                }
-            }
-            "anchorReference" => {
-                let layer = index(get(request, "layer"), count)?;
-                let k = kind(get(request, "kind"))?;
-                let r = anchor::anchor_reference(&mut edit, layer, k, t, &mut probe)?;
-                extra.raw(",\"bounds\":");
-                match r {
-                    Some(r) => rect_reply(&mut extra, &r),
-                    None => extra.raw("null"),
-                }
-                Ok(())
-            }
-            "anchorMoved" => {
-                let layer = index(get(request, "layer"), count)?;
-                let k = kind(get(request, "kind"))?;
-                let bounds = rect(get(request, "bounds"))?;
-                anchor::anchor_moved(&mut edit, layer, k, t, &bounds)
-            }
-            "splitText" => {
-                let sources = indexes(get(request, "sources"), count)?;
-                let mode = get(request, "mode")
-                    .and_then(Value::as_str)
-                    .and_then(split_text::Mode::parse)
-                    .ok_or_else(|| JsThrow::type_error("Unknown split mode"))?;
-                let plans = split_text::split_text(&mut edit, &sources, mode, t, &mut probe)?;
-                extra.raw(",\"plans\":[");
-                for (i, plan) in plans.iter().enumerate() {
-                    if i > 0 {
-                        extra.raw(",");
-                    }
-                    extra.raw("{\"source\":");
-                    extra.num(plan.source as f64);
-                    extra.raw(",\"children\":");
-                    extra.value(&Value::Array(plan.children.clone()));
-                    extra.raw("}");
-                }
-                extra.raw("]");
-                Ok(())
-            }
-            "leaveAttributes" => {
-                let layer = index(get(request, "layer"), count)?;
-                let b = comp_bounds::leave_attributes(&mut edit, layer, t, &mut probe, &mut host)?;
-                for (k, v) in [("w", b.w), ("h", b.h), ("ax", b.ax), ("ay", b.ay)] {
-                    extra.raw(",");
-                    extra.str(k);
-                    extra.raw(":");
-                    extra.num(v);
-                }
-                Ok(())
-            }
-            "syncPeers" => {
-                let layer = index(get(request, "layer"), count)?;
-                let channel = get(request, "channel")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| JsThrow::type_error("channel is required"))?;
-                let n = materials::synchronize_peers(&mut edit, layer, channel)?;
-                extra.raw(",\"count\":");
-                extra.num(n as f64);
-                Ok(())
-            }
-            other => Err(JsThrow::type_error(format!("unknown edit '{other}'"))),
+    let result: Result<(), JsThrow> = (|| match name {
+        "reparent" => {
+            let layer = index(get(request, "layer"), count)?;
+            let parent = optional_index(get(request, "parent"), count)?;
+            pose::reparent(&mut edit, layer, parent, t)
         }
+        "moveToGroup" => {
+            let roots = indexes(get(request, "roots"), count)?;
+            let target = optional_index(get(request, "target"), count)?;
+            groups::move_to_group(&mut edit, &roots, target, t)
+        }
+        "ungroup" => {
+            let gs = indexes(get(request, "groups"), count)?;
+            let children = groups::ungroup(&mut edit, &gs, t)?;
+            extra.raw(",\"ids\":[");
+            for (i, id) in children.iter().enumerate() {
+                if i > 0 {
+                    extra.raw(",");
+                }
+                extra.js(id);
+            }
+            extra.raw("]");
+            Ok(())
+        }
+        "groupPlacement" => {
+            let group = index(get(request, "group"), count)?;
+            let b = groups::group_placement(&mut edit, group, t, &mut probe, &mut host)?;
+            extra.raw(",\"bounds\":");
+            match b {
+                Some(b) => rect_reply(&mut extra, &b.rect()),
+                None => extra.raw("null"),
+            }
+            Ok(())
+        }
+        "align" => {
+            let layers = indexes(get(request, "layers"), count)?;
+            let mode = get(request, "mode")
+                .and_then(Value::as_str)
+                .and_then(Mode::parse)
+                .ok_or_else(|| JsThrow::type_error("Unknown alignment"))?;
+            let moves = align::align(&mut edit, &layers, mode, t, &mut probe, &mut host)?;
+            moves_reply(&mut extra, &moves);
+            Ok(())
+        }
+        "distribute" => {
+            let layers = indexes(get(request, "layers"), count)?;
+            let spread = get(request, "spread")
+                .and_then(Value::as_str)
+                .and_then(Spread::parse)
+                .ok_or_else(|| JsThrow::type_error("Unknown distribution"))?;
+            let moves = align::distribute(&mut edit, &layers, spread, t, &mut probe, &mut host)?;
+            moves_reply(&mut extra, &moves);
+            Ok(())
+        }
+        "captureFontAnchor" | "captureSizeAnchor" => {
+            let layer = index(get(request, "layer"), count)?;
+            let fields: Vec<JsString> = get(request, "fields")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(Value::to_js_string).collect())
+                .unwrap_or_default();
+            if name == "captureFontAnchor" {
+                anchor::capture_font_anchor(&mut edit, layer, &fields, t, &mut probe)
+            } else {
+                anchor::capture_size_anchor(&mut edit, layer, &fields, t)
+            }
+        }
+        "anchorReference" => {
+            let layer = index(get(request, "layer"), count)?;
+            let k = kind(get(request, "kind"))?;
+            let r = anchor::anchor_reference(&mut edit, layer, k, t, &mut probe)?;
+            extra.raw(",\"bounds\":");
+            match r {
+                Some(r) => rect_reply(&mut extra, &r),
+                None => extra.raw("null"),
+            }
+            Ok(())
+        }
+        "anchorMoved" => {
+            let layer = index(get(request, "layer"), count)?;
+            let k = kind(get(request, "kind"))?;
+            let bounds = rect(get(request, "bounds"))?;
+            anchor::anchor_moved(&mut edit, layer, k, t, &bounds)
+        }
+        "splitText" => {
+            let sources = indexes(get(request, "sources"), count)?;
+            let mode = get(request, "mode")
+                .and_then(Value::as_str)
+                .and_then(split_text::Mode::parse)
+                .ok_or_else(|| JsThrow::type_error("Unknown split mode"))?;
+            let plans = split_text::split_text(&mut edit, &sources, mode, t, &mut probe)?;
+            extra.raw(",\"plans\":[");
+            for (i, plan) in plans.iter().enumerate() {
+                if i > 0 {
+                    extra.raw(",");
+                }
+                extra.raw("{\"source\":");
+                extra.num(plan.source as f64);
+                extra.raw(",\"children\":");
+                extra.value(&Value::Array(plan.children.clone()));
+                extra.raw("}");
+            }
+            extra.raw("]");
+            Ok(())
+        }
+        "leaveAttributes" => {
+            let layer = index(get(request, "layer"), count)?;
+            let b = comp_bounds::leave_attributes(&mut edit, layer, t, &mut probe, &mut host)?;
+            for (k, v) in [("w", b.w), ("h", b.h), ("ax", b.ax), ("ay", b.ay)] {
+                extra.raw(",");
+                extra.str(k);
+                extra.raw(":");
+                extra.num(v);
+            }
+            Ok(())
+        }
+        "syncPeers" => {
+            let layer = index(get(request, "layer"), count)?;
+            let channel = get(request, "channel")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsThrow::type_error("channel is required"))?;
+            let n = materials::synchronize_peers(&mut edit, layer, channel)?;
+            extra.raw(",\"count\":");
+            extra.num(n as f64);
+            Ok(())
+        }
+        other => Err(JsThrow::type_error(format!("unknown edit '{other}'"))),
     })();
     let ink = probe.ink;
-    match result {
-        Err(e) if host_only(&e) => return Err(Unanswered::Host),
-        Err(e) => return Ok(Err(e)),
-        Ok(()) => {}
+    if let Err(e) = &result
+        && host_only(e)
+    {
+        return Err(Unanswered::Host);
     }
+    if let Err(e) = &result
+        && e.kind == pm_edit::LEGACY_ONLY
+    {
+        return Err(Unanswered::Legacy);
+    }
+    // A kernel that measured text without every font, or ink without
+    // outlines, did not answer, whatever it went on to do: a throw raised
+    // after such a measurement is not the legacy edit's throw, and the
+    // renderer runs the legacy edit (which throws itself if it must).
     if fonts.incomplete() {
         return Err(Unanswered::Fonts);
     }
     if ink && !outlines {
         return Err(Unanswered::Ink);
+    }
+    if let Err(e) = result {
+        return Ok(Err(e));
     }
     let next = edit.ids.peek();
     let ops = edit.finish();

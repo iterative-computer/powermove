@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { listMedia, mediaReferences, manageMedia } from './media-management';
+import { alreadyImported, listMedia, mediaReferences, manageMedia } from './media-management';
 import { install } from '../core/media';
 
 function registry() {
@@ -38,5 +38,47 @@ describe('agent media management', () => {
     expect(PM.proj.assets.a).toBeUndefined();
     expect(PM.proj.layers).toEqual([]);
     expect(PM.sel.layers).toEqual([]);
+  });
+  it('dedupes agent imports on the full content hash among every asset sharing the fingerprint', async () => {
+    const PM = registry();
+    const [h1, h2, h3] = ['1', '2', '3'].map(digit => digit.repeat(64));
+    PM.proj.assets = {
+      a: { id: 'a', fingerprint: 'fp', persisted: true, contentHash: h1 },
+      b: { id: 'b', fingerprint: 'fp', persisted: true, contentHash: h2 },
+      other: { id: 'other', fingerprint: 'other', persisted: true, contentHash: h3 },
+    };
+    PM.assets.get = vi.fn(() => ({}));
+    let fileHash = h2;
+    const hash = vi.fn(async (_blob: Blob) => fileHash);
+    PM.HostMedia = { enabled: true, hash };
+    const file = new Blob(['x']);
+    // The second asset with the fingerprint is the match, not the first.
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('b');
+    expect(hash).toHaveBeenCalledTimes(1);
+    // Other content under the same fingerprint is a new import.
+    fileHash = h3;
+    expect(await alreadyImported(PM, PM.proj, 'fp', file)).toBeNull();
+    // Legacy media without a content hash matches only when its stored bytes are this file's.
+    PM.proj.assets.legacy = { id: 'legacy', fingerprint: 'fp', persisted: true };
+    const storedBytes: Record<string, Blob> = { legacy: new Blob(['y']) };
+    PM.MediaStore = { get: vi.fn(async (item: any) => storedBytes[item.id] ?? null) };
+    hash.mockImplementation(async (blob: Blob) => (blob === file ? fileHash : `${await blob.text()}`.repeat(64)));
+    fileHash = h3;
+    expect(await alreadyImported(PM, PM.proj, 'fp', file)).toBeNull();
+    fileHash = 'x'.repeat(64);
+    storedBytes.legacy = new Blob(['x']);
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('legacy');
+    // Stored bytes that are a conversion cannot be compared: the fingerprint decides.
+    storedBytes.legacy = new Blob(['proxy bytes']);
+    PM.proj.assets.legacy.playbackProxy = true;
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('legacy');
+    fileHash = h1;
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('a');
+    // The legacy engine dedupes on the fingerprint alone.
+    PM.HostMedia.enabled = false;
+    hash.mockClear();
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('a');
+    expect(hash).not.toHaveBeenCalled();
+    expect(await alreadyImported(PM, PM.proj, 'none', file)).toBeNull();
   });
 });

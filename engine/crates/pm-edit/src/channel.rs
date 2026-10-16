@@ -46,19 +46,36 @@ pub fn property(v: Option<Value>) -> Value {
     Value::Object(map)
 }
 
-/// `PM.KF(t, v, ease)`: `{ t, v, eo, ei, hold: false, i: PM.uid('k') }`.
-pub fn keyframe(t: f64, v: Option<Value>, ease: &str, ids: &mut IdSource) -> Value {
-    let (eo, ei) = pm_eval::easing::handles(ease);
-    let pair = |p: [f64; 2]| Value::Array(vec![Value::Number(p[0]), Value::Number(p[1])]);
+/// AE's influence of a linear key (`LINEAR_INFLUENCE`, 100/3).
+pub const LINEAR_INFLUENCE: f64 = 100.0 / 3.0;
+
+/// A linear key at `t`: `PM.KF(t, v, 'linear')` as the document keeps it
+/// once evaluation has adopted it (`adoptTemporalEase` turns the legacy
+/// `eo`/`ei`/`hold` handles into native ease and drops them from the JSON;
+/// the app adopts every key on its first evaluation, and a saved document
+/// never holds the legacy handles):
+/// `{ t, v, i, inInterp: 'linear', outInterp: 'linear', inEase, outEase,
+/// autoBezier: false, continuous: false }` with zero speed and linear
+/// influence.
+pub fn linear_key(t: f64, v: Option<Value>, ids: &mut IdSource) -> Value {
+    let ease = || {
+        let mut m = Map::new();
+        m.insert("speed", Value::Number(0.0));
+        m.insert("influence", Value::Number(LINEAR_INFLUENCE));
+        Value::Object(m)
+    };
     let mut map = Map::new();
     map.insert("t", Value::Number(t));
     if let Some(v) = v {
         map.insert("v", v);
     }
-    map.insert("eo", pair(eo));
-    map.insert("ei", pair(ei));
-    map.insert("hold", Value::Bool(false));
     map.insert("i", Value::String(ids.next("k")));
+    map.insert("outInterp", Value::String(JsString::from("linear")));
+    map.insert("outEase", ease());
+    map.insert("inInterp", Value::String(JsString::from("linear")));
+    map.insert("inEase", ease());
+    map.insert("autoBezier", Value::Bool(false));
+    map.insert("continuous", Value::Bool(false));
     Value::Object(map)
 }
 

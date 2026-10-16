@@ -154,6 +154,31 @@ export function normalizeCompositions(project: any, uid: (prefix: string) => str
   return project;
 }
 
+/**
+ * Pre-compose › Leave all attributes: the new composition's size (the
+ * source's `GL.bounds`, else its content size, else the open composition's,
+ * at least 16 px) and the anchor shift that keeps it in place. Layer space
+ * for most sources starts at their centre; a precomp's starts at its
+ * top-left corner. pm-edit's `comp_bounds` kernel is the native counterpart.
+ */
+export function leaveAttributeBounds(PM: any, layer: any, time: number): { w: number; h: number; ax: number; ay: number } {
+  const bounds = PM.GL?.bounds?.(layer, time);
+  const w = Math.max(16, Math.round(bounds?.w || layer.d?.w || PM.proj.w));
+  const h = Math.max(16, Math.round(bounds?.h || layer.d?.h || PM.proj.h));
+  const ax = Number(bounds?.ax) || 0, ay = Number(bounds?.ay) || 0;
+  return { w, h, ax, ay };
+}
+
+/** Moves a layer's anchor (static value and keys) by the leave-attributes shift. */
+export function shiftLeaveAnchor(layer: any, ax: number, ay: number): void {
+  const shift = (prop: any, by: number) => {
+    if (!prop) return;
+    prop.v = Number(prop.v) + by;
+    for (const key of prop.kf || []) key.v = Number(key.v) + by;
+  };
+  shift(layer.p['anchor.x'], ax); shift(layer.p['anchor.y'], ay);
+}
+
 export function install(PM: PMRegistry): void {
   /* Per-composition view state (AE keeps each comp's current time and layer
      selection). Session-only, keyed by project id + comp id. */
@@ -532,12 +557,11 @@ export function install(PM: PMRegistry): void {
   const canLeave = (layer: any) => !!layer && LEAVE_TYPES.has(layer.type);
 
   const leaveAttributes = (layer: any, name: string, openAfter: boolean) => {
-    const bounds = PM.GL?.bounds?.(layer, PM.time);
-    const w = Math.max(16, Math.round(bounds?.w || layer.d?.w || PM.proj.w));
-    const h = Math.max(16, Math.round(bounds?.h || layer.d?.h || PM.proj.h));
-    /* Layer space for most sources starts at their centre; a precomp's starts
-       at its top-left corner. Shift the anchor so nothing moves. */
-    const ax = Number(bounds?.ax) || 0, ay = Number(bounds?.ay) || 0;
+    // pm-edit computes the bounds in pm-wasm (and the anchor shift as
+    // operations) when the native evaluator is on.
+    const edits = PM.EngineDoc?.edits;
+    const legacy = () => leaveAttributeBounds(PM, layer, PM.time);
+    const { w, h, ax, ay, ops } = edits ? edits.leaveAttributes(layer, PM.time, legacy) : { ...legacy(), ops: null };
     /* The new comp spans the layer; the layer's source timing (trim, speed,
        time remap) moves inside with the source, so every frame is unchanged. */
     const comp: any = compWithRate({ name, w, h, fps: PM.proj.fps, fpsRational: PM.proj.fpsRational, dur: layer.dur, bg: PM.proj.bg, render3d:PM.proj.render3d });
@@ -549,12 +573,8 @@ export function install(PM: PMRegistry): void {
     transact('Pre-compose', () => {
       comp.layers = [inner];
       PM.proj.comps = { ...comps(), [comp.id]: comp };
-      const shift = (prop: any, by: number) => {
-        if (!prop) return;
-        prop.v = Number(prop.v) + by;
-        for (const key of prop.kf || []) key.v = Number(key.v) + by;
-      };
-      shift(layer.p['anchor.x'], ax); shift(layer.p['anchor.y'], ay);
+      if (ops) edits.apply(ops);
+      else shiftLeaveAnchor(layer, ax, ay);
       layer.type = 'precomp';
       layer.d = { comp: comp.id, w, h };
       PM.ProjectIndex?.invalidate();

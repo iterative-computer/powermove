@@ -12,7 +12,7 @@ use ts_rs::TS;
 
 use crate::color::{OutputColor, Precision, ViewerColorSpace};
 use crate::common::{
-    CompositionId, LayerId, Mat3, Mat4, PixelRect, Rect, Revision, Seq, Size, Ticks,
+    CompositionId, HostMicros, LayerId, Mat3, Mat4, PixelRect, Rect, Revision, Seq, Size, Ticks,
 };
 use crate::interop::SurfaceFormat;
 use crate::priority::PriorityClass;
@@ -500,6 +500,40 @@ pub struct ViewerState {
     /// Increases whenever the viewer state changes; descriptors echo the
     /// state they show.
     pub view_seq: Seq,
+    /// The refresh grid of the display showing the viewer (amendment 18),
+    /// so the engine can start timed frames' GPU work just after the
+    /// compositor's. Absent until the viewer has fitted its animation
+    /// frames. Added after `protocol-16c8e6e125019103` as an optional field
+    /// (RFC 02 version notes): a peer that does not send it is decoded as
+    /// `None`, and a change of the hint alone is not a new view (it keeps
+    /// `view_seq`).
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub vsync: Option<VsyncHint>,
+}
+
+/// A display's refresh grid on the host clock: refreshes (BeginFrame times)
+/// fall at `host_time + n × period_us`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct VsyncHint {
+    /// One refresh instant (host µs).
+    pub host_time: HostMicros,
+    /// The refresh period in µs (8,333.3 at 120 Hz).
+    pub period_us: f64,
+}
+
+impl VsyncHint {
+    /// The shortest and longest refresh periods accepted (500 Hz to 10 Hz).
+    pub const PERIOD_RANGE_US: (f64, f64) = (2_000.0, 100_000.0);
+
+    /// The first refresh at or after host µs `t`, moved by `offset_us`.
+    pub fn next_at_or_after(&self, t: f64, offset_us: f64) -> f64 {
+        let origin = self.host_time.get() as f64 + offset_us;
+        let n = ((t - origin) / self.period_us - 1e-9).ceil();
+        origin + n * self.period_us
+    }
 }
 
 impl Validate for ViewerState {
@@ -530,7 +564,16 @@ impl Validate for ViewerState {
         })?;
         ensure(self.pan.iter().all(|v| v.is_finite()), C, || {
             "pan must be finite".into()
-        })
+        })?;
+        if let Some(vsync) = &self.vsync {
+            let (min, max) = VsyncHint::PERIOD_RANGE_US;
+            ensure(
+                vsync.period_us.is_finite() && vsync.period_us >= min && vsync.period_us <= max,
+                C,
+                || format!("vsync period {} µs outside {min}..{max}", vsync.period_us),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -632,6 +675,62 @@ mod tests {
             depth_id: true,
             overlay: true,
         }
+    }
+
+    fn viewer_state() -> ViewerState {
+        ViewerState {
+            composition: "main".into(),
+            size: Size::new(2400, 1300),
+            device_pixel_ratio: 2.0,
+            zoom: 0.5,
+            pan: [0.0, 0.0],
+            resolution: PreviewResolution::Automatic,
+            media: MediaPreference::Automatic,
+            color_space: ViewerColorSpace::DisplayP3,
+            view: None,
+            play_every_frame: false,
+            edr: true,
+            view_seq: Seq::new(3).unwrap(),
+            vsync: Some(VsyncHint {
+                host_time: HostMicros::new(1_000_000).unwrap(),
+                period_us: 8_333.333,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_vsync_hint_is_optional_on_the_wire_and_validated() {
+        // A viewer built before the hint existed sends no `vsync` key.
+        let mut map = serde_json::to_value(viewer_state()).unwrap();
+        map.as_object_mut().unwrap().remove("vsync");
+        let bytes = rmp_serde::to_vec_named(&map).unwrap();
+        let decoded: ViewerState = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.vsync, None);
+        assert!(decoded.validate().is_ok());
+        // With it, it round-trips and its period is checked.
+        let state = viewer_state();
+        let bytes = rmp_serde::to_vec_named(&state).unwrap();
+        assert_eq!(rmp_serde::from_slice::<ViewerState>(&bytes).unwrap(), state);
+        assert!(state.validate().is_ok());
+        let mut bad = viewer_state();
+        bad.vsync = Some(VsyncHint {
+            host_time: HostMicros::new(1).unwrap(),
+            period_us: 0.0,
+        });
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn vsync_hint_finds_the_next_refresh_with_an_offset() {
+        let hint = VsyncHint {
+            host_time: HostMicros::new(1_000_000).unwrap(),
+            period_us: 8_000.0,
+        };
+        assert_eq!(hint.next_at_or_after(1_000_000.0, 0.0), 1_000_000.0);
+        assert_eq!(hint.next_at_or_after(1_000_001.0, 0.0), 1_008_000.0);
+        assert_eq!(hint.next_at_or_after(1_000_001.0, 2_000.0), 1_002_000.0);
+        // Before the anchor, the grid extends backwards.
+        assert_eq!(hint.next_at_or_after(990_000.0, 2_000.0), 994_000.0);
     }
 
     #[test]

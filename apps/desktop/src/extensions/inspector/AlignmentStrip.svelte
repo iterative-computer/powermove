@@ -35,15 +35,28 @@
     };
   }
 
+  /** pm-edit's alignment (the renderer's `editKernels` service) when it can
+   *  answer, else `alignCommands`. */
+  type EditKernels = { align<T>(layers: any[], mode: AlignMode, time: number, legacy: () => T): T };
+
   function align(mode: AlignMode): void {
     const time = api.transport.time();
+    const kernels = api.services.get<EditKernels>('editKernels');
+    const legacy = () => alignCommands(mode, time);
+    const commands = kernels ? kernels.align(layers.filter(Boolean), mode, time, legacy) : legacy();
+    if (!commands.length) return;
+    inspectorEdit.apply(commands, { label: ALIGN_LABELS[mode], origin: 'inspector' });
+    api.transport.invalidate?.();
+  }
+
+  function alignCommands(mode: AlignMode, time: number): any[] {
     const targets = layers.filter(layer => layer && !layer.lock && layer.type !== 'audio');
     const boxed = targets.map(layer => ({ layer, box: worldBox(layer, time) })).filter((item): item is { layer: any; box: Box } => !!item.box);
     const bounds = unionBox(boxed.map(item => item.box));
-    if (!bounds) return;
+    if (!bounds) return [];
     const { w, h } = api.project.get();
     const world = alignDelta(bounds, { x0: 0, y0: 0, x1: w, y1: h }, mode);
-    if (!world.dx && !world.dy) return;
+    if (!world.dx && !world.dy) return [];
     const commands: any[] = [];
     for (const { layer } of boxed) {
       const parent = layer.parent ? api.model.layer(layer.parent) : null;
@@ -51,9 +64,7 @@
       if (local.dx) commands.push({ type: 'set_property', target: layer.id, path: 'position.x', value: api.util.round(Number(api.anim.ev(layer, 'position.x', time)) + local.dx, 3), time, mode: 'auto', preserveHandEdits: false });
       if (local.dy) commands.push({ type: 'set_property', target: layer.id, path: 'position.y', value: api.util.round(Number(api.anim.ev(layer, 'position.y', time)) + local.dy, 3), time, mode: 'auto', preserveHandEdits: false });
     }
-    if (!commands.length) return;
-    inspectorEdit.apply(commands, { label: ALIGN_LABELS[mode], origin: 'inspector' });
-    api.transport.invalidate?.();
+    return commands;
   }
 </script>
 

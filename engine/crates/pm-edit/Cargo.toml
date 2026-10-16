@@ -15,8 +15,9 @@ pm-eval = { path = "../pm-eval" }
 pm-text = { path = "../pm-text", default-features = false }
 
 [dev-dependencies]
-# The expression engine the parity vectors evaluate expressions with (the
-# production adapter lives in pm-wasm, which depends on this crate).
-pm-expr = { path = "../pm-expr" }
+# The production expression adapter (pm-wasm's, over pm-expr) the parity
+# vectors evaluate expressions with. A dev-dependency cycle: pm-wasm depends
+# on this crate; the tests share pm-eval's `ExpressionEngine` trait with it.
+pm-wasm = { path = "../pm-wasm" }
 serde_json.workspace = true
 flate2 = "1.1"

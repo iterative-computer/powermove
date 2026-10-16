@@ -16,6 +16,24 @@ describe('legacy media install', () => {
     expect(PM.MediaImport.posterKeyFor('media:v2:123:abc')).toBe('media:v2:123:abc:poster');
   });
 
+  it('matches imports by fingerprint unless their full content hashes differ', () => {
+    const PM = mediaRegistry();
+    const a = 'a'.repeat(64), b = 'b'.repeat(64);
+    const project = { assets: { x: { id: 'x', kind: 'audio', name: 'room tone.wav', fingerprint: 'v2:10:f', contentHash: a } }, layers: [] };
+    const live = new Map([['x', {}]]);
+    // Same sampled fingerprint, different bytes: a new asset, not the old one.
+    expect(PM.MediaImport.match(project, live, { kind: 'audio', name: 'room tone 2.wav', fingerprint: 'v2:10:f', contentHash: b }).canonicalId).toBeNull();
+    expect(PM.MediaImport.match(project, live, { kind: 'audio', name: 'room tone.wav', fingerprint: 'v2:10:f', contentHash: a }).canonicalId).toBe('x');
+    // Without a hash on either side, the fingerprint still decides (legacy engine).
+    expect(PM.MediaImport.match(project, live, { kind: 'audio', name: 'room tone.wav', fingerprint: 'v2:10:f' }).canonicalId).toBe('x');
+    // A converted copy's hash is of the conversion: re-importing the original upgrades it.
+    const converted = { assets: { y: { id: 'y', kind: 'video', name: 'a.mov', fingerprint: 'v2:20:g', contentHash: a, playbackProxy: true } }, layers: [] };
+    expect(PM.MediaImport.match(converted, new Map(), { kind: 'video', name: 'a.mov', fingerprint: 'v2:20:g', contentHash: b }).canonicalId).toBe('y');
+    expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'heic', contentHash: a })).toBeNull();
+    expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'heic', rendition: true, contentHash: a })).toBe(a);
+    expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'svg', contentHash: a })).toBe(a);
+  });
+
   it('preserves source time for video trim timing', () => {
     const PM = mediaRegistry();
     const video = { type: 'video', from: 2, d: { trim: 1, speed: 2 } };

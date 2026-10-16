@@ -42,7 +42,7 @@ use crate::error::{
 use crate::frame::{
     Caret, DepthIdSurface, EditorCamera, FrameDescriptor, FramePurpose, FrameQuality, FrameRelease,
     FrameRequest, MediaPreference, MotionBlurKind, OverlayGeometry, OverlayLayer, PathCommand,
-    PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState,
+    PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState, VsyncHint,
 };
 use crate::host::{
     CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, HandleGrant,
@@ -1053,6 +1053,10 @@ pub fn events() -> Vec<Envelope> {
             play_every_frame: true,
             edr: true,
             view_seq: seq(17),
+            vsync: Some(VsyncHint {
+                host_time: HostMicros::new(123_456_700_000).expect("micros"),
+                period_us: 8_333.333_333_333_334,
+            }),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),

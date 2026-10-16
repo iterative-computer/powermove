@@ -167,7 +167,9 @@ function onClock(sample: ClockSample, arrivedMs: number): void {
   clock = sample;
   clocks.push(sample);
   const offset = sample.hostTime - arrivedMs * 1000;
-  if (hostOffsetUs === null || offset < hostOffsetUs) hostOffsetUs = offset;
+  // Each sample bounds the offset from below; the largest is the tightest
+  // (the presenter's estimator, presenter.ts).
+  if (hostOffsetUs === null || offset > hostOffsetUs) hostOffsetUs = offset;
 }
 
 /* ── input ────────────────────────────────────────────────────────── */
@@ -284,8 +286,8 @@ const api = {
   },
   now: (): number => performance.now(),
   /** Empties the per-frame records so a recording starts clean. */
-  reset(): void {
-    presentation?.takeTrace();
+  async reset(): Promise<void> {
+    await presentation?.takeTrace();
     if (today) {
       today.draws = [];
       today.rafs = [];
@@ -298,8 +300,8 @@ const api = {
     if (m === 'orbit' || m === 'walk') view = { ...view, camera: cameraFor(0, m), shading: 'solid' };
     presentation?.update(view);
   },
-  collect() {
-    const trace = presentation?.takeTrace() ?? null;
+  async collect() {
+    const trace = (await presentation?.takeTrace()) ?? null;
     return {
       mode,
       presenter: presentation?.stats() ?? null,

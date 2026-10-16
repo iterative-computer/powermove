@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { blake3Hex } from '../../../shared/blake3';
@@ -6,14 +8,24 @@ import type { MediaLink, MediaStoreBridge, MediaStoreRecord } from '../../../sha
 import { bindingsFor, createHostMediaStore, decideImport, hashBlob, renditionKey, type LegacyMediaStore } from './host-media-store';
 
 /** An in-memory stand-in for main's store with the same contract. */
-function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<string, string> } = {}) {
+function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<string, string>; failConvert?: boolean } = {}) {
   const objects = new Map<string, Uint8Array>();
   const keys = new Map<string, MediaStoreRecord>();
   const uploads = new Map<string, { key: string | null; type: string; size: number; parts: Uint8Array[]; revision: string | null; origin: string }>();
   const reads = new Map<string, Uint8Array>();
   const files = new Map<string, Uint8Array>(Object.entries(options.links ?? {}));
+  const projectFiles = new Map<string, Uint8Array>();
   let next = 0;
   const calls: string[] = [];
+  const conversions: any[] = [];
+  const converted = (kind: 'still' | 'video') => (options.failConvert
+    ? { ok: false as const, error: kind === 'still' ? 'Could not convert this image' : 'Could not optimize this video for playback' }
+    : { ok: true as const, token: 'f'.repeat(32), size: 8, type: kind === 'still' ? 'image/png' as const : 'video/webm' as const });
+  const byRef = (kind: 'still' | 'video') => async (request: { hash?: string; link?: MediaLink; name: string }) => {
+    const found = request.link ? files.has(request.link.path) || objects.has(request.link.hash) : objects.has(request.hash ?? '');
+    conversions.push({ by: request.link ? 'link' : 'hash', kind });
+    return found ? converted(kind) : { ok: false as const, error: 'The original file is no longer available', missing: true as const };
+  };
   const commit = (key: string | null, data: Uint8Array, type: string, revision: string | null, source: string): MediaStoreRecord => {
     const hash = blake3Hex(data);
     objects.set(hash, data);
@@ -33,8 +45,17 @@ function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<
       uploads.delete(token);
       const data = new Uint8Array(u.parts.reduce((s, p) => s + p.length, 0));
       let at = 0; for (const p of u.parts) { data.set(p, at); at += p.length; }
-      if (blake3Hex(data) !== expected.blake3) throw new Error('The stored copy does not match the original bytes.');
-      return { ...commit(u.key, data, u.type, u.revision, u.origin), sha256: 'x' };
+      const sha256 = createHash('sha256').update(data).digest('hex');
+      if (expected.blake3 !== undefined ? blake3Hex(data) !== expected.blake3 : expected.sha256 !== undefined && expected.sha256 !== sha256) {
+        throw new Error(expected.blake3 ? 'The stored copy does not match the original bytes.' : 'The project media checksum does not match.');
+      }
+      return { ...commit(u.key, data, u.type, u.revision, u.origin), sha256 };
+    },
+    putProjectRange: async (token, readToken, offset, length, at) => {
+      calls.push(`putProjectRange:${readToken}:${offset}:${length}:${at}`);
+      const u = uploads.get(token)!;
+      const file = projectFiles.get(readToken)!;
+      u.parts.push(file.slice(offset, offset + length));
     },
     abortPut: async (token) => { uploads.delete(token); },
     link: async (path) => ({ path, hash: blake3Hex(files.get(path)!), size: files.get(path)!.length, mtimeMs: 1 }),
@@ -63,9 +84,20 @@ function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<
     close: async (token) => { reads.delete(token); },
     relink: async () => null,
     bind: async () => undefined,
-    removeKey: async (key) => keys.delete(key)
+    removeKey: async (key) => keys.delete(key),
+    convertStill: byRef('still'),
+    convertVideo: byRef('video'),
+    convertUpload: async (token, request) => {
+      const u = uploads.get(token)!;
+      uploads.delete(token);
+      const bytes = new Uint8Array(u.parts.reduce((s, p) => s + p.length, 0));
+      let at = 0; for (const p of u.parts) { bytes.set(p, at); at += p.length; }
+      expect(blake3Hex(bytes)).toBe(request.blake3);
+      conversions.push({ by: 'upload', kind: request.kind, hash: request.blake3, size: bytes.length });
+      return converted(request.kind);
+    }
   };
-  return { host, objects, keys, files, calls };
+  return { host, objects, keys, files, calls, projectFiles, conversions };
 }
 
 function fakeLegacy(initial: Record<string, Blob> = {}) {
@@ -147,13 +179,21 @@ describe('host media store (new engine on)', () => {
     expect(await bytesOf(await store.get(offline))).toEqual(original);
   });
 
-  it('keeps browser renditions as generated media under their own key', async () => {
+  it('keeps browser renditions as generated media named by the original they render', async () => {
     const { host, keys } = fakeHost();
     const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const a = blake3Hex(data(64, 1)), b = blake3Hex(data(64, 2));
+    expect(await store.rendition.get(a)).toBeNull();
+    expect(await store.rendition.put(a, new Blob([data(10, 1)], { type: 'video/webm' }))).toBe(true);
+    expect(await store.rendition.put(b, new Blob([data(10, 2)], { type: 'video/webm' }))).toBe(true);
+    expect(keys.get(renditionKey(a))).toMatchObject({ key: `rendition:${a}`, source: 'rendition', type: 'video/webm' });
+    // Two originals that share a storage key keep their own renditions.
+    expect(await bytesOf(await store.rendition.get(a))).toEqual(data(10, 1));
+    expect(await bytesOf(await store.rendition.get(b))).toEqual(data(10, 2));
+    // Without the original's hash there is nothing to name a rendition by.
+    expect(await store.rendition.put(null, new Blob([data(3)]))).toBe(false);
+    expect(await store.rendition.put('media:v2:p', new Blob([data(3)]))).toBe(false);
     expect(await store.rendition.get('media:v2:p')).toBeNull();
-    expect(await store.rendition.put('media:v2:p', new Blob([data(10)], { type: 'video/webm' }))).toBe(true);
-    expect(keys.get(renditionKey('media:v2:p'))).toMatchObject({ source: 'rendition', type: 'video/webm' });
-    expect(await bytesOf(await store.rendition.get('media:v2:p'))).toEqual(data(10));
   });
 
   it('names stored bytes for desktop Save, migrating IndexedDB media first', async () => {
@@ -163,7 +203,152 @@ describe('host media store (new engine on)', () => {
   });
 });
 
+describe('content identity', () => {
+  it('reads, saves, and binds each asset by its content hash when two files share a storage key', async () => {
+    const { host, keys } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    // Two different files whose sampled fingerprints (and so storage keys) agree.
+    await store.put('a1', new Blob([data(64, 1)]), { storageKey: 'media:v2:same' });
+    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: store.recordFor('media:v2:same')!.hash };
+    await store.put('a2', new Blob([data(64, 2)]), { storageKey: 'media:v2:same' });
+    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: store.recordFor('media:v2:same')!.hash };
+    expect(keys.get('media:v2:same')!.hash).toBe(blake3Hex(data(64, 2)));
+    expect(await bytesOf(await store.get(first))).toEqual(data(64, 1));
+    expect(await bytesOf(await store.get(second))).toEqual(data(64, 2));
+    expect(await store.saveSource(first)).toMatchObject({ hash: blake3Hex(data(64, 1)), size: 64, revision: blake3Hex(data(64, 1)) });
+    expect(await store.saveSource(second)).toMatchObject({ hash: blake3Hex(data(64, 2)), size: 64 });
+    expect(await bytesOf((await store.getForSave(first))!.blob)).toEqual(data(64, 1));
+    expect(bindingsFor({ assets: { a1: first } }, () => null)).toEqual({ a1: { key: 'media:v2:same', hash: blake3Hex(data(64, 1)) } });
+    // Forgetting the key (deleting either asset) leaves the other's content readable.
+    await store.remove(second);
+    expect(await bytesOf(await store.get(first))).toEqual(data(64, 1));
+  });
+
+  it('saves each asset by its content hash with the flag off too', async () => {
+    const { host, keys } = fakeHost();
+    const { legacy } = fakeLegacy();
+    // Imported with the flag on: the shared key ends up naming the second file.
+    const on = createHostMediaStore({ host, legacy, enabled: true, sourcePath: () => null });
+    const a = new Blob([data(64, 1)]), b = new Blob([data(64, 2)]);
+    await on.put('a1', a, { storageKey: 'media:v2:same' });
+    await on.put('a2', b, { storageKey: 'media:v2:same' });
+    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: on.storedRecord(a)!.hash };
+    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: on.storedRecord(b)!.hash };
+    expect(keys.get('media:v2:same')!.hash).toBe(second.contentHash);
+    // The flag off, IndexedDB has neither; Save must still embed each file's own bytes.
+    const off = createHostMediaStore({ host, legacy, enabled: false, sourcePath: () => null });
+    expect(await bytesOf((await off.getForSave(first))!.blob)).toEqual(data(64, 1));
+    expect(await bytesOf((await off.getForSave(second))!.blob)).toEqual(data(64, 2));
+    expect(await bytesOf(await off.get(first))).toEqual(data(64, 1));
+    // Content that is gone is not replaced by whatever the key names.
+    expect(await off.getForSave({ id: 'a3', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 3)) })).toBeNull();
+  });
+
+  it('remembers the record of each stored Blob, so concurrent puts under one key keep their own hashes', async () => {
+    const { host } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const a = new Blob([data(64, 1)]), b = new Blob([data(64, 2)]);
+    await Promise.all([store.put('a1', a, { storageKey: 'media:v2:same' }), store.put('a2', b, { storageKey: 'media:v2:same' })]);
+    expect(store.storedRecord(a)!.hash).toBe(blake3Hex(data(64, 1)));
+    expect(store.storedRecord(b)!.hash).toBe(blake3Hex(data(64, 2)));
+    expect(store.storedRecord(new Blob([data(64, 1)]))).toBeNull();
+  });
+
+  it('never reads another file through a shared key when its own content is gone', async () => {
+    const { host } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    await store.put('a2', new Blob([data(64, 2)]), { storageKey: 'media:v2:same' });
+    expect(await store.get({ id: 'a1', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 1)) })).toBeNull();
+  });
+});
+
+describe('opening a project file', () => {
+  it('has main copy embedded ranges into the store, checked against the recorded checksum', async () => {
+    const { host, keys, calls, projectFiles } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const media = data(300, 4);
+    const file = new Uint8Array(1000); file.set(media, 200);
+    projectFiles.set('reader-1', file);
+    const sha256 = createHash('sha256').update(media).digest('hex');
+    const progress: number[] = [];
+    const source = { id: 'a1', type: 'audio/wav', offset: 200, length: 300, revision: 'rev-7', sha256 };
+    expect(await store.putProjectRange('reader-1', source, { id: 'a1', storageKey: 'media:v2:w' }, (bytes) => progress.push(bytes))).toBe(true);
+    expect(calls).toContain('putProjectRange:reader-1:200:300:0');
+    expect(keys.get('media:v2:w')).toMatchObject({ hash: blake3Hex(media), revision: 'rev-7', source: 'project' });
+    expect(progress).toEqual([300]);
+    // A range that is not what the file recorded is refused, and nothing is kept.
+    await expect(store.putProjectRange('reader-1', { ...source, offset: 201 }, { id: 'a1', storageKey: 'media:v2:x' })).rejects.toThrow(/checksum/);
+    expect(keys.has('media:v2:x')).toBe(false);
+  });
+
+  it('leaves ranges to the page with the flag off or without host support', async () => {
+    const { host } = fakeHost();
+    const off = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: false, sourcePath: () => null });
+    expect(await off.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 1 }, { id: 'a' })).toBe(false);
+    const { putProjectRange: _omit, ...older } = host;
+    const on = createHostMediaStore({ host: older as MediaStoreBridge, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    expect(await on.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 1 }, { id: 'a' })).toBe(false);
+    // An empty range has nothing for main to read: the page sends it, hash named.
+    const full = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    expect(await full.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 0 }, { id: 'a' })).toBe(false);
+  });
+});
+
 describe('host media store (new engine off)', () => {
+  it('reuses the rendition the new engine kept', async () => {
+    const { host, keys } = fakeHost();
+    const on = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const original = blake3Hex(data(64, 7));
+    await on.rendition.put(original, new Blob([data(12)], { type: 'video/webm' }));
+    const { legacy, puts } = fakeLegacy();
+    const off = createHostMediaStore({ host, legacy, enabled: false, sourcePath: () => null });
+    expect(await bytesOf(await off.rendition.get(original))).toEqual(data(12));
+    // A rendition made with the flag off is IndexedDB's (the store stays read-only), and is reused.
+    const other = blake3Hex(data(64, 8));
+    const before = new Set(keys.keys());
+    expect(await off.rendition.put(other, new Blob([data(3)], { type: 'image/png' }))).toBe(true);
+    expect(puts).toEqual([renditionKey(other)]);
+    expect(new Set(keys.keys())).toEqual(before);
+    expect(await bytesOf(await off.rendition.get(other))).toEqual(data(3));
+  });
+
+  it('converts a kept original main lacks from the bytes the page has, keeping none of them', async () => {
+    const { host, objects, keys, calls, conversions } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: false, sourcePath: () => null });
+    // A TIFF from a project file saved with the new engine, opened on another Mac: only IndexedDB has it.
+    const tiff = data(5 * 1024 * 1024 + 3, 4);
+    const hash = blake3Hex(tiff);
+    const result = await store.convert('still', new Blob([tiff], { type: 'image/tiff' }), { hash, name: 'original.tiff' });
+    expect(result).toMatchObject({ ok: true, type: 'image/png' });
+    expect(conversions).toEqual([{ by: 'hash', kind: 'still' }, { by: 'upload', kind: 'still', hash, size: tiff.length }]);
+    expect(calls.filter((call) => call.startsWith('beginPut'))).toEqual(['beginPut:null:stream']);
+    expect(objects.size).toBe(0);
+    expect(keys.size).toBe(0);
+    // A ProRes movie the same way.
+    const movie = data(2048, 6);
+    expect(await store.convert('video', new Blob([movie]), { hash: blake3Hex(movie), name: 'A001.mov' })).toMatchObject({ ok: true, type: 'video/webm' });
+    expect(conversions.at(-1)).toEqual({ by: 'upload', kind: 'video', hash: blake3Hex(movie), size: 2048 });
+  });
+
+  it('converts from the stored object or linked file when main has it, without sending bytes', async () => {
+    const tiff = data(300, 9);
+    const { host, conversions, calls } = fakeHost({ links: { '/Media/scan.tiff': tiff } });
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    await store.put('a1', new Blob([tiff]), { storageKey: 'media:v2:t' });
+    calls.length = 0;
+    expect(await store.convert('still', new Blob([tiff]), { hash: blake3Hex(tiff), name: 'original.tiff' })).toMatchObject({ ok: true });
+    const link = await host.link('/Media/scan.tiff');
+    expect(await store.convert('still', new Blob([tiff]), { link, name: 'original.tiff' })).toMatchObject({ ok: true });
+    expect(conversions).toEqual([{ by: 'hash', kind: 'still' }, { by: 'link', kind: 'still' }]);
+    expect(calls).toEqual([]);
+    // A conversion that failed on bytes main has is not retried by upload.
+    const failing = fakeHost({ failConvert: true });
+    const other = createHostMediaStore({ host: failing.host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    await other.put('a1', new Blob([tiff]), { storageKey: 'media:v2:t' });
+    expect(await other.convert('still', new Blob([tiff]), { hash: blake3Hex(tiff), name: 'original.tiff' })).toEqual({ ok: false, error: 'Could not convert this image' });
+    expect(failing.conversions).toEqual([{ by: 'hash', kind: 'still' }]);
+  });
+
   it('keeps IndexedDB as the source and reads the store only for its own media', async () => {
     const { host, keys } = fakeHost();
     const { legacy, puts } = fakeLegacy({ 'media:v2:old': new Blob([data(10, 1)]) });

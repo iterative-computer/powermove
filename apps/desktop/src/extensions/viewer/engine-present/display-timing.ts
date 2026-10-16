@@ -107,3 +107,22 @@ export function nextVsync(fit: VsyncFit, t: number): number {
   const n = Math.ceil((t - fit.vsyncMs) / fit.periodMs - 1e-9);
   return fit.vsyncMs + n * fit.periodMs;
 }
+
+/**
+ * When to tell the engine about the refresh grid again (amendment 18's
+ * vsync-phase hint). The hint moves the engine's render starts, so it is
+ * sent when it is first known, when the period changes by more than 0.1%,
+ * or when the phase moves by more than `PHASE_TOLERANCE_US`, and not more
+ * than once a second unless the display link's phase jumped.
+ */
+export const PHASE_TOLERANCE_US = 250;
+export const HINT_INTERVAL_MS = 1000;
+
+export function hintChanged(last: { hostTime: number; periodUs: number } | null, next: { hostTime: number; periodUs: number }): boolean {
+  if (!last) return true;
+  if (Math.abs(next.periodUs - last.periodUs) > last.periodUs * 0.001) return true;
+  let d = (next.hostTime - last.hostTime) % next.periodUs;
+  if (d > next.periodUs / 2) d -= next.periodUs;
+  if (d < -next.periodUs / 2) d += next.periodUs;
+  return Math.abs(d) > PHASE_TOLERANCE_US;
+}

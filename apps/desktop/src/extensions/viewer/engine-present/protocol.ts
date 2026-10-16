@@ -100,7 +100,12 @@ export type ViewerState = {
   playEveryFrame: boolean;
   edr: boolean;
   viewSeq: number;
+  /** The display's refresh grid (amendment 18); a change alone keeps `viewSeq`. */
+  vsync?: VsyncHint | null;
 };
+
+/** Refreshes (BeginFrame times) fall at `hostTime + n × periodUs` (host µs). */
+export type VsyncHint = { hostTime: number; periodUs: number };
 
 export type FrameRelease = { poolIndex: number; seq: number };
 

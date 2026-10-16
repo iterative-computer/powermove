@@ -1,0 +1,1235 @@
+{
+  "run": "app-playback-engine-load-phaseoff",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "env": {
+      "POWERMOVE_BRIDGE_PHASE": "off"
+    },
+    "mode": "engine",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.080078125,
+      3.76416015625,
+      3.87646484375
+    ],
+    "after": [
+      6.23779296875,
+      4.80224609375,
+      4.26953125
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 50,
+    "offsetUs": 134046970630
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.02370800002245,
+        "max": 50.04145799999242
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1135,
+      "replies": 1135,
+      "replyBytes": 89315470,
+      "mainMsP50": 0.09716599999228492
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.aecafe9480189aa0491338d51c48a4e5",
+    "accepted": {
+      "pid": 48960,
+      "pidversion": 1993095
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "playback": {
+    "window": {
+      "seconds": 60.04,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 13465
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1
+    },
+    "frames": {
+      "expected": 1794,
+      "notDrawn": 151,
+      "notPresented": 52,
+      "drops": 203,
+      "presented": 1591,
+      "offSlot": 993
+    },
+    "jitterAbsMs": {
+      "n": 1591,
+      "p50": 8.294,
+      "p95": 45.419,
+      "p99": 70.401,
+      "max": 70.423
+    },
+    "intervalErrorAbsMs": {
+      "n": 1431,
+      "p50": 0.002,
+      "p95": 25,
+      "p99": 33.333,
+      "max": 49.999
+    },
+    "irregularIntervals": 599,
+    "rafToPresentMs": {
+      "n": 1591,
+      "p50": 28.29,
+      "p95": 44.92,
+      "p99": 53.97,
+      "max": 94.88
+    },
+    "drawMainThreadMs": {
+      "n": 1650,
+      "p50": 1.5,
+      "p95": 17.3,
+      "p99": 38.1,
+      "max": 61.3
+    },
+    "arrivalLeadMs": {
+      "n": 1803,
+      "p50": -130.42,
+      "p95": -30.19,
+      "p99": 9.08,
+      "max": 47.88
+    },
+    "rafGapMs": {
+      "n": 5581,
+      "p50": 8.3,
+      "p95": 34,
+      "p99": 58.4,
+      "max": 99.9
+    },
+    "rafGapsOver25Ms": 298,
+    "missing": [
+      {
+        "k": 75,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 78,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 81,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 86,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 92,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 94,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 97,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 101,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 103,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 105,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 108,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 110,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 112,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 113,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 114,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 117,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 225,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 231,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 237,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 242,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 245,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 247,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 251,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 253,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 259,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 266,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 374,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 375,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 378,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 380,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 382,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 384,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 385,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 387,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 388,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 390,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 393,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 395,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 396,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 399,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 400,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 402,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 405,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 408,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 409,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 410,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 413,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 416,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 419,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 421,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 422,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 424,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 523,
+        "state": "not-drawn",
+        "near": "none"
+      },
+      {
+        "k": 525,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 527,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 530,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 532,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 534,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 535,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 536,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 537,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 539,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 540,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 541,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 542,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 544,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 545,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 547,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 548,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 550,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 553,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 554,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 555,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 556,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 558,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 563,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 565,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 567,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 569,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 570,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 572,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 573,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 576,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 578,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 676,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 677,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 680,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 681,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 682,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 684,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 685,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 691,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 693,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 695,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 697,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 699,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 701,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 703,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 706,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 708,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 710,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 712,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 714,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 824,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 830,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 832,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 834,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 841,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 843,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 846,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 848,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 850,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 854,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 855,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 857,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 859,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 861,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 864,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 972,
+        "state": "STATE_DROPPED",
+        "near": "none"
+      },
+      {
+        "k": 973,
+        "state": "not-drawn",
+        "near": "none"
+      },
+      {
+        "k": 980,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 982,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 984,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 986,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 989,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 993,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 998,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1003,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1005,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1015,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1122,
+        "state": "STATE_DROPPED",
+        "near": "none"
+      },
+      {
+        "k": 1124,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1128,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1144,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1147,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1151,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1152,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1156,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1157,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1160,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1163,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1165,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1166,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1167,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1275,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1276,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1277,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1278,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1280,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1288,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1290,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1293,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1300,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1303,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1305,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1311,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1313,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1315,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1318,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1426,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1430,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1433,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1435,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1439,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1444,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1449,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1451,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1453,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1455,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1458,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1459,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1461,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1463,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1465,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1582,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1583,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1589,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1591,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1597,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1599,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1601,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1603,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1606,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1610,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1611,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1614,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1615,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1617,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1725,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1726,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1732,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1735,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1737,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1742,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1743,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1747,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1751,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1756,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1760,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1761,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1762,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1764,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1766,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 22,
+      "2": 366,
+      "3": 753,
+      "4": 326,
+      "5": 91,
+      "6": 18,
+      "7": 3,
+      "8": 3,
+      "9": 5,
+      "10": 3,
+      "11": 1
+    },
+    "presenter": {
+      "received": 1851,
+      "drawn": 1693,
+      "dropped": {
+        "late": 151
+      },
+      "released": 1843,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 8,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 306
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 8,
+      "received": 8,
+      "released": 0,
+      "videoFrames": 1851,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

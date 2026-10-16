@@ -1,5 +1,5 @@
 import { resolveContent } from './content-properties';
-import { fontAnchorOffset } from './font-anchor';
+import { anchorKernel, commandFields, fontAnchorOffset } from './font-anchor';
 
 const sizedTypes = new Set(['shape', 'solid', 'image', 'video', 'shader', 'extension', 'precomp']);
 
@@ -22,10 +22,26 @@ export function sizeAnchorOffset(PM: any, layer: any, time: number) {
 
 export function captureSizeAnchor(PM: any, layer: any, command: any) {
   if (!layer || layer.d?.sizeAnchorBounds) return;
-  const fields = command.type === 'set_content' ? Object.keys(command.patch || {})
-    : ['set_property', 'replace_keyframes', 'set_expression'].includes(command.type)
-      ? [String(command.path || command.channel || '').replace(/^c\./, '')] : [];
+  const fields = commandFields(command);
   if (!fields.some(key => key === 'w' || key === 'h')) return;
-  const bounds = sizeBounds(PM, layer, command.time ?? PM.time);
-  if (bounds) layer.d.sizeAnchorBounds = bounds;
+  const time = command.time ?? PM.time;
+  const legacy = () => {
+    const bounds = sizeBounds(PM, layer, time);
+    if (bounds) layer.d.sizeAnchorBounds = bounds;
+  };
+  const kernel = anchorKernel(PM, layer);
+  if (kernel) kernel.edits.edit('captureSizeAnchor', { layer: kernel.index, fields, t: time }, legacy, () => undefined);
+  else legacy();
+}
+
+/** The native size bounds shifted by the size anchor offset (what the artwork
+ *  occupies), before an anchor edit; null when nothing is recorded. */
+export function sizeAnchorReference(PM: any, layer: any, time: number): any {
+  const legacy = () => {
+    const native = sizeBounds(PM, layer, time);
+    const offset = native ? sizeAnchorOffset(PM, layer, time) : null;
+    return native && offset ? { x0: native.x0 + offset.x, x1: native.x1 + offset.x, y0: native.y0 + offset.y, y1: native.y1 + offset.y } : null;
+  };
+  const edits = PM.EngineDoc?.edits;
+  return edits ? edits.anchorReference(layer, 'size', time, legacy) : legacy();
 }

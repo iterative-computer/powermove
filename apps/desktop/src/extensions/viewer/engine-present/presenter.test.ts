@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
-import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState } from './protocol';
+import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
 const F = TICKS_PER_SECOND / 60;
 
@@ -186,6 +186,31 @@ describe('EnginePresenter', () => {
     expect(presenter.stats.dropped['late']).toBeGreaterThan(0);
   });
 
+  it('maps to host time with the promptest clock sample, never a stalled one', () => {
+    const { presenter } = setup();
+    // True mapping: performance.now() ms × 1000 + 900_000 = host µs.
+    const sample = (seq: number, hostTime: number): ClockSample => ({
+      seq,
+      epoch: 2,
+      state: 'playing',
+      hostTime,
+      mediaTime: 0,
+      rate: { num: 1, den: 1 },
+      outputLatencyUs: 0,
+      sampleRate: 48_000,
+      loopRange: null
+    });
+    // Made at 100 ms, delivered 0.3 ms later.
+    presenter.receive({ type: 'clock', sample: sample(1, 1_000_000) }, 100.3);
+    expect(presenter.hostUs(200)).toBe(1_099_700);
+    // Made at 350 ms, delivered after a 110 ms long task: it says nothing new.
+    presenter.receive({ type: 'clock', sample: sample(2, 1_250_000) }, 460);
+    expect(presenter.hostUs(200)).toBe(1_099_700);
+    // Made at 600 ms, delivered 0.1 ms later: a tighter bound.
+    presenter.receive({ type: 'clock', sample: sample(3, 1_500_000) }, 600.1);
+    expect(presenter.hostUs(200)).toBe(1_099_900);
+  });
+
   it('a new pool generation drops the old frames and retires the old imports', () => {
     const { source, link, presenter } = setup();
     source.arrive(1, 1);
@@ -212,5 +237,64 @@ describe('EnginePresenter', () => {
     ]);
     presenter.receive({ type: 'frame', frame: desc(4) });
     expect(link.releases).toHaveLength(2);
+  });
+
+  it('tells the engine the refresh grid on the host clock once it is fitted, and again only when it moves', () => {
+    const hints: VsyncHint[] = [];
+    // host µs = performance.now() ms × 1000 + 5,000,000
+    const presenter = new EnginePresenter({
+      link: new Link(),
+      source: new Source(),
+      painter: new Painter(),
+      displayHz: 120,
+      hostOffsetUs: () => 5_000_000,
+      onVsync: (hint) => hints.push(hint)
+    });
+    const period = 1000 / 120;
+    let t = 1000.4;
+    for (let i = 0; i < 30; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(1);
+    expect(hints[0]!.periodUs).toBeCloseTo(8333.33, 1);
+    // On the grid: hostTime is a refresh, 1000.4 ms + n periods.
+    const phase = (((hints[0]!.hostTime - 5_000_000 - 1_000_400) % hints[0]!.periodUs) + hints[0]!.periodUs) % hints[0]!.periodUs;
+    expect(Math.min(phase, hints[0]!.periodUs - phase)).toBeLessThan(1);
+    // The same grid two seconds later: nothing new.
+    for (let i = 0; i < 240; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(1);
+    // The display link's phase jumps by half a refresh: a new hint at once.
+    t += period / 2;
+    for (let i = 0; i < 24; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(2);
+    const moved = (((hints[1]!.hostTime - hints[0]!.hostTime) % hints[0]!.periodUs) + hints[0]!.periodUs) % hints[0]!.periodUs;
+    expect(moved).toBeCloseTo(hints[0]!.periodUs / 2, -1);
+    expect(presenter.vsyncHint).toEqual(hints[1]);
+  });
+
+  it('sends no hint without a host clock offset', () => {
+    const hints: VsyncHint[] = [];
+    const presenter = new EnginePresenter({ link: new Link(), source: new Source(), painter: new Painter(), displayHz: 120, onVsync: (hint) => hints.push(hint) });
+    for (let i = 0, t = 0; i < 60; i++, t += 1000 / 120) presenter.refresh(t);
+    expect(hints).toEqual([]);
+  });
+  it('draws next-refresh frames on arrival when asked (a worker canvas), but timed frames only at animation frames', () => {
+    const source = new Source();
+    const painter = new Painter();
+    const link = new Link();
+    let now = 100;
+    const rafs: ((t: number) => void)[] = [];
+    const presenter = new EnginePresenter({ link, source, painter, drawOnArrival: true, now: () => now });
+    presenter.start((cb) => rafs.push(cb), () => {});
+    for (let i = 0; i < 6; i++) source.imports.add(`1:${i}`);
+    presenter.receive({ type: 'frame', frame: desc(1) }, 100);
+    expect(painter.draws).toHaveLength(1);
+    presenter.receive({ type: 'frame', frame: desc(2) }, 101);
+    expect(painter.draws.map((f) => f.id)).toEqual(['1:1', '1:2']);
+    // A timed frame waits for its refresh.
+    const clock = { epoch: 1, seq: 1, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null } as ClockSample;
+    presenter.receive({ type: 'clock', sample: clock }, 0);
+    now = 102;
+    presenter.receive({ type: 'frame', frame: desc(3, { pts: 0, duration: F }) }, 102);
+    expect(painter.draws).toHaveLength(2);
+    presenter.dispose();
   });
 });

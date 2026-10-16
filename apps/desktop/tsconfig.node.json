@@ -28,5 +28,5 @@
     "../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors.ts"
   ],
   /* The frame bridge harness pages run in a renderer (tsconfig.web.json). */
-  "exclude": ["src/main/engine/integration/*-page.ts", "src/main/engine/integration/page-engine.ts"]
+  "exclude": ["src/main/engine/integration/*-page.ts", "src/main/engine/integration/page-engine.ts", "src/main/engine/integration/bridge-worker.ts"]
 }
