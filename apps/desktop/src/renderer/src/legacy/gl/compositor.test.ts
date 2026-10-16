@@ -220,3 +220,46 @@ describe('linear compositing traversal', () => {
     expect(reads).toBeLessThanOrEqual(layers.length * 2);
   });
 });
+
+describe('the compositor context for offline renders', () => {
+  const fakeCanvas = () => {
+    const gl = {
+      getExtension: () => null, createBuffer: () => ({}), bindBuffer() {}, bufferData() {},
+      disable() {}, enable() {}, blendFunc() {}, ARRAY_BUFFER: 0, STATIC_DRAW: 0, DEPTH_TEST: 0, BLEND: 0, ONE: 1, ONE_MINUS_SRC_ALPHA: 2,
+    };
+    return { getContext: () => gl, addEventListener() {} };
+  };
+
+  it('waits for the viewer to give it a canvas, and stops waiting per frame after a timeout', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    try {
+      const PM = compositorRegistry();
+      // An export that starts before the viewer mounted waits for its context.
+      let ready: boolean | undefined;
+      void PM.GL.whenReady(1000).then((value: boolean) => { ready = value; });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(ready).toBeUndefined();
+      expect(PM.GL.init(fakeCanvas())).toBe(true);
+      await Promise.resolve();
+      expect(ready).toBe(true);
+      expect(await PM.GL.whenReady(1000)).toBe(true);
+
+      // Without a viewer (no context comes), one wait times out and the next
+      // frames do not wait again until a context arrives.
+      const other = compositorRegistry();
+      const first = other.GL.whenReady(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await first).toBe(false);
+      let second: boolean | undefined;
+      void other.GL.whenReady(1000).then((value: boolean) => { second = value; });
+      await Promise.resolve();
+      expect(second).toBe(false);
+      other.GL.init(fakeCanvas());
+      expect(await other.GL.whenReady(1000)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
