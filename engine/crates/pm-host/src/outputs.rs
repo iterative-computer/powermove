@@ -19,7 +19,6 @@ pub const NAME_MAX: usize = 255;
 pub const TEMP_PREFIX: &str = ".powermove-";
 pub const TEMP_SUFFIX: &str = ".part";
 
-/// `Name.ext`, `Name (2).ext`, … trimmed so every candidate fits `NAME_MAX`.
 /// Whether `name` is a job engine work file of the temporary output `base`
 /// (`pm_export::AtomicOutput::in_place`: `<base>.<16 hex>.partial[.<ext>]`).
 fn is_work_file_of(name: &str, base: &str) -> bool {
@@ -62,6 +61,7 @@ pub fn remove_temporary(temporary: &Path) {
     }
 }
 
+/// `Name.ext`, `Name (2).ext`, … trimmed so every candidate fits `NAME_MAX`.
 pub fn candidate_name(base: &str, extension: &str, attempt: u32) -> String {
     let suffix = if attempt == 0 {
         String::new()
