@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { ClockSample, Envelope, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
@@ -42,6 +42,13 @@ export type ViewerMessage =
   | { type: 'clock'; sample: ClockSample }
   | { type: 'routed'; route: 'legacy'; reason: string };
 
+/** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
+export interface DefinitionsSource {
+  session(send: (update: DefinitionsUpdate) => boolean | void): { full(): void; dispose(): void };
+  applied(applied: DefinitionsApplied): void;
+  failure(report: FailureReport): void;
+}
+
 export type SessionHandlers = {
   message(message: ViewerMessage, arrivedMs: number): void;
   closed(reason: string): void;
@@ -61,6 +68,8 @@ export type SessionOptions = {
   onClock?: (sample: ClockSample) => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
+  /** Definition snapshots for the session (with "Use New Engine" on). */
+  definitions?: () => DefinitionsSource | null;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -113,6 +122,8 @@ export class DocumentSession {
   private resyncAgain = false;
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
+  /** This session's definition stream. */
+  private definitions: { full(): void; dispose(): void } | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -132,12 +143,40 @@ export class DocumentSession {
     this.id = opened.session;
     this.unlisten = connection.listen(opened.session, (message, arrived) => this.receive(message, arrived));
     this.unsubscribe = this.options.stream.subscribe((batch) => this.onBatch(batch));
+    // Definitions before the document, so the first frame has them
+    // (contract 10, read-your-registrations).
+    this.startDefinitions();
     await this.resync('open');
     if (this.pendingState && !this.closed) {
       const state = this.pendingState;
       this.pendingState = null;
       this.sendViewerState(state);
     }
+  }
+
+  /**
+   * The kernel's winning registrations as this session's stream: a full
+   * update, then a delta per register, dispose, and hot reload. A refused
+   * update (a generation gap after a restart) makes the next one full.
+   */
+  private startDefinitions(): void {
+    const source = this.options.definitions?.();
+    if (!source || this.id === null) return;
+    const id = this.id;
+    this.definitions = source.session((update) => {
+      if (this.closed) return false;
+      void this.options.connection.request({ type: 'pushDefinitions', ...update } as Request, id).then(
+        (response) => {
+          if ((response as { type?: string }).type === 'definitionsApplied') source.applied(response as unknown as DefinitionsApplied);
+        },
+        (error) => {
+          if (this.closed) return;
+          this.options.log('warn', `engine definitions refused: ${error instanceof Error ? error.message : String(error)}`);
+          this.definitions?.full();
+        }
+      );
+      return true;
+    });
   }
 
   /** Replaces the engine's document with the current one. */
@@ -266,6 +305,8 @@ export class DocumentSession {
         }
         this.failures.push(`${error.code}: ${error.message}`);
         if (this.failures.length > 32) this.failures.shift();
+        // Shader meta and compile errors at the report's revision.
+        this.options.definitions?.()?.failure(event as unknown as FailureReport);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
           void this.resync(error.code);
           return;
@@ -312,6 +353,8 @@ export class DocumentSession {
 
   private dispose(): void {
     this.closed = true;
+    this.definitions?.dispose();
+    this.definitions = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.unlisten?.();

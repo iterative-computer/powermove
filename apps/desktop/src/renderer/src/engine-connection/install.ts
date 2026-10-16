@@ -211,6 +211,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         stream: stream(),
         documentId: () => String(PM.proj?.id ?? ''),
         stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
+        definitions: () => ((PM as any).EngineDefinitions ?? null),
         handlers: {
           message: (message, arrivedMs) => {
             if (message.type === 'frame' && !firstFrame) {

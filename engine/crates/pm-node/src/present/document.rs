@@ -223,6 +223,8 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::ImageSequence => "animated images or sequences".into(),
         Feature::Media(m) => format!("media: {m}"),
         Feature::Request(r) => format!("request: {r}"),
+        Feature::Definition(d) => format!("no definition for {d}"),
+        Feature::ShaderFallback(d) => format!("{d} needs the GLSL fallback runner"),
     };
     match (&u.composition, &u.layer) {
         (Some(c), Some(l)) => format!("{what} (layer {l} in {c})"),
