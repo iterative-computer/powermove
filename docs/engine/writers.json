@@ -633,13 +633,13 @@
       "code": "PM.Edit.mutate('Delete keyframes',()=>{ for(const l of layers)for(const path of KEY_CHANNELS[layer3DRole(l)||'group']!){ const prop=chann..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/engine-doc/edits.ts:225",
+      "site": "apps/desktop/src/renderer/src/engine-doc/edits.ts:295",
       "class": "doc.touched",
       "scope": "NativeEdits.ask",
       "code": "this.PM.doc?.touched?.(wide ? [['layers'], ['comps']] : [['layers']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/engine-doc/edits.ts:266",
+      "site": "apps/desktop/src/renderer/src/engine-doc/edits.ts:336",
       "class": "doc.write",
       "scope": "NativeEdits.apply",
       "code": "this.PM.doc.write(paths, write)"
