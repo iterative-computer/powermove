@@ -265,12 +265,13 @@ impl Composer {
     }
 
     /// Loads a view's definitions into the renderer when they are not the
-    /// ones it holds (translations come from the renderer's cache).
+    /// ones it holds (translations come from the renderer's cache). Returns
+    /// the definitions' translation failures when it loaded them.
     pub fn use_definitions(
         &mut self,
         owner: impl std::hash::Hash,
         definitions: Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
-    ) {
+    ) -> Option<Vec<pm_protocol::error::EngineError>> {
         use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
         let owner = BuildHasherDefault::<DefaultHasher>::default().hash_one(owner);
         let wanted = (
@@ -278,15 +279,16 @@ impl Composer {
             definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version)),
         );
         if self.definitions == Some(wanted) {
-            return;
-        }
-        match definitions {
-            Some((set, _)) => {
-                let _ = self.renderer.set_definitions(set);
-            }
-            None => self.renderer.clear_definitions(),
+            return None;
         }
         self.definitions = Some(wanted);
+        match definitions {
+            Some((set, _)) => Some(self.renderer.set_definitions(set).unwrap_or_default()),
+            None => {
+                self.renderer.clear_definitions();
+                Some(Vec::new())
+            }
+        }
     }
 
     /// Draws `composition` of `doc` at `time` into `working` for `state`.

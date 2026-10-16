@@ -412,6 +412,32 @@ fn child_engine() {
         frame(m).filter(|d| d.revision.get() == r)
     });
     release(&mut host, &plain);
+    // A definition that does not compile is reported for the shader UI.
+    let source = "#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main(){ o = nope; }\n";
+    let broken: pm_protocol::definitions::DefinitionSnapshot = serde_json::from_value(json!({
+        "id": "broken", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+        "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.len(), "bodyUtf8Len": source.len() },
+        "params": [],
+        "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+    }))
+    .unwrap();
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(4).unwrap(),
+            body: Request::PushDefinitions(pm_protocol::definitions::DefinitionsUpdate {
+                generation: Seq::new(2).unwrap(),
+                full: false,
+                upserts: vec![broken],
+                removals: vec![],
+            }),
+        })
+        .with_session(session),
+    );
+    let code = inbox.wait(Duration::from_secs(10), |m| {
+        failure(m).filter(|c| *c == ErrorCode::ShaderCompile)
+    });
+    assert_eq!(code, ErrorCode::ShaderCompile);
 
     // Playback on the host clock at 30 fps.
     send(

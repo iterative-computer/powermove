@@ -660,7 +660,28 @@ impl Thread {
             }
             Command::Document { key, update } => self.document(key, update),
             Command::Definitions { key, set } => {
-                self.docs.entry(key).or_default().set_definitions(set);
+                let doc = self.docs.entry(key).or_default();
+                doc.set_definitions(set);
+                let definitions = doc.definitions().cloned();
+                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // Translate now (not at the next frame) and report each
+                // definition that fails (contract 10; the kernel fills the
+                // shader UI from these).
+                let mut failures = Vec::new();
+                if self.config.document
+                    && let Some(gpu) = self.gpu.as_mut()
+                {
+                    let composer = gpu
+                        .composer
+                        .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
+                    failures = composer
+                        .use_definitions(key, definitions.as_ref())
+                        .unwrap_or_default();
+                }
+                for error in failures {
+                    let report = pm_protocol::error::FailureReport { revision, error };
+                    self.event(key, Event::Failure(report), None);
+                }
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
@@ -1795,7 +1816,7 @@ impl Thread {
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
-            composer.use_definitions(key, doc.definitions());
+            let _ = composer.use_definitions(key, doc.definitions());
             match composer.compose(
                 doc.document(),
                 &composition,
