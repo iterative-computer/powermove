@@ -327,6 +327,14 @@ Kept small; listed for the owning lanes.
   `measure-app-page.ts` (the `tracer` mode, synthetic projects, edits
   during playback); `tsconfig.web.json` and `tsconfig.node.json` list
   `synthetic-project.ts`.
+- Tests of other lanes adapted to this lane's behavior:
+  `engine/crates/pm-node/tests/present.rs` (the first playing sample names
+  the run's start), `e2e/native-engine.spec.ts` (the kernel's connection
+  negotiates the interactive port itself), `docs/engine/writers.json`
+  (regenerated: the synthetic project builder writes the document).
+- `engine/crates/pm-engine/src/engine.rs`: the integration branch's
+  `viewer_transport` (deadline signals for viewer playback) replaced this
+  lane's earlier version of the same signals at the merge.
 - `docs/engine/host-processes.md`: the Settings row exists now.
 
 ## Gaps
