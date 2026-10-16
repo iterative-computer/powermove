@@ -47,7 +47,8 @@ pub fn lathe_geometry(points: &[V2], segments: f64) -> Geometry {
         let sin = libm::sin(phi);
         let cos = libm::cos(phi);
         for (j, p) in points.iter().enumerate() {
-            b.vertices.extend_from_slice(&[p[0] * sin, p[1], p[0] * cos]);
+            b.vertices
+                .extend_from_slice(&[p[0] * sin, p[1], p[0] * cos]);
             b.uvs.push(f64::from(i) / segments);
             b.uvs.push(j as f64 / (n as f64 - 1.0));
             b.normals.extend_from_slice(&[
@@ -324,7 +325,13 @@ pub fn extrude_geometry(points: &[V2], depth: f64, bevel: f64) -> Geometry {
         }
         let offset = vlen * (steps_n + bevel_segments * 2);
         for f in &faces {
-            f3(&mut out, &mut uvs, f[0] + offset, f[1] + offset, f[2] + offset);
+            f3(
+                &mut out,
+                &mut uvs,
+                f[0] + offset,
+                f[1] + offset,
+                f[2] + offset,
+            );
         }
     } else {
         for f in &faces {
@@ -332,7 +339,13 @@ pub fn extrude_geometry(points: &[V2], depth: f64, bevel: f64) -> Geometry {
         }
         let offset = vlen * steps_n;
         for f in &faces {
-            f3(&mut out, &mut uvs, f[0] + offset, f[1] + offset, f[2] + offset);
+            f3(
+                &mut out,
+                &mut uvs,
+                f[0] + offset,
+                f[1] + offset,
+                f[2] + offset,
+            );
         }
     }
     groups.push(Group {
@@ -402,4 +415,3 @@ mod tests {
         assert_eq!(b.vertex_count(), (2 * 2 + 4 * 7 * 2) * 3);
     }
 }
-

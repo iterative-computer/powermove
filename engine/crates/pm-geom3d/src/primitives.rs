@@ -113,7 +113,10 @@ pub enum Primitive {
         radial_segments: f64,
     },
     /// `new IcosahedronGeometry(radius, detail)`.
-    Icosahedron { radius: f64, detail: f64 },
+    Icosahedron {
+        radius: f64,
+        detail: f64,
+    },
 }
 
 /// The primitive's parameters (`source.parameters`), each `None` when absent.
@@ -668,9 +671,9 @@ pub fn icosahedron_geometry(radius: f64, detail: f64) -> Geometry {
         -1.0, -t, 0.0, 1.0, -t, t, 0.0, -1.0, t, 0.0, 1.0, -t, 0.0, -1.0, -t, 0.0, 1.0,
     ];
     let indices: [usize; 60] = [
-        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6,
-        7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6,
-        7, 9, 8, 1,
+        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7,
+        1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9,
+        8, 1,
     ];
     polyhedron_geometry(&vertices, &indices, radius, detail)
 }
@@ -678,7 +681,12 @@ pub fn icosahedron_geometry(radius: f64, detail: f64) -> Geometry {
 /// `new PolyhedronGeometry(vertices, indices, radius, detail)`: subdivided,
 /// projected onto the sphere, spherical UVs with the seam corrections, flat
 /// normals at detail 0 and smooth ones otherwise. Not indexed.
-pub fn polyhedron_geometry(vertices: &[f64], indices: &[usize], radius: f64, detail: f64) -> Geometry {
+pub fn polyhedron_geometry(
+    vertices: &[f64],
+    indices: &[usize],
+    radius: f64,
+    detail: f64,
+) -> Geometry {
     let mut buffer: Vec<f64> = Vec::new();
     let vertex = |i: usize| [vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]];
     for f in indices.chunks_exact(3) {

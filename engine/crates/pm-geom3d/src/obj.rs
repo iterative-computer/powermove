@@ -240,7 +240,10 @@ pub fn parse_obj(source: &str) -> Result<ObjMesh, String> {
                         "OBJ line {line_number}: texture coordinate needs u and v"
                     ));
                 }
-                texcoords.push([finite(fields[0], line_number)?, finite(fields[1], line_number)?]);
+                texcoords.push([
+                    finite(fields[0], line_number)?,
+                    finite(fields[1], line_number)?,
+                ]);
             }
             "f" => {
                 if fields.len() < 3 {

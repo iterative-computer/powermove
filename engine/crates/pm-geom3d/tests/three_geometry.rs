@@ -26,7 +26,13 @@ fn points(v: &Value) -> Vec<[f64; 2]> {
 }
 
 fn numbers(v: Option<&Value>) -> Option<Vec<f64>> {
-    v.map(|a| a.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect())
+    v.map(|a| {
+        a.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect()
+    })
 }
 
 /// The source as `parseScene` stores it.

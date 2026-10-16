@@ -74,7 +74,13 @@ impl Ring {
         self.n(a).x == self.n(b).x && self.n(a).y == self.n(b).y
     }
 
-    fn linked_list(&mut self, data: &[f64], start: usize, end: usize, clockwise: bool) -> Option<usize> {
+    fn linked_list(
+        &mut self,
+        data: &[f64],
+        start: usize,
+        end: usize,
+        clockwise: bool,
+    ) -> Option<usize> {
         let mut last = None;
         if clockwise == (signed_area(data, start, end) > 0.0) {
             let mut i = start;
@@ -258,7 +264,11 @@ impl Ring {
         true
     }
 
-    fn cure_local_intersections(&mut self, start: Option<usize>, triangles: &mut Vec<usize>) -> Option<usize> {
+    fn cure_local_intersections(
+        &mut self,
+        start: Option<usize>,
+        triangles: &mut Vec<usize>,
+    ) -> Option<usize> {
         let mut start = start?;
         let mut p = start;
         loop {
@@ -285,7 +295,14 @@ impl Ring {
         self.filter_points(Some(p), None)
     }
 
-    fn split_earcut(&mut self, start: usize, triangles: &mut Vec<usize>, min_x: f64, min_y: f64, inv_size: f64) {
+    fn split_earcut(
+        &mut self,
+        start: usize,
+        triangles: &mut Vec<usize>,
+        min_x: f64,
+        min_y: f64,
+        inv_size: f64,
+    ) {
         let mut a = start;
         loop {
             let mut b = self.n(self.n(a).next).next;
@@ -658,7 +675,16 @@ fn z_order(x: f64, y: f64, min_x: f64, min_y: f64, inv_size: f64) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn point_in_triangle(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64, px: f64, py: f64) -> bool {
+fn point_in_triangle(
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+    px: f64,
+    py: f64,
+) -> bool {
     (cx - px) * (ay - py) >= (ax - px) * (cy - py)
         && (ax - px) * (by - py) >= (bx - px) * (ay - py)
         && (bx - px) * (cy - py) >= (cx - px) * (by - py)
@@ -750,7 +776,11 @@ pub fn earcut(data: &[f64], holes: &[usize]) -> Vec<usize> {
             i += 2;
         }
         inv_size = (max_x - min_x).max(max_y - min_y);
-        inv_size = if inv_size != 0.0 { 32767.0 / inv_size } else { 0.0 };
+        inv_size = if inv_size != 0.0 {
+            32767.0 / inv_size
+        } else {
+            0.0
+        };
     }
     ring.earcut_linked(Some(outer), &mut triangles, min_x, min_y, inv_size, 0);
     triangles
@@ -780,4 +810,3 @@ mod tests {
         assert_eq!(to_int32(f64::NAN), 0);
     }
 }
-

@@ -19,7 +19,10 @@ pub struct MeshSource {
 pub enum Source {
     Primitive(Primitive),
     /// `{ lathe: [[x, y], …], segments }` (`segments || 48`).
-    Lathe { points: Vec<[f64; 2]>, segments: f64 },
+    Lathe {
+        points: Vec<[f64; 2]>,
+        segments: f64,
+    },
     /// `{ extrude: [[x, y], …], depth, bevel }`.
     Extrude {
         points: Vec<[f64; 2]>,
