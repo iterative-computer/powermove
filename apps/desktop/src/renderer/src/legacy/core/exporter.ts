@@ -2,9 +2,9 @@ import { animateExportPreview } from './export-preview';
 import { prepareFrame } from './frame-preparation';
 import { captureFramePixels, renderOpaqueFrame } from './frame-capture';
 import { installRenderQueue, wavBytes } from './render-queue';
+import { openRenderQueuePanel } from './render-queue-panel';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
-  EXPORT_FORMAT_OPTIONS,
   EXPORT_FRAME_RATES,
   EXPORT_QUALITY_OPTIONS,
   EXPORT_RANGE_OPTIONS,
@@ -13,16 +13,34 @@ import {
   exportActionLabel,
   exportBitrateMbps,
   exportFieldSupport,
+  exportFormatOptions,
   normalizeExportDefaults,
   planExport
 } from '../../core/export-defaults';
+import {
+  allPresets,
+  BUILT_IN_PRESETS,
+  expandFileName,
+  formatInfo,
+  isDropFrameTimecode,
+  isProRes,
+  isRenderFormat,
+  legacyFormatId,
+  migrateFormat,
+  normalizeDelivery,
+  normalizeTimecode,
+  supportsAlpha,
+  type ExportPreset,
+  type ExportPresetOptions,
+  type SheetFormat
+} from '../../../../shared/delivery';
 import type { PMRegistry } from '../registry';
 import { packProjectFileBlob } from './project-file';
 import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
 import { createSettingsSection } from '../ui/settings-section';
 import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
-import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
+import { deliveryEngineOn, row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { captionSidecars } from '../../captions/sidecar';
 
@@ -135,9 +153,29 @@ X.buildWeb = () => buildWebExport(PM);
 X.defaults = () => normalizeExportDefaults(
   PM.proj?.exportDefaults || PM.store.get('exportOpts', {}), PM.proj?.fps);
 
+/** Whether this launch runs the native engine (Use New Engine): it writes
+ *  every delivery format; the current exporter writes today's. */
+const engineOn = (): boolean => deliveryEngineOn();
+
+/** A format the current exporter writes in place of one only the engine
+ *  writes (the sheet opened without the engine). */
+function writableFormat(format: string, engine: boolean): SheetFormat {
+  const f = migrateFormat(format);
+  if (engine || !formatInfo(f).engine) return f;
+  if (isProRes(f)) return 'prores-4444';
+  if (f === 'hevc') return 'h264';
+  return f === 'webm-vp8' ? 'webm-vp9' : 'h264';
+}
+
+/** The exact export frame rate when it is the composition's own. */
+const RATE_LABEL = (f: number) => (Number.isInteger(f) ? String(f) : f.toFixed(3)) + ' fps';
+
 X.dialog = () => {
   const p: any = PM.proj;
+  const engine = engineOn();
   const opts: any = Object.assign({}, X.defaults(), { name: p.name });
+  opts.format = writableFormat(opts.format, engine);
+  opts.delivery = normalizeDelivery(opts.delivery);
   /* The dialog is the Settings › Project page in a sheet: the same group
      cards, title-and-description rows and 30px hairline controls, so export
      reads as one surface with the place its defaults come from. */
@@ -162,13 +200,21 @@ X.dialog = () => {
     field.sync();
     return field;
   };
-  const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
-  const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
+  const text = (label: string, get: () => string, set: (v: string) => void, placeholder = '') => {
+    const field: any = h('input.settings-input.is-wide', { type: 'text', placeholder, 'aria-label': label, spellcheck: 'false' });
+    field.sync = () => { if (window.document.activeElement !== field) field.value = get(); };
+    field.addEventListener('change', () => { set(field.value); sync(); });
+    field.addEventListener('keydown', (e: KeyboardEvent) => { e.stopPropagation(); if (e.key === 'Enter') field.blur(); });
+    field.sync();
+    return field;
+  };
+  const category = (format: string) => formatInfo(migrateFormat(format)).category;
+  const remembered: Record<string, string> = { code: 'web', video: 'h264', images: 'still', project: 'json' };
   remembered[category(opts.format)] = opts.format;
 
   const destinations = [
     ['code', 'Code', 'A live animation for apps and coding agents.'],
-    ['video', 'Video', 'MP4, WebM or ProRes for delivery and editing.'],
+    ['video', 'Video', engine ? 'ProRes, H.264, HEVC or WebM for delivery and editing.' : 'MP4, WebM or ProRes for delivery and editing.'],
     ['images', 'Images', 'A single frame, or every frame as a PNG sequence.'],
     ['project', 'Project', 'An editable .pmv with every layer and its media.'],
   ] as const;
@@ -195,13 +241,14 @@ X.dialog = () => {
     ['Editable layers', 'Original media', 'Animation & effects']);
   body.append(codeDetails, projectDetails);
 
-  const hasWC: any = typeof window.VideoEncoder !== 'undefined';
   const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
   const rows: Record<string, SettingsRow> = {};
   const output = createSettingsSection('Output');
   const rendering = createSettingsSection('Rendering');
+  const delivery = createSettingsSection('Delivery');
+  const file = createSettingsSection('File');
   const presetSection = createSettingsSection('Presets');
-  body.append(output.element, rendering.element, presetSection.element);
+  body.append(output.element, rendering.element, delivery.element, file.element, presetSection.element);
   const mk = (section: { body: HTMLElement }, key: string, title: string, detail: string, control: HTMLElement): SettingsRow => {
     const r = settingsRow(title, detail, control);
     rows[key] = r;
@@ -210,13 +257,18 @@ X.dialog = () => {
   };
 
   const formatOptions: any[] = [];
+  const allFormats = exportFormatOptions(engine).map((o: any) => {
+    if (o.v === 'h264' && !engine) return { v: o.v, label: (hostBridge() as any)?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
+    return { ...o };
+  });
   const formatField = select('Format', () => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
-  const allFormats = EXPORT_FORMAT_OPTIONS.map((o: any) => {
-      if (o.v === 'mp4') return { v: o.v, label: (hostBridge() as any)?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
-      if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
-      return { ...o };
-    });
   mk(output, 'format', 'Format', 'Container and codec of the exported file.', formatField);
+  mk(output, 'container', 'Container', 'MP4 for the web, or a QuickTime movie with timecode and PCM audio.',
+    select('Container', () => opts.delivery.container, (v: any) => { opts.delivery.container = v; sync(); },
+      [{ v: 'mp4', label: 'MP4' }, { v: 'mov', label: 'QuickTime (.mov)' }]));
+  const depthOptions: any[] = [];
+  mk(output, 'highDepth', 'Bit depth', 'More bits keep smooth gradients without banding.',
+    select('Bit depth', () => (opts.delivery.highDepth ? 'high' : 'standard'), (v: any) => { opts.delivery.highDepth = v === 'high'; sync(); }, depthOptions));
 
   /* Resolution: the common multiples of the composition, or any pixel size.
      Custom sizes keep the composition's aspect so nothing renders stretched. */
@@ -254,7 +306,7 @@ X.dialog = () => {
     if (e.key === 'Enter') inp.blur();
   });
 
-  mk(output, 'fps', 'Frame rate', 'Frames written per second of exported video.', select('Frame rate', () => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
+  mk(output, 'fps', 'Frame rate', 'Frames written per second of exported video.', select('Frame rate', () => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: RATE_LABEL(f) }))));
   const hasWork: any = !!(p.work && p.work[1] > p.work[0]);
   mk(output, 'range', 'Range', 'Export the work area or the whole composition.', select('Range', () => opts.range, (v: any) => { opts.range = v; sync(); },
     EXPORT_RANGE_OPTIONS.map((o: any) => o.v === 'work' && !hasWork
@@ -264,8 +316,34 @@ X.dialog = () => {
   const hasAudio: any = PM.Audio.hasAudibleLayers(p);
   mk(rendering, 'audio', 'Include audio', hasAudio ? 'Mix composition audio into the video.' : 'No audio layers in this project.',
     toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, 'Include audio'));
-  mk(rendering, 'alpha', 'Transparent background', 'Keep the background see-through, with straight alpha.',
+  mk(rendering, 'alpha', 'Transparent background', 'Keep the background see-through.',
     toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, 'Transparent background'));
+  mk(rendering, 'alphaMode', 'Alpha', 'Straight alpha for editing apps, or premultiplied over black.',
+    select('Alpha', () => opts.delivery.alphaMode, (v: any) => { opts.delivery.alphaMode = v; sync(); },
+      [{ v: 'straight', label: 'Straight' }, { v: 'premultiplied', label: 'Premultiplied' }]));
+
+  mk(delivery, 'audioCoding', 'Audio format', 'How the soundtrack is stored in the movie.',
+    select('Audio format', () => opts.delivery.audioCoding, (v: any) => { opts.delivery.audioCoding = v; sync(); }, [
+      { v: 'auto', label: 'Automatic · 24-bit PCM' }, { v: 'pcm16', label: '16-bit PCM' }, { v: 'pcm24', label: '24-bit PCM' },
+      { v: 'float', label: '32-bit float PCM' }, { v: 'aac', label: 'AAC' }
+    ]));
+  const timecodeRow = mk(delivery, 'timecode', 'Start timecode', 'The first frame’s timecode; empty uses the composition’s.',
+    text('Start timecode', () => opts.delivery.timecode, (v) => { opts.delivery.timecode = normalizeTimecode(v); }, '00:00:00:00'));
+  mk(delivery, 'reel', 'Reel name', 'Written with the timecode for editing apps.',
+    text('Reel name', () => opts.delivery.reel, (v) => { opts.delivery.reel = v.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 64); }));
+  mk(delivery, 'videoColor', 'Color', 'Rec.709 for QuickTime and Safari matches the viewer; broadcast for grading.',
+    select('Color', () => opts.delivery.videoColor, (v: any) => { opts.delivery.videoColor = v; sync(); },
+      [{ v: 'quicktime', label: 'Rec.709 (QuickTime and Safari)' }, { v: 'broadcast', label: 'Rec.709 (broadcast)' }]));
+  mk(delivery, 'imageColor', 'Color', 'The color space the image files are tagged with.',
+    select('Image color', () => opts.delivery.imageColor, (v: any) => { opts.delivery.imageColor = v; sync(); },
+      [{ v: 'srgb', label: 'sRGB' }, { v: 'rec709', label: 'Rec.709' }]));
+
+  mk(file, 'fileName', 'File name', 'Use {project}, {composition}, {preset}, {size}, {fps}, {date}, and {time}.',
+    text('File name', () => opts.delivery.fileName, (v) => { opts.delivery.fileName = v.trim() || '{project}'; }, '{project}'));
+  mk(file, 'overwrite', 'If the file exists', 'For render queue jobs; exporting now asks.',
+    select('If the file exists', () => opts.delivery.overwrite, (v: any) => { opts.delivery.overwrite = v; sync(); },
+      [{ v: 'keep-both', label: 'Keep both' }, { v: 'replace', label: 'Replace' }, { v: 'stop', label: 'Stop the job' }]));
+
   /* Captions: burned in by default, optionally also delivered as a sidecar. */
   const captionLayers = (p.layers || []).filter((layer: any) => layer.type === 'captions');
   const captionsSection = createSettingsSection('Captions');
@@ -282,16 +360,37 @@ X.dialog = () => {
         [{ v: 'none', label: 'None' }, { v: 'srt', label: 'SubRip (.srt)' }, { v: 'vtt', label: 'WebVTT (.vtt)' }]));
   }
 
-  let presets=PM.store.get('renderPresets',[]);
-  let chosenPreset='';const presetOptions=[{v:'',label:'Choose preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
-  const presetSelect=select('Saved preset',()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows))r.element.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
-  const presetName=h('input.settings-input.is-wide.export-preset-name',{type:'text',placeholder:'Preset name','aria-label':'Render preset name'});
-  const savePreset=h('button.btn','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
-  presetName.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); savePreset.click(); } });
-  const presetRow = mk(presetSection, 'preset', 'Saved preset', 'Load a set of export settings you saved earlier.', presetSelect);
+  /* Presets: the five built-ins, then the user's (today's saved presets migrate). */
+  let presets: ExportPreset[] = allPresets(PM.store.get('renderPresets', [])).filter((preset) => engine || !formatInfo(preset.options.format).engine);
+  let chosenPreset = '';
+  const presetOptions = [{ v: '', label: 'Choose preset' }, ...presets.map((preset) => ({ v: preset.id, label: preset.name }))];
+  const presetSelect = select('Saved preset', () => chosenPreset, (id: any) => {
+    chosenPreset = id;
+    const preset = presets.find((item) => item.id === id);
+    if (!preset) return;
+    applyPreset(opts, preset);
+    customOpen = !presetScales.includes(opts.scale);
+    sync();
+  }, presetOptions);
+  const presetName = h('input.settings-input.is-wide.export-preset-name', { type: 'text', placeholder: 'Preset name', 'aria-label': 'Render preset name' });
+  const savePreset = h('button.btn', 'Save');
+  savePreset.onclick = () => {
+    const name = presetName.value.trim();
+    if (!name) return;
+    if (BUILT_IN_PRESETS.some((preset) => preset.name === name)) { PM.toast('Built-in presets keep their name; choose another.'); return; }
+    const stored = (PM.store.get('renderPresets', []) as any[]).filter((preset: any) => preset?.name !== name);
+    const id = PM.uid('preset');
+    stored.push({ id, name, options: presetOptionsOf(opts) });
+    PM.store.set('renderPresets', stored);
+    presets = allPresets(stored).filter((preset) => engine || !formatInfo(preset.options.format).engine);
+    chosenPreset = id;
+    presetOptions.splice(1, presetOptions.length - 1, ...presets.map((preset) => ({ v: preset.id, label: preset.name })));
+    presetSelect.sync?.();
+    PM.toast('Render preset saved');
+  };
+  presetName.addEventListener('keydown', (e: KeyboardEvent) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); savePreset.click(); } });
+  const presetRow = mk(presetSection, 'preset', 'Preset', 'Start from a preset, or one you saved earlier.', presetSelect);
   const saveRow = mk(presetSection, 'presetSave', 'Save as preset', 'Name these settings to reuse them in any project.', h('div.export-preset-save', presetName, savePreset));
-  const colorNote = h('p.settings-note','Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
-  presetSection.element.append(colorNote);
   const nfoMain: any = h('b');
   const nfoNote: any = h('span');
   const nfo: any = h('div.export-summary', nfoMain, nfoNote);
@@ -299,6 +398,7 @@ X.dialog = () => {
 
   let m: any = null;
   function sync() {
+    opts.format = writableFormat(opts.format, engine);
     const kind = category(opts.format);
     for (const [id, button] of Object.entries(buttons)) {
       button.setAttribute('aria-pressed', String(id === kind));
@@ -307,20 +407,29 @@ X.dialog = () => {
     destinationNote.textContent = destinations.find(([id]) => id === kind)?.[2] ?? '';
     codeDetails.hidden = kind !== 'code';
     projectDetails.hidden = kind !== 'project';
-    body.querySelectorAll('select, [role=switch]').forEach((field: any) => field.sync?.());
     const settingsFree = kind === 'code' || kind === 'project';
     formatOptions.splice(0, formatOptions.length, ...allFormats.filter(o => category(o.v) === kind));
-    formatField.sync?.();
-    const support: any = exportFieldSupport(opts.format);
+    depthOptions.splice(0, depthOptions.length, ...(opts.format === 'hevc'
+      ? [{ v: 'standard', label: '8-bit' }, { v: 'high', label: '10-bit' }]
+      : [{ v: 'standard', label: '8-bit' }, { v: 'high', label: '16-bit' }]));
+    body.querySelectorAll('select, [role=switch], input[type=text]').forEach((field: any) => field.sync?.());
+    const support: any = exportFieldSupport(opts.format, opts.delivery, engine);
+    const sectionFree = new Set(['format', 'size', 'preset', 'presetSave']);
     for (const key of Object.keys(rows)) {
-      if (key === 'format' || key === 'size' || key === 'preset' || key === 'presetSave') continue;
+      if (sectionFree.has(key)) continue;
       if (key === 'captionsBurn' || key === 'captionsSidecar') { rows[key]!.element.hidden = kind !== 'video' && !(key === 'captionsBurn' && kind === 'images'); continue; }
+      if (key === 'reel') { rows[key]!.element.hidden = !support.timecode; continue; }
+      if (key === 'fileName') { rows[key]!.element.hidden = !engine || settingsFree; continue; }
+      if (key === 'overwrite') { rows[key]!.element.hidden = !engine || settingsFree; continue; }
       rows[key]!.element.hidden = !support[key];
     }
+    timecodeRow.detail.textContent = opts.delivery.timecode && isDropFrameTimecode(opts.delivery.timecode)
+      ? 'Drop-frame timecode; it needs 29.97 or 59.94 fps.'
+      : 'The first frame’s timecode; empty uses the composition’s.';
     rows.format!.element.hidden = settingsFree;
     sizeRow.element.hidden = !support.scale || !customOpen;
     presetRow.element.hidden = saveRow.element.hidden = settingsFree;
-    for (const section of [output, rendering, captionsSection, presetSection]) {
+    for (const section of [output, rendering, delivery, file, captionsSection, presetSection]) {
       section.element.hidden = settingsFree || ![...section.body.children].some((child) => !(child as HTMLElement).hidden);
     }
     const est: any = plan();
@@ -345,18 +454,48 @@ X.dialog = () => {
     }
     const pri: any = m?.el?.querySelector('.mf .btn.pri');
     if (pri) pri.textContent = exportActionLabel(opts.format);
+    const queue: any = m?.el?.querySelector('.mf .export-queue-action') ?? [...(m?.el?.querySelectorAll('.mf .btn') ?? [])].find((b: any) => b.textContent === 'Add to Queue');
+    if (queue) { queue.classList.add('export-queue-action'); queue.hidden = settingsFree; }
   }
   sync();
   let unmountCorners: (() => void) | undefined;
+  const actions: any[] = [{ label: 'Cancel' }];
+  actions.push({ label: 'Add to Queue', run: () => { X.remember(opts); window.setTimeout(() => void X.addToQueue(opts), 0); } });
+  actions.push({ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } });
   m = PM.modal({
     title: 'Export', body, width: 620,
     onClose: () => unmountCorners?.(),
-    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
+    actions,
   });
   m.el.classList.add('export-modal');
   unmountCorners = mountSquircles(m.el, `${SQUIRCLE_SELECTOR}, .export-destinations, .export-destination, .btn`);
   sync();
 };
+
+/** The options a preset sets (scale, rate, range, quality, switches, and
+ *  delivery), applied over the sheet's. */
+function applyPreset(opts: any, preset: ExportPreset): void {
+  const o = preset.options;
+  opts.format = o.format;
+  for (const key of ['scale', 'fps', 'range', 'quality', 'mblur', 'audio', 'alpha', 'captionsBurn', 'captionsSidecar'] as const) {
+    if ((o as any)[key] !== undefined) opts[key] = (o as any)[key];
+  }
+  opts.delivery = normalizeDelivery({ ...opts.delivery, ...(o.delivery ?? {}) });
+}
+
+/** What a saved preset keeps of the sheet's settings. */
+function presetOptionsOf(opts: any): ExportPresetOptions {
+  const { name: _name, reportPath: _report, ...rest } = opts;
+  return {
+    format: migrateFormat(rest.format), scale: rest.scale, fps: rest.fps, range: rest.range, quality: rest.quality,
+    mblur: !!rest.mblur, audio: rest.audio !== false, alpha: !!rest.alpha,
+    ...(rest.captionsBurn !== undefined ? { captionsBurn: rest.captionsBurn !== false } : {}),
+    ...(rest.captionsSidecar ? { captionsSidecar: rest.captionsSidecar } : {}),
+    delivery: normalizeDelivery(rest.delivery)
+  };
+}
+X.applyPreset = applyPreset;
+X.presetOptionsOf = presetOptionsOf;
 
 /** Keep the dialog's last choices as this project's export settings. */
 X.remember = (opts: any) => {
@@ -394,6 +533,8 @@ function progressUI(total: any) {
   mod.el.classList.add('export-modal');
   try { stopPreview = animateExportPreview(scan); } catch { scan.hidden = true; }
   const started: any = window.performance.now();
+  /* Engine previews: JPEG frames streamed with the job's statuses. */
+  let decoding = false;
   return {
     mod, prev,
     set(i: any, extra: any) {
@@ -410,6 +551,23 @@ function progressUI(total: any) {
         eta.textContent = 'Finishing…';
       }
     },
+    /** "Waiting for media · 2 clips offline" (section 14.8). */
+    waiting(message: string) {
+      if (X.cancel) return;
+      label.textContent = message;
+      eta.textContent = '';
+    },
+    preview(frame: { width: number; height: number; jpeg: Uint8Array }) {
+      if (decoding || X.cancel || typeof window.createImageBitmap !== 'function') return;
+      decoding = true;
+      const blob = new window.Blob([frame.jpeg as BlobPart], { type: 'image/jpeg' });
+      void window.createImageBitmap(blob).then((image: ImageBitmap) => {
+        if (prev.width !== frame.width || prev.height !== frame.height) { prev.width = frame.width; prev.height = frame.height; }
+        prev.getContext('2d')?.drawImage(image, 0, 0, prev.width, prev.height);
+        image.close();
+        scan.hidden = true;
+      }).catch(() => undefined).finally(() => { decoding = false; });
+    },
   };
 }
 
@@ -421,6 +579,8 @@ let sequenceDirectory: any = null;
 
 async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
+  // Today's ids (`prores`, `mp4`, `webm`, `rec`) are the new formats' names now.
+  opts = { ...opts, format: migrateFormat(opts?.format), delivery: normalizeDelivery(opts?.delivery) };
   // The native engine's consistency check (docs/rust-engine.md, section 6).
   PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
   X.busy = true;
@@ -428,13 +588,18 @@ async function run(opts: any) {
   const bridge = (hostBridge() as any);
   try {
     const p = PM.proj;
-    // With Use New Engine on, ProRes and MP4 render in the job engine; a
+    // With Use New Engine on, every render format runs in the job engine; a
     // project it cannot render yet comes back here and the current exporter
     // writes the file the user already chose (agent exports route in main).
-    if ((opts.format === 'prores' || opts.format === 'mp4') && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
       const engine = await exportThroughEngine(opts);
       if (engine) return engine;
     }
+    const legacy = legacyFormatId(opts.format);
+    if (!legacy) {
+      throw new Error(`The new engine can’t export this project yet, and the current exporter doesn’t write ${formatInfo(opts.format).label}. Choose ProRes 4444, H.264, WebM VP9, or PNG.`);
+    }
+    opts = { ...opts, format: legacy };
     if (opts.format === 'prores' || (opts.format === 'mp4' && bridge?.render)) {
       if (!bridge?.render) throw new Error('The native encoder requires the updated desktop runtime.');
       nativeToken = await bridge.render.start({
@@ -476,9 +641,40 @@ async function run(opts: any) {
   }
 }
 
+/** The job engine's view of the sheet's settings (shared/engine-ipc.ts). */
+function sheetOptions(opts: any): any {
+  const p: any = PM.proj;
+  const [t0, t1]: any = range(opts);
+  return {
+    format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
+    start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
+    audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
+    delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false
+  };
+}
+
+/** The output's name from the sheet's file name template. */
+function outputName(opts: any): string {
+  const p: any = PM.proj;
+  const est = planExport({ ...normalizeExportDefaults(opts, p.fps), format: opts.format }, { w: p.w, h: p.h, dur: p.dur, work: p.work });
+  return expandFileName(opts.delivery?.fileName || '{project}', {
+    project: p.name || 'Powermove', composition: p.compName || p.name || '', preset: opts.preset, format: opts.format,
+    width: est.width, height: est.height, fps: Number(opts.fps) || p.fps, now: new Date()
+  });
+}
+
+/** "Locate Media…" in the offline message: the Media panel's locate flow for
+ *  the first offline clip. */
+function locateMedia(assets: string[]): void {
+  const first = assets[0];
+  if (!first) return;
+  PM.toast(assets.length === 1 ? 'Locate the offline clip to export at full quality' : `Locate the ${assets.length} offline clips to export at full quality`, 4000);
+  PM.pickFiles?.(false, { replaceAssetId: first });
+}
+
 /** An export through the job engine (main/engine/agent-jobs.ts), with the
- *  progress sheet driven by its job statuses. Resolves null when the engine
- *  is off or routes the project to the current exporter. */
+ *  progress sheet driven by its job statuses and live previews. Resolves null
+ *  when the engine is off or routes the project to the current exporter. */
 async function exportThroughEngine(opts: any): Promise<any | null> {
   const engine = (hostBridge() as any)?.nativeEngine;
   const status = await engine.status().catch(() => null);
@@ -492,13 +688,11 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   try {
     const started = await engine.exportVideo({
       project: JSON.stringify(p),
-      name: opts.name || p.name || 'Powermove',
-      options: {
-        format: opts.format, alpha: opts.format === 'prores' && !!opts.alpha, fps: Number(opts.fps), scale: Number(opts.scale) || 1,
-        start: t0, end: t1, audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high'
-      }
+      name: outputName(opts),
+      options: sheetOptions(opts)
     });
     if (started.status === 'cancelled') return { cancelled: true };
+    if (started.status === 'locate') { locateMedia(started.assets); return { cancelled: true }; }
     if (started.status !== 'accepted') return null;
     const total = Math.max(1, started.frames);
     const began = window.performance.now();
@@ -509,7 +703,12 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
         const cancelPoll = window.setInterval(() => { if (X.cancel) void engine.cancelExport(started.jobId).catch(() => undefined); }, 100);
         const on = (s: any): void => {
           if (s.jobId !== started.jobId) return;
-          if (s.state === 'queued' || s.state === 'running' || s.state === 'waitingForMedia') {
+          if (s.preview) ui.preview(s.preview);
+          if (s.state === 'waitingForMedia') {
+            ui.waiting(`Waiting for media · ${s.waiting ?? 'offline clips'}`);
+            return;
+          }
+          if (s.state === 'queued' || s.state === 'running') {
             ui.set(Math.min(total, Math.round(s.progress * total)), s.state === 'running' ? '' : 'Waiting');
             return;
           }
@@ -525,7 +724,10 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
       ui.mod.close();
       X.cancel = cancelled;
     }
-    if (final.routed) return null;
+    if (final.routed) {
+      if (legacyFormatId(opts.format)) return null;
+      throw new Error(`The new engine can’t export this project yet (${final.error}), and the current exporter doesn’t write ${formatInfo(opts.format).label}.`);
+    }
     if (final.state === 'cancelled') { PM.toast('Export cancelled'); return { cancelled: true }; }
     if (final.state === 'failed') throw new Error(final.error || 'The export failed.');
     lastOutputPath = final.path ?? started.path;
@@ -536,6 +738,37 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
     off();
   }
 }
+
+/** "Add to Queue": a render queue job in the job engine (Use New Engine), or
+ *  today's queue otherwise. */
+X.addToQueue = async (rawOpts: any) => {
+  const opts = { ...rawOpts, format: migrateFormat(rawOpts?.format), delivery: normalizeDelivery(rawOpts?.delivery) };
+  const engine = (hostBridge() as any)?.nativeEngine;
+  if (!engineOn() || !engine?.queueAdd || !isRenderFormat(opts.format)) {
+    const legacy = legacyFormatId(opts.format);
+    if (!legacy) { PM.toast('The render queue needs the new engine for this format.', 4000); return null; }
+    return X.enqueue({ ...opts, format: legacy, name: opts.name || PM.proj.name });
+  }
+  const [t0, t1]: any = range(opts);
+  const sidecarFormat = opts.captionsSidecar;
+  const sidecars = (sidecarFormat === 'srt' || sidecarFormat === 'vtt') && isRenderFormat(opts.format) && opts.format !== 'png' && opts.format !== 'still'
+    ? captionSidecars(PM.proj, sidecarFormat, { from: t0, to: t1 }).map((s) => ({ extension: sidecarFormat, text: s.text, ...(s.suffix ? { suffix: s.suffix } : {}) }))
+    : [];
+  try {
+    const result = await engine.queueAdd({
+      project: JSON.stringify(PM.proj),
+      name: outputName(opts),
+      options: sheetOptions(opts),
+      ...(sidecars.length ? { sidecars } : {}),
+      ...(opts.preset ? { preset: String(opts.preset) } : {})
+    });
+    if (result?.status === 'added') PM.toast('Added to render queue');
+    return result;
+  } catch (error) {
+    PM.toast('Could not add to the render queue: ' + (error instanceof Error ? error.message : String(error)), 5000);
+    return null;
+  }
+};
 
 async function deliver(blob: Blob, name: string): Promise<boolean> {
   const bridge = (hostBridge() as any);
@@ -917,6 +1150,13 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
 
 /* Programmatic export — used by tests and the native menu. */
 installRenderQueue(PM,X);
+/* With Use New Engine on, the Render Queue panel shows the job engine's queue
+   (render-queue-panel.ts); today's queue dialog stays for the current exporter. */
+const legacyQueueDialog = X.queueDialog;
+X.queueDialog = () => (engineOn() && openRenderQueuePanel(PM)) || legacyQueueDialog();
+/* "Locate Media…" from the offline message reaches this window too when the
+   export started elsewhere (an agent, the queue). */
+(hostBridge() as any)?.nativeEngine?.onLocateMedia?.((assets: string[]) => { if (!X.busy) locateMedia(assets); });
 X.run = (opts: any) => run(Object.assign({}, X.defaults(), { name: PM.proj.name }, opts || {}));
 
 /* Test hooks: the muxer is deterministic pure JS, so it is verifiable headlessly. */

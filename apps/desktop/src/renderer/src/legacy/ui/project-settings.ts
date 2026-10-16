@@ -1,6 +1,6 @@
 import { coerceFrameRate } from '../../../../shared/frame-rate';
 import {
-  EXPORT_FORMAT_OPTIONS,
+  exportFormatOptions,
   EXPORT_QUALITY_OPTIONS,
   EXPORT_RANGE_OPTIONS,
   EXPORT_SCALE_OPTIONS,
@@ -9,6 +9,17 @@ import {
   type ExportDefaults
 } from '../../core/export-defaults';
 import { createSettingsSection } from './settings-section';
+import { bridge as hostBridge } from '../../kernel/bridge';
+
+/** Whether this launch runs the native engine, which writes every delivery
+ *  format; the current exporter writes today's. */
+export function deliveryEngineOn(): boolean {
+  try {
+    return (hostBridge() as { nativeEngine?: { enabledSync?(): boolean } } | undefined)?.nativeEngine?.enabledSync?.() === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Composition fields the Project tab and the New project dialog both edit. */
 export interface CompositionValues {
@@ -289,7 +300,8 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
 
   const exports = createSettingsSection('Export');
   const format = select('Export format');
-  fillOptions(format, EXPORT_FORMAT_OPTIONS);
+  const formatOptions = exportFormatOptions(deliveryEngineOn());
+  fillOptions(format, formatOptions);
   const scale = select('Export resolution');
   const exportWidth = numberInput('Export width in pixels', MIN_DIMENSION, MAX_DIMENSION, 2);
   const exportHeight = numberInput('Export height in pixels', MIN_DIMENSION, MAX_DIMENSION, 2);
@@ -392,7 +404,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       gated.setEnabled(support[key as keyof typeof support]);
     }
     exportSizeRow.setEnabled(support.scale);
-    const formatLabel = EXPORT_FORMAT_OPTIONS.find((item) => item.v === defaults.format)?.label ?? '';
+    const formatLabel = formatOptions.find((item) => item.v === defaults.format)?.label ?? '';
     exports.summary.textContent = defaults.format === 'web' ? 'Web animation · full composition · code and assets' : defaults.format === 'json'
       ? formatLabel
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
