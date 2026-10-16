@@ -4,6 +4,7 @@ import type { CorpusProject } from './common';
 import { compositingProjects } from './compositing';
 import { effectProjects } from './effects';
 import { layerProjects } from './layers';
+import { motionProjects } from './motion';
 import { renderProjects } from './render';
 import { shapeProjects } from './shapes';
 import { spaceProjects } from './space';
@@ -16,7 +17,7 @@ export type { CorpusProject } from './common';
 export function allProjects(): CorpusProject[] {
   const projects = [
     ...layerProjects(), ...shapeProjects(), ...textProjects(), ...animationProjects(),
-    ...compositingProjects(), ...effectProjects(), ...timeProjects(), ...spaceProjects(), ...renderProjects(),
+    ...compositingProjects(), ...effectProjects(), ...timeProjects(), ...spaceProjects(), ...renderProjects(), ...motionProjects(),
   ];
   const ids = new Set<string>();
   for (const item of projects) {

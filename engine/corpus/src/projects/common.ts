@@ -14,6 +14,11 @@ export interface CorpusProject {
   samples: number[];
   /** Also capture transparent renders (float RGBA and straight-alpha PNG). */
   alpha?: boolean;
+  /**
+   * Also capture transparent float renders at these motion-blur sample counts
+   * (`frames/t<time>.mb<n>.rgba32f`), beside the export path's 16 (opaque) and 20 (alpha).
+   */
+  blurSamples?: number[];
   /** Capture size when it should differ from the composition size. */
   size?: [number, number];
   notes?: string;
