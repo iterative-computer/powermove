@@ -1,4 +1,8 @@
-//! Prints suspicious outline features of a glyph after expansion (debug aid).
+//! Prints a glyph's outline before and after the profile's expansion: element
+//! counts, bounds, and (with `DUMP=1`) every element. A debugging aid for
+//! fonts whose expansion misbehaves.
+//!
+//! cargo run -p pm-text --features render --example outline_probe -- <font file> <char> <size px> <expansion px> [face index]
 fn main() {
     use pm_text::render::outline::{Coords, FaceRef, GlyphStyle, Outlines};
     let args: Vec<String> = std::env::args().collect();

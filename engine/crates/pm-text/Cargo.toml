@@ -79,3 +79,8 @@ harness = false
 # the native vs WASM identity check (scripts/wasm-identity.mjs).
 name = "layout_wasm"
 crate-type = ["cdylib"]
+
+[[example]]
+# Prints a glyph's outline before and after the profile's expansion.
+name = "outline_probe"
+required-features = ["render"]
