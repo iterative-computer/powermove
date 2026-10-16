@@ -671,6 +671,18 @@ pm-electron-lock cargo run --release -p pm-audio --example device_probe   # open
   pm-electron-lock bunx playwright test e2e/native-engine-transport.spec.ts --workers=1
   ```
 
+  Measured 2026-10-16 (two runs, this Mac, built-in output, other lanes building): all
+  three pass. Each J/K/L run, 0.7 s of page samples after the key: playhead rate (least
+  squares) 2.0002 and 1.9998 at 2×, −1.0002 and −0.9997 at −1×, −1.9999 and −2.0011 at −2×,
+  1.0000 at 1×; A/V sync by frame-callback timing (the audio clock's line at each timed
+  frame's display instant against the frame's interval, section 15's ±10 ms): 0 of 21 to
+  43 frames outside in every run, worst 2.4 ms outside (−2×). Every run played on the
+  device clock (`hostClockRuns` 0). Play around from 3 s ran from 1 s past 4.2 s and
+  returned to 3 s; scrub and step grains were heard (master peak above 0.05 within
+  0.1 s of their position) and nothing was heard with Scrub audio off; the master meter
+  read the tone while playing and silence under a monitor solo of another strip;
+  `asset.peaks` came from the engine (150 buckets for the 1.5 s tone).
+
 ## Gaps
 
 - **J/K/L keys** need Jude's sign-off. Powermove's keymap is After Effects's, where J and K
