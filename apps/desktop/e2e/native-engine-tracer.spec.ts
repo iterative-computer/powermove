@@ -176,8 +176,12 @@ test.describe('Use New Engine: the tracer bullet', () => {
       const PM = (window as any).PM;
       const viewer = PM.Kernel.services.get('viewer');
       const start = performance.now();
+      const before = PM.EngineDoc.barrier.revision;
       PM.Edit.apply({ type: 'set_property', target: 'box', path: 'position.x', value: 160 }, { label: 'Position', origin: 'inspector' });
-      PM.EngineDoc.barrier.flush();
+      // The edit leaves the renderer at the end of this task, without any
+      // query flushing the barrier (the connection flushes it).
+      await Promise.resolve();
+      if (PM.EngineDoc.barrier.pending || PM.EngineDoc.barrier.revision <= before) throw new Error('the edit did not reach the patch stream by itself');
       const wanted = PM.EngineDoc.barrier.revision;
       return new Promise<number>((resolve) => {
         const off = viewer.enginePresentation.onPresented((frame: any) => {

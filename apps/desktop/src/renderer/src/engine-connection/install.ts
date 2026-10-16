@@ -28,6 +28,7 @@ import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
+import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, type DocumentStream } from './session';
@@ -63,6 +64,14 @@ export type EngineConnectionStatus = {
 
 export interface EngineConnectionHandle {
   status(): EngineConnectionStatus;
+  /**
+   * Diagnostics (the measurement harness): the viewer's presentation keeps
+   * a per-frame trace while on. Registers `engine.viewer` again so the
+   * viewer opens a new presentation with it.
+   */
+  setTrace(on: boolean): void;
+  /** Every clock sample of every session (the measurements). */
+  onClock(listener: (sample: ClockSample) => void): () => void;
   /** The session the transport follows (the newest viewer session). */
   session(): DocumentSession | null;
   hostClock: HostClock;
@@ -96,6 +105,27 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let current: DocumentSession | null = null;
   const transport = new EngineTransport(() => current, hostClock);
   PM.setTransportDriver?.(transport);
+
+  // Edits reach the engine as soon as the write that made them returns: a
+  // write that leaves the barrier dirty schedules one flush at the end of
+  // the current task (one per synchronous run, however many writes), so
+  // the batch does not wait for the next pm-wasm query (an overlay draw at
+  // the next animation frame). Only while an engine session is open.
+  let flushQueued = false;
+  const flushSoon = (): void => {
+    if (flushQueued || !sessions.size) return;
+    flushQueued = true;
+    queueMicrotask(() => {
+      flushQueued = false;
+      if (!sessions.size) return;
+      try {
+        PM.EngineDoc?.barrier?.flush();
+      } catch (error) {
+        log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  };
+  const offPending = PM.EngineDoc?.onPending?.(flushSoon) ?? (() => {});
 
   const stream = (): DocumentStream => {
     const doc = PM.EngineDoc;
@@ -142,7 +172,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // before the kernel booted) were dropped: ask for fresh ones.
   native.requestPorts?.();
 
-  const service: EngineViewerService = {
+  const clockListeners = new Set<(sample: ClockSample) => void>();
+  let trace = false;
+  const makeService = (): EngineViewerService & { trace?: boolean } => ({
+    trace,
     source,
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
@@ -172,6 +205,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           }
         },
         log,
+        onClock: (sample) => {
+          for (const listener of clockListeners) listener(sample);
+        },
         onRoute: (route, reason) => {
           if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
           transport.refresh();
@@ -194,14 +230,25 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         }
       };
     }
-  };
-  const registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
+  });
+  let registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
   target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
 
   const handle: EngineConnectionHandle = {
     hostClock,
     transport,
     session: () => current,
+    setTrace: (on) => {
+      if (on === trace) return;
+      trace = on;
+      registration.dispose();
+      registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
+      target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+    },
+    onClock: (listener) => {
+      clockListeners.add(listener);
+      return () => clockListeners.delete(listener);
+    },
     status: () => ({
       connected: !!connection?.ready && !connection.closed,
       generation,
@@ -220,6 +267,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      offPending();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
       registration.dispose();
