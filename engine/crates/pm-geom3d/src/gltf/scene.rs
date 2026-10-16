@@ -519,7 +519,8 @@ fn skinned_box(model: &Model, scene: &Scene, o: &Object) -> Box3 {
             }
             if let Some(d) = &t.position {
                 for c in 0..3 {
-                    morph[c] += f64::from(d[i][c]) * f64::from(*inf);
+                    // Past a short target three.js reads NaN.
+                    morph[c] += d.get(i).map_or(f64::NAN, |d| f64::from(d[c])) * f64::from(*inf);
                 }
             }
         }

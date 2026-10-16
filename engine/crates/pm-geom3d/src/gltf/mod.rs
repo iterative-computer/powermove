@@ -94,6 +94,11 @@ pub struct Primitive {
     /// The POSITION accessor's min and max (normalized components scaled),
     /// grown by the largest morph displacement (GLTFLoader's `computeBounds`).
     pub accessor_bounds: Option<([f64; 3], [f64; 3])>,
+    /// Why WebGL refuses to draw this primitive, when it does: an index past
+    /// the last vertex or a vertex attribute shorter than POSITION. three.js
+    /// loads such a primitive (it counts toward the import facts and
+    /// bounds) and draws nothing for it, so the renderer skips it.
+    pub undrawable: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -615,10 +620,11 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 }
                 m => return err(format!("primitive mode {m}")),
             };
+            let mut undrawable = None;
             if let Some(ix) = &indices
                 && ix.iter().any(|&i| i as usize >= positions.len())
             {
-                return err(format!("mesh {mi}: index out of range"));
+                undrawable = Some(format!("mesh {mi}: index out of range"));
             }
             for (name, len) in [
                 ("NORMAL", normals.as_ref().map(Vec::len)),
@@ -627,8 +633,8 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 ("COLOR_0", colors.as_ref().map(Vec::len)),
                 ("TANGENT", tangents.as_ref().map(Vec::len)),
             ] {
-                if len.is_some_and(|l| l != positions.len()) {
-                    return err(format!("mesh {mi}: {name} has a different count than POSITION"));
+                if len.is_some_and(|l| l < positions.len()) {
+                    undrawable.get_or_insert(format!("mesh {mi}: {name} is shorter than POSITION"));
                 }
             }
             let joints = match attrs["JOINTS_0"].as_u64() {
@@ -666,6 +672,20 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                         .transpose()?,
                 });
             }
+            if [joints.as_ref().map(Vec::len), weights.as_ref().map(Vec::len)]
+                .iter()
+                .any(|l| l.is_some_and(|l| l < positions.len()))
+            {
+                // three.js reads past the skin attributes and throws.
+                return err(format!("mesh {mi}: skin attributes are shorter than POSITION"));
+            }
+            if targets.iter().any(|t| {
+                [t.position.as_ref().map(Vec::len), t.normal.as_ref().map(Vec::len)]
+                    .iter()
+                    .any(|l| l.is_some_and(|l| l < positions.len()))
+            }) {
+                undrawable.get_or_insert(format!("mesh {mi}: a morph target is shorter than POSITION"));
+            }
             let accessor_bounds =
                 accessor_bounds(raw, pos_index as usize, p["targets"].as_array());
             primitives.push(Primitive {
@@ -684,6 +704,7 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 targets,
                 material: p["material"].as_u64().map(|v| v as usize),
                 accessor_bounds,
+                undrawable,
             });
         }
         let weights = m["weights"]
