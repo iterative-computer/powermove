@@ -24,7 +24,10 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): cancel one of the window's export jobs. */
   cancelExport: 'engine:export-cancel',
   /** main → renderer: an export job's status (`EngineExportStatus`). */
-  exportStatus: 'engine:export-status'
+  exportStatus: 'engine:export-status',
+  /** renderer → main (send): the editor's transport plays or stopped
+   *  (boolean); the job engine slices its GPU work while anything plays. */
+  playback: 'engine:editor-playback'
 } as const;
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -99,4 +102,6 @@ export interface EngineBridge {
   cancelExport(jobId: string): Promise<void>;
   /** Export job statuses for this window; returns an unsubscribe. */
   onExportStatus(listener: (status: EngineExportStatus) => void): () => void;
+  /** The editor's transport started (`true`) or stopped playing. */
+  playback(playing: boolean): void;
 }

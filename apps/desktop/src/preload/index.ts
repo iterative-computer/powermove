@@ -553,7 +553,8 @@ const bridge: PowermoveBridge = {
       const handler = (_event: Electron.IpcRendererEvent, status: EngineExportStatus) => listener(status);
       ipcRenderer.on(ENGINE_IPC.exportStatus, handler);
       return () => { ipcRenderer.removeListener(ENGINE_IPC.exportStatus, handler); };
-    }
+    },
+    playback: (playing) => ipcRenderer.send(ENGINE_IPC.playback, playing === true)
   },
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */

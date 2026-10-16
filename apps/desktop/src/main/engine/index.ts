@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { BrowserWindow, dialog, MessageChannelMain, sharedTexture, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { BrowserWindow, dialog, MessageChannelMain, screen, sharedTexture, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
 import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
@@ -235,6 +235,25 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!validStageRequest(request)) throw new Error('A staged document names an engine, a session, and its bytes.');
     return engine!.stageDocument(request.process, request.session, request.bytes);
   });
+  /* The editor's transport: the job engine slices while an editor plays,
+     not only while the interactive engine does (the viewer can draw
+     playback without it). The frame budget is the window's display's. */
+  const playingWindows = new Set<number>();
+  options.ipc.on(ENGINE_IPC.playback, (event, playing: unknown) => {
+    if (!options.isTrustedSender(event) || typeof playing !== 'boolean') return;
+    const sender = event.sender;
+    const owner = sender.id;
+    const window = BrowserWindow.fromWebContents(sender);
+    const hz = window && !window.isDestroyed() ? screen.getDisplayMatching(window.getBounds()).displayFrequency : 0;
+    engine!.editorPlayback(owner, playing, hz > 0 ? 1_000_000 / hz : undefined);
+    if (playing && !playingWindows.has(owner)) {
+      playingWindows.add(owner);
+      sender.once('destroyed', () => {
+        playingWindows.delete(owner);
+        engine?.editorPlayback(owner, false);
+      });
+    }
+  });
   options.ipc.on(ENGINE_IPC.definitions, (event, update: unknown) => {
     if (!options.isTrustedSender(event)) return;
     try {
@@ -336,6 +355,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       uninstallFonts();
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
+      options.ipc.removeAllListeners(ENGINE_IPC.playback);
       agentJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();
