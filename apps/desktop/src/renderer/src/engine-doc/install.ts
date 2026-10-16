@@ -90,6 +90,9 @@ export interface EngineDoc {
    * resyncs. The tracer forwards the same stream to the interactive engine.
    */
   subscribe(fn: (batch: PatchBatch) => void): () => void;
+  /** `fn` runs when a write leaves something to flush where nothing was
+   *  (the engine connection then flushes, so edits reach the engine soon). */
+  onPending(fn: () => void): () => void;
   /** The flushed canonical document and its revision and hash (null until ready). */
   snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
   stats(): Record<string, unknown>;
@@ -111,7 +114,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
-      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
+      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
     };
     PM.EngineDoc = off;
     return off;
@@ -328,6 +331,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
 
   const subscribers = new Set<(batch: PatchBatch) => void>();
+  const pendingListeners = new Set<() => void>();
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
@@ -340,6 +344,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     beforeSave(reason = 'save') { state.check(reason); },
     beforeExport(reason = 'export') { state.check(reason); },
     subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
+    onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },
     snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
     stats() {
       return {
@@ -370,6 +375,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         },
       });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
+      barrier.onPending(() => pendingListeners.forEach(fn => { try { fn(); } catch (error) { console.error(error); } }));
       api.reset();
       state.wasm = wasm;
       state.barrier = barrier;

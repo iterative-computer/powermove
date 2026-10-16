@@ -152,6 +152,8 @@ export class DocumentBarrier {
   private resyncPending = false;
   private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
+  /** Told when the barrier goes from nothing pending to something pending. */
+  private pendingListeners = new Set<() => void>();
   private onMismatch: (result: ConsistencyResult) => void;
   readonly stats: BarrierStats = { flushes: 0, batches: 0, ops: 0, bytes: 0, resyncs: 0, structuralDiffs: 0, refused: 0, flushMs: 0, maxFlushMs: 0, checks: 0, checkMismatches: 0 };
   /** Set while a flush runs, so reads of the document during it are not writes. */
@@ -183,7 +185,28 @@ export class DocumentBarrier {
   get pending(): boolean { return this.resyncPending || this.structural || this.dirty.size > 0; }
 
   /** Resyncs at the next flush (the live document was replaced by another). */
-  markResync(): void { this.resyncPending = true; }
+  markResync(): void {
+    const was = this.pending;
+    this.resyncPending = true;
+    if (!was) this.announcePending();
+  }
+
+  /**
+   * `fn` runs when a write leaves something to flush where nothing was
+   * (once until the next flush). The engine connection flushes soon after,
+   * so a write reaches the engine's patch stream without waiting for the
+   * next query (section 6, "The patch stream").
+   */
+  onPending(fn: () => void): () => void {
+    this.pendingListeners.add(fn);
+    return () => this.pendingListeners.delete(fn);
+  }
+
+  private announcePending(): void {
+    for (const fn of this.pendingListeners) {
+      try { fn(); } catch (error) { console.error('[engine-doc] pending listener failed', error); }
+    }
+  }
 
   subscribe(fn: (batch: PatchBatch) => void): () => void {
     this.subscribers.add(fn);
@@ -196,8 +219,10 @@ export class DocumentBarrier {
 
   /** Records canonical paths as dirty. */
   touchedCanonical(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit'): void {
+    const was = this.pending;
     for (const path of paths) this.dirty.set(pathKey(path), [...path]);
     if (paths.length) this.bump(origin);
+    if (!was && this.pending) this.announcePending();
   }
 
   /** Records paths relative to `PM.proj` (the realized form writers see). */
@@ -208,8 +233,10 @@ export class DocumentBarrier {
 
   /** A `touch()` without a path: diff the open composition and the project's members. */
   touchAll(): void {
+    const was = this.pending;
     this.structural = true;
     this.bump('structuralDiff');
+    if (!was) this.announcePending();
   }
 
   /** Replaces the mirror with the live document. */

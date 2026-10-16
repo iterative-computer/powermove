@@ -187,6 +187,24 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(batches[1].revision).toBe(batches[0].revision + 1);
   });
 
+  it('tells its pending listeners once when a write leaves something to flush', async () => {
+    const { PM, doc } = await editor();
+    populate(PM, rng(11), 6);
+    doc.barrier!.flush();
+    let told = 0;
+    const off = doc.onPending(() => { told += 1; });
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 12 });
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 13 });
+    expect(told).toBe(1);
+    doc.barrier!.flush();
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 14 });
+    expect(told).toBe(2);
+    off();
+    doc.barrier!.flush();
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 15 });
+    expect(told).toBe(2);
+  });
+
   it('resyncs when the project changes and diffs when a version of it replaces it', async () => {
     const { PM, doc } = await editor();
     populate(PM, rng(9), 6);
