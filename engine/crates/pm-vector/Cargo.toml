@@ -44,3 +44,11 @@ required-features = ["conformance"]
 name = "digest_wasm"
 crate-type = ["cdylib"]
 required-features = ["conformance"]
+
+[[example]]
+name = "canvas_compare"
+required-features = ["render"]
+
+[[test]]
+name = "canvas2d"
+required-features = ["render"]

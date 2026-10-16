@@ -1,66 +1,12 @@
 //! Compares the compat level 1 rasterizer with Chromium's Canvas2D
 //! references (tools/canvas-ref). Development tool:
 //!   cargo run -p pm-vector --features render --example canvas_compare -- <capture dir> [filter]
+//! Environment: FLIP (references stored bottom-up), SHOW (every case),
+//! PIX (differing pixels), ROW/COL (alpha along a row and a column).
 use std::path::Path;
 
-use pm_vector::canvas2d::shape::{PathColors, ShapeColors, raster_paths, raster_shape};
-use pm_vector::path::{PathLayer, PathNode, PathValues, Vertex};
-use pm_vector::shape::{ShapeContent, ShapeKind};
-
-fn read_png(path: &Path) -> (u32, u32, Vec<u8>) {
-    let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
-    let mut reader = decoder.read_info().unwrap();
-    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-    let info = reader.next_frame(&mut buf).unwrap();
-    buf.truncate(info.buffer_size());
-    (info.width, info.height, buf)
-}
-
-fn num(v: &serde_json::Value) -> f64 {
-    match v {
-        serde_json::Value::Number(n) => n.as_f64().unwrap(),
-        serde_json::Value::Null => 0.0,
-        serde_json::Value::Bool(b) => f64::from(u8::from(*b)),
-        _ => f64::NAN,
-    }
-}
-
-fn opt(v: &serde_json::Value) -> Option<f64> {
-    if v.is_null() { None } else { Some(num(v)) }
-}
-
-fn s(v: &serde_json::Value) -> String {
-    v.as_str().map(str::to_owned).unwrap_or_default()
-}
-
-/// Replays a raw case's canvas calls on the emulated context.
-fn raw(c: &serde_json::Value) -> (u32, u32, Vec<u8>) {
-    use pm_vector::canvas2d::context::Context;
-    let (w, h) = (num(&c["width"]) as u32, num(&c["height"]) as u32);
-    let mut ctx = Context::new(w, h);
-    for op in c["ops"].as_array().unwrap() {
-        let op = op.as_array().unwrap();
-        let a: Vec<f64> = op[1..].iter().map(num).collect();
-        match op[0].as_str().unwrap() {
-            "=fillStyle" => ctx.set_fill_style(op[1].as_str().unwrap()),
-            "=strokeStyle" => ctx.set_stroke_style(op[1].as_str().unwrap()),
-            "=lineWidth" => ctx.set_line_width(a[0]),
-            "scale" => ctx.scale(a[0], a[1]),
-            "translate" => ctx.translate(a[0], a[1]),
-            "rotate" => ctx.rotate(a[0]),
-            "beginPath" => ctx.begin_path(),
-            "moveTo" => ctx.path.move_to(a[0], a[1]),
-            "lineTo" => ctx.path.line_to(a[0], a[1]),
-            "bezierCurveTo" => ctx.path.bezier_curve_to(a[0], a[1], a[2], a[3], a[4], a[5]),
-            "ellipse" => { assert_eq!(a[4], 0.0, "rotated ellipse"); ctx.path.ellipse(a[0], a[1], a[2], a[3], a[5], a[6], false) }.unwrap(),
-            "closePath" => ctx.path.close_path(),
-            "fill" => ctx.fill().unwrap(),
-            "stroke" => ctx.stroke().unwrap(),
-            other => panic!("raw op {other}"),
-        }
-    }
-    (w, h, ctx.finish())
-}
+#[path = "../tests/canvas_cases.rs"]
+mod canvas_cases;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -68,12 +14,8 @@ fn main() {
     let filter = args.get(2).cloned().unwrap_or_default();
     let flip = std::env::var("FLIP").is_ok();
     let show = std::env::var("SHOW").is_ok();
-    let fixture: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/canvas-cases.json")).unwrap(),
-    )
-    .unwrap();
     let (mut exact, mut within1, mut worse, mut unsupported) = (0, 0, 0, 0);
-    for c in fixture["cases"].as_array().unwrap() {
+    for c in &canvas_cases::cases() {
         let id = c["id"].as_str().unwrap();
         if !id.contains(&filter) {
             continue;
@@ -82,52 +24,7 @@ fn main() {
         if std::fs::metadata(&path).is_err() {
             continue;
         }
-        let result = if c["kind"] == "svg" {
-            continue;
-        } else if c["kind"] == "raw" {
-            Ok(raw(c))
-        } else if c["kind"] == "shape" {
-            let d = &c["d"];
-            let content = ShapeContent {
-                shape: ShapeKind::from_name(d["shape"].as_str().unwrap_or("")),
-                w: num(&d["w"]),
-                h: num(&d["h"]),
-                radius: if d.get("radius").is_some() { num(&d["radius"]) } else { f64::NAN },
-                independent_corners: d["independentCorners"].as_bool().unwrap_or(false),
-                corner_radii: ["radiusTL", "radiusTR", "radiusBR", "radiusBL"].map(|k| d.get(k).and_then(opt)),
-                smoothing: if d.get("smoothing").is_some() { num(&d["smoothing"]) } else { f64::NAN },
-                stroke: if d.get("stroke").is_some() { num(&d["stroke"]) } else { f64::NAN },
-                points: if d.get("points").is_some() { num(&d["points"]) } else { f64::NAN },
-            };
-            let colors = ShapeColors { color: s(&d["color"]), stroke_color: s(&d["strokeColor"]) };
-            raster_shape(&content, &colors, num(&c["scale"])).map(|b| (b.width, b.height, b.rgba))
-        } else {
-            let mut nodes = vec![];
-            let mut colors = vec![];
-            for p in c["paths"].as_array().unwrap() {
-                let v = &p["p"];
-                let n = |k: &str| num(&v[k]);
-                nodes.push(PathNode {
-                    id: s(&p["id"]),
-                    parent: p["parent"].as_str().map(str::to_owned),
-                    values: PathValues {
-                        x: n("x"), y: n("y"), rotation: n("rotation"), scale_x: n("scaleX"), scale_y: n("scaleY"),
-                        closed: v["closed"].as_bool().unwrap_or(false), fill_enabled: v["fillEnabled"].as_bool().unwrap_or(false),
-                        fill_opacity: n("fillOpacity"), stroke_width: n("strokeWidth"), stroke_opacity: n("strokeOpacity"),
-                        trim_start: n("trimStart"), trim_end: n("trimEnd"), trim_offset: n("trimOffset"), copies: n("copies"),
-                        repeat_x: n("repeatX"), repeat_y: n("repeatY"), repeat_rotation: n("repeatRotation"),
-                        vertices: p["vertices"].as_array().unwrap().iter().map(|q| Vertex {
-                            x: num(&q["x"]), y: num(&q["y"]),
-                            in_x: q.get("inX").map_or(0.0, num), in_y: q.get("inY").map_or(0.0, num),
-                            out_x: q.get("outX").map_or(0.0, num), out_y: q.get("outY").map_or(0.0, num),
-                        }).collect(),
-                    },
-                });
-                colors.push(PathColors { fill: s(&v["fill"]), stroke: s(&v["stroke"]) });
-            }
-            let layer = PathLayer::new(&nodes);
-            raster_paths(&layer, &colors, num(&c["scale"])).map(|(b, _)| (b.width, b.height, b.rgba))
-        };
+        let Some(result) = canvas_cases::rasterize(c) else { continue };
         let (w, h, ours) = match result {
             Ok(r) => r,
             Err(e) => {
@@ -136,7 +33,7 @@ fn main() {
                 continue;
             }
         };
-        let (rw, rh, mut reference) = read_png(&path);
+        let (rw, rh, mut reference) = canvas_cases::read_png(&path);
         if flip {
             let row = (rw * 4) as usize;
             let mut f = vec![0; reference.len()];
