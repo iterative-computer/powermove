@@ -103,3 +103,23 @@ describe('exports the job engine routed here',()=>{
   expect(takeRoutedDestination(7,'mov',11*60_000)).toBeUndefined();
  });
 });
+it('an agent export never takes a routed destination the user chose', async () => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'powermove-render-routed-'));
+  const handlers = new Map<string, any>();
+  registerRenderEncoder({ handle: (channel: string, handler: any) => handlers.set(channel, handler) } as any, { isTrustedSender: () => true, ffmpeg: binary });
+  native.showSaveDialog.mockReset();
+  const event = { sender: { id: 9, isDestroyed: () => false } };
+  const chosen = path.join(folder, 'User cut.mp4');
+  try {
+    // An export sheet job routed here never reached renderStart.
+    routeToCurrentExporter(9, chosen);
+    await withAgentExport(event.sender, folder, async () => {
+      const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Agent cut' });
+      await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
+      expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: path.join(folder, 'Agent cut.mp4') });
+    });
+    await expect(readFile(chosen)).rejects.toThrow();
+    // The user's own export still takes it.
+    expect(takeRoutedDestination(9, 'mp4')).toBe(chosen);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});

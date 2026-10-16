@@ -69,7 +69,10 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
     const window=BrowserWindow.fromWebContents(e.sender);
     if(!window||window.isDestroyed())throw new Error('Export window is unavailable');
     const extension=options.format==='prores'?'mov':'mp4';
-    const automatic=takeRoutedDestination(owner,extension)??await agentExportDestination(e.sender,options.name+'.'+extension);
+    // An agent export from this window always gets its own unique file: a
+    // routed export sheet job's destination is the user's, and only the
+    // user's own export may write it.
+    const automatic=await agentExportDestination(e.sender,options.name+'.'+extension)??takeRoutedDestination(owner,extension);
     const result=automatic?{canceled:false,filePath:automatic}:await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
     if(result.canceled||!result.filePath||window.isDestroyed())return null;
     const token=await encoder.start(options,owner);
