@@ -301,15 +301,15 @@ describe('Settings › Project › Color (new engine)', () => {
     const control = createProjectSettingsControl(host.api);
     expect([...control.element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
       .toEqual(['Composition', 'Color', 'Export']);
-    const linear = field(control, 'Blend in linear light') as HTMLInputElement;
+    const linear = field(control, 'Blend in linear light') as HTMLButtonElement;
     const precision = field(control, 'Precision') as HTMLSelectElement;
-    expect(linear.type).toBe('checkbox');
-    expect(linear.checked).toBe(false);
+    expect(linear.className).toBe('toggle');
+    expect(linear.getAttribute('aria-pressed')).toBe('false');
     expect([...precision.options].map((option) => [option.value, option.textContent])).toEqual([['float16', '16-bit float'], ['float32', '32-bit float']]);
     expect(precision.value).toBe('float16');
-    linear.checked = true;
-    change(linear);
+    linear.click();
     expect(applyProjectColor).toHaveBeenLastCalledWith({ linearBlending: true });
+    expect(linear.getAttribute('aria-pressed')).toBe('true');
     precision.value = 'float32';
     change(precision);
     expect(applyProjectColor).toHaveBeenLastCalledWith({ precision: 'float32' });
@@ -317,7 +317,7 @@ describe('Settings › Project › Color (new engine)', () => {
     // An edit made elsewhere (undo) shows on refresh.
     settings = { linearBlending: false, precision: 'float16' };
     control.refresh();
-    expect(linear.checked).toBe(false);
+    expect(linear.classList.contains('on')).toBe(false);
     expect(precision.value).toBe('float16');
     control.destroy();
   });
