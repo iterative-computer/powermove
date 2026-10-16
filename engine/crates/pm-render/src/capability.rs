@@ -357,7 +357,12 @@ fn check_composition(
                 add(layer, Feature::MotionBlur);
             }
         }
-        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0) {
+        // Level 2 raster content (image, video, precomp) is resampled by
+        // `crate::sampling`; other level 2 content keeps routing.
+        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
+            && !(crate::sampling::samples_layer_type(&ty)
+                && !(ty == "image" && is_svg_image(root, layer)))
+        {
             add(layer, Feature::CompatLevel2);
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
@@ -430,6 +435,19 @@ fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
         next = id_of(node::member(Some(group), "group"));
     }
     (three_d, blurred)
+}
+
+/// The layer's asset record says SVG.
+fn is_svg_image(root: &Node, layer: &Node) -> bool {
+    let Some(asset) = node::member(node::member(Some(layer), "d"), "asset") else {
+        return false;
+    };
+    let id = node::js_value_opt(Some(asset))
+        .to_js_string()
+        .to_string_lossy();
+    node::member(node::member(Some(root), "assets"), &id)
+        .and_then(|r| js::member_string(r, "format"))
+        .is_some_and(|f| f.eq_ignore_ascii_case("svg"))
 }
 
 /// `L.fx` holds an effect that is not marked missing (enabled or not: the

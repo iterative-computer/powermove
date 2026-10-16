@@ -71,6 +71,8 @@ pub struct Pipelines {
     background: [wgpu::RenderPipeline; 3],
     flip: [wgpu::RenderPipeline; 3],
     source: [wgpu::ComputePipeline; 2],
+    /// Level 2 sampling (`crate::sampling`).
+    pub(crate) resample: crate::sampling::gpu::Resampler,
 }
 
 /// Formats a 2D target can have: the two working formats, and 8-bit
@@ -392,7 +394,9 @@ impl Pipelines {
             &layout_with(&[&quad_layout, &texture_layout, &depth_layout]),
             "fs_id_3d",
         );
+        let resample = crate::sampling::gpu::Resampler::new(device, &quad_layout);
         Pipelines {
+            resample,
             depth_layout,
             id_draw,
             id_solid,

@@ -30,6 +30,8 @@
 use pm_eval::{JsResult, Scope, node};
 use pm_model::Node;
 
+pub mod gpu;
+
 /// Which resampler level 2 content uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Sampling {

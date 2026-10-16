@@ -38,6 +38,8 @@ pub(crate) struct Resolved {
     pub plane: Option<[f64; 9]>,
     /// Level 2 raster content (`crate::sampling`).
     pub level2: Option<crate::sampling::Sampling>,
+    /// The level 2 source's mip pyramid.
+    pub pyramid: Option<crate::sampling::gpu::Pyramid>,
 }
 
 impl Resolved {
@@ -69,6 +71,8 @@ pub(crate) struct Exec<'a> {
     pub depth_id: bool,
     /// Pool targets to give back after the frame is submitted.
     pub taken: Vec<Target>,
+    /// Mip pyramids of level 2 stills, kept across frames.
+    pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
 }
@@ -151,6 +155,7 @@ impl Exec<'_> {
                 layer: draw.layer.clone(),
                 plane: None,
                 level2: None,
+                pyramid: None,
             };
             self.resolve_content(encoder, plan, draw, &draw.content, region, &mut r);
             out.push(r);
@@ -196,6 +201,7 @@ impl Exec<'_> {
                         };
                         self.render_comp_with(encoder, child, child_region, &target, blend);
                         r.view = Some(target.view.clone());
+                        self.prepare_level2(encoder, r, &target.texture, false);
                         r.from_fbo = true;
                         if let (true, Some(g)) = (group, region) {
                             r.matrix = [
@@ -219,7 +225,10 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                         ) {
-                            Ok(t) => r.view = Some(t.view.clone()),
+                            Ok(t) => {
+                                r.view = Some(t.view.clone());
+                                self.prepare_level2(encoder, r, &t.texture, true);
+                            }
                             Err(e) => self.fail(plan, draw, e),
                         }
                     }
@@ -239,7 +248,10 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                         ) {
-                            Ok(Some(t)) => r.view = Some(t.view.clone()),
+                            Ok(Some(t)) => {
+                                r.view = Some(t.view.clone());
+                                self.prepare_level2(encoder, r, &t.texture, false);
+                            }
                             Ok(None) => {}
                             Err(e) => self.fail(plan, draw, e),
                         }
@@ -268,6 +280,25 @@ impl Exec<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// The mip pyramid a level 2 draw samples (`crate::sampling`).
+    fn prepare_level2(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        r: &mut Resolved,
+        texture: &wgpu::Texture,
+        still: bool,
+    ) {
+        if r.level2.is_some() {
+            r.pyramid = Some(self.pipelines.resample.pyramid(
+                self.device,
+                encoder,
+                texture,
+                still,
+                self.pyramids,
+            ));
         }
     }
 
@@ -300,6 +331,37 @@ impl Exec<'_> {
         // same vertex positions as in the full frame and every pixel of the
         // region equals the full frame's.
         let (fw, fh) = (plan.width, plan.height);
+        // Level 2 draws: the content polygon, its bounds, and the
+        // resampler's bind group (`crate::sampling`).
+        let level2: Vec<Option<(wgpu::BindGroup, [f64; 6])>> = resolved
+            .iter()
+            .map(|r| {
+                let (Some(sampling), Some(pyramid)) = (r.level2, r.pyramid.as_ref()) else {
+                    return None;
+                };
+                let matrix = r
+                    .plane
+                    .unwrap_or_else(|| crate::sampling::gpu::affine3(&r.matrix));
+                let placement = crate::sampling::gpu::placement(matrix, r.uv)?;
+                let bounds = placement.bounds_matrix(fw, fh)?;
+                let origin = region.map_or((0, 0), |g| (g.x, g.y));
+                let u = placement.uniform(
+                    r.uv,
+                    r.alpha,
+                    r.from_fbo,
+                    sampling,
+                    origin,
+                    target.height(),
+                    pyramid,
+                );
+                Some((
+                    self.pipelines
+                        .resample
+                        .bind(self.device, self.queue, pyramid, &u),
+                    bounds,
+                ))
+            })
+            .collect();
         // Uniforms: one slot per draw plus the background quad.
         let slots = resolved.len() + 1;
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
@@ -321,6 +383,9 @@ impl Exec<'_> {
                 .unwrap_or([r.alpha, if r.from_fbo { 1.0 } else { 0.0 }, 0.0, 0.0]);
             let mut u = quad(r.matrix, r.uv, color);
             u.m = r.uniform_matrix();
+            if let Some((_, bounds)) = &level2[i] {
+                u = crate::sampling::gpu::bounds_quad(*bounds, fw, fh);
+            }
             let at = (i + 1) * UNIFORM_STRIDE as usize;
             data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
         }
@@ -433,7 +498,16 @@ impl Exec<'_> {
         }
         for (i, r) in resolved.iter().enumerate() {
             let offset = ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
-            if r.solid.is_some() {
+            if r.level2.is_some() && r.solid.is_none() {
+                // Level 2: the resampler, or nothing when no part of the
+                // content is in front of the camera and in the frame.
+                if let Some((bind, _)) = &level2[i] {
+                    pass.set_pipeline(self.pipelines.resample.pipeline(format, blend));
+                    pass.set_bind_group(0, &quad_bind, &[offset]);
+                    pass.set_bind_group(1, bind, &[]);
+                    pass.draw(0..4, 0..1);
+                }
+            } else if r.solid.is_some() {
                 pass.set_pipeline(self.pipelines.solid_with(format, blend));
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);

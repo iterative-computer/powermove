@@ -138,6 +138,7 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
+    pyramids: crate::sampling::gpu::PyramidCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
 }
@@ -155,6 +156,7 @@ impl Renderer {
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
+            pyramids: crate::sampling::gpu::PyramidCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -182,9 +184,10 @@ impl Renderer {
         &self.queue
     }
 
-    /// Bytes of intermediate targets held by the pool.
+    /// Bytes of intermediate targets held by the pool and of the kept mip
+    /// pyramids of level 2 stills.
     pub fn pooled_bytes(&self) -> u64 {
-        self.pool.bytes()
+        self.pool.bytes() + self.pyramids.bytes()
     }
 
     /// Keeps translated 3D programs in `dir` across processes (amendment
@@ -205,6 +208,9 @@ impl Renderer {
     /// Frees idle intermediate targets down to `bytes` (lease pressure).
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
+        if self.pool.bytes() + self.pyramids.bytes() > bytes {
+            self.pyramids.clear();
+        }
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
@@ -368,6 +374,7 @@ impl Renderer {
                 export: request.export,
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
+                pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
             };
