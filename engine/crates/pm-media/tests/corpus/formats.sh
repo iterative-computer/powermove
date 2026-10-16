@@ -17,6 +17,8 @@
 #   - MP3: libmp3lame (Homebrew FFmpeg) — FFmpeg has no native MP3 encoder.
 #   - WebP and animated WebP: cwebp and img2webp (libwebp, Homebrew).
 #   - HEIF/HEIC: sips (ImageIO).
+#   - 12-bit and lossless JPEG: cjpeg (libjpeg-turbo, Homebrew) — FFmpeg's
+#     MJPEG encoder writes 8-bit baseline only.
 #   - Float TIFF, SVG, and MOV boxes FFmpeg does not write (mdcv, clli, dvcC,
 #     clap): formats_tools.py.
 #
@@ -233,6 +235,12 @@ ff -f lavfi -i "testsrc2=size=64x64:rate=1,format=rgba" -frames:v 1 -c:v png -f 
 ff -f lavfi -i "$IMG,format=rgb8" -frames:v 1 gif-still.gif
 ff -f lavfi -i "$IMG,format=yuv420p" -frames:v 1 -c:v libsvtav1 avif-still.avif
 ff -f lavfi -i "nullsrc=s=$S,format=yuv420p10le,geq=lum=64+X*2:cb=512:cr=512" -frames:v 1 -c:v libsvtav1 avif-10bit.avif
+"${TOOLS[@]}" ramp-ppm ramp12.ppm 256 64 4095
+cjpeg -precision 12 -quality 95 -outfile jpeg-12bit.jpg ramp12.ppm
+"${TOOLS[@]}" ramp-ppm ramp16.ppm 256 64 65535
+cjpeg -precision 16 -lossless 1 -outfile jpeg-lossless16.jpg ramp16.ppm
+rm ramp12.ppm ramp16.ppm
+cjpeg -progressive -quality 90 -outfile jpeg-progressive.jpg <(ff -f lavfi -i "$IMG,format=rgb24" -frames:v 1 -f image2pipe -c:v ppm -)
 cwebp -quiet -q 90 png8-rgb.png -o webp-lossy.webp
 cwebp -quiet -lossless png8-rgba.png -o webp-lossless-alpha.webp
 sips -s format heic png8-rgb.png --out heic.heic >/dev/null

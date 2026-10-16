@@ -1,7 +1,8 @@
-//! Still and animated image readers (section 13 "Images"): the `image`
-//! crate for PNG (8 and 16-bit), JPEG, TIFF (8, 16, 32f), BMP, ICO, GIF, and
-//! WebP; ImageIO for HEIF/HEIC, AVIF, animation frames, and anything else
-//! macOS reads; OpenEXR's C library for EXR; FFmpeg for DPX.
+//! Still and animated image readers (section 13 "Images"): libjpeg-turbo for
+//! JPEG (the decoder today's viewer uses); the `image` crate for PNG (8 and
+//! 16-bit), TIFF (8, 16, 32f), BMP, ICO, GIF, and WebP; ImageIO for
+//! HEIF/HEIC, AVIF, CMYK JPEG, animation frames, and anything else macOS
+//! reads; OpenEXR's C library for EXR; FFmpeg for DPX; resvg for SVG.
 //!
 //! Pixels are returned as they are stored, never color managed: an RGBA
 //! plane in pool memory at the file's depth (8 or 16-bit integer, half or
@@ -12,6 +13,7 @@
 pub mod exr;
 pub mod icc;
 pub mod imageio;
+pub mod jpeg;
 pub mod raster;
 pub mod sequence;
 
@@ -29,6 +31,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ImageBackend {
+    LibjpegTurbo,
     ImageCrate,
     ImageIo,
     OpenExr,
@@ -137,6 +140,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     let format = sniff(&head[..n]);
     match format {
         ImageFormat::Exr => exr::read(path, pool),
+        ImageFormat::Jpeg => jpeg::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
         ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
             imageio::read_frame(path, 0, pool, format)

@@ -681,10 +681,10 @@ fn reference_rgba(path: &Path, deep: bool) -> (usize, usize, Vec<f64>) {
     ffmpeg_rgba(path, deep)
 }
 
-/// PGM, PPM, or PAM (8-bit) to RGBA.
+/// PGM, PPM, or PAM (8 or 16-bit samples) to RGBA in 0..1.
 fn netpbm(b: &[u8]) -> (usize, usize, Vec<f64>) {
     let text = String::from_utf8_lossy(&b[..b.len().min(256)]).to_string();
-    let (w, h, ch, data_at) = if text.starts_with("P7") {
+    let (w, h, ch, maxval, data_at) = if text.starts_with("P7") {
         let end = text.find("ENDHDR\n").unwrap() + 7;
         let field = |k: &str| -> usize {
             text.lines().find(|l| l.starts_with(k)).unwrap()[k.len()..]
@@ -692,7 +692,13 @@ fn netpbm(b: &[u8]) -> (usize, usize, Vec<f64>) {
                 .parse()
                 .unwrap()
         };
-        (field("WIDTH"), field("HEIGHT"), field("DEPTH"), end)
+        (
+            field("WIDTH"),
+            field("HEIGHT"),
+            field("DEPTH"),
+            field("MAXVAL"),
+            end,
+        )
     } else {
         let mut tokens = Vec::new();
         let mut i = 2;
@@ -711,18 +717,22 @@ fn netpbm(b: &[u8]) -> (usize, usize, Vec<f64>) {
                     .unwrap(),
             );
         }
-        (
-            tokens[0],
-            tokens[1],
-            if &b[..2] == b"P5" { 1 } else { 3 },
-            i + 1,
-        )
+        let ch = if &b[..2] == b"P5" { 1 } else { 3 };
+        (tokens[0], tokens[1], ch, tokens[2], i + 1)
     };
     let px = &b[data_at..];
+    let bytes = if maxval > 255 { 2 } else { 1 };
+    let sample = |i: usize| -> f64 {
+        let v = if bytes == 2 {
+            u16::from_be_bytes([px[2 * i], px[2 * i + 1]]) as f64
+        } else {
+            px[i] as f64
+        };
+        v / maxval as f64
+    };
     let mut out = Vec::with_capacity(w * h * 4);
     for i in 0..w * h {
-        let p = &px[i * ch..(i + 1) * ch];
-        let v = |c: usize| f64::from(p[c]) / 255.0;
+        let v = |c: usize| sample(i * ch + c);
         match ch {
             1 => out.extend([v(0), v(0), v(0), 1.0]),
             3 => out.extend([v(0), v(1), v(2), 1.0]),
@@ -780,6 +790,7 @@ fn still_rgba(s: &image::StillImage) -> Vec<[f64; 4]> {
     let f = &s.frame;
     assert_eq!(f.format.layout, Layout::Rgba);
     let (w, h) = (f.format.width, f.format.height);
+    let max16 = ((1u32 << f.format.bits) - 1) as f64;
     f.with_planes(|pl| {
         let p = &pl[0];
         let mut out = Vec::with_capacity(w * h);
@@ -791,7 +802,8 @@ fn still_rgba(s: &image::StillImage) -> Vec<[f64; 4]> {
                         PlaneFormat::Rgba8 => f64::from(*row.add(x * 4 + c)) / 255.0,
                         PlaneFormat::Rgba16 => {
                             let b = row.add(x * 8 + c * 2);
-                            f64::from(u16::from_le_bytes([*b, *b.add(1)])) / 65535.0
+                            // Codes of `bits` (12-bit JPEG keeps 0..4095).
+                            f64::from(u16::from_le_bytes([*b, *b.add(1)])) / max16
                         }
                         PlaneFormat::Rgba16Float => {
                             let b = row.add(x * 8 + c * 2);
@@ -912,6 +924,30 @@ fn stills() {
             "jpeg-gray.jpg",
             ImageFormat::Jpeg,
             8,
+            false,
+            false,
+            Some(0.0),
+        ),
+        (
+            "jpeg-progressive.jpg",
+            ImageFormat::Jpeg,
+            8,
+            false,
+            false,
+            Some(0.0),
+        ),
+        (
+            "jpeg-12bit.jpg",
+            ImageFormat::Jpeg,
+            12,
+            false,
+            false,
+            Some(0.0),
+        ),
+        (
+            "jpeg-lossless16.jpg",
+            ImageFormat::Jpeg,
+            16,
             false,
             false,
             Some(0.0),

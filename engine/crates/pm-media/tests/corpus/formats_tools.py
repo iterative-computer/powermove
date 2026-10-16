@@ -13,7 +13,8 @@ Run with `python3 -I`. Subcommands:
   clap W H HOFF VOFF        print a clean aperture payload (integers)
   tiff-float OUT W H        write an uncompressed RGB float32 TIFF ramp
   svg OUT                   write a small SVG with gradients and text-free shapes
-  ramp16-pgm OUT W H        write a 16-bit grey ramp as a binary PGM (P5)
+  ramp-ppm OUT W H MAXVAL   write an RGB ramp as a binary PPM (P6), samples
+                            0..MAXVAL across (red), down (green), constant blue
 
 Everything written is synthetic test media.
 """
@@ -181,10 +182,16 @@ def svg(out):
 """)
 
 
-def ramp16_pgm(out, w, h):
-    w, h = int(w), int(h)
-    row = b"".join(struct.pack(">H", round(x * 65535 / (w - 1))) for x in range(w))
-    open(out, "wb").write(f"P5\n{w} {h}\n65535\n".encode() + row * h)
+def ramp_ppm(out, w, h, maxval):
+    w, h, m = int(w), int(h), int(maxval)
+    fmt = ">H" if m > 255 else ">B"
+    body = bytearray()
+    for y in range(h):
+        for x in range(w):
+            body += struct.pack(fmt, round(x * m / (w - 1)))
+            body += struct.pack(fmt, round(y * m / (h - 1)))
+            body += struct.pack(fmt, m // 3)
+    open(out, "wb").write(f"P6\n{w} {h}\n{m}\n".encode() + bytes(body))
 
 
 def main():
@@ -203,8 +210,8 @@ def main():
         tiff_float(*args)
     elif cmd == "svg":
         svg(*args)
-    elif cmd == "ramp16-pgm":
-        ramp16_pgm(*args)
+    elif cmd == "ramp-ppm":
+        ramp_ppm(*args)
     else:
         sys.exit(f"unknown command {cmd}")
 
