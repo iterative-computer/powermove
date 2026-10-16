@@ -299,6 +299,11 @@ impl Context {
         if let Some((r, _)) = p.is_rect() {
             return self.fill_rect(r, &m, color);
         }
+        if p.is_convex() {
+            let tris = tess::convex_wedge_triangles(p, &m, self.width, self.height);
+            self.ops.push(Op::Triangles { tris, color });
+            return Ok(());
+        }
         let local = tess::fill_polygons_local(p, &m);
         let polys = tess::to_device(&local, &m, self.width, self.height);
         self.ops.push(Op::Polygons { polys, color, msaa: true });

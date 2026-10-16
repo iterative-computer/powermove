@@ -8744,6 +8744,3319 @@
     }
    ],
    "scale": 3
+  },
+  {
+   "id": "diag-tri-cubic-0",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.019198621771937627
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-1",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.1466076571675237
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-2",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     0.2740166925631097
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-3",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.40142572795869574
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-4",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.5288347633542818
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-5",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     0.6562437987498679
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-6",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.7836528341454538
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-7",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.9110618695410401
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-8",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.038470904936626
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-9",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.165879940332212
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-10",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     1.293288975727798
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-11",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.420698011123384
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-12",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.54810704651897
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-13",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     1.675516081914556
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-14",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.8029251173101424
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-15",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.9303341527057285
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-16",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.0577431881013144
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-17",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.1851522234969
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-18",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     2.3125612588924866
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-19",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.4399702942880723
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-20",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.5673793296836585
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-21",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     2.694788365079244
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-22",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.8221974004748307
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-cubic-23",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.949606435870417
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     0,
+     0,
+     6,
+     0,
+     6,
+     0
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     0,
+     6,
+     6,
+     6,
+     6
+    ],
+    [
+     "bezierCurveTo",
+     6,
+     6,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-0",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.019198621771937627
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-1",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.1466076571675237
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-2",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     0.2740166925631097
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-3",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.40142572795869574
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-4",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.5288347633542818
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-5",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     0.6562437987498679
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-6",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     0.7836528341454538
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-7",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     0.9110618695410401
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-8",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.038470904936626
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-9",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.165879940332212
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-10",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     1.293288975727798
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-11",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.420698011123384
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-12",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.54810704651897
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-13",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     1.675516081914556
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-14",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     1.8029251173101424
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-15",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     1.9303341527057285
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-16",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.0577431881013144
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-17",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.1851522234969
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-18",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     2.3125612588924866
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-19",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.4399702942880723
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-20",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.5673793296836585
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-21",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     0.5,
+     0.5
+    ],
+    [
+     "translate",
+     24,
+     24
+    ],
+    [
+     "rotate",
+     2.694788365079244
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-22",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     1.5,
+     1.5
+    ],
+    [
+     "translate",
+     8,
+     8
+    ],
+    [
+     "rotate",
+     2.8221974004748307
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-tri-line-23",
+   "kind": "raw",
+   "width": 40,
+   "height": 40,
+   "ops": [
+    [
+     "scale",
+     3,
+     3
+    ],
+    [
+     "translate",
+     4,
+     4
+    ],
+    [
+     "rotate",
+     2.949606435870417
+    ],
+    [
+     "beginPath"
+    ],
+    [
+     "moveTo",
+     0,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     0
+    ],
+    [
+     "lineTo",
+     6,
+     6
+    ],
+    [
+     "lineTo",
+     0,
+     0
+    ],
+    [
+     "closePath"
+    ],
+    [
+     "=fillStyle",
+     "#F2C14E"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-200",
+   "kind": "raw",
+   "width": 408,
+   "height": 288,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     203.3,
+     142.7,
+     200,
+     140,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-260",
+   "kind": "raw",
+   "width": 528,
+   "height": 372,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     263.3,
+     184.7,
+     260,
+     182,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-320",
+   "kind": "raw",
+   "width": 648,
+   "height": 456,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     323.3,
+     226.7,
+     320,
+     224,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-380",
+   "kind": "raw",
+   "width": 768,
+   "height": 540,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     383.3,
+     268.7,
+     380,
+     266,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-440",
+   "kind": "raw",
+   "width": 888,
+   "height": 624,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     443.3,
+     310.7,
+     440,
+     308,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-520",
+   "kind": "raw",
+   "width": 1048,
+   "height": 736,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     523.3,
+     366.7,
+     520,
+     364,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "diag-ellipse-640",
+   "kind": "raw",
+   "width": 1288,
+   "height": 904,
+   "ops": [
+    [
+     "beginPath"
+    ],
+    [
+     "ellipse",
+     643.3,
+     450.7,
+     640,
+     448,
+     0,
+     0,
+     7
+    ],
+    [
+     "=fillStyle",
+     "#FF6B1A"
+    ],
+    [
+     "fill"
+    ]
+   ]
+  },
+  {
+   "id": "svg-solid-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path d=\"M10 10 L90 20 L60 90 Z\" fill=\"#4C8DFF\"/><circle cx=\"70\" cy=\"35\" r=\"18\" fill=\"#FF6B1A\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-solid-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path d=\"M10 10 L90 20 L60 90 Z\" fill=\"#4C8DFF\"/><circle cx=\"70\" cy=\"35\" r=\"18\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-solid-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path d=\"M10 10 L90 20 L60 90 Z\" fill=\"#4C8DFF\"/><circle cx=\"70\" cy=\"35\" r=\"18\" fill=\"#FF6B1A\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-stroke-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"80\" viewBox=\"0 0 120 80\"><rect x=\"10.5\" y=\"10.5\" width=\"100\" height=\"60\" rx=\"12\" fill=\"none\" stroke=\"#3FCF8E\" stroke-width=\"5\"/><polyline points=\"20,60 50,25 80,55 105,20\" fill=\"none\" stroke=\"#E8E2CF\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-stroke-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"80\" viewBox=\"0 0 120 80\"><rect x=\"10.5\" y=\"10.5\" width=\"100\" height=\"60\" rx=\"12\" fill=\"none\" stroke=\"#3FCF8E\" stroke-width=\"5\"/><polyline points=\"20,60 50,25 80,55 105,20\" fill=\"none\" stroke=\"#E8E2CF\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-stroke-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"80\" viewBox=\"0 0 120 80\"><rect x=\"10.5\" y=\"10.5\" width=\"100\" height=\"60\" rx=\"12\" fill=\"none\" stroke=\"#3FCF8E\" stroke-width=\"5\"/><polyline points=\"20,60 50,25 80,55 105,20\" fill=\"none\" stroke=\"#E8E2CF\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-opacity-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><g opacity=\"0.6\"><rect x=\"4\" y=\"4\" width=\"40\" height=\"40\" fill=\"#A73366\"/><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#F2C14E\"/></g><ellipse cx=\"32\" cy=\"50\" rx=\"20\" ry=\"8\" fill=\"#4C8DFF\" fill-opacity=\"0.5\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-opacity-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><g opacity=\"0.6\"><rect x=\"4\" y=\"4\" width=\"40\" height=\"40\" fill=\"#A73366\"/><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#F2C14E\"/></g><ellipse cx=\"32\" cy=\"50\" rx=\"20\" ry=\"8\" fill=\"#4C8DFF\" fill-opacity=\"0.5\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-opacity-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><g opacity=\"0.6\"><rect x=\"4\" y=\"4\" width=\"40\" height=\"40\" fill=\"#A73366\"/><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#F2C14E\"/></g><ellipse cx=\"32\" cy=\"50\" rx=\"20\" ry=\"8\" fill=\"#4C8DFF\" fill-opacity=\"0.5\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-gradient-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#fff\" stop-opacity=\"0\"/></radialGradient></defs><rect width=\"100\" height=\"60\" rx=\"8\" fill=\"url(#g)\"/><circle cx=\"70\" cy=\"30\" r=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-gradient-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#fff\" stop-opacity=\"0\"/></radialGradient></defs><rect width=\"100\" height=\"60\" rx=\"8\" fill=\"url(#g)\"/><circle cx=\"70\" cy=\"30\" r=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-gradient-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#fff\" stop-opacity=\"0\"/></radialGradient></defs><rect width=\"100\" height=\"60\" rx=\"8\" fill=\"url(#g)\"/><circle cx=\"70\" cy=\"30\" r=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-clip-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"40\" r=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"80\" height=\"40\" fill=\"#3FCF8E\"/><rect y=\"40\" width=\"80\" height=\"40\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-clip-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"40\" r=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"80\" height=\"40\" fill=\"#3FCF8E\"/><rect y=\"40\" width=\"80\" height=\"40\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-clip-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"40\" r=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"80\" height=\"40\" fill=\"#3FCF8E\"/><rect y=\"40\" width=\"80\" height=\"40\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-evenodd-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path fill-rule=\"evenodd\" d=\"M50 5 L61 39 L97 39 L68 61 L79 95 L50 74 L21 95 L32 61 L3 39 L39 39 Z M50 30 L58 52 L42 52 Z\" fill=\"#E8E2CF\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-evenodd-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path fill-rule=\"evenodd\" d=\"M50 5 L61 39 L97 39 L68 61 L79 95 L50 74 L21 95 L32 61 L3 39 L39 39 Z M50 30 L58 52 L42 52 Z\" fill=\"#E8E2CF\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-evenodd-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path fill-rule=\"evenodd\" d=\"M50 5 L61 39 L97 39 L68 61 L79 95 L50 74 L21 95 L32 61 L3 39 L39 39 Z M50 30 L58 52 L42 52 Z\" fill=\"#E8E2CF\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-blur-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><filter id=\"b\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feGaussianBlur stdDeviation=\"4\"/></filter></defs><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" filter=\"url(#b)\"/></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-blur-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><filter id=\"b\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feGaussianBlur stdDeviation=\"4\"/></filter></defs><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" filter=\"url(#b)\"/></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-blur-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 80 80\"><defs><filter id=\"b\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feGaussianBlur stdDeviation=\"4\"/></filter></defs><rect x=\"20\" y=\"20\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" filter=\"url(#b)\"/></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-text-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 50\"><text x=\"10\" y=\"35\" font-family=\"Helvetica\" font-size=\"28\" fill=\"#4C8DFF\">Powermove</text></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-text-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 50\"><text x=\"10\" y=\"35\" font-family=\"Helvetica\" font-size=\"28\" fill=\"#4C8DFF\">Powermove</text></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-text-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 50\"><text x=\"10\" y=\"35\" font-family=\"Helvetica\" font-size=\"28\" fill=\"#4C8DFF\">Powermove</text></svg>",
+   "width": 333,
+   "height": 150
+  },
+  {
+   "id": "svg-transform-64x64",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><g transform=\"rotate(20 50 50) scale(0.9)\"><rect x=\"20\" y=\"20\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" stroke=\"#0C0D12\" stroke-width=\"3\" stroke-dasharray=\"8 4\"/></g></svg>",
+   "width": 64,
+   "height": 64
+  },
+  {
+   "id": "svg-transform-200x200",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><g transform=\"rotate(20 50 50) scale(0.9)\"><rect x=\"20\" y=\"20\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" stroke=\"#0C0D12\" stroke-width=\"3\" stroke-dasharray=\"8 4\"/></g></svg>",
+   "width": 200,
+   "height": 200
+  },
+  {
+   "id": "svg-transform-333x150",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><g transform=\"rotate(20 50 50) scale(0.9)\"><rect x=\"20\" y=\"20\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" stroke=\"#0C0D12\" stroke-width=\"3\" stroke-dasharray=\"8 4\"/></g></svg>",
+   "width": 333,
+   "height": 150
   }
  ]
 }

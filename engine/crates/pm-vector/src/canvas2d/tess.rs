@@ -3,9 +3,13 @@
 //! `tessellate_filled_curve` vertex function), reproduced on the CPU in
 //! `f32`: every curve becomes the polyline the GPU rasterizes.
 //!
-//! Filled wedges, stencilled wedges, and stencilled curves with middle-out
-//! triangles all cover exactly the samples inside the polygonized path under
-//! the fill rule, so a fill reduces to that polygon.
+//! Stencilled wedges and stencilled curves with middle-out triangles cover
+//! exactly the samples inside the polygonized path under the fill rule, so a
+//! concave fill reduces to that polygon. Convex paths are drawn in one
+//! unstencilled pass (`convexTessellatedWedges`): every wedge triangle and
+//! every middle-out triangle covers its samples whatever its orientation, so
+//! slivers between a curve's chords and its polyline add coverage
+//! ([`convex_wedge_triangles`]).
 //!
 //! Portions are derived from Skia, Copyright Google LLC, used under the BSD
 //! 3-Clause license.
@@ -112,11 +116,13 @@ fn gpu_conic_log2(p: &[P; 3], w: f32, vx: &Vx) -> f32 {
     libm::ceilf(libm::log2f(n2.max(1.0)) * 0.5)
 }
 
-/// Metal's `mix` as the fast-math compiler emits it: `fma(b - a, t, a)`
-/// (measured: the other expansions lose bit-exact ellipse fills).
+/// Metal's `mix(a, b, t)` as the fast-math compiler emits it on Apple
+/// GPUs: `fma(t, b, fma(-t, a, a))` (measured bit-exact against the GPU on
+/// 200,868 random and ellipse inputs with a compute-shader oracle; the
+/// textbook `fma(b - a, t, a)` matches 76%).
 #[inline]
 fn mix(a: f32, b: f32, t: f32) -> f32 {
-    (b - a).mul_add(t, a)
+    t.mul_add(b, (-t).mul_add(a, a))
 }
 
 #[inline]
@@ -161,7 +167,15 @@ pub fn patch_points(patch: &Patch, vx: &Vx, out: &mut Vec<P>) {
             let u = mix(1.0, w, t);
             let v = w + 1.0 - u;
             let uv = mix(u, v, t);
-            out.push(if w < 0.0 { abcd } else { [abc[0] / uv, abc[1] / uv] });
+            // `abc / uv` under fast math is `abc * rcp(uv)` (measured: the
+            // GPU's result equals `abc` times its reciprocal on every
+            // oracle input). The GPU's reciprocal is faithful, not
+            // correctly rounded (10.3% of mantissas round the other way);
+            // the correctly rounded reciprocal stands in for it
+            // (docs/engine/vector.md).
+            let r = 1.0 / uv;
+            let q = [abc[0] * r, abc[1] * r];
+            out.push(if w < 0.0 { abcd } else { q });
         } else {
             out.push(if fixed == 0.0 { p0 } else { p3 });
         }
@@ -380,4 +394,109 @@ pub fn window(p: P, m: &Mat, _width: u32, _height: u32) -> [f64; 2] {
     let x = m.sx.mul_add(p[0], m.kx.mul_add(p[1], m.tx));
     let y = m.ky.mul_add(p[0], m.sy.mul_add(p[1], m.ty));
     [f64::from(x), f64::from(y)]
+}
+
+/// The points of a patch at its resolve level, `T = j / 2^level` for
+/// `j = 0..=2^level`.
+fn patch_vertices(patch: &Patch, vx: &Vx) -> Vec<P> {
+    let mut out = vec![patch.p[0]];
+    patch_points(patch, vx, &mut out);
+    out
+}
+
+/// `MidpointContourParser::currentMidpoint` for a single-contour path: the
+/// mean of every verb's end point (and the start point when the contour
+/// closes implicitly), accumulated in `f32`.
+fn contour_midpoint(path: &SkPath) -> P {
+    let mut sum = [0.0f32; 2];
+    let mut weight = 0u32;
+    let mut start = None;
+    let mut last = [0.0f32; 2];
+    for (verb, pts) in path.segments() {
+        match verb {
+            Verb::Move => {
+                if start.is_none() {
+                    start = Some(pts[0]);
+                    last = pts[0];
+                }
+            }
+            Verb::Close => {}
+            _ => {
+                let end = *pts.last().unwrap_or(&last);
+                sum = [sum[0] + end[0], sum[1] + end[1]];
+                weight += 1;
+                last = end;
+            }
+        }
+    }
+    if let Some(s) = start
+        && weight > 0
+        && s != last
+    {
+        sum = [sum[0] + s[0], sum[1] + s[1]];
+        weight += 1;
+    }
+    let k = 1.0 / weight.max(1) as f32;
+    [sum[0] * k, sum[1] * k]
+}
+
+/// The triangles of `PathWedgeTessellator` patches for a convex path, in
+/// window coordinates: per patch the fan triangle `(fan, p0, p3)` and the
+/// middle-out triangles `(T(i-1), T(i), T(i+1))` of every level up to the
+/// patch's resolve level (the demoted higher levels are degenerate).
+pub fn convex_wedge_triangles(path: &SkPath, m: &Mat, width: u32, height: u32) -> Vec<[P; 3]> {
+    let vx = Vx::of(m);
+    let dev = |p: P| {
+        let w = window(p, m, width, height);
+        [w[0] as f32, w[1] as f32]
+    };
+    let fan = dev(contour_midpoint(path));
+    let mut tris = Vec::new();
+    let mut patches = Vec::new();
+    let mut start: Option<P> = None;
+    let mut last = [0.0f32; 2];
+    let emit = |patches: &[Patch], tris: &mut Vec<[P; 3]>| {
+        for patch in patches {
+            let v: Vec<P> = patch_vertices(patch, &vx).into_iter().map(dev).collect();
+            let n = v.len() - 1;
+            tris.push([fan, v[0], v[n]]);
+            let mut span = n;
+            while span >= 2 {
+                let half = span / 2;
+                let mut i = half;
+                while i < n {
+                    tris.push([v[i - half], v[i], v[i + half]]);
+                    i += span;
+                }
+                span = half;
+            }
+        }
+    };
+    let close = |start: Option<P>, last: P, tris: &mut Vec<[P; 3]>| {
+        if let Some(s) = start
+            && s != last
+        {
+            let mut p = Vec::new();
+            curve_patches(Verb::Line, &[last, s], &vx, &mut p);
+            emit(&p, tris);
+        }
+    };
+    for (verb, pts) in path.segments() {
+        match verb {
+            Verb::Move => {
+                close(start, last, &mut tris);
+                start = Some(pts[0]);
+                last = pts[0];
+            }
+            Verb::Close => {}
+            _ => {
+                patches.clear();
+                curve_patches(verb, &pts, &vx, &mut patches);
+                emit(&patches, &mut tris);
+                last = *pts.last().unwrap_or(&last);
+            }
+        }
+    }
+    close(start, last, &mut tris);
+    tris
 }

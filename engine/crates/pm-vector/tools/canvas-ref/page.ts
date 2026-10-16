@@ -99,7 +99,30 @@ async function post(path: string, body: BodyInit, params: Record<string, string 
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
 }
 
-function rasterize(c: Case): { cv: HTMLCanvasElement; meta: Record<string, unknown> } {
+async function rasterize(c: Case): Promise<{ cv: HTMLCanvasElement; meta: Record<string, unknown> }> {
+  if (c.kind === 'raw') {
+    const cv = getCanvas(c.width, c.height);
+    const ctx = cv.getContext('2d') as any;
+    for (const [op, ...args] of c.ops) {
+      if (String(op).startsWith('=')) ctx[String(op).slice(1)] = args[0];
+      else ctx[op as string](...args);
+    }
+    return { cv, meta: {} };
+  }
+  if (c.kind === 'svg') {
+    // legacy/gl/raster.ts rasterSvgAsset: an <img> of the SVG blob, drawn
+    // into a canvas of the bucket size.
+    const url = URL.createObjectURL(new Blob([c.svg], { type: 'image/svg+xml' }));
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const cv = getCanvas(c.width, c.height);
+    const context = cv.getContext('2d')!;
+    context.clearRect(0, 0, c.width, c.height);
+    context.drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    return { cv, meta: { naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight } };
+  }
   if (c.kind === 'shape') {
     const r = rasterShape(c.d, c.scale);
     return { cv: r.cv, meta: { w: r.w, h: r.h } };
@@ -114,7 +137,7 @@ function rasterize(c: Case): { cv: HTMLCanvasElement; meta: Record<string, unkno
     const list = cases();
     for (const c of list) {
       let result;
-      try { result = rasterize(c); } catch (e) {
+      try { result = await rasterize(c); } catch (e) {
         await post('case', JSON.stringify({ id: c.id, error: String((e as Error)?.message || e) }), { id: c.id, kind: 'error' });
         continue;
       }

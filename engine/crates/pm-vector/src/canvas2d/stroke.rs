@@ -767,7 +767,14 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
             };
         }
         tangent = tg;
-        stroke_coord = if w >= 0.0 { [abc[0] / uv, abc[1] / uv] } else { abcd };
+        // `abc / uv` compiles to `abc * rcp(uv)` under Metal fast math
+        // (see `tess::patch_points`).
+        stroke_coord = if w >= 0.0 {
+            let r = 1.0 / uv;
+            [abc[0] * r, abc[1] * r]
+        } else {
+            abcd
+        };
     } else {
         tangent = if combined_edge_id == 0.0 { tan0 } else { tan1 };
         stroke_coord = if combined_edge_id == 0.0 { p0 } else { p3 };

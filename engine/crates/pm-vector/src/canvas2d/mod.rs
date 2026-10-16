@@ -9,3 +9,4 @@ pub mod context;
 pub mod shape;
 pub mod stroke;
 pub mod analytic;
+pub mod convex;

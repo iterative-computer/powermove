@@ -12,7 +12,11 @@ export type PathSpec = {
   vertices: Array<{ x: number; y: number; inX?: number; inY?: number; outX?: number; outY?: number }>;
 };
 export type PathsCase = { id: string; kind: 'paths'; paths: PathSpec[]; scale: number };
-export type Case = ShapeCase | PathsCase;
+/** Canvas calls replayed as they are: [method, ...args] or ['=prop', value]. */
+export type RawCase = { id: string; kind: 'raw'; width: number; height: number; ops: Array<Array<string | number>> };
+/** An SVG drawn as `rasterSvgAsset` draws it: drawImage(img, 0, 0, w, h). */
+export type SvgCase = { id: string; kind: 'svg'; svg: string; width: number; height: number };
+export type Case = ShapeCase | PathsCase | RawCase | SvgCase;
 
 /** A small deterministic generator (mulberry32). */
 function rng(seed: number) {
@@ -145,5 +149,51 @@ export function cases(): Case[] {
     ['self-intersecting', [{ id: 's', parent: null, p: P({ closed: true, fill: '#A73366', strokeWidth: 2 }), vertices: [{ x: -60, y: -40 }, { x: 60, y: 40 }, { x: 60, y: -40 }, { x: -60, y: 40 }] }]],
   ];
   for (const [id, paths] of pathCases) for (const scale of [0.5, 1, 1.75, 3]) out.push({ id: `paths-${id}-s${scale}`, kind: 'paths', paths, scale });
+  out.push(...diagnostics(), ...svgCases());
   return out;
+}
+
+/** Raw canvas diagnostics for the emulation's open questions. */
+function diagnostics(): RawCase[] {
+  const out: RawCase[] = [];
+  // Rotated triangles with degenerate cubic edges (as tracePath writes
+  // corners) and with lines, at several scales.
+  for (const curve of [true, false]) {
+    for (let k = 0; k < 24; k++) {
+      const deg = k * 7.3 + 1.1, scale = [0.5, 1.5, 3][k % 3]!;
+      const ops: Array<Array<string | number>> = [['scale', scale, scale], ['translate', 12 / scale, 12 / scale], ['rotate', deg * Math.PI / 180], ['beginPath'], ['moveTo', 0, 0]];
+      const pts = [[6, 0], [6, 6], [0, 0]];
+      let prev = [0, 0];
+      for (const p of pts) {
+        if (curve) ops.push(['bezierCurveTo', prev[0]!, prev[1]!, p[0]!, p[1]!, p[0]!, p[1]!]);
+        else ops.push(['lineTo', p[0]!, p[1]!]);
+        prev = p;
+      }
+      ops.push(['closePath'], ['=fillStyle', '#F2C14E'], ['fill']);
+      out.push({ id: `diag-tri-${curve ? 'cubic' : 'line'}-${k}`, kind: 'raw', width: 40, height: 40, ops });
+    }
+  }
+  // Large ellipses around the conic chopping threshold.
+  for (const r of [200, 260, 320, 380, 440, 520, 640]) {
+    const ops: Array<Array<string | number>> = [['beginPath'], ['ellipse', r + 3.3, r * 0.7 + 2.7, r, r * 0.7, 0, 0, 7], ['=fillStyle', '#FF6B1A'], ['fill']];
+    out.push({ id: `diag-ellipse-${r}`, kind: 'raw', width: Math.ceil(2 * r + 8), height: Math.ceil(1.4 * r + 8), ops });
+  }
+  return out;
+}
+
+/** SVG images (`<img>` per size bucket). */
+function svgCases(): SvgCase[] {
+  const svgs: Array<[string, string]> = [
+    ['solid', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M10 10 L90 20 L60 90 Z" fill="#4C8DFF"/><circle cx="70" cy="35" r="18" fill="#FF6B1A"/></svg>'],
+    ['stroke', '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80"><rect x="10.5" y="10.5" width="100" height="60" rx="12" fill="none" stroke="#3FCF8E" stroke-width="5"/><polyline points="20,60 50,25 80,55 105,20" fill="none" stroke="#E8E2CF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>'],
+    ['opacity', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g opacity="0.6"><rect x="4" y="4" width="40" height="40" fill="#A73366"/><rect x="20" y="20" width="40" height="40" fill="#F2C14E"/></g><ellipse cx="32" cy="50" rx="20" ry="8" fill="#4C8DFF" fill-opacity="0.5"/></svg>'],
+    ['gradient', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FF6B1A"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient><radialGradient id="r"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs><rect width="100" height="60" rx="8" fill="url(#g)"/><circle cx="70" cy="30" r="25" fill="url(#r)"/></svg>'],
+    ['clip', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><defs><clipPath id="c"><circle cx="40" cy="40" r="30"/></clipPath></defs><g clip-path="url(#c)"><rect width="80" height="40" fill="#3FCF8E"/><rect y="40" width="80" height="40" fill="#1B2A4A"/></g></svg>'],
+    ['evenodd', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="evenodd" d="M50 5 L61 39 L97 39 L68 61 L79 95 L50 74 L21 95 L32 61 L3 39 L39 39 Z M50 30 L58 52 L42 52 Z" fill="#E8E2CF"/></svg>'],
+    ['blur', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4"/></filter></defs><rect x="20" y="20" width="40" height="40" fill="#FF6B1A" filter="url(#b)"/></svg>'],
+    ['text', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 50"><text x="10" y="35" font-family="Helvetica" font-size="28" fill="#4C8DFF">Powermove</text></svg>'],
+    ['transform', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><g transform="rotate(20 50 50) scale(0.9)"><rect x="20" y="20" width="60" height="40" fill="#3FCF8E" stroke="#0C0D12" stroke-width="3" stroke-dasharray="8 4"/></g></svg>'],
+  ];
+  const sizes: Array<[number, number]> = [[64, 64], [200, 200], [333, 150]];
+  return svgs.flatMap(([id, svg]) => sizes.map(([w, h]) => ({ id: `svg-${id}-${w}x${h}`, kind: 'svg' as const, svg, width: w, height: h })));
 }

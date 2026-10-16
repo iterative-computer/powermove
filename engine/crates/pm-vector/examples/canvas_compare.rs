@@ -33,6 +33,35 @@ fn s(v: &serde_json::Value) -> String {
     v.as_str().map(str::to_owned).unwrap_or_default()
 }
 
+/// Replays a raw case's canvas calls on the emulated context.
+fn raw(c: &serde_json::Value) -> (u32, u32, Vec<u8>) {
+    use pm_vector::canvas2d::context::Context;
+    let (w, h) = (num(&c["width"]) as u32, num(&c["height"]) as u32);
+    let mut ctx = Context::new(w, h);
+    for op in c["ops"].as_array().unwrap() {
+        let op = op.as_array().unwrap();
+        let a: Vec<f64> = op[1..].iter().map(num).collect();
+        match op[0].as_str().unwrap() {
+            "=fillStyle" => ctx.set_fill_style(op[1].as_str().unwrap()),
+            "=strokeStyle" => ctx.set_stroke_style(op[1].as_str().unwrap()),
+            "=lineWidth" => ctx.set_line_width(a[0]),
+            "scale" => ctx.scale(a[0], a[1]),
+            "translate" => ctx.translate(a[0], a[1]),
+            "rotate" => ctx.rotate(a[0]),
+            "beginPath" => ctx.begin_path(),
+            "moveTo" => ctx.path.move_to(a[0], a[1]),
+            "lineTo" => ctx.path.line_to(a[0], a[1]),
+            "bezierCurveTo" => ctx.path.bezier_curve_to(a[0], a[1], a[2], a[3], a[4], a[5]),
+            "ellipse" => { assert_eq!(a[4], 0.0, "rotated ellipse"); ctx.path.ellipse(a[0], a[1], a[2], a[3], a[5], a[6], false) }.unwrap(),
+            "closePath" => ctx.path.close_path(),
+            "fill" => ctx.fill().unwrap(),
+            "stroke" => ctx.stroke().unwrap(),
+            other => panic!("raw op {other}"),
+        }
+    }
+    (w, h, ctx.finish())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
@@ -53,7 +82,11 @@ fn main() {
         if std::fs::metadata(&path).is_err() {
             continue;
         }
-        let result = if c["kind"] == "shape" {
+        let result = if c["kind"] == "svg" {
+            continue;
+        } else if c["kind"] == "raw" {
+            Ok(raw(c))
+        } else if c["kind"] == "shape" {
             let d = &c["d"];
             let content = ShapeContent {
                 shape: ShapeKind::from_name(d["shape"].as_str().unwrap_or("")),
