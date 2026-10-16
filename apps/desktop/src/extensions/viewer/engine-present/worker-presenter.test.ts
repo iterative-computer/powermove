@@ -290,18 +290,20 @@ describe('WorkerPresenter and the presentation worker', () => {
     // Worker frames every 8.33 ms from page 1000 ms (worker 0 ms).
     for (let i = 0; i < 8; i++) pair.frame(i * (1000 / 120));
     await settle();
-    // Picked for two refreshes after each animation frame (a worker
-    // canvas's measured depth): frame 10 (0 to 16.7 ms) was already
-    // passing at the first one, so it is dropped as late.
-    expect(presented.map((f) => f.seq)).toEqual([11, 12, 13]);
-    expect(presenter.stats.dropped['late']).toBe(1);
+    // Picked for the instant a worker canvas's frame reaches the panel
+    // (1.5 refreshes and 3.2 ms after its animation frame, rounded to the
+    // nearest refresh; 60 Hz until the refresh grid is fitted): at the
+    // first animation frame that is media 36.5 ms, so frames 10 (0 to
+    // 16.7 ms) and 11 (16.7 to 33.3 ms) are dropped as late.
+    expect(presented.map((f) => f.seq)).toEqual([12, 13]);
+    expect(presenter.stats.dropped['late']).toBe(2);
     pair.painter.finishGpu();
     await settle();
     expect(link.releases.map((r) => r.seq)).toEqual([10, 11, 12, 13]);
     const trace = await presenter.takeTrace();
     expect(trace!.arrivals.map((a) => a[2])).toEqual([1000, 1000, 1000, 1000]);
     expect(trace!.rafs[0]).toBe(1000);
-    expect(trace!.draws).toHaveLength(3);
+    expect(trace!.draws).toHaveLength(2);
   });
 
   it('hands queued frames back to the engine when the session ends, and forgets the session once the worker closed it', async () => {

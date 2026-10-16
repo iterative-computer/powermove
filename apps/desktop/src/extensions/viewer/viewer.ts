@@ -811,7 +811,6 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       // Engine frames are drawn by a presentation worker, so playback keeps
       // its cadence while the editor's main thread is busy (present-worker.ts).
       createWorker: service.offMainThread === false ? undefined : () => new Worker(new URL('./engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }),
-      presentEveryRefresh: service.presentEveryRefresh ?? false,
     });
     // Overlays redraw at each new frame tag (revision, view sequence), so
     // handles drawn from the frame's geometry never lead its pixels.

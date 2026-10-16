@@ -72,6 +72,18 @@ export type PresenterOptions = {
   displayHz?: number | null;
   /** Predicted rAF to display time, in refreshes (S1: one or two at 120 Hz). */
   latencyRefreshes?: number;
+  /** Added to `latencyRefreshes`: where in its refresh a frame's
+   *  presentation lands after the BeginFrame (ms; measured, see
+   *  present-worker.ts). */
+  presentOffsetMs?: number;
+  /**
+   * Shows the frame whose interval contains the display instant rounded to
+   * the nearest refresh (decides half a refresh later), so a frame reaches
+   * the panel within half a refresh of its time on the audio clock's line
+   * either way; otherwise frames show from the first refresh at or after
+   * their start (up to a refresh late).
+   */
+  nearestRefresh?: boolean;
   /** How long a descriptor may wait for its surface's import. */
   parkTimeoutMs?: number;
   /** performance.now() */
@@ -103,14 +115,6 @@ export type PresenterOptions = {
    * frame anyway.
    */
   drawOnArrival?: boolean;
-  /**
-   * While the clock runs, submit a frame at every refresh: the painter
-   * draws its copy of the last frame again (`FramePainter.redraw`) at
-   * refreshes that show no new one, so the canvas's compositor frames reach
-   * viz at the same point of every refresh (docs/engine/bridge.md,
-   * "Cadence").
-   */
-  presentEveryRefresh?: boolean;
 };
 
 type Payload = { frame: VideoFrame };
@@ -125,8 +129,6 @@ export type PresenterStats = {
   staleGeneration: number;
   maxQueued: number;
   generation: number;
-  /** Refreshes that drew the last frame again (`presentEveryRefresh`). */
-  redrawn?: number;
 };
 
 export type TraceRecord = {
@@ -373,17 +375,14 @@ export class EnginePresenter implements Presenter {
     const fit = this.vsync.sample(rafMs);
     this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
-    const decisionMs = this.decisionMs(rafMs, fit);
+    const { decisionMs, displayMs } = this.decision(rafMs, fit);
     const atUs = this.hostUs(decisionMs);
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
     // The display instant itself, without the shift that puts frame
     // boundaries halfway between decisions.
-    if (show) this.draw(show, rafMs, this.hostUs(decisionMs - this.offsetUs / 1000));
-    else if (this.options.presentEveryRefresh && this.clock && this.clock.state !== 'stopped' && this.stats.drawn > 0 && this.options.painter.redraw?.()) {
-      this.stats.redrawn = (this.stats.redrawn ?? 0) + 1;
-    }
+    if (show) this.draw(show, rafMs, this.hostUs(displayMs));
   }
 
   takeTrace(): Promise<TraceRecord | null> {
@@ -408,13 +407,16 @@ export class EnginePresenter implements Presenter {
     this.options.onVsync(next);
   }
 
-  /** The predicted display time of this refresh's frame, moved so frame
-   *  boundaries fall halfway between decisions. */
-  private decisionMs(rafMs: number, fit: VsyncFit | null): number {
+  /** The predicted display time of this refresh's frame (`displayMs`), and
+   *  the instant the frame is picked for (`decisionMs`): half a refresh
+   *  later with `nearestRefresh`, then moved so frame boundaries fall
+   *  halfway between decisions. */
+  private decision(rafMs: number, fit: VsyncFit | null): { decisionMs: number; displayMs: number } {
     const periodMs = fit?.periodMs ?? 1000 / 60;
-    const latency = (this.options.latencyRefreshes ?? 1) * periodMs;
+    const latency = (this.options.latencyRefreshes ?? 1) * periodMs + (this.options.presentOffsetMs ?? 0);
     const vsync = fit ? nextVsync(fit, rafMs - periodMs / 2) : rafMs;
-    const decision = vsync + latency;
+    const displayMs = vsync + latency;
+    const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
     if (fit && clock && head) {
@@ -425,7 +427,7 @@ export class EnginePresenter implements Presenter {
         this.offsetUs = decisionOffsetUs(periodMs * 1000, host, clock, head);
       }
     }
-    return decision + this.offsetUs / 1000;
+    return { decisionMs: decision + this.offsetUs / 1000, displayMs };
   }
 
   private draw(item: Queued<Payload>, rafMs: number, displayUs: number | null = null): void {

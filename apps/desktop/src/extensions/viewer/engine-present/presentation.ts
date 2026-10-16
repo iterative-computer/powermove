@@ -90,9 +90,6 @@ export interface EngineViewerService {
   /** `false`: draw engine frames on the page's main thread rather than in
    *  a presentation worker (the measurement harness compares the two). */
   readonly offMainThread?: boolean;
-  /** Overrides the presentation's choice of submitting a frame at every
-   *  refresh during playback (the measurement harness compares). */
-  readonly presentEveryRefresh?: boolean;
 }
 
 /** What the viewer decides; the presentation adds what the window knows. */
@@ -131,8 +128,6 @@ export type PresentationOptions = {
    * frames are drawn on this thread.
    */
   createWorker?: () => WorkerLike;
-  /** Submit a frame at every refresh while the clock runs (`PresenterOptions.presentEveryRefresh`). */
-  presentEveryRefresh?: boolean;
 };
 
 /** Recent viewer states by sequence, so overlay geometry converts with the
@@ -391,7 +386,6 @@ export class ViewerPresentation {
           // This realm's clock: arrivals are stamped with it, and a
           // popout's worker must decide on it too (timeOriginShift).
           timeOrigin: performance.timeOrigin,
-          everyRefresh: this.options.presentEveryRefresh === true,
           onFailed: (message) => this.workerFailed(token, message),
           onLost: (message) => this.deviceLost(token, message)
         });
@@ -407,7 +401,7 @@ export class ViewerPresentation {
     const token = this.backendToken;
     let painter: FramePainter;
     try {
-      painter = this.options.createPainter ? await this.options.createPainter(this.canvasElement) : await createWebGpuPainter(this.canvasElement, undefined, { retain: this.options.presentEveryRefresh === true });
+      painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
       this.options.log?.('error', `engine presentation is unavailable: ${error instanceof Error ? error.message : String(error)}`);
@@ -497,7 +491,7 @@ export class ViewerPresentation {
     };
     const presenter: Presenter = this.worker
       ? this.worker.open({ ...common, displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null })
-      : new EnginePresenter({ ...common, painter: this.painter!, presentEveryRefresh: this.options.presentEveryRefresh === true });
+      : new EnginePresenter({ ...common, painter: this.painter! });
     this.presenter = presenter;
     presenter.onPresented((frame) => {
       if (this.presenter !== presenter) return;

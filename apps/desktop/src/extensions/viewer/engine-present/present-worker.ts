@@ -27,7 +27,7 @@
  * This module is the worker's side; `present-worker-entry.ts` is the
  * worker script.
  */
-import { createWebGpuPainter, type FramePainter, type PainterOptions, type PaintTarget } from './gpu';
+import { createWebGpuPainter, type FramePainter, type PaintTarget } from './gpu';
 import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
@@ -38,8 +38,6 @@ export type ToWorker =
       canvas: OffscreenCanvas;
       /** The page's `performance.timeOrigin`, to put worker times on its clock. */
       pageTimeOrigin: number;
-      /** Submit a frame at every refresh while the clock runs (`PresenterOptions.presentEveryRefresh`). */
-      everyRefresh?: boolean;
     }
   | { type: 'open'; session: number; displayHz: number | null; trace: boolean; generation: number }
   | { type: 'close'; session: number }
@@ -78,15 +76,27 @@ export interface WorkerScope {
 }
 
 export type ServeOptions = {
-  createPainter?: (canvas: PaintTarget, options: PainterOptions) => Promise<FramePainter>;
+  createPainter?: (canvas: PaintTarget) => Promise<FramePainter>;
   /** Wraps the painter (the integration test reads drawn frames back). */
   wrapPainter?: (painter: FramePainter) => Promise<FramePainter> | FramePainter;
   /** Every frame drawn, in the worker (the integration test checks its pixels). */
   onPresented?: (frame: PresentedFrame) => void;
 };
 
-/** Animation frame to display, in refreshes, for a worker canvas. */
-export const WORKER_LATENCY_REFRESHES = 2;
+/**
+ * A worker canvas's animation frame to the panel (docs/engine/bridge.md,
+ * "A/V sync"): viz draws the canvas's compositor frame at the BeginFrame
+ * of its animation frame when it arrives before the page's frame for that
+ * BeginFrame, else at the next one (a race between two frame sinks the
+ * worker cannot see: 0 to 40% of frames the first way, by run and load),
+ * and the panel shows it a refresh after that draw (8% two refreshes),
+ * 3.2 ms into that refresh (measured on the 120 Hz panel, viz's
+ * presentation feedback). The prediction sits between the two draws, so
+ * with the nearest refresh either lands within a refresh of the frame's
+ * time on the audio clock.
+ */
+export const WORKER_LATENCY_REFRESHES = 1.5;
+export const WORKER_PRESENT_OFFSET_MS = 3.2;
 
 /** How often the worker sends a session's stats while frames flow. */
 export const STATS_INTERVAL_MS = 250;
@@ -98,7 +108,6 @@ type Session = { id: number; presenter: EnginePresenter; hostOffsetUs: number | 
 
 export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): void {
   let painter: FramePainter | null = null;
-  let everyRefresh = false;
   let session: Session | null = null;
   let shift = 0;
   let disposed = false;
@@ -155,12 +164,12 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // now can reach the display frame being composed, instead of
         // waiting for the worker's next animation frame.
         drawOnArrival: true,
-        // A worker canvas's frame reaches the display two refreshes after
-        // the animation frame that drew it (measured in the real app: 2 in
-        // 80% of frames, 18.7 ms at 120 Hz), so timed frames are picked for
-        // that instant and stay on the audio clock's line.
+        // Timed frames are picked for the instant a worker canvas's frame
+        // reaches the panel (WORKER_LATENCY_REFRESHES), rounded to the
+        // nearest refresh, so they stay on the audio clock's line.
         latencyRefreshes: WORKER_LATENCY_REFRESHES,
-        presentEveryRefresh: everyRefresh,
+        presentOffsetMs: WORKER_PRESENT_OFFSET_MS,
+        nearestRefresh: true,
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,
@@ -247,9 +256,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
 
   const init = async (message: Extract<ToWorker, { type: 'init' }>): Promise<void> => {
     shift = scope.performance.timeOrigin - message.pageTimeOrigin;
-    everyRefresh = message.everyRefresh === true;
     try {
-      const made = options.createPainter ? await options.createPainter(message.canvas, { retain: everyRefresh }) : await createWebGpuPainter(message.canvas, undefined, { retain: everyRefresh });
+      const made = await (options.createPainter ?? createWebGpuPainter)(message.canvas);
       painter = options.wrapPainter ? await options.wrapPainter(made) : made;
     } catch (error) {
       failed = true;
