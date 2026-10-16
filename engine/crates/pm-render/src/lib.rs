@@ -24,12 +24,16 @@ mod exec;
 pub mod expr;
 pub mod js;
 pub mod media;
+pub mod motion;
 pub mod parity;
 mod pipelines;
 pub mod plan;
 mod renderer;
 mod request;
+pub mod retime;
+pub mod sampling;
 pub mod scene3d;
+pub mod space25d;
 pub mod stills;
 pub mod three;
 

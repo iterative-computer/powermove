@@ -71,17 +71,44 @@ impl LayerQuad {
     /// Plan matrices map the unit quad in the frame's own (top-down)
     /// composition space scaled to output pixels.
     pub fn of_plan(plan: &CompPlan) -> Vec<LayerQuad> {
-        plan.draws
-            .iter()
-            .map(|draw| {
-                let m = draw.matrix;
-                let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
-                LayerQuad {
-                    layer: draw.layer.clone(),
-                    corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        for draw in &plan.draws {
+            quads_of(draw, &mut out);
+        }
+        out
+    }
+}
+
+fn quads_of(draw: &plan::Draw, out: &mut Vec<LayerQuad>) {
+    match &draw.content {
+        // A 2.5D layer: its projected quad.
+        plan::Content::Placed(p) if p.plane.is_some() => {
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: crate::space25d::corners(p.plane.as_ref().expect("checked")),
+            });
+        }
+        // A motion-blurred layer: where its samples were drawn.
+        plan::Content::Texture {
+            source: plan::Source::Accumulate(acc),
+            ..
+        } => {
+            let start = out.len();
+            for d in &acc.draws {
+                quads_of(d, out);
+            }
+            for q in &mut out[start..] {
+                q.layer.clone_from(&draw.layer);
+            }
+        }
+        _ => {
+            let m = draw.matrix;
+            let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+            });
+        }
     }
 }
 
@@ -93,6 +120,14 @@ pub trait CommandBracket: Send + Sync {
     fn begin(&self, encoder: &mut wgpu::CommandEncoder);
     /// Recorded last; `output` is the frame's target, written by then.
     fn end(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView);
+}
+
+/// The motion blur and resampler a request asks of its root composition.
+fn build_options(comp: &Comp<'_>, request: &RenderRequest) -> plan::BuildOptions {
+    plan::BuildOptions {
+        blur: crate::motion::resolve(comp, request.motion_blur),
+        sampling: request.sampling,
+    }
 }
 
 /// The renderer.
@@ -287,7 +322,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build(
+        let (mut plan, build) = plan::build_with_options(
             &mut self.evaluator,
             &comp,
             &project,
@@ -296,6 +331,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            build_options(&comp, request),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -511,7 +547,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build(
+        let (plan, build) = plan::build_with_options(
             &mut self.evaluator,
             &comp,
             &project,
@@ -520,6 +556,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            build_options(&comp, request),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

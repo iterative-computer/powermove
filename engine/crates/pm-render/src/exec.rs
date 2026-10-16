@@ -7,7 +7,7 @@ use pm_protocol::color::{Precision, WorkingEncoding};
 use crate::capability::Unsupported;
 use crate::error::LayerFailure;
 use crate::media::{MediaCache, MediaFailure};
-use crate::pipelines::{FillUniform, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
+use crate::pipelines::{FillUniform, PassBlend, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
 use crate::plan::{Background, CompPlan, Content, Draw, Source};
 use crate::scene3d::Scene3dRenderer;
 
@@ -33,6 +33,25 @@ pub(crate) struct Resolved {
     pub from_fbo: bool,
     pub uv: [f64; 4],
     pub layer: String,
+    /// A 2.5D plane: replaces `matrix` (unit quad to target pixels,
+    /// column-major 3×3).
+    pub plane: Option<[f64; 9]>,
+    /// Level 2 raster content (`crate::sampling`).
+    pub level2: Option<crate::sampling::Sampling>,
+}
+
+impl Resolved {
+    /// The quad's `mat3` uniform: the plane, or the affine matrix.
+    pub fn uniform_matrix(&self) -> [[f32; 4]; 3] {
+        match &self.plane {
+            Some(p) => [
+                [p[0] as f32, p[1] as f32, p[2] as f32, 0.0],
+                [p[3] as f32, p[4] as f32, p[5] as f32, 0.0],
+                [p[6] as f32, p[7] as f32, p[8] as f32, 0.0],
+            ],
+            None => m3(&self.matrix),
+        }
+    }
 }
 
 pub(crate) struct Exec<'a> {
@@ -130,100 +149,126 @@ impl Exec<'_> {
                 from_fbo: false,
                 uv: [0.0, 0.0, 1.0, 1.0],
                 layer: draw.layer.clone(),
+                plane: None,
+                level2: None,
             };
-            match &draw.content {
-                Content::Solid(c) => r.solid = Some(*c),
-                Content::Texture { source, uv, alpha } => {
-                    r.uv = *uv;
-                    r.alpha = *alpha;
-                    match source {
-                        Source::Comp(child) => {
-                            // A group boundary shares its parent's pixel
-                            // space: it renders only the region, drawn 1:1.
-                            let group = child.group;
-                            let child_region = if group { region } else { None };
-                            let (w, h) = match child_region {
-                                Some(g) => (g.width, g.height),
-                                None => (child.width, child.height),
-                            };
-                            let target = self.pool.take_working(self.device, w, h, self.precision);
-                            self.render_comp(encoder, child, child_region, &target);
-                            r.view = Some(target.view.clone());
-                            r.from_fbo = true;
-                            if let (true, Some(g)) = (group, region) {
-                                r.matrix = [
-                                    f64::from(g.width),
-                                    0.0,
-                                    0.0,
-                                    f64::from(g.height),
-                                    f64::from(g.x),
-                                    f64::from(g.y),
-                                ];
-                            }
-                            self.taken.push(target);
+            self.resolve_content(encoder, plan, draw, &draw.content, region, &mut r);
+            out.push(r);
+        }
+        out
+    }
+
+    fn resolve_content(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draw: &Draw,
+        content: &Content,
+        region: Option<Region>,
+        r: &mut Resolved,
+    ) {
+        match content {
+            Content::Solid(c) => r.solid = Some(*c),
+            Content::Placed(p) => {
+                r.plane = p.plane;
+                r.level2 = p.level2;
+                self.resolve_content(encoder, plan, draw, &p.content, region, r);
+            }
+            Content::Texture { source, uv, alpha } => {
+                r.uv = *uv;
+                r.alpha = *alpha;
+                match source {
+                    Source::Comp(child) | Source::Accumulate(child) => {
+                        // A group boundary (and a motion-blur accumulation)
+                        // shares its parent's pixel space: it renders only
+                        // the region, drawn 1:1.
+                        let group = child.group;
+                        let child_region = if group { region } else { None };
+                        let (w, h) = match child_region {
+                            Some(g) => (g.width, g.height),
+                            None => (child.width, child.height),
+                        };
+                        let target = self.pool.take_working(self.device, w, h, self.precision);
+                        let blend = if matches!(source, Source::Accumulate(_)) {
+                            PassBlend::Additive
+                        } else {
+                            PassBlend::Over
+                        };
+                        self.render_comp_with(encoder, child, child_region, &target, blend);
+                        r.view = Some(target.view.clone());
+                        r.from_fbo = true;
+                        if let (true, Some(g)) = (group, region) {
+                            r.matrix = [
+                                f64::from(g.width),
+                                0.0,
+                                0.0,
+                                f64::from(g.height),
+                                f64::from(g.x),
+                                f64::from(g.y),
+                            ];
                         }
-                        Source::Image { path, .. } => {
-                            match self.media.image(
-                                self.device,
-                                self.queue,
-                                self.pipelines,
-                                encoder,
-                                path,
-                                self.working,
-                                self.precision,
-                            ) {
-                                Ok(t) => r.view = Some(t.view.clone()),
-                                Err(e) => self.fail(plan, draw, e),
-                            }
+                        self.taken.push(target);
+                    }
+                    Source::Image { path, .. } => {
+                        match self.media.image(
+                            self.device,
+                            self.queue,
+                            self.pipelines,
+                            encoder,
+                            path,
+                            self.working,
+                            self.precision,
+                        ) {
+                            Ok(t) => r.view = Some(t.view.clone()),
+                            Err(e) => self.fail(plan, draw, e),
                         }
-                        Source::Video { path, time, .. } => {
-                            match self.media.video(
-                                self.device,
-                                self.queue,
-                                self.pipelines,
-                                encoder,
-                                path,
-                                instance_of(&draw.layer),
-                                *time,
-                                self.export,
-                                self.working,
-                                self.precision,
-                            ) {
-                                Ok(Some(t)) => r.view = Some(t.view.clone()),
-                                Ok(None) => {}
-                                Err(e) => self.fail(plan, draw, e),
-                            }
+                    }
+                    Source::Video {
+                        path, time, rate, ..
+                    } => {
+                        match self.media.video(
+                            self.device,
+                            self.queue,
+                            self.pipelines,
+                            encoder,
+                            path,
+                            instance_of(&draw.layer),
+                            *time,
+                            *rate,
+                            self.export,
+                            self.working,
+                            self.precision,
+                        ) {
+                            Ok(Some(t)) => r.view = Some(t.view.clone()),
+                            Ok(None) => {}
+                            Err(e) => self.fail(plan, draw, e),
                         }
-                        Source::Object3d(object) => {
-                            match self.scene3d.render(
-                                self.device,
-                                self.queue,
-                                encoder,
-                                self.pool,
-                                object,
-                                self.depth_id,
-                            ) {
-                                Ok(out) => {
-                                    // The pass renders in GL row order.
-                                    r.view = Some(out.color.view.clone());
-                                    r.from_fbo = true;
-                                    r.depth = out.depth.as_ref().map(|d| d.view.clone());
-                                    self.taken.push(out.color);
-                                    if let Some(d) = out.depth {
-                                        self.taken.push(d);
-                                    }
+                    }
+                    Source::Object3d(object) => {
+                        match self.scene3d.render(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            self.pool,
+                            object,
+                            self.depth_id,
+                        ) {
+                            Ok(out) => {
+                                // The pass renders in GL row order.
+                                r.view = Some(out.color.view.clone());
+                                r.from_fbo = true;
+                                r.depth = out.depth.as_ref().map(|d| d.view.clone());
+                                self.taken.push(out.color);
+                                if let Some(d) = out.depth {
+                                    self.taken.push(d);
                                 }
-                                Err(message) => {
-                                    self.fail(plan, draw, MediaFailure::Failed(message))
-                                }
                             }
+                            Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
                 }
             }
-            out.push(r);
         }
-        out
     }
 
     /// Renders `plan` into `target` (the region's size when `region` is set).
@@ -233,6 +278,19 @@ impl Exec<'_> {
         plan: &CompPlan,
         region: Option<Region>,
         target: &Target,
+    ) -> Vec<Resolved> {
+        self.render_comp_with(encoder, plan, region, target, PassBlend::Over)
+    }
+
+    /// [`Self::render_comp`] with the pass's blending: source-over, or
+    /// additive for motion-blur samples (`drawSample(true)`: `ONE, ONE`).
+    pub fn render_comp_with(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        region: Option<Region>,
+        target: &Target,
+        blend: PassBlend,
     ) -> Vec<Resolved> {
         let resolved = self.resolve(encoder, plan, region);
         let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
@@ -261,7 +319,8 @@ impl Exec<'_> {
             let color = r
                 .solid
                 .unwrap_or([r.alpha, if r.from_fbo { 1.0 } else { 0.0 }, 0.0, 0.0]);
-            let u = quad(r.matrix, r.uv, color);
+            let mut u = quad(r.matrix, r.uv, color);
+            u.m = r.uniform_matrix();
             let at = (i + 1) * UNIFORM_STRIDE as usize;
             data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
         }
@@ -375,11 +434,11 @@ impl Exec<'_> {
         for (i, r) in resolved.iter().enumerate() {
             let offset = ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
             if r.solid.is_some() {
-                pass.set_pipeline(self.pipelines.solid(format));
+                pass.set_pipeline(self.pipelines.solid_with(format, blend));
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {
-                pass.set_pipeline(self.pipelines.draw(format));
+                pass.set_pipeline(self.pipelines.draw_with(format, blend));
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.set_bind_group(1, bind, &[]);
                 pass.draw(0..4, 0..1);
@@ -404,7 +463,7 @@ impl Exec<'_> {
             let id = i as u32;
             let alpha = r.solid.map_or(r.alpha, |c| c[3]);
             let u = QuadUniform {
-                m: m3(&r.matrix),
+                m: r.uniform_matrix(),
                 res: [full.0 as f32, full.1 as f32, 0.0, 0.0],
                 uv: r.uv.map(|v| v as f32),
                 color: [

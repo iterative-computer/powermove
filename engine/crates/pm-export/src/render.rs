@@ -639,6 +639,18 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         // Today's alpha exports render without the composition background.
         background: alpha == AlphaOutput::None,
         export: true,
+        // Today's export counts: 16 samples opaque, 20 with alpha (the
+        // composition's `motionBlurSamples` when set).
+        motion_blur: if s.motion_blur {
+            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
+                pm_protocol::frame::MotionBlurKind::Export
+            } else {
+                pm_protocol::frame::MotionBlurKind::AlphaExport
+            })
+        } else {
+            pm_render::motion::MotionBlur::Off
+        },
+        sampling: pm_render::sampling::Sampling::Final,
     };
     Ok(ExportPlan {
         spec,

@@ -1782,6 +1782,7 @@ impl Thread {
                 .composer
                 .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
             let composition = view.state.composition.as_str().to_owned();
+            composer.set_playing(timing.is_some());
             match composer.compose(
                 doc.document(),
                 &composition,

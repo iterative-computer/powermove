@@ -78,6 +78,9 @@ pub struct Draw {
 pub enum Content {
     /// A premultiplied color.
     Solid([f64; 4]),
+    /// Solid or texture content drawn through a 2.5D plane or with level 2
+    /// sampling (`crate::space25d`, `crate::sampling`).
+    Placed(Box<Placed>),
     /// A source sampled through a UV window (`u_uv`: offset, scale), hard
     /// edges outside 0..1, multiplied by `alpha`.
     Texture {
@@ -85,6 +88,18 @@ pub enum Content {
         uv: [f64; 4],
         alpha: f64,
     },
+}
+
+/// Content with a projective placement or a level 2 resampler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    /// [`Content::Solid`] or [`Content::Texture`].
+    pub content: Content,
+    /// A 2.5D layer's homography: unit quad to target pixels, column-major
+    /// (replaces the draw's affine matrix for drawing).
+    pub plane: Option<crate::space25d::Plane>,
+    /// Level 2 raster content: the resampler and analytic edges.
+    pub level2: Option<crate::sampling::Sampling>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,11 +113,17 @@ pub enum Source {
         path: PathBuf,
         /// Source time in seconds after retiming and today's end clamp.
         time: f64,
+        /// Interpret Footage frame rate override (`interpret.frameRate`):
+        /// frame n shows at n / rate.
+        rate: Option<pm_time::Rate>,
     },
     /// A nested composition (precomp) or a group's compositing boundary.
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
+    /// Motion-blur samples accumulated with additive blending into a
+    /// transparent target in the parent's pixel space (`crate::motion`).
+    Accumulate(Box<CompPlan>),
 }
 
 /// Inputs and outputs of a build.
@@ -110,8 +131,24 @@ pub struct Build<'r> {
     pub assets: &'r dyn AssetResolver,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
-    retime: RetimeCache,
+    pub(crate) retime: RetimeCache,
     precomp_depth: u32,
+    /// Motion blur for layers with their switch on; `None` when the request
+    /// has it off or inside a group's samples (today's `mblur: false`).
+    pub(crate) blur: Option<crate::motion::Blur>,
+    /// The composition time at which video sources select their frame
+    /// inside motion-blur samples (the center time of their level).
+    pub(crate) video_center: Option<f64>,
+    /// The resampler of level 2 raster content.
+    pub(crate) sampling: crate::sampling::Sampling,
+}
+
+/// Options of a build beyond the frame's geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BuildOptions {
+    /// Resolved motion blur (`crate::motion::resolve`).
+    pub blur: Option<crate::motion::Blur>,
+    pub sampling: crate::sampling::Sampling,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -130,12 +167,41 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
+    build_with_options(
+        ev,
+        root_comp,
+        project,
+        time,
+        width,
+        height,
+        scale,
+        assets,
+        BuildOptions::default(),
+    )
+}
+
+/// [`build`] with motion blur and the level 2 resampler.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_options<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    options: BuildOptions,
+) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
         failures: Vec::new(),
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
         precomp_depth: 0,
+        blur: options.blur,
+        video_center: None,
+        sampling: options.sampling,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -162,7 +228,7 @@ fn layer_failure(b: &mut Build<'_>, comp: &Comp<'_>, layer: &Node, message: Stri
 
 /// `renderProject(proj, T, W, H, opt)` for one pass.
 #[allow(clippy::too_many_arguments)]
-fn comp_pass<'d>(
+pub(crate) fn comp_pass<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     time: f64,
@@ -191,8 +257,11 @@ fn comp_pass<'d>(
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
         let known = |_: &JsString| true;
+        // A group with motion blur is a boundary only while motion blur
+        // applies (`opt.mblur !== false`).
+        let blur_on = b.blur.is_some();
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
-            s.group_creates_compositing_boundary(l, time, true, &known)
+            s.group_creates_compositing_boundary(l, time, blur_on, &known)
         };
         match scope.compositing_layers(&all, parent_id.as_ref(), &mut boundary) {
             Ok(p) => p,
@@ -204,6 +273,18 @@ fn comp_pass<'d>(
                 });
                 return plan;
             }
+        }
+    };
+    // `compositionOrderedLayers`: 2.5D runs back to front.
+    let pass = match crate::space25d::order(scope, pass, time) {
+        Ok(p) => p,
+        Err(e) => {
+            b.failures.push(LayerFailure {
+                composition: comp_id,
+                layer: group_parent.map(js::layer_id).unwrap_or_default(),
+                message: e.to_string(),
+            });
+            return plan;
         }
     };
     let solo = all.iter().any(|l| js::flag(l, "solo"));
@@ -348,10 +429,7 @@ fn draw_layer<'d>(
         }
     }
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
-    if mblur.truthy() {
-        refuse(Feature::MotionBlur);
-        return Ok(None);
-    }
+    let blur = if mblur.truthy() { b.blur } else { None };
     let transition: Option<ActiveTransition<'d>> =
         scope.active_transition(layer, time, &|_| true)?;
     if transition.is_some() {
@@ -363,6 +441,13 @@ fn draw_layer<'d>(
         return Ok(None);
     }
     if ty == "group" {
+        if let Some(blur) = blur {
+            // The group's members at every sample time, accumulated.
+            let draw = crate::motion::plan::blur_group(
+                scope, b, layer, time, width, height, scale, alpha, blur,
+            );
+            return Ok(Some(vec![draw]));
+        }
         // A boundary group (only opacity can make it one here): its members
         // composite into their own target, drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
@@ -377,16 +462,36 @@ fn draw_layer<'d>(
             },
         }]));
     }
-    // 3D object layers draw in screen space (`c.screenSpace`), never as planes.
-    if pm_eval::parenting::Role3d::of(layer).is_none() && scope.is_3d_layer(layer)? {
-        refuse(Feature::TwoAndAHalfD);
-        return Ok(None);
+    if let Some(blur) = blur {
+        let draw = crate::motion::plan::blur_layer(
+            scope, b, layer, time, width, height, scale, alpha, blur,
+        )?;
+        return Ok(draw.map(|d| vec![d]));
     }
+    Ok(layer_draw(scope, b, layer, time, width, height, scale, alpha)?.map(|d| vec![d]))
+}
+
+/// `drawContent(L, T, W, H, alpha)`: the layer's content quad at `time`
+/// through its world matrix, or its 2.5D plane, with `alpha` folded in.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layer_draw<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    alpha: f64,
+) -> JsResult<Option<Draw>> {
     let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
     let world = scaled_world(scope, layer, time, scale)?;
     let id = js::layer_id(layer);
+    let ty = js::layer_type(layer);
+    let level2 = (crate::sampling::is_level2(layer) && crate::sampling::samples_layer_type(&ty))
+        .then_some(b.sampling);
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -397,10 +502,15 @@ fn draw_layer<'d>(
             ay,
         } => {
             let alpha = alpha * a;
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
             Draw {
                 layer: id,
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
-                content: Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
+                content: placed(
+                    Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
+                    plane,
+                    None,
+                ),
             }
         }
         Quad::Texture {
@@ -410,11 +520,14 @@ fn draw_layer<'d>(
             ax,
             ay,
             uv,
-        } => Draw {
-            layer: id,
-            matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
-            content: Content::Texture { source, uv, alpha },
-        },
+        } => {
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
+            Draw {
+                layer: id,
+                matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
+                content: placed(Content::Texture { source, uv, alpha }, plane, level2),
+            }
+        }
         Quad::Screen { source } => Draw {
             layer: id,
             matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
@@ -425,7 +538,23 @@ fn draw_layer<'d>(
             },
         },
     };
-    Ok(Some(vec![draw]))
+    Ok(Some(draw))
+}
+
+/// `content` as it is, or wrapped with its plane and resampler.
+fn placed(
+    content: Content,
+    plane: Option<crate::space25d::Plane>,
+    level2: Option<crate::sampling::Sampling>,
+) -> Content {
+    if plane.is_none() && level2.is_none() {
+        return content;
+    }
+    Content::Placed(Box::new(Placed {
+        content,
+        plane,
+        level2,
+    }))
 }
 
 /// `scaledWorld(L, T, W, H)` without a preview viewport.
@@ -561,12 +690,22 @@ fn native_content_quad<'d>(
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
             let source = if ty == "video" {
-                let st = scope.source_time(layer, time, Some(&mut b.retime))?;
-                let dur = rec("dur").to_number();
+                // Inside motion-blur samples video keeps the center time's
+                // frame (`crate::motion`).
+                let at = b.video_center.unwrap_or(time);
+                let st = scope.source_time(layer, at, Some(&mut b.retime))?;
+                let rate = crate::retime::rate_override(record);
+                let time = match rate {
+                    // The file's frames on the overridden grid; the last
+                    // frame clamps when the media is opened.
+                    Some(_) => js::max(0.0, st),
+                    None => playback_time(st, rec("dur").to_number()),
+                };
                 Source::Video {
                     asset: asset_id,
                     path,
-                    time: playback_time(st, dur),
+                    time,
+                    rate,
                 }
             } else {
                 Source::Image {
@@ -595,8 +734,20 @@ fn native_content_quad<'d>(
             let ch = node::to_number(scope.comp.member("h"));
             let w = js::max(1.0, or_chain(js::get(&d, "w"), cw, wf));
             let hh = js::max(1.0, or_chain(js::get(&d, "h"), ch, hf));
-            let tw = js::max(2.0, js::round(w * scale.0));
-            let th = js::max(2.0, js::round(hh * scale.1));
+            let (tw, th) = if crate::sampling::is_level2(layer) {
+                // Continuous rasterization (section 8): the child renders
+                // at the density it is drawn at, never below its own size.
+                let density = crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?;
+                (
+                    js::max(2.0, js::round(w * js::max(scale.0, density.0))),
+                    js::max(2.0, js::round(hh * js::max(scale.1, density.1))),
+                )
+            } else {
+                (
+                    js::max(2.0, js::round(w * scale.0)),
+                    js::max(2.0, js::round(hh * scale.1)),
+                )
+            };
             if !(tw.is_finite() && th.is_finite()) || tw > 16384.0 || th > 16384.0 {
                 b.failures.push(LayerFailure {
                     composition: comp_id,
@@ -606,11 +757,19 @@ fn native_content_quad<'d>(
                 return Ok(None);
             }
             let (tw, th) = (tw as u32, th as u32);
-            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
             let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
                 Ok(c) => c,
                 Err(_) => return Ok(None),
             };
+            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
+            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
+            // The child's video frames follow the center time of this level
+            // inside motion-blur samples.
+            let outer_center = b.video_center;
+            if let Some(center) = outer_center {
+                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
+                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
+            }
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;
             let project = scope.project;
@@ -628,6 +787,7 @@ fn native_content_quad<'d>(
                 )
             };
             b.precomp_depth -= 1;
+            b.video_center = outer_center;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
                 w,
@@ -721,10 +881,7 @@ pub fn fit_uv(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
 /// `[0, dur − 0.04]`. The engine then selects the frame by section 5 rule 7
 /// (today's microsecond rounding only steers Chromium's seek to the same
 /// frame).
-pub fn playback_time(time: f64, dur: f64) -> f64 {
-    let dur = if dur.is_nan() { 0.0 } else { dur };
-    js::max(0.0, js::min(js::max(0.0, dur - 0.04), time))
-}
+pub use crate::retime::playback_time;
 
 /// `PM.normalizeFill(comp.backgroundFill, comp.bg)` and the clear it gives.
 pub fn background(comp: &Comp<'_>) -> Background {
@@ -841,14 +998,6 @@ mod tests {
         assert_eq!(fit_uv("fill", 2.0, 1.0, 1.0, 1.0), [0.0, 0.0, 1.0, 1.0]);
         // A 1:2 source in a 1:1 box.
         assert_eq!(fit_uv("contain", 1.0, 2.0, 1.0, 1.0), [-0.5, 0.0, 2.0, 1.0]);
-    }
-
-    #[test]
-    fn playback_time_clamps_like_video_timing() {
-        assert_eq!(playback_time(-1.0, 2.0), 0.0);
-        assert_eq!(playback_time(1.0, 2.0), 1.0);
-        assert!((playback_time(5.0, 2.0) - 1.96).abs() < 1e-12);
-        assert_eq!(playback_time(0.5, f64::NAN), 0.0);
     }
 
     fn parse(s: &str) -> Node {

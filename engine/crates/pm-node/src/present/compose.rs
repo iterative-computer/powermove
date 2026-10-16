@@ -158,6 +158,9 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
+    /// The viewer is playing: today's playing motion-blur count and the
+    /// playback resampler (`set_playing`).
+    playing: bool,
 }
 
 impl Composer {
@@ -251,11 +254,17 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
+            playing: false,
         }
     }
 
     pub fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
+    }
+
+    /// Whether the next frames are playback frames (timed) or paused ones.
+    pub fn set_playing(&mut self, playing: bool) {
+        self.playing = playing;
     }
 
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
@@ -292,6 +301,18 @@ impl Composer {
                 depth_id: false,
                 background: true,
                 export: false,
+                // Today's viewer: 6 samples while playing, 12 when paused;
+                // the playback resampler while playing.
+                motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
+                    pm_protocol::frame::MotionBlurKind::PreviewPlaying
+                } else {
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused
+                }),
+                sampling: if self.playing {
+                    pm_render::sampling::Sampling::Playback
+                } else {
+                    pm_render::sampling::Sampling::Final
+                },
             };
             let reuse = self
                 .scratch
