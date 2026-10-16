@@ -188,7 +188,13 @@ impl VectorCache {
         }
     }
 
+    /// Selects the level 2 coverage backend; cached textures are dropped
+    /// when it changes, so the next frame is rendered by the new one.
     pub fn set_backend(&mut self, backend: CoverageBackend) {
+        if backend != self.backend {
+            self.entries.clear();
+            self.bytes = 0;
+        }
         self.backend = backend;
     }
 

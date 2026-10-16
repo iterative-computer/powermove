@@ -18,13 +18,15 @@
 mod canvas_cases;
 
 /// Cases with a pixel off by more than 1 code value, as measured on
-/// `canvas-20261016-065301-15d1dedc` (Electron 44, Chromium 152, Apple M-series):
+/// `canvas-20261016-075306-cbd1dcfd` (Electron 44, Chromium 152, Apple M-series):
 /// (id, pixels off by more than 1, largest difference).
 const KNOWN: &[(&str, usize, i32)] = &[
     ("shape-ellipse-big-s2.75", 3, 64),
     ("shape-random153-s3.75", 1, 45),
     ("paths-badge-rotated-scaled-s3", 2, 57),
     ("diag-ellipse-380", 2, 64),
+    // The parity corpus's composition/metadata rectangle (radius 24).
+    ("shape-corpus-rect-r24-s1", 2, 64),
 ];
 
 #[test]

@@ -12,7 +12,7 @@ use peniko::Fill;
 use peniko::color::AlphaColor;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
-use crate::render::scene::{AtlasLayout, CoverageScene, FillRule, ItemStyle};
+use crate::render::scene::{AtlasLayout, CoverageScene, FillRule};
 
 /// Why the GPU backend is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,19 +97,12 @@ impl GpuCoverage {
             );
             self.scene
                 .push_clip_layer(Fill::NonZero, Affine::IDENTITY, &cell_rect);
-            let transform = to_cell * item.transform;
-            match &item.style {
-                ItemStyle::Fill(rule) => {
-                    let fill = match rule {
-                        FillRule::NonZero => Fill::NonZero,
-                        FillRule::EvenOdd => Fill::EvenOdd,
-                    };
-                    self.scene.fill(fill, transform, white, None, &item.path);
-                }
-                ItemStyle::Stroke(stroke) => {
-                    self.scene.stroke(stroke, transform, white, None, &item.path);
-                }
-            }
+            let (outline, rule) = item.device_outline();
+            let fill = match rule {
+                FillRule::NonZero => Fill::NonZero,
+                FillRule::EvenOdd => Fill::EvenOdd,
+            };
+            self.scene.fill(fill, to_cell, white, None, &outline);
             self.scene.pop_layer();
         }
         let params = RenderParams {

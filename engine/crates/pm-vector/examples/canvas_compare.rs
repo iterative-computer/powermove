@@ -5,7 +5,7 @@
 //! PIX (differing pixels), ROW/COL (alpha along a row and a column).
 use std::path::Path;
 
-#[path = "../tests/canvas_cases.rs"]
+#[path = "../tests/canvas_cases/mod.rs"]
 mod canvas_cases;
 
 fn main() {

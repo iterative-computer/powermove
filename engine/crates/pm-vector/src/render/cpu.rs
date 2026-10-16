@@ -7,7 +7,7 @@ use peniko::Fill;
 use peniko::color::AlphaColor;
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, Resources};
 
-use crate::render::scene::{AtlasLayout, CoverageScene, FillRule, ItemStyle};
+use crate::render::scene::{AtlasLayout, CoverageScene, FillRule};
 
 /// Coverage pages as 8-bit premultiplied RGBA (white × coverage), the format
 /// Vello's GPU backend writes.
@@ -49,20 +49,13 @@ pub fn render_coverage(scene: &CoverageScene, layout: &AtlasLayout) -> CoverageP
                 f64::from(cell.y + cell.device.height),
             );
             ctx.push_clip_layer(&kurbo::Shape::to_path(&cell_rect, 0.1));
-            ctx.set_transform(to_cell * item.transform);
-            match &item.style {
-                ItemStyle::Fill(rule) => {
-                    ctx.set_fill_rule(match rule {
-                        FillRule::NonZero => Fill::NonZero,
-                        FillRule::EvenOdd => Fill::EvenOdd,
-                    });
-                    ctx.fill_path(&item.path);
-                }
-                ItemStyle::Stroke(stroke) => {
-                    ctx.set_stroke(stroke.clone());
-                    ctx.stroke_path(&item.path);
-                }
-            }
+            let (outline, rule) = item.device_outline();
+            ctx.set_transform(to_cell);
+            ctx.set_fill_rule(match rule {
+                FillRule::NonZero => Fill::NonZero,
+                FillRule::EvenOdd => Fill::EvenOdd,
+            });
+            ctx.fill_path(&outline);
             ctx.set_transform(Affine::IDENTITY);
             ctx.pop_layer();
         }
@@ -113,7 +106,7 @@ pub fn paint_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::scene::{CoverageItem, PixelRect};
+    use crate::render::scene::{CoverageItem, ItemStyle, PixelRect};
     use kurbo::{Rect, Shape};
 
     fn rect_item(r: Rect, color: [f32; 4]) -> CoverageItem {
@@ -140,6 +133,34 @@ mod tests {
         };
         assert!((i32::from(at(2, 3)) - 128).abs() <= 1, "{}", at(2, 3));
         assert_eq!(at(3, 3), 255);
+    }
+
+    /// Curved edges keep their area (no erosion from coarse flattening).
+    #[test]
+    fn circle_coverage_is_its_area() {
+        let mut scene = CoverageScene::default();
+        let circle = kurbo::Circle::new((64.3, 61.7), 50.0);
+        scene.items.push(CoverageItem {
+            path: circle.to_path(1e-3),
+            transform: Affine::IDENTITY,
+            style: ItemStyle::Fill(FillRule::NonZero),
+            color: [1.0; 4],
+        });
+        let clip = PixelRect::new(0, 0, 128, 128);
+        let layout = AtlasLayout::pack(&scene, clip, 256);
+        let cov = render_coverage(&scene, &layout);
+        let cell = layout.cells[0];
+        let mut area = 0.0f64;
+        for y in 0..cell.device.height {
+            for x in 0..cell.device.width {
+                area += f64::from(cov.coverage(&layout, 0, cell.x + x, cell.y + y)) / 255.0;
+            }
+        }
+        let exact = core::f64::consts::PI * 2500.0;
+        // Flattening within 1/256 px insets the edge by under 0.004 px on
+        // average (about 0.8 px² over the circumference), and 8-bit
+        // coverage moves each of ~400 edge pixels by under 1/255.
+        assert!((area - exact).abs() < 1.5, "area {area}, exact {exact}");
     }
 
     #[test]

@@ -1,0 +1,289 @@
+//! Vector layers (plan section 10; docs/engine/vector.md): `compat` level 2
+//! shapes at output resolution with analytic edges, Vello on the GPU
+//! against the `vello_cpu` fallback, the solid `radius` on level 2 only, and
+//! the vector cache's memory accounting.
+//!
+//! Level 2 references are computed here, not captured: each pixel's exact
+//! coverage of the transformed geometry, estimated with 16 × 16 samples.
+
+mod support;
+
+use pm_protocol::color::Precision;
+use pm_protocol::common::Size;
+use pm_render::vector::cache::CoverageBackend;
+use pm_render::{MapResolver, RenderRequest, Renderer};
+use serde_json::{Value, json};
+use support::doc::*;
+use support::ticks;
+
+const W: u32 = 256;
+const H: u32 = 256;
+
+/// A layer at the composition's center, rotated by `rotation` degrees and
+/// scaled by `scale` percent.
+fn placed(id: &str, ty: &str, d: Value, compat: u32, rotation: f64, scale: f64) -> Value {
+    let mut l = layer(id, ty, d, 128.0, 128.0, 2.0);
+    set(&mut l, "rotation", json!(rotation));
+    set(&mut l, "scale.x", json!(scale));
+    set(&mut l, "scale.y", json!(scale));
+    if compat > 1 {
+        l["compat"] = json!(compat);
+    }
+    l
+}
+
+fn render_alpha(renderer: &mut Renderer, layers: Vec<Value>) -> Vec<f32> {
+    let doc = load(&project(W, H, 2.0, no_fill(), layers));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    let frame = renderer
+        .render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+        .expect("render");
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let rgba = renderer.read_rgba(&frame).unwrap();
+    rgba.chunks(4).map(|p| p[3]).collect()
+}
+
+/// Exact coverage of each pixel by `inside` (composition pixels), with
+/// 16 × 16 samples per pixel.
+fn coverage(inside: impl Fn(f64, f64) -> bool) -> Vec<f32> {
+    let mut out = vec![0.0f32; (W * H) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let mut n = 0u32;
+            for sy in 0..16 {
+                for sx in 0..16 {
+                    let px = f64::from(x) + (f64::from(sx) + 0.5) / 16.0;
+                    let py = f64::from(y) + (f64::from(sy) + 0.5) / 16.0;
+                    n += u32::from(inside(px, py));
+                }
+            }
+            out[(y * W + x) as usize] = n as f32 / 256.0;
+        }
+    }
+    out
+}
+
+/// Composition point to layer units for a layer at the center rotated by
+/// `rotation` degrees and scaled by `scale` percent.
+fn to_layer(px: f64, py: f64, rotation: f64, scale: f64) -> (f64, f64) {
+    let (s, c) = (-rotation.to_radians()).sin_cos();
+    let (dx, dy) = (px - 128.0, py - 128.0);
+    let k = 100.0 / scale;
+    ((dx * c - dy * s) * k, (dx * s + dy * c) * k)
+}
+
+fn point_in_polygon(poly: &[(f64, f64)], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Error statistics over the reference's edge pixels (partial coverage),
+/// and the largest error anywhere.
+struct EdgeError {
+    edge_pixels: usize,
+    rms: f64,
+    psnr_db: f64,
+    max_any: f32,
+}
+
+fn edge_error(ours: &[f32], reference: &[f32]) -> EdgeError {
+    let (mut sum, mut n, mut max_any) = (0.0f64, 0usize, 0.0f32);
+    for (a, b) in ours.iter().zip(reference) {
+        let e = (a - b).abs();
+        max_any = max_any.max(e);
+        if *b > 0.0 && *b < 1.0 {
+            sum += f64::from(e) * f64::from(e);
+            n += 1;
+        }
+    }
+    let rms = (sum / n.max(1) as f64).sqrt();
+    EdgeError { edge_pixels: n, rms, psnr_db: -20.0 * rms.log10(), max_any }
+}
+
+fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
+    let outer = w.min(h) / 2.0;
+    let inner = outer * 0.46;
+    let n = points * 2;
+    (0..n)
+        .map(|i| {
+            let a = -core::f64::consts::FRAC_PI_2 + f64::from(i) * core::f64::consts::TAU / f64::from(n);
+            let r = if i % 2 == 1 { inner } else { outer };
+            (a.cos() * r, a.sin() * r)
+        })
+        .collect()
+}
+
+#[test]
+fn level2_edges_are_analytic() {
+    let mut renderer = Renderer::headless().unwrap();
+    let (rotation, scale) = (17.0, 130.0);
+    let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
+    let star = json!({ "shape": "star", "w": 150, "h": 150, "points": 7, "color": "#FFFFFF", "stroke": 0 });
+    let star_poly = star_polygon(150.0, 150.0, 7);
+    // A line is a round-capped stroke: a capsule of radius 4.5 around
+    // (-80, 0)..(80, 0) in layer units.
+    let line = json!({ "shape": "line", "w": 160, "h": 20, "color": "#FFFFFF", "stroke": 9 });
+    type Inside = Box<dyn Fn(f64, f64) -> bool>;
+    let cases: Vec<(&str, Value, Inside)> = vec![
+        (
+            "ellipse",
+            ellipse,
+            Box::new(move |x, y| {
+                let (u, v) = to_layer(x, y, rotation, scale);
+                (u / 75.0).powi(2) + (v / 48.0).powi(2) <= 1.0
+            }),
+        ),
+        (
+            "line",
+            line,
+            Box::new(move |x, y| {
+                let (u, v) = to_layer(x, y, rotation, scale);
+                let cu = u.clamp(-80.0, 80.0);
+                (u - cu).powi(2) + v.powi(2) <= 4.5 * 4.5
+            }),
+        ),
+        (
+            "star",
+            star,
+            Box::new(move |x, y| {
+                let (u, v) = to_layer(x, y, rotation, scale);
+                point_in_polygon(&star_poly, u, v)
+            }),
+        ),
+    ];
+    for (name, d, inside) in cases {
+        let reference = coverage(inside);
+        let level2 = render_alpha(&mut renderer, vec![placed(name, "shape", d.clone(), 2, rotation, scale)]);
+        let level1 = render_alpha(&mut renderer, vec![placed(name, "shape", d, 1, rotation, scale)]);
+        let e2 = edge_error(&level2, &reference);
+        let e1 = edge_error(&level1, &reference);
+        eprintln!(
+            "{name}: level 2 over {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}; level 1 rms {:.5} ({:.1} dB), max {:.4}",
+            e2.edge_pixels, e2.rms, e2.psnr_db, e2.max_any, e1.rms, e1.psnr_db, e1.max_any
+        );
+        assert!(e2.edge_pixels > 300, "{name}: the shape has edges");
+        assert!(e2.psnr_db >= 40.0, "{name}: level 2 edges are analytic ({:.1} dB)", e2.psnr_db);
+        assert!(e2.max_any <= 0.03, "{name}: level 2 largest error {}", e2.max_any);
+        assert!(
+            e2.rms * 2.0 < e1.rms,
+            "{name}: level 2 is sharper than the level 1 raster ({:.5} vs {:.5})",
+            e2.rms,
+            e1.rms
+        );
+    }
+}
+
+#[test]
+fn gpu_and_cpu_coverage_agree() {
+    let mut renderer = Renderer::headless().unwrap();
+    let layers = || {
+        vec![
+            placed(
+                "star",
+                "shape",
+                json!({ "shape": "star", "w": 180, "h": 180, "points": 9, "color": "#4C8DFF", "stroke": 6, "strokeColor": "#F2C14E" }),
+                2,
+                -23.0,
+                110.0,
+            ),
+            placed(
+                "rect",
+                "shape",
+                json!({ "shape": "rect", "w": 120, "h": 70, "radius": 18, "color": "#3FCF8E", "stroke": 0 }),
+                2,
+                41.0,
+                90.0,
+            ),
+        ]
+    };
+    renderer.set_vector_backend(CoverageBackend::Auto);
+    let gpu = render_alpha(&mut renderer, layers());
+    assert_eq!(renderer.last_vector_backend(), Some("vello"), "Vello draws on the GPU");
+    renderer.set_vector_backend(CoverageBackend::Cpu);
+    let cpu = render_alpha(&mut renderer, layers());
+    assert_eq!(renderer.last_vector_backend(), Some("vello_cpu"));
+    let (mut max, mut sum, mut differing) = (0.0f32, 0.0f64, 0usize);
+    for (a, b) in gpu.iter().zip(&cpu) {
+        let e = (a - b).abs();
+        max = max.max(e);
+        sum += f64::from(e);
+        differing += usize::from(e > 0.0);
+    }
+    let mean = sum / gpu.len() as f64;
+    eprintln!("Vello GPU vs vello_cpu: {differing} pixels differ, max {max:.4}, mean {mean:.6}");
+    assert!(max <= 3.0 / 255.0 + 1e-6, "coverage agrees within 3/255 (max {max})");
+    assert!(mean <= 1e-3, "mean difference {mean}");
+}
+
+#[test]
+fn solid_radius_is_honored_on_level2_only() {
+    let mut renderer = Renderer::headless().unwrap();
+    let d = json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": 30 });
+    let mut l1 = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
+    let level1 = render_alpha(&mut renderer, vec![l1.clone()]);
+    l1["compat"] = json!(2);
+    let level2 = render_alpha(&mut renderer, vec![l1]);
+    // The solid's box, as level 1 draws it (today's quad, radius ignored).
+    let opaque: Vec<(u32, u32)> = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|(x, y)| level1[(y * W + x) as usize] > 0.5)
+        .collect();
+    let (x0, y0) = (opaque.iter().map(|p| p.0).min().unwrap(), opaque.iter().map(|p| p.1).min().unwrap());
+    let (x1, y1) = (opaque.iter().map(|p| p.0).max().unwrap() + 1, opaque.iter().map(|p| p.1).max().unwrap() + 1);
+    assert_eq!((x1 - x0, y1 - y0), (120, 80), "level 1 draws the full box");
+    let at = |a: &[f32], x: u32, y: u32| a[(y * W + x) as usize];
+    assert_eq!(at(&level1, x0, y0), 1.0, "level 1 ignores the radius");
+    assert_eq!(at(&level2, x0, y0), 0.0, "level 2 rounds the corner");
+    assert_eq!(at(&level2, x0 + 60, y0), 1.0, "level 2 keeps the straight edges");
+    // Level 2 against the exact rounded rectangle.
+    let (fx0, fy0) = (f64::from(x0), f64::from(y0));
+    let reference = coverage(|x, y| {
+        let (u, v) = (x - fx0, y - fy0);
+        if !(0.0..=120.0).contains(&u) || !(0.0..=80.0).contains(&v) {
+            return false;
+        }
+        let cx = u.clamp(30.0, 90.0);
+        let cy = v.clamp(30.0, 50.0);
+        (u - cx).powi(2) + (v - cy).powi(2) <= 900.0
+    });
+    let e = edge_error(&level2, &reference);
+    eprintln!(
+        "solid radius 30: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
+        e.edge_pixels, e.rms, e.psnr_db, e.max_any
+    );
+    assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
+}
+
+#[test]
+fn vector_textures_are_accounted_and_trimmed() {
+    let mut renderer = Renderer::headless().unwrap();
+    assert_eq!(renderer.vector_cache_bytes(), 0);
+    let layers = vec![
+        placed("a", "shape", json!({ "shape": "ellipse", "w": 100, "h": 60, "color": "#FFFFFF" }), 1, 0.0, 100.0),
+        placed("b", "shape", json!({ "shape": "polygon", "w": 100, "h": 100, "points": 6, "color": "#FFFFFF" }), 2, 10.0, 100.0),
+    ];
+    let first = render_alpha(&mut renderer, layers.clone());
+    let bytes = renderer.vector_cache_bytes();
+    eprintln!("vector cache after one frame: {bytes} bytes");
+    // A level 1 raster (RGBA8) and a level 2 coverage atlas plus its float
+    // paint target hold at least the shapes' pixels.
+    assert!(bytes >= 100 * 60 * 4 + 100 * 100 * 4, "{bytes} bytes");
+    // The same frame again reuses the cached textures.
+    let again = render_alpha(&mut renderer, layers.clone());
+    assert_eq!(renderer.vector_cache_bytes(), bytes);
+    assert_eq!(first, again);
+    // Lease pressure frees them; the next frame rebuilds identical pixels.
+    renderer.trim(0);
+    assert_eq!(renderer.vector_cache_bytes(), 0);
+    let rebuilt = render_alpha(&mut renderer, layers);
+    assert_eq!(first, rebuilt);
+}

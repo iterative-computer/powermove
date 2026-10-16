@@ -16,6 +16,10 @@ use crate::path::PathLayer;
 use crate::render::color::{CanvasColor, StyleSlot};
 use crate::shape::{ShapeGeometry, StrokePaint};
 
+/// Largest distance, in device pixels, between an item's curves and the
+/// line segments the coverage backends rasterize.
+pub const FLATTEN_TOLERANCE: f64 = 1.0 / 256.0;
+
 /// Fill rule of a filled item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FillRule {
@@ -73,6 +77,39 @@ impl CoverageItem {
         };
         let finite = r.x0.is_finite() && r.y0.is_finite() && r.x1.is_finite() && r.y1.is_finite();
         (finite && r.width() >= 0.0 && r.height() >= 0.0).then_some(r)
+    }
+
+    /// The area the item covers as line segments in device pixels, with
+    /// its fill rule: fills are transformed and flattened, strokes expanded
+    /// in local space (Canvas2D strokes under the current transform), then
+    /// transformed and flattened, all within [`FLATTEN_TOLERANCE`].
+    ///
+    /// Both coverage backends rasterize this outline, so their results
+    /// differ only by their area arithmetic; left to themselves they flatten
+    /// curves with a quarter-pixel tolerance, which erodes every curved edge
+    /// by about 0.1 px (measured: a circle of radius 50 lost 42 px², 0.5% of
+    /// its area, in `vello_cpu`, and Vello on the GPU lost as much).
+    pub fn device_outline(&self) -> (BezPath, FillRule) {
+        let (local, rule) = match &self.style {
+            ItemStyle::Fill(rule) => (self.path.clone(), *rule),
+            ItemStyle::Stroke(stroke) => {
+                // Expand finely enough that the transformed outline stays
+                // within the tolerance.
+                let c = self.transform.as_coeffs();
+                let scale = libm::hypot(c[0], c[1]).max(libm::hypot(c[2], c[3])).max(1e-9);
+                let outline = kurbo::stroke(
+                    self.path.iter(),
+                    stroke,
+                    &kurbo::StrokeOpts::default(),
+                    FLATTEN_TOLERANCE / scale / 4.0,
+                );
+                (outline, FillRule::NonZero)
+            }
+        };
+        let device = self.transform * local;
+        let mut out = BezPath::new();
+        kurbo::flatten(device.iter(), FLATTEN_TOLERANCE, |el| out.push(el));
+        (out, rule)
     }
 
     /// Premultiplied paint.

@@ -101,9 +101,12 @@ pub fn raw(c: &serde_json::Value) -> (u32, u32, Vec<u8>) {
 }
 
 
+/// A rasterized case: width, height, premultiplied RGBA8.
+pub type Raster = (u32, u32, Vec<u8>);
+
 /// A case rasterized by the emulation: `None` for SVG cases (rendered by
 /// the SVG path, not the Canvas2D emulation).
-pub fn rasterize(c: &serde_json::Value) -> Option<Result<(u32, u32, Vec<u8>), RasterError>> {
+pub fn rasterize(c: &serde_json::Value) -> Option<Result<Raster, RasterError>> {
     if c["kind"] == "svg" {
         return None;
     }

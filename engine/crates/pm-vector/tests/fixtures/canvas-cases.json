@@ -8746,6 +8746,36 @@
    "scale": 3
   },
   {
+   "id": "shape-corpus-rect-r24-s1",
+   "kind": "shape",
+   "d": {
+    "shape": "rect",
+    "color": "#3FCF8E",
+    "w": 100,
+    "h": 100,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "scale": 1
+  },
+  {
+   "id": "shape-corpus-rect-r24-s1.25",
+   "kind": "shape",
+   "d": {
+    "shape": "rect",
+    "color": "#3FCF8E",
+    "w": 100,
+    "h": 100,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "scale": 1.25
+  },
+  {
    "id": "diag-tri-cubic-0",
    "kind": "raw",
    "width": 40,

@@ -54,6 +54,18 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", false),
 ];
 
+/// Frames outside the render class by a measured, explained residual:
+/// (project, most pixels off by more than 1, largest difference). A frame
+/// within its pin is listed as known instead of failed; one beyond it fails.
+///
+/// - `composition/metadata`: the radius-24 rectangle's Canvas2D raster has
+///   two pixels where one of Chromium's four MSAA samples falls on the other
+///   side of a tessellated arc edge (0.15/256 px from it); the compat level 1
+///   emulation reproduces the raster otherwise exactly
+///   (docs/engine/vector.md, "Residuals"; `shape-corpus-rect-r24-s1` in
+///   pm-vector's Canvas2D parity test).
+const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[("composition/metadata", 6, 43)];
+
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -311,7 +323,12 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            if !d.passes() || bar.is_some_and(|b| !b.pass()) {
+            let known = KNOWN_RESIDUALS.iter().any(|&(name, pixels, max)| {
+                p.name == name && bar.is_none() && d.pixels - d.within_one <= pixels && d.max <= max
+            });
+            if known && !d.passes() {
+                eprintln!("  known residual: {}", p.name);
+            } else if !d.passes() || bar.is_some_and(|b| !b.pass()) {
                 failed.push(line);
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();

@@ -149,6 +149,8 @@ export function cases(): Case[] {
     ['self-intersecting', [{ id: 's', parent: null, p: P({ closed: true, fill: '#A73366', strokeWidth: 2 }), vertices: [{ x: -60, y: -40 }, { x: 60, y: 40 }, { x: 60, y: -40 }, { x: -60, y: 40 }] }]],
   ];
   for (const [id, paths] of pathCases) for (const scale of [0.5, 1, 1.75, 3]) out.push({ id: `paths-${id}-s${scale}`, kind: 'paths', paths, scale });
+  // The rounded rectangle of the parity corpus's composition/metadata.
+  for (const scale of [1, 1.25]) out.push({ id: `shape-corpus-rect-r24-s${scale}`, kind: 'shape', d: { shape: 'rect', color: '#3FCF8E', w: 100, h: 100, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale });
   out.push(...diagnostics(), ...svgCases());
   return out;
 }
