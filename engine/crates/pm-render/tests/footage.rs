@@ -503,3 +503,105 @@ fn wide_gamut_footage_converts_in_linear_light_when_interpreted() {
             .any(|p| p[..3].iter().any(|&v| v < 0.0))
     );
 }
+
+/// A still document: `path` (w × h) stretched over the whole frame.
+fn still_document(
+    path: &Path,
+    (w, h): (u32, u32),
+    interpret: Option<Value>,
+) -> (Value, MapResolver) {
+    let mut doc = project(
+        w,
+        h,
+        1.0,
+        no_fill(),
+        vec![layer(
+            "i",
+            "image",
+            json!({ "asset": "img", "fit": "stretch", "w": w, "h": h }),
+            f64::from(w) / 2.0,
+            f64::from(h) / 2.0,
+            1.0,
+        )],
+    );
+    asset(&mut doc, "img", "image", "png", w, h, 0.0);
+    if let Some(i) = interpret {
+        doc["assets"]["img"]["interpret"] = i;
+        doc["requiresEngine"] = json!("native");
+    }
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("img".into(), path.to_path_buf());
+    (doc, resolver)
+}
+
+#[test]
+fn interpreted_stills_convert_other_profiles_through_colorsync() {
+    let (Some(adobe), Some(reference)) = (
+        formats("image/icc-adobergb.png"),
+        formats("image/ref-srgb-icc-adobergb.png"),
+    ) else {
+        return;
+    };
+    let (w, h) = (320u32, 180u32);
+    let mut r = Renderer::headless().unwrap();
+    let (doc, res) = still_document(&adobe, (w, h), None);
+    let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
+    assert!(
+        r.render(&load(&doc), "Ptest-root", ticks(0.0), &request, &res)
+            .is_err(),
+        "Adobe RGB stills are routed without an interpretation"
+    );
+    // Any interpretation (here the file's own primaries) draws it, converted
+    // by ColorSync into linear Rec.709 and re-encoded with E.
+    let (doc, res) = still_document(&adobe, (w, h), Some(json!({ "primaries": "bt709" })));
+    let ours = render(&mut r, &doc, (w, h), 0.0, &res);
+    let pool = pm_media::pool::FramePool::new(0);
+    let want = pm_media::image::read(&reference, &pool).unwrap();
+    let want_px = want
+        .frame
+        .with_planes(|p| {
+            (0..h as usize)
+                .flat_map(|y| {
+                    let row = unsafe {
+                        std::slice::from_raw_parts(p[0].ptr.add(y * p[0].stride), w as usize * 4)
+                    };
+                    row.to_vec()
+                })
+                .collect::<Vec<u8>>()
+        })
+        .unwrap();
+    let (mut max, mut compared) = (0f64, 0usize);
+    for i in 0..(w * h) as usize {
+        let px = &ours[i * 4..i * 4 + 3];
+        if px.iter().any(|v| !(-0.002..=1.002).contains(v)) {
+            continue; // outside sRGB: kept unclipped, ColorSync's reference clipped
+        }
+        compared += 1;
+        for c in 0..3 {
+            max = max.max((f64::from(px[c]) * 255.0 - f64::from(want_px[i * 4 + c])).abs());
+        }
+    }
+    eprintln!("icc-adobergb.png through the renderer: max |Δ| {max:.3} CV over {compared} pixels");
+    assert!(compared > 30_000 && max <= 1.0, "{max} over {compared}");
+}
+
+#[test]
+fn interpreted_stills_take_alpha_overrides() {
+    let Some(exr) = formats("image/exr-half-alpha.exr") else {
+        return;
+    };
+    let (w, h) = (256u32, 16u32);
+    let mut r = Renderer::headless().unwrap();
+    let (doc, res) = still_document(&exr, (w, h), Some(json!({ "alpha": "ignore" })));
+    let ours = render(&mut r, &doc, (w, h), 0.0, &res);
+    assert!(ours.chunks_exact(4).all(|p| p[3] == 1.0));
+    let (doc, res) = still_document(&exr, (w, h), Some(json!({ "alpha": "straight" })));
+    let straight = render(&mut r, &doc, (w, h), 0.0, &res);
+    // Column 100 of row 8: alpha 100/255; straight color premultiplied.
+    let i = (8 * w as usize + 100) * 4;
+    assert!(
+        (straight[i + 3] - 100.0 / 255.0).abs() < 1e-3,
+        "{:?}",
+        &straight[i..i + 4]
+    );
+}

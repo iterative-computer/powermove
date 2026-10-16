@@ -471,7 +471,10 @@ fn check_media(
         return;
     };
     match ty {
-        "image" => match crate::media::probe_image(&path) {
+        "image" => match crate::footage::interpretation(record).map_or_else(
+            || crate::media::probe_image(&path),
+            |i| crate::media::probe_interpreted_image(&path, &i),
+        ) {
             Ok(()) => {}
             Err(crate::media::ProbeIssue::Unsupported(f)) => add(layer, f),
             Err(crate::media::ProbeIssue::Unreadable(m)) => add(layer, Feature::Media(m)),

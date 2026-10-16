@@ -162,7 +162,9 @@ impl Exec<'_> {
                             }
                             self.taken.push(target);
                         }
-                        Source::Image { path, .. } => {
+                        Source::Image {
+                            path, interpret, ..
+                        } => {
                             match self.media.image(
                                 self.device,
                                 self.queue,
@@ -171,6 +173,7 @@ impl Exec<'_> {
                                 path,
                                 self.working,
                                 self.precision,
+                                interpret.as_ref(),
                             ) {
                                 Ok(t) => r.view = Some(t.view.clone()),
                                 Err(e) => self.fail(plan, draw, e),

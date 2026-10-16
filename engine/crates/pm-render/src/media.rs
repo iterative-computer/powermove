@@ -102,6 +102,79 @@ fn probe_cache() -> &'static ProbeCache {
     CACHE.get_or_init(Default::default)
 }
 
+/// [`probe_image`] for an asset with Interpret Footage overrides (only this
+/// engine reads them, so there is no legacy look to match): readable, not
+/// animated, and a reading the renderer converts (every ICC profile, through
+/// ColorSync where it is neither sRGB nor Display P3; Rec.709 OpenEXR).
+pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
+    if stamp(path).is_none() {
+        return Err(ProbeIssue::Unreadable(format!(
+            "{} is offline",
+            path.display()
+        )));
+    }
+    if let Ok(Some(a)) = pm_media::image::animation(path)
+        && a.frames > 1
+    {
+        return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
+    }
+    let pool = FramePool::new(0);
+    let still = pm_media::image::read(path, &pool)
+        .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+    interpreted_image_color(&still, interp).map(|_| ())
+}
+
+/// A still's reading with Interpret Footage overrides: profiles other than
+/// sRGB and Display P3 are read after the ColorSync conversion
+/// ([`pm_media::image::imageio::convert_to_linear_srgb`]); primaries,
+/// transfer, and alpha overrides replace the file's.
+pub fn interpreted_image_color(
+    still: &pm_media::image::StillImage,
+    interp: &Interpretation,
+) -> Result<SourceColor, ProbeIssue> {
+    let mut color = if still.color.icc_class == Some(IccClass::Other) {
+        // Converted to extended linear sRGB before the source pass.
+        SourceColor {
+            transfer: Transfer::Linear,
+            primaries: Primaries::Bt709,
+            matrix: MatrixCoefficients::Identity,
+            siting: ChromaSiting::Center,
+            alpha: match still.color.alpha {
+                AlphaMode::Opaque => AlphaMode::Opaque,
+                _ => AlphaMode::Premultiplied,
+            },
+            tone_map: None,
+        }
+    } else {
+        image_color(still)?
+    };
+    if let Some(p) = interp.primaries {
+        color.primaries = p;
+    }
+    if let Some(t) = interp.transfer {
+        color.transfer = t;
+        color.tone_map = matches!(t, Transfer::Pq | Transfer::Hlg).then_some(ToneMap {
+            transfer: t,
+            peak_nits: 1000.0,
+        });
+    }
+    if let Some(a) = interp.alpha
+        && still.color.alpha != AlphaMode::Opaque
+    {
+        color.alpha = match a {
+            pm_media::interpret::AlphaChoice::Ignore => AlphaMode::Opaque,
+            pm_media::interpret::AlphaChoice::Straight => AlphaMode::Straight,
+            pm_media::interpret::AlphaChoice::Premultiplied => AlphaMode::Premultiplied,
+            pm_media::interpret::AlphaChoice::PremultipliedWithColor => {
+                AlphaMode::PremultipliedWithColor {
+                    matte: interp.alpha_matte,
+                }
+            }
+        };
+    }
+    Ok(color)
+}
+
 /// Whether an image file can be drawn: readable, not animated, in a tested
 /// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
@@ -406,6 +479,8 @@ struct ImageKey {
     len: u64,
     modified: u128,
     precision: u8,
+    /// The interpretation it was converted with (empty: none).
+    reading: String,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -474,7 +549,8 @@ impl MediaCache {
             .ok_or_else(|| MediaFailure::Failed("the device cannot import decoded frames".into()))
     }
 
-    /// The working texture of a still.
+    /// The working texture of a still, read with the asset's Interpret
+    /// Footage overrides when it has any.
     #[allow(clippy::too_many_arguments)]
     pub fn image(
         &mut self,
@@ -485,6 +561,7 @@ impl MediaCache {
         path: &Path,
         working: WorkingEncoding,
         precision: Precision,
+        interpret: Option<&Interpretation>,
     ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
@@ -493,21 +570,33 @@ impl MediaCache {
             len,
             modified,
             precision: precision as u8,
+            reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
         }
-        match probe_image(path) {
-            Ok(()) => {}
-            Err(ProbeIssue::Unsupported(f)) => return Err(MediaFailure::Unsupported(f)),
-            Err(ProbeIssue::Unreadable(m)) => return Err(MediaFailure::Failed(m)),
-        }
-        let still = pm_media::image::read(path, &self.pool)
-            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-        let color = image_color(&still).map_err(|i| match i {
+        let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
-        })?;
+        };
+        match interpret {
+            Some(i) => probe_interpreted_image(path, i),
+            None => probe_image(path),
+        }
+        .map_err(issue)?;
+        let mut still = pm_media::image::read(path, &self.pool)
+            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        let color = match interpret {
+            Some(i) => {
+                let color = interpreted_image_color(&still, i).map_err(issue)?;
+                if still.color.icc_class == Some(IccClass::Other) {
+                    still = pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
+                color
+            }
+            None => image_color(&still).map_err(issue)?,
+        };
         let importer = self.importer()?;
         let imported = importer
             .import(&still.frame)
