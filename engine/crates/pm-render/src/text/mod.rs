@@ -30,9 +30,7 @@ use pm_text::render::bitmap::Bitmaps;
 use pm_text::render::color::{self, Rgba};
 use pm_text::render::outline::Outlines;
 use pm_text::render::profile::Profile;
-use pm_text::render::scene::{
-    ItemContent, PathStyle, Painter, TextScene, fill_path, rounded_rect,
-};
+use pm_text::render::scene::{ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect};
 
 /// The fonts a renderer lays text out with: `pm-text`'s level 1 layout
 /// over the host's font registry (full font files, so outlines are
@@ -289,7 +287,11 @@ fn hex_to_rgba(hex: &str, opacity: f64) -> Rgba {
         if n.is_nan() { 0.0 } else { n }
     };
     let (r, g, b) = (part(0, 2), part(2, 4), part(4, 6));
-    let a = if v.len() >= 8 { part(6, 8) / 255.0 } else { 1.0 };
+    let a = if v.len() >= 8 {
+        part(6, 8) / 255.0
+    } else {
+        1.0
+    };
     let alpha = libm::round(a * opacity * 1000.0) / 1000.0;
     // The `rgba(...)` string the canvas parses: channels are integers.
     [r / 255.0, g / 255.0, b / 255.0, alpha.clamp(0.0, 1.0)]
@@ -462,18 +464,13 @@ impl TextContext {
                 let (mut painter, fonts, unsupported) = self.painter();
                 let mut style_color = color::BLACK;
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
-                    if !(g.opacity > 0.0) {
+                    if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
                     }
-                    let m = Affine::new([
-                        density,
-                        0.0,
-                        0.0,
-                        density,
-                        -a.x0 * density,
-                        -a.y0 * density,
-                    ]) * Affine::translate((g.unit.x, *baseline))
-                        * Affine::new(g.matrix);
+                    let m =
+                        Affine::new([density, 0.0, 0.0, density, -a.x0 * density, -a.y0 * density])
+                            * Affine::translate((g.unit.x, *baseline))
+                            * Affine::new(g.matrix);
                     let fill = match &g.color {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
@@ -553,11 +550,15 @@ impl TextContext {
                 .unwrap_or(false)
         };
         if has("animators") || has("styles") {
-            self.unsupported.push("animated or range-styled text at compat level 2".into());
+            self.unsupported
+                .push("animated or range-styled text at compat level 2".into());
             return Ok(None);
         }
-        if pm_eval::node::member(stored, "fontAnchorBounds").is_some_and(|b| pm_eval::node::truthy(Some(b))) {
-            self.unsupported.push("typography anchoring at compat level 2".into());
+        if pm_eval::node::member(stored, "fontAnchorBounds")
+            .is_some_and(|b| pm_eval::node::truthy(Some(b)))
+        {
+            self.unsupported
+                .push("typography anchoring at compat level 2".into());
             return Ok(None);
         }
         let d = scope.resolved_text_content(layer, time)?;
@@ -569,16 +570,21 @@ impl TextContext {
         };
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         let Some(l2) = fonts.level2() else {
-            self.unsupported.push("compat level 2 text without level 2 fonts".into());
+            self.unsupported
+                .push("compat level 2 text without level 2 fonts".into());
             return Ok(None);
         };
         let layout = l2.engine.layout(&tc);
         if layout.missing_glyphs > 0 {
-            self.unsupported.push("compat level 2 text whose fonts are not loaded".into());
+            self.unsupported
+                .push("compat level 2 text whose fonts are not loaded".into());
             return Ok(None);
         }
-        let faces: Vec<Option<pm_text::font::FontBytes>> =
-            layout.runs.iter().map(|r| l2.face(&r.font).cloned()).collect();
+        let faces: Vec<Option<pm_text::font::FontBytes>> = layout
+            .runs
+            .iter()
+            .map(|r| l2.face(&r.font).cloned())
+            .collect();
         let mut scene = TextScene {
             width: target.0,
             height: target.1,
@@ -592,7 +598,8 @@ impl TextContext {
         };
         for (run, data) in layout.runs.iter().zip(&faces) {
             let Some(data) = data else {
-                self.unsupported.push(format!("compat level 2 font {} not loaded", run.font));
+                self.unsupported
+                    .push(format!("compat level 2 font {} not loaded", run.font));
                 return Ok(None);
             };
             let face = pm_text::render::outline::FaceRef {
@@ -667,7 +674,11 @@ impl TextContext {
 
     /// The captions rasterizer's `draw(frame, scale)` as a scene, with the
     /// raster box and anchor.
-    pub fn caption_scene(&mut self, f: &CaptionFrame, scale: f64) -> (TextScene, f64, f64, f64, f64) {
+    pub fn caption_scene(
+        &mut self,
+        f: &CaptionFrame,
+        scale: f64,
+    ) -> (TextScene, f64, f64, f64, f64) {
         let block = f.block;
         let margin = f.margin;
         let w = block.x1 - block.x0 + margin * 2.0;
@@ -678,7 +689,8 @@ impl TextContext {
             height: canvas_px(h, density),
             items: Vec::new(),
         };
-        let m0 = Affine::new([density, 0.0, 0.0, density, 0.0, 0.0]) * Affine::translate((margin, margin));
+        let m0 = Affine::new([density, 0.0, 0.0, density, 0.0, 0.0])
+            * Affine::translate((margin, margin));
         self.caption_items(f, m0, &mut scene);
         (scene, w, h, margin - block.x0, margin - block.y0)
     }
@@ -691,7 +703,10 @@ impl TextContext {
         let block = f.block;
         let pad = if style.boxed { style.box_padding } else { 0.0 };
         if style.boxed && style.box_opacity > 0.0 {
-            let fill = hex_to_rgba(&style.box_color.to_string_lossy(), style.box_opacity / 100.0);
+            let fill = hex_to_rgba(
+                &style.box_color.to_string_lossy(),
+                style.box_opacity / 100.0,
+            );
             let path = rounded_rect(
                 0.0,
                 0.0,
@@ -716,13 +731,15 @@ impl TextContext {
         let mut fill_previous = color::BLACK;
         for line in &layout.lines {
             for word in &line.words {
-                let state = f.states.get(word.index).copied().unwrap_or(
-                    pm_eval::captions::WordState {
-                        alpha: 1.0,
-                        scale: 1.0,
-                        highlighted: false,
-                    },
-                );
+                let state =
+                    f.states
+                        .get(word.index)
+                        .copied()
+                        .unwrap_or(pm_eval::captions::WordState {
+                            alpha: 1.0,
+                            scale: 1.0,
+                            highlighted: false,
+                        });
                 if state.alpha <= 0.0 {
                     continue;
                 }
@@ -775,7 +792,11 @@ impl TextContext {
 
 /// The faces of `runs` and, for color bitmap faces, the size their glyphs
 /// draw at under the device transform `m`.
-fn run_faces(fonts: &mut dyn TextFonts, runs: &[GlyphRun], m: Affine) -> Vec<(FaceInfo, Option<f32>)> {
+fn run_faces(
+    fonts: &mut dyn TextFonts,
+    runs: &[GlyphRun],
+    m: Affine,
+) -> Vec<(FaceInfo, Option<f32>)> {
     let [a, b, c, d, _, _] = m.as_coeffs();
     let scale = (a * d - b * c).abs().sqrt();
     runs.iter()
@@ -816,15 +837,33 @@ mod tests {
 
     #[test]
     fn raster_scale_matches_the_compositor() {
-        assert_eq!(continuous_raster_scale(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), 1.0);
-        assert_eq!(continuous_raster_scale(&[0.5, 0.0, 0.0, 0.5, 9.0, 9.0]), 0.5);
-        assert_eq!(continuous_raster_scale(&[1.1, 0.0, 0.0, 1.1, 0.0, 0.0]), 1.25);
-        assert_eq!(continuous_raster_scale(&[0.01, 0.0, 0.0, 0.01, 0.0, 0.0]), 0.25);
-        assert_eq!(continuous_raster_scale(&[100.0, 0.0, 0.0, 1.0, 0.0, 0.0]), 32.0);
+        assert_eq!(
+            continuous_raster_scale(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            1.0
+        );
+        assert_eq!(
+            continuous_raster_scale(&[0.5, 0.0, 0.0, 0.5, 9.0, 9.0]),
+            0.5
+        );
+        assert_eq!(
+            continuous_raster_scale(&[1.1, 0.0, 0.0, 1.1, 0.0, 0.0]),
+            1.25
+        );
+        assert_eq!(
+            continuous_raster_scale(&[0.01, 0.0, 0.0, 0.01, 0.0, 0.0]),
+            0.25
+        );
+        assert_eq!(
+            continuous_raster_scale(&[100.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            32.0
+        );
         let r = std::f64::consts::FRAC_PI_4;
         let m = [2.0 * r.cos(), 2.0 * r.sin(), -r.sin(), r.cos(), 0.0, 0.0];
         assert_eq!(continuous_raster_scale(&m), 2.0);
-        assert_eq!(continuous_raster_scale(&[f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]), 1.0);
+        assert_eq!(
+            continuous_raster_scale(&[f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            1.0
+        );
     }
 
     #[test]

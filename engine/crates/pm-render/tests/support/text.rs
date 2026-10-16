@@ -18,7 +18,8 @@ pub fn png_rgba(px: &[u8], unpremultiply: bool) -> Vec<u8> {
             if a == 0 {
                 [0, 0, 0, 0]
             } else {
-                let u = |c: u8| ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+                let u =
+                    |c: u8| ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
                 [u(p[0]), u(p[1]), u(p[2]), a]
             }
         })
@@ -100,12 +101,17 @@ pub fn level2_fonts(
 ) -> pm_render::text::Level2Fonts {
     let manifest = registry.fallback_manifest("system-ui");
     let mut l2 = pm_render::text::Level2Fonts::default();
-    let mut add = |registry: &pm_text::registry::CoreTextRegistry, family: &str, blob: &str, index: u32| {
-        if let Some(bytes) = registry.blob(blob) {
-            let data = single_face(bytes.as_slice(), index);
-            l2.add_font(&format!("{blob}#{index}"), pm_text::font::FontBytes::new(data), family);
-        }
-    };
+    let mut add =
+        |registry: &pm_text::registry::CoreTextRegistry, family: &str, blob: &str, index: u32| {
+            if let Some(bytes) = registry.blob(blob) {
+                let data = single_face(bytes.as_slice(), index);
+                l2.add_font(
+                    &format!("{blob}#{index}"),
+                    pm_text::font::FontBytes::new(data),
+                    family,
+                );
+            }
+        };
     for f in &manifest.faces {
         add(registry, &f.family, &f.source.blob, f.source.index);
     }
@@ -120,7 +126,9 @@ pub fn level2_fonts(
 
 fn layer_lists(root: &mut pm_model::Value) -> Vec<&mut Vec<pm_model::Value>> {
     let mut out = Vec::new();
-    let Some(map) = root.as_object_mut() else { return out };
+    let Some(map) = root.as_object_mut() else {
+        return out;
+    };
     let mut comps = None;
     for (k, v) in map.iter_mut() {
         match k.to_string_lossy().as_str() {
@@ -135,7 +143,11 @@ fn layer_lists(root: &mut pm_model::Value) -> Vec<&mut Vec<pm_model::Value>> {
     }
     if let Some(comps) = comps.and_then(|c| c.as_object_mut()) {
         for (_, c) in comps.iter_mut() {
-            if let Some(a) = c.as_object_mut().and_then(|c| c.get_mut("layers")).and_then(|l| l.as_array_mut()) {
+            if let Some(a) = c
+                .as_object_mut()
+                .and_then(|c| c.get_mut("layers"))
+                .and_then(|l| l.as_array_mut())
+            {
                 out.push(a);
             }
         }
@@ -145,15 +157,21 @@ fn layer_lists(root: &mut pm_model::Value) -> Vec<&mut Vec<pm_model::Value>> {
 
 fn is_text_layer(l: &pm_model::Value) -> bool {
     matches!(
-        l.as_object().and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+        l.as_object()
+            .and_then(|o| o.get("type"))
+            .and_then(|t| t.as_str()),
         Some("text" | "captions")
     )
 }
 
 /// Whether any composition of the document holds text or captions layers.
 pub fn has_text(doc: &pm_model::Document) -> bool {
-    let Some(mut root) = doc.to_value() else { return false };
-    layer_lists(&mut root).iter().any(|l| l.iter().any(is_text_layer))
+    let Some(mut root) = doc.to_value() else {
+        return false;
+    };
+    layer_lists(&mut root)
+        .iter()
+        .any(|l| l.iter().any(is_text_layer))
 }
 
 /// The document with every text and captions layer at opacity 0 (drawn by
@@ -162,7 +180,11 @@ pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
     let mut root = doc.to_value().expect("a document");
     for list in layer_lists(&mut root) {
         for l in list.iter_mut().filter(|l| is_text_layer(l)) {
-            let Some(p) = l.as_object_mut().and_then(|o| o.get_mut("p")).and_then(|p| p.as_object_mut()) else {
+            let Some(p) = l
+                .as_object_mut()
+                .and_then(|o| o.get_mut("p"))
+                .and_then(|p| p.as_object_mut())
+            else {
                 continue;
             };
             let mut ch = pm_model::json::Map::new();

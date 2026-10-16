@@ -474,7 +474,8 @@ impl<'d> Scope<'_, 'd> {
         for g in &glyphs {
             let baseline = g.unit.y + d_size * 0.82;
             baselines.push(baseline);
-            if !(g.opacity > 0.0) {
+            // NaN opacity draws nothing, as `g.opacity > 0` filters it.
+            if g.opacity.is_nan() || g.opacity <= 0.0 {
                 continue;
             }
             let w = measure.plain_width(&text_content(&g.style), &g.unit.text);

@@ -121,7 +121,8 @@ fn decode(data: &BitmapData<'_>, width: u32, height: u32) -> Option<Rgba8> {
     let rgba: Vec<u8> = match data {
         BitmapData::Png(bytes) => {
             let mut decoder = png::Decoder::new(Cursor::new(*bytes));
-            decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+            decoder
+                .set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
             let mut reader = decoder.read_info().ok()?;
             if reader.output_color_type() != (png::ColorType::Rgba, png::BitDepth::Eight) {
                 // Gray with alpha expands to gray-alpha; widen it.
@@ -142,9 +143,9 @@ fn decode(data: &BitmapData<'_>, width: u32, height: u32) -> Option<Rgba8> {
                         png::ColorType::Rgb => (0..px)
                             .flat_map(|i| [buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2], 255])
                             .collect(),
-                        png::ColorType::Grayscale => {
-                            (0..px).flat_map(|i| [buf[i], buf[i], buf[i], 255]).collect()
-                        }
+                        png::ColorType::Grayscale => (0..px)
+                            .flat_map(|i| [buf[i], buf[i], buf[i], 255])
+                            .collect(),
                         _ => return None,
                     },
                 }));
@@ -194,7 +195,7 @@ fn premultiply(mut img: Rgba8) -> Rgba8 {
 /// kernel widened by 1 / scale); output pixel `o` is centered on source
 /// position `(o + 0.5) / scale`. Larger scales return the image as it is.
 pub fn lanczos2(img: &Rgba8, scale: f64) -> Rgba8 {
-    if !(scale < 1.0) || img.width == 0 || img.height == 0 {
+    if scale.is_nan() || scale >= 1.0 || img.width == 0 || img.height == 0 {
         return img.clone();
     }
     const SUPPORT: f64 = 2.0;
@@ -260,7 +261,7 @@ pub fn lanczos2(img: &Rgba8, scale: f64) -> Rgba8 {
 /// as it is). Output pixel `o` covers source pixels `[o, o + 1) / scale`;
 /// the part of the last row and column beyond the source is transparent.
 pub fn resample(img: &Rgba8, scale: f64) -> Rgba8 {
-    if !(scale < 1.0) || img.width == 0 || img.height == 0 {
+    if scale.is_nan() || scale >= 1.0 || img.width == 0 || img.height == 0 {
         return img.clone();
     }
     let w = ((f64::from(img.width) * scale).ceil() as u32).max(1);
@@ -316,7 +317,9 @@ pub fn resample(img: &Rgba8, scale: f64) -> Rgba8 {
 /// further, by the amounts measured at every size from 6 to 19 px
 /// (`fit-emoji`, two emoji, every pixel equal after the shift).
 pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
-    const SMALL: [f64; 14] = [1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0];
+    const SMALL: [f64; 14] = [
+        1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0,
+    ];
     let r = f64::from(requested).round();
     if r < 20.0 {
         if r >= 6.0 {
@@ -428,6 +431,10 @@ mod tests {
         assert_eq!((out.width, out.height), (8, 8));
         let mid = &out.data[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4];
         assert_eq!(mid, &[100, 50, 0, 200]);
-        assert!(out.data.chunks_exact(4).all(|p| p[0] <= p[3] && p[1] <= p[3]));
+        assert!(
+            out.data
+                .chunks_exact(4)
+                .all(|p| p[0] <= p[3] && p[1] <= p[3])
+        );
     }
 }

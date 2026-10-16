@@ -166,8 +166,13 @@ mod tests {
         for i in 0..40 {
             let x = 10.0 + f64::from(i) * 70.0;
             scene.items.push(
-                fill_path(rounded_rect(x, 20.0, 60.0, 30.0, 4.0), Affine::IDENTITY, [1.0; 4], 1.0)
-                    .unwrap(),
+                fill_path(
+                    rounded_rect(x, 20.0, 60.0, 30.0, 4.0),
+                    Affine::IDENTITY,
+                    [1.0; 4],
+                    1.0,
+                )
+                .unwrap(),
             );
         }
         let atlas = pack(&scene, 128);
@@ -195,8 +200,13 @@ mod tests {
             width: 9000,
             height: 300,
             items: vec![
-                fill_path(rounded_rect(10.0, 10.0, 8900.0, 200.0, 0.0), Affine::IDENTITY, [1.0; 4], 1.0)
-                    .unwrap(),
+                fill_path(
+                    rounded_rect(10.0, 10.0, 8900.0, 200.0, 0.0),
+                    Affine::IDENTITY,
+                    [1.0; 4],
+                    1.0,
+                )
+                .unwrap(),
             ],
         };
         let atlas = pack(&scene, 4096);
@@ -213,8 +223,13 @@ mod tests {
             width: 100,
             height: 100,
             items: vec![
-                fill_path(rounded_rect(-50.0, 10.0, 100.0, 10.0, 0.0), Affine::IDENTITY, [1.0; 4], 1.0)
-                    .unwrap(),
+                fill_path(
+                    rounded_rect(-50.0, 10.0, 100.0, 10.0, 0.0),
+                    Affine::IDENTITY,
+                    [1.0; 4],
+                    1.0,
+                )
+                .unwrap(),
             ],
         };
         let atlas = pack(&scene, 4096);

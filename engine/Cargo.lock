@@ -2206,6 +2206,7 @@ dependencies = [
  "pm-text",
  "pm-time",
  "png",
+ "read-fonts 0.45.0",
  "regex",
  "serde_json",
  "sha2",

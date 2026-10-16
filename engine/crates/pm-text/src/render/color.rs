@@ -27,12 +27,7 @@ fn hex(s: &str) -> Option<Rgba> {
     let d = d?;
     let byte = |hi: u8, lo: u8| f64::from(hi * 16 + lo) / 255.0;
     match d.len() {
-        3 => Some([
-            byte(d[0], d[0]),
-            byte(d[1], d[1]),
-            byte(d[2], d[2]),
-            1.0,
-        ]),
+        3 => Some([byte(d[0], d[0]), byte(d[1], d[1]), byte(d[2], d[2]), 1.0]),
         4 => Some([
             byte(d[0], d[0]),
             byte(d[1], d[1]),
@@ -307,7 +302,10 @@ mod tests {
         assert_eq!(parse("#fff"), Some(WHITE));
         assert_eq!(parse("#FF000080"), Some([1.0, 0.0, 0.0, 128.0 / 255.0]));
         assert_eq!(parse("rgba(255,0,0,0.5)"), Some([1.0, 0.0, 0.0, 0.5]));
-        assert_eq!(parse(" rgb(0, 128, 255) "), Some([0.0, 128.0 / 255.0, 1.0, 1.0]));
+        assert_eq!(
+            parse(" rgb(0, 128, 255) "),
+            Some([0.0, 128.0 / 255.0, 1.0, 1.0])
+        );
         assert_eq!(parse("rgb(0 0 0 / 25%)"), Some([0.0, 0.0, 0.0, 0.25]));
         assert_eq!(parse("Red"), Some([1.0, 0.0, 0.0, 1.0]));
         assert_eq!(parse("transparent"), Some([0.0; 4]));
@@ -318,7 +316,10 @@ mod tests {
 
     #[test]
     fn named_colors_are_sorted_for_the_search() {
-        assert_eq!(parse("yellowgreen"), Some([154.0 / 255.0, 205.0 / 255.0, 50.0 / 255.0, 1.0]));
+        assert_eq!(
+            parse("yellowgreen"),
+            Some([154.0 / 255.0, 205.0 / 255.0, 50.0 / 255.0, 1.0])
+        );
         assert_eq!(parse("aliceblue").map(|c| c[0]), Some(240.0 / 255.0));
         assert_eq!(parse("rebeccapurple").map(|c| c[2]), Some(153.0 / 255.0));
     }

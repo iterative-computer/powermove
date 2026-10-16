@@ -134,7 +134,9 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
-    build_with_text(ev, root_comp, project, time, width, height, scale, assets, None)
+    build_with_text(
+        ev, root_comp, project, time, width, height, scale, assets, None,
+    )
 }
 
 /// [`build`] with text layout: text and captions layers draw through
@@ -448,7 +450,14 @@ fn draw_layer<'d>(
         },
         Quad::Device { source, rect } => Draw {
             layer: id,
-            matrix: [rect[2] - rect[0], 0.0, 0.0, rect[3] - rect[1], rect[0], rect[1]],
+            matrix: [
+                rect[2] - rect[0],
+                0.0,
+                0.0,
+                rect[3] - rect[1],
+                rect[0],
+                rect[1],
+            ],
             content: Content::Texture {
                 source,
                 uv: [0.0, 0.0, 1.0, 1.0],

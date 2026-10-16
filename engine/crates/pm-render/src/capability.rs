@@ -137,7 +137,9 @@ impl fmt::Display for Unsupported {
 /// Layer types this renderer draws (or knows draw nothing). Text and
 /// captions need fonts (`Renderer::set_text_fonts`); without them a render
 /// fails with `RenderError::Unsupported`.
-const DRAWN: [&str; 7] = ["solid", "image", "video", "precomp", "group", "text", "captions"];
+const DRAWN: [&str; 7] = [
+    "solid", "image", "video", "precomp", "group", "text", "captions",
+];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.
@@ -364,7 +366,10 @@ fn check_composition(
             add(layer, Feature::Scene3d("model groups".into()));
         }
         if !fonts && matches!(ty.as_str(), "text" | "captions") {
-            add(layer, Feature::Text(format!("{ty} layers without the engine's fonts")));
+            add(
+                layer,
+                Feature::Text(format!("{ty} layers without the engine's fonts")),
+            );
         }
         match ty.as_str() {
             "image" | "video" => check_media(root, layer, &ty, assets, &mut add),

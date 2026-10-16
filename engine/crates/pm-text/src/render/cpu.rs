@@ -14,7 +14,10 @@ use super::scene::{ItemContent, PathStyle, TextScene};
 /// Renders page `page` of `atlas` for `scene`; returns RGBA8 rows.
 pub fn render_page(scene: &TextScene, atlas: &Atlas, page: usize) -> (u32, u32, Vec<u8>) {
     let (w, h) = atlas.pages[page];
-    let (w16, h16) = (w.clamp(1, u32::from(u16::MAX)) as u16, h.clamp(1, u32::from(u16::MAX)) as u16);
+    let (w16, h16) = (
+        w.clamp(1, u32::from(u16::MAX)) as u16,
+        h.clamp(1, u32::from(u16::MAX)) as u16,
+    );
     let mut ctx = RenderContext::new(w16, h16);
     let mut resources = Resources::new();
     ctx.set_paint(WHITE);

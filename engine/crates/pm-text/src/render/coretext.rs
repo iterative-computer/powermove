@@ -19,8 +19,7 @@ use objc2_core_graphics::{
     CGImageComponentInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorsFromData,
-    kCTFontVariationAttribute,
+    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorsFromData, kCTFontVariationAttribute,
 };
 
 /// One run to draw: a face's bytes, its size and user-space variation
@@ -35,11 +34,14 @@ pub struct RefRun<'a> {
     pub color: [f64; 4],
 }
 
+/// Font identity: buffer, face index, size bits, variation coordinates.
+type FontKey = (usize, u32, u32, Vec<(u32, u32)>);
+
 /// A CoreText reference renderer (keeps fonts across calls).
 #[derive(Default)]
 pub struct CoreTextReference {
     descriptors: HashMap<(usize, u32), CFRetained<CTFontDescriptor>>,
-    fonts: HashMap<(usize, u32, u32, Vec<(u32, u32)>), CFRetained<CTFont>>,
+    fonts: HashMap<FontKey, CFRetained<CTFont>>,
 }
 
 impl CoreTextReference {
@@ -53,7 +55,10 @@ impl CoreTextReference {
             id,
             run.index,
             run.size.to_bits(),
-            run.coords.iter().map(|(t, v)| (*t, v.to_bits())).collect::<Vec<_>>(),
+            run.coords
+                .iter()
+                .map(|(t, v)| (*t, v.to_bits()))
+                .collect::<Vec<_>>(),
         );
         if let Some(f) = self.fonts.get(&key) {
             return Some(f.clone());
@@ -70,15 +75,17 @@ impl CoreTextReference {
             self.fonts.insert(key, font.clone());
             return Some(font);
         }
-        if !self.descriptors.contains_key(&(id, run.index)) {
-            let data = CFData::from_bytes(run.data);
-            let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
-            // SAFETY: the function returns an array of font descriptors.
-            let arr: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(arr) };
-            let d = arr.get(run.index as usize)?;
-            self.descriptors.insert((id, run.index), d);
-        }
-        let desc = self.descriptors[&(id, run.index)].clone();
+        let desc = match self.descriptors.entry((id, run.index)) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let data = CFData::from_bytes(run.data);
+                let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
+                // SAFETY: the function returns an array of font descriptors.
+                let arr: CFRetained<CFArray<CTFontDescriptor>> =
+                    unsafe { CFRetained::cast_unchecked(arr) };
+                e.insert(arr.get(run.index as usize)?).clone()
+            }
+        };
         let mut font =
             unsafe { CTFont::with_font_descriptor(&desc, f64::from(run.size), std::ptr::null()) };
         if !run.coords.is_empty() {
@@ -120,13 +127,22 @@ impl CoreTextReference {
             let tags: Vec<u32> = font
                 .fvar()
                 .ok()
-                .and_then(|f| f.axes().ok().map(|a| a.iter().map(|x| x.axis_tag().into_bytes()).map(u32::from_be_bytes).collect()))
+                .and_then(|f| {
+                    f.axes().ok().map(|a| {
+                        a.iter()
+                            .map(|x| x.axis_tag().into_bytes())
+                            .map(u32::from_be_bytes)
+                            .collect()
+                    })
+                })
                 .unwrap_or_default();
             let axes = CGFont::variation_axes(Some(&cg))?;
             let mut names: Vec<CFRetained<CFString>> = Vec::new();
             let mut values: Vec<CFRetained<CFNumber>> = Vec::new();
             for (i, tag) in tags.iter().enumerate() {
-                let Some(&(_, v)) = run.coords.iter().find(|(t, _)| t == tag) else { continue };
+                let Some(&(_, v)) = run.coords.iter().find(|(t, _)| t == tag) else {
+                    continue;
+                };
                 // SAFETY: CGFontCopyVariationAxes returns an array of dictionaries.
                 let axis: Option<CFRetained<CFDictionary<CFString, CFType>>> = unsafe {
                     let arr: &CFArray<CFDictionary<CFString, CFType>> = axes.cast_unchecked();
@@ -134,14 +150,19 @@ impl CoreTextReference {
                 };
                 let Some(axis) = axis else { continue };
                 let name_key = unsafe { objc2_core_graphics::kCGFontVariationAxisName };
-                let Some(name) = axis.get(name_key) else { continue };
-                let Ok(name) = name.downcast::<CFString>() else { continue };
+                let Some(name) = axis.get(name_key) else {
+                    continue;
+                };
+                let Ok(name) = name.downcast::<CFString>() else {
+                    continue;
+                };
                 names.push(name);
                 values.push(CFNumber::new_f64(f64::from(v)));
             }
             let nr: Vec<&CFString> = names.iter().map(|k| &**k).collect();
             let vr: Vec<&CFNumber> = values.iter().map(|v| &**v).collect();
-            let dict: CFRetained<CFDictionary<CFString, CFNumber>> = CFDictionary::from_slices(&nr, &vr);
+            let dict: CFRetained<CFDictionary<CFString, CFNumber>> =
+                CFDictionary::from_slices(&nr, &vr);
             cg = unsafe { CGFont::new_copy_with_variations(Some(&cg), Some(dict.as_opaque())) }?;
         }
         // CoreText sets the optical size from the point size unless the font
@@ -166,7 +187,13 @@ impl CoreTextReference {
 
     /// Draws `runs` in order into a transparent `width` × `height` bitmap;
     /// returns premultiplied f32 RGBA, top-down.
-    pub fn render(&mut self, runs: &[RefRun<'_>], width: u32, height: u32, smoothing: bool) -> Vec<f32> {
+    pub fn render(
+        &mut self,
+        runs: &[RefRun<'_>],
+        width: u32,
+        height: u32,
+        smoothing: bool,
+    ) -> Vec<f32> {
         let (w, h) = (width as usize, height as usize);
         let mut data = vec![0.0f32; w * h * 4];
         let Some(space) = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })) else {
@@ -176,7 +203,15 @@ impl CoreTextReference {
             | CGImageComponentInfo::Float.0
             | CGImageByteOrderInfo::Order32Little.0;
         let Some(ctx) = (unsafe {
-            CGBitmapContextCreate(data.as_mut_ptr().cast(), w, h, 32, w * 16, Some(&space), info)
+            CGBitmapContextCreate(
+                data.as_mut_ptr().cast(),
+                w,
+                h,
+                32,
+                w * 16,
+                Some(&space),
+                info,
+            )
         }) else {
             return data;
         };
@@ -203,7 +238,13 @@ impl CoreTextReference {
         );
         for run in runs {
             let Some(font) = self.font(run) else { continue };
-            CGContext::set_rgb_fill_color(c, run.color[0], run.color[1], run.color[2], run.color[3]);
+            CGContext::set_rgb_fill_color(
+                c,
+                run.color[0],
+                run.color[1],
+                run.color[2],
+                run.color[3],
+            );
             let glyphs: Vec<u16> = run.glyphs.iter().map(|g| g.0).collect();
             let pos: Vec<CGPoint> = run
                 .glyphs
@@ -261,7 +302,8 @@ mod tests {
         let plain = r.render(&[run(10.0)], 64, 64, false);
         let smooth = r.render(&[run(10.0)], 64, 64, true);
         let ink = |img: &[f32], rows: std::ops::Range<usize>| -> f32 {
-            rows.flat_map(|y| (0..64).map(move |x| img[(y * 64 + x) * 4 + 3])).sum()
+            rows.flat_map(|y| (0..64).map(move |x| img[(y * 64 + x) * 4 + 3]))
+                .sum()
         };
         assert!(ink(&plain, 22..50) > 100.0);
         assert!(ink(&plain, 52..64) < 1.0 && ink(&plain, 0..18) < 1.0);

@@ -27,10 +27,18 @@ fn main() {
         fn measure(&mut self) -> &mut dyn pm_eval::text_geom::TextMeasure {
             &mut self.0
         }
-        fn line_runs(&mut self, d: &pm_text::compat::TextContent) -> Vec<pm_text::compat::LineRuns> {
+        fn line_runs(
+            &mut self,
+            d: &pm_text::compat::TextContent,
+        ) -> Vec<pm_text::compat::LineRuns> {
             self.0.compat().line_runs(d)
         }
-        fn text_runs(&mut self, d: &pm_text::compat::TextContent, t: &str, tracking: f64) -> Vec<pm_text::compat::GlyphRun> {
+        fn text_runs(
+            &mut self,
+            d: &pm_text::compat::TextContent,
+            t: &str,
+            tracking: f64,
+        ) -> Vec<pm_text::compat::GlyphRun> {
             self.0.compat().text_runs(d, t, tracking).0
         }
         fn face(&mut self, id: pm_text::font::FaceId) -> &pm_text::font::FaceInfo {
@@ -67,29 +75,54 @@ fn main() {
         pm_model::Document::new(Some(pm_model::json::parse(&root.to_string()).unwrap()), 1)
     };
     let mut renderer = Renderer::headless().expect("a Metal device");
-    renderer.set_text_fonts(Some(Box::new(Fonts(pm_eval::text_measure::CompatMeasure::new(
-        pm_text::registry::CoreTextRegistry::new(),
-    )))));
+    renderer.set_text_fonts(Some(Box::new(Fonts(
+        pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+    ))));
     let request = RenderRequest::sized(Size::new(1920, 1080), Precision::Float16);
     let sentence = "The quick brown fox jumps over the lazy dog while editors type captions";
     let scenarios = [
         ("title 96 px", json!({})),
-        ("paragraph 48 px, 1400 px box", json!({ "size": 48, "boxWidth": 1400, "align": "left", "weight": 500 })),
+        (
+            "paragraph 48 px, 1400 px box",
+            json!({ "size": 48, "boxWidth": 1400, "align": "left", "weight": 500 }),
+        ),
         ("caption-size 36 px", json!({ "size": 36, "weight": 500 })),
     ];
     for (name, extra) in scenarios {
         // Warm up (pipelines, Vello, fonts).
         for t in ["W", "Wa"] {
-            let f = renderer.render(&doc(t, extra.clone()), "P-root", support_ticks(), &request, &MapResolver::default()).unwrap();
+            let f = renderer
+                .render(
+                    &doc(t, extra.clone()),
+                    "P-root",
+                    support_ticks(),
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
             drop(f);
         }
-        renderer.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        renderer
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let mut times = Vec::new();
         for i in 1..=sentence.len() {
             let d = doc(&sentence[..i], extra.clone());
             let start = std::time::Instant::now();
-            let frame = renderer.render(&d, "P-root", support_ticks(), &request, &MapResolver::default()).unwrap();
-            renderer.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let frame = renderer
+                .render(
+                    &d,
+                    "P-root",
+                    support_ticks(),
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            renderer
+                .device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
             times.push(start.elapsed().as_secs_f64() * 1000.0);
             drop(frame);
         }

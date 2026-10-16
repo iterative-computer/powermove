@@ -41,7 +41,9 @@ fn main() {
         return;
     }
     let only = std::env::var("PM_TEXT_ONLY").ok();
-    let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(std::path::PathBuf::from);
+    let diffs = std::env::var("PM_TEXT_DIFFS")
+        .ok()
+        .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
     let mut compared = 0;
     let mut failed = Vec::new();
@@ -78,19 +80,24 @@ fn main() {
                 continue;
             }
             if !p.missing_media.is_empty() {
-                skipped.push((p.name.clone(), format!("media not available: {:?}", p.missing_media)));
+                skipped.push((
+                    p.name.clone(),
+                    format!("media not available: {:?}", p.missing_media),
+                ));
                 continue;
             }
             let issues = renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
             if !issues.is_empty() {
-                let mut reasons: Vec<String> = issues.iter().map(|u| u.feature.to_string()).collect();
+                let mut reasons: Vec<String> =
+                    issues.iter().map(|u| u.feature.to_string()).collect();
                 reasons.dedup();
                 skipped.push((p.name.clone(), reasons.join(", ")));
                 continue;
             }
             let hidden = text::without_text(&p.document);
             for s in &p.samples {
-                let request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+                let request =
+                    RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
                 let render = |r: &mut Renderer, doc: &pm_model::Document| {
                     r.render(doc, &p.composition, ticks(s.time), &request, &p.resolver)
                         .map(|f| opaque8(&r.read_rgba(&f).unwrap()))
@@ -156,7 +163,11 @@ fn main() {
     for f in &failed {
         println!("  FAILED {f}");
     }
-    assert!(failed.is_empty(), "{} frames outside the text class", failed.len());
+    assert!(
+        failed.is_empty(),
+        "{} frames outside the text class",
+        failed.len()
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

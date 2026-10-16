@@ -38,14 +38,17 @@ fn main() {
         eprintln!("no text raster capture; set PM_TEXT_RASTER");
         return;
     };
-    let cases: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
-    let manifest: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let cases: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
     let corpus = pm_text::corpus::CorpusFile::from_value(&serde_json::json!({
         "variableSources": cases["variableSources"], "projectFonts": cases["projectFonts"], "cases": [],
     }))
     .unwrap();
     let registry = pm_text::corpus::native_registry(&corpus).expect("registry");
-    let mut fonts = support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(registry), None);
+    let mut fonts =
+        support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(registry), None);
     let mut renderer = Renderer::headless().expect("a Metal device");
     let mut reference = CoreTextReference::new();
     let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
@@ -53,7 +56,12 @@ fn main() {
     let profile = Profile::CORETEXT;
     let mut failed = Vec::new();
     let mut groups: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
-    for (case, shot) in cases["cases"].as_array().unwrap().iter().zip(manifest["cases"].as_array().unwrap()) {
+    for (case, shot) in cases["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(manifest["cases"].as_array().unwrap())
+    {
         let id = case["id"].as_str().unwrap();
         let group = case["group"].as_str().unwrap();
         if case["kind"] != "text" || group == "emoji" || group == "synthetic" {
@@ -63,15 +71,24 @@ fn main() {
             continue;
         }
         let text = case["d"]["text"].as_str().unwrap_or("");
-        if text.chars().any(|c| u32::from(c) >= 0x1F000 || c == '✂' || c == '❤') {
+        if text
+            .chars()
+            .any(|c| u32::from(c) >= 0x1F000 || c == '✂' || c == '❤')
+        {
             continue;
         }
         let g = &shot["geometry"];
-        let (w, h) = (shot["width"].as_u64().unwrap() as u32, shot["height"].as_u64().unwrap() as u32);
+        let (w, h) = (
+            shot["width"].as_u64().unwrap() as u32,
+            shot["height"].as_u64().unwrap() as u32,
+        );
         let density = g["density"].as_f64().unwrap();
         let (gx, pad) = (g["x"].as_f64().unwrap(), g["pad"].as_f64().unwrap());
         let tc = TextContent::from_json(&case["d"]);
-        let color = pm_text::render::color::parse_or(case["d"]["color"].as_str().unwrap_or("#fff"), [0.0, 0.0, 0.0, 1.0]);
+        let color = pm_text::render::color::parse_or(
+            case["d"]["color"].as_str().unwrap_or("#fff"),
+            [0.0, 0.0, 0.0, 1.0],
+        );
         let lines = {
             use pm_render::text::TextFonts;
             fonts.line_runs(&tc)
@@ -88,10 +105,18 @@ fn main() {
                     .collect()
             })
             .collect();
-        if lines.iter().flat_map(|l| &l.runs).any(|r| r.synthetic_bold || r.synthetic_italic) {
+        if lines
+            .iter()
+            .flat_map(|l| &l.runs)
+            .any(|r| r.synthetic_bold || r.synthetic_italic)
+        {
             continue;
         }
-        let mut scene = TextScene { width: w, height: h, items: Vec::new() };
+        let mut scene = TextScene {
+            width: w,
+            height: h,
+            items: Vec::new(),
+        };
         let mut painter = Painter {
             outlines: &mut outlines,
             bitmaps: &mut bitmaps,
@@ -115,7 +140,15 @@ fn main() {
                     bitmap_size: None,
                 })
                 .collect();
-            painter.fill_text(&mut scene.items, &runs, (gx, pad), Affine::scale(density), color, 1.0, 0.0);
+            painter.fill_text(
+                &mut scene.items,
+                &runs,
+                (gx, pad),
+                Affine::scale(density),
+                color,
+                1.0,
+                0.0,
+            );
             for (r, f) in line.runs.iter().zip(faces) {
                 refs.push(RefRun {
                     data: f.data.as_slice(),
@@ -131,10 +164,17 @@ fn main() {
                 });
             }
         }
-        let ours = renderer.paint_text_scene(scene, Precision::Float32).unwrap();
+        let ours = renderer
+            .paint_text_scene(scene, Precision::Float32)
+            .unwrap();
         let theirs = reference.render(&refs, w, h, true);
-        let to8 = |p: &[f32]| -> Vec<u8> { p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect() };
-        let (ink, full, ratio) = pm_render::parity::text_ssim(&to8(&theirs), &to8(&ours), w as usize, h as usize);
+        let to8 = |p: &[f32]| -> Vec<u8> {
+            p.iter()
+                .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                .collect()
+        };
+        let (ink, full, ratio) =
+            pm_render::parity::text_ssim(&to8(&theirs), &to8(&ours), w as usize, h as usize);
         println!("{id:<24} ink SSIM {ink:.4} full {full:.4} ink ratio {ratio:.3}");
         groups.entry(group.to_owned()).or_default().push(ink);
         if ink < 0.98 {
@@ -143,17 +183,32 @@ fn main() {
                 let d = std::path::PathBuf::from(d);
                 std::fs::create_dir_all(&d).unwrap();
                 for (name, px) in [("coretext", &theirs), ("engine", &ours)] {
-                    let rgba: Vec<u8> = px.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
-                    support::write_png(&d.join(format!("{id}-{name}.png")), w, h, &support::text::png_rgba(&rgba, true));
+                    let rgba: Vec<u8> = px
+                        .iter()
+                        .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                        .collect();
+                    support::write_png(
+                        &d.join(format!("{id}-{name}.png")),
+                        w,
+                        h,
+                        &support::text::png_rgba(&rgba, true),
+                    );
                 }
             }
         }
     }
-    println!("\n{:<16} {:>5} {:>8} {:>8}", "group", "cases", "min", "mean");
+    println!(
+        "\n{:<16} {:>5} {:>8} {:>8}",
+        "group", "cases", "min", "mean"
+    );
     let mut all: Vec<f64> = Vec::new();
     for (g, v) in &groups {
         let min = v.iter().cloned().fold(1.0, f64::min);
-        println!("{g:<16} {:>5} {min:>8.4} {:>8.4}", v.len(), v.iter().sum::<f64>() / v.len() as f64);
+        println!(
+            "{g:<16} {:>5} {min:>8.4} {:>8.4}",
+            v.len(),
+            v.iter().sum::<f64>() / v.len() as f64
+        );
         all.extend(v);
     }
     println!("{} cases, {} below 0.98", all.len(), failed.len());
@@ -161,7 +216,11 @@ fn main() {
     for f in &failed {
         println!("  FAILED {f}");
     }
-    assert!(failed.is_empty(), "{} cases below 0.98 against CoreText", failed.len());
+    assert!(
+        failed.is_empty(),
+        "{} cases below 0.98 against CoreText",
+        failed.len()
+    );
 }
 
 /// `compat` level 2 text layers through the whole renderer (level 2
@@ -182,7 +241,10 @@ fn level2_layers() -> Vec<String> {
     let mut l2_layout = support::text::level2_fonts(&mut registry, &families);
     let measure = pm_eval::text_measure::CompatMeasure::new(registry);
     let mut renderer = Renderer::headless().expect("a Metal device");
-    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(measure, Some(l2)))));
+    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+        measure,
+        Some(l2),
+    ))));
     let mut reference = CoreTextReference::new();
     let mut failed = Vec::new();
     let mut n = 0;
@@ -206,10 +268,17 @@ fn level2_layers() -> Vec<String> {
             set(&mut l, "scale.x", json!(scale * 100.0));
             set(&mut l, "scale.y", json!(scale * 100.0));
             let doc = project(640, 360, 10.0, no_fill(), vec![l]);
-            let doc = pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1);
+            let doc =
+                pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1);
             let mut request = RenderRequest::sized(Size::new(640, 360), Precision::Float32);
             request.background = false;
-            let frame = match renderer.render(&doc, "Ptest-root", support::ticks(0.0), &request, &pm_render::MapResolver::default()) {
+            let frame = match renderer.render(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &pm_render::MapResolver::default(),
+            ) {
                 Ok(f) => f,
                 Err(e) => {
                     failed.push(format!("level 2 layer {font} {size}: {e}"));
@@ -221,7 +290,11 @@ fn level2_layers() -> Vec<String> {
             let tc = pm_text::compat::TextContent::from_json(&d);
             let layout = l2_layout.engine.layout(&tc);
             let color = pm_text::render::color::parse_or(color, [0.0, 0.0, 0.0, 1.0]);
-            let faces: Vec<_> = layout.runs.iter().map(|r| l2_layout.face(&r.font).cloned().unwrap()).collect();
+            let faces: Vec<_> = layout
+                .runs
+                .iter()
+                .map(|r| l2_layout.face(&r.font).cloned().unwrap())
+                .collect();
             let runs: Vec<RefRun<'_>> = layout
                 .runs
                 .iter()
@@ -230,15 +303,21 @@ fn level2_layers() -> Vec<String> {
                     let user: Vec<(u32, f32)> = {
                         use read_fonts::TableProvider;
                         let f = read_fonts::FontRef::new(data.as_slice()).unwrap();
-                        let axes: Vec<_> = f.fvar().ok().and_then(|v| v.axes().ok().map(|a| a.iter().cloned().collect())).unwrap_or_default();
+                        let axes: Vec<_> = f
+                            .fvar()
+                            .ok()
+                            .and_then(|v| v.axes().ok().map(|a| a.to_vec()))
+                            .unwrap_or_default();
                         axes.iter()
                             .zip(&r.coords)
                             .map(|(a, c)| {
                                 let n = f32::from(*c) / 16384.0;
                                 let v = if n < 0.0 {
-                                    a.default_value().to_f32() + n * (a.default_value().to_f32() - a.min_value().to_f32())
+                                    a.default_value().to_f32()
+                                        + n * (a.default_value().to_f32() - a.min_value().to_f32())
                                 } else {
-                                    a.default_value().to_f32() + n * (a.max_value().to_f32() - a.default_value().to_f32())
+                                    a.default_value().to_f32()
+                                        + n * (a.max_value().to_f32() - a.default_value().to_f32())
                                 };
                                 (u32::from_be_bytes(a.axis_tag().into_bytes()), v)
                             })
@@ -251,14 +330,26 @@ fn level2_layers() -> Vec<String> {
                     index: 0,
                     size: (f64::from(r.size) * scale) as f32,
                     coords: Box::leak(user.into_boxed_slice()),
-                    glyphs: r.glyphs.iter().map(|g| (g.id as u16, px + g.x * scale, py + g.y * scale)).collect(),
+                    glyphs: r
+                        .glyphs
+                        .iter()
+                        .map(|g| (g.id as u16, px + g.x * scale, py + g.y * scale))
+                        .collect(),
                     color,
                 })
                 .collect();
             let theirs = reference.render(&runs, 640, 360, true);
-            let to8 = |p: &[f32]| -> Vec<u8> { p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect() };
-            let (ink, _, ratio) = pm_render::parity::text_ssim(&to8(&theirs), &to8(&ours), 640, 360);
-            println!("level 2 layer {font:<16} {size:>4}px ×{scale:<4} {align:<6} {}  ink SSIM {ink:.4} ink ratio {ratio:.3}", if color[0] == 0.0 { "black" } else { "light" });
+            let to8 = |p: &[f32]| -> Vec<u8> {
+                p.iter()
+                    .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                    .collect()
+            };
+            let (ink, _, ratio) =
+                pm_render::parity::text_ssim(&to8(&theirs), &to8(&ours), 640, 360);
+            println!(
+                "level 2 layer {font:<16} {size:>4}px ×{scale:<4} {align:<6} {}  ink SSIM {ink:.4} ink ratio {ratio:.3}",
+                if color[0] == 0.0 { "black" } else { "light" }
+            );
             if ink < 0.98 {
                 failed.push(format!("level 2 layer {font} {size} ×{scale}: {ink:.4}"));
             }

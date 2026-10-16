@@ -489,8 +489,19 @@ impl TextGpu {
         while i < scene.items.len() {
             if scene.items[i].blur > 0.0 {
                 self.blurred(
-                    device, queue, encoder, pool, taken, plan, i, &cells, &images, &pages, &raster,
-                    precision, &mut cleared,
+                    device,
+                    queue,
+                    encoder,
+                    pool,
+                    taken,
+                    plan,
+                    i,
+                    &cells,
+                    &images,
+                    &pages,
+                    &raster,
+                    precision,
+                    &mut cleared,
                 );
                 i += 1;
                 continue;
@@ -501,10 +512,30 @@ impl TextGpu {
                 i += 1;
             }
             let draws = self.draws(scene, start..i, crop, (tw, th), &cells, &images);
-            self.pass(device, queue, encoder, &raster, &draws, &pages, &images, precision, &mut cleared);
+            self.pass(
+                device,
+                queue,
+                encoder,
+                &raster,
+                &draws,
+                &pages,
+                &images,
+                precision,
+                &mut cleared,
+            );
         }
         if !cleared {
-            self.pass(device, queue, encoder, &raster, &[], &pages, &images, precision, &mut cleared);
+            self.pass(
+                device,
+                queue,
+                encoder,
+                &raster,
+                &[],
+                &pages,
+                &images,
+                precision,
+                &mut cleared,
+            );
         }
         self.stats.painted += 1;
         self.insert(plan, precision, raster.clone());
@@ -586,7 +617,9 @@ impl TextGpu {
                     }
                 }
                 ItemContent::Image { transform, .. } => {
-                    let Some((_, isize)) = images.get(&i) else { continue };
+                    let Some((_, isize)) = images.get(&i) else {
+                        continue;
+                    };
                     let b: Rect = item.bounds.inflate(1.0, 1.0);
                     let rect = [
                         (b.x0.floor() - origin[0]) as f32,
@@ -755,7 +788,9 @@ impl TextGpu {
         let b = pool.take_working(device, lw, lh, precision);
         let draws = self.draws(scene, index..index + 1, [rx0, ry0], (lw, lh), cells, images);
         let mut fresh = false;
-        self.pass(device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh);
+        self.pass(
+            device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh,
+        );
         let sigma = item.blur;
         let radius = blur_radius(sigma);
         let sum: f64 = (-(radius as i64)..=radius as i64)
@@ -879,7 +914,8 @@ pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
     let mut out = pm_text::render::paint::Image::new(w, h);
     for y in 0..h as usize {
         let sy = y + plan.crop[1] as usize;
-        let src = &full.data[(sy * full.width as usize + plan.crop[0] as usize) * 4..][..w as usize * 4];
+        let src =
+            &full.data[(sy * full.width as usize + plan.crop[0] as usize) * 4..][..w as usize * 4];
         out.data[y * w as usize * 4..(y + 1) * w as usize * 4].copy_from_slice(src);
     }
     out

@@ -78,17 +78,16 @@ fn bilinear(img: &super::bitmap::Rgba8, u: f64, v: f64) -> [f32; 4] {
 
 /// Paints `item` alone into `layer` (premultiplied), over the device rect
 /// `[x0, y0, x1, y1)` of a target `width` px wide.
-fn paint_item(
-    item: &Item,
-    coverage: &dyn Fn(i64, i64) -> f32,
-    rect: [i64; 4],
-    layer: &mut Image,
-) {
+fn paint_item(item: &Item, coverage: &dyn Fn(i64, i64) -> f32, rect: [i64; 4], layer: &mut Image) {
     let [x0, y0, x1, y1] = rect;
     let a = (item.color[3] * item.opacity) as f32;
     match &item.content {
         ItemContent::Coverage { curve, .. } => {
-            let rgb = [item.color[0] as f32, item.color[1] as f32, item.color[2] as f32];
+            let rgb = [
+                item.color[0] as f32,
+                item.color[1] as f32,
+                item.color[2] as f32,
+            ];
             for y in y0.max(0)..y1.min(i64::from(layer.height)) {
                 for x in x0.max(0)..x1.min(i64::from(layer.width)) {
                     let c = coverage(x, y);
@@ -98,8 +97,8 @@ fn paint_item(
                     let k = curve_at(curve, f64::from(c)) as f32 * a;
                     let o = (y as usize * layer.width as usize + x as usize) * 4;
                     let s = [rgb[0] * k, rgb[1] * k, rgb[2] * k, k];
-                    for ch in 0..4 {
-                        layer.data[o + ch] = s[ch] + layer.data[o + ch] * (1.0 - k);
+                    for (d, v) in layer.data[o..o + 4].iter_mut().zip(s) {
+                        *d = v + *d * (1.0 - k);
                     }
                 }
             }
@@ -115,8 +114,8 @@ fn paint_item(
                     }
                     let o = (y as usize * layer.width as usize + x as usize) * 4;
                     let sa = s[3] * a;
-                    for ch in 0..4 {
-                        layer.data[o + ch] = s[ch] * a + layer.data[o + ch] * (1.0 - sa);
+                    for (d, v) in layer.data[o..o + 4].iter_mut().zip(s) {
+                        *d = v * a + *d * (1.0 - sa);
                     }
                 }
             }
@@ -128,7 +127,12 @@ fn blur(img: &mut Image, rect: [i64; 4], sigma: f64) {
     let k = gaussian(sigma);
     let r = (k.len() / 2) as i64;
     let (w, h) = (i64::from(img.width), i64::from(img.height));
-    let [x0, y0, x1, y1] = [rect[0].max(0), rect[1].max(0), rect[2].min(w), rect[3].min(h)];
+    let [x0, y0, x1, y1] = [
+        rect[0].max(0),
+        rect[1].max(0),
+        rect[2].min(w),
+        rect[3].min(h),
+    ];
     if x1 <= x0 || y1 <= y0 {
         return;
     }
@@ -183,24 +187,26 @@ pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) ->
                     continue;
                 }
                 let (pw, _, data) = &pages[c.page];
-                let o = ((c.y as usize + py as usize) * *pw as usize + c.x as usize + px as usize) * 4;
+                let o =
+                    ((c.y as usize + py as usize) * *pw as usize + c.x as usize + px as usize) * 4;
                 return f32::from(data[o + 3]) / 255.0;
             }
             0.0
         };
         let rect = match &item.content {
             ItemContent::Coverage { .. } if tiles.is_empty() => continue,
-            ItemContent::Coverage { .. } => tiles.iter().fold(
-                [i64::MAX, i64::MAX, i64::MIN, i64::MIN],
-                |r, c| {
-                    [
-                        r[0].min(c.device_x),
-                        r[1].min(c.device_y),
-                        r[2].max(c.device_x + i64::from(c.width)),
-                        r[3].max(c.device_y + i64::from(c.height)),
-                    ]
-                },
-            ),
+            ItemContent::Coverage { .. } => {
+                tiles
+                    .iter()
+                    .fold([i64::MAX, i64::MAX, i64::MIN, i64::MIN], |r, c| {
+                        [
+                            r[0].min(c.device_x),
+                            r[1].min(c.device_y),
+                            r[2].max(c.device_x + i64::from(c.width)),
+                            r[3].max(c.device_y + i64::from(c.height)),
+                        ]
+                    })
+            }
             ItemContent::Image { .. } => {
                 let b = item.bounds.inflate(1.0, 1.0);
                 [

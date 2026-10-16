@@ -85,12 +85,15 @@ impl<'a> FaceRef<'a> {
     }
 }
 
+/// Normalized coordinates of a face at user coordinates.
+type LocationKey = (usize, u32, Vec<(u32, u32)>);
+
 /// The glyph outline cache.
 #[derive(Default)]
 pub struct Outlines {
     map: HashMap<Key, Option<Arc<Outline>>>,
     /// Normalized coordinates per (font, index, user coords).
-    locations: HashMap<(usize, u32, Vec<(u32, u32)>), Arc<Vec<skrifa::instance::NormalizedCoord>>>,
+    locations: HashMap<LocationKey, Arc<Vec<skrifa::instance::NormalizedCoord>>>,
 }
 
 /// A run's variation location.
@@ -222,7 +225,10 @@ impl Outlines {
             glyph,
             size: style.size.to_bits(),
             coords: coords.key(),
-            bold: (style.synthetic_bold.0.to_bits(), style.synthetic_bold.1.to_bits()),
+            bold: (
+                style.synthetic_bold.0.to_bits(),
+                style.synthetic_bold.1.to_bits(),
+            ),
             skew: style.skew.to_bits(),
             ex: style.expand.0.to_bits(),
             ey: style.expand.1.to_bits(),

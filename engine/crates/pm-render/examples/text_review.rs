@@ -43,7 +43,12 @@ mod review {
         fn line_runs(&mut self, d: &TextContent) -> Vec<pm_text::compat::LineRuns> {
             self.0.compat().line_runs(d)
         }
-        fn text_runs(&mut self, d: &TextContent, text: &str, tracking: f64) -> Vec<pm_text::compat::GlyphRun> {
+        fn text_runs(
+            &mut self,
+            d: &TextContent,
+            text: &str,
+            tracking: f64,
+        ) -> Vec<pm_text::compat::GlyphRun> {
             self.0.compat().text_runs(d, text, tracking).0
         }
         fn face(&mut self, id: pm_text::font::FaceId) -> &pm_text::font::FaceInfo {
@@ -88,7 +93,11 @@ mod review {
         px.chunks_exact(4)
             .flat_map(|p| {
                 let a = p[3];
-                std::array::from_fn::<u8, 3, _>(|c| ((p[c] + bg[c] * (1.0 - a)) * 255.0).round().clamp(0.0, 255.0) as u8)
+                std::array::from_fn::<u8, 3, _>(|c| {
+                    ((p[c] + bg[c] * (1.0 - a)) * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                })
             })
             .collect()
     }
@@ -102,17 +111,25 @@ mod review {
     }
 
     pub fn run(capture: PathBuf, out: PathBuf) {
-        let cases: Value = serde_json::from_str(&std::fs::read_to_string(capture.join("cases.json")).unwrap()).unwrap();
-        let manifest: Value = serde_json::from_str(&std::fs::read_to_string(capture.join("manifest.json")).unwrap()).unwrap();
+        let cases: Value =
+            serde_json::from_str(&std::fs::read_to_string(capture.join("cases.json")).unwrap())
+                .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(capture.join("manifest.json")).unwrap())
+                .unwrap();
         let corpus = pm_text::corpus::CorpusFile::from_value(&json!({
             "variableSources": cases["variableSources"], "projectFonts": cases["projectFonts"], "cases": [],
         }))
         .unwrap();
         let mut renderer = Renderer::headless().expect("a Metal device");
-        renderer.set_text_fonts(Some(Box::new(Fonts(pm_eval::text_measure::CompatMeasure::new(
+        renderer.set_text_fonts(Some(Box::new(Fonts(
+            pm_eval::text_measure::CompatMeasure::new(
+                pm_text::corpus::native_registry(&corpus).unwrap(),
+            ),
+        ))));
+        let mut fonts = Fonts(pm_eval::text_measure::CompatMeasure::new(
             pm_text::corpus::native_registry(&corpus).unwrap(),
-        )))));
-        let mut fonts = Fonts(pm_eval::text_measure::CompatMeasure::new(pm_text::corpus::native_registry(&corpus).unwrap()));
+        ));
         let mut reference = CoreTextReference::new();
         let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
         std::fs::create_dir_all(&out).unwrap();
@@ -121,12 +138,20 @@ mod review {
              <h1>Text review</h1><p>Rows, top to bottom: today's Canvas2D, engine level 1 (Canvas2D profile), CoreText with font smoothing, engine level 2 (CoreText profile). Scores are ink SSIM.</p>",
         );
         let mut n = 0;
-        for (case, shot) in cases["cases"].as_array().unwrap().iter().zip(manifest["cases"].as_array().unwrap()) {
+        for (case, shot) in cases["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(manifest["cases"].as_array().unwrap())
+        {
             if case["kind"] != "text" || shot.get("error").is_some() {
                 continue;
             }
             let id = case["id"].as_str().unwrap();
-            let (w, h) = (shot["width"].as_u64().unwrap() as u32, shot["height"].as_u64().unwrap() as u32);
+            let (w, h) = (
+                shot["width"].as_u64().unwrap() as u32,
+                shot["height"].as_u64().unwrap() as u32,
+            );
             if w > 2400 {
                 continue;
             }
@@ -134,13 +159,31 @@ mod review {
             let density = g["density"].as_f64().unwrap();
             let (gx, pad) = (g["x"].as_f64().unwrap(), g["pad"].as_f64().unwrap());
             let d = &case["d"];
-            let color = pm_text::render::color::parse_or(d["color"].as_str().unwrap_or("#fff"), [0.0, 0.0, 0.0, 1.0]);
+            let color = pm_text::render::color::parse_or(
+                d["color"].as_str().unwrap_or("#fff"),
+                [0.0, 0.0, 0.0, 1.0],
+            );
             let luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
-            let bg = if luma > 0.5 { [0.13f32; 3] } else { [0.88f32; 3] };
-            let reference_px: Vec<f32> = std::fs::read(capture.join(format!("{id}.rgba"))).unwrap().iter().map(|v| f32::from(*v) / 255.0).collect();
+            let bg = if luma > 0.5 {
+                [0.13f32; 3]
+            } else {
+                [0.88f32; 3]
+            };
+            let reference_px: Vec<f32> = std::fs::read(capture.join(format!("{id}.rgba")))
+                .unwrap()
+                .iter()
+                .map(|v| f32::from(*v) / 255.0)
+                .collect();
             // Level 1 through the renderer.
             let mut level1 = vec![0.0f32; (w * h * 4) as usize];
-            if let Ok(Some(r)) = renderer.text_raster(&document(d), "P-root", "l", 0.0, case["scale"].as_f64().unwrap(), Precision::Float32) {
+            if let Ok(Some(r)) = renderer.text_raster(
+                &document(d),
+                "P-root",
+                "l",
+                0.0,
+                case["scale"].as_f64().unwrap(),
+                Precision::Float32,
+            ) {
                 let [x0, y0, x1, _] = r.plan.crop.map(|v| v as usize);
                 let cw = x1 - x0;
                 for (row, chunk) in r.pixels.chunks_exact(cw * 4).enumerate() {
@@ -149,7 +192,8 @@ mod review {
                         break;
                     }
                     let n = cw.min(w as usize - x0);
-                    level1[(y * w as usize + x0) * 4..(y * w as usize + x0 + n) * 4].copy_from_slice(&chunk[..n * 4]);
+                    level1[(y * w as usize + x0) * 4..(y * w as usize + x0 + n) * 4]
+                        .copy_from_slice(&chunk[..n * 4]);
                 }
             }
             // Level 2 and CoreText at the same glyph positions.
@@ -170,8 +214,17 @@ mod review {
                         .collect()
                 })
                 .collect();
-            let mut scene = TextScene { width: w, height: h, items: Vec::new() };
-            let mut painter = Painter { outlines: &mut outlines, bitmaps: &mut bitmaps, profile: Profile::CORETEXT, unsupported: Vec::new() };
+            let mut scene = TextScene {
+                width: w,
+                height: h,
+                items: Vec::new(),
+            };
+            let mut painter = Painter {
+                outlines: &mut outlines,
+                bitmaps: &mut bitmaps,
+                profile: Profile::CORETEXT,
+                unsupported: Vec::new(),
+            };
             let mut refs: Vec<RefRun<'_>> = Vec::new();
             for (line, faces) in lines.iter().zip(&faces) {
                 let runs: Vec<Run<'_>> = line
@@ -189,25 +242,57 @@ mod review {
                         bitmap_size: None,
                     })
                     .collect();
-                painter.fill_text(&mut scene.items, &runs, (gx, pad), Affine::scale(density), color, 1.0, 0.0);
+                painter.fill_text(
+                    &mut scene.items,
+                    &runs,
+                    (gx, pad),
+                    Affine::scale(density),
+                    color,
+                    1.0,
+                    0.0,
+                );
                 for (r, f) in line.runs.iter().zip(faces) {
                     refs.push(RefRun {
                         data: f.data.as_slice(),
                         index: f.index,
                         size: (f64::from(r.size) * density) as f32,
                         coords: &r.coords,
-                        glyphs: r.glyphs.iter().map(|p| (p.id as u16, (gx + p.x) * density, (pad + p.y) * density)).collect(),
+                        glyphs: r
+                            .glyphs
+                            .iter()
+                            .map(|p| (p.id as u16, (gx + p.x) * density, (pad + p.y) * density))
+                            .collect(),
                         color,
                     });
                 }
             }
-            let level2 = renderer.paint_text_scene(scene, Precision::Float32).unwrap();
+            let level2 = renderer
+                .paint_text_scene(scene, Precision::Float32)
+                .unwrap();
             let coretext = reference.render(&refs, w, h, true);
-            let to8 = |p: &[f32]| -> Vec<u8> { p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect() };
-            let (s1, ..) = pm_render::parity::text_ssim(&to8(&reference_px), &to8(&level1), w as usize, h as usize);
-            let (s2, ..) = pm_render::parity::text_ssim(&to8(&coretext), &to8(&level2), w as usize, h as usize);
+            let to8 = |p: &[f32]| -> Vec<u8> {
+                p.iter()
+                    .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                    .collect()
+            };
+            let (s1, ..) = pm_render::parity::text_ssim(
+                &to8(&reference_px),
+                &to8(&level1),
+                w as usize,
+                h as usize,
+            );
+            let (s2, ..) = pm_render::parity::text_ssim(
+                &to8(&coretext),
+                &to8(&level2),
+                w as usize,
+                h as usize,
+            );
             // Stack the rows, 2× below 24 px.
-            let zoom = if d["size"].as_f64().unwrap_or(16.0) * density < 24.0 { 2 } else { 1 };
+            let zoom = if d["size"].as_f64().unwrap_or(16.0) * density < 24.0 {
+                2
+            } else {
+                1
+            };
             let (zw, zh) = (w * zoom, h * zoom);
             let mut sheet = Vec::with_capacity((zw * zh * 4 * 3) as usize);
             for img in [&reference_px, &level1, &coretext, &level2] {
@@ -240,18 +325,31 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let root = std::path::PathBuf::from(std::env::var("HOME").unwrap())
         .join("Library/Application Support/Powermove Engine Corpus");
-    let capture = args.next().map(std::path::PathBuf::from).unwrap_or_else(|| {
-        let mut caps: Vec<_> = std::fs::read_dir(&root)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("text-raster-")))
-            .collect();
-        caps.sort();
-        caps.pop().expect("a text-raster capture")
-    });
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let out = args.next().map(std::path::PathBuf::from).unwrap_or_else(|| root.join("review").join(format!("text-{stamp}")));
+    let capture = args
+        .next()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut caps: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("text-raster-"))
+                })
+                .collect();
+            caps.sort();
+            caps.pop().expect("a text-raster capture")
+        });
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let out = args
+        .next()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("review").join(format!("text-{stamp}")));
     review::run(capture, out);
 }
 

@@ -161,13 +161,18 @@ impl Placement {
         let [a, b, c, d, _, _] = m.as_coeffs();
         let det = a * d - b * c;
         let scale = det.abs().sqrt();
-        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 0.0 };
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            0.0
+        };
         let residual = if scale > 0.0 {
             Affine::new([a / scale, b / scale, c / scale, d / scale, 0.0, 0.0])
         } else {
             Affine::IDENTITY
         };
-        let axis_aligned = b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0 && (a - d).abs() <= 1e-9 * a.abs();
+        let axis_aligned =
+            b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0 && (a - d).abs() <= 1e-9 * a.abs();
         Placement {
             m,
             scale,
@@ -295,7 +300,7 @@ impl Painter<'_> {
                     };
                     o
                 };
-                let (x, y) = if place.axis_aligned && !(large && !as_path) {
+                let (x, y) = if place.axis_aligned && (as_path || !large) {
                     let (x, y) = self.profile.snap.apply(p.x, p.y);
                     (x, y + dy)
                 } else if place.axis_aligned {
@@ -305,12 +310,18 @@ impl Painter<'_> {
                     (p.x + d.x, p.y + d.y)
                 };
                 let t = Affine::translate((x, y)) * place.residual;
-                let target = if as_path || large { &mut path } else { &mut mask };
+                let target = if as_path || large {
+                    &mut path
+                } else {
+                    &mut mask
+                };
                 union(&mut target.1, t.transform_rect_bbox(outline.bounds));
                 target.0.push(placed(&outline, t, PathStyle::Fill));
                 if let Some(width) = outline.dilate {
                     let stroke = Stroke::new(width).with_join(kurbo::Join::Round);
-                    target.0.push(placed(&outline, t, PathStyle::Stroke(stroke)));
+                    target
+                        .0
+                        .push(placed(&outline, t, PathStyle::Stroke(stroke)));
                 }
                 if !as_path {
                     curve_size = curve_size.max(device_size);
@@ -321,7 +332,9 @@ impl Painter<'_> {
             out.push(Item {
                 content: ItemContent::Coverage {
                     paths: mask.0,
-                    curve: self.profile.curve(curve_size, [color[0], color[1], color[2]]),
+                    curve: self
+                        .profile
+                        .curve(curve_size, [color[0], color[1], color[2]]),
                 },
                 color,
                 opacity,
@@ -387,7 +400,12 @@ impl Painter<'_> {
             let bitmap_face = has_bitmaps(run.face);
             for g in run.glyphs {
                 let bsize = run.bitmap_size.unwrap_or(device_size as f32);
-                if bitmap_face && self.bitmaps.get(run.face, g.id, device_size as f32, bsize).is_some() {
+                if bitmap_face
+                    && self
+                        .bitmaps
+                        .get(run.face, g.id, device_size as f32, bsize)
+                        .is_some()
+                {
                     continue;
                 }
                 let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
@@ -492,7 +510,11 @@ pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
     p.line_to((x + w - r, y));
     p.curve_to((x + w - r + k, y), (x + w, y + r - k), (x + w, y + r));
     p.line_to((x + w, y + h - r));
-    p.curve_to((x + w, y + h - r + k), (x + w - r + k, y + h), (x + w - r, y + h));
+    p.curve_to(
+        (x + w, y + h - r + k),
+        (x + w - r + k, y + h),
+        (x + w - r, y + h),
+    );
     p.line_to((x + r, y + h));
     p.curve_to((x + r - k, y + h), (x, y + h - r + k), (x, y + h - r));
     p.line_to((x, y + r));

@@ -20,7 +20,10 @@ fn main() {
     use support::doc::{ch, layer, no_fill, project};
 
     let fonts = || {
-        Box::new(support::text::MainThreadFonts(pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()), None))
+        Box::new(support::text::MainThreadFonts(
+            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+            None,
+        ))
     };
     let blur = json!({
         "text": "Blur in\nsecond line", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
@@ -62,9 +65,18 @@ fn main() {
     let mut failures = Vec::new();
     for (name, ty, d, t, scale) in &docs {
         let doc = doc_of(ty, d);
-        let a = gpu.text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32).unwrap().unwrap();
-        let b = cpu.text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32).unwrap().unwrap();
-        assert_eq!(a.plan.key, b.plan.key, "{name}: the plan does not depend on the coverage source");
+        let a = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        let b = cpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            a.plan.key, b.plan.key,
+            "{name}: the plan does not depend on the coverage source"
+        );
         // Paint pass vs the CPU reference over the same (vello_cpu) coverage.
         let reference = pm_render::text::gpu::render_cpu(&b.plan);
         let max = b
@@ -73,34 +85,70 @@ fn main() {
             .zip(&reference.data)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max);
-        println!("{name:<8} {}x{} paint pass vs CPU reference: max |Δ| {max:.6}", b.plan.width(), b.plan.height());
+        println!(
+            "{name:<8} {}x{} paint pass vs CPU reference: max |Δ| {max:.6}",
+            b.plan.width(),
+            b.plan.height()
+        );
         if max > 1.0 / 255.0 {
-            failures.push(format!("{name}: paint pass differs from the CPU reference by {max}"));
+            failures.push(format!(
+                "{name}: paint pass differs from the CPU reference by {max}"
+            ));
         }
         // GPU coverage vs the CPU fallback.
         let (w, h) = (a.plan.width() as usize, a.plan.height() as usize);
-        let rgba8 = |p: &[f32]| -> Vec<u8> { p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect() };
-        let (ink, _, ratio) = pm_render::parity::text_ssim(&rgba8(&b.pixels), &rgba8(&a.pixels), w, h);
-        println!("{name:<8} Vello GPU vs vello_cpu coverage: ink SSIM {ink:.5}, ink ratio {ratio:.4}");
+        let rgba8 = |p: &[f32]| -> Vec<u8> {
+            p.iter()
+                .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                .collect()
+        };
+        let (ink, _, ratio) =
+            pm_render::parity::text_ssim(&rgba8(&b.pixels), &rgba8(&a.pixels), w, h);
+        println!(
+            "{name:<8} Vello GPU vs vello_cpu coverage: ink SSIM {ink:.5}, ink ratio {ratio:.4}"
+        );
         if ink < 0.995 {
             failures.push(format!("{name}: GPU and CPU coverage differ (SSIM {ink})"));
         }
         // Determinism and the raster cache.
         let hits = gpu.text_gpu().stats.cache_hits;
-        let again = gpu.text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32).unwrap().unwrap();
+        let again = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
         assert_eq!(again.pixels, a.pixels, "{name}: deterministic");
-        assert_eq!(gpu.text_gpu().stats.cache_hits, hits + 1, "{name}: served from the cache");
+        assert_eq!(
+            gpu.text_gpu().stats.cache_hits,
+            hits + 1,
+            "{name}: served from the cache"
+        );
         gpu.text_gpu().clear();
-        let fresh = gpu.text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32).unwrap().unwrap();
+        let fresh = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
         assert_eq!(fresh.pixels, a.pixels, "{name}: repainted identically");
     }
     // Without fonts a text layer is refused.
     let mut bare = Renderer::headless().expect("a Metal device");
     let doc = doc_of("text", &docs[1].2);
-    let request = pm_render::RenderRequest::sized(pm_protocol::common::Size::new(320, 180), Precision::Float16);
-    match bare.render(&doc, "Ptest-root", support::ticks(0.0), &request, &pm_render::MapResolver::default()) {
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(320, 180),
+        Precision::Float16,
+    );
+    match bare.render(
+        &doc,
+        "Ptest-root",
+        support::ticks(0.0),
+        &request,
+        &pm_render::MapResolver::default(),
+    ) {
         Err(RenderError::Unsupported(u)) => {
-            assert!(u.iter().any(|u| matches!(u.feature, pm_render::Feature::Text(_))), "{u:?}");
+            assert!(
+                u.iter()
+                    .any(|u| matches!(u.feature, pm_render::Feature::Text(_))),
+                "{u:?}"
+            );
         }
         Ok(_) => failures.push("a text layer rendered without fonts".into()),
         Err(e) => failures.push(format!("unexpected error without fonts: {e}")),

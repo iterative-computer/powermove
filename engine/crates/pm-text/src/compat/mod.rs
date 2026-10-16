@@ -250,7 +250,12 @@ impl<R: FontResolver> Compat<R> {
     /// `textAlign = 'left'` and `letterSpacing = tracking px` (`tracking`
     /// overrides `d.tracking`): no wrapping, pens from 0 on the baseline
     /// at y = 0. Returns the runs and the measured width.
-    pub fn text_runs(&mut self, d: &TextContent, text: &str, tracking: f64) -> (Vec<GlyphRun>, f64) {
+    pub fn text_runs(
+        &mut self,
+        d: &TextContent,
+        text: &str,
+        tracking: f64,
+    ) -> (Vec<GlyphRun>, f64) {
         let mut ctx = d.clone();
         ctx.tracking = Some(tracking);
         let units: Vec<u16> = text.encode_utf16().collect();

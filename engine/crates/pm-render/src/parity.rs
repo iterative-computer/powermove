@@ -193,7 +193,10 @@ pub fn text_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64
             .map(|p| f64::from(p[3]) / 255.0)
             .collect()
     };
-    let (mr, mt) = (gaussian_blur(&alpha(&cr), bw, bh), gaussian_blur(&alpha(&ct), bw, bh));
+    let (mr, mt) = (
+        gaussian_blur(&alpha(&cr), bw, bh),
+        gaussian_blur(&alpha(&ct), bw, bh),
+    );
     let (mut sum, mut n) = (0.0, 0usize);
     for i in 0..bw * bh {
         if mr[i] > 1.0 / 512.0 || mt[i] > 1.0 / 512.0 {
