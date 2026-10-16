@@ -107,8 +107,9 @@ transition draws a padded crop of the region (today's 128 px viewer overscan plu
 sum of the chain's `viewportPadding` values, clamped to the frame) with the crop's
 effect coordinates (`effectViewportCoordinates`: `u_uv`, `u_pxOrigin`, `u_coordRes`),
 then copies the region out. Any other staged level is drawn in full and cropped. Tests:
-a blur, chroma, and vignette chain's padded crop equals the full frame (0 CV); levels with
-transitions or non-viewport-safe effects equal it exactly. Note: Mosaic computes its grid
+a blur, chroma, and vignette chain's padded crop of a 1280 × 720 frame equals the full
+frame (measured 0 CV); a level with a transition, drawn in full, is checked within 1 CV.
+Note: Mosaic computes its grid
 from `v_px - u_pxOrigin` (crop-local), so its grid follows the crop in today's zoomed
 viewer and here alike.
 
