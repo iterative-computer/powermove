@@ -199,6 +199,24 @@ export class NativeEngine {
     return this.supervisors[process];
   }
 
+  /** Destroys the interactive engine's viewer GPU device as a real loss
+   *  would (the recovery test). False when it is not running. */
+  simulateGpuLoss(): boolean {
+    const launch = this.supervisors.interactive.current;
+    if (!launch || launch.exiting) return false;
+    launch.control({ type: 'simulateGpuLoss' });
+    return true;
+  }
+
+  /** An engine's own status report (sessions, lease, the presenter's
+   *  counters, routes, and audio): diagnostics, the e2e suite, and the
+   *  measurements. Null when it is not running or does not answer. */
+  async report(process: EngineProcess = 'interactive'): Promise<unknown> {
+    const launch = this.supervisors[process].current;
+    if (!launch || launch.exiting) return null;
+    return launch.report();
+  }
+
   status(): NativeEngineStatus {
     const one = (s: EngineSupervisor): EngineProcessStatus => ({
       state: s.state,

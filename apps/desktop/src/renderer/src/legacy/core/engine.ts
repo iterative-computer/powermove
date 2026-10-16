@@ -260,6 +260,59 @@ for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
   for (const asset of PM.assets.map?.values() ?? []) pruneVideoInstances(asset, byAsset.get(asset.id) ?? empty);
 });
 
+/* ── the new engine's transport (behind "Use New Engine") ──
+   While the interactive engine draws the open composition, it also runs
+   the transport (plan section 15): play, pause, seek, and the loop go to
+   it, the playhead follows its clock (the audio device's), and the legacy
+   compositor, audio, and video decoders rest. When the composition routes
+   back to this engine (or the engine restarts) the run continues here from
+   the same time, and the other way round. */
+type TransportDriver = {
+  active(): boolean;
+  play(time: number): void;
+  pause(): void;
+  seek(time: number, scrub: boolean): void;
+  setLoop(range: readonly [number, number] | null): void;
+  now(nowMs: number): { time: number; playing: boolean; ended: boolean } | null;
+  onActiveChange(listener: (active: boolean) => void): () => void;
+};
+let driver: TransportDriver | null = null;
+let driverOff: (() => void) | null = null;
+const engineDrives = (): boolean => !!driver?.active();
+const workArea = (): [number, number] => {
+  const p = PM.proj;
+  return p.work && p.work[1] > p.work[0] ? [p.work[0], p.work[1]] : [0, p.dur];
+};
+const syncEngineLoop = () => driver?.setLoop(PM.loop ? workArea() : null);
+function handover(active: boolean) {
+  PM.audioDisabled = active;
+  if (active) {
+    PM.Audio.pause();
+    for (const el of playingVideos) { cancelPreviewVideoSeek(el); ensureMediaPaused(el); }
+    playingVideos = new Set();
+    videoClipPlans.clear();
+    if (PM.playing) { syncEngineLoop(); driver!.play(PM.time); }
+    else driver!.seek(PM.time, false);
+  } else if (PM.playing) {
+    const now = window.performance.now();
+    clock.base = PM.time; clock.origin = now; clock.last = now; clock.cycle = 0;
+    videoSeekGeneration++;
+    PM.Audio.start(PM.time);
+    videoClipPlans.clear();
+    scrubVideos(PM.time, false);
+  }
+  needsDraw = true; lastRenderTime = NaN;
+  PM.invalidate();
+}
+PM.setTransportDriver = (next: TransportDriver | null) => {
+  driverOff?.(); driverOff = null;
+  const was = engineDrives();
+  driver = next;
+  if (next) driverOff = next.onActiveChange(handover);
+  const now = engineDrives();
+  if (now !== was) handover(now);
+};
+
 /* ── transport ─────────────────────────────────────────── */
 PM.setTime = (t: any, opt: any = {}) => {
   const p = PM.proj;
@@ -270,6 +323,7 @@ PM.setTime = (t: any, opt: any = {}) => {
   synchronizedFrame = null;
   PM.playbackVideoFrame = null;
   PM.time = t;
+  if (engineDrives() && !opt.fromEngine) driver!.seek(t, !PM.playing);
   if (PM.playing) previewQuality.reset(window.performance.now());
   if (PM.playing) { clock.base=t;clock.origin=window.performance.now();clock.last=clock.origin;clock.cycle=0;videoSeekGeneration++; PM.Audio.seek(t); }
   PM.bus.emit('time', t);
@@ -288,6 +342,19 @@ PM.play = () => {
   PM.preparedVideoFrames=null;
   synchronizedFrame = null;
   PM.playbackVideoFrame = null;
+  if (engineDrives()) {
+    // A run from the end of the work area starts over (or at its start when looping), as below.
+    const [ws, we] = workArea();
+    if (PM.time >= we - 1e-6) PM.setTime(ws, { raw: true });
+    PM.playing = true;
+    lastRenderTime = NaN;
+    syncEngineLoop();
+    driver!.play(PM.time);
+    clock.t0 = window.performance.now(); clock.frames = 0; E.fps = 0;
+    PM.bus.emit('transport');
+    PM.invalidate('ui');
+    return;
+  }
   PM.playing = true;
   lastRenderTime = NaN;
   // AudioContext construction can block the first Play on some devices. Do
@@ -314,6 +381,7 @@ PM.play = () => {
 PM.pause = () => {
   const wasPlaying = PM.playing;
   PM.playing = false;
+  if (wasPlaying && engineDrives()) driver!.pause();
   synchronizedFrame = null; PM.videoFrameSync = false;
   PM.playbackVideoFrame = null;
   E.fps = 0; clock.frames = 0;
@@ -365,6 +433,29 @@ function frame(now: any) {
   }
   videoClipPlans.clear();
   const p = PM.proj;
+  if (engineDrives()) {
+    // The engine draws and plays; the playhead follows its clock.
+    if (PM.playing) {
+      syncEngineLoop();
+      const engine = driver!.now(now);
+      if (engine) {
+        const [ws, we] = workArea();
+        if (engine.ended || (!PM.loop && engine.time >= we - 1e-6)) {
+          PM.setTime(Math.min(engine.time, we), { raw: true, fromEngine: true });
+          PM.pause();
+          return;
+        }
+        if (engine.playing && engine.time !== PM.time && engine.time >= ws - 1e-6) {
+          PM.time = engine.time;
+          PM.bus.emit('time', PM.time);
+          PM.invalidate('timeline');
+        }
+      }
+      if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
+    }
+    if (needsDraw) { needsDraw = false; PM.bus.emit('overlay'); }
+    return;
+  }
   if (PM.playing) {
     if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
     const gap = (now-clock.last)/1000;

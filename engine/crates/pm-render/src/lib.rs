@@ -19,6 +19,7 @@
 
 pub mod assets;
 pub mod capability;
+pub mod composite;
 mod error;
 mod exec;
 pub mod expr;
@@ -37,5 +38,5 @@ pub mod three;
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
 pub use error::{LayerFailure, RenderError};
-pub use renderer::{CommandBracket, Frame, PassThrough, Rendered, Renderer};
+pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer};
 pub use request::RenderRequest;

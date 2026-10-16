@@ -4,7 +4,13 @@
 //! jitter buffer holds them until their predicted display time. Frame `k`
 //! shows unwrapped media `[k F, (k + 1) F)`; at a negative rate frames are
 //! visited in decreasing `k`. A frame whose whole display interval already
-//! passed is skipped (an engine-side drop the stats count).
+//! passed is skipped (an engine-side drop the stats count), and so is a
+//! frame that cannot reach the viewer before its interval ends at the
+//! render cost measured so far: when a composition costs more than a frame
+//! to draw, every frame rendered in order would arrive too late and the
+//! viewer would drop them all; skipping to the next frame that can still
+//! be shown keeps playback on the clock at a lower frame rate (section 15,
+//! drops counted).
 //!
 //! With the viewer's vsync hint (amendment 18), a frame's render starts at a
 //! fixed phase of the display's refresh grid rather than at an arbitrary
@@ -52,6 +58,14 @@ impl Phase {
 /// Margin before the first frame of a run: render, GPU, and delivery.
 pub const START_MARGIN_US: i64 = 20_000;
 
+/// Time a finished frame needs to reach the display without a vsync hint:
+/// delivery to the viewer, its next animation frame, and the two refreshes
+/// it presents ahead (bridge.md, about 19 ms at 120 Hz).
+pub const DELIVERY_US: f64 = 25_000.0;
+
+/// Weight of the newest render in the cost estimate.
+const COST_WEIGHT: f64 = 0.25;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Next {
     /// Render frame `k` now; it is shown from host µs `shown_from`.
@@ -67,12 +81,32 @@ pub enum Next {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Schedule {
     next_k: Option<i64>,
+    /// Render cost of a timed frame (host µs, exponentially weighted).
+    cost_us: Option<f64>,
 }
 
 impl Schedule {
     /// Forgets the position (play, seek, loop change: a clock discontinuity).
+    /// The render cost estimate stays: the composition is the same.
     pub fn reset(&mut self) {
         self.next_k = None;
+    }
+
+    /// A timed frame took `cost_us` from the start of its render until its
+    /// GPU work finished.
+    pub fn observe(&mut self, cost_us: f64) {
+        if !(cost_us.is_finite() && cost_us >= 0.0) {
+            return;
+        }
+        self.cost_us = Some(match self.cost_us {
+            Some(c) => c + COST_WEIGHT * (cost_us - c),
+            None => cost_us,
+        });
+    }
+
+    /// The render cost estimate, once a frame was rendered.
+    pub fn cost_us(&self) -> Option<f64> {
+        self.cost_us
     }
 
     /// The frame index after `k` in the clock's direction.
@@ -136,7 +170,12 @@ impl Schedule {
         let Some((from, until)) = Self::interval(clock, k) else {
             return Next::Idle;
         };
-        if until < now as f64 {
+        // Gone, or cannot reach the display before its interval ends.
+        let delivery = phase.map_or(DELIVERY_US, |p| {
+            (3.0 * p.hint.period_us).max(DELIVERY_US / 2.0)
+        });
+        let ready = now as f64 + self.cost_us.map_or(0.0, |c| c + delivery);
+        if until < now as f64 || until < ready {
             self.next_k = Some(k + Self::step(clock));
             return Next::Skip { k };
         }
@@ -238,6 +277,38 @@ mod tests {
         assert!(matches!(
             schedule.next(&clock, 101_000, 2),
             Next::Render { k: 603, .. }
+        ));
+    }
+
+    #[test]
+    fn a_composition_that_costs_more_than_a_frame_skips_to_frames_it_can_still_show() {
+        // 60 fps (16.7 ms frames) and a render cost of 40 ms: at 101 ms the
+        // frames shown until 150 ms cannot be ready in time (101 + 40 + 25 ms).
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(40_000.0);
+        assert_eq!(schedule.cost_us(), Some(40_000.0));
+        let mut skipped = Vec::new();
+        let k = loop {
+            match schedule.next(&clock, 101_000, 4) {
+                Next::Skip { k } => skipped.push(k),
+                Next::Render { k, .. } => break k,
+                other => panic!("{other:?}"),
+            }
+        };
+        // The run looks from 121 ms (frame 604); 604 and 605 end before
+        // 166 ms; 606 ends at 166.7 ms.
+        assert_eq!(skipped, vec![604, 605]);
+        assert_eq!(k, 606);
+        // The estimate follows new renders gradually.
+        schedule.observe(0.0);
+        assert_eq!(schedule.cost_us(), Some(30_000.0));
+        // Keeping up, nothing is skipped: frames render a lead ahead.
+        let mut schedule = Schedule::default();
+        schedule.observe(5_000.0);
+        assert!(matches!(
+            schedule.next(&clock, 0, 4),
+            Next::Render { k: 600, .. }
         ));
     }
 

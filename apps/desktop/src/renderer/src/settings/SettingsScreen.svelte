@@ -65,6 +65,10 @@
   let restoreWindows = $state(true);
   let autoDownloadCloudMedia = $state(false);
   let previewMemoryMiB = $state(256);
+  /* "Use New Engine" (plan section 26, Phase 2): main reads the stored
+     choice at launch, so a change applies the next time Powermove opens. */
+  let useNewEngine = $state(false);
+  const newEngineRunning = $derived(!!PM.EngineConnection);
   const multiWindow = $derived(!!PM.windows?.supported);
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
@@ -137,6 +141,7 @@
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
     autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
     previewMemoryMiB = (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) / (1024 * 1024);
+    useNewEngine = PM.store?.get?.('useNewEngine', false) === true;
     const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
@@ -303,6 +308,11 @@
     } finally {
       accountBusy = false;
     }
+  }
+
+  function toggleNewEngine(): void {
+    useNewEngine = !useNewEngine;
+    PM.store?.set?.('useNewEngine', useNewEngine);
   }
 
   function toggleRestoreWindows(): void {
@@ -474,6 +484,22 @@
                       <option value={1024}>1 GB</option>
                       <option value={2048}>2 GB</option>
                     </select>
+                  </div>
+                </div>
+              </section>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Engine</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <div class="settings-copy">
+                      <b>Use New Engine</b>
+                      <span>{useNewEngine === newEngineRunning
+                        ? 'Preview and play back with the new engine. Applies the next time Powermove opens.'
+                        : 'Restart Powermove to switch engines.'}</span>
+                    </div>
+                    <button class="toggle" class:on={useNewEngine} type="button" aria-pressed={useNewEngine} aria-label="Use New Engine"
+                      onclick={toggleNewEngine}
+                    ><i aria-hidden="true"></i></button>
                   </div>
                 </div>
               </section>

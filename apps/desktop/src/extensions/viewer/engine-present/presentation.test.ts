@@ -13,6 +13,9 @@ class FakeFrame {
   closed = false;
   readonly codedWidth = 1280;
   readonly codedHeight = 720;
+  clone(): FakeFrame {
+    return new FakeFrame();
+  }
   close(): void {
     this.closed = true;
   }

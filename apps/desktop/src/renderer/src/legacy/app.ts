@@ -586,6 +586,10 @@ PM.hist.import?.(bootSession?.history);
 // The same promise a project switch publishes, so callers can wait for the
 // restored project's media however it was opened.
 PM.projectAssetsReady = restoreProjectAssets(PM.proj);
+// When the window finished loading the project it opened with (the cold
+// start row of the engine's performance gates compares the engine's
+// readiness with it).
+void PM.projectAssetsReady.then(() => performance.mark?.('powermove:project-ready'), () => {});
 
 /* ── shell ─────────────────────────────────────────────── */
 /** Export defaults live on the project, so every write is an ordinary edit. */

@@ -20,6 +20,19 @@ describe('requiresEngine stamp', () => {
     expect('requiresEngine' in project).toBe(false);
   });
 
+  it('stamps non-default project color settings', () => {
+    const project: any = { assets: {} };
+    project.color = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
+    expect(nativeOnlyFeatures(project)).toEqual([]);
+    project.color.linearBlending = true;
+    expect(nativeOnlyFeatures(project)).toEqual(['projectColor']);
+    expect(applyEngineStamp(project)).toBe(true);
+    expect(project.requiresEngine).toBe('native');
+    delete project.color;
+    expect(applyEngineStamp(project)).toBe(true);
+    expect('requiresEngine' in project).toBe(false);
+  });
+
   it('leaves a stamp it does not know alone', () => {
     const project: any = { assets: {}, requiresEngine: 'future' };
     expect(applyEngineStamp(project)).toBe(false);

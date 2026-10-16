@@ -11,6 +11,11 @@
 //! - invariant (1) for 4:2:0: an 8-bit H.264 source through `420v` keeps
 //!   luma exactly and chroma within 1 CV.
 //!
+//! Each bar also runs with linear blending on (section 2, "Color
+//! invariants, linear blending": bars (1) and (2) also hold): sources and
+//! solids are read with E⁻¹, intermediates are linear light, and the frame
+//! is encoded with E.
+//!
 //! The ProRes and H.264 sources come from the media corpus outside the
 //! repository (`PM_MEDIA_CORPUS`, default
 //! `~/Library/Caches/powermove-engine/media-corpus`); without it those tests
@@ -106,13 +111,32 @@ fn params() -> ConvertParams {
     }
 }
 
+/// Linear blending on (Settings › Project › Color › Blend in linear light).
+fn linear(mut doc: serde_json::Value) -> serde_json::Value {
+    doc["color"] = json!({ "mode": "standard", "linearBlending": true });
+    doc
+}
+
 #[test]
 fn invariant_2_solids_decode_to_their_codes() {
+    invariant_2(false);
+}
+
+#[test]
+fn invariant_2_with_linear_blending() {
+    invariant_2(true);
+}
+
+fn invariant_2(linear_light: bool) {
     let mut r = Renderer::headless().unwrap();
     let none = MapResolver::default();
     let mut worst = [0u32; 4];
     for colors in palettes() {
-        let doc = grid(&colors);
+        let doc = if linear_light {
+            linear(grid(&colors))
+        } else {
+            grid(&colors)
+        };
         for precision in [Precision::Float16, Precision::Float32] {
             let rgba = render(&mut r, &doc, precision, (G, G), 0.0, &none);
             let frame = WorkingFrame {
@@ -129,8 +153,12 @@ fn invariant_2_solids_decode_to_their_codes() {
                 let gw = G as usize;
                 let px = (y * gw + x) * 4;
                 let working = [rgba[px], rgba[px + 1], rgba[px + 2]];
-                // The hex code is the working value (Standard).
+                // The hex code is the working value (Standard). With linear
+                // blending the frame is E(E⁻¹(code)): the codes below.
                 for k in 0..3 {
+                    if linear_light {
+                        break;
+                    }
                     let ideal = f32::from(c[k]) / 255.0;
                     if precision == Precision::Float32 {
                         assert_eq!(working[k], ideal, "{c:?} working value");
@@ -317,10 +345,16 @@ fn frame_of(path: &std::path::Path, t: f64) -> usize {
 }
 
 /// Transparency of one ProRes file into `format`: (samples, differing).
-fn transparency(name: &str, format: InputFormat, luma_max: u16) -> Option<(usize, usize)> {
+fn transparency(
+    name: &str,
+    format: InputFormat,
+    luma_max: u16,
+    linear_light: bool,
+) -> Option<(usize, usize)> {
     let path = media(name)?;
     let (w, h) = (320u32, 180u32);
     let (doc, resolver) = full_frame_video(&path, w, h, 3.0);
+    let doc = if linear_light { linear(doc) } else { doc };
     let mut r = Renderer::headless().unwrap();
     // The corpus files are tagged BT.601 (`smpte170m`); read them as Rec.709
     // so the source and the Rec.709 output share the matrix (the bar's
@@ -393,15 +427,28 @@ fn transparency(name: &str, format: InputFormat, luma_max: u16) -> Option<(usize
 
 #[test]
 fn pipeline_transparency_prores_4444_xq_to_y416() {
-    match transparency("prores4444xq-vt.mov", InputFormat::Y416, 65264) {
+    match transparency("prores4444xq-vt.mov", InputFormat::Y416, 65264, false) {
         None => eprintln!("media corpus not found; transparency not measured"),
         Some((_, bad)) => assert_eq!(bad, 0, "ProRes 4444 XQ → y416 is not exact"),
     }
 }
 
 #[test]
+fn pipeline_transparency_with_linear_blending() {
+    for (name, format, max) in [
+        ("prores4444xq-vt.mov", InputFormat::Y416, 65264),
+        ("prores422hq-vt.mov", InputFormat::V216, 65216),
+    ] {
+        match transparency(name, format, max, true) {
+            None => eprintln!("media corpus not found; transparency not measured"),
+            Some((_, bad)) => assert_eq!(bad, 0, "{name} with linear blending is not exact"),
+        }
+    }
+}
+
+#[test]
 fn pipeline_transparency_prores_422_hq_to_v216() {
-    match transparency("prores422hq-vt.mov", InputFormat::V216, 65216) {
+    match transparency("prores422hq-vt.mov", InputFormat::V216, 65216, false) {
         None => eprintln!("media corpus not found; transparency not measured"),
         Some((_, bad)) => assert_eq!(bad, 0, "ProRes 422 HQ → v216 is not exact"),
     }
@@ -440,12 +487,22 @@ fn reference_u8(path: &std::path::Path, n: usize) -> (Vec<Vec<u8>>, String) {
 
 #[test]
 fn invariant_1_h264_420_keeps_luma_and_chroma_within_one() {
+    invariant_1_420(false);
+}
+
+#[test]
+fn invariant_1_420_with_linear_blending() {
+    invariant_1_420(true);
+}
+
+fn invariant_1_420(linear_light: bool) {
     let Some(path) = media("h264-bpyramid.mp4") else {
         eprintln!("media corpus not found; 4:2:0 invariant not measured");
         return;
     };
     let (w, h) = (320u32, 180u32);
     let (doc, resolver) = full_frame_video(&path, w, h, 5.0);
+    let doc = if linear_light { linear(doc) } else { doc };
     let mut r = Renderer::headless().unwrap();
     // Untagged SD reads as BT.601 (section 9); read it as Rec.709 to export
     // to Rec.709 with the same matrix.

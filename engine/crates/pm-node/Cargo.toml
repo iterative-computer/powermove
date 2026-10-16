@@ -31,13 +31,18 @@ napi-derive = { version = "3.6", optional = true }
 pm-bridge = { path = "../pm-bridge" }
 pm-gpu = { path = "../pm-gpu", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
-# The job engine's render and export service (sections 17 and 20): pm-render
-# frames, pm-audio's offline mix, VideoToolbox and AVAssetWriter through
+# The viewer draws the document (Phase 2 tracer bullet) and the job
+# engine renders and exports (sections 17 and 20): pm-render frames,
+# pm-audio playback (the viewer's master clock) and offline mix, the
+# session's pm-model mirror, VideoToolbox and AVAssetWriter through
 # pm-export. This links FFmpeg (pm-media) into the addon.
 pm-export = { path = "../pm-export" }
 pm-render = { path = "../pm-render" }
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
 pm-media = { path = "../pm-media" }
+pm-audio = { path = "../pm-audio" }
+pm-eval = { path = "../pm-eval" }
+pm-model = { path = "../pm-model" }
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]

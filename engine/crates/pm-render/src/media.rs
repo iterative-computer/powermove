@@ -7,7 +7,7 @@
 //! (`shaders/source.wgsl`): chroma upsampling, matrix, transfer and
 //! primaries into the working encoding, and premultiplication.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -216,9 +216,30 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 /// where today's viewer clips at upload, the same open decision as Display
 /// P3 stills: it is drawn when its asset carries Interpret Footage
 /// overrides, which only this engine reads.
+///
+/// Answers are kept per file, size, and modification time: capability
+/// routing asks at every document revision, and opening a source indexes
+/// it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
-    let src = MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    video_supported(&src)
+    type VideoProbes = Mutex<HashMap<(PathBuf, u64, u128), Result<(), String>>>;
+    static CACHE: OnceLock<VideoProbes> = OnceLock::new();
+    let key = stamp(path).map(|(len, modified)| (path.to_path_buf(), len, modified));
+    if let Some(key) = &key
+        && let Some(r) = CACHE.get_or_init(Default::default).lock().unwrap().get(key)
+    {
+        return r.clone();
+    }
+    let result = MediaSource::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+        .and_then(|src| video_supported(&src));
+    if let Some(key) = key {
+        CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(key, result.clone());
+    }
+    result
 }
 
 /// [`probe_video`] for an asset with Interpret Footage overrides: only what
@@ -481,6 +502,8 @@ struct ImageKey {
     precision: u8,
     /// The interpretation it was converted with (empty: none).
     reading: String,
+    /// Converted textures hold working values: linear light differs.
+    linear: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -493,6 +516,7 @@ struct FrameKey {
     export: bool,
     /// The interpretation the frame was converted with (a digest).
     reading: u64,
+    linear: bool,
 }
 
 /// Media state kept across frames: decoded and converted stills, video
@@ -571,6 +595,7 @@ impl MediaCache {
             modified,
             precision: precision as u8,
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
@@ -620,8 +645,9 @@ impl MediaCache {
         drop(imported);
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
-        self.images
-            .retain(|k, _| k.path != key.path || k.precision != key.precision);
+        self.images.retain(|k, _| {
+            k.path != key.path || k.precision != key.precision || k.linear != key.linear
+        });
         self.images.insert(key, target.clone());
         self.recount();
         Ok(target)
@@ -705,6 +731,7 @@ impl MediaCache {
                     .hash(&mut h);
                 h.finish()
             },
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
@@ -828,7 +855,10 @@ impl MediaCache {
         drop(held);
         // Keep only the newest frame per source and precision.
         self.frames.retain(|k, _| {
-            k.path != key.path || k.precision != key.precision || k.export != key.export
+            k.path != key.path
+                || k.precision != key.precision
+                || k.export != key.export
+                || k.linear != key.linear
         });
         self.frames.insert(key, target.clone());
         self.recount();

@@ -53,6 +53,15 @@ export function parseMode(value: unknown): EngineDocMode {
   }
 }
 
+/**
+ * The mode with "Use New Engine" on: the interactive engine follows the
+ * mirror's patch stream (plan section 6), so the mirror is on at least in
+ * the plain `on` mode; a test mode the profile chose stays.
+ */
+export function withNewEngine(mode: EngineDocMode, newEngine: boolean): EngineDocMode {
+  return newEngine && !mode.evaluator ? parseMode('on') : mode;
+}
+
 /** The renderer's mode: the stored override, else the build default. */
 export function rendererMode(): EngineDocMode {
   let stored: string | null = null;

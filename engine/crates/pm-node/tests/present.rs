@@ -379,10 +379,12 @@ fn child_engine() {
             .iter()
             .all(|d| d.duration == Some(Ticks::new(frame_ticks).unwrap()))
     );
-    // Playback starts at the paused frame (media 0): the first sample is
-    // taken during the preroll, so the line is still before it.
+    // Playback starts at the paused frame (media 0). The first sample is
+    // taken during the preroll: it names where the run starts, at a host
+    // time still ahead, rather than the media before it the line would
+    // extrapolate to (clock.rs, `run_starts_at`).
     assert_eq!(timed[0].pts.get(), 0);
-    assert!(sample.media_time.get() < 0);
+    assert_eq!(sample.media_time.get(), 0);
 
     // Without releases the engine stops at the pool: never more than 6 held.
     let held_start = inbox.take().into_iter().filter_map(|m| frame(&m)).count();

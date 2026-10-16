@@ -18,6 +18,7 @@ use pm_protocol::error::EngineError;
 use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
 use pm_protocol::host::PortId;
 
+use crate::document::DocumentUpdate;
 use crate::engine::LogLevel;
 use crate::lease::{Category, Evict, LeaseBudget};
 
@@ -113,4 +114,35 @@ pub trait FramePresenter: Send {
 
     /// The port closed with every session on it.
     fn port_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId);
+
+    /// Whether this presenter renders the session's document. When it
+    /// does, the engine forwards every document change ([`Self::document`])
+    /// and resolves the document's media with the host ([`Self::media`]).
+    fn renders_documents(&self) -> bool {
+        false
+    }
+
+    /// The session's document changed (a resync or a patch batch, in
+    /// revision order; plan section 6, "The patch stream").
+    fn document(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _update: DocumentUpdate,
+    ) {
+    }
+
+    /// An asset of the session's document resolved to a file, or went
+    /// offline (`None`: the host could not resolve it, or it left the
+    /// document).
+    fn media(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _asset: &str,
+        _path: Option<std::path::PathBuf>,
+    ) {
+    }
 }

@@ -138,6 +138,22 @@ struct Shared {
     device_rate: u32,
 }
 
+/// A read-only view of a [`Playback`]'s clock, for another thread.
+#[derive(Clone)]
+pub struct ClockHandle(Arc<Shared>);
+
+impl ClockHandle {
+    /// The latest clock sample.
+    pub fn latest(&self) -> Option<ClockSample> {
+        self.0.clock.latest()
+    }
+
+    /// Bumped whenever a new clock sample is published.
+    pub fn version(&self) -> u64 {
+        self.0.clock.version()
+    }
+}
+
 /// Playback of one composition.
 pub struct Playback {
     tx: Sender<Control>,
@@ -343,6 +359,12 @@ impl Playback {
     /// The latest clock sample.
     pub fn clock(&self) -> Option<ClockSample> {
         self.shared.clock.latest()
+    }
+
+    /// The clock for another thread (the viewer presenter follows it while
+    /// a control thread owns the playback).
+    pub fn clock_handle(&self) -> ClockHandle {
+        ClockHandle(self.shared.clone())
     }
 
     /// Bumped whenever a new clock sample is published.

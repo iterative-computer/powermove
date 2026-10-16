@@ -114,10 +114,14 @@ class FakeEngine implements ChildLike {
     } else if (control.type === 'disconnect') {
       this.ports.get(control.port)?.port.close();
       this.ports.delete(control.port);
+    } else if (control.type === 'status') {
+      if (!this.silent) queueMicrotask(() => this.notify({ type: 'status', id: control.id, json: JSON.stringify({ process: this.process, presenter: { framesDelivered: 3 } }) }));
     } else if (control.type === 'shutdown') {
       this.exit(0);
     }
   }
+  /** Leaves status requests unanswered (a hung engine). */
+  silent = false;
 
   kill(): boolean {
     this.exit(137);
@@ -315,6 +319,15 @@ describe('NativeEngine with fake engines', () => {
       expect(engine.controls.slice(shutdown + 1)).toEqual([]);
     }
     expect(host.supervisor('job').current).toBeNull();
+  });
+
+  it('asks an engine for its status report, and answers null when it exits or does not answer', async () => {
+    expect(await host.report('interactive')).toEqual({ process: 'interactive', presenter: { framesDelivered: 3 } });
+    expect(await host.report('job')).toEqual({ process: 'job', presenter: { framesDelivered: 3 } });
+    live('interactive').silent = true;
+    const pending = host.report('interactive');
+    live('interactive').kill();
+    expect(await pending).toBeNull();
   });
 
   it('drops control messages to a launch that is exiting and closes the ports they carried', async () => {

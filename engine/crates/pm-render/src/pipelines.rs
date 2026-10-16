@@ -22,6 +22,8 @@ pub struct FillUniform {
     pub stops: [[f32; 4]; 8],
     pub params: [f32; 4],
     pub view: [f32; 4],
+    /// x: 1 when the working encoding is linear light.
+    pub flags: [f32; 4],
 }
 
 /// `Params` in `source.wgsl`.
@@ -57,6 +59,8 @@ pub struct Pipelines {
     pub id_draw: wgpu::RenderPipeline,
     pub id_solid: wgpu::RenderPipeline,
     pub id_3d: wgpu::RenderPipeline,
+    /// The compositing passes (`crate::composite`).
+    pub(crate) ops: crate::composite::gpu::OpPipelines,
     draw: [wgpu::RenderPipeline; 3],
     solid: [wgpu::RenderPipeline; 3],
     background: [wgpu::RenderPipeline; 3],
@@ -83,7 +87,14 @@ impl Pipelines {
     pub fn new(device: &wgpu::Device) -> Pipelines {
         let composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render composite"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    pm_color::wgsl::COLOR,
+                    include_str!("shaders/composite.wgsl")
+                )
+                .into(),
+            ),
         });
         let uniform = |binding, visibility, dynamic, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
@@ -365,6 +376,7 @@ impl Pipelines {
             "fs_id_3d",
         );
         Pipelines {
+            ops: crate::composite::gpu::OpPipelines::new(device),
             depth_layout,
             id_draw,
             id_solid,
