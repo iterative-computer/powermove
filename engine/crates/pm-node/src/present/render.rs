@@ -1669,11 +1669,16 @@ impl Thread {
                     let f = view.clock.frame_ticks();
                     let media = view.clock.wrap(k * f);
                     let shown_for = super::schedule::Schedule::frame_us(&view.clock);
+                    let started = now();
                     let rendered = self.render(key, media, k, Some((shown_from, shown_for)));
                     let Some(view) = self.views.get_mut(&key) else {
                         return;
                     };
                     view.schedule.rendered(&view.clock, k);
+                    if rendered.is_some() {
+                        // What the next frames will cost (deadline-aware skips).
+                        view.schedule.observe((now() - started) as f64);
+                    }
                     let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
                     if let Some(descriptor) = rendered {
                         if remote {

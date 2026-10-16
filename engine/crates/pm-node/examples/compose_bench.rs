@@ -36,7 +36,11 @@ fn main() {
     let number = |key: &str| pm_eval::node::to_number(comp.member(key));
     let (cw, ch) = (number("w"), number("h"));
     let fps = number("fps");
-    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        30.0
+    };
     // Fit the composition in the view at DPR 2, as the viewer does.
     let zoom = (f64::from(width) / 2.0 / cw).min(f64::from(height) / 2.0 / ch);
     let state = ViewerState {
@@ -61,8 +65,8 @@ fn main() {
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
     for k in 0..frames {
-        let time = Ticks::new((f64::from(k) / fps * TICKS_PER_SECOND as f64).round() as i64)
-            .unwrap();
+        let time =
+            Ticks::new((f64::from(k) / fps * TICKS_PER_SECOND as f64).round() as i64).unwrap();
         let start = Instant::now();
         let composed = composer
             .compose(&doc, &composition, &media, time, &state, &working)
@@ -92,7 +96,24 @@ fn main() {
             at(1.0)
         )
     };
+    // What each new revision costs the presenter besides drawing: the
+    // routing decision (capability check over the document) and a copy of
+    // the document (the audio thread mixes from its own).
+    let mut route_ms = Vec::new();
+    let mut clone_ms = Vec::new();
+    for _ in 0..20 {
+        let start = Instant::now();
+        let reasons = pm_render::unsupported_with_media(&doc, &composition, &media);
+        route_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        assert!(reasons.is_empty(), "{reasons:?}");
+        let start = Instant::now();
+        let copy = doc.clone();
+        clone_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        drop(copy);
+    }
     println!("{frames} frames of {composition} ({cw}x{ch} at {zoom:.3}x in {width}x{height} px)");
+    println!("routing (capability check): {}", summary(&mut route_ms));
+    println!("document copy: {}", summary(&mut clone_ms));
     println!("compose CPU: {}", summary(&mut cpu));
     println!("compose + GPU: {}", summary(&mut wall));
 }
