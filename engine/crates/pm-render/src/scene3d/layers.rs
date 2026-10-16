@@ -448,84 +448,161 @@ pub(crate) fn check(
     assets: Option<&dyn AssetResolver>,
 ) -> Vec<Issue> {
     let mut out = Vec::new();
-    let id = js::layer_id;
-    let asset = |a: &str| node::member(node::member(Some(root), "assets"), a);
-    for l in layers
-        .iter()
-        .filter(|l| Role3d::of(l) == Some(Role3d::Object))
-    {
-        let object = node::member(node::member(node::member(Some(l), "d"), "data"), "object");
-        let source = node::member(object, "source");
-        if let Some(a) = str_member(source, "assetId")
-            && let Some(record) = asset(&a)
-        {
-            // An imported glTF scene is the glTF lane's; OBJ models draw
-            // here, other assets as the missing-model box.
-            let format = str_member(Some(record), "format").unwrap_or_default();
-            let name = str_member(Some(record), "name")
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if matches!(format.as_str(), "gltf" | "glb")
-                || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
-            {
-                out.push((Some(id(l)), "imported models".to_owned()));
+    for l in layers {
+        let data = node::member(node::member(Some(l), "d"), "data");
+        let mut issues = Vec::new();
+        match Role3d::of(l) {
+            Some(Role3d::Object) => {
+                check_object(root, node::member(data, "object"), assets, &mut issues);
             }
+            Some(Role3d::Light) => check_light(node::member(data, "light"), &mut issues),
+            _ => {}
         }
-        if let Some(p) = str_member(source, "primitive")
-            && !matches!(
-                p.as_str(),
-                "box"
-                    | "sphere"
-                    | "plane"
-                    | "cylinder"
-                    | "cone"
-                    | "torus"
-                    | "capsule"
-                    | "icosahedron"
-            )
+        out.extend(issues.into_iter().map(|why| (Some(js::layer_id(l)), why)));
+    }
+    out
+}
+
+/// Static checks of a legacy `scene3d` layer's embedded scene
+/// (`d.data.scene`): its objects and lights meet the same checks as 3D
+/// object and light layers, so a routing decision holds at every frame.
+pub(crate) fn check_legacy_scene(
+    root: &Node,
+    layer: &Node,
+    assets: Option<&dyn AssetResolver>,
+) -> Vec<String> {
+    let scene = node::member(
+        node::member(node::member(Some(layer), "d"), "data"),
+        "scene",
+    );
+    let Some(scene) = scene.filter(|s| matches!(s.kind(), NodeKind::Object(_))) else {
+        return vec!["a legacy 3D scene without a scene object".to_owned()];
+    };
+    let mut out = Vec::new();
+    for o in node::array(node::member(Some(scene), "objects")).unwrap_or(&[]) {
+        let mut issues = Vec::new();
+        check_object(root, Some(o), assets, &mut issues);
+        let id = str_member(Some(o), "id").unwrap_or_default();
+        out.extend(
+            issues
+                .into_iter()
+                .map(|why| format!("{why} (legacy scene object {id})")),
+        );
+    }
+    for l in node::array(node::member(Some(scene), "lights")).unwrap_or(&[]) {
+        let mut issues = Vec::new();
+        check_light(Some(l), &mut issues);
+        let id = str_member(Some(l), "id").unwrap_or_default();
+        out.extend(
+            issues
+                .into_iter()
+                .map(|why| format!("{why} (legacy scene light {id})")),
+        );
+    }
+    out
+}
+
+/// The light kinds [`SceneBuilder`] draws (an absent type is a sun).
+fn check_light(light: Option<&Node>, out: &mut Vec<String>) {
+    if let Some(t) = node::member(light, "type") {
+        match node::string(Some(t)).map(|s| s.to_string_lossy()) {
+            Some(t) if matches!(t.as_str(), "sun" | "point" | "spot" | "area") => {}
+            Some(t) => out.push(format!("{t} lights")),
+            None => out.push("a 3D light type that is not a string".to_owned()),
+        }
+    }
+}
+
+/// One scene object (`d.data.object` of a 3D object layer, or an entry of
+/// a legacy scene's `objects`): its source and its materials' maps.
+fn check_object(
+    root: &Node,
+    object: Option<&Node>,
+    assets: Option<&dyn AssetResolver>,
+    out: &mut Vec<String>,
+) {
+    let asset = |a: &str| node::member(node::member(Some(root), "assets"), a);
+    let source = node::member(object, "source");
+    if let Some(a) = str_member(source, "assetId")
+        && let Some(record) = asset(&a)
+    {
+        // An imported glTF scene is the glTF lane's; OBJ models draw
+        // here, other assets as the missing-model box.
+        let format = str_member(Some(record), "format").unwrap_or_default();
+        let name = str_member(Some(record), "name")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(format.as_str(), "gltf" | "glb")
+            || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
         {
-            out.push((Some(id(l)), format!("{p} primitives")));
+            out.push("imported models".to_owned());
         }
-        if node::truthy(node::member(object, "generation")) {
-            out.push((Some(id(l)), "model-group recipe parts".to_owned()));
-        }
-        // Map images outside the drawn still classes.
-        let mut materials: Vec<Option<&Node>> = vec![node::member(object, "material")];
-        for slot in node::array(node::member(object, "slots")).unwrap_or(&[]) {
-            materials.push(node::member(Some(slot), "material"));
-        }
-        for m in materials {
-            let Some(maps) = node::member(m, "maps") else {
+    }
+    if let Some(p) = str_member(source, "primitive")
+        && !matches!(
+            p.as_str(),
+            "box"
+                | "sphere"
+                | "plane"
+                | "cylinder"
+                | "cone"
+                | "torus"
+                | "capsule"
+                | "icosahedron"
+        )
+    {
+        out.push(format!("{p} primitives"));
+    }
+    if node::truthy(node::member(object, "generation")) {
+        out.push("model-group recipe parts".to_owned());
+    }
+    // Map images outside the drawn still classes.
+    let mut materials: Vec<Option<&Node>> = vec![node::member(object, "material")];
+    for slot in node::array(node::member(object, "slots")).unwrap_or(&[]) {
+        materials.push(node::member(Some(slot), "material"));
+    }
+    for m in materials {
+        let Some(maps) = node::member(m, "maps") else {
+            continue;
+        };
+        let NodeKind::Object(map) = maps.kind() else {
+            continue;
+        };
+        for v in map.values() {
+            let Some(a) = node::string(Some(v)).map(|s| s.to_string_lossy()) else {
                 continue;
             };
-            let NodeKind::Object(map) = maps.kind() else {
+            let Some(record) = asset(&a) else {
                 continue;
             };
-            for v in map.values() {
-                let Some(a) = node::string(Some(v)).map(|s| s.to_string_lossy()) else {
-                    continue;
-                };
-                let Some(record) = asset(&a) else {
-                    continue;
-                };
-                if !node::is_str(node::member(Some(record), "kind"), "image") {
-                    continue;
+            if !node::is_str(node::member(Some(record), "kind"), "image") {
+                continue;
+            }
+            let format = str_member(Some(record), "format").unwrap_or_default();
+            if format.eq_ignore_ascii_case("svg") {
+                out.push("SVG texture maps".to_owned());
+                continue;
+            }
+            match assets {
+                Some(r) => {
+                    if let Some(path) = r.path(&a, Some(record))
+                        && let Err(super::textures::MapError::Unsupported(why)) =
+                            super::textures::Textures::probe(&path)
+                    {
+                        out.push(why);
+                    }
                 }
-                let format = str_member(Some(record), "format").unwrap_or_default();
-                if format.eq_ignore_ascii_case("svg") {
-                    out.push((Some(id(l)), "SVG texture maps".to_owned()));
-                    continue;
-                }
-                if let Some(path) = assets.and_then(|r| r.path(&a, Some(record)))
-                    && let Err(super::textures::MapError::Unsupported(why)) =
-                        super::textures::Textures::probe(&path)
-                {
-                    out.push((Some(id(l)), why));
+                // Without media, the recorded container decides, as for
+                // image layers (`capability::check_media`).
+                None => {
+                    let name = str_member(Some(record), "name").unwrap_or_default();
+                    if let Err(f) = crate::stills::static_format(&format, &name) {
+                        out.push(format!("3D texture map image ({f})"));
+                    }
                 }
             }
         }
     }
-    out
 }
 
 /// A legacy `scene3d` layer's scene (`sceneForLayer` + `sync`), rendered

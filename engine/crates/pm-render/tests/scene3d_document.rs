@@ -546,3 +546,143 @@ fn frame_requests_carry_the_view_except_for_final_purposes() {
     let (r, view) = RenderRequest::from_frame_request_with_view(&export).unwrap();
     assert!(view.is_none() && r.export, "exports ignore view overrides");
 }
+
+/// The corpus legacy scene layer (`3d/legacy-scene`): a cube and a torus
+/// parented to it, a sun, and a perspective camera.
+fn legacy_scene_layer() -> Value {
+    let project: Value = serde_json::from_str(include_str!(
+        "../../pm-model/tests/fixtures/corpus/3d-legacy-scene.json"
+    ))
+    .unwrap();
+    let d = project["layers"][0]["d"].clone();
+    assert_eq!(d["definition"], "powermove.3d.scene");
+    let mut l = layer("s", "extension", d, 0.0, 0.0, 2.0);
+    l["p"]["anchor.x"] = ch(json!(0));
+    l["p"]["anchor.y"] = ch(json!(0));
+    l
+}
+
+fn features(doc: &pm_model::Document) -> Vec<String> {
+    pm_render::unsupported(doc, "Ptest-root")
+        .into_iter()
+        .map(|u| u.feature.to_string())
+        .collect()
+}
+
+#[test]
+fn the_static_check_looks_inside_legacy_scenes() {
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let mut r = Renderer::headless().unwrap();
+    let mut render = |doc: &pm_model::Document| {
+        r.render(doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+            .map(|f| f.failures.is_empty())
+    };
+    let base = || project(W, H, 2.0, solid_fill("#000000"), vec![legacy_scene_layer()]);
+    // As captured: nothing listed, and it renders.
+    let doc = load(&base());
+    assert_eq!(features(&doc), Vec::<String>::new());
+    assert!(render(&doc).unwrap());
+
+    // Each change is listed, and the ones the 3D pass cannot build also
+    // fail at render time: the routing decision holds at every frame.
+    let scene = "/layers/0/d/data/scene";
+    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>, bool)> = vec![
+        (
+            "3D: imported models (legacy scene object cube)",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/0/source")).unwrap() =
+                    json!({ "assetId": "m" });
+                doc["assets"]["m"] =
+                    json!({ "id": "m", "kind": "model", "format": "glb", "name": "m.glb" });
+            }),
+            true,
+        ),
+        (
+            "3D: knot primitives (legacy scene object ring)",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/1/source")).unwrap() =
+                    json!({ "primitive": "knot" });
+            }),
+            true,
+        ),
+        (
+            "3D: hemisphere lights (legacy scene light key)",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/lights/0/type")).unwrap() = json!("hemisphere");
+            }),
+            true,
+        ),
+        (
+            "3D: model-group recipe parts (legacy scene object cube)",
+            Box::new(|doc: &mut Value| {
+                doc.pointer_mut(&format!("{scene}/objects/0"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("generation".into(), json!({ "groupId": "g", "partId": "p" }));
+            }),
+            false,
+        ),
+        (
+            "3D: SVG texture maps (legacy scene object ring)",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
+                    .unwrap() = json!({ "color": "i" });
+                doc["assets"]["i"] =
+                    json!({ "id": "i", "kind": "image", "format": "svg", "name": "i.svg" });
+            }),
+            false,
+        ),
+        (
+            "3D: 3D texture map image (media: an image of unrecorded format) (legacy scene object ring)",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
+                    .unwrap() = json!({ "roughness": "i" });
+                doc["assets"]["i"] = json!({ "id": "i", "kind": "image", "name": "i" });
+            }),
+            false,
+        ),
+        (
+            "3D: a legacy 3D scene without a scene object",
+            Box::new(|doc: &mut Value| {
+                *doc.pointer_mut("/layers/0/d/data/scene").unwrap() = json!(null);
+            }),
+            true,
+        ),
+    ];
+    for (want, change, fails) in cases {
+        let mut doc = base();
+        change(&mut doc);
+        let doc = load(&doc);
+        assert_eq!(features(&doc), vec![want.to_owned()]);
+        if fails {
+            assert!(
+                !render(&doc).unwrap_or(false),
+                "{want}: the render cannot draw it"
+            );
+        }
+    }
+    // A model asset without a record draws the orange box: not listed.
+    let mut doc = base();
+    *doc.pointer_mut(&format!("{scene}/objects/0/source")).unwrap() = json!({ "assetId": "gone" });
+    let doc = load(&doc);
+    assert_eq!(features(&doc), Vec::<String>::new());
+    assert!(render(&doc).unwrap());
+
+    // 3D light layers meet the same light check.
+    let mut light = sun("sun", [-3.0, 5.0, 4.0], false, 2.0);
+    light["d"]["data"]["light"]["type"] = json!("hemisphere");
+    let doc = load(&project(
+        W,
+        H,
+        2.0,
+        solid_fill("#000000"),
+        vec![
+            camera("cam", [0.0, 0.0, 6.0], false, 2.0),
+            light,
+            object3d("a", "box", json!({}), "#FF4040", W, H, 2.0),
+        ],
+    ));
+    assert_eq!(features(&doc), vec!["3D: hemisphere lights".to_owned()]);
+    assert!(!render(&doc).unwrap_or(false));
+}
