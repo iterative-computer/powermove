@@ -21,7 +21,7 @@ use pm_protocol::priority::{
     AlphaOutput as WireAlpha, ExportFormat, ExportSettings, ProResProfile as WireProRes,
     QualityTier,
 };
-use pm_render::Renderer;
+use pm_render::{RenderRequest, Renderer};
 use serde_json::{Value, json};
 use support::doc::*;
 
@@ -320,6 +320,10 @@ impl GpuGate for Bands {
     fn finished(&self, _: u64, _: u32, measured_us: f64) {
         assert!(measured_us >= 0.0);
     }
+
+    fn abandoned(&self, _: u64) {
+        panic!("a supported frame never abandons a submission");
+    }
 }
 
 #[test]
@@ -494,6 +498,127 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Counts what `render_frame` told the gate.
+#[derive(Default)]
+struct Ledger {
+    admitted: AtomicU32,
+    finished: AtomicU32,
+    abandoned: AtomicU32,
+}
+
+impl GpuGate for Ledger {
+    fn admit(&self, _: u64, units: u32, _: &AtomicBool) -> Option<u32> {
+        self.admitted.fetch_add(1, Ordering::Relaxed);
+        Some(units)
+    }
+
+    fn finished(&self, _: u64, _: u32, _: f64) {
+        self.finished.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn abandoned(&self, _: u64) {
+        self.abandoned.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Every admission ends in `finished` or `abandoned`, including a render
+/// that fails after admission (a text layer when nothing routed the frame
+/// first); an offline clip is a layer failure of a finished render; stills
+/// route before admitting anything.
+#[test]
+fn every_admission_is_released_when_a_render_fails() {
+    let dur = 0.2;
+    let mut renderer = Renderer::headless().unwrap();
+    let request = RenderRequest::sized(Size::new(W, H), Precision::Float16);
+    let (mut text_doc, media) = generated(dur);
+    text_doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, text("caption", dur));
+    let ledger = Ledger::default();
+    let result = render_frame(
+        &mut renderer,
+        &load(&text_doc),
+        "Ptest-root",
+        Ticks::ZERO,
+        &request,
+        &media,
+        &ledger,
+        1,
+        &AtomicBool::new(false),
+    );
+    assert!(
+        matches!(result, Err(JobError::Unsupported(_))),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(ledger.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.abandoned.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.finished.load(Ordering::Relaxed), 0);
+    let (offline_doc, mut offline) = generated(dur);
+    offline.paths.remove("clip");
+    let ledger = Ledger::default();
+    let frame = render_frame(
+        &mut renderer,
+        &load(&offline_doc),
+        "Ptest-root",
+        Ticks::ZERO,
+        &request,
+        &offline,
+        &ledger,
+        1,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        !frame.failures.is_empty(),
+        "the offline clip failed its layer"
+    );
+    assert_eq!(ledger.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.finished.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.abandoned.load(Ordering::Relaxed), 0);
+    // The still path routes the text layer before the gate is asked.
+    let ledger = Ledger::default();
+    let mut routing = StillRouting::new();
+    let still = render_still(
+        &mut renderer,
+        &load(&text_doc),
+        "Ptest-root",
+        Ticks::ZERO,
+        1280,
+        &media,
+        &mut routing,
+        &ledger,
+        1,
+        &AtomicBool::new(false),
+    );
+    match still {
+        Err(JobError::Unsupported(list)) => {
+            assert!(list.iter().any(|u| u.contains("text")), "{list:?}")
+        }
+        other => panic!("expected routing, got {:?}", other.err()),
+    }
+    assert_eq!(ledger.admitted.load(Ordering::Relaxed), 0);
+    // A supported frame after the failures: admitted and finished.
+    let (doc, media) = generated(dur);
+    let ledger = Ledger::default();
+    render_frame(
+        &mut renderer,
+        &load(&doc),
+        "Ptest-root",
+        Ticks::ZERO,
+        &request,
+        &media,
+        &ledger,
+        1,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(ledger.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.finished.load(Ordering::Relaxed), 1);
+    assert_eq!(ledger.abandoned.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn a_cancelled_export_leaves_nothing_behind() {
     let dir = scratch("cancel");
@@ -591,6 +716,7 @@ fn gpu_times_by_band() {
         fn finished(&self, _: u64, units: u32, us: f64) {
             self.0.lock().unwrap().push((units, us));
         }
+        fn abandoned(&self, _: u64) {}
     }
     let (doc, media) = generated(1.0);
     let job = job(

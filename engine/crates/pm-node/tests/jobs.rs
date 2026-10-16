@@ -825,3 +825,144 @@ fn agent_frames_during_playback_are_sliced_and_still_answer() {
         at: at_now(),
     }));
 }
+
+fn frame_outcome_codes(message: &Message) -> Vec<Option<ErrorCode>> {
+    let Message::Response {
+        body: Response::AgentFrames(result),
+        ..
+    } = message
+    else {
+        panic!("{message:?}")
+    };
+    result
+        .outcomes
+        .iter()
+        .map(|o| match o {
+            AgentFrameOutcome::Failed { error, .. } => Some(error.code),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Batches the engine cannot render never hold the GPU gate: a text layer
+/// is routed before any GPU work, an offline clip fails its frames after
+/// rendering, and the supported batch after each one answers at once, as an
+/// export after them does.
+#[test]
+fn unsupported_agent_frames_never_block_the_batches_after_them() {
+    let mut host = Host::new("unblock", &[]);
+    let good = host.snapshot(&project(false), SessionRole::Job, 1);
+    let text = host.snapshot(&project(true), SessionRole::Job, 2);
+    let mut doc = project(false);
+    doc["layers"][1]["d"]["asset"] = json!("gone");
+    doc["assets"]["gone"] = doc["assets"]["clip"].clone();
+    doc["assets"]["gone"]["id"] = json!("gone");
+    let offline = host.snapshot(&doc, SessionRole::Job, 3);
+    for (session, revision) in [(text, 2), (offline, 3)] {
+        let id = host.send_request(
+            Request::AgentFrames(frames_request(2)),
+            Some(session),
+            Some(revision),
+        );
+        assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+        let codes = frame_outcome_codes(&host.answers[&id]);
+        assert!(
+            codes
+                .iter()
+                .all(|c| c.is_some_and(|c| c != ErrorCode::Cancelled)),
+            "{codes:?}"
+        );
+        let started = Instant::now();
+        let id = host.send_request(Request::AgentFrames(frames_request(2)), Some(good), Some(1));
+        assert!(
+            host.run_until(Duration::from_secs(20), |h| h.answers.contains_key(&id)),
+            "the supported batch after an unsupported one answers"
+        );
+        assert_eq!(frame_images(&host.answers[&id]).len(), 2);
+        eprintln!(
+            "supported batch after the failed one: {:?}",
+            started.elapsed()
+        );
+    }
+    // An export after them still runs to the end.
+    let snapshot = host.snapshot(&project(false), SessionRole::JobSnapshot, 4);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-after",
+            "run-u",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-after").is_some()
+    }));
+    assert_eq!(terminal(&host, "job-after").unwrap().state, JobState::Done);
+}
+
+/// A render that fails after the gate admitted it (a frame nothing routed
+/// first) releases the admission on the shared gate, idle and while the
+/// interactive engine plays, so every lane after it is admitted at once.
+#[test]
+fn a_render_that_fails_after_admission_releases_the_shared_gate() {
+    use pm_export::render::{GpuGate, JobError, MediaPaths, render_frame};
+    use pm_node::jobs::gate::{Gate, LaneGate, SNAPSHOT_LANE, USER_LANE};
+    use pm_render::{RenderRequest, Renderer};
+    use std::sync::atomic::AtomicBool;
+
+    let mut renderer = Renderer::headless().unwrap();
+    let mut doc = project(true);
+    // Only the text layer and the solid: nothing the host must resolve.
+    doc["layers"] = json!([doc["layers"][0].clone(), doc["layers"][4].clone()]);
+    let text = pm_model::json::parse(&doc.to_string()).unwrap();
+    let text = pm_model::Document::new(Some(text), 1);
+    let request = RenderRequest::sized(Size::new(320, 180), Precision::Float16);
+    let gate = Arc::new(Gate::new());
+    let snap = LaneGate {
+        gate: gate.clone(),
+        lane: SNAPSHOT_LANE,
+    };
+    let user = LaneGate {
+        gate: gate.clone(),
+        lane: USER_LANE,
+    };
+    let no = AtomicBool::new(false);
+    for playing in [false, true] {
+        if playing {
+            gate.signal(&DeadlineSignal::PlaybackStarted {
+                at: at_now(),
+                rate: PlaybackRate::NORMAL,
+                frame_budget_us: 16_666,
+            });
+        }
+        let failed = render_frame(
+            &mut renderer,
+            &text,
+            "Ptest-root",
+            Ticks::ZERO,
+            &request,
+            &MediaPaths::default(),
+            &snap,
+            42,
+            &no,
+        );
+        assert!(
+            matches!(failed, Err(JobError::Unsupported(_))),
+            "{:?}",
+            failed.err()
+        );
+        let started = Instant::now();
+        let granted = user.admit(7, 12, &no);
+        assert!(granted.is_some());
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "admitted after {:?} (playing {playing})",
+            started.elapsed()
+        );
+        user.finished(7, granted.unwrap(), 50.0);
+    }
+    assert_eq!(gate.stats().abandoned, 2);
+}
