@@ -56,7 +56,7 @@ the operations. `IdSource { base, next }` makes ids `prefix + base + n`.
 `{"ok":{"ops":[…],"next":n,…answers}}`, `{"throw":{kind,message}}`, or the
 query fallbacks `{"host"}` (three.js geometry: 3D objects and model groups until
 Phase 3c), `{"fonts"}` (fonts not served yet), `{"ink"}` (glyph ink without
-outlines). Answers: `ids` (ungroup), `bounds` (groupPlacement, anchorReference),
+outlines), `{"legacy"}` (an edit left to the legacy code, below). Answers: `ids` (ungroup), `bounds` (groupPlacement, anchorReference),
 `moves` (align, distribute), `plans` (splitText), `w h ax ay` (leaveAttributes),
 `count` (syncPeers).
 
@@ -100,6 +100,31 @@ dual-mode reference:
 - An ungroup bake samples the playhead and every frame of the composition; frame
   keys land on `n / fps` exactly as today. The playhead key, when the playhead is
   off the frame grid, lands on the playhead's tick.
+- While an ungroup runs, its baked keys sit at TypeScript's float times
+  (`sample.time − layer.from`), so every later sample reads them where evaluation
+  puts them: a child sampled against its baked parent, a group sampled against a
+  group baked earlier in the same ungroup. When every group is done, the keys move
+  to their times on the tick grid (found by their created ids). The values are
+  therefore the legacy values; only the times snap.
+
+## Edits left to the legacy code
+
+A camera or light reparented onto a member of a group that is itself parented to
+the camera (or onto anything whose `parent3D` walk reaches the camera through a
+group's parent chain) is answered `{"legacy"}` (`pm_edit::LEGACY_ONLY`), and the
+renderer runs `preserveParentPose`. The app allows this: `PM.wouldCycle` checks
+group ancestors only when the reparented layer is itself a group. In that space
+the camera's new parent matrix contains the camera's own transform, so no pose
+can be preserved, and the legacy aim is computed from a matrix that reads the
+camera's keyframed channels through the evaluation cache the pose write left
+stale (`preserveParentPose` writes the pose and reads `parent3D` without
+`PM.touch()`; `temporalEvaluate` keeps prepared keys per `PM.touch` version).
+That mix of old and new values is not a function of the document, so the kernel
+declines before writing anything. The generator computes the same predicate with
+its own walk of `parent3D` and marks such cases `selfSpace`; the replay requires
+the kernel to decline exactly those (the committed set has 36, from documents
+built for it; seed 12345 also draws 3 at random). Fixing `PM.wouldCycle` to
+refuse the loop is a renderer change outside this lane.
 
 ## Ids and keys
 
@@ -120,23 +145,19 @@ on the first evaluation of every track.
    moved between layers or material peers, `time − from` for a baked key)
    computed in ticks: each term is rounded to the tick (half a tick at most,
    0.7 ns), and the result is written as `ticks / TICKS`. TypeScript adds the
-   floats. On exact rates the two differ by up to about 1.5 ticks (observed:
-   0.95 ticks, material peers on 24 fps with layer starts 1.0667 and the like);
-   on a composition stored with a float NTSC rate (29.97, 23.976, 59.94) a sum
-   of frame times is also on 30000/1001 rather than on the float rate, so it
-   differs by the float rate's drift as well (about 1e-6 relative).
-   Frame-aligned results are identical (`n / fps`).
-2. **Values sampled on the tick grid.** A value a bake writes is sampled from
-   the document as the bake left it so far: a parent baked on the same ticks,
-   or a group baked by an earlier group of the same ungroup. Those keys sit up
-   to a tick and a half from where TypeScript put them, so a sample read beside
-   them moves by the sampled track's slope over that time (observed: at most
-   1.4e-7 relative, 26 values in 3,361 cases of one seed; for example an
-   opacity sampled just before a step of a group baked with layer start 1.0189:
-   71.55407453 against 71.55407423). An ungroup bake's playhead key, when the
-   playhead is off the frame grid, likewise lands on the playhead's tick.
-3. **Created keys in native ease.** As described above; equal after adoption.
-4. **Distribute** has no TypeScript counterpart (the strip only aligns). The two
+   floats. On exact rates the two differ by up to about 1.5 ticks (observed at
+   most 1.29 ticks, seed 13); on a composition stored with a float NTSC rate
+   (29.97, 23.976, 59.94) a sum of frame times is also on 30000/1001 rather than
+   on the float rate, so it differs by the float rate's drift as well (about
+   1e-6 relative). Frame-aligned results are identical (`n / fps`). Values are
+   not affected: a bake samples its keys at the legacy float times and snaps them
+   only when it is done (see Time). Earlier builds sampled against keys already
+   on the tick grid, which moved values by the sampled track's slope over that
+   time (up to 1.3e-6 relative on an NTSC nested ungroup, seed 3, and up to
+   1.9e-9 relative where a child rides a fast parent, seed 0xed17); that
+   difference is gone.
+2. **Created keys in native ease.** As described above; equal after adoption.
+3. **Distribute** has no TypeScript counterpart (the strip only aligns). The two
    outermost layers stay; the others move along one axis so the chosen edges or
    centers fall at equal steps, or so the gaps between neighbours are equal.
    Tested against that definition (`tests/distribute.rs`); no UI calls it yet.
@@ -148,18 +169,17 @@ never counts as a mismatch (rule 4):
 - key times (`….kf[i].t`): section 25's tolerance plus 2 ticks (three rounded
   terms, plus the float error of the TypeScript sum), plus twice the compared
   compositions' drift scaled by the times and the largest layer start on NTSC
-  float rates;
-- values of keys a kernel created (an id the input lacks) or whose time it moved
-  (`….kf[i].v`): the track's slope next to the key over 4 ticks, or 1e-6 of the
-  value's magnitude (a parent track moving up to about 350 times the value's
-  magnitude per second, read 2.8 ns off);
+  float rates. This applies to every key time; a time a kernel leaves alone is
+  echoed, so the extra slack (under 3 ns) only matters for created or moved ones;
+- every other number, key values included: section 25's tolerance only
+  (`1e-9 + 1e-9·|b|`; rotations also modulo 360);
 - keyframe tracks adopted on both sides first (legacy evaluation adopts stored
   handles as a side effect of the TypeScript edit), created ids by order of first
   appearance, numbers inside rewritten expressions with section 25's tolerance.
 
 ## Tests and results
 
-All measured on 2026-10-14 and 2026-10-15 at this branch.
+All measured on 2026-10-14 and 2026-10-15 at this branch (the vectors, seeds, corpus, pipeline, pm-wasm, and the last e2e rerun after the self-space and bake-time fixes).
 
 - **Generated vectors** (`tests/vectors/generate-edit-vectors.ts` under bun, the
   TypeScript edits on seeded random documents; `tests/edit_parity.rs` replays them
@@ -169,22 +189,27 @@ All measured on 2026-10-14 and 2026-10-15 at this branch.
   `legacy/gl/raster.ts`'s `PM.raster` and `PM.textLayout` over it, the harness
   passes the same functions to pm-text's wrapping and glyph units, so font anchor
   capture, the font anchor reference, its Pan Behind rescale, and split text's
-  `font_offset` are compared end to end. The committed set (default seed):
-  2,359 cases (reparent 323, move to group 238, ungroup 180, group placement 164,
-  align 236, size anchor capture 166, anchor reference 27 and font 214, anchor
-  moved 27 and font 106, font anchor capture 242, leave attributes 89, material
-  peers 207, split text 60 and measured 80), 1,104,794 numbers, 1,085,446
-  bit-identical, max relative error 9.5e-10; 3,159 key times in difference 1 and
-  7 values in difference 2 (max 1.5e-8 relative); 257 error messages identical;
+  `font_offset` are compared end to end. The committed set (default seed, plus
+  8 documents built for self-space reparents): 2,455 cases (reparent 419, of
+  them 36 self-space ones left to the legacy edit, move to group 238, ungroup
+  180, group placement 164, align 236, size anchor capture 166, anchor reference
+  27 and font 214, anchor moved 27 and font 106, font anchor capture 242, leave
+  attributes 89, material peers 207, split text 60 and measured 80), 1,104,794
+  numbers, 1,085,450 bit-identical, max relative error 9.5e-10; 3,159 key times
+  in difference 1; no value needs any allowance; 317 error messages identical;
   0 mismatches.
 - **Other seeds** (`PM_EDIT_SEED`, `PM_EDIT_SCALE=2`, written outside the
-  repository and replayed with `PM_EDIT_VECTORS`): seeds 7, 99, 4242, 1, 31337,
-  and 2026, 4,555 to 4,834 cases each (28,206 in all), 0 mismatches in each. Key
-  times in difference 1 at most 1.07 ticks off outside the NTSC drift (seed
-  2026; 0.95 on seed 7, 0.77 on seed 4242); values in difference 2 at most
-  1.4e-7 relative (26 values, seed 99); max relative error elsewhere 1.0e-9.
+  repository and replayed with `PM_EDIT_VECTORS`): seeds 3, 12345, 7, 99, 4242,
+  1, 31337, 2026, 555, 42, 8080, 65537, 9001, 77, and 13, 4,725 to 5,026 cases
+  each (73,359 in all), 0 mismatches in each, values held to section 25's
+  tolerance (max relative error 9.97e-10). Key times in difference 1 at most
+  1.29 ticks off outside the NTSC drift (seed 13; 1.21 on seed 8080, 1.16 on
+  seed 3). Self-space reparents left to the legacy edit: 72 to 77 per seed, all
+  marked by the generator (seed 12345 also draws 3 at random). Seeds 3 (an NTSC
+  nested ungroup) and 12345 (self-space cameras) failed before these fixes.
 - **Corpus v1** (`PM_EDIT_CORPUS` over the 132 `loaded.json` of
-  `v1-20261012-230504-ae47a3b3`, vectors written outside the repository): 3,154
+  `v1-20261012-230504-ae47a3b3`, vectors written outside the repository,
+  regenerated as v1c with the current generator; no self-space cases): 3,154
   cases (reparent 416, move to group 443, ungroup 9, group placement 203, align
   467, size anchor capture 354, leave attributes 146, and on the corpus's text
   layers font anchor capture 834, font anchor reference 170, font Pan Behind 2,
@@ -204,7 +229,12 @@ All measured on 2026-10-14 and 2026-10-15 at this branch.
   kernel answered natively.
 - **pm-wasm** (`crates/pm-wasm/tests/edit.rs`): replies, id sources, throws, and
   the world pose kept through reparent and an animated ungroup applied back to the
-  mirror.
+  mirror; the `{legacy}` reply for a self-space camera (and an answer without the
+  loop); baked keys of an off-grid start on 29.97 settled on the tick grid.
+- **Pipeline, self-space** (`engine-doc/edits.test.ts`): `set_layer` puts a
+  keyframed camera under a member of a group parented to it with the flag `on`:
+  the kernel answers `{legacy}`, `reparent:legacy` is counted, nothing is
+  applied natively, and the document equals the flag-off one.
 - **e2e** (`--workers=1 --retries=0`, one Electron at a time,
   `POWERMOVE_ENGINE_FONTS=1` with the pm-bridge addon built): 23 specs (64 tests)
   covering groups, 2.5D groups and layers, alignment, font and size anchors, split
@@ -236,6 +266,16 @@ All measured on 2026-10-14 and 2026-10-15 at this branch.
   2, move to group 2, reparent 3, split text 2, material peers 2, ungroup 3), 0
   mismatches; 173 audits, 0 failures, 0 mirror mismatches. Edit fallbacks: `ink`
   7 and `fonts` 6, nothing else.
+- **e2e rerun after the self-space and bake-time fixes** (2026-10-15, same 10
+  specs and conditions; `native-edit-kernels.spec.ts` now also asserts that the
+  page reports the mode the build was made with, so a build without the flag
+  cannot pass as `off`): `audit`, `on`, and `off` each 18 passed, 1 failed (the
+  quarantined `precomp.spec.ts:46`). `audit`: 30,522 dual answers over 19 page
+  sessions, 27 of them `edit.*` (align 1, anchor moved 2, anchor reference 1,
+  size anchor capture 2, group placement 8, leave attributes 2, move to group 2,
+  reparent 3, split text 2, material peers 2, ungroup 2), 0 mismatches; 128
+  audits, 0 failures, 0 mirror mismatches. Edit fallbacks: `ink` 7 and `fonts` 6
+  (group placement, font anchor, split text), nothing else.
 - **What fell back in the e2e runs**: `ink` (glyph ink, below), `fonts` (the first
   text question of a page, before the registry's answers arrive), and one `host`
   (a 3D group's bounds).
