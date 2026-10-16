@@ -297,10 +297,13 @@ mod fit {
                     points: Cow::Owned(vec![Point { size: 0.0, expand_x: 0.0, expand_y: 0.0, dy: 0.0, gamma: 1.0 }]),
                     snap: pm_text::render::profile::Snap::QuarterRound,
                     path_above: None,
+                    large_above: None,
+                    large: Point { size: 0.0, expand_x: 0.0, expand_y: 0.0, dy: 0.0, gamma: 1.0 },
                     light: Cow::Borrowed(&pm_text::render::profile::LINEAR),
                     dark: Cow::Borrowed(&pm_text::render::profile::LINEAR),
                     mix: 1.0,
-                    fake_bold: 1.0,
+                    fake_bold: 0.0,
+                    fake_bold_y: 1.0,
                     stroke: base.stroke,
                 };
                 renderer.text().set_profile(plain);
@@ -359,15 +362,54 @@ mod fit {
                         top_of(&c.reference, false) - top_of(&o, true), bot_of(&c.reference, false) - bot_of(&o, true));
                 }
             }
-            "bold" => {
-                let set: Vec<&Case> = cases.iter().filter(|c| c.group == "synthetic").collect();
-                let mut x = vec![base.fake_bold];
-                let mut step = vec![0.2];
-                let best = search(&mut x, &mut step, &[0.0], &[2.0], &mut |v| {
-                    renderer.text().set_profile(Profile { fake_bold: v[0], ..base.clone() });
+            "large" => {
+                for c in cases.iter().filter(|c| c.group.starts_with("probe-large")) {
+                    let mut mask = base.clone();
+                    mask.path_above = None;
+                    renderer.text().set_profile(mask);
+                    let (m, mr) = score(&mut renderer, c);
+                    let mut path = base.clone();
+                    path.path_above = Some(0.0);
+                    renderer.text().set_profile(path);
+                    let (p, pr) = score(&mut renderer, c);
+                    println!("{:<22} {:>5}px mask {m:.4} ({mr:.3})  path {p:.4} ({pr:.3})", c.id, c.size);
+                }
+            }
+            "mid" => {
+                // Glyphs between 160 and 256 px: fit a plain-curve regime.
+                let set: Vec<&Case> = cases
+                    .iter()
+                    .filter(|c| c.group == "probe-large-h" && c.size > 162.0 && c.size <= 250.0)
+                    .collect();
+                let mut x = vec![0.0, 0.0, 0.0, 1.0];
+                let mut step = vec![0.1, 0.1, 0.1, 0.2];
+                let best = search(&mut x, &mut step, &[-0.5, -0.5, -1.0, 0.3], &[1.0, 1.0, 1.0, 3.0], &mut |v| {
+                    let mut prof = base.clone();
+                    prof.large_above = Some(162.0);
+                    prof.large = Point { size: 200.0, expand_x: v[0], expand_y: v[1], dy: v[2], gamma: v[3] };
+                    renderer.text().set_profile(prof);
                     mean(&mut renderer, &set)
                 });
-                println!("fake_bold {:.3}: mean {best:.4}", x[0]);
+                println!("mid: ex {:.3} ey {:.3} dy {:.3} gamma {:.3} mean {best:.4}", x[0], x[1], x[2], x[3]);
+            }
+            "bold" => {
+                let set: Vec<&Case> = cases.iter().filter(|c| c.group == "synthetic").collect();
+                let mut x = vec![base.fake_bold, base.fake_bold_y];
+                let mut step = vec![0.002, 0.2];
+                let best = search(&mut x, &mut step, &[0.0, 0.0], &[0.05, 2.0], &mut |v| {
+                    renderer.text().set_profile(Profile { fake_bold: v[0], fake_bold_y: v[1], ..base.clone() });
+                    mean(&mut renderer, &set)
+                });
+                println!("fake_bold {:.5} y {:.3}: mean {best:.4}", x[0], x[1]);
+                for c in set.iter().filter(|c| c.id.ends_with('4') || c.id.ends_with('6') || c.id.ends_with('8')) {
+                    let mut y = vec![0.006, 1.0];
+                    let mut st = vec![0.002, 0.2];
+                    let b = search(&mut y, &mut st, &[0.0, 0.0], &[0.05, 2.0], &mut |v| {
+                        renderer.text().set_profile(Profile { fake_bold: v[0], fake_bold_y: v[1], ..base.clone() });
+                        score(&mut renderer, c).0
+                    });
+                    println!("  {} {}px best {:.5} × size, y {:.3}: ink {b:.4}", c.id, c.size, y[0], y[1]);
+                }
                 renderer.text().set_profile(Profile { fake_bold: x[0], ..base.clone() });
                 for c in &set {
                     let (ink, ratio) = score(&mut renderer, c);

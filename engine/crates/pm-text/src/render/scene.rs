@@ -180,11 +180,12 @@ fn union(r: &mut Option<Rect>, b: Rect) {
 
 impl Painter<'_> {
     /// The fake-bold outset per side for a synthesized bold run.
-    fn fake_bold(&self, synthetic: bool, device_size: f64) -> f64 {
+    fn fake_bold(&self, synthetic: bool, device_size: f64) -> (f64, f64) {
         if synthetic {
-            super::outline::synthetic_bold_width(device_size) / 2.0 * self.profile.fake_bold
+            let x = self.profile.fake_bold * device_size;
+            (x, x * self.profile.fake_bold_y)
         } else {
-            0.0
+            (0.0, 0.0)
         }
     }
 
@@ -208,21 +209,34 @@ impl Painter<'_> {
         if place.scale == 0.0 {
             return;
         }
-        let mut paths = Vec::new();
-        let mut bounds: Option<Rect> = None;
+        // Glyphs drawn from smoothed masks (the profile's expansion, offset,
+        // and curve) and glyphs drawn as plain paths (Skia draws a glyph as a
+        // path when its size or its bounding box exceeds the atlas limit).
+        let mut mask = (Vec::new(), None::<Rect>);
+        let mut path = (Vec::new(), None::<Rect>);
         let mut images = Vec::new();
-        let mut gamma_size = 0.0f64;
+        let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
             let dsize = device_size as f32;
             let bitmap_face = has_bitmaps(run.face);
             let colr = super::bitmap::has_colr(run.face);
-            let (ex, ey) = self.profile.expansion(device_size, false);
+            let large = self.profile.is_large(device_size);
+            let (ex, ey) = if large {
+                (self.profile.large.expand_x, self.profile.large.expand_y)
+            } else {
+                self.profile.expansion(device_size, false)
+            };
+            let bold = self.fake_bold(run.synthetic_bold, device_size);
             let style = GlyphStyle {
                 size: dsize,
-                synthetic_bold: self.fake_bold(run.synthetic_bold, device_size),
+                synthetic_bold: bold,
                 synthetic_italic: run.synthetic_italic,
                 expand: (ex, ey),
+            };
+            let plain = GlyphStyle {
+                expand: (0.0, 0.0),
+                ..style
             };
             for g in run.glyphs {
                 let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
@@ -259,27 +273,67 @@ impl Painter<'_> {
                     }
                     continue;
                 }
-                let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
+                let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                let (x, y) = if place.axis_aligned {
-                    self.profile.position(p.x, p.y, device_size, false)
+                let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                let dy = if as_path {
+                    0.0
+                } else if large {
+                    self.profile.large.dy
                 } else {
-                    let dy = self.profile.dy(device_size, false);
+                    self.profile.dy(device_size, false)
+                };
+                let outline = if as_path || (ex == 0.0 && ey == 0.0) {
+                    bare
+                } else {
+                    let Some(o) = self.outlines.get(run.face, run.coords, g.id, style) else {
+                        continue;
+                    };
+                    o
+                };
+                let (x, y) = if place.axis_aligned && !(large && !as_path) {
+                    let (x, y) = self.profile.snap.apply(p.x, p.y);
+                    (x, y + dy)
+                } else if place.axis_aligned {
+                    (p.x, p.y + dy)
+                } else {
                     let d = place.residual * kurbo::Point::new(0.0, dy);
                     (p.x + d.x, p.y + d.y)
                 };
                 let t = Affine::translate((x, y)) * place.residual;
-                union(&mut bounds, t.transform_rect_bbox(outline.bounds));
-                gamma_size = gamma_size.max(device_size);
-                paths.push(placed(&outline, t, PathStyle::Fill));
+                let target = if as_path || large { &mut path } else { &mut mask };
+                union(&mut target.1, t.transform_rect_bbox(outline.bounds));
+                target.0.push(placed(&outline, t, PathStyle::Fill));
+                if !as_path {
+                    curve_size = curve_size.max(device_size);
+                }
             }
         }
-        if let Some(bounds) = bounds {
+        if let Some(bounds) = mask.1 {
             out.push(Item {
                 content: ItemContent::Coverage {
-                    paths,
-                    curve: self.profile.curve(gamma_size, [color[0], color[1], color[2]]),
+                    paths: mask.0,
+                    curve: self.profile.curve(curve_size, [color[0], color[1], color[2]]),
+                },
+                color,
+                opacity,
+                blur,
+                bounds,
+            });
+        }
+        if let Some(bounds) = path.1 {
+            let mut curve = super::profile::LINEAR;
+            let g = self.profile.large.gamma;
+            if g != 1.0 {
+                for v in &mut curve {
+                    *v = super::profile::coverage_curve(f64::from(*v), g) as f32;
+                }
+            }
+            out.push(Item {
+                content: ItemContent::Coverage {
+                    paths: path.0,
+                    curve,
                 },
                 color,
                 opacity,

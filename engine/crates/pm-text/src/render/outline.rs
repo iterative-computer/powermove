@@ -48,7 +48,7 @@ struct Key {
     glyph: u32,
     size: u32,
     coords: Vec<(u32, u32)>,
-    bold: u64,
+    bold: (u64, u64),
     italic: bool,
     ex: u64,
     ey: u64,
@@ -89,8 +89,9 @@ pub struct Outlines {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphStyle {
     pub size: f32,
-    /// Fake-bold outset per side in device px (0: not synthesized bold).
-    pub synthetic_bold: f64,
+    /// Fake-bold outset per side in device px, x and y (0: not
+    /// synthesized bold).
+    pub synthetic_bold: (f64, f64),
     pub synthetic_italic: bool,
     /// Outline expansion per side in device px.
     pub expand: (f64, f64),
@@ -184,7 +185,7 @@ impl Outlines {
             glyph,
             size: style.size.to_bits(),
             coords: coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
-            bold: style.synthetic_bold.to_bits(),
+            bold: (style.synthetic_bold.0.to_bits(), style.synthetic_bold.1.to_bits()),
             italic: style.synthetic_italic,
             ex: style.expand.0.to_bits(),
             ey: style.expand.1.to_bits(),
@@ -220,11 +221,11 @@ fn build(
     if path.elements().is_empty() {
         return None;
     }
-    if style.synthetic_bold > 0.0 {
-        let half = style.synthetic_bold;
+    if style.synthetic_bold.0 > 0.0 || style.synthetic_bold.1 > 0.0 {
+        let (bx, by) = style.synthetic_bold;
         path = kurbo::expand_path(
             &path,
-            Diagonal2::new(half, half),
+            Diagonal2::new(bx, by),
             Join::Miter,
             EXPAND_MITER_LIMIT,
             EXPAND_TOLERANCE,

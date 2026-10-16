@@ -108,10 +108,20 @@ pub struct Profile {
     /// By ascending size.
     pub points: Cow<'static, [Point]>,
     pub snap: Snap,
-    /// Glyphs above this device size draw as plain paths: Skia renders
-    /// glyphs larger than its 256 px atlas limit as paths, without
-    /// CoreGraphics smoothing.
+    /// Glyphs whose device font size, or whose device bounding box in
+    /// either dimension, exceeds this draw as plain paths: Skia renders
+    /// glyphs beyond its 256 px atlas limit as paths, without CoreGraphics
+    /// smoothing (measured on Menlo's H and full block, 150 to 300 px:
+    /// the block, 1.03 em tall, switches at 250 px, the H at 260 px).
     pub path_above: Option<f64>,
+    /// Glyphs above this device size (and not drawn as paths) are drawn
+    /// the way Chromium's GPU canvas draws large text: from the plain
+    /// outline at exact positions (no rounding of the baseline), with the
+    /// expansion and exponent of `large` and the linear curve.
+    #[serde(default)]
+    pub large_above: Option<f64>,
+    #[serde(default)]
+    pub large: Point,
     /// Coverage curves for white and for black paint (`CURVE_POINTS`
     /// values each). Paint in between mixes them by `luma^mix` (Rec. 709
     /// luma of the E-encoded color). Canvas2D's glyph masks are CoreText's
@@ -119,10 +129,12 @@ pub struct Profile {
     pub light: Cow<'static, [f32]>,
     pub dark: Cow<'static, [f32]>,
     pub mix: f64,
-    /// Scales Skia's fake-bold outset (`outline::synthetic_bold_width`) for
-    /// synthesized bold faces.
-    #[serde(default = "one")]
+    /// Synthesized bold: the outline grows by `fake_bold × size` per side
+    /// horizontally and `fake_bold_y` times that vertically.
+    #[serde(default)]
     pub fake_bold: f64,
+    #[serde(default = "one")]
+    pub fake_bold_y: f64,
     pub stroke: StrokeProfile,
 }
 
@@ -187,10 +199,13 @@ impl Profile {
         points: Cow::Borrowed(&[p(0.0, 0.0, 0.0, 0.0, 1.0)]),
         snap: Snap::Exact,
         path_above: None,
+        large_above: None,
+        large: p(0.0, 0.0, 0.0, 0.0, 1.0),
         light: Cow::Borrowed(&LINEAR),
         dark: Cow::Borrowed(&LINEAR),
         mix: 1.0,
-        fake_bold: 1.0,
+        fake_bold: 0.00875,
+        fake_bold_y: 0.925,
         stroke: StrokeProfile {
             snap: Snap::Exact,
             widen: 0.0,
@@ -204,10 +219,13 @@ impl Profile {
         points: Cow::Borrowed(CORETEXT_POINTS),
         snap: Snap::Exact,
         path_above: None,
+        large_above: None,
+        large: p(0.0, 0.0, 0.0, 0.0, 1.0),
         light: Cow::Borrowed(&LINEAR),
         dark: Cow::Borrowed(&LINEAR),
         mix: 1.0,
-        fake_bold: 1.0,
+        fake_bold: 0.00875,
+        fake_bold_y: 0.925,
         stroke: StrokeProfile {
             snap: Snap::Exact,
             widen: 0.0,
@@ -221,19 +239,40 @@ impl Profile {
         points: Cow::Borrowed(CANVAS2D_POINTS),
         snap: Snap::QuarterRound,
         path_above: Some(256.0),
+        // Measured on Menlo's H at 150 to 300 px (`text-probe`): masks up
+        // to 160 px; from 170 px glyphs sit at exact positions with this
+        // treatment (mean SSIM 0.991 at 170 to 250 px).
+        large_above: Some(162.0),
+        large: p(200.0, 0.425, 0.325, -0.303, 0.962),
         light: Cow::Borrowed(&CANVAS2D_LIGHT),
         dark: Cow::Borrowed(&CANVAS2D_DARK),
         mix: 1.0,
-        fake_bold: 1.0,
+        fake_bold: 0.00875,
+        fake_bold_y: 0.925,
+        // Fitted on `fit-stroke` (7 sizes × 6 widths): mean SSIM 0.992.
         stroke: StrokeProfile {
             snap: Snap::QuarterRound,
-            widen: 0.0,
-            gamma: 1.0,
+            widen: -0.025,
+            gamma: 0.612,
         },
     };
 
     fn as_path(&self, size: f64) -> bool {
         self.path_above.is_some_and(|p| size > p)
+    }
+
+    /// Whether a glyph at `size` device px is in the large-text regime.
+    pub fn is_large(&self, size: f64) -> bool {
+        self.large_above.is_some_and(|l| size > l)
+    }
+
+    /// Whether a glyph at `size` device px with plain outline `bounds`
+    /// (device px) draws as a path.
+    pub fn glyph_as_path(&self, size: f64, bounds: kurbo::Rect) -> bool {
+        // Skia compares the glyph mask's size, the bounds rounded out (one
+        // pixel more than the outline's extent at most phases).
+        self.path_above
+            .is_some_and(|p| size > p || bounds.width() + 1.0 > p || bounds.height() + 1.0 > p)
     }
 
     /// The profile at `size` device px (linear between points).
