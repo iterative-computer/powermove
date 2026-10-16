@@ -100,6 +100,23 @@ pub trait JobService: Send {
         request: AgentFrameRequest,
     ) -> Result<(), Box<EngineError>>;
 
+    /// Interpret Footage's facts of a file (`probeMedia`): the service
+    /// answers `id` on `port` with `Response::MediaFacts` (or an error)
+    /// through its outbox. Services without media access refuse.
+    fn probe_media(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        probe: pm_protocol::media::ProbeMedia,
+    ) -> Result<(), Box<EngineError>> {
+        let _ = (port, probe);
+        Err(Box::new(EngineError::new(
+            pm_protocol::error::ErrorCode::Unsupported,
+            pm_protocol::error::ErrorScope::Request { id },
+            "This job engine cannot read media.",
+        )))
+    }
+
     /// A deadline signal (contract 13) after the engine's own slicer saw it.
     fn signal(&mut self, signal: &DeadlineSignal);
 

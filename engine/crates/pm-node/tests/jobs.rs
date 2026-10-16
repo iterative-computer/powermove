@@ -1025,3 +1025,54 @@ fn a_relinked_asset_is_resolved_again_in_the_same_session() {
         "the relinked still did not change the frame ({changed})"
     );
 }
+
+/// Interpret Footage's facts: the host mints a `mediaRead` handle for the
+/// job engine (session 0) and asks `probeMedia`; the engine resolves the
+/// handle through the host and answers off its thread. An unknown handle is
+/// refused.
+#[test]
+fn media_facts_resolve_their_handle_through_the_host() {
+    use pm_protocol::media::{MediaKind, ProbeMedia};
+    let mut host = Host::new("probe", &[]);
+    let handle = host.mint(
+        CapabilityKind::MediaRead {
+            asset: "clip".into(),
+        },
+        fixture("hevc-alpha.mov"),
+    );
+    let id = host.send_request(
+        Request::ProbeMedia(ProbeMedia {
+            handle,
+            interpret: Some(r#"{"alpha":"premultiplied"}"#.into()),
+        }),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(20), |h| h.answers.contains_key(&id)));
+    let Some(Message::Response {
+        body: Response::MediaFacts(facts),
+        ..
+    }) = host.answers.get(&id)
+    else {
+        panic!("{:?}", host.answers.get(&id));
+    };
+    assert_eq!(facts.kind, MediaKind::Video);
+    let alpha = facts.settings.iter().find(|s| s.member == "alpha").unwrap();
+    assert_eq!(alpha.value, "premultiplied");
+    assert_eq!(facts.display_size, Some([320, 180]));
+    assert!(host.host_requests.contains(&"resolveHandle"));
+
+    let id = host.send_request(
+        Request::ProbeMedia(ProbeMedia {
+            handle: CapabilityHandle::from_random_bytes([0xEE; 16]),
+            interpret: None,
+        }),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(20), |h| h.answers.contains_key(&id)));
+    assert!(matches!(
+        host.answers.get(&id),
+        Some(Message::Error { error, .. }) if error.code == ErrorCode::CapabilityRejected
+    ));
+}

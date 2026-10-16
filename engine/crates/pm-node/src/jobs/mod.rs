@@ -556,6 +556,27 @@ impl JobService for JobEngineService {
         Ok(())
     }
 
+    fn probe_media(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        probe: pm_protocol::media::ProbeMedia,
+    ) -> Result<(), Box<EngineError>> {
+        // Probing opens and indexes the file: off the engine thread.
+        let shared = self.shared.clone();
+        std::thread::Builder::new()
+            .name("pm-probe-media".into())
+            .spawn(move || probe_media(&shared, port, id, probe))
+            .map(|_| ())
+            .map_err(|e| {
+                Box::new(EngineError::new(
+                    ErrorCode::Internal,
+                    ErrorScope::Request { id },
+                    format!("The probe could not start: {e}"),
+                ))
+            })
+    }
+
     fn signal(&mut self, signal: &DeadlineSignal) {
         self.shared.gate.signal(signal);
         if let DeadlineSignal::PlaybackStarted { .. } | DeadlineSignal::PlaybackStopped { .. } =
@@ -1241,6 +1262,57 @@ fn run_job(
             discard(shared);
             finish(JobState::Failed, None, Some(engine_error(job, &e)))
         }
+    }
+}
+
+/// Interpret Footage's facts of the file a `mediaRead` handle names: the
+/// handle resolves through the host (session 0: no engine session), then
+/// `pm_media::facts` reads the file with the asset's `interpret` member.
+fn probe_media(
+    shared: &Shared,
+    port: PortId,
+    id: RequestId,
+    probe: pm_protocol::media::ProbeMedia,
+) {
+    let fail = |code: ErrorCode, message: String| {
+        let mut envelope = Envelope::new(pm_protocol::envelope::Message::Error {
+            id,
+            error: EngineError::new(code, ErrorScope::Request { id }, message),
+        });
+        envelope.session = None;
+        shared.send(port, envelope);
+    };
+    let resolved = shared.call(
+        Request::ResolveHandle(ResolveHandle {
+            handle: probe.handle.clone(),
+            session: SessionId::ZERO,
+        }),
+        None,
+    );
+    let path = match resolved {
+        Ok(Response::HandleResolved(r))
+            if r.access == HandleAccess::Read
+                && matches!(r.kind, CapabilityKind::MediaRead { .. }) =>
+        {
+            PathBuf::from(r.path)
+        }
+        Ok(_) => {
+            return fail(
+                ErrorCode::CapabilityRejected,
+                "The handle does not name media to read.".into(),
+            );
+        }
+        Err(e) => return fail(e.code, e.message),
+    };
+    match pm_media::facts::media_facts(&path, probe.interpret.as_deref()) {
+        Ok(facts) => shared.send(
+            port,
+            Envelope::new(pm_protocol::envelope::Message::Response {
+                id,
+                body: Response::MediaFacts(Box::new(facts)),
+            }),
+        ),
+        Err(e) => fail(ErrorCode::DecodeFailed, format!("{}: {e}", path.display())),
     }
 }
 
