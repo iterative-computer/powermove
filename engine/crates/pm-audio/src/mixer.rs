@@ -507,8 +507,7 @@ impl Mixer {
     ) -> Result<Option<bool>> {
         let p = self.format.sample_rate as f64;
         let end = start + frames as i64;
-        let first = sample_at(plan.window.0, p);
-        let last = sample_at(plan.window.1, p);
+        let (first, last) = voice_bounds(&self.voices[vi].reader, plan, p);
         let (a, b) = (start.max(first), end.min(last));
         if b <= a {
             return Ok(None);
@@ -739,8 +738,7 @@ impl Mixer {
         // Time-mapped voices: (index, first and last sample heard here).
         let mut mapped: Vec<(usize, i64, i64)> = Vec::new();
         for (vi, plan) in graph.voices.iter().enumerate() {
-            let first = sample_at(plan.window.0, p);
-            let last = sample_at(plan.window.1, p);
+            let (first, last) = voice_bounds(&self.voices[vi].reader, plan, p);
             let (a, b) = (start.max(first), end.min(last));
             if b <= a {
                 continue;
@@ -895,7 +893,28 @@ fn blend(acc: &mut [Vec<f32>], next: &[Vec<f32>], done: usize, len: f32) {
     }
 }
 
-/// The first project sample at or after a time (`ceil(t × rate)`).
+/// The project samples `[first, last)` a voice is heard in. A copy reader
+/// places the clip on whole samples (source sample `n − shift` plays at
+/// project sample n, with `shift = round(offset × rate)`), so its window is
+/// measured on that lattice: a clip whose in-point falls between two samples
+/// starts with its first source sample at the rounded position instead of
+/// losing it to `ceil` (a clip at frame 7 of 29.97 fps, 11,211.2 samples).
+fn voice_bounds(reader: &Reader, plan: &VoicePlan, p: f64) -> (i64, i64) {
+    match (reader, plan.offset) {
+        (Reader::Copy { shift }, Some(offset)) => (
+            shift + sample_at(plan.window.0 - offset, p),
+            shift + sample_at(plan.window.1 - offset, p),
+        ),
+        _ => (sample_at(plan.window.0, p), sample_at(plan.window.1, p)),
+    }
+}
+
+/// The first project sample at or after a time (`ceil(t × rate)`). A time
+/// within `1e-9 × max(1, |n|)` of sample n is that sample (amendment 1's
+/// tolerance): a clip placed at frame 7 of 25 fps is at 0.28000000000000003 s
+/// in f64, and its first source sample must play at sample 13440, where the
+/// copy reader's rounded shift puts it, not one sample later (which dropped
+/// it).
 pub fn sample_at(t: f64, rate: f64) -> i64 {
     if t == f64::INFINITY {
         return i64::MAX / 4;
@@ -903,7 +922,13 @@ pub fn sample_at(t: f64, rate: f64) -> i64 {
     if t == f64::NEG_INFINITY {
         return i64::MIN / 4;
     }
-    (t * rate).ceil() as i64
+    let x = t * rate;
+    let n = x.round();
+    if (x - n).abs() <= 1e-9 * n.abs().max(1.0) {
+        n as i64
+    } else {
+        x.ceil() as i64
+    }
 }
 
 fn reader_for(plan: &VoicePlan, project: u32) -> Reader {
