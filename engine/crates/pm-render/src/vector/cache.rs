@@ -38,8 +38,17 @@ struct Entry {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bytes: u64,
+    /// The resolve tick of the last use (least recently used order).
     used: u64,
+    /// The frame of the last use; entries of the current frame are its
+    /// working set and are never evicted while it records.
+    frame: u64,
 }
+
+/// Today's raster cache bounds (legacy/gl/raster.ts: `MAX` entries and the
+/// `raster` budget's 192 MiB default).
+pub const DEFAULT_MAX_ENTRIES: usize = 4096;
+pub const DEFAULT_MAX_BYTES: u64 = 192 * 1024 * 1024;
 
 /// The float paint pass.
 struct Paint {
@@ -163,7 +172,10 @@ impl Paint {
 pub struct VectorCache {
     entries: HashMap<([u8; 32], u8), Entry>,
     tick: u64,
+    frame: u64,
     bytes: u64,
+    max_bytes: u64,
+    max_entries: usize,
     backend: CoverageBackend,
     gpu: Option<Option<GpuCoverage>>,
     paint: Option<Paint>,
@@ -182,7 +194,10 @@ impl VectorCache {
         Self {
             entries: HashMap::new(),
             tick: 0,
+            frame: 0,
             bytes: 0,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_entries: DEFAULT_MAX_ENTRIES,
             backend: CoverageBackend::Auto,
             gpu: None,
             paint: None,
@@ -205,17 +220,66 @@ impl VectorCache {
         self.bytes
     }
 
-    /// Evicts least recently used textures until at most `budget` bytes stay.
+    /// Cached textures.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The cache's standing bound: at most `max_bytes` and `max_entries`
+    /// outside the working set of the frame being recorded (a frame's own
+    /// textures are never evicted while it records, so one frame may
+    /// exceed the bound until the next one starts). Evicts at once.
+    pub fn set_budget(&mut self, max_bytes: u64, max_entries: usize) {
+        self.max_bytes = max_bytes;
+        self.max_entries = max_entries.max(1);
+        self.evict(self.max_bytes, self.max_entries, false);
+    }
+
+    /// The standing bound in bytes.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Starts a frame: the previous frame's textures become evictable, and
+    /// the cache is brought within its bound (animated content misses on
+    /// every frame, so this is what keeps playback and long exports
+    /// bounded).
+    pub fn begin_frame(&mut self) {
+        self.frame += 1;
+        self.evict(self.max_bytes, self.max_entries, false);
+    }
+
+    /// Evicts least recently used textures until at most `budget` bytes
+    /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
-        if self.bytes <= budget {
+        self.evict(budget, self.max_entries, true);
+    }
+
+    /// Evicts least recently used entries until at most `bytes` and
+    /// `entries` stay; the current frame's entries stay unless `all`.
+    fn evict(&mut self, bytes: u64, entries: usize, all: bool) {
+        if self.bytes <= bytes && self.entries.len() <= entries {
             return;
         }
-        let mut by_age: Vec<(u64, ([u8; 32], u8))> = self.entries.iter().map(|(k, e)| (e.used, *k)).collect();
-        by_age.sort();
+        let frame = self.frame;
+        let mut by_age: Vec<(u64, ([u8; 32], u8))> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| all || e.frame != frame)
+            .map(|(k, e)| (e.used, *k))
+            .collect();
+        by_age.sort_unstable();
         for (_, k) in by_age {
-            if self.bytes <= budget {
+            if self.bytes <= bytes && self.entries.len() <= entries {
                 break;
             }
+            // Dropping the texture is safe while recorded commands still
+            // use it: wgpu keeps it alive until they complete.
             if let Some(e) = self.entries.remove(&k) {
                 self.bytes -= e.bytes;
             }
@@ -236,6 +300,7 @@ impl VectorCache {
         let key = (source.key(), precision as u8);
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
+            e.frame = self.frame;
             return Ok(e.view.clone());
         }
         let (texture, bytes) = match source {
@@ -257,8 +322,16 @@ impl VectorCache {
             }
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Make room before inserting: earlier frames' entries go first, so
+        // the bound holds within a frame too (a work item can be a whole
+        // export).
+        self.evict(
+            self.max_bytes.saturating_sub(bytes),
+            self.max_entries.saturating_sub(1),
+            false,
+        );
         self.bytes += bytes;
-        self.entries.insert(key, Entry { _texture: texture, view: view.clone(), bytes, used: self.tick });
+        self.entries.insert(key, Entry { _texture: texture, view: view.clone(), bytes, used: self.tick, frame: self.frame });
         Ok(view)
     }
 

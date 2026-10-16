@@ -169,11 +169,23 @@ impl Renderer {
             .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
     }
 
-    /// Frees idle intermediate targets down to `bytes` (lease pressure),
-    /// and cached vector textures down to the same budget.
+    /// Frees idle intermediate targets and cached vector textures so that
+    /// together they hold at most `bytes` (lease pressure): the pool trims
+    /// first, and the vector cache gets what the pool leaves.
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
-        self.vector.trim(bytes);
+        self.vector.trim(bytes.saturating_sub(self.pool.bytes()));
+    }
+
+    /// The vector cache's standing bound, enforced while frames render
+    /// (default: today's raster cache, 192 MiB and 4096 entries).
+    pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
+        self.vector.set_budget(max_bytes, max_entries);
+    }
+
+    /// Cached vector textures.
+    pub fn vector_cache_len(&self) -> usize {
+        self.vector.len()
     }
 
     /// Bytes of cached vector textures (shape rasters and level 2 scenes):
@@ -332,6 +344,9 @@ impl Renderer {
             width: r.width,
             height: r.height,
         });
+        // The previous frame's vector textures become evictable, and the
+        // cache returns within its bound.
+        self.vector.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
