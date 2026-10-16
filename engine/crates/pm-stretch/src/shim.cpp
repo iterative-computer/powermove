@@ -143,4 +143,15 @@ int pm_stretch_flush(void *handle, float *const *outputs, int output_samples, fl
 	}
 }
 
+// The library's one-shot stretch of a whole buffer (its reference use):
+// returns 1 when it stretched, 0 when the input was too short.
+int pm_stretch_exact(void *handle, const float *const *inputs, int input_samples,
+		float *const *outputs, int output_samples) {
+	try {
+		return static_cast<Handle *>(handle)->stretch.exact(inputs, input_samples, outputs, output_samples) ? 1 : 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
 } // extern "C"

@@ -36,9 +36,19 @@ unsafe extern "C" {
         samples: c_int,
         rate: f64,
     ) -> c_int;
-    fn pm_stretch_output_seek(handle: *mut c_void, inputs: *const *const f32, samples: c_int)
-    -> c_int;
+    fn pm_stretch_output_seek(
+        handle: *mut c_void,
+        inputs: *const *const f32,
+        samples: c_int,
+    ) -> c_int;
     fn pm_stretch_process(
+        handle: *mut c_void,
+        inputs: *const *const f32,
+        input_samples: c_int,
+        outputs: *const *mut f32,
+        output_samples: c_int,
+    ) -> c_int;
+    fn pm_stretch_exact(
         handle: *mut c_void,
         inputs: *const *const f32,
         input_samples: c_int,
@@ -210,7 +220,9 @@ impl Stretcher {
         }
         let n = input[0].len();
         if input.iter().any(|c| c.len() != n) || n > c_int::MAX as usize {
-            return Err(StretchError::Shape("input channels differ in length".into()));
+            return Err(StretchError::Shape(
+                "input channels differ in length".into(),
+            ));
         }
         for (p, c) in self.inputs.iter_mut().zip(input) {
             *p = c.as_ptr();
@@ -228,7 +240,9 @@ impl Stretcher {
         }
         let n = output[0].len();
         if output.iter().any(|c| c.len() != n) || n > c_int::MAX as usize {
-            return Err(StretchError::Shape("output channels differ in length".into()));
+            return Err(StretchError::Shape(
+                "output channels differ in length".into(),
+            ));
         }
         for (p, c) in self.outputs.iter_mut().zip(output.iter_mut()) {
             *p = c.as_mut_ptr();
@@ -297,6 +311,31 @@ impl Stretcher {
                 rate as f32,
             )
         })
+    }
+}
+
+impl Stretcher {
+    /// The library's one-shot stretch of a whole buffer into `output`
+    /// (input and output lengths set the rate): the reference a streaming
+    /// use is measured against. Returns false when the input is too short.
+    pub fn exact(&mut self, input: &[&[f32]], output: &mut [&mut [f32]]) -> Result<bool> {
+        let n_in = self.input_pointers(input)?;
+        let n_out = self.output_pointers(output)?;
+        // SAFETY: as in `process`.
+        let r = unsafe {
+            pm_stretch_exact(
+                self.handle.as_ptr(),
+                self.inputs.as_ptr(),
+                n_in as c_int,
+                self.outputs.as_ptr(),
+                n_out as c_int,
+            )
+        };
+        match r {
+            1 => Ok(true),
+            0 => Ok(false),
+            _ => Err(StretchError::Alloc),
+        }
     }
 }
 

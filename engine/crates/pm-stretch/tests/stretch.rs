@@ -90,7 +90,11 @@ fn pitch_and_level_are_preserved_at_every_rate() {
         (1.003, 997.0),
         (0.997, 997.0),
     ] {
-        let input = sine(freq, (SR as f64 * 6.0 * rate.max(1.0)) as usize + 20_000, 0.5);
+        let input = sine(
+            freq,
+            (SR as f64 * 6.0 * rate.max(1.0)) as usize + 20_000,
+            0.5,
+        );
         let mut s = Stretcher::new(1, SR).unwrap();
         let out = stretch(&mut s, &input, rate, SR as usize * 3);
         // Skip the start (the reflected pre-roll), measure 1 s.
@@ -102,7 +106,10 @@ fn pitch_and_level_are_preserved_at_every_rate() {
             20.0 * (amp / 0.5).log10()
         );
         assert!((f / freq - 1.0).abs() < 0.001, "pitch at rate {rate}: {f}");
-        assert!((amp / 0.5 - 1.0).abs() < 0.03, "level at rate {rate}: {amp}");
+        assert!(
+            (amp / 0.5 - 1.0).abs() < 0.03,
+            "level at rate {rate}: {amp}"
+        );
         assert!(residual < -40.0, "residual at rate {rate}: {residual} dB");
     }
 }
@@ -151,4 +158,3 @@ fn output_seek_aligns_the_first_output_with_the_first_input() {
     );
     assert!((centroid - 48_000.0).abs() < 48.0 * 3.0, "{centroid}");
 }
-
