@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-ec2dc3a830649ec9";
+export const PROTOCOL_BUILD = "protocol-1066de5127496fb0";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -88,6 +88,8 @@ export type { ExportSettings } from "./ExportSettings";
 export type { ExtensionId } from "./ExtensionId";
 export type { ExtensionRegistered } from "./ExtensionRegistered";
 export type { ExtensionSource } from "./ExtensionSource";
+export type { FactLine } from "./FactLine";
+export type { FactOrigin } from "./FactOrigin";
 export type { FailureReport } from "./FailureReport";
 export type { FrameDescriptor } from "./FrameDescriptor";
 export type { FramePurpose } from "./FramePurpose";
@@ -107,6 +109,7 @@ export type { HostMicros } from "./HostMicros";
 export type { ImagePayload } from "./ImagePayload";
 export type { InFlight } from "./InFlight";
 export type { InstanceId } from "./InstanceId";
+export type { InterpretSetting } from "./InterpretSetting";
 export type { JobAccepted } from "./JobAccepted";
 export type { JobId } from "./JobId";
 export type { JobSpec } from "./JobSpec";
@@ -129,6 +132,8 @@ export type { LightKind } from "./LightKind";
 export type { MaskMode } from "./MaskMode";
 export type { MatteMode } from "./MatteMode";
 export type { MatteRef } from "./MatteRef";
+export type { MediaFacts } from "./MediaFacts";
+export type { MediaKind } from "./MediaKind";
 export type { MediaPreference } from "./MediaPreference";
 export type { Message } from "./Message";
 export type { MintHandle } from "./MintHandle";
@@ -166,6 +171,7 @@ export type { Precision } from "./Precision";
 export type { PreviewResolution } from "./PreviewResolution";
 export type { PriorityClass } from "./PriorityClass";
 export type { ProResProfile } from "./ProResProfile";
+export type { ProbeMedia } from "./ProbeMedia";
 export type { ProjectColor } from "./ProjectColor";
 export type { ProjectId } from "./ProjectId";
 export type { ProjectOpened } from "./ProjectOpened";

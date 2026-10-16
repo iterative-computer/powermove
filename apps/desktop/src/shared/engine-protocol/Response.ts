@@ -13,6 +13,7 @@ import type { JobAccepted } from "./JobAccepted";
 import type { JobsCancelled } from "./JobsCancelled";
 import type { Lease } from "./Lease";
 import type { LeaseUsage } from "./LeaseUsage";
+import type { MediaFacts } from "./MediaFacts";
 import type { OutputCommitted } from "./OutputCommitted";
 import type { OutputDestination } from "./OutputDestination";
 import type { PatchesApplied } from "./PatchesApplied";
@@ -25,4 +26,4 @@ import type { ToolResult } from "./ToolResult";
 /**
  * Responses, one per request kind.
  */
-export type Response = { "type": "ack" } | { "type": "sessionOpened", session: SessionId, } | { "type": "patchesApplied" } & PatchesApplied | { "type": "consistency" } & ConsistencyResult | { "type": "frame" } & FrameDescriptor | { "type": "image" } & RenderedImage | { "type": "scene" } & EvaluatedScene | { "type": "agentFrames" } & AgentFrameResult | { "type": "jobAccepted" } & JobAccepted | { "type": "jobsCancelled" } & JobsCancelled | { "type": "definitionsApplied" } & DefinitionsApplied | { "type": "leaseUsage" } & LeaseUsage | { "type": "lease" } & Lease | { "type": "handle" } & HandleGrant | { "type": "handleResolved" } & HandleResolved | { "type": "outputDestination" } & OutputDestination | { "type": "outputCommitted" } & OutputCommitted | { "type": "hardwareSessions" } & HardwareSessionGrant | { "type": "blenderStatus" } & BlenderStatus | { "type": "projectOpened" } & ProjectOpened | { "type": "persisted" } & Persisted | { "type": "extensionRegistered" } & ExtensionRegistered | { "type": "toolResult" } & ToolResult;
+export type Response = { "type": "ack" } | { "type": "sessionOpened", session: SessionId, } | { "type": "patchesApplied" } & PatchesApplied | { "type": "consistency" } & ConsistencyResult | { "type": "frame" } & FrameDescriptor | { "type": "image" } & RenderedImage | { "type": "scene" } & EvaluatedScene | { "type": "agentFrames" } & AgentFrameResult | { "type": "jobAccepted" } & JobAccepted | { "type": "jobsCancelled" } & JobsCancelled | { "type": "definitionsApplied" } & DefinitionsApplied | { "type": "leaseUsage" } & LeaseUsage | { "type": "lease" } & Lease | { "type": "handle" } & HandleGrant | { "type": "handleResolved" } & HandleResolved | { "type": "outputDestination" } & OutputDestination | { "type": "outputCommitted" } & OutputCommitted | { "type": "hardwareSessions" } & HardwareSessionGrant | { "type": "blenderStatus" } & BlenderStatus | { "type": "projectOpened" } & ProjectOpened | { "type": "persisted" } & Persisted | { "type": "extensionRegistered" } & ExtensionRegistered | { "type": "toolResult" } & ToolResult | { "type": "mediaFacts" } & MediaFacts;
