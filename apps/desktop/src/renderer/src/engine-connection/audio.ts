@@ -86,6 +86,12 @@ export class EngineAudio {
       }
       case 'peaks': {
         const { audio: _a, ...peaks } = message;
+        if (peaks.error) {
+          // Offline media (not resolved yet) or no sound: ask again at the
+          // next sync (a route change, an asset change), not at once.
+          this.asked.delete(peaks.asset);
+          return;
+        }
         this.answered.set(peaks.asset, peaks as AudioPeaks);
         this.apply(peaks as AudioPeaks);
         return;

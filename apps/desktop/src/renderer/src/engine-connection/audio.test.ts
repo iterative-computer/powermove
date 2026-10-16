@@ -80,9 +80,14 @@ describe('the engine audio for the audio panels', () => {
     audio.receive({ audio: 'peaks', asset: 'a1', peaksPerSecond: 100, duration: 0.03, peaks: [0.1, 0.5, 0.2], error: null }, session);
     expect(Array.from(assets[0]!.peaks as unknown as Float32Array)).toEqual([0.1, 0.5, 0.2].map(Math.fround));
     expect(changed).toHaveBeenCalledTimes(1);
-    // A failure leaves the asset as it was.
-    audio.receive({ audio: 'peaks', asset: 'v1', peaksPerSecond: 100, duration: 0, peaks: [], error: 'no audio stream' }, session);
+    // A failure leaves the asset as it was, and the next sync asks again
+    // (offline media resolves later).
+    audio.receive({ audio: 'peaks', asset: 'v1', peaksPerSecond: 100, duration: 0, peaks: [], error: 'the media is offline' }, session);
     expect((assets[1] as any).peaks).toBeUndefined();
+    audio.sync();
+    expect(sent.at(-1)).toEqual({ audio: 'peaksWanted', asset: 'v1' });
+    audio.sync();
+    expect(sent.filter((m) => m.audio === 'peaksWanted' && m.asset === 'v1')).toHaveLength(2);
   });
 
   it('routes PM.Audio.meters and the solo to the engine only while it runs the transport', () => {
