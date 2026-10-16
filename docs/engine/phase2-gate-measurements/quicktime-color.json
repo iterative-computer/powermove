@@ -1,0 +1,253 @@
+{
+  "bar": "ΔE2000 ≤ 1.0 on every patch, AVPlayerItemVideoOutput into the display profile against ColorSync of the viewer",
+  "exports": [
+    {
+      "format": "h264",
+      "stream": {
+        "codec_name": "h264",
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "iec61966-2-1",
+        "color_primaries": "bt709"
+      },
+      "displayProfile": "none",
+      "cases": [
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.7178784637553435,
+          "meanDeltaE": 0.22803459437245382,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            122,
+            122,
+            121
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.7178784637553435,
+          "meanDeltaE": 0.22803459437245382,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            122,
+            122,
+            121
+          ]
+        },
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 1.2202844173903353,
+          "meanDeltaE": 0.25492847805871377,
+          "output": "BGRA",
+          "passMax1": false,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 1.2202844173903353,
+          "meanDeltaE": 0.25492847805871377,
+          "output": "BGRA",
+          "passMax1": false,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        }
+      ]
+    },
+    {
+      "format": "prores-hq",
+      "stream": {
+        "codec_name": "prores",
+        "pix_fmt": "yuv422p10le",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "iec61966-2-1",
+        "color_primaries": "bt709"
+      },
+      "displayProfile": "none",
+      "cases": [
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.06267777585311732,
+          "meanDeltaE": 0.01030805513150126,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            243,
+            243,
+            242
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.06267777585311732,
+          "meanDeltaE": 0.01030805513150126,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            243,
+            243,
+            242
+          ]
+        },
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.42540463411063445,
+          "meanDeltaE": 0.1827487532625959,
+          "output": "BGRA",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.42540463411063445,
+          "meanDeltaE": 0.1827487532625959,
+          "output": "BGRA",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        }
+      ]
+    },
+    {
+      "format": "prores-4444",
+      "stream": {
+        "codec_name": "prores",
+        "pix_fmt": "yuva444p12le",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "iec61966-2-1",
+        "color_primaries": "bt709"
+      },
+      "displayProfile": "none",
+      "cases": [
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.06267777585311732,
+          "meanDeltaE": 0.01030805513150126,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            243,
+            243,
+            242
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.06267777585311732,
+          "meanDeltaE": 0.01030805513150126,
+          "output": "RGhA (64RGBAHalf)",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            243,
+            243,
+            242
+          ]
+        },
+        {
+          "display": "main display profile",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.42540463411063445,
+          "meanDeltaE": 0.1827487532625959,
+          "output": "BGRA",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        },
+        {
+          "display": "Display P3",
+          "frameColorSpace": "none",
+          "frameTime": 0.5,
+          "matrix": "ITU_R_709_2",
+          "maxDeltaE": 0.42540463411063445,
+          "meanDeltaE": 0.1827487532625959,
+          "output": "BGRA",
+          "passMax1": true,
+          "primaries": "ITU_R_709_2",
+          "transfer": "IEC_sRGB",
+          "worstPatch": [
+            24,
+            24,
+            24
+          ]
+        }
+      ]
+    }
+  ],
+  "judgedOn": "RGhA (64RGBAHalf)",
+  "pass": true
+}
