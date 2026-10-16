@@ -18,6 +18,7 @@ import { mkdtemp } from 'node:fs/promises';
 import type { Page } from 'playwright';
 
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
+import { fixturePath } from './helpers/media';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
 const OFF = { POWERMOVE_NEW_ENGINE: '0' };
@@ -259,12 +260,63 @@ test.describe('Use New Engine: the tracer bullet', () => {
     await expect.poll(async () => (await status(page)).driving, { timeout: 20_000 }).toBe(true);
     await page.evaluate(() => { const PM = (window as any).PM; PM.loop = false; PM.setTime(0.5); PM.play(); });
     await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('playing');
-    const a = await page.evaluate(() => ({ t: (window as any).PM.time as number, now: performance.now() }));
-    await page.waitForTimeout(1000);
-    const b = await page.evaluate(() => ({ t: (window as any).PM.time as number, now: performance.now() }));
-    const rate = (b.t - a.t) / ((b.now - a.now) / 1000);
-    expect(rate).toBeGreaterThan(0.95);
-    expect(rate).toBeLessThan(1.05);
+    // The playhead holds where Play put it until the run's first frame is
+    // shown (the audio output's latency), never moving back.
+    const held: string[] = await page.evaluate(async () => {
+      const out: string[] = [];
+      for (let i = 0; i < 40; i++) {
+        const PM = (window as any).PM; const c = PM.EngineConnection.session()?.clock; const host = PM.EngineConnection.hostClock.hostUs();
+        out.push(`${PM.time} ${c?.state} ${c?.epoch}/${c?.seq} m=${c?.mediaTime / 705600000} ahead=${c ? Math.round(c.hostTime - host) : ''}`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return out;
+    });
+    const ht = held.map((h) => Number(h.split(' ')[0]));
+    expect(Math.min(...ht), held.join('\n')).toBeGreaterThanOrEqual(0.5 - 1e-9);
+    // (Re-anchoring to the device clock may move it by microseconds.)
+    expect(ht.every((t, i) => i === 0 || t >= ht[i - 1]! - 0.002), held.join('\n')).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.time as number), { timeout: 5000 }).toBeGreaterThan(0.6);
+    // One second of the playhead, sampled in the page: it advances in real
+    // time (least squares over the samples) and stays on the engine
+    // clock's line (the audio device's).
+    const { series, sync } = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const out: { now: number; t: number; line: number }[] = [];
+      // A/V sync from frame-callback timing (section 15): for every timed
+      // engine frame presented, where the audio clock's line is at the
+      // instant the frame reaches the display, against the frame's interval.
+      const sync: number[] = [];
+      const off = PM.Kernel.services.get('viewer').enginePresentation.onPresented((frame: any) => {
+        const clock = PM.EngineConnection.session()?.clock;
+        if (!frame.timed || frame.displayUs === null || !clock || clock.state === 'stopped') return;
+        const heard = clock.mediaTime + ((frame.displayUs - clock.hostTime) * 705_600_000 * clock.rate.num) / (1e6 * clock.rate.den);
+        const end = frame.pts + 705_600_000 / 30;
+        const outside = heard < frame.pts ? frame.pts - heard : heard >= end ? heard - end : 0;
+        sync.push((outside / 705_600_000) * 1000);
+      });
+      const start = performance.now();
+      while (performance.now() - start < 1000) {
+        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+        const now = performance.now();
+        out.push({ now, t: PM.time, line: PM.EngineConnection.transport.now(now)?.time ?? NaN });
+      }
+      off();
+      return { series: out, sync };
+    });
+    // Frames reach the display inside the interval the audio is heard in
+    // (±10 ms, section 15): at most one late or early refresh in the second.
+    expect(sync.length).toBeGreaterThan(20);
+    expect(sync.filter((ms) => ms > 10).length).toBeLessThanOrEqual(1);
+    expect(series.length).toBeGreaterThan(20);
+    const n = series.length;
+    const mx = series.reduce((s, p) => s + p.now, 0) / n;
+    const my = series.reduce((s, p) => s + p.t, 0) / n;
+    const rate = series.reduce((s, p) => s + (p.now - mx) * (p.t - my), 0) / series.reduce((s, p) => s + (p.now - mx) ** 2, 0) * 1000;
+    expect(rate).toBeGreaterThan(0.98);
+    expect(rate).toBeLessThan(1.02);
+    // The playhead is the line at its last animation frame: within one
+    // refresh (8.3 ms at 120 Hz, 16.7 at 60) plus scheduling.
+    for (const p of series) expect(Math.abs(p.line - p.t)).toBeLessThan(0.025);
     // Timed engine frames are on screen while playing.
     const frame = await engineFrame(page);
     expect(frame.pts / 705_600_000).toBeGreaterThan(0.5);
@@ -293,6 +345,80 @@ test.describe('Use New Engine: the tracer bullet', () => {
     expect(times.some((t, i) => i > 0 && t < times[i - 1]!)).toBe(true);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
+
+  for (const clip of ['prores422.mov', 'h264-aac.mp4']) {
+    test(`a ${clip.startsWith('prores') ? 'ProRes' : 'long-GOP H.264'} clip scrubs and plays in engine frames with its audio`, async ({ session }) => {
+      const { page } = session;
+      await session.openEditor();
+      await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+      await page.evaluate(() => {
+        const PM = (window as any).PM;
+        PM.replaceProject(PM.mkProject({ name: 'Tracer video', w: 640, h: 360, fps: 30, dur: 2, bg: '#000000' }));
+        PM.setTime(0);
+      });
+      const chooser = page.waitForEvent('filechooser');
+      await page.evaluate(() => (window as any).PM.pickFiles());
+      await (await chooser).setFiles(fixturePath(clip));
+      await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 30_000 });
+      const layerId = await page.evaluate(() => (window as any).PM.proj.layers.find((l: any) => l.type === 'video').id as string);
+      await waitRoute(page, 'engine');
+      await expect.poll(() => enginePresenting(page), { timeout: 30_000 }).toBe(true);
+      // The fixture is red at 0.5 s and green at 1.5 s (fixtures.json).
+      const centerColor = async (): Promise<number[]> => {
+        const frame = await engineFrame(page);
+        const quad = quadBox(frame.overlay.layers.find((l: any) => l.layer === layerId).bounds);
+        // A quarter in from a corner: the center carries the anchor handle.
+        return windowPixel(session, quad.x0 + (quad.x1 - quad.x0) / 4, quad.y0 + ((quad.y1 - quad.y0) * 3) / 4);
+      };
+      const showsAt = async (t: number): Promise<void> => {
+        await expect.poll(async () => Math.abs(((await engineFrame(page))?.pts ?? -1) / 705_600_000 - t), { timeout: 10_000 }).toBeLessThan(1e-6);
+      };
+      // A scrub: many paused seeks in a row; the last one's frame stays.
+      await page.evaluate(() => {
+        const PM = (window as any).PM;
+        for (let i = 0; i <= 20; i++) PM.setTime(Math.round((0.2 + i * 0.05) * 30) / 30);
+      });
+      await showsAt(Math.round(1.2 * 30) / 30);
+      await page.evaluate(() => (window as any).PM.setTime(0.5));
+      await showsAt(0.5);
+      const red = await centerColor();
+      expect(red[0]!).toBeGreaterThan(200);
+      expect(red[1]!).toBeLessThan(60);
+      await page.evaluate(() => (window as any).PM.setTime(1.5));
+      await showsAt(1.5);
+      const green = await centerColor();
+      expect(green[1]!).toBeGreaterThan(200);
+      expect(green[0]!).toBeLessThan(60);
+      // Playback from 0.2 s runs on the audio clock of the clip's own
+      // audio, and the frames shown carry rising times.
+      await page.evaluate(() => { const PM = (window as any).PM; PM.loop = false; PM.setTime(0.2); PM.play(); });
+      await expect.poll(() => page.evaluate(() => (window as any).PM.time as number), { timeout: 10_000 }).toBeGreaterThan(0.4);
+      const pts: number[] = await page.evaluate(async () => {
+        const out: number[] = [];
+        const V = (window as any).PM.Kernel.services.get('viewer');
+        const off = V.enginePresentation.onPresented((f: any) => { if (f.timed) out.push(f.pts / 705_600_000); });
+        await new Promise((r) => setTimeout(r, 600));
+        off();
+        return out;
+      });
+      expect(pts.length).toBeGreaterThan(8);
+      expect(pts.every((t, i) => i === 0 || t > pts[i - 1]!)).toBe(true);
+      await page.evaluate(() => (window as any).PM.pause());
+      // The run played on the audio device (not the host-clock fallback),
+      // which mixed the clip's sound without problems.
+      const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+      const audio = Object.values(report.presenter.audio) as any[];
+      expect(report.presenter.hostClockRuns).toBe(0);
+      expect(audio.length).toBe(1);
+      expect(audio[0].error).toBeNull();
+      expect(audio[0].device).toBeTruthy();
+      expect(audio[0].projects).toBeGreaterThan(0);
+      expect(audio[0].problems).toEqual([]);
+      expect(report.presenter.renderErrors).toBe(0);
+      expect((await status(page)).failures.filter((f) => !f.startsWith('deviceLost'))).toEqual([]);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    });
+  }
 
   test('a killed interactive engine and a lost GPU recover and resync', async ({ session }) => {
     const { page, app } = session;
