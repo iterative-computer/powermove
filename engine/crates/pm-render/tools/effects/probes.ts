@@ -13,7 +13,7 @@ export type Probe = { group: string; name: string; body: string; decls?: string;
 export const probes: Probe[] = [];
 const add = (group: string, name: string, body: string, extra: Partial<Probe> = {}) => probes.push({ group, name, body, ...extra });
 
-const SHOW = `
+export const SHOW = `
 vec4 show(float x){ x = x / (1.0 + abs(x)); return vec4(vec3(0.5 + 0.5 * x), 1.0); }
 vec4 show(vec2 x){ x = x / (1.0 + abs(x)); return vec4(0.5 + 0.5 * x, 0.5, 1.0); }
 vec4 show(vec3 x){ x = x / (1.0 + abs(x)); return vec4(0.5 + 0.5 * x, 1.0); }
@@ -41,7 +41,7 @@ vec4 show(mat4x2 m){ return (show(m[0]) + show(m[1]) + show(m[2]) + show(m[3])) 
 vec4 show(mat4x3 m){ return (show(m[0]) + show(m[1]) + show(m[2]) + show(m[3])) * 0.25; }
 `;
 
-const PRELUDE = (tex: string) => `
+export const PRELUDE = (tex: string) => `
   vec2 p = v_uv * 4.0 - 2.0;
   vec4 t = ${tex};
   float s = p.x + 0.37 * p.y;
