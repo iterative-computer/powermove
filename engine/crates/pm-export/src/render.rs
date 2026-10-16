@@ -149,12 +149,53 @@ pub trait GpuGate: Send + Sync {
     /// The submission admitted last completed: `units` units of `pass` in
     /// `measured_us` of GPU time (submission to completion).
     fn finished(&self, pass: u64, units: u32, measured_us: f64);
+    /// [`finished`](GpuGate::finished), saying whether `measured_us` is the
+    /// submission's GPU time from timestamps (`true`) or wall time from
+    /// submission to completion, which also counts waits behind other GPU
+    /// clients (`false`). The renderer calls this one.
+    fn finished_timed(&self, pass: u64, units: u32, measured_us: f64, gpu_timed: bool) {
+        let _ = gpu_timed;
+        self.finished(pass, units, measured_us);
+    }
     /// The submission admitted last never completed (the renderer returned an
     /// error or panicked): releases the admission without measuring it.
     /// Every [`admit`](GpuGate::admit) that returns `Some` is followed by
     /// exactly one `finished` or `abandoned`; [`render_frame`] guarantees it
     /// on every exit path.
     fn abandoned(&self, pass: u64);
+    /// Whether `finished` needs each submission's GPU time ([`GpuSpan`]
+    /// timestamps); without it the renderer reports wall time only.
+    ///
+    /// [`GpuSpan`]: crate::gpu_time::GpuSpan
+    fn measures(&self) -> bool {
+        true
+    }
+}
+
+thread_local! {
+    /// This thread's timestamp span for the device it renders on (each job
+    /// engine lane renders on its own thread; spans are never shared).
+    static SPAN: std::cell::RefCell<Option<(wgpu::Device, Arc<crate::gpu_time::GpuSpan>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The thread's [`GpuSpan`](crate::gpu_time::GpuSpan) on `renderer`'s
+/// device, made once per device; `None` without timestamp queries.
+fn gpu_span(renderer: &Renderer) -> Option<Arc<crate::gpu_time::GpuSpan>> {
+    SPAN.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((device, span)) = cell.as_ref()
+            && device == renderer.device()
+        {
+            return Some(span.clone());
+        }
+        let span = Arc::new(crate::gpu_time::GpuSpan::new(
+            renderer.device(),
+            renderer.queue(),
+        )?);
+        *cell = Some((renderer.device().clone(), span.clone()));
+        Some(span)
+    })
 }
 
 /// One admitted submission: released as abandoned when dropped before
@@ -166,9 +207,10 @@ struct Admitted<'a> {
 }
 
 impl Admitted<'_> {
-    fn finish(mut self, units: u32, measured_us: f64) {
+    fn finish(mut self, units: u32, measured_us: f64, gpu_timed: bool) {
         self.open = false;
-        self.gate.finished(self.pass, units, measured_us);
+        self.gate
+            .finished_timed(self.pass, units, measured_us, gpu_timed);
     }
 }
 
@@ -192,6 +234,10 @@ impl GpuGate for Unrestricted {
     fn finished(&self, _: u64, _: u32, _: f64) {}
 
     fn abandoned(&self, _: u64) {}
+
+    fn measures(&self) -> bool {
+        false
+    }
 }
 
 /// A slicing pass key for one job at one output size: units of the same job
@@ -232,6 +278,45 @@ pub fn render_frame(
     gate: &dyn GpuGate,
     pass: u64,
     cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    let span = if gate.measures() {
+        gpu_span(renderer)
+    } else {
+        None
+    };
+    renderer.set_bracket(
+        span.clone()
+            .map(|s| s as Arc<dyn pm_render::CommandBracket>),
+    );
+    let result = render_bands(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        span.as_deref(),
+    );
+    renderer.set_bracket(None);
+    result
+}
+
+/// [`render_frame`]'s bands, with the renderer's bracket set to `span`.
+#[allow(clippy::too_many_arguments)]
+fn render_bands(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+    span: Option<&crate::gpu_time::GpuSpan>,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
@@ -276,11 +361,15 @@ pub fn render_frame(
         };
         let submitted = Instant::now();
         wait_idle(renderer);
-        let gpu_us = submitted.elapsed().as_secs_f64() * 1e6;
+        let wall_us = submitted.elapsed().as_secs_f64() * 1e6;
+        // The admitted command buffer's GPU time when timestamps are
+        // available (the wall time also counts the wait behind other GPU
+        // clients); the readback below is its own small copy.
+        let gpu_us = span
+            .as_ref()
+            .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
-        // The admitted command buffer's time; the readback below is its own
-        // small copy and would only add a second wait behind other clients.
-        admission.finish(units, gpu_us);
+        admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
         let pixels = renderer.read_rgba(&frame)?;
         let row = w as usize * 4;
         let at = y as usize * row;
