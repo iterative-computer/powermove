@@ -39,7 +39,6 @@ const displayState = (): { asleep: boolean; locked: boolean } | null => {
 };
 
 test.skip(!process.env.PM_TRACER_MEASURE, 'measurements run on request (PM_TRACER_MEASURE=1)');
-test.describe.configure({ mode: 'serial' });
 
 type Dist = { n: number; p50?: number; p95?: number; p99?: number; max?: number };
 function dist(xs: number[], digits = 2): Dist {
@@ -319,7 +318,41 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
       composeUsMax: report?.presenter?.composeUsMax ?? null,
       composeUsMean: report?.presenter?.documentFrames ? Math.round(report.presenter.composeUsTotal / report.presenter.documentFrames) : null
     });
-    expect(result.toDrawMs.length).toBe(60);
+    // Measured, not gated here: every edit is reported, drawn or not.
+    expect(result.applyMs.length).toBe(60);
+  });
+});
+
+test.describe('the current engine, for comparison', () => {
+  test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '0' } } });
+
+  test('inspector edits during playback of 1,000 layers (Use New Engine off)', async ({ session }) => {
+    test.setTimeout(300_000);
+    await session.openEditor();
+    const { page } = session;
+    await page.evaluate(buildSyntheticProject, { layers: 1000, dur: 60 });
+    await page.waitForTimeout(2000);
+    const result = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      PM.loop = false;
+      PM.setTime(0);
+      PM.play();
+      await new Promise((r) => setTimeout(r, 1500));
+      const applyMs: number[] = [];
+      const layers = PM.proj.layers.filter((l: any) => l.type === 'solid');
+      for (let i = 0; i < 60; i++) {
+        const layer = layers[(i * 37) % layers.length];
+        const t0 = performance.now();
+        PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 30 + (i % 60) }, { label: 'Opacity', origin: 'inspector' });
+        await Promise.resolve();
+        applyMs.push(performance.now() - t0);
+        await new Promise((r) => setTimeout(r, 250 - (performance.now() - t0) % 250));
+      }
+      PM.pause();
+      return { applyMs, mirror: !!PM.EngineDoc?.enabled };
+    });
+    await record('edit-during-playback-1000-page-legacy', { applyMs: dist(result.applyMs, 3), mirrorOn: result.mirror });
+    expect(result.applyMs.length).toBe(60);
   });
 });
 
@@ -331,8 +364,18 @@ test('cold start: the engine is ready before the window finished loading the las
     try {
       await synthetic(session, 500);
       await engineReady(session.page, 120_000);
-      await session.page.evaluate(() => (window as any).PM.Projects.put((window as any).PM.proj));
-      await session.page.waitForTimeout(1500);
+      // Open it the way a user's project is open (a tab of this window), so
+      // the next launch opens it again.
+      await session.page.evaluate(async () => {
+        const PM = (window as any).PM;
+        const project = JSON.parse(JSON.stringify(PM.proj));
+        PM.Projects.put(PM.proj);
+        window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
+        await new Promise((r) => setTimeout(r, 500));
+        await PM.flushProject?.();
+      });
+      expect(await session.page.evaluate(() => (window as any).PM.proj.layers.length)).toBeGreaterThan(400);
+      await session.page.waitForTimeout(1000);
     } finally {
       await session.close();
     }
@@ -341,6 +384,7 @@ test('cold start: the engine is ready before the window finished loading the las
       const launchedAt = Date.now();
       session = await launchApp({ userData, env: ON });
       try {
+        expect(await session.page.evaluate(() => (window as any).PM.proj.layers.length)).toBeGreaterThan(400);
         const marks = await session.page.evaluate(async () => {
           const PM = (window as any).PM;
           await PM.projectAssetsReady;

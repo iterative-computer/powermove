@@ -152,6 +152,7 @@ function tracerRuns() {
     { name: 'tracer-drag-engine-500-idle', ...latency, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s500, inputModes: ['drag'], env: doc },
     { name: 'tracer-drag-today-500-load', ...latency, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: s500, inputModes: ['drag'] },
     { name: 'tracer-drag-engine-500-load', ...latency, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: s500, inputModes: ['drag'], env: doc },
+    { name: 'tracer-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, startS: 0, env: doc },
     { name: 'tracer-edit-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, edits: { everyMs: 250 }, startS: 0, env: doc },
     { name: 'tracer-playback-engine-25', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
     { name: 'tracer-playback-engine-23976', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc },
