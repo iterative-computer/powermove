@@ -43,7 +43,7 @@ import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineExportStart, type EngineExportStatus, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
-import { installFrameBridgeReceiver, type ReceiverModule } from './frame-bridge';
+import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -68,7 +68,9 @@ function cloudEvent<T>(channel: string) {
  * window the engine's viewer surfaces once each; the receiver keeps them.
  * Installing it is inert until main sends something.
  */
-const frameBridge = sharedTexture ? installFrameBridgeReceiver(sharedTexture as unknown as ReceiverModule) : undefined;
+const frameBridge = sharedTexture
+  ? installFrameBridgeReceiver(sharedTexture as unknown as ReceiverModule, typeof window === 'undefined' ? null : window, (textureId) => ipcRenderer.invoke(RELEASE_NOTICE_CHANNEL, textureId))
+  : undefined;
 
 let nextMediaRequest = 0;
 
