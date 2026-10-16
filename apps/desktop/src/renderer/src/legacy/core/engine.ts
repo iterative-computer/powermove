@@ -526,9 +526,12 @@ function frame(now: any) {
       if (engine) {
         const [ws, we] = workArea();
         const backward = PM.playRate < 0;
-        if (engine.ended || (!PM.loop && !backward && engine.time >= we - 1e-6)
-          || (!PM.loop && backward && engine.time <= ws + 1e-6)) {
-          PM.setTime(Math.max(Math.min(engine.time, we), backward ? ws : 0), { raw: true, fromEngine: true });
+        // A play around ends where it began, wherever the work area ends.
+        const bounded = !PM.loop && !PM.playAroundRun;
+        if (engine.ended || (bounded && !backward && engine.time >= we - 1e-6)
+          || (bounded && backward && engine.time <= ws + 1e-6)) {
+          const end = PM.playAroundRun ? engine.time : Math.max(Math.min(engine.time, we), backward ? ws : 0);
+          PM.setTime(end, { raw: true, fromEngine: true });
           PM.pause();
           return;
         }

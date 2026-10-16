@@ -3,6 +3,10 @@
 Plan sections 15 and 16, contract 6 (the playback clock), section 25 (audio bars).
 Phase 2 tracer bullet: the device clock with its latency as the master clock,
 streaming decode, mixing, playback, scrubbing, and the offline render export uses.
+Phase 3b: pitch preserved through Signalsmith Stretch (our binding, `pm-stretch`) or
+following speed per clip, conformed frame rates, every channel layout, J/K/L at 1× and
+2× forward and reverse, play around, audio scrub, and the engine's meters, solo, and
+waveforms for today's audio panels.
 
 | Module | What it does |
 |---|---|
@@ -10,11 +14,14 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
 | `source` | Decoded program samples in 65,536-sample blocks under a byte budget, decoded ahead by worker threads |
 | `kernel` | Band-limited interpolation (rubato's windowed-sinc design) for sample-rate conversion, speed, and remaps |
 | `graph` | Which clips sound and how level and source time follow the document (the legacy `audioLayers` and `gainAt`) |
+| `conform` | A clip's `pitch` choice and a conformed frame rate (Interpret Footage `frameRate`) |
+| `stretch` | Pitch-preserving voices: time-stretch runs with deterministic pre-roll (`pm-stretch`, Signalsmith Stretch) |
+| `shuttle` | The 2× J/K/L stretch of the master, with its media bookkeeping |
 | `mixer` | Voices → per-layer strips → master in f32 at `audioSampleRate`, a pure function of the sample range |
 | `layout` | Down-mix and up-mix matrices |
 | `offline` | Export render: PCM float, 24-bit, 16-bit with TPDF dither; streaming WAV/RF64 writer |
 | `meter`, `waveform` | Level taps (peak, RMS) per strip and master; legacy peak envelopes and a min/max pyramid |
-| `transport` | Play, pause, seek, loop, frame step, play around, audio scrub |
+| `transport` | Play (J/K/L at 1× and 2×, forward and reverse), pause, seek, loop, frame step, play around, audio scrub |
 | `clock` | Clock samples from the device's presentation times (contract 6) |
 | `ring`, `playback`, `device` | Render thread → lock-free ring → CoreAudio callback through `cpal` |
 
@@ -215,7 +222,14 @@ where the source ends); zero while the layer or an enclosing group is switched o
 open composition's `audioGain` is the master fader. Channel layouts fold into the bus by
 Web Audio's speaker rules where Web Audio has them (mono copies to both sides, quad
 ½(L + Ls), 5.1 L + √½(C + Ls) with LFE dropped) and by ITU-R BS.775 otherwise (Web Audio
-mixes unknown layouts "discretely", dropping 7.1's center and surrounds).
+mixes unknown layouts "discretely", dropping 7.1's center and surrounds). Streams whose
+channels have no speaker meaning (ambisonics, unknown orders) fold as Web Audio folds
+every stream, by channel count (1, 2, 4, 6 by its speaker rules, other counts keep the
+first two channels as left and right); a channel without a meaning inside a named layout
+folds as a center. Every one of the 40 layouts our FFmpeg build names (mono to 22.2,
+binaural, downmix) decodes with its speakers and folds with each channel heard on its
+side at the matrix's gain and nothing but LFE dropped (`tests/layouts.rs`). A voice keeps
+its source's channels up to its strip, so a wider bus receives them by name.
 
 Automation: gain is applied per sample. Animated inputs (levels, `on` switches, fades,
 remaps, speed) are evaluated through `pm_eval` at control points every 16 samples
@@ -267,6 +281,102 @@ frame apart.
     level times √½, as today's bus plays it, ours matches today's to −96.6 dBFS, guarded
     by the parity test; the `mono` project confirms unity today for plain, center-masked,
     unmasked, 22.05 kHz WAV, AAC, Opus, and FLAC mono).
+
+## Pitch (`conform`, `stretch`, `pm-stretch`)
+
+Plan section 16: "pitch preserved by default (Signalsmith Stretch, our own binding) or
+following speed per clip (`pitch`); deterministic pre-roll."
+
+**The binding.** `pm-stretch` vendors Signalsmith Stretch 1.4.0 and Signalsmith Linear
+0.6.4 (both MIT, on the section 24 `cargo-deny` list; headers unmodified, hashes in
+`engine/crates/pm-stretch/vendor/README.md`) behind a C shim that catches every C++
+exception. It uses the library's portable FFT with fast math off, and seeds (and reseeds
+on reset) the random engine the library uses below 0.5×, so the same calls give the same
+bytes on every machine. Default preset: 120 ms analysis blocks every 30 ms.
+
+**The clip's choice** (`d.pitch`, additive, section 6): `"follow"` lets the pitch follow
+the speed (the band-limited resampler, as tape would); anything else, absent included,
+preserves it. The inspector shows "Preserve pitch" on video clips with sound while the new
+engine runs; `"follow"` stamps the project `requiresEngine: "native"` (engine-stamp.ts).
+Audio layers keep the field through validation (it matters inside time-remapped
+precompositions).
+
+**Which voices stretch.** A time-mapped voice (speed, remaps, animated trims along its
+path, a conformed rate) whose clip preserves pitch. Constant read rates within
+`unity_band` of 1 (2 / interval samples: ±0.14% at 48 kHz) resample instead: there the
+library does not re-analyse the previous block and its output follows the speed anyway
+(measured: 997 Hz at 1.001× came out at 997.5 Hz, residual −36 dB), while the resampler
+moves the pitch by at most 2.4 cents, below hearing, at −140 dB. Constant rates beyond
+32× or below 1/64 resample too.
+
+**Runs.** The voice's map is sampled at the mixer's control points (every 16 samples). A
+control interval reads forward, backward, or nothing: it is silent when the voice is off
+or out of span, below `HOLD_RATE` (1/64: a held remap is as silent as a held tape), or
+above `CUT_RATE` (32: a remap jump is a cut). A run covers consecutive intervals reading in
+one direction and starts with `output_seek` on the source at its first position, which
+aligns the first output with that sample; each call is fed input up to the map's position
+one output latency ahead plus the input latency, extrapolated along the run's last
+interval past its end. Backward runs feed the source reversed (pitch-preserved reverse
+playback inside a remap). The stretch's input is the source at the project rate through
+the exact-phase reader.
+
+**Deterministic pre-roll.** A phase vocoder's output depends on everything it heard, so
+runs start only at points that are a function of the map and of where rendering starts:
+a render that continues the previous one (or reads inside what it produced) continues the
+run; any other render starts at the latest run start at or before it, but no earlier than
+`preroll` (two analysis blocks) before the 16,384-sample `GRID` boundary at or before it,
+and discards the pre-roll. The stretcher is driven in calls of exactly one analysis
+interval aligned to the run's start, so its analysis positions do not depend on callers'
+block sizes. Hence playback from a seek equals the offline render from the same sample
+(the playback tests above pass unchanged with stretched voices, also at speed 1.5, 0.75,
+and under a remap), and a render is the same in any block size. A render that played on
+from an earlier start differs from a fresh start at the same sample only in the phases the
+vocoder chose (log-spectral distance 0 to 1.8 dB below). A stretch in progress carries
+over a live edit when the voice's map is unchanged (`VoicePlan::map_key`, a digest of every
+input of the map), and a retune glide's outgoing mix reads the same run's output, so a
+fader drag never restarts a stretch.
+
+**Conformed frame rates** ("Frame-rate override keeps audio in sync"). An asset whose
+`interpret` sets `frameRate`/`frameRateRational` (the formats lane's Interpret Footage
+shape) shows presented frame n at n / conformed; its soundtrack follows the same map,
+`conformed / native` times as fast (native: the probe's nominal rate, kept per file),
+with the clip's pitch choice. 23.976 → 24 (1.001×) lies in the unity band and resamples
+(+1.7 cents); 23.976 → 25 stretches.
+
+Measured 2026-10-16 (`tests/stretch.rs`, release, this Mac under other lanes' builds):
+
+| Speed | Pitch | Frequency (1 kHz tone) | Level | THD+N (residual) |
+|---|---|---|---|---|
+| 0.5 | preserve | 1000.000 Hz | −0.45 dB | −46.1 dB |
+| 0.75 | preserve | 1000.000 Hz | −0.00 dB | −57.6 dB |
+| 1.25 | preserve | 1000.000 Hz | −0.00 dB | −65.6 dB |
+| 1.5 | preserve | 1000.000 Hz | −0.00 dB | −59.3 dB |
+| 2 | preserve | 1000.000 Hz | −0.00 dB | −49.8 dB |
+| 0.5 to 2 | follow | 500 to 2000 Hz exactly | 0.00 dB | −138.5 to −142.4 dB |
+
+Placement (energy centroid of 3 kHz bursts, through the mixer): 0.5× within 0.006 ms,
+0.8× within 0.32 ms, 1.6× within 0.05 ms of where the map puts them; conformed footage
+(23.976 → 24 and → 25, preserve and follow) within 0.11 ms, the bed at 1000.00 Hz
+(preserve) and 1042.71 Hz (follow at 25/23.976). A first render 150 s into a stretched
+clip costs 3.3 ms (one grid step and the pre-roll).
+
+Offline mixes with stretch against references (`offline_stretch_mixes_against_references`:
+a 12 s music-like signal of chords with vibrato, bass, and noise percussion; log-spectral
+distance of aligned 2048-sample frames, bins floored 80 dB under each frame's peak; phases
+differ between methods, so waveforms are not compared):
+
+| Speed | vs the library's one-shot stretch (L / R) | vs FFmpeg `atempo` (L / R) | one-shot vs `atempo` | fresh start at 3 s vs the run from 0 |
+|---|---|---|---|---|
+| 0.5 | 1.35 / 1.31 dB | 6.20 / 5.88 dB | 6.21 dB | 1.34 dB |
+| 0.8 | 0.95 / 0.92 dB | 4.00 / 3.83 dB | 4.00 dB | 1.08 dB |
+| 1.25 | 1.03 / 1.02 dB | 4.40 / 4.21 dB | 3.97 dB | 1.18 dB |
+| 2.0 | 1.33 / 1.30 dB | 6.02 / 5.65 dB | 6.03 dB | 1.80 dB |
+
+Our streaming mix stays within 1 to 1.4 dB of the library's best case (its one-shot
+`exact()` of the whole clip: no streaming, no pre-roll, no restarts), and differs from
+WSOLA (`atempo`, a different method) exactly as much as the library's own one-shot does,
+so the streaming, the pre-roll, and the alignment add nothing measurable beyond the
+method itself. No listening test was run; the numbers are as measured.
 
 ## Playback (`transport`, `clock`, `ring`, `playback`, `device`)
 
@@ -323,9 +433,12 @@ consumers ◀───────────── ClockSlot ◀── clock s
   from 1.0 s with a loop [2.0, 2.5) every consumer derived a position inside the loop
   while 1.0 s played, the line republished on every callback, and a pause stopped inside
   the loop.)
-- **Audio scrub** (contract 6 open question 2): rides on `Shuttling` samples. A scrub seek
-  or frame step while paused, with audio scrub on, plays a grain of one composition frame
-  or 60 ms, whichever is longer, with 4 ms fades.
+- **Audio scrub** (contract 6 open question 2, decided): rides on `Shuttling` samples. A
+  scrub seek or frame step while paused, with audio scrub on, plays a grain of one
+  composition frame or 60 ms, whichever is longer, with 4 ms fades. The presenter sends
+  every paused scrub seek and step to the audio when the session's switch is on
+  (Settings › General › Engine › Scrub audio, `PM.setAudioScrub`; off by default, as
+  today's engine plays nothing while scrubbing); the viewer's line does not follow grains.
 - **Device changes** (open question 3): playback continues on the new device with a new
   epoch, re-anchored from what is heard. The default output's id and latency are polled
   once a second (the latency converted at the new device's nominal rate); a host that
@@ -357,8 +470,24 @@ consumers ◀───────────── ClockSlot ◀── clock s
   seek or a new run ends glides; paused edits and exports swap at once. An edit is
   heard once the queued audio has played: at most `ahead_ms` (80 ms) plus the device
   latency.
-- **Rates.** Phase 2 plays at 1× only; `Play` at another rate (J/K/L) is refused with
-  `Unsupported` until Phase 3b.
+- **J/K/L** (section 15): `Play` at 1×, 2×, −1×, and −2× (`JKL_RATES`); faster shuttles
+  (after cutover) are refused with `Unsupported`. A segment's frames are output frames
+  covering `|rate|` project samples each; every ring chunk carries its rate, and the clock
+  advances the media by `rate` frames per device frame (exact in ticks). Reverse runs mix
+  the samples they play forward and play them backwards (reverse audio, at the pitch the
+  mix has), stop after sample 0, and inside the loop wrap from its start to its last
+  sample; a reverse run from past the loop end plays down into it first. Reverse renders
+  each chunk on its own, so stretched voices resample there (their pitch follows speed
+  while shuttling backwards; `RenderOptions::no_stretch`). 2× (both ways) runs the mix
+  through one master time stretch (`shuttle`): output frame k plays stream sample 2k
+  (`output_seek` at the start, input fed the latencies ahead), so each output piece is
+  tagged with the media it plays and the line stays exact through loop wraps; the first
+  2× output comes once the stream holds the seek length (about 0.25 s of media, mixed in
+  a few milliseconds). A new rate while playing starts a new epoch from what is heard.
+- **Play around** (`PlayAround { pre_roll, post_roll }`): a 1× run from `pre_roll` before
+  the playhead to `post_roll` after, then the clock stops back on the playhead (the
+  renderer asks for 2 s each way, the Final Cut Pro and Premiere default). Without an
+  output device the presenter runs it on the host clock.
 
 The simulated device's timeline is synthetic (host times from its frame count), so on a
 loaded machine it waits up to 40 ms for the render thread to queue a buffer
@@ -393,6 +522,29 @@ the device clock runs +0.1 ppm against the host clock; no underruns or starved r
 The first playing sample presented 176.6 ms after `Play` (160 ms of it the Bluetooth
 latency). cpal's own estimate would have put the clock 10.7 ms (the I/O buffer) late.
 
+## The audio panels (levels, solo, waveforms)
+
+Appendix C: "Timeline waveforms; mixer meters, solo, retune | WebAudio | Engine". Contract
+6's `AudioMessage` (one session-bound `audio` event, RFC 06) carries them while "Use New
+Engine" is on:
+
+- **Meters.** While the device plays, the viewer's audio thread sends the levels of what
+  is heard (`Playback::meters`, the 2048-sample peak and RMS window the legacy taps
+  measure, per strip and the master) about 30 times a second, and silence once when it
+  stops. While the engine runs the transport, `PM.Audio.meters` reads them
+  (`engine-connection/audio.ts`), so the mixer panel's meters, ballistics, and clip
+  indicators work unchanged; levels older than 250 ms read as silence.
+- **Solo.** `PM.Audio.setMonitorSolo` reaches the legacy mix and the engine's
+  (`Playback::set_monitor_solo`, glided like any live edit); a session that opens later
+  receives it.
+- **Retune.** Edits during playback glide into the new mix over 12 ms (above).
+- **Waveforms.** For every asset with sound, the renderer asks the engine for its
+  envelope (`peaksWanted`); a worker thread computes `peakEnvelope`'s 100 buckets a
+  second from a streaming decode of any length (today's whole-file decode stops at its
+  128 MiB budget, so long files get no waveform) and keeps the last 64 per file, size,
+  and modification time; the answer fills `asset.peaks`, which the timeline, the assets
+  panel, and `api.media.audio.drawWaveform` draw as before.
+
 ## Export (`offline`)
 
 `offline::render(mixer, first, end, block, sink)` renders project samples `[first, end)`
@@ -420,6 +572,14 @@ Measured 2026-10-13 with other lanes building (numbers vary about 1.5× with loa
 | Keyframed gain (control points), 16 voices | 3.1 ms | 20× |
 | Variable speed (free-position sinc), 4 voices | 15.4 ms | 16× |
 | Constant speed 1.5, 4 voices | 11.7 ms | 21× |
+
+Pitch preserved (2026-10-16, load average 7 to 9 from other lanes), against the same
+voices with `pitch: "follow"` in the same run:
+
+| Voices (stereo, 48 kHz) | Pitch follows (free-position sinc) | Pitch preserved (stretch) |
+|---|---|---|
+| Variable speed 0.5 → 1, 4 voices | 15.0 ms per voice-second (16.6×) | 18.5 ms (13.5×) |
+| Constant speed 1.5, 4 voices | 11.9 ms (21.0×) | 8.6 ms (29.0×) |
 
 Read-ahead bounds of time-mapped voices (`Mixer::source_spans` over 20 s, memo empty;
 2026-10-14, other lanes building): 25.2 ms per second of audio for the 4 variable-speed
@@ -483,7 +643,30 @@ cargo test --release -p pm-audio --test legacy_parity -- --nocapture   # PM_AUDI
 ```sh
 source engine/env.sh
 cargo test -p pm-media --test audio_decode
+cargo test -p pm-stretch --release -- --nocapture       # the binding: pitch, level, alignment, determinism
 cargo test -p pm-audio -- --test-threads=4
+cargo test --release -p pm-audio --test stretch -- --nocapture   # the pitch and quality tables above
+cargo test --release -p pm-audio --test playback -- --nocapture  # J/K/L lines, pitch, and placement
+cargo test --release -p pm-audio --test layouts                  # every FFmpeg layout through the mix
 cargo run --release -p pm-audio --example mix_bench
 pm-electron-lock cargo run --release -p pm-audio --example device_probe   # opens the output device, silent
 ```
+
+- `tests/playback.rs` adds J/K/L: `reverse_playback_plays_backwards_on_its_clock` (−1×,
+  sample by sample, the line within 1.2 µs of what is heard, stops on sample 0),
+  `jkl_rates_keep_pitch_and_stay_on_their_line` (2×, −2×, and −1× on 48 and 44.1 kHz
+  devices: a 1 kHz bed stays at 999.9 to 1000.0 Hz, bursts land within 0.02 ms of the
+  line's instant for their media), `a_rate_change_continues_from_what_is_heard` (1× → −1×
+  starts on the heard sample, within 0.1 ms).
+- `pm-node`: the presenter's host-clock play around (`present/clock.rs`).
+- Renderer: `engine-connection/engine-connection.test.ts` (J/K/L, play around, scrub
+  switch, lines at any rate), `engine-connection/audio.test.ts` (meters, solo, peaks,
+  routing `PM.Audio`), the keymap tests (J/K/L ahead of the After Effects keys, declining
+  while paused or on the legacy engine), `shared/engine-stamp.test.ts` (clip pitch).
+- e2e, serially under the Electron lock: `e2e/native-engine-transport.spec.ts` (J/K/L at
+  1× and 2× both ways with A/V sync per run, play around, audio scrub on scrubs and
+  steps, engine meters, solo, and waveforms):
+
+  ```sh
+  pm-electron-lock bunx playwright test e2e/native-engine-transport.spec.ts --workers=1
+  ```

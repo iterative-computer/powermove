@@ -111,9 +111,9 @@ fn main() {
             r#"{{"id":"A{i}","type":"audio","from":0,"dur":{seconds},"on":true,"p":{{}},"d":{{"asset":"{asset}","gain":0.5,"trim":0,"fadeIn":0.1,"fadeOut":0.1{extra}}}}}"#
         )
     };
-    let video = |i: usize, speed: &str| {
+    let video = |i: usize, speed: &str, pitch: &str| {
         format!(
-            r#"{{"id":"V{i}","type":"video","from":0,"dur":{seconds},"on":true,"p":{{}},"d":{{"asset":"a48","speed":{speed},"embeddedAudio":true,"audioGain":0.5}}}}"#
+            r#"{{"id":"V{i}","type":"video","from":0,"dur":{seconds},"on":true,"p":{{}},"d":{{"asset":"a48","speed":{speed},"embeddedAudio":true,"audioGain":0.5,"pitch":"{pitch}"}}}}"#
         )
     };
     run(
@@ -139,14 +139,26 @@ fn main() {
     );
     let speed = keys(&[(0.0, 0.5), (seconds, 1.0)]);
     run(
-        "variable speed (free-position sinc)",
-        (0..4).map(|i| video(i, &speed)).collect(),
+        "variable speed, pitch follows (free-position sinc)",
+        (0..4).map(|i| video(i, &speed, "follow")).collect(),
         seconds,
         &media,
     );
     run(
-        "constant speed 1.5 (free-position sinc)",
-        (0..4).map(|i| video(i, "1.5")).collect(),
+        "constant speed 1.5, pitch follows (free-position sinc)",
+        (0..4).map(|i| video(i, "1.5", "follow")).collect(),
+        seconds,
+        &media,
+    );
+    run(
+        "variable speed, pitch preserved (stretch)",
+        (0..4).map(|i| video(i, &speed, "preserve")).collect(),
+        seconds,
+        &media,
+    );
+    run(
+        "constant speed 1.5, pitch preserved (stretch)",
+        (0..4).map(|i| video(i, "1.5", "preserve")).collect(),
         seconds,
         &media,
     );
