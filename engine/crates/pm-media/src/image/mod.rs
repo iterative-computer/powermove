@@ -80,12 +80,28 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
     } else if at(0, b"SDPX") || at(0, b"XPDS") {
         ImageFormat::Dpx
     } else if at(4, b"ftyp") {
+        // Only image brands: MOV and MP4 movies carry `ftyp` too.
+        let size = head
+            .get(..4)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
         let brand = head.get(8..12).unwrap_or(&[]);
-        let compat = head.get(16..64).unwrap_or(&[]);
-        if brand == b"avif" || brand == b"avis" || compat.windows(4).any(|w| w == b"avif") {
+        let compat: Vec<&[u8]> = head
+            .get(16..size.clamp(16, head.len()))
+            .unwrap_or(&[])
+            .chunks_exact(4)
+            .collect();
+        let any = |set: &[&[u8; 4]]| {
+            set.iter()
+                .any(|b| brand == &b[..] || compat.iter().any(|c| *c == &b[..]))
+        };
+        if any(&[b"avif", b"avis"]) {
             ImageFormat::Avif
-        } else {
+        } else if any(&[
+            b"mif1", b"msf1", b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis",
+        ]) {
             ImageFormat::Heif
+        } else {
+            ImageFormat::Other
         }
     } else if svg::sniff(head) {
         ImageFormat::Svg
@@ -350,6 +366,15 @@ mod tests {
             ImageFormat::Heif
         );
         assert_eq!(sniff(b"\0\0\0\x1cftypavif\0\0\0\0"), ImageFormat::Avif);
+        // Movies are not images.
+        assert_eq!(
+            sniff(b"\0\0\0\x14ftypqt  \0\0\x02\0qt  \0\0\0\x08wide"),
+            ImageFormat::Other
+        );
+        assert_eq!(
+            sniff(b"\0\0\0\x20ftypisom\0\0\x02\0isomiso2avc1mp41"),
+            ImageFormat::Other
+        );
         assert_eq!(
             sniff(&[0x76, 0x2F, 0x31, 0x01, 2, 0, 0, 0]),
             ImageFormat::Exr

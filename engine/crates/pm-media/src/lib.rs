@@ -21,6 +21,7 @@ pub mod cache;
 pub mod dav1d;
 pub mod decode;
 pub mod error;
+pub mod facts;
 pub mod ff;
 pub mod frame;
 pub mod hash;

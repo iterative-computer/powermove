@@ -1475,3 +1475,117 @@ fn icc_stills() {
         );
     }
 }
+
+/// Interpret Footage's facts: settings with their values, automatic values,
+/// and origins; overrides; display size and duration with the reading.
+#[test]
+#[ignore]
+fn interpret_footage_facts() {
+    use pm_media::facts::media_facts;
+    use pm_protocol::media::{FactOrigin, MediaKind};
+    let dir = formats();
+    let get = |f: &pm_protocol::media::MediaFacts, m: &str| {
+        f.settings
+            .iter()
+            .find(|s| s.member == m)
+            .unwrap_or_else(|| panic!("no {m}: {:?}", f.settings))
+            .clone()
+    };
+    let facts = media_facts(&dir.join("video/meta-pasp.mov"), None).unwrap();
+    assert_eq!(facts.kind, MediaKind::Video);
+    let pasp = get(&facts, "pixelAspect");
+    assert_eq!(pasp.value, "8:9");
+    assert_eq!(
+        pasp.origin,
+        FactOrigin::File {
+            source: "pasp".into()
+        }
+    );
+    assert_eq!(facts.display_size, Some([640, 480]));
+    let primaries = get(&facts, "primaries");
+    assert!(matches!(
+        primaries.origin,
+        FactOrigin::Default { .. } | FactOrigin::File { .. }
+    ));
+    // An override: value changes, automatic stays, origin says so.
+    let facts = media_facts(
+        &dir.join("video/meta-pasp.mov"),
+        Some(r#"{"pixelAspect":[1,1],"frameRate":24}"#),
+    )
+    .unwrap();
+    let pasp = get(&facts, "pixelAspect");
+    assert_eq!(
+        (pasp.value.as_str(), pasp.automatic.as_str()),
+        ("1:1", "8:9")
+    );
+    assert_eq!(pasp.origin, FactOrigin::Override);
+    assert_eq!(facts.display_size, Some([720, 480]));
+    let rate = get(&facts, "frameRate");
+    assert_eq!(
+        (rate.value.as_str(), rate.automatic.as_str()),
+        ("24/1", "30000/1001")
+    );
+    assert!((facts.duration.unwrap() - 30.0 / 24.0).abs() < 1e-9);
+
+    let facts = media_facts(&dir.join("hdr/hdr10.mov"), None).unwrap();
+    let labels: Vec<&str> = facts.facts.iter().map(|l| l.label.as_str()).collect();
+    for l in ["HDR", "Mastering display", "Content light", "Tone mapping"] {
+        assert!(labels.contains(&l), "{l}: {labels:?}");
+    }
+    assert_eq!(get(&facts, "transfer").value, "pq");
+    let facts = media_facts(&dir.join("video/interlaced-bff.mxf"), None).unwrap();
+    assert_eq!(get(&facts, "fieldOrder").value, "bottomFirst");
+    let facts = media_facts(&dir.join("video/meta-timecode.mov"), None).unwrap();
+    assert!(
+        facts
+            .facts
+            .iter()
+            .any(|l| l.label == "Timecode" && l.value.contains("01:00:00;00"))
+    );
+    assert!(
+        facts
+            .facts
+            .iter()
+            .any(|l| l.label == "Reel" && l.value == "A001")
+    );
+    let facts = media_facts(
+        &dir.join("video/prores-4444-alpha.mov"),
+        Some(r#"{"alpha":"ignore"}"#),
+    )
+    .unwrap();
+    let alpha = get(&facts, "alpha");
+    assert_eq!(
+        (alpha.value.as_str(), alpha.origin.clone()),
+        ("ignore", FactOrigin::Override)
+    );
+
+    let facts = media_facts(&dir.join("image/icc-adobergb.png"), None).unwrap();
+    assert_eq!(facts.kind, MediaKind::Still);
+    assert!(
+        matches!(get(&facts, "primaries").origin, FactOrigin::File { ref source } if source.contains("ColorSync"))
+    );
+    let facts = media_facts(&dir.join("sequence/seq_png_0001.png"), None).unwrap();
+    assert!(
+        facts
+            .facts
+            .iter()
+            .any(|l| l.label == "Missing frames" && l.value == "5–6, 10"),
+        "{:?}",
+        facts.facts
+    );
+
+    let facts = media_facts(&dir.join("audio/wav-5.1.wav"), None).unwrap();
+    assert_eq!(facts.kind, MediaKind::Audio);
+    assert!(facts.settings.is_empty());
+    assert!(
+        facts
+            .facts
+            .iter()
+            .any(|l| l.label == "Audio" && l.value.contains("5.1"))
+    );
+
+    let bad = media_facts(&dir.join("video/vp9.webm"), Some(r#"{"range":"loud"}"#)).unwrap();
+    assert_eq!(bad.issues.len(), 1, "{:?}", bad.issues);
+    use pm_protocol::Validate;
+    assert!(bad.validate().is_ok());
+}
