@@ -494,7 +494,7 @@
                     <div class="settings-copy">
                       <b>Use New Engine</b>
                       <span>{useNewEngine === newEngineRunning
-                        ? 'Draws the viewer and plays back with the native engine. Changes apply the next time Powermove opens.'
+                        ? 'Preview and play back with the new engine. Applies the next time Powermove opens.'
                         : 'Restart Powermove to switch engines.'}</span>
                     </div>
                     <button class="toggle" class:on={useNewEngine} type="button" aria-pressed={useNewEngine} aria-label="Use New Engine"
