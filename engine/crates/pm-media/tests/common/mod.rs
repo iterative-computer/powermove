@@ -274,6 +274,8 @@ fn reference_for(src: &MediaSource, run: &BackendRun) -> Option<(String, usize, 
                     "-hwaccel_output_format",
                     "videotoolbox_vld",
                     "-noautorotate",
+                    "-apply_cropping",
+                    "codec",
                     "-i",
                     file,
                     "-map",
@@ -311,9 +313,13 @@ fn reference_for(src: &MediaSource, run: &BackendRun) -> Option<(String, usize, 
     if run.copied_frames > 0 && run.backend == Backend::Ffmpeg && run.name.contains("converted") {
         return None;
     }
-    // Frames as decoded: no display-matrix rotation.
+    // Frames as decoded: no display-matrix rotation and no container
+    // cropping (clap), which FFmpeg 7.1+ applies by default; the renderer
+    // applies both.
     args.extend([
         "-noautorotate",
+        "-apply_cropping",
+        "codec",
         "-i",
         file,
         "-map",
