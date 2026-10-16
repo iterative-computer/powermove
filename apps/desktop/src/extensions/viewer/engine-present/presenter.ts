@@ -151,6 +151,8 @@ export class EnginePresenter implements Presenter {
   private clock: ClockSample | null = null;
   /** performance.now() ms → host µs: host = ms × 1000 + offset. */
   private hostOffsetUs: number | null = null;
+  /** The estimate came from a run's first sample only (see `onClock`). */
+  private provisionalOffset = false;
   private generation = 0;
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
@@ -243,6 +245,10 @@ export class EnginePresenter implements Presenter {
 
   private onClock(sample: ClockSample, arrivedMs: number): void {
     if (this.clock && sample.seq <= this.clock.seq && sample.epoch === this.clock.epoch) return;
+    // A run's first sample may name a host time still ahead (where the run
+    // starts: the pre-roll or the audio output's latency), so it is no
+    // bound: it serves only until any other sample arrives.
+    const runStart = sample.state !== 'stopped' && sample.epoch !== this.clock?.epoch;
     this.clock = sample;
     // The sample was made at its host time and arrived here no earlier, so
     // host = ms × 1000 + offset gives offset ≥ hostTime − arrivedMs × 1000:
@@ -255,7 +261,15 @@ export class EnginePresenter implements Presenter {
     // session (measured in the real app: about 110 ms, so the jitter buffer
     // held twice its render-ahead and the engine ran out of free slots).
     const offset = sample.hostTime - arrivedMs * 1000;
-    if (this.hostOffsetUs === null || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
+    if (runStart) {
+      if (this.hostOffsetUs === null) {
+        this.hostOffsetUs = offset;
+        this.provisionalOffset = true;
+      }
+      return;
+    }
+    if (this.hostOffsetUs === null || this.provisionalOffset || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
+    this.provisionalOffset = false;
   }
 
   /** Host µs (the engine's clock) for a performance.now() time. */

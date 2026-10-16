@@ -235,8 +235,13 @@ describe('the transport driver', () => {
     // Playing: heard at host 2 s (page 1000 ms with the 1 s offset).
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 2, state: 'playing', hostTime: 2_000_000, mediaTime: ticks(1.5), rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(1250)!.time).toBeCloseTo(1.75, 9);
+    // Until a run's first sample is heard (its host time is still ahead:
+    // the output latency) the playhead stays at the start, never behind it.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 3, state: 'playing', hostTime: 3_160_000, mediaTime: ticks(1.5), rate: { num: 1, den: 1 }, outputLatencyUs: 160_000, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.now(2000)).toEqual({ time: 1.5, playing: true, ended: false });
+    expect(driver.now(2260)!.time).toBeCloseTo(1.6, 9);
     // The run ends at the composition's end.
-    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 3, epoch: 2, state: 'stopped', hostTime: 9_000_000, mediaTime: ticks(2), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 3, state: 'stopped', hostTime: 9_000_000, mediaTime: ticks(2), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(9000)).toEqual({ time: 2, playing: false, ended: true });
 
     // Routed to the legacy viewer: the driver hands back.

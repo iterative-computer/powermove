@@ -200,14 +200,18 @@ describe('EnginePresenter', () => {
       sampleRate: 48_000,
       loopRange: null
     });
+    // A run's first sample names where it starts, 160 ms ahead (the audio
+    // output's latency): it serves only until another sample arrives.
+    presenter.receive({ type: 'clock', sample: sample(1, 1_160_000) }, 100.3);
+    expect(presenter.hostUs(200)).toBe(1_259_700);
     // Made at 100 ms, delivered 0.3 ms later.
-    presenter.receive({ type: 'clock', sample: sample(1, 1_000_000) }, 100.3);
+    presenter.receive({ type: 'clock', sample: sample(2, 1_000_000) }, 100.3);
     expect(presenter.hostUs(200)).toBe(1_099_700);
     // Made at 350 ms, delivered after a 110 ms long task: it says nothing new.
-    presenter.receive({ type: 'clock', sample: sample(2, 1_250_000) }, 460);
+    presenter.receive({ type: 'clock', sample: sample(3, 1_250_000) }, 460);
     expect(presenter.hostUs(200)).toBe(1_099_700);
     // Made at 600 ms, delivered 0.1 ms later: a tighter bound.
-    presenter.receive({ type: 'clock', sample: sample(3, 1_500_000) }, 600.1);
+    presenter.receive({ type: 'clock', sample: sample(4, 1_500_000) }, 600.1);
     expect(presenter.hostUs(200)).toBe(1_099_900);
   });
 

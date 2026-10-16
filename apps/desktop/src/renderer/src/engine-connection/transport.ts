@@ -117,7 +117,11 @@ export class EngineTransport implements TransportDriver {
     if (run && moving && sample.epoch !== run.before) run.played = true;
     const host = this.clock.hostUs(nowMs);
     if (moving && host === null) return null;
-    const media = mediaTicksAt(sample, host ?? sample.hostTime);
+    // A run's first sample is anchored where it starts, at a host time
+    // still ahead (the pre-roll, or the audio output's latency): until
+    // then the playhead stays where Play put it rather than following the
+    // line backwards (contract 6 invariant 3).
+    const media = mediaTicksAt(sample, Math.max(host ?? sample.hostTime, sample.hostTime));
     return { time: media / TICKS_PER_SECOND, playing: moving, ended: !!run?.played && !moving };
   }
 }

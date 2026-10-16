@@ -319,9 +319,39 @@ impl TransportClock {
         media.div_euclid(self.frame) * self.frame
     }
 
+    /// Host µs at which a playing run shows its first frame, while that is
+    /// still ahead of `now` (the pre-roll of a host-clock run, or the
+    /// output latency of the audio device's first buffer).
+    pub fn run_starts_at(&self, now: i64) -> Option<i64> {
+        if !self.is_playing() {
+            return None;
+        }
+        let unwrapped = self.unwrapped_at(now);
+        let before = if self.rate.num > 0 {
+            unwrapped < self.run_start
+        } else {
+            unwrapped > self.run_start
+        };
+        if !before {
+            return None;
+        }
+        // The first µs at which the line reaches the run's start.
+        let at = self.host_at(self.run_start)?.ceil() as i64;
+        Some(at.max(now))
+    }
+
     /// The sample describing the line at host µs `now`.
+    ///
+    /// Before a run shows its first frame the line extrapolates backwards
+    /// to media the run never shows (by the pre-roll, or by the device's
+    /// output latency when the audio clock leads: 160 ms on Bluetooth
+    /// outputs). Such a sample is anchored where the run starts instead, at
+    /// a host time still ahead (contract 6 invariant 3: `host_time` is when
+    /// `media_time` is shown), so a consumer never moves the playhead back
+    /// from where Play was pressed.
     pub fn sample(&mut self, now: i64) -> ClockSample {
         self.seq += 1;
+        let now = self.run_starts_at(now).unwrap_or(now);
         let playing = self.is_playing();
         let unwrapped = self.unwrapped_at(now);
         let inside = if playing {
@@ -398,6 +428,64 @@ mod tests {
         }
         assert!(sample.epoch > 1);
         assert!(pm_protocol::validate::Validate::validate(&sample).is_ok());
+    }
+
+    #[test]
+    fn a_sample_before_the_run_starts_names_the_start_not_earlier_media() {
+        // Host-clock run: Play at 0.5 s; the line starts after the pre-roll.
+        let mut clock = TransportClock::new(FRAME);
+        clock.apply(
+            TransportCommand::Seek {
+                time: Ticks::new(30 * FRAME).unwrap(),
+                mode: SeekMode::Exact,
+            },
+            0,
+        );
+        play(&mut clock, 1_000_000);
+        let sample = clock.sample(1_000_000);
+        assert_eq!(sample.host_time.get(), (1_000_000 + PREROLL_US) as u64);
+        assert_eq!(sample.media_time.get(), 30 * FRAME);
+        assert_eq!(clock.run_starts_at(1_000_000), Some(1_000_000 + PREROLL_US));
+        // Once it runs, samples are anchored at the time they are made.
+        let later = clock.sample(1_500_000);
+        assert_eq!(later.host_time.get(), 1_500_000);
+        assert_eq!(clock.run_starts_at(1_500_000), None);
+        assert_eq!(
+            later.media_time.get(),
+            sample
+                .media_time_at(HostMicros::new(1_500_000).unwrap())
+                .get()
+        );
+
+        // Audio run: the device presents the first buffer (0.5 s) 160 ms
+        // after its callback; the presenter publishes before that.
+        let mut clock = TransportClock::new(FRAME);
+        assert!(clock.follow(&audio(
+            7,
+            TransportState::Playing,
+            5_160_000,
+            30 * FRAME,
+            None
+        )));
+        let early = clock.sample(5_000_000);
+        assert_eq!(early.host_time.get(), 5_160_000);
+        assert_eq!(early.media_time.get(), 30 * FRAME);
+        assert_eq!(early.state, TransportState::Playing);
+        // A re-anchor of the same run (also 160 ms ahead) is published at
+        // the time it is made: the run has started.
+        assert!(!clock.follow(&audio(
+            7,
+            TransportState::Playing,
+            5_360_000,
+            30 * FRAME + TICKS_PER_SECOND / 5,
+            None
+        )));
+        let running = clock.sample(5_250_000);
+        assert_eq!(running.host_time.get(), 5_250_000);
+        assert_eq!(
+            running.media_time.get(),
+            30 * FRAME + TICKS_PER_SECOND / 5 - TICKS_PER_SECOND * 110 / 1000
+        );
     }
 
     #[test]
