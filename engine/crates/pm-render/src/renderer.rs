@@ -150,6 +150,11 @@ impl Renderer {
         self.effects.apply(update)
     }
 
+    /// Forgets every definition: effects and transitions are routed again.
+    pub fn clear_definitions(&mut self) {
+        self.effects.clear();
+    }
+
     /// The definitions in force (what an export job embeds).
     pub fn definitions(&self) -> pm_protocol::definitions::DefinitionSetSnapshot {
         self.effects.snapshot()

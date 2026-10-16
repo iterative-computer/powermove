@@ -69,10 +69,26 @@ pub struct ViewDocument {
     broken: Option<String>,
     media: MediaMap,
     media_version: u64,
+    /// The session's definitions (contract 10) and their version.
+    definitions: Option<(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
     cached: Option<Cached>,
 }
 
 impl ViewDocument {
+    /// The session's definitions: effects and transitions are drawn with
+    /// them (`pm_render::effects`), routed without them.
+    pub fn set_definitions(&mut self, set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>) {
+        let version = self.definitions.as_ref().map_or(1, |(_, v)| v + 1);
+        self.definitions = Some((set, version));
+        self.cached = None;
+    }
+
+    pub fn definitions(
+        &self,
+    ) -> Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)> {
+        self.definitions.as_ref()
+    }
+
     pub fn document(&self) -> &Document {
         &self.doc
     }
@@ -187,6 +203,18 @@ impl ViewDocument {
             })
             .collect();
         for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
+            // With definitions, effects and transitions are drawn; one the
+            // renderer cannot draw (no definition, a program that needs the
+            // fallback runner) fails the render as unsupported and routes
+            // the composition then (`force_legacy`).
+            if self.definitions.is_some()
+                && matches!(
+                    u.feature,
+                    pm_render::Feature::Effects | pm_render::Feature::Transition
+                )
+            {
+                continue;
+            }
             reasons.push(describe(&u));
         }
         if reasons.is_empty() {

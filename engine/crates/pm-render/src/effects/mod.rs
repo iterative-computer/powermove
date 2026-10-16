@@ -267,6 +267,14 @@ impl Effects {
         Ok(failures)
     }
 
+    /// Forgets every definition: effects and transitions are routed again.
+    pub fn clear(&mut self) {
+        self.set = DefinitionSet::default();
+        self.configured = false;
+        self.missing_ids.clear();
+        self.entries.clear();
+    }
+
     /// The definition set an export job or Collect Project embeds.
     pub fn snapshot(&self) -> DefinitionSetSnapshot {
         let mut snapshot = self.set.snapshot();

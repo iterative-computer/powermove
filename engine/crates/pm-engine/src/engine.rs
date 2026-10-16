@@ -857,12 +857,13 @@ impl Engine {
                 let Some(sid) = self.owned_session(port, id, session, out) else {
                     return;
                 };
-                let result = self
-                    .sessions
-                    .get_mut(&sid)
-                    .expect("owned")
-                    .definitions
-                    .apply(&update);
+                let session = self.sessions.get_mut(&sid).expect("owned");
+                let result = session.definitions.apply(&update);
+                if result.is_ok() {
+                    // The presenter renders with the session's definitions.
+                    let (session_port, set) = (session.port, session.definitions.snapshot());
+                    self.with_presenter(out, |p, ctx| p.definitions(ctx, session_port, sid, &set));
+                }
                 match result {
                     Ok(()) => self.respond(
                         port,

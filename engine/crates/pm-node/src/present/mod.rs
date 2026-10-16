@@ -395,6 +395,19 @@ impl FramePresenter for BridgePresenter {
         });
     }
 
+    fn definitions(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) {
+        self.send(Command::Definitions {
+            key: (port, session),
+            set: std::sync::Arc::new(set.clone()),
+        });
+    }
+
     fn media(
         &mut self,
         _ctx: &mut PresentContext<'_>,

@@ -13,6 +13,8 @@
 //! opaque black inside the rectangle (today's WebGL canvas is opaque) and
 //! transparent around it, where the viewer's stage shows through.
 
+use std::sync::Arc;
+
 use pm_gpu::Target;
 use pm_gpu::bridge_out::display::{WORKING_FORMAT, WorkingTexture};
 use pm_protocol::color::Precision;
@@ -158,6 +160,9 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
+    /// Whose definitions the renderer holds: the view (hashed) and the set's
+    /// identity and version.
+    definitions: Option<(u64, Option<(usize, u64)>)>,
 }
 
 impl Composer {
@@ -251,11 +256,37 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
+            definitions: None,
         }
     }
 
     pub fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
+    }
+
+    /// Loads a view's definitions into the renderer when they are not the
+    /// ones it holds (translations come from the renderer's cache).
+    pub fn use_definitions(
+        &mut self,
+        owner: impl std::hash::Hash,
+        definitions: Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
+    ) {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        let owner = BuildHasherDefault::<DefaultHasher>::default().hash_one(owner);
+        let wanted = (
+            owner,
+            definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version)),
+        );
+        if self.definitions == Some(wanted) {
+            return;
+        }
+        match definitions {
+            Some((set, _)) => {
+                let _ = self.renderer.set_definitions(set);
+            }
+            None => self.renderer.clear_definitions(),
+        }
+        self.definitions = Some(wanted);
     }
 
     /// Draws `composition` of `doc` at `time` into `working` for `state`.

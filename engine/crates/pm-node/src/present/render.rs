@@ -164,6 +164,11 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
     },
+    /// The session's definitions (contract 10).
+    Definitions {
+        key: Key,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+    },
     /// An asset's file, or `None` when it is offline or gone.
     Media {
         key: Key,
@@ -654,6 +659,12 @@ impl Thread {
                 }
             }
             Command::Document { key, update } => self.document(key, update),
+            Command::Definitions { key, set } => {
+                self.docs.entry(key).or_default().set_definitions(set);
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
             Command::Media { key, asset, path } => {
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -1782,6 +1793,9 @@ impl Thread {
                 .composer
                 .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
             let composition = view.state.composition.as_str().to_owned();
+            // The renderer draws with this view's definitions (one renderer
+            // serves every view on the device).
+            composer.use_definitions(key, doc.definitions());
             match composer.compose(
                 doc.document(),
                 &composition,

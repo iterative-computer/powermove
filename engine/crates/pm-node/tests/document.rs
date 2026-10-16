@@ -10,7 +10,8 @@
 //!   with the edit's revision, the overlay following the layer;
 //! * capability routing: an effect routes the composition to the legacy
 //!   viewer (a session `unsupported` failure, no frames); removing it
-//!   brings engine frames back;
+//!   brings engine frames back; with the kernel's definitions pushed to the
+//!   session the engine draws the effect;
 //! * playback on the host clock at the composition's rate;
 //! * a GPU device loss: the device and pool are rebuilt as a new
 //!   generation and the paused frame is drawn again.
@@ -374,6 +375,43 @@ fn child_engine() {
         frame(m).filter(|d| d.revision.get() == r)
     });
     release(&mut host, &back);
+
+    // With the kernel's definitions (contract 10) the engine draws the same
+    // effect: the session's set reaches the presenter's renderer.
+    let builtins = pm_render::builtin_definitions();
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(3).unwrap(),
+            body: Request::PushDefinitions(pm_protocol::definitions::DefinitionsUpdate {
+                generation: Seq::new(1).unwrap(),
+                full: true,
+                upserts: builtins.definitions,
+                removals: vec![],
+            }),
+        })
+        .with_session(session),
+    );
+    let applied = inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::DefinitionsApplied(applied),
+            ..
+        } => Some(applied.clone()),
+        _ => None,
+    });
+    assert_eq!(applied.generation, Seq::new(1).unwrap());
+    let blurred =
+        json!([{ "id": "fx1", "type": "blur", "on": true, "p": { "amount": ch(json!(8)) } }]);
+    let r = edit(&mut host, project(solid(130.0, blurred)), &mut doc);
+    let drawn = inbox.wait(Duration::from_secs(20), |m| {
+        frame(m).filter(|d| d.revision.get() == r)
+    });
+    release(&mut host, &drawn);
+    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    let plain = inbox.wait(Duration::from_secs(10), |m| {
+        frame(m).filter(|d| d.revision.get() == r)
+    });
+    release(&mut host, &plain);
 
     // Playback on the host clock at 30 fps.
     send(

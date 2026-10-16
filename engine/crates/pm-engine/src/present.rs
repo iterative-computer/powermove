@@ -133,6 +133,17 @@ pub trait FramePresenter: Send {
     ) {
     }
 
+    /// The session's effect, transition, and layer definitions changed
+    /// (contract 10): the winning set after a `pushDefinitions` update.
+    fn definitions(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) {
+    }
+
     /// An asset of the session's document resolved to a file, or went
     /// offline (`None`: the host could not resolve it, or it left the
     /// document).
