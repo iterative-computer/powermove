@@ -34,7 +34,7 @@ for (const { restore, fps, format, sourceFormat } of cases) test(`exports each $
       await PM.importFiles([(document.querySelector('#frame-source') as HTMLInputElement).files![0]]);
       // Ordinary WebM imports and older projects have no image-sequence hint.
       if (restore) await PM.assets.restoreProject(PM.proj);
-      const layer = PM.proj.layers.find((l: any) => l.type === 'video'); layer.from = 0; layer.dur = 20 / fps;
+      const layer = PM.proj.layers.find((l: any) => l.type === 'video'); layer.from = 0; layer.dur = 20 / fps; PM.touch();
       PM.setTime(15 / fps, { force: true });
       await new Promise(resolve => setTimeout(resolve, 300));
       const result = await PM.Export.run({ format, scale: 1, fps, range: 'all', quality: 'high', mblur: false, audio: false });

@@ -35,7 +35,7 @@ for (const auto of [false, true]) test(`transparent sequence scrubbing replaces 
     await asset.previewReady;
     if (auto && !asset.preview) throw new Error('Expected a preview proxy');
     PM.pause(); PM.perf.auto = auto; PM.quality = 1;
-    layer.d.w = layer.d.h = 128;
+    layer.d.w = layer.d.h = 128; PM.touch();
     PM.GL.previewViewport = null; PM.GL.resize(128, 128);
     const samples = [];
     // Visit enough distinct frames to recycle both the one-frame original

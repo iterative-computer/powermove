@@ -101,7 +101,7 @@ test('right-click replacement preserves layers, renders new pixels, undoes/redoe
     const PM = (window as any).PM;
     const layer = PM.proj.layers.find((l: any) => l.name === 'original-red.png');
     PM.proj.layers = [layer];
-    layer.from = 0; layer.dur = 5;
+    layer.from = 0; layer.dur = 5; PM.ProjectIndex.invalidate(); PM.touch();
     PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'rotation.z', keyframes: [{ time: 0, value: 0 }, { time: 2, value: 45 }], preserveHandEdits: false });
     PM.setTime(0, { raw: true, force: true });
     return { id: layer.d.asset, layers: JSON.stringify(PM.proj.layers) };
@@ -175,7 +175,7 @@ for (const media of [{ original: 'tone.wav', replacement: 'tone.mp3', kind: 'aud
     await page.waitForFunction(name => (window as any).PM.proj.layers.some((l: any) => l.name === name), media.original);
     const before = await page.evaluate(name => {
       const PM = (window as any).PM, layer = PM.proj.layers.find((l: any) => l.name === name);
-      layer.from = 2; layer.dur = 1; layer.d.trim = .25;
+      layer.from = 2; layer.dur = 1; layer.d.trim = .25; PM.touch();
       return { id: layer.d.asset, layer: JSON.stringify(layer) };
     }, media.original);
     const chooser = page.waitForEvent('filechooser');

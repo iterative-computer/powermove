@@ -1183,6 +1183,11 @@ impl Engine {
                 }
             }
             other => {
+                if let Some(result) =
+                    crate::queries::dispatch(other, &mut scope, fonts, layer, t, request, out)
+                {
+                    return result;
+                }
                 let _ = NoHost;
                 return Ok(Err(JsThrow::type_error(format!("unknown query '{other}'"))));
             }

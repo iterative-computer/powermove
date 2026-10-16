@@ -7,4 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "pm-cli"
+path = "src/main.rs"
+# The parity runner measures text with the native font registry, which uses
+# AppKit's font manager and must stay on the main thread.
+test = true
+
 [dependencies]
+pm-model = { path = "../pm-model" }
+pm-eval = { path = "../pm-eval" }
+pm-text = { path = "../pm-text", features = ["system"] }
+# The renderer's mirror, run natively for the native/wasm32 identity check
+# and as the production expression engine.
+pm-wasm = { path = "../pm-wasm" }
+serde_json.workspace = true
