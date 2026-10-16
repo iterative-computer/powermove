@@ -270,6 +270,9 @@ for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
 type TransportDriver = {
   active(): boolean;
   play(time: number): void;
+  shuttle(time: number, rate: number): void;
+  playAround(time: number, preRoll: number, postRoll: number): void;
+  setAudioScrub(enabled: boolean): void;
   pause(): void;
   seek(time: number, scrub: boolean): void;
   setLoop(range: readonly [number, number] | null): void;
@@ -308,9 +311,88 @@ PM.setTransportDriver = (next: TransportDriver | null) => {
   driverOff?.(); driverOff = null;
   const was = engineDrives();
   driver = next;
-  if (next) driverOff = next.onActiveChange(handover);
+  if (next) {
+    driverOff = next.onActiveChange(handover);
+    next.setAudioScrub(audioScrubOn());
+  }
   const now = engineDrives();
   if (now !== was) handover(now);
+};
+
+/* ── J/K/L, play around, audio scrub (the new engine's transport) ──
+   Plan section 15. While the engine runs the transport, J, K, and L shuttle
+   during playback as in Final Cut Pro and Premiere: L plays forward (again:
+   2×), J backward (again: 2×), K stops; pressed while paused, J and K keep
+   their After Effects meaning (previous and next event) and L reveals audio
+   levels. Control-J starts backward playback from a pause. Play around runs
+   from two seconds before the current frame to two after and returns. The
+   legacy engine plays forward at 1× only, so these decline there and the
+   keys keep their After Effects meaning. */
+const PLAY_AROUND_SECONDS = 2;
+const audioScrubOn = (): boolean => PM.store?.get?.('audioScrub', false) === true;
+PM.playRate = 0;
+PM.engineTransport = () => engineDrives();
+/** J/K/L at `rate` (1, 2, −1, −2) from the playhead; false when the engine does not run the transport. */
+PM.shuttle = (rate: number) => {
+  if (!engineDrives() || ![1, 2, -1, -2].includes(rate)) return false;
+  if (PM.playing && PM.playRate === rate) return true;
+  if (PM.assets.loading?.size) {
+    PM.toast('Loading project media…', 3000);
+    return true;
+  }
+  const [ws, we] = workArea();
+  if (!PM.playing) {
+    // A run from the end of the work area starts over; backwards from its start, from its end.
+    if (rate > 0 && PM.time >= we - 1e-6) PM.setTime(ws, { raw: true });
+    if (rate < 0 && PM.time <= ws + 1e-6) PM.setTime(we, { raw: true });
+  }
+  PM.preparedVideoFrames = null;
+  synchronizedFrame = null;
+  PM.playbackVideoFrame = null;
+  const starting = !PM.playing;
+  PM.playing = true;
+  PM.playRate = rate;
+  lastRenderTime = NaN;
+  syncEngineLoop();
+  driver!.shuttle(PM.time, rate);
+  if (starting) { clock.t0 = window.performance.now(); clock.frames = 0; E.fps = 0; }
+  PM.bus.emit('transport');
+  PM.invalidate('ui');
+  return true;
+};
+/** The J/K/L keys: `key` is 'j', 'k', or 'l'. False when they keep their other meaning. */
+PM.jkl = (key: string, { fromPause = false }: { fromPause?: boolean } = {}) => {
+  if (!engineDrives()) return false;
+  if (!PM.playing && !fromPause) return false;
+  if (key === 'k') {
+    if (!PM.playing) return false;
+    PM.pause();
+    return true;
+  }
+  const direction = key === 'l' ? 1 : -1;
+  const current = PM.playing ? PM.playRate || 1 : 0;
+  const next = Math.sign(current) === direction ? Math.max(-2, Math.min(2, current * 2)) : direction;
+  return PM.shuttle(next);
+};
+/** Plays around the current frame; false when the engine does not run the transport. */
+PM.playAround = (preRoll = PLAY_AROUND_SECONDS, postRoll = PLAY_AROUND_SECONDS) => {
+  if (!engineDrives()) return false;
+  if (PM.playing) PM.pause();
+  PM.playing = true;
+  PM.playRate = 1;
+  lastRenderTime = NaN;
+  PM.playAroundRun = true;
+  driver!.playAround(PM.time, preRoll, postRoll);
+  PM.bus.emit('transport');
+  PM.invalidate('ui');
+  return true;
+};
+/** Whether scrubs and frame steps play a short grain of sound (the new engine). */
+PM.audioScrub = () => audioScrubOn();
+PM.setAudioScrub = (enabled: boolean) => {
+  PM.store?.set?.('audioScrub', !!enabled);
+  driver?.setAudioScrub(!!enabled);
+  PM.bus.emit('transport');
 };
 
 /* ── transport ─────────────────────────────────────────── */
@@ -347,6 +429,7 @@ PM.play = () => {
     const [ws, we] = workArea();
     if (PM.time >= we - 1e-6) PM.setTime(ws, { raw: true });
     PM.playing = true;
+    PM.playRate = 1;
     lastRenderTime = NaN;
     syncEngineLoop();
     driver!.play(PM.time);
@@ -381,6 +464,8 @@ PM.play = () => {
 PM.pause = () => {
   const wasPlaying = PM.playing;
   PM.playing = false;
+  PM.playRate = 0;
+  PM.playAroundRun = false;
   if (wasPlaying && engineDrives()) driver!.pause();
   synchronizedFrame = null; PM.videoFrameSync = false;
   PM.playbackVideoFrame = null;
@@ -440,12 +525,15 @@ function frame(now: any) {
       const engine = driver!.now(now);
       if (engine) {
         const [ws, we] = workArea();
-        if (engine.ended || (!PM.loop && engine.time >= we - 1e-6)) {
-          PM.setTime(Math.min(engine.time, we), { raw: true, fromEngine: true });
+        const backward = PM.playRate < 0;
+        if (engine.ended || (!PM.loop && !backward && engine.time >= we - 1e-6)
+          || (!PM.loop && backward && engine.time <= ws + 1e-6)) {
+          PM.setTime(Math.max(Math.min(engine.time, we), backward ? ws : 0), { raw: true, fromEngine: true });
           PM.pause();
           return;
         }
-        if (engine.playing && engine.time !== PM.time && engine.time >= ws - 1e-6) {
+        // A play around and a backward run move below the work area start.
+        if (engine.playing && engine.time !== PM.time && (engine.time >= ws - 1e-6 || backward || PM.playAroundRun)) {
           PM.time = engine.time;
           PM.bus.emit('time', PM.time);
           PM.invalidate('timeline');

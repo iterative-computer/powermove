@@ -1,7 +1,8 @@
 /*
  * The transport while the new engine draws the composition (plan section
- * 15; contract 6): play, pause, seek, loop, and frame steps go to the
- * interactive engine, and the playhead follows the engine's clock, whose
+ * 15; contract 6): play, pause, seek, loop, frame steps, J/K/L at 1× and 2×
+ * forward and reverse, play around the current frame, and audio scrub go to
+ * the interactive engine, and the playhead follows the engine's clock, whose
  * master is the audio device clock. The legacy transport
  * (legacy/core/engine.ts) asks the driver whether it is active and hands
  * over to it, and back, when the composition's route changes.
@@ -17,6 +18,14 @@ export interface TransportDriver {
   /** Whether the engine runs the transport now. */
   active(): boolean;
   play(time: number): void;
+  /** J/K/L: plays from `time` at `rate` (1, 2, −1, −2); a new rate while
+   *  playing continues from what is heard. */
+  shuttle(time: number, rate: number): void;
+  /** Plays from `preRoll` seconds before `time` to `postRoll` after, then
+   *  rests on `time` again. */
+  playAround(time: number, preRoll: number, postRoll: number): void;
+  /** Whether scrubs and steps while paused play a short grain of sound. */
+  setAudioScrub(enabled: boolean): void;
   pause(): void;
   seek(time: number, scrub: boolean): void;
   /** The work-area loop (seconds), or null. */
@@ -50,6 +59,9 @@ export class EngineTransport implements TransportDriver {
   private loop: string | null = null;
   /** A run this driver started: the epoch before it, and whether it played. */
   private run: { before: number | null; played: boolean } | null = null;
+  /** Audio scrub as asked, and the session it was sent on. */
+  private scrub = false;
+  private scrubSentOn: DocumentSession | null = null;
 
   constructor(
     private readonly session: () => DocumentSession | null,
@@ -67,6 +79,7 @@ export class EngineTransport implements TransportDriver {
     if (active === this.wasActive) return;
     this.wasActive = active;
     if (!active) this.run = null;
+    else this.syncScrub();
     for (const listener of [...this.listeners]) listener(active);
   }
 
@@ -80,10 +93,38 @@ export class EngineTransport implements TransportDriver {
   }
 
   play(time: number): void {
+    this.shuttle(time, 1);
+  }
+
+  shuttle(time: number, rate: number): void {
+    const s = this.session();
+    const clock = s?.clock;
+    const moving = !!clock && clock.state !== 'stopped' && clock.rate.num !== 0;
+    this.run = { before: clock?.epoch ?? null, played: false };
+    // A rate change while the engine plays continues from what is heard.
+    if (!moving) this.send({ command: 'seek', time: ticks(time), mode: 'exact' });
+    this.send({ command: 'play', rate: { num: rate, den: 1 } });
+  }
+
+  playAround(time: number, preRoll: number, postRoll: number): void {
     const s = this.session();
     this.run = { before: s?.clock?.epoch ?? null, played: false };
     this.send({ command: 'seek', time: ticks(time), mode: 'exact' });
-    this.send({ command: 'play', rate: { num: 1, den: 1 } });
+    this.send({ command: 'playAround', preRoll: ticks(preRoll), postRoll: ticks(postRoll) });
+  }
+
+  setAudioScrub(enabled: boolean): void {
+    this.scrub = enabled;
+    this.scrubSentOn = null;
+    this.syncScrub();
+  }
+
+  /** Sends the audio scrub switch to a session that has not had it. */
+  private syncScrub(): void {
+    const s = this.session();
+    if (!s || s.closed || s.id === null || s === this.scrubSentOn) return;
+    this.scrubSentOn = s;
+    this.send({ command: 'audioScrub', enabled: this.scrub });
   }
 
   pause(): void {
@@ -92,6 +133,7 @@ export class EngineTransport implements TransportDriver {
   }
 
   seek(time: number, scrub: boolean): void {
+    if (scrub) this.syncScrub();
     if (this.run) this.run = { before: this.session()?.clock?.epoch ?? null, played: false };
     this.send({ command: 'seek', time: ticks(time), mode: scrub ? 'scrub' : 'exact' });
   }
@@ -107,6 +149,13 @@ export class EngineTransport implements TransportDriver {
   /** Forgets the loop sent (a new session starts without one). */
   resetLoop(): void {
     this.loop = null;
+  }
+
+  /** The line's rate: 1, 2, −1, −2 while it moves, 0 when stopped. */
+  rate(): number {
+    const sample = this.session()?.clock;
+    if (!sample || sample.state === 'stopped' || sample.rate.num === 0) return 0;
+    return sample.rate.num / sample.rate.den;
   }
 
   now(nowMs: number): { time: number; playing: boolean; ended: boolean } | null {
