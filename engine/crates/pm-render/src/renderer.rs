@@ -492,7 +492,12 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        let timer = self.effects.watchdog.frame_timer(&self.device);
+        // Only renderers with definitions draw effects (and so time them).
+        let timer = if self.effects.configured() {
+            self.effects.watchdog.frame_timer(&self.device)
+        } else {
+            None
+        };
         let (legend, taken, unsupported, exec_failures, timer) = {
             let mut exec = Exec {
                 device: &self.device,
