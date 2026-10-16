@@ -70,6 +70,21 @@ impl CostModel {
             .or_insert(sample);
     }
 
+    /// Lowers a pass's per-unit cost to `sample_us` when that is less: a run
+    /// measured while other GPU clients work (the interactive engine plays)
+    /// can only take longer than the pass costs, so the least such sample is
+    /// the best estimate until an uncontended run calibrates it.
+    pub fn calibrate_contended(&mut self, pass: PassKey, units: u32, measured_us: f64) {
+        if units == 0 || !(measured_us.is_finite() && measured_us > 0.0) {
+            return;
+        }
+        let sample = measured_us / f64::from(units);
+        self.per_unit_us
+            .entry(pass)
+            .and_modify(|cost| *cost = cost.min(sample))
+            .or_insert(sample);
+    }
+
     pub fn is_calibrated(&self, pass: PassKey) -> bool {
         self.per_unit_us.contains_key(&pass)
     }
@@ -298,6 +313,13 @@ impl JobSlicer {
         self.in_flight = self.in_flight.saturating_add(1);
     }
 
+    /// A command buffer admitted with [`submitted`](Self::submitted) was
+    /// never measured (its render failed): frees its in-flight slot without
+    /// teaching the model anything.
+    pub fn abandoned(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
     /// A command buffer completed after `measured_us` of GPU time.
     pub fn completed(&mut self, raw_predicted_us: f64, measured_us: f64) {
         self.in_flight = self.in_flight.saturating_sub(1);
@@ -322,6 +344,20 @@ mod tests {
         model.calibrate(SOURCE, 100, 500.0); // 5 µs per unit
         model.calibrate(BLUR, 10, 400.0); // 40 µs per unit
         model
+    }
+
+    #[test]
+    fn contended_calibration_keeps_the_least_sample() {
+        let mut model = CostModel::new();
+        model.calibrate_contended(BLUR, 1, 3800.0);
+        assert_eq!(model.raw_unit_us(BLUR), Some(3800.0));
+        model.calibrate_contended(BLUR, 2, 600.0);
+        assert_eq!(model.raw_unit_us(BLUR), Some(300.0));
+        model.calibrate_contended(BLUR, 1, 9000.0);
+        assert_eq!(model.raw_unit_us(BLUR), Some(300.0));
+        model.calibrate_contended(BLUR, 0, 1.0);
+        model.calibrate_contended(BLUR, 1, f64::NAN);
+        assert_eq!(model.raw_unit_us(BLUR), Some(300.0));
     }
 
     #[test]

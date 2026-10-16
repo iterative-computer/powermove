@@ -12,6 +12,7 @@ import { doc } from '../state/document.svelte';
 import { sel, setSelection } from '../state/selection.svelte';
 import { perf, transport, updateControlTime } from '../state/transport.svelte';
 import { frameBus } from './frame-bus';
+import { bridge as hostBridge } from '../kernel/bridge';
 import { frame, invalidate } from './invalidate';
 import { installPorts, type MutationKind, type RuntimePorts, type Selection } from './ports';
 
@@ -87,9 +88,16 @@ export function installLegacyRuntime(PM: LegacyPM): () => void {
     transport.time = t;
     updateControlTime(t, !!PM.playing, performance.now());
   });
+  // The job engine slices its GPU work while the editor plays (main relays
+  // this to it; a no-op without the new engine).
+  let reportedPlaying = false;
   on('transport', () => {
     transport.playing = !!PM.playing;
     updateControlTime(PM.time ?? transport.time, transport.playing, performance.now(), true);
+    if (transport.playing !== reportedPlaying) {
+      reportedPlaying = transport.playing;
+      (hostBridge() as { nativeEngine?: { playback?: (playing: boolean) => void } } | null)?.nativeEngine?.playback?.(reportedPlaying);
+    }
   });
   on('quality', () => {
     transport.quality = PM.quality ?? 1;

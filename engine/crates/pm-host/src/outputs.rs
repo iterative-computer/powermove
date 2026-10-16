@@ -19,6 +19,48 @@ pub const NAME_MAX: usize = 255;
 pub const TEMP_PREFIX: &str = ".powermove-";
 pub const TEMP_SUFFIX: &str = ".part";
 
+/// Whether `name` is a job engine work file of the temporary output `base`
+/// (`pm_export::AtomicOutput::in_place`: `<base>.<16 hex>.partial[.<ext>]`).
+fn is_work_file_of(name: &str, base: &str) -> bool {
+    let Some(rest) = name.strip_prefix(base).and_then(|r| r.strip_prefix('.')) else {
+        return false;
+    };
+    let Some((hex, tail)) = rest.split_once('.') else {
+        return false;
+    };
+    let ext_ok = match tail.strip_prefix("partial") {
+        Some("") => true,
+        Some(ext) => ext.strip_prefix('.').is_some_and(|e| {
+            !e.is_empty() && e.len() <= 16 && e.bytes().all(|b| b.is_ascii_alphanumeric())
+        }),
+        None => false,
+    };
+    hex.len() == 16
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        && ext_ok
+}
+
+/// Removes a temporary output and the job engine's work files named after
+/// it (a cancelled, failed, or crashed encode leaves one beside it), as
+/// main's `outputs.ts` does.
+pub fn remove_temporary(temporary: &Path) {
+    let _ = fs::remove_file(temporary);
+    let (Some(dir), Some(base)) = (temporary.parent(), temporary.file_name()) else {
+        return;
+    };
+    let base = base.to_string_lossy();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if is_work_file_of(&entry.file_name().to_string_lossy(), &base) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// `Name.ext`, `Name (2).ext`, … trimmed so every candidate fits `NAME_MAX`.
 pub fn candidate_name(base: &str, extension: &str, attempt: u32) -> String {
     let suffix = if attempt == 0 {
@@ -178,6 +220,40 @@ pub fn place(temporary: &Path, placement: &Placement) -> Result<PathBuf, PlaceEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_a_temporary_output_removes_its_work_files_only() {
+        let dir = std::env::temp_dir().join(format!("pm-host-work-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let temp = dir.join(".powermove-0123456789abcdef.part");
+        for name in [
+            ".powermove-0123456789abcdef.part",
+            ".powermove-0123456789abcdef.part.fedcba9876543210.partial.mov",
+            ".powermove-0123456789abcdef.part.fedcba9876543210.partial",
+            ".powermove-0123456789abcdef.part.notours",
+            ".powermove-0123456789abcdef.part.fedcba987654321.partial.mov",
+            ".powermove-1111111111111111.part.fedcba9876543210.partial.mov",
+        ] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+        remove_temporary(&temp);
+        let mut left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                ".powermove-0123456789abcdef.part.fedcba987654321.partial.mov",
+                ".powermove-0123456789abcdef.part.notours",
+                ".powermove-1111111111111111.part.fedcba9876543210.partial.mov",
+            ]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn candidates_number_from_two_and_fit_name_max() {

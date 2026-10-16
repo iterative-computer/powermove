@@ -425,6 +425,54 @@ describe('NativeEngine with fake engines', () => {
     expect(logs.some((l) => l.includes('only the interactive engine'))).toBe(true);
   });
 
+  it('slices job engine work while an editor plays, merged with the interactive engine\'s playback', async () => {
+    const playback: boolean[] = [];
+    host.listen({ playback: (p) => playback.push(p) });
+    const signals = () => live('job').events('deadline').map((e) => {
+      const d = e as { signal: string; frameBudgetUs?: number };
+      return d.signal === 'playbackStarted' ? `started ${d.frameBudgetUs}` : d.signal;
+    });
+    // Two editors: the job engine hears a start, then the shorter budget of
+    // the two once both play, and one stop when the last stops.
+    host.editorPlayback(5, true, 16_667);
+    host.editorPlayback(6, true, 8_333);
+    await settle();
+    expect(signals()).toEqual(['started 16667', 'started 8333']);
+    expect(host.memory.current('job')!.reason).toBe('playbackStarted');
+    host.editorPlayback(5, false);
+    await settle();
+    expect(signals()).toEqual(['started 16667', 'started 8333']);
+    // The interactive engine starts and stops while editor 6 plays: its own
+    // signal is relayed, and its stop hands back to the editor's budget.
+    live('interactive').tell({ type: 'deadline', signal: 'playbackStarted', at: 1, rate: { num: 1, den: 1 }, frameBudgetUs: 16_666 });
+    await settle();
+    live('interactive').tell({ type: 'deadline', signal: 'playbackStopped', at: 2 });
+    await settle();
+    expect(signals()).toEqual(['started 16667', 'started 8333', 'started 16666', 'started 8333']);
+    host.editorPlayback(6, false);
+    await settle();
+    expect(signals()).toEqual(['started 16667', 'started 8333', 'started 16666', 'started 8333', 'playbackStopped']);
+    expect(playback).toEqual([true, false]);
+    expect(host.memory.isPlaying).toBe(false);
+    // An editor stopping twice, or a window that never played, changes nothing.
+    host.editorPlayback(6, false);
+    host.editorPlayback(9, false);
+    await settle();
+    expect(signals()).toHaveLength(5);
+    // A dead interactive engine does not stop an editor's playback.
+    host.editorPlayback(7, true, 1);
+    live('interactive').tell({ type: 'deadline', signal: 'playbackStarted', at: 3, rate: { num: 1, den: 1 }, frameBudgetUs: 16_666 });
+    await settle();
+    live('interactive').exit(139);
+    await settle();
+    expect(signals().slice(5)).toEqual(['started 2000', 'started 16666', 'started 2000']);
+    expect(host.memory.isPlaying).toBe(true);
+    host.editorPlayback(7, false);
+    await settle();
+    expect(signals().at(-1)).toBe('playbackStopped');
+    expect(playback).toEqual([true, false, true, false]);
+  });
+
   it('stages resync documents as cache files bound to the session and launch', async () => {
     const staged = await host.stageDocument('interactive', 3, new TextEncoder().encode('{"a":1}'));
     expect(staged.length).toBe(7);

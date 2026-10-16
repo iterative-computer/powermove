@@ -14,10 +14,15 @@
 //! * [`expr`]: the production expression engine (`pm-expr` reading the
 //!   mirror's nodes in place).
 //! * [`reply`]: JSON replies with exact numbers.
+//! * [`edit`]: the `edit.*` requests, `pm-edit`'s kernels over the mirror.
+//! * `queries`: the remaining evaluation answers the parity corpus records
+//!   (`PM.textLayout`, `PM.captionBounds`, `sourceTime`, ...).
 //! * `abi` (wasm32 only): the module's C ABI exports.
 
+pub mod edit;
 pub mod engine;
 pub mod expr;
+mod queries;
 pub mod reply;
 
 #[cfg(target_family = "wasm")]

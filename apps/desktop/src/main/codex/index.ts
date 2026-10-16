@@ -95,6 +95,8 @@ export interface CodexIpcContext {
   /** The bundled ffmpeg the agent's media tools run (probe, frames, waveform). */
   agentMediaFfmpeg?: string;
   agentExportDirectory?: string;
+  /** Agent exports and frames through the job engine ("Use New Engine"). */
+  agentEngineJobs?: import('../agent-tools/bridge').AgentEngineJobs | null;
   externalMcp?: {
     /** Desktop boot barrier: only return an editor after its tool listener is ready. */
     getOwner?(): BrowserWindow['webContents'] | null;
@@ -401,6 +403,7 @@ export function registerCodexIpc(
         storeAgent: ctx.storeAgent?.() ?? null,
         ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
         exportDirectory: ctx.agentExportDirectory,
+        engineJobs: ctx.agentEngineJobs ?? null,
         capturePanel: ctx.externalMcp?.capturePanel,
         panelInput: ctx.externalMcp?.panelInput,
         orchestrate: (runId, tool, args) => orchestrator.call(runId, tool, args),

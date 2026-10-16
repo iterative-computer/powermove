@@ -85,6 +85,16 @@ impl LayerQuad {
     }
 }
 
+/// Commands recorded around each frame's own commands, in the frame's
+/// command buffer: the job engine's GPU timestamps (contract 13), which must
+/// not count the time the GPU waits for the frame to be encoded.
+pub trait CommandBracket: Send + Sync {
+    /// Recorded first.
+    fn begin(&self, encoder: &mut wgpu::CommandEncoder);
+    /// Recorded last; `output` is the frame's target, written by then.
+    fn end(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView);
+}
+
 /// The renderer.
 pub struct Renderer {
     device: wgpu::Device,
@@ -94,6 +104,7 @@ pub struct Renderer {
     pool: TargetPool,
     scene3d: Scene3dRenderer,
     evaluator: Evaluator,
+    bracket: Option<Arc<dyn CommandBracket>>,
 }
 
 impl Renderer {
@@ -112,7 +123,14 @@ impl Renderer {
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
+            bracket: None,
         }
+    }
+
+    /// Records `bracket` around every following frame's commands (`None`:
+    /// nothing).
+    pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
+        self.bracket = bracket;
     }
 
     /// A renderer on its own device (`pm_gpu::Gpu::new`).
@@ -298,6 +316,9 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pm frame"),
             });
+        if let Some(bracket) = &self.bracket {
+            bracket.begin(&mut encoder);
+        }
         let (legend, taken, unsupported, exec_failures) = {
             let mut exec = Exec {
                 device: &self.device,
@@ -354,6 +375,9 @@ impl Renderer {
             let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
             (legend, exec.taken, exec.unsupported, exec.failures)
         };
+        if let Some(bracket) = &self.bracket {
+            bracket.end(&mut encoder, &target.view);
+        }
         self.queue.submit([encoder.finish()]);
         for t in taken {
             self.pool.give(t);

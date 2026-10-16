@@ -9,12 +9,16 @@ test('export inherits Settings spacing and rounded cards and controls in both th
     await page.evaluate(theme => {
       const PM = (window as any).PM;
       PM.theme.apply(theme);
-      PM.proj.w = 1080; PM.proj.h = 1920;
+      PM.proj.w = 1080; PM.proj.h = 1920; PM.touch();
       PM.Export.dialog();
     }, theme);
     const dialog = page.getByRole('dialog', { name: 'Export', exact: true });
     const field = dialog.locator('.pm-select.export-select').first();
     await expect(field).toHaveAttribute('data-squircle', '');
+    // settings/squircle.ts paints the clip path once the element has a
+    // layout size (its ResizeObserver), which can land after the attribute.
+    await expect.poll(() => dialog.evaluate(el => ['.settings-section-body', '.pm-select', '.mf .pri']
+      .every(selector => getComputedStyle(el.querySelector<HTMLElement>(selector)!).clipPath !== 'none'))).toBe(true);
     const geometry = await dialog.evaluate(el => {
       const card = el.querySelector<HTMLElement>('.settings-section-body')!;
       const row = card.querySelector<HTMLElement>('.settings-row')!;

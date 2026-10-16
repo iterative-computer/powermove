@@ -73,6 +73,17 @@ const RUNS = [
   { name: 'playback-engine-load-noautosave', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave' },
   // Render-ahead 8 frames (pool 12): slack for GPU-process stalls that hold slots.
   { name: 'playback-engine-lead8-load', ...playback, mode: 'engine', load: true, lead: 8 },
+  // Agent snapshots during playback (section 25 Phase 2 row): 4 frames at
+  // 720 px per agent turn, a turn every 2 s, a 24-layer 4K project.
+  { name: 'playback-engine-agent-snapshots', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 2000, frames: 4, width: 720, layers: 24 }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  { name: 'playback-engine-agent-snapshots-busy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 720, layers: 24 }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  // An over-bound pass (contract 13's 2 ms bound): 1500 solids in a
+  // full-size 4K precomposition, which renders whole for every band, at
+  // 3840 px stills; a 16-row band takes about 6.6 ms of GPU time idle
+  // (pm-export measure_heavy_precomp_band_cost). Cold: first met during
+  // playback; warm: one agent turn before playback.
+  { name: 'playback-engine-agent-snapshots-heavy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 2, width: 3840, layers: 1500, heavy: 'precomp' }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
+  { name: 'playback-engine-agent-snapshots-heavy-warm', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 2, width: 3840, layers: 1500, heavy: 'precomp', warm: true }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
   { name: 'latency-today-idle', ...latency, mode: 'today', load: false, inputModes: ['baseline'] },
   { name: 'latency-engine-idle', ...latency, mode: 'engine', load: false, inputModes: ['drag', 'orbit', 'walk'] },
   { name: 'latency-engine-raw-idle', ...latency, mode: 'engine', load: false, rawInput: true, inputModes: ['drag', 'orbit', 'walk'] },
@@ -811,6 +822,8 @@ try {
         clock: raw.clock,
         load: raw.load ? { ...raw.load, events: undefined, eventCount: raw.load.events?.length } : null,
         bridge: raw.bridge,
+        ...(raw.agentWarmup ? { agentWarmup: raw.agentWarmup } : {}),
+        ...(raw.agentSnapshots ? { agentSnapshots: { ...raw.agentSnapshots, queuedMs: undefined, queuedMsMax: Math.max(0, ...(raw.agentSnapshots.queuedMs ?? [])), jobEngineLog: (raw.log ?? []).filter((l) => /job engine/.test(l)).slice(-20) } } : {}),
         ...(raw.mainRate ? { mainRate: raw.mainRate } : {}),
         ...(run.scenario === 'playback'
           ? run.remoteLayer
@@ -829,6 +842,9 @@ try {
     if (summary.playback) {
       const p = summary.playback;
       process.stdout.write(`   drops ${p.frames.drops}/${p.frames.expected}  |jitter| p50 ${p.jitterAbsMs.p50} p99 ${p.jitterAbsMs.p99} ms  irregular ${p.irregularIntervals}  ${p.rafToPresentMs ? `rAF→present p50 ${p.rafToPresentMs.p50}` : `due→present p50 ${p.dueToPresentMs?.p50}`}\n`);
+      const a = summary.agentSnapshots;
+      if (a) process.stdout.write(`   agent snapshots: ${a.batches} batches, ${a.frames} frames (${a.sizes.join(', ')}), batch p50 ${a.batchMsP50} p95 ${a.batchMsP95} max ${a.batchMsMax} ms, failures ${a.failureCount}, routed ${a.routedCount}, playback signals ${JSON.stringify(a.playbackSignals.map(([, on]) => on))}\n`);
+      if (a?.jobsAtEnd) process.stdout.write(`   job gate at the end of the window: ${JSON.stringify(a.jobsAtEnd.gate)}\n`);
     } else {
       for (const [mode, l] of Object.entries(summary.latency)) process.stdout.write(`   ${mode}: pointer-to-pixel p50 ${l.pointerToPixelMs.p50} p99 ${l.pointerToPixelMs.p99} ms (${l.pointerToPixelMs.n} of ${l.events}, unmatched ${l.unmatched}, unpresented ${l.unpresented}; with them p50 ${l.pointerToPixelWithDropsMs.p50} p99 ${l.pointerToPixelWithDropsMs.p99} ms)\n`);
       for (const [mode, l] of Object.entries(summary.latency)) if (l.hopsMs) process.stdout.write(`   ${mode} hops p50/p99: ${Object.entries(l.hopsMs ?? {}).map(([k, d]) => `${k} ${d.p50}/${d.p99}`).join(', ')}\n`);

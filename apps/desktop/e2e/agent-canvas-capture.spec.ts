@@ -56,7 +56,7 @@ test('offscreen captures match opaque presentation without resizing or replacing
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),GL=PM.GL;
     const results=[];
     for(const transparent of [false,true]) {
-      PM.proj.backgroundFill = {type:transparent?'none':'solid',stops:[{color:'#142839',position:0}],angle:0};
+      PM.proj.backgroundFill = {type:transparent?'none':'solid',stops:[{color:'#142839',position:0}],angle:0}; PM.touch();
       viewer.fit=false;viewer.zoom=4.371588852276498;viewer.pan=[17.25,-11.5];viewer.layout();GL.render(0,{mblur:false});
       const before=viewer.el.toDataURL(),viewport=GL.previewViewport,dimensions=[viewer.el.width,viewer.el.height];
       const resize=GL.resize;let resizes=0;

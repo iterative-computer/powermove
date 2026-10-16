@@ -73,14 +73,14 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
   })).toEqual(await page.evaluate(() => (window as any).expectedLines));
   await page.evaluate(() => {
     const PM = (window as any).PM; PM.hist.undo();
-    const layer = PM.proj.layers[0]; layer.lock = true;
+    const layer = PM.proj.layers[0]; layer.lock = true; PM.touch();
   });
   const menu = await inspectNativeMenu(session, () => page.evaluate(() => {
     const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200});
   }));
   expect(menu).toContainEqual({ label: 'Split text into layers…', enabled: false });
   const before = await page.evaluate(() => {
-    const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = '';
+    const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = ''; PM.touch();
     return JSON.stringify(PM.proj);
   });
   await chooseNativeMenu(session, ['Split text into layers…', 'By character'], () => page.evaluate(() => { const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}); }));

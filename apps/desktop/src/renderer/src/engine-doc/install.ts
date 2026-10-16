@@ -26,6 +26,7 @@ import { ShadowAuditor } from './auditor';
 import { DualAnswers } from './dual';
 import { OFF, rendererMode, type EngineDocMode } from './flags';
 import { findPath, NativeApi } from './native';
+import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
@@ -73,6 +74,8 @@ export interface EngineDoc {
   enabled: boolean;
   ready: boolean;
   api: NativeApi | null;
+  /** pm-edit's kernels for the edit pipeline (engine-doc/edits.ts). */
+  edits: NativeEdits | null;
   barrier: DocumentBarrier | null;
   wasm: PmWasm | null;
   auditor: ShadowAuditor | null;
@@ -112,7 +115,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   if (!mode.evaluator) {
     PM.doc = noopDoc;
     const off: EngineDoc = {
-      mode: OFF, enabled: false, ready: false, api: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
+      mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
     };
@@ -326,6 +329,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite(undefined, 8), tx: PM.hist?.busy?.() ? (PM.hist?.scoped?.() ? 'scoped' : 'plain') : 'none' });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
+  const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual, () => api.fonts);
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
 
   const onMismatch = (result: ConsistencyResult) => {
@@ -339,7 +343,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
   const state: EngineDoc = {
-    mode, enabled: true, ready: false, api, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
+    mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     check(reason) {
       if (!state.ready || !barrier) return null;
       try { return barrier.check(reason); } catch (error) { console.warn('[engine-doc] consistency check failed to run', error); return null; }
@@ -354,6 +358,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         mode: mode.name, ready: state.ready,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
+        edits: edits.stats,
         dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale, allowed: dual.stats.allowed, fragile: dual.stats.fragile, fragileBudget: dual.fragileBudget() } : null,
         audit: auditor ? { audits: auditor.stats.audits, failures: auditor.stats.failures, missedWrites: auditor.stats.missedWrites, mirrorMismatches: auditor.stats.mirrorMismatches, ms: Math.round(auditor.stats.ms) } : null,
         violations: tracker ? tracker.violations().slice(0, 50) : null,

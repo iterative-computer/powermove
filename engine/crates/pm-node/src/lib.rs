@@ -21,6 +21,9 @@ mod node;
 #[cfg(target_os = "macos")]
 pub mod present;
 
+#[cfg(target_os = "macos")]
+pub mod jobs;
+
 pub mod fonts;
 
 /// Parses `"interactive"` or `"job"`.
@@ -54,10 +57,20 @@ pub use pm_engine::qos::{apply_process_qos, current_qos};
 /// utility process's ports.
 pub type ActionSink = std::sync::Arc<dyn Fn(Vec<Action>) + Send + Sync>;
 
+/// Set to `0` to start the job engine without its render and export service
+/// (it then refuses jobs and agent frames, and the host routes them to the
+/// current engine).
+pub const JOBS_ENV: &str = "POWERMOVE_ENGINE_JOBS";
+
 #[cfg(target_os = "macos")]
 type PresenterStats = std::sync::Arc<std::sync::Mutex<present::Stats>>;
 #[cfg(not(target_os = "macos"))]
 type PresenterStats = ();
+
+#[cfg(target_os = "macos")]
+type JobStats = jobs::StatsHandle;
+#[cfg(not(target_os = "macos"))]
+type JobStats = ();
 
 /// One engine process as its JavaScript host sees it.
 pub struct EngineHost {
@@ -65,6 +78,7 @@ pub struct EngineHost {
     presenter: Option<PresenterStats>,
     #[cfg(target_os = "macos")]
     control: Option<present::PresenterControl>,
+    jobs: Option<JobStats>,
     process: EngineProcess,
     /// The font service, created when main first attaches a font port.
     fonts: Option<fonts::FontService>,
@@ -89,15 +103,33 @@ impl EngineHost {
         let mut engine = Engine::new(EngineConfig::new(process));
         #[allow(unused_mut)]
         let mut presenter = None;
+        #[allow(unused_mut)]
+        let mut job_stats = None;
         #[cfg(target_os = "macos")]
         let mut control = None;
         #[cfg(target_os = "macos")]
-        if let (Some(sink), Some(config)) = (sink, present::PresenterConfig::from_env(process, env))
         {
-            let bridge = present::BridgePresenter::start(config, sink)?;
-            presenter = Some(bridge.stats_handle());
-            control = Some(bridge.control());
-            engine.set_presenter(Box::new(bridge));
+            if let (Some(sink), Some(config)) = (
+                sink.clone(),
+                present::PresenterConfig::from_env(process, &env),
+            ) {
+                let bridge = present::BridgePresenter::start(config, sink)?;
+                presenter = Some(bridge.stats_handle());
+                control = Some(bridge.control());
+                engine.set_presenter(Box::new(bridge));
+            }
+            // The job engine renders exports and agent frames (sections 17
+            // and 20). Its lanes wake the utility process through the sink,
+            // which then calls `pump`. `POWERMOVE_ENGINE_JOBS=0` turns it off.
+            if process == EngineProcess::Job
+                && env(JOBS_ENV).as_deref() != Some("0")
+                && let Some(sink) = sink
+            {
+                let wake: jobs::Wake = std::sync::Arc::new(move || sink(Vec::new()));
+                let service = jobs::JobEngineService::start(wake)?;
+                job_stats = Some(service.stats_handle());
+                engine.set_job_service(Box::new(service));
+            }
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (sink, env);
@@ -106,6 +138,7 @@ impl EngineHost {
             presenter,
             #[cfg(target_os = "macos")]
             control,
+            jobs: job_stats,
             process,
             fonts: None,
             font_ports: Default::default(),
@@ -189,6 +222,11 @@ impl EngineHost {
         self.engine.tick(pm_engine::clock::host_now())
     }
 
+    /// What the job service produced off this thread (`Engine::pump`).
+    pub fn pump(&mut self) -> Vec<Action> {
+        self.engine.pump()
+    }
+
     pub fn status(&self) -> EngineStatus {
         self.engine.status()
     }
@@ -200,6 +238,10 @@ impl EngineHost {
         if let Some(object) = value.as_object_mut() {
             object.insert("qos".into(), current_qos().into());
             object.insert("fontPorts".into(), self.font_ports.len().into());
+            #[cfg(target_os = "macos")]
+            if let Some(jobs) = &self.jobs {
+                object.insert("jobs".into(), jobs.json());
+            }
             #[cfg(target_os = "macos")]
             if let Some(stats) = &self.presenter {
                 let stats = stats.lock().unwrap_or_else(|e| e.into_inner());

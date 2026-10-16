@@ -3,4 +3,4 @@
 /**
  * The two tags S2 tests for "Rec.709 (QuickTime and Safari)" (section 9).
  */
-export type QuickTimeTag = "cicp1131" | "cicp121Gamma22";
+export type QuickTimeTag = "cicp1_13_1" | "cicp1_2_1Gamma22";

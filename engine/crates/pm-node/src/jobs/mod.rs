@@ -1,0 +1,1288 @@
+//! The job engine's render and export service (plan sections 17 and 20;
+//! contracts 12, 13, 14).
+//!
+//! [`JobEngineService`] is the [`JobService`] the job engine installs. It runs
+//! three lanes, each a thread at utility QoS with its own [`Renderer`] on one
+//! shared GPU device:
+//!
+//! | Lane | Work | Class |
+//! |---|---|---|
+//! | Snapshots | `agentFrames` batches | agent snapshot |
+//! | Agent exports | `export_video` jobs | agent export |
+//! | User jobs | export sheet and render queue jobs, background renders | user job, background |
+//!
+//! Lanes run concurrently; their GPU submissions pass one [`gate::Gate`],
+//! which keeps one submission in flight, lets the higher class go first, and
+//! slices everything while the interactive engine plays (contract 13). Work
+//! queues instead of failing for being busy (contract 12 invariant 3).
+//!
+//! Exports (section 17): media handles are minted and resolved through host
+//! services, the capability check routes anything pm-render or pm-audio
+//! cannot do (`unsupported`, so the host sends it to the legacy exporter),
+//! host services create the output's temporary file (`open(wx, 0600)`), the
+//! export is encoded, muxed, and verified beside it and renamed over it, and
+//! `commitOutput` moves it into place (unique names for agents) and returns
+//! the real path, which the final `jobStatus` carries. A failed or cancelled
+//! export asks the host to remove its temporary file.
+//!
+//! Everything the service sends waits in an outbox the engine drains on its
+//! own thread ([`pm_engine::Engine::pump`]); `wake` asks the utility process
+//! to pump.
+
+// Host answers carry protocol errors by value, as the engine hands them over.
+#![allow(clippy::result_large_err)]
+
+pub mod gate;
+
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
+use pm_engine::priority::Scheduler;
+use pm_export::render::{
+    ExportJob, JobError, MediaPaths, Progress, StillRouting, asset_records, encode_jpeg,
+    encode_png, plan_export, render_still, run_export_into, to_rgba8,
+};
+use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
+use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
+use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
+use pm_protocol::host::{
+    CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, MintHandle, OutputChoice,
+    OutputDestinationRequest, OutputVerification, OverwritePolicy, PortId, ResolveHandle,
+};
+use pm_protocol::priority::{
+    AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AgentImageFormat, BlenderUse,
+    CancelJobs, ImagePayload, JobAccepted, JobSpec, JobState, JobStatus, JobsCancelled,
+    PriorityClass, SubmitJob,
+};
+use pm_protocol::slicing::{DeadlineSignal, SlicingPolicy};
+use pm_render::Renderer;
+
+use gate::{AGENT_EXPORT_LANE, Gate, LaneGate, SNAPSHOT_LANE, USER_LANE};
+
+/// How long a lane waits for host services to answer one call.
+pub const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The most image bytes one `agentFrames` response carries; later frames of a
+/// larger batch fail with `budgetExceeded` (the message limit is 16 MiB).
+pub const AGENT_FRAMES_MAX_BYTES: usize = 14 << 20;
+/// Progress events at most this often per job.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+/// Unix mode of exported files (contract 14 invariant 4: owner-only).
+const OUTPUT_MODE: u32 = 0o600;
+
+/// Asks the engine's host thread to pump the engine (pm-node posts an empty
+/// action list through the utility process's threadsafe callback).
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
+enum Work {
+    Frames {
+        port: PortId,
+        id: RequestId,
+        document: JobDocument,
+        request: AgentFrameRequest,
+        queued: Instant,
+        cancel: Arc<AtomicBool>,
+    },
+    Export {
+        job: JobId,
+        host: PortId,
+        submit: SubmitJob,
+        document: JobDocument,
+        cancel: Arc<AtomicBool>,
+    },
+}
+
+struct JobRecord {
+    class: PriorityClass,
+    run: Option<AgentRunId>,
+    host: PortId,
+    state: JobState,
+    progress: f64,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct State {
+    snapshots: VecDeque<Work>,
+    agent_exports: VecDeque<Work>,
+    user: Option<Scheduler<Work>>,
+    jobs: HashMap<JobId, JobRecord>,
+    /// Ended jobs, oldest first: their records are kept for the last
+    /// `FINISHED_KEPT` (cancels and resubmissions of recent jobs answer
+    /// correctly), older ones are dropped.
+    finished: VecDeque<JobId>,
+    outbox: Drained,
+    next_token: u64,
+    answers: HashMap<u64, Result<Response, EngineError>>,
+    /// Media paths resolved per session (handles are bound to the session),
+    /// each with the digest of the asset record it was resolved for.
+    media: HashMap<SessionId, HashMap<String, ([u8; 32], PathBuf)>>,
+    /// The run of each queued or running frame batch, for run cancels.
+    frame_runs: Vec<(AgentRunId, Arc<AtomicBool>)>,
+    shutdown: bool,
+    stats: ServiceStats,
+}
+
+/// Ended job records kept.
+pub const FINISHED_KEPT: usize = 256;
+
+impl State {
+    /// `job` ended: keep its record among the last `FINISHED_KEPT`.
+    fn retire(&mut self, job: JobId) {
+        self.finished.push_back(job);
+        while self.finished.len() > FINISHED_KEPT {
+            if let Some(old) = self.finished.pop_front()
+                && self.jobs.get(&old).is_some_and(|r| r.state.is_terminal())
+            {
+                self.jobs.remove(&old);
+            }
+        }
+    }
+}
+
+/// Counters for status and tests.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStats {
+    pub frames_rendered: u64,
+    pub frame_batches: u64,
+    pub exports_done: u64,
+    pub exports_failed: u64,
+    pub exports_routed: u64,
+    pub exports_cancelled: u64,
+    /// Agent frame batches answered while the interactive engine played.
+    pub batches_during_playback: u64,
+    /// Longest wait of a frame batch behind other work, in ms.
+    pub max_queued_ms: u64,
+}
+
+struct Shared {
+    state: Mutex<State>,
+    work: Condvar,
+    answers: Condvar,
+    gate: Arc<Gate>,
+    wake: Wake,
+    gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn send(&self, port: PortId, envelope: Envelope) {
+        self.lock().outbox.messages.push((port, envelope));
+        (self.wake)();
+    }
+
+    fn status(&self, host: PortId, job: &JobId, update: impl FnOnce(&mut JobRecord)) {
+        let mut st = self.lock();
+        let Some(record) = st.jobs.get_mut(job) else {
+            return;
+        };
+        update(record);
+        let status = status_of(job, record, None, None);
+        st.outbox.messages.push((host, status_event(status)));
+        drop(st);
+        (self.wake)();
+    }
+
+    /// Makes host calls and waits for every answer (in order).
+    fn call_many(
+        &self,
+        calls: Vec<(Request, Option<SessionId>)>,
+    ) -> Vec<Result<Response, EngineError>> {
+        if calls.is_empty() {
+            return vec![];
+        }
+        let mut st = self.lock();
+        let tokens: Vec<u64> = calls
+            .into_iter()
+            .map(|(request, session)| {
+                st.next_token += 1;
+                let token = st.next_token;
+                st.outbox.host_requests.push(HostRequest {
+                    token,
+                    request,
+                    session,
+                });
+                token
+            })
+            .collect();
+        drop(st);
+        (self.wake)();
+        let deadline = Instant::now() + HOST_CALL_TIMEOUT;
+        let mut st = self.lock();
+        loop {
+            if tokens.iter().all(|t| st.answers.contains_key(t)) || st.shutdown {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            st = self
+                .answers
+                .wait_timeout(st, left)
+                .map(|(g, _)| g)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+        tokens
+            .iter()
+            .map(|t| {
+                st.answers.remove(t).unwrap_or_else(|| {
+                    Err(EngineError::new(
+                        ErrorCode::Timeout,
+                        ErrorScope::Connection,
+                        "Host services did not answer in time.",
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
+        self.call_many(vec![(request, session)])
+            .pop()
+            .expect("one answer per call")
+    }
+
+    fn renderer(&self) -> Result<Renderer, String> {
+        let mut gpu = self.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        if gpu.is_none() {
+            let g = pm_gpu::Gpu::new("pm-job").map_err(|e| e.to_string())?;
+            *gpu = Some((g.device, g.queue));
+        }
+        let (device, queue) = gpu.as_ref().expect("set above");
+        Ok(Renderer::new(device.clone(), queue.clone()))
+    }
+}
+
+fn status_of(
+    job: &JobId,
+    record: &JobRecord,
+    path: Option<String>,
+    error: Option<EngineError>,
+) -> JobStatus {
+    JobStatus {
+        job: job.clone(),
+        class: record.class,
+        state: record.state,
+        progress: record.progress.clamp(0.0, 1.0),
+        path: path.filter(|_| record.state == JobState::Done),
+        error: error.filter(|_| record.state == JobState::Failed),
+    }
+}
+
+fn status_event(status: JobStatus) -> Envelope {
+    Envelope::new(Message::Event {
+        body: Event::JobStatus(status),
+    })
+}
+
+fn job_error(job: &JobId, code: ErrorCode, message: impl Into<String>) -> EngineError {
+    EngineError::new(code, ErrorScope::Job { job: job.clone() }, message)
+}
+
+/// The engine error for a failed render job: routing failures keep
+/// `unsupported` so the host sends the work to the legacy engine.
+fn engine_error(job: &JobId, e: &JobError) -> EngineError {
+    let code = match e {
+        JobError::Unsupported(_) => ErrorCode::Unsupported,
+        JobError::Cancelled => ErrorCode::Cancelled,
+        JobError::Invalid(_) => ErrorCode::InvalidMessage,
+        JobError::Render(_) | JobError::Audio(_) => ErrorCode::ExportFailed,
+        JobError::Export(_) => ErrorCode::ExportFailed,
+    };
+    job_error(job, code, e.to_string())
+}
+
+/// The job engine's service.
+pub struct JobEngineService {
+    shared: Arc<Shared>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl JobEngineService {
+    /// Starts the three lanes. `wake` must make the engine's host call
+    /// [`pm_engine::Engine::pump`] soon.
+    pub fn start(wake: Wake) -> Result<JobEngineService, String> {
+        let state = State {
+            user: Some(Scheduler::new(EngineProcess::Job)),
+            ..State::default()
+        };
+        let shared = Arc::new(Shared {
+            state: Mutex::new(state),
+            work: Condvar::new(),
+            answers: Condvar::new(),
+            gate: Arc::new(Gate::new()),
+            wake,
+            gpu: Mutex::new(None),
+        });
+        let mut threads = Vec::new();
+        for (lane, name) in [
+            (SNAPSHOT_LANE, "pm-job-snapshots"),
+            (AGENT_EXPORT_LANE, "pm-job-agent-exports"),
+            (USER_LANE, "pm-job-user"),
+        ] {
+            let shared = shared.clone();
+            let handle = pm_engine::qos::spawn_engine_thread(EngineProcess::Job, name, move || {
+                run_lane(&shared, lane)
+            })
+            .map_err(|e| format!("could not start the {name} lane: {e}"))?;
+            threads.push(handle);
+        }
+        Ok(JobEngineService { shared, threads })
+    }
+
+    pub fn stats(&self) -> ServiceStats {
+        self.shared.lock().stats.clone()
+    }
+
+    pub fn gate_stats(&self) -> gate::GateStats {
+        self.shared.gate.stats()
+    }
+
+    /// A handle for status reads after the service moved into the engine.
+    pub fn stats_handle(&self) -> StatsHandle {
+        StatsHandle(self.shared.clone())
+    }
+}
+
+/// Reads the service's counters from another owner.
+#[derive(Clone)]
+pub struct StatsHandle(Arc<Shared>);
+
+impl StatsHandle {
+    pub fn json(&self) -> serde_json::Value {
+        let st = self.0.lock();
+        serde_json::json!({
+            "service": st.stats,
+            "gate": self.0.gate.stats(),
+            "queued": {
+                "snapshots": st.snapshots.len(),
+                "agentExports": st.agent_exports.len(),
+                "user": st.user.as_ref().map_or(0, |s| s.len()),
+            },
+            "jobs": st.jobs.len(),
+        })
+    }
+}
+
+impl Drop for JobEngineService {
+    fn drop(&mut self) {
+        {
+            let mut st = self.shared.lock();
+            st.shutdown = true;
+            for record in st.jobs.values() {
+                record.cancel.store(true, Ordering::Relaxed);
+            }
+            for (_, cancel) in &st.frame_runs {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.shared.work.notify_all();
+        self.shared.answers.notify_all();
+        self.shared.gate.poke();
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
+impl JobService for JobEngineService {
+    fn submit(
+        &mut self,
+        host: PortId,
+        submit: SubmitJob,
+        document: Option<JobDocument>,
+    ) -> Result<JobAccepted, Box<EngineError>> {
+        let job = submit.job.clone();
+        let JobSpec::Export { .. } = &submit.spec else {
+            return Err(Box::new(job_error(
+                &job,
+                ErrorCode::Unsupported,
+                "Proxy generation is not in the job engine yet (Phase 4a).",
+            )));
+        };
+        let Some(document) = document else {
+            return Err(Box::new(job_error(
+                &job,
+                ErrorCode::StaleRevision,
+                "The export has no document snapshot.",
+            )));
+        };
+        let mut st = self.shared.lock();
+        if st.jobs.get(&job).is_some_and(|r| !r.state.is_terminal()) {
+            return Err(Box::new(job_error(
+                &job,
+                ErrorCode::InvalidMessage,
+                "A job with that id is running.",
+            )));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let class = submit.class;
+        st.jobs.insert(
+            job.clone(),
+            JobRecord {
+                class,
+                run: submit.run.clone(),
+                host,
+                state: JobState::Queued,
+                progress: 0.0,
+                cancel: cancel.clone(),
+            },
+        );
+        let work = Work::Export {
+            job: job.clone(),
+            host,
+            submit,
+            document,
+            cancel,
+        };
+        let position = match class {
+            PriorityClass::AgentExport => {
+                st.agent_exports.push_back(work);
+                st.agent_exports.len() as u32 - 1
+            }
+            _ => {
+                let scheduler = st.user.as_mut().expect("present");
+                scheduler
+                    .push(class, work, pm_engine::clock::host_now())
+                    .map_err(|e| {
+                        Box::new(job_error(&job, ErrorCode::InvalidMessage, e.to_string()))
+                    })?;
+                scheduler.len() as u32 - 1
+            }
+        };
+        drop(st);
+        self.shared.work.notify_all();
+        Ok(JobAccepted {
+            job,
+            state: JobState::Queued,
+            position,
+        })
+    }
+
+    fn cancel(&mut self, cancel: &CancelJobs) -> JobsCancelled {
+        let mut st = self.shared.lock();
+        let hit: Vec<JobId> = st
+            .jobs
+            .iter()
+            .filter(|(id, r)| {
+                !r.state.is_terminal()
+                    && match cancel {
+                        CancelJobs::Job { job } => *id == job,
+                        CancelJobs::Run { run } => r.run.as_ref() == Some(run),
+                    }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &hit {
+            st.jobs[id].cancel.store(true, Ordering::Relaxed);
+        }
+        if let CancelJobs::Run { run } = cancel {
+            for (r, flag) in &st.frame_runs {
+                if r == run {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        // Queued jobs end now; running ones stop at their next frame or band.
+        let mut queued: Vec<(PortId, JobId)> = vec![];
+        let is_hit = |w: &Work| matches!(w, Work::Export { job, .. } if hit.contains(job));
+        let mut removed: Vec<Work> = vec![];
+        let keep: VecDeque<Work> = st
+            .agent_exports
+            .drain(..)
+            .filter_map(|w| {
+                if is_hit(&w) {
+                    removed.push(w);
+                    None
+                } else {
+                    Some(w)
+                }
+            })
+            .collect();
+        st.agent_exports = keep;
+        if let Some(user) = st.user.as_mut() {
+            removed.extend(user.remove_where(is_hit));
+        }
+        for w in removed {
+            if let Work::Export { job, host, .. } = w {
+                queued.push((host, job));
+            }
+        }
+        for (host, job) in queued {
+            if let Some(record) = st.jobs.get_mut(&job) {
+                record.state = JobState::Cancelled;
+                let status = status_of(&job, record, None, None);
+                st.outbox.messages.push((host, status_event(status)));
+                st.stats.exports_cancelled += 1;
+                st.retire(job);
+            }
+        }
+        drop(st);
+        self.shared.gate.poke();
+        self.shared.work.notify_all();
+        (self.shared.wake)();
+        JobsCancelled { jobs: hit }
+    }
+
+    fn agent_frames(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        document: JobDocument,
+        request: AgentFrameRequest,
+    ) -> Result<(), Box<EngineError>> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut st = self.shared.lock();
+        st.frame_runs.push((request.run.clone(), cancel.clone()));
+        st.snapshots.push_back(Work::Frames {
+            port,
+            id,
+            document,
+            request,
+            queued: Instant::now(),
+            cancel,
+        });
+        drop(st);
+        self.shared.work.notify_all();
+        Ok(())
+    }
+
+    fn signal(&mut self, signal: &DeadlineSignal) {
+        self.shared.gate.signal(signal);
+        if let DeadlineSignal::PlaybackStarted { .. } | DeadlineSignal::PlaybackStopped { .. } =
+            signal
+        {
+            let playing = matches!(signal, DeadlineSignal::PlaybackStarted { .. });
+            if let Some(user) = self.shared.lock().user.as_mut() {
+                user.set_playing(playing);
+            }
+            self.shared.work.notify_all();
+        }
+    }
+
+    fn policy(&mut self, policy: &SlicingPolicy) {
+        self.shared.gate.policy(policy);
+    }
+
+    fn host_answer(&mut self, token: u64, answer: Result<Response, EngineError>) {
+        self.shared.lock().answers.insert(token, answer);
+        self.shared.answers.notify_all();
+    }
+
+    fn drain(&mut self) -> Drained {
+        std::mem::take(&mut self.shared.lock().outbox)
+    }
+
+    fn session_closed(&mut self, session: SessionId) {
+        let mut st = self.shared.lock();
+        st.media.remove(&session);
+        // Queued frame batches for the session are answered as unknown.
+        let mut answers = vec![];
+        let keep: VecDeque<Work> = st
+            .snapshots
+            .drain(..)
+            .filter_map(|w| match w {
+                Work::Frames {
+                    port, id, document, ..
+                } if document.session == session => {
+                    answers.push((port, id));
+                    None
+                }
+                w => Some(w),
+            })
+            .collect();
+        st.snapshots = keep;
+        for (port, id) in answers {
+            let error = EngineError::new(
+                ErrorCode::UnknownSession,
+                ErrorScope::Request { id },
+                "The session closed before its frames rendered.",
+            );
+            st.outbox
+                .messages
+                .push((port, Envelope::new(Message::Error { id, error })));
+        }
+        drop(st);
+        (self.shared.wake)();
+    }
+
+    fn port_closed(&mut self, port: PortId) {
+        let mut st = self.shared.lock();
+        let keep: VecDeque<Work> = st
+            .snapshots
+            .drain(..)
+            .filter(|w| !matches!(w, Work::Frames { port: p, .. } if *p == port))
+            .collect();
+        st.snapshots = keep;
+        // Jobs whose host went away cannot commit: cancel them (agent jobs
+        // never resume; user jobs are resubmitted by the host, section 17).
+        for record in st.jobs.values() {
+            if record.host == port && !record.state.is_terminal() {
+                record.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        drop(st);
+        self.shared.gate.poke();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lanes
+// ---------------------------------------------------------------------------
+
+fn next_work(shared: &Shared, lane: usize) -> Option<Work> {
+    let mut st = shared.lock();
+    loop {
+        if st.shutdown {
+            return None;
+        }
+        let work = match lane {
+            SNAPSHOT_LANE => st.snapshots.pop_front(),
+            AGENT_EXPORT_LANE => st.agent_exports.pop_front(),
+            _ => st
+                .user
+                .as_mut()
+                .and_then(|s| s.pop(pm_engine::clock::host_now()))
+                .map(|s| s.item),
+        };
+        if let Some(work) = work {
+            return Some(work);
+        }
+        st = shared
+            .work
+            .wait_timeout(st, Duration::from_millis(500))
+            .map(|(g, _)| g)
+            .unwrap_or_else(|e| e.into_inner().0);
+    }
+}
+
+fn run_lane(shared: &Arc<Shared>, lane: usize) {
+    let gate = LaneGate {
+        gate: shared.gate.clone(),
+        lane,
+    };
+    let mut renderer: Option<Renderer> = None;
+    while let Some(work) = next_work(shared, lane) {
+        if renderer.is_none() {
+            match shared.renderer() {
+                Ok(r) => renderer = Some(r),
+                Err(message) => {
+                    fail_work(shared, work, ErrorCode::DeviceLost, &message);
+                    continue;
+                }
+            }
+        }
+        let r = renderer.as_mut().expect("set above");
+        match work {
+            Work::Frames {
+                port,
+                id,
+                document,
+                request,
+                queued,
+                cancel,
+            } => {
+                run_frames(
+                    shared, r, &gate, port, id, &document, &request, queued, &cancel,
+                );
+                shared
+                    .lock()
+                    .frame_runs
+                    .retain(|(_, flag)| !Arc::ptr_eq(flag, &cancel));
+            }
+            Work::Export {
+                job,
+                host,
+                submit,
+                document,
+                cancel,
+            } => run_job(shared, r, &gate, &job, host, &submit, &document, &cancel),
+        }
+        // Keep the pool small between work items (lease pressure).
+        r.trim(64 << 20);
+    }
+}
+
+fn fail_work(shared: &Shared, work: Work, code: ErrorCode, message: &str) {
+    match work {
+        Work::Frames { port, id, .. } => {
+            let error = EngineError::new(code, ErrorScope::Request { id }, message);
+            shared.send(port, Envelope::new(Message::Error { id, error }));
+        }
+        Work::Export { job, host, .. } => {
+            let error = job_error(&job, code, message);
+            let mut st = shared.lock();
+            if let Some(record) = st.jobs.get_mut(&job) {
+                record.state = JobState::Failed;
+                let status = status_of(&job, record, None, Some(error));
+                st.outbox.messages.push((host, status_event(status)));
+                st.retire(job);
+            }
+            drop(st);
+            (shared.wake)();
+        }
+    }
+}
+
+/// Media paths for `document`'s assets, resolved through host services:
+/// a `mediaRead` handle per asset, then its path. Assets the host cannot
+/// resolve are offline (the capability check routes what needs them).
+/// The media of `document`'s assets, through host services. Paths are kept
+/// per session while the asset's record is unchanged: a relink or a replaced
+/// file changes the record, and the asset is resolved again.
+fn resolve_media(shared: &Shared, document: &JobDocument) -> MediaPaths {
+    let session = document.session;
+    let records = asset_records(&document.document);
+    let mut known = MediaPaths::default();
+    let missing: Vec<String> = {
+        let st = shared.lock();
+        let cached = st.media.get(&session);
+        records
+            .iter()
+            .filter(|(asset, digest)| match cached.and_then(|c| c.get(asset)) {
+                Some((d, path)) if d == digest => {
+                    known.insert(asset.clone(), path.clone());
+                    false
+                }
+                _ => true,
+            })
+            .map(|(asset, _)| asset.clone())
+            .collect()
+    };
+    if missing.is_empty() {
+        return known;
+    }
+    let mints = shared.call_many(
+        missing
+            .iter()
+            .map(|asset| {
+                (
+                    Request::MintHandle(MintHandle {
+                        kind: CapabilityKind::MediaRead {
+                            asset: asset.as_str().into(),
+                        },
+                        session,
+                    }),
+                    Some(session),
+                )
+            })
+            .collect(),
+    );
+    let granted: Vec<(String, CapabilityHandle)> = missing
+        .into_iter()
+        .zip(mints)
+        .filter_map(|(asset, answer)| match answer {
+            Ok(Response::Handle(grant)) => Some((asset, grant.handle)),
+            _ => None,
+        })
+        .collect();
+    let resolved = shared.call_many(
+        granted
+            .iter()
+            .map(|(_, handle)| {
+                (
+                    Request::ResolveHandle(ResolveHandle {
+                        handle: handle.clone(),
+                        session,
+                    }),
+                    Some(session),
+                )
+            })
+            .collect(),
+    );
+    for ((asset, _), answer) in granted.into_iter().zip(resolved) {
+        if let Ok(Response::HandleResolved(r)) = answer
+            && r.access == HandleAccess::Read
+            && matches!(r.kind, CapabilityKind::MediaRead { .. })
+        {
+            known.insert(asset, PathBuf::from(r.path));
+        }
+    }
+    // Only the document's current assets stay cached.
+    let cache: HashMap<String, ([u8; 32], PathBuf)> = records
+        .into_iter()
+        .filter_map(|(asset, digest)| {
+            let path = known.paths.get(&asset)?.clone();
+            Some((asset, (digest, path)))
+        })
+        .collect();
+    shared.lock().media.insert(session, cache);
+    known
+}
+
+fn asset_scopes(media: &MediaPaths) -> Vec<ErrorScope> {
+    media
+        .paths
+        .keys()
+        .take(pm_protocol::error::MAX_IN_FLIGHT_SUSPECTS)
+        .map(|a| ErrorScope::Asset {
+            asset: a.as_str().into(),
+        })
+        .collect()
+}
+
+fn note(shared: &Shared, note: WorkNote) {
+    shared.lock().outbox.work.push(note);
+    (shared.wake)();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_frames(
+    shared: &Shared,
+    renderer: &mut Renderer,
+    gate: &LaneGate,
+    port: PortId,
+    id: RequestId,
+    document: &JobDocument,
+    request: &AgentFrameRequest,
+    queued: Instant,
+    cancel: &AtomicBool,
+) {
+    let queued_ms = queued.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+    let media = resolve_media(shared, document);
+    let token = {
+        let mut st = shared.lock();
+        st.next_token += 1;
+        st.next_token
+    };
+    note(
+        shared,
+        WorkNote::Started {
+            token,
+            scopes: asset_scopes(&media),
+        },
+    );
+    let playing_at_start = shared.gate.is_playing();
+    let mut routing = StillRouting::new();
+    let mut outcomes = Vec::with_capacity(request.frames.len());
+    let mut bytes = 0usize;
+    for (index, frame) in request.frames.iter().enumerate() {
+        let index = index as u32;
+        let fail = |code: ErrorCode, message: String| AgentFrameOutcome::Failed {
+            index,
+            error: EngineError::new(code, ErrorScope::Request { id }, message),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            outcomes.push(fail(
+                ErrorCode::Cancelled,
+                "The agent run was cancelled.".into(),
+            ));
+            continue;
+        }
+        let rendered = render_still(
+            renderer,
+            &document.document,
+            frame.composition.as_str(),
+            frame.time,
+            request.max_dimension,
+            &media,
+            &mut routing,
+            gate,
+            still_seed(frame.composition.as_str()),
+            cancel,
+        );
+        let outcome = match rendered {
+            Ok(f) => {
+                let rgba = to_rgba8(&f.rgba);
+                let image = match request.format {
+                    AgentImageFormat::Jpeg { quality } => {
+                        encode_jpeg(&rgba, f.width, f.height, quality)
+                    }
+                    AgentImageFormat::Png => encode_png(&rgba, f.width, f.height),
+                };
+                match image {
+                    Ok(image) if bytes + image.len() <= AGENT_FRAMES_MAX_BYTES => {
+                        bytes += image.len();
+                        AgentFrameOutcome::Rendered {
+                            index,
+                            revision: document.revision,
+                            width: f.width,
+                            height: f.height,
+                            image: ImagePayload::Inline {
+                                bytes: pm_protocol::common::Bytes(image),
+                            },
+                            blender: BlenderUse::NotUsed,
+                        }
+                    }
+                    Ok(_) => fail(
+                        ErrorCode::BudgetExceeded,
+                        "The batch's images exceed one message; ask for fewer or smaller frames."
+                            .into(),
+                    ),
+                    Err(e) => fail(ErrorCode::Internal, e.to_string()),
+                }
+            }
+            Err(JobError::Unsupported(list)) => fail(ErrorCode::Unsupported, list.join("; ")),
+            Err(JobError::Cancelled) => fail(ErrorCode::Cancelled, "Cancelled.".into()),
+            Err(e) => fail(ErrorCode::Internal, e.to_string()),
+        };
+        outcomes.push(outcome);
+    }
+    note(shared, WorkNote::Ended { token });
+    let rendered = outcomes
+        .iter()
+        .filter(|o| matches!(o, AgentFrameOutcome::Rendered { .. }))
+        .count() as u64;
+    {
+        let mut st = shared.lock();
+        st.stats.frames_rendered += rendered;
+        st.stats.frame_batches += 1;
+        st.stats.max_queued_ms = st.stats.max_queued_ms.max(u64::from(queued_ms));
+        if playing_at_start || shared.gate.is_playing() {
+            st.stats.batches_during_playback += 1;
+        }
+    }
+    let mut envelope = Envelope::new(Message::Response {
+        id,
+        body: Response::AgentFrames(AgentFrameResult {
+            outcomes,
+            queued_ms,
+        }),
+    });
+    envelope.session = Some(document.session);
+    envelope.revision = Some(document.revision);
+    shared.send(port, envelope);
+}
+
+/// The slicing pass seed of agent stills: per composition, so the cost of a
+/// composition's stills carries over from one agent turn to the next.
+fn still_seed(composition: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ("agent-still", composition).hash(&mut h);
+    h.finish()
+}
+
+/// What an output destination answered: the handle and its path.
+struct Destination {
+    handle: CapabilityHandle,
+    path: PathBuf,
+}
+
+fn destination(
+    shared: &Shared,
+    job: &JobId,
+    session: SessionId,
+    choice: &OutputChoice,
+) -> Result<Destination, EngineError> {
+    let overwrite = match choice {
+        OutputChoice::AgentAutomatic { .. } => OverwritePolicy::UniqueName,
+        // The user confirmed the name in the save dialog or chose it on
+        // the command line.
+        OutputChoice::UserChosen { .. } => OverwritePolicy::Replace,
+    };
+    let answer = shared.call(
+        Request::OutputDestination(OutputDestinationRequest {
+            job: job.clone(),
+            choice: choice.clone(),
+            overwrite,
+        }),
+        Some(session),
+    )?;
+    let Response::OutputDestination(d) = answer else {
+        return Err(job_error(
+            job,
+            ErrorCode::Internal,
+            "The host answered outputDestination with something else.",
+        ));
+    };
+    let resolved = shared.call(
+        Request::ResolveHandle(ResolveHandle {
+            handle: d.temporary.clone(),
+            session,
+        }),
+        Some(session),
+    );
+    match resolved {
+        Ok(Response::HandleResolved(r))
+            if r.access == HandleAccess::Write
+                && matches!(&r.kind, CapabilityKind::OutputWrite { job: j } if j == job) =>
+        {
+            Ok(Destination {
+                handle: d.temporary,
+                path: PathBuf::from(r.path),
+            })
+        }
+        other => {
+            // The temporary file exists: ask the host to remove it.
+            let _ = shared.call(
+                Request::CommitOutput(CommitOutput {
+                    job: job.clone(),
+                    temporary: d.temporary,
+                    commit: false,
+                    verification: None,
+                }),
+                Some(session),
+            );
+            Err(match other {
+                Err(e) => e,
+                Ok(_) => job_error(
+                    job,
+                    ErrorCode::CapabilityRejected,
+                    "The output handle is not this job's.",
+                ),
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_job(
+    shared: &Shared,
+    renderer: &mut Renderer,
+    gate: &LaneGate,
+    job: &JobId,
+    host: PortId,
+    submit: &SubmitJob,
+    document: &JobDocument,
+    cancel: &Arc<AtomicBool>,
+) {
+    let JobSpec::Export {
+        composition,
+        settings,
+        ..
+    } = &submit.spec
+    else {
+        return;
+    };
+    let session = document.session;
+    shared.status(host, job, |r| {
+        r.state = JobState::Running;
+        r.progress = 0.0;
+    });
+    let media = Arc::new(resolve_media(shared, document));
+    let token = {
+        let mut st = shared.lock();
+        st.next_token += 1;
+        st.next_token
+    };
+    note(
+        shared,
+        WorkNote::Started {
+            token,
+            scopes: asset_scopes(&media),
+        },
+    );
+    let finish = |state: JobState, path: Option<String>, error: Option<EngineError>| {
+        let mut st = shared.lock();
+        match state {
+            JobState::Done => st.stats.exports_done += 1,
+            JobState::Cancelled => st.stats.exports_cancelled += 1,
+            _ if error
+                .as_ref()
+                .is_some_and(|e| e.code == ErrorCode::Unsupported) =>
+            {
+                st.stats.exports_routed += 1
+            }
+            _ => st.stats.exports_failed += 1,
+        }
+        st.outbox.work.push(WorkNote::Ended { token });
+        if let Some(record) = st.jobs.get_mut(job) {
+            record.state = state;
+            if state == JobState::Done {
+                record.progress = 1.0;
+            }
+            let status = status_of(job, record, path, error);
+            st.outbox.messages.push((host, status_event(status)));
+            st.retire(job.clone());
+        }
+        drop(st);
+        (shared.wake)();
+    };
+    let mut export = ExportJob {
+        document: document.document.clone(),
+        composition: composition.as_str().to_owned(),
+        settings: settings.clone(),
+        media,
+        destination: PathBuf::from("pending"),
+        overwrite: pm_export::Overwrite::InPlace,
+        mode: Some(OUTPUT_MODE),
+        seed: {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            job.hash(&mut h);
+            h.finish()
+        },
+    };
+    // Routing first: nothing is created for work the engine cannot do.
+    let mut plan = match plan_export(&export) {
+        Ok(plan) => plan,
+        Err(e) => {
+            let state = if matches!(e, JobError::Cancelled) {
+                JobState::Cancelled
+            } else {
+                JobState::Failed
+            };
+            return finish(state, None, Some(engine_error(job, &e)));
+        }
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return finish(JobState::Cancelled, None, None);
+    }
+    let Some(choice) = submit.output.as_ref() else {
+        return finish(
+            JobState::Failed,
+            None,
+            Some(job_error(
+                job,
+                ErrorCode::InvalidMessage,
+                "An export needs an output choice.",
+            )),
+        );
+    };
+    let dest = match destination(shared, job, session, choice) {
+        Ok(d) => d,
+        Err(e) => {
+            return finish(
+                JobState::Failed,
+                None,
+                Some(EngineError {
+                    scope: ErrorScope::Job { job: job.clone() },
+                    ..e
+                }),
+            );
+        }
+    };
+    export.destination = dest.path.clone();
+    plan.spec.destination = dest.path.clone();
+    let discard = |shared: &Shared| {
+        let _ = shared.call(
+            Request::CommitOutput(CommitOutput {
+                job: job.clone(),
+                temporary: dest.handle.clone(),
+                commit: false,
+                verification: None,
+            }),
+            Some(session),
+        );
+    };
+    let sink = match pm_export::mac::VideoToolboxSink::new(&plan.spec) {
+        Ok(s) => s,
+        Err(e) => {
+            discard(shared);
+            return finish(
+                JobState::Failed,
+                None,
+                Some(engine_error(job, &JobError::Export(e))),
+            );
+        }
+    };
+    let mut last = Instant::now() - PROGRESS_EVERY;
+    let mut last_fraction = 0.0;
+    let mut progress = |p: Progress| {
+        let f = p.fraction();
+        if f >= 1.0 || (last.elapsed() >= PROGRESS_EVERY && f - last_fraction >= 0.005) {
+            last = Instant::now();
+            last_fraction = f;
+            shared.status(host, job, |r| r.progress = f.min(0.999));
+        }
+    };
+    let result = run_export_into(renderer, &export, plan, sink, gate, cancel, &mut progress);
+    match result {
+        Ok(delivered) => {
+            let bytes = std::fs::metadata(&dest.path).map(|m| m.len()).unwrap_or(0);
+            let r = &delivered.report;
+            let verification = OutputVerification {
+                codec: r.codec.clone(),
+                frames: r.frames.min(u64::from(u32::MAX)) as u32,
+                audio_samples: pm_protocol::common::Count::new(
+                    r.audio.as_ref().map_or(0, |a| a.samples),
+                )
+                .unwrap_or(pm_protocol::common::Count::new(0).expect("0 is safe")),
+                bytes: pm_protocol::common::ByteSize::new(bytes)
+                    .unwrap_or(pm_protocol::common::ByteSize::new(0).expect("0 is safe")),
+            };
+            let committed = shared.call(
+                Request::CommitOutput(CommitOutput {
+                    job: job.clone(),
+                    temporary: dest.handle.clone(),
+                    commit: true,
+                    verification: Some(verification),
+                }),
+                Some(session),
+            );
+            match committed {
+                Ok(Response::OutputCommitted(c)) if c.path.is_some() => {
+                    finish(JobState::Done, c.path, None)
+                }
+                Ok(_) => finish(
+                    JobState::Failed,
+                    None,
+                    Some(job_error(
+                        job,
+                        ErrorCode::ExportFailed,
+                        "The host did not place the output.",
+                    )),
+                ),
+                Err(e) => finish(
+                    JobState::Failed,
+                    None,
+                    Some(EngineError {
+                        scope: ErrorScope::Job { job: job.clone() },
+                        ..e
+                    }),
+                ),
+            }
+        }
+        Err(JobError::Cancelled) => {
+            discard(shared);
+            finish(JobState::Cancelled, None, None)
+        }
+        Err(e) => {
+            discard(shared);
+            finish(JobState::Failed, None, Some(engine_error(job, &e)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(state: JobState) -> JobRecord {
+        JobRecord {
+            class: PriorityClass::AgentExport,
+            run: None,
+            host: PortId(1),
+            state,
+            progress: 0.0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn ended_job_records_are_kept_for_the_last_few_hundred_jobs() {
+        let mut st = State::default();
+        st.jobs.insert("live".into(), record(JobState::Running));
+        for i in 0..FINISHED_KEPT + 50 {
+            let id = JobId::from(format!("job-{i}").as_str());
+            st.jobs.insert(id.clone(), record(JobState::Done));
+            st.retire(id);
+        }
+        assert_eq!(st.jobs.len(), FINISHED_KEPT + 1);
+        assert!(!st.jobs.contains_key(&JobId::from("job-0")));
+        assert!(st.jobs.contains_key(&JobId::from("job-50")));
+        assert!(
+            st.jobs.contains_key(&JobId::from("live")),
+            "running jobs stay"
+        );
+        // A resubmitted id that runs again is not dropped by its old entry.
+        let reused = JobId::from(format!("job-{}", 60).as_str());
+        st.jobs.get_mut(&reused).unwrap().state = JobState::Running;
+        for i in 0..FINISHED_KEPT {
+            let id = JobId::from(format!("more-{i}").as_str());
+            st.jobs.insert(id.clone(), record(JobState::Failed));
+            st.retire(id);
+        }
+        assert!(st.jobs.contains_key(&reused));
+    }
+}

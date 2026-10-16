@@ -118,6 +118,13 @@ impl JsEngineHost {
         convert(self.inner.tick())
     }
 
+    /// What the job engine's lanes produced off this thread (agent frames,
+    /// job status, host calls). Call after `onActions` fires.
+    #[napi]
+    pub fn pump(&mut self) -> Vec<EngineAction> {
+        convert(self.inner.pump())
+    }
+
     /// The engine's state as JSON (sessions, ports, lease, QoS, presenter).
     #[napi]
     pub fn status(&self) -> String {

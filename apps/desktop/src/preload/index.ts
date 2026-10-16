@@ -40,7 +40,7 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
-import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
+import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineExportStart, type EngineExportStatus, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, type ReceiverModule } from './frame-bridge';
@@ -545,7 +545,19 @@ const bridge: PowermoveBridge = {
       session: request.session,
       bytes: request.bytes
     }) as Promise<StageDocumentResult>,
-    pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update)
+    pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update),
+    exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
+      project: String(request.project),
+      name: String(request.name),
+      options: { ...request.options }
+    }) as Promise<EngineExportStart>,
+    cancelExport: (jobId) => ipcRenderer.invoke(ENGINE_IPC.cancelExport, String(jobId)) as Promise<void>,
+    onExportStatus: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, status: EngineExportStatus) => listener(status);
+      ipcRenderer.on(ENGINE_IPC.exportStatus, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_IPC.exportStatus, handler); };
+    },
+    playback: (playing) => ipcRenderer.send(ENGINE_IPC.playback, playing === true)
   },
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */

@@ -104,6 +104,9 @@ function validInFlight(value: unknown): value is InFlight {
     value['suspects'].every((s: unknown) => isRecord(s) && typeof s['kind'] === 'string' && isAttributable(s as never));
 }
 
+/** A 60 Hz frame, when the display's refresh rate is unknown. */
+export const DEFAULT_FRAME_BUDGET_US = 16_667;
+
 export class NativeEngine {
   readonly services: HostServicesCore;
   readonly definitions = new DefinitionRelay();
@@ -113,7 +116,15 @@ export class NativeEngine {
   private clients = new Map<number, Client>();
   private peer: { interactive: number; job: number; generations: [number, number] } | null = null;
   private listeners = new Set<NativeEngineListener>();
+  /** The `playbackStarted` the job engine last heard while something plays
+   *  (resent to a job engine that starts during playback). */
   private lastPlaybackStarted: DeadlineSignal | null = null;
+  /** Whether the interactive engine plays (its own deadline signals). */
+  private interactivePlaying = false;
+  /** Editor windows whose transport plays, with their frame budget (µs):
+   *  the viewer may draw playback without the interactive engine, and the
+   *  job engine slices whenever anything plays (contract 13). */
+  private editorsPlaying = new Map<number, number>();
   private staged = new Map<number, string[]>();
   /** Set by `stop()`: no control messages go to engines that are shutting
    *  down (they would be dropped anyway; see `Launch.exiting`). */
@@ -311,9 +322,24 @@ export class NativeEngine {
   }
 
   /** A request main itself sends to an engine (sessions main opens for
-   *  exports and agent snapshots; tests). */
-  request(process: EngineProcess, body: Request, session: number | null = null): Promise<Response> {
-    return this.supervisors[process].request(body, session);
+   *  exports and agent snapshots; tests). `revision` is the envelope
+   *  revision (an agent frame request's read-your-writes revision). */
+  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+    return this.supervisors[process].request(body, session, revision);
+  }
+
+  /** A destination the user chose for a job, as a write handle bound to the
+   *  job engine session that renders it and the current launch's host port
+   *  (contract 14: the engine never sees the path). */
+  chooseOutput(file: string, job: string, session: number): string {
+    const launch = this.supervisors.job.current;
+    if (!launch) throw new Error('the job engine is not running');
+    return this.outputs.chooseDestination(file, job, session, launch.hostPort);
+  }
+
+  /** Whether an engine's current launch is connected and answering. */
+  isReady(process: EngineProcess): boolean {
+    return this.supervisors[process].state === 'ready';
   }
 
   /* ── engine launches ────────────────────────────────────────────────── */
@@ -331,7 +357,7 @@ export class NativeEngine {
     this.sendGrants(this.memory.initial(process));
     if (process === 'job') {
       launch.connection.event({ type: 'slicing', ...DEFAULT_SLICING_POLICY });
-      if (this.memory.isPlaying && this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });
+      if (this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });
     }
     const failed = this.ledger.failed();
     if (failed.length) {
@@ -359,12 +385,18 @@ export class NativeEngine {
     this.staged.delete(launch.hostPort);
     const wasPlaying = this.memory.isPlaying;
     this.sendGrants(this.memory.exited(process));
-    if (process === 'interactive' && wasPlaying) {
+    if (process === 'interactive') {
       // Main stops playback on behalf of a dead interactive engine so the
-      // job engine never waits on it (contract 13 invariant 9).
-      this.supervisors.job.event({ type: 'deadline', signal: 'playbackStopped', at: this.options.hostNow() });
-      this.lastPlaybackStarted = null;
-      for (const l of this.listeners) l.playback?.(false);
+      // job engine never waits on it (contract 13 invariant 9), unless an
+      // editor still plays.
+      const interactiveWas = this.interactivePlaying;
+      this.interactivePlaying = false;
+      if (this.editorsPlaying.size) {
+        if (wasPlaying && !this.memory.isPlaying) this.sendGrants(this.memory.playbackStarted());
+        if (interactiveWas) this.startPlayback(this.editorSignal());
+      } else if (interactiveWas) {
+        this.stopPlayback(false);
+      }
     }
     if (this.peer) {
       // While stopping, the survivor is shutting down too: leave it alone.
@@ -455,16 +487,68 @@ export class NativeEngine {
   private onDeadline(signal: DeadlineSignal & { type?: string }): void {
     const { type: _type, ...rest } = signal;
     const plain = rest as DeadlineSignal;
-    // Relay first: the job engine reacts to the miss before main does any bookkeeping.
-    this.supervisors.job.event({ type: 'deadline', ...plain });
     if (plain.signal === 'playbackStarted') {
-      this.lastPlaybackStarted = plain;
-      this.sendGrants(this.memory.playbackStarted());
-      for (const l of this.listeners) l.playback?.(true);
+      this.interactivePlaying = true;
+      // Relayed even when an editor already plays: it carries the
+      // interactive engine's own rate and frame budget.
+      this.startPlayback(plain);
     } else if (plain.signal === 'playbackStopped') {
-      this.lastPlaybackStarted = null;
-      this.sendGrants(this.memory.playbackStopped());
-      for (const l of this.listeners) l.playback?.(false);
+      this.interactivePlaying = false;
+      // While an editor still plays, the job engine keeps slicing, by the
+      // editor's frame budget again.
+      if (this.editorsPlaying.size) this.startPlayback(this.editorSignal());
+      else this.stopPlayback(true, plain);
+    } else {
+      // Relay first: the job engine reacts to the miss before main does any bookkeeping.
+      this.supervisors.job.event({ type: 'deadline', ...plain });
     }
+  }
+
+  /** An editor window's transport started or stopped (`frameBudgetUs`: its
+   *  display's refresh period). The job engine hears `playbackStarted` when
+   *  the first thing starts playing and `playbackStopped` when the last
+   *  stops, whether that is an editor or the interactive engine. */
+  editorPlayback(owner: number, playing: boolean, frameBudgetUs = DEFAULT_FRAME_BUDGET_US): void {
+    const budget = Number.isFinite(frameBudgetUs) ? Math.max(2_000, Math.min(100_000, Math.round(frameBudgetUs))) : DEFAULT_FRAME_BUDGET_US;
+    const had = this.editorsPlaying.size > 0;
+    if (playing) this.editorsPlaying.set(owner, budget);
+    else this.editorsPlaying.delete(owner);
+    const has = this.editorsPlaying.size > 0;
+    if (this.interactivePlaying) return;
+    if (has) {
+      // Started, or the shortest budget of the playing editors changed.
+      const signal = this.editorSignal();
+      const last = this.lastPlaybackStarted as { frameBudgetUs?: number } | null;
+      if (!had || last?.frameBudgetUs !== (signal as { frameBudgetUs?: number }).frameBudgetUs) this.startPlayback(signal);
+    } else if (had) {
+      this.stopPlayback(true);
+    }
+  }
+
+  /** `playbackStarted` for the playing editors: the shortest frame budget. */
+  private editorSignal(): DeadlineSignal {
+    return {
+      signal: 'playbackStarted',
+      at: this.options.hostNow(),
+      rate: { num: 1, den: 1 },
+      frameBudgetUs: Math.min(...this.editorsPlaying.values())
+    } as DeadlineSignal;
+  }
+
+  private startPlayback(signal: DeadlineSignal): void {
+    const was = this.lastPlaybackStarted !== null;
+    this.supervisors.job.event({ type: 'deadline', ...signal });
+    this.lastPlaybackStarted = signal;
+    if (was) return;
+    this.sendGrants(this.memory.playbackStarted());
+    for (const l of this.listeners) l.playback?.(true);
+  }
+
+  private stopPlayback(grants: boolean, signal?: DeadlineSignal): void {
+    if (this.lastPlaybackStarted === null) return;
+    this.supervisors.job.event({ type: 'deadline', ...(signal ?? { signal: 'playbackStopped', at: this.options.hostNow() }) });
+    this.lastPlaybackStarted = null;
+    if (grants) this.sendGrants(this.memory.playbackStopped());
+    for (const l of this.listeners) l.playback?.(false);
   }
 }

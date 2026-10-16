@@ -31,9 +31,12 @@ napi-derive = { version = "3.6", optional = true }
 pm-bridge = { path = "../pm-bridge" }
 pm-gpu = { path = "../pm-gpu", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
-# The viewer draws the document (Phase 2 tracer bullet): pm-render frames,
-# pm-audio playback as the master clock, the session's pm-model mirror.
-# This links FFmpeg (pm-media) into the addon.
+# The viewer draws the document (Phase 2 tracer bullet) and the job
+# engine renders and exports (sections 17 and 20): pm-render frames,
+# pm-audio playback (the viewer's master clock) and offline mix, the
+# session's pm-model mirror, VideoToolbox and AVAssetWriter through
+# pm-export. This links FFmpeg (pm-media) into the addon.
+pm-export = { path = "../pm-export" }
 pm-render = { path = "../pm-render" }
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
 pm-media = { path = "../pm-media" }
@@ -46,6 +49,10 @@ node = ["dep:napi", "dep:napi-derive"]
 # The C′ prototype (pm-gpu `remote-layer`): measurement builds only. Without
 # it, POWERMOVE_BRIDGE_REMOTE_LAYER=1 reports that this build has no C′.
 remote-layer = ["pm-gpu/remote-layer"]
+
+[dev-dependencies]
+pm-model = { path = "../pm-model" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [[test]]
 # Runs on the main thread (the CoreText registry uses AppKit's font manager).

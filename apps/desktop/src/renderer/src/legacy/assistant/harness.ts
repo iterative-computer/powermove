@@ -707,6 +707,18 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     transaction.changed ||= transaction.revision !== transaction.baseRevision;
     return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
   }
+  if (request.tool === '__engine_frames_plan') {
+    // render_frames through the job engine (main/engine/agent-jobs.ts): the
+    // same times and width the capture below would use, and the project at
+    // the revision the agent sees.
+    const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
+    const times = safeTimes(rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite), defaultTimes());
+    const width = PM.clamp(Math.round(Number(request.arguments.width) || 720), 160, 1280);
+    return { ok: true, content: [toolText({ times, width, project: JSON.stringify(PM.proj), revision: currentRevision() })], revision: currentRevision() };
+  }
+  if (request.tool === 'get_render_status') {
+    throw new Error('No render job with that id: exports in this host finish before export_video returns.');
+  }
   if (request.tool === 'render_frames') {
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
     const times = rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite);

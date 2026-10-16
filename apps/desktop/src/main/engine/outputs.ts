@@ -31,6 +31,20 @@ export class OutputError extends Error {
 const TEMP_PREFIX = '.powermove-';
 const TEMP_SUFFIX = '.part';
 const NAME_MAX = 255;
+/** Our temporary outputs, and the job engine's work files beside them
+ *  (`pm_export::AtomicOutput::in_place`: `<temporary>.<16 hex>.partial.<ext>`),
+ *  which a crashed or cancelled encode can leave behind. */
+const TEMPORARY_NAME = /^\.powermove-[0-9a-f]{16}\.part(?:\.[0-9a-f]{16}\.partial(?:\.[A-Za-z0-9]{1,16})?)?$/;
+
+/** Removes a temporary output and every work file named after it. */
+async function removeTemporary(temporary: string): Promise<void> {
+  await unlink(temporary).catch(() => {});
+  const base = path.basename(temporary);
+  const entries = await readdir(path.dirname(temporary)).catch(() => [] as string[]);
+  for (const name of entries) {
+    if (name.startsWith(`${base}.`) && TEMPORARY_NAME.test(name)) await unlink(path.join(path.dirname(temporary), name)).catch(() => {});
+  }
+}
 
 /** Rust's `OutputDestinationRequest::validate`: a bare file name part. */
 function bareName(value: string): boolean {
@@ -147,7 +161,7 @@ export class OutputDestinations {
     }
     this.pending.delete(request.temporary);
     this.options.handles.revoke(request.temporary);
-    const discard = async (): Promise<void> => { await unlink(pending.temporary).catch(() => {}); };
+    const discard = (): Promise<void> => removeTemporary(pending.temporary);
     if (!request.commit) {
       await discard();
       return { job: request.job, path: null };
@@ -217,7 +231,7 @@ export class OutputDestinations {
       if (pending.port !== port) continue;
       this.pending.delete(handle);
       this.options.handles.revoke(handle);
-      await unlink(pending.temporary).catch(() => {});
+      await removeTemporary(pending.temporary);
       removed++;
     }
     return removed;
@@ -229,7 +243,7 @@ export class OutputDestinations {
     const entries = await readdir(this.options.automaticDirectory).catch(() => [] as string[]);
     let removed = 0;
     for (const name of entries) {
-      if (!/^\.powermove-[0-9a-f]{16}\.part$/.test(name)) continue;
+      if (!TEMPORARY_NAME.test(name)) continue;
       await unlink(path.join(this.options.automaticDirectory, name)).then(() => removed++, () => {});
     }
     return removed;
