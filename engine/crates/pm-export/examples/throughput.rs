@@ -75,7 +75,7 @@ fn main() {
             height,
             rgba: &px,
         },
-        codec.input_format(),
+        codec.input_format(false),
         &params,
     )
     .unwrap();

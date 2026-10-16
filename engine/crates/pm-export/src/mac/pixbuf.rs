@@ -291,12 +291,12 @@ pub fn color_constants(
 ) -> (&'static CFString, &'static CFString, &'static CFString) {
     unsafe {
         match tags {
-            ColorTags::Rec709Broadcast => (
+            ColorTags::Rec709Broadcast | ColorTags::Rec709Image => (
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
                 kCVImageBufferTransferFunction_ITU_R_709_2,
                 kCVImageBufferYCbCrMatrix_ITU_R_709_2,
             ),
-            ColorTags::Rec709QuickTime => (
+            ColorTags::Rec709QuickTime | ColorTags::SrgbImage => (
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
                 kCVImageBufferTransferFunction_sRGB,
                 kCVImageBufferYCbCrMatrix_ITU_R_709_2,

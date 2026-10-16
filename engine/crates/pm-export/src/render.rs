@@ -620,10 +620,9 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         alpha,
         working: WorkingEncoding::Standard,
         dither: if s.dither { Dither::On } else { Dither::Off },
-        audio: audio.as_ref().map(|a| AudioSpec {
-            sample_rate: a.sample_rate,
-            channels: 2,
-        }),
+        audio: audio
+            .as_ref()
+            .map(|a| AudioSpec::default_for(container, a.sample_rate, 2)),
         timecode: (container == Container::Mov).then(|| start_timecode(&timeline)),
         destination: job.destination.clone(),
         overwrite: job.overwrite,
