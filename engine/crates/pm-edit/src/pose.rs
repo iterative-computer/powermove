@@ -9,6 +9,7 @@
 //! ([`Scope::world_pose_values`], [`Scope::pose_values3d`],
 //! [`Scope::aim_values3d`]).
 
+use pm_eval::comp::IdKey;
 use pm_eval::js_sem::{self, JsResult, JsThrow, JsValue};
 use pm_eval::node;
 use pm_eval::parenting::{AIM_KEYS, Role3d, WorldPose, aim_properties3d};
@@ -71,6 +72,16 @@ pub fn world_aim(edit: &mut Edit<'_>, layer: usize, time: f64) -> JsResult<Optio
 /// `preserveParentPose(PM, layer, parent, time)`: reparent `layer` under
 /// `parent` (by index; `None` unparents) keeping its world pose and aim. The
 /// `parent` member itself is the caller's to write, as in `setLayer`.
+///
+/// A camera or light whose new parent space reads its own transform (it is
+/// reparented onto a member of a group that is itself parented to the
+/// camera: `PM.wouldCycle` checks group ancestors only for groups) is left
+/// to the legacy edit ([`crate::LEGACY_ONLY`]). There the legacy aim reads
+/// the layer's keyframed channels through the evaluation cache the pose
+/// write left stale (`preserveParentPose` writes the pose and reads
+/// `parent3D` without `PM.touch()`), a mix of old and new values no
+/// document-only kernel can reproduce, and the pose cannot be preserved in
+/// such a space anyway.
 pub fn reparent(
     edit: &mut Edit<'_>,
     layer: usize,
@@ -78,6 +89,17 @@ pub fn reparent(
     time: f64,
 ) -> JsResult<()> {
     let aim = world_aim(edit, layer, time)?;
+    if aim.is_some()
+        && edit.read(|s| {
+            let l = layer_at(s, layer)?;
+            let p = parent.and_then(|i| s.layers().get(i));
+            space_reads_layer(s, l, p)
+        })?
+    {
+        return Err(crate::legacy_only(
+            "Reparenting a camera or light into a space that moves with it",
+        ));
+    }
     let world = world_pose(edit, layer, time)?;
     preserve_world_pose(edit, layer, world, time, ParentArg::Layer(parent))?;
     let parent3 = edit.read(|s| {
@@ -86,6 +108,68 @@ pub fn reparent(
         s.parent3d(l, time, Some(p))
     })?;
     preserve_world_aim(edit, layer, aim, time, Some(parent3))
+}
+
+/// Whether `parent3D(PM, layer, time, parent)` multiplies in `layer`'s own
+/// transform: the walk of [`pm_eval::Scope::parent3d`] (enclosing groups
+/// and their parent chains, then the parent chain from `parent` and each
+/// link's groups), recording instead of multiplying. Each parent chain
+/// starts its own `seen` set with the layer whose chain it is, so `layer`
+/// is reached only through a group's chain.
+fn space_reads_layer<'d>(
+    s: &mut pm_eval::Scope<'_, 'd>,
+    layer: &'d Node,
+    parent: Option<&'d Node>,
+) -> JsResult<bool> {
+    struct Walk<'d> {
+        target: &'d Node,
+        groups: Vec<Option<IdKey>>,
+        found: bool,
+    }
+    impl<'d> Walk<'d> {
+        fn parents(
+            &mut self,
+            s: &mut pm_eval::Scope<'_, 'd>,
+            layer: &'d Node,
+            first: Option<&'d Node>,
+        ) -> JsResult<()> {
+            let mut seen: Vec<&'d Node> = vec![layer];
+            let mut count = 0;
+            let mut cur = first;
+            while let Some(c) = cur {
+                if seen.iter().any(|l| std::ptr::eq(*l, c)) || count >= 256 {
+                    break;
+                }
+                seen.push(c);
+                count += 1;
+                self.found |= std::ptr::eq(c, self.target);
+                self.groups(s, c)?;
+                cur = s.parent_by_id(c);
+            }
+            Ok(())
+        }
+        fn groups(&mut self, s: &mut pm_eval::Scope<'_, 'd>, layer: &'d Node) -> JsResult<()> {
+            for group in s.group_ancestors(layer)?.into_iter().rev() {
+                let id = IdKey::of(&node::get(group, b"id"));
+                if self.groups.contains(&id) {
+                    continue;
+                }
+                self.groups.push(id);
+                let first = s.parent_by_id(group);
+                self.parents(s, group, first)?;
+                self.found |= std::ptr::eq(group, self.target);
+            }
+            Ok(())
+        }
+    }
+    let mut walk = Walk {
+        target: layer,
+        groups: Vec::new(),
+        found: false,
+    };
+    walk.groups(s, layer)?;
+    walk.parents(s, layer, parent)?;
+    Ok(walk.found)
 }
 
 /// `preserveWorldPose(PM, layer, world, time, parent)`: rebase the layer's

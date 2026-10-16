@@ -285,6 +285,11 @@ pub(crate) fn dispatch(
     {
         return Err(Unanswered::Host);
     }
+    if let Err(e) = &result
+        && e.kind == pm_edit::LEGACY_ONLY
+    {
+        return Err(Unanswered::Legacy);
+    }
     // A kernel that measured text without every font, or ink without
     // outlines, did not answer, whatever it went on to do: a throw raised
     // after such a measurement is not the legacy edit's throw, and the
