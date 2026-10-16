@@ -425,7 +425,7 @@ export async function capture(options: Options): Promise<string> {
     }
     const all = [...records, ...(real ? [real] : [])];
     const files = all.flatMap(record => [
-      ...record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, sample.eval, sample.blender].filter(Boolean) as FileRecord[]),
+      ...record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, ...(sample.blur ?? []).flatMap(b => [b.float.data, b.float.header]), sample.eval, sample.blender].filter(Boolean) as FileRecord[]),
       ...(record.blender?.assets ?? []),
     ]);
     const manifest = {
@@ -444,7 +444,7 @@ export async function capture(options: Options): Promise<string> {
       totals: {
         projects: all.length, synthetic: records.length, real: real ? 1 : 0,
         frames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.png).length, 0),
-        floatFrames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.float).length, 0),
+        floatFrames: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.float ? 1 : 0) + (sample.blur?.length ?? 0), 0), 0),
         evalDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.eval).length, 0),
         blenderDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.blender).length, 0),
         blenderSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots ? sample.blenderSnapshots.final + sample.blenderSnapshots.preview : 0), 0), 0),
@@ -465,7 +465,7 @@ export async function capture(options: Options): Promise<string> {
         document: record.document, loaded: record.loaded, media: record.media, error: record.error,
         extensions: record.extensions, extensionChecks: record.extensionChecks, hydrateIssues: record.hydrateIssues, keyIdRewrites: record.keyIdRewrites.length, missingDefinitions: record.missingDefinitions, mediaPending: record.mediaPending, settle: record.settle,
         blender: record.blender,
-        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, eval: sample.eval, blender: sample.blender, blenderSnapshots: sample.blenderSnapshots, blenderError: sample.blenderError, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
+        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, blur: sample.blur, eval: sample.eval, blender: sample.blender, blenderSnapshots: sample.blenderSnapshots, blenderError: sample.blenderError, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
         pageErrors: record.pageErrors.length,
       })),
       scenarios,
