@@ -85,7 +85,9 @@ pub struct Effects {
     /// carries ids without kinds; contract 10, open question 3).
     missing_ids: std::collections::BTreeSet<DefinitionId>,
     entries: BTreeMap<(DefinitionKind, DefinitionId), Entry>,
-    cache: pm_glsl::Cache,
+    /// Shared by the renderers' definition sets ([`Effects::sibling`]).
+    cache: Arc<pm_glsl::Cache>,
+    context: String,
     pub watchdog: Watchdog,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
@@ -205,21 +207,37 @@ impl Effects {
     /// `context` names the device (back end and driver) for the
     /// translation cache.
     pub fn new(context: impl Into<String>) -> Effects {
+        let context = context.into();
+        Effects::with_cache(
+            Arc::new(pm_glsl::Cache::new(context.clone(), None)),
+            context,
+        )
+    }
+
+    fn with_cache(cache: Arc<pm_glsl::Cache>, context: String) -> Effects {
         Effects {
             set: DefinitionSet::default(),
             configured: false,
             missing_ids: Default::default(),
             entries: BTreeMap::new(),
-            cache: pm_glsl::Cache::new(context, None),
+            cache,
+            context,
             watchdog: Watchdog::default(),
             dummies: Default::default(),
             simple: Default::default(),
         }
     }
 
-    /// Keeps prepared programs on disk across processes.
+    /// An empty definition set sharing this one's translation cache (one
+    /// per view of a device: each keeps its own programs and watchdog).
+    pub fn sibling(&self) -> Effects {
+        Effects::with_cache(self.cache.clone(), self.context.clone())
+    }
+
+    /// Keeps prepared programs on disk across processes. Siblings made
+    /// before the call keep the previous cache.
     pub fn set_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
-        self.cache.set_dir(dir);
+        self.cache = Arc::new(pm_glsl::Cache::new(self.context.clone(), dir));
     }
 
     pub fn configured(&self) -> bool {
@@ -246,10 +264,11 @@ impl Effects {
                 .iter()
                 .map(|d| (d.kind, d.id.clone()))
                 .collect();
-            self.entries.retain(|k, _| live.contains(k));
+            self.drop_entries(|k| !live.contains(k));
         }
         for removal in &update.removals {
-            self.entries.remove(&(removal.kind, removal.id.clone()));
+            let key = (removal.kind, removal.id.clone());
+            self.drop_entries(|k| *k == key);
         }
         for snapshot in &update.upserts {
             if let Some(e) = self.translate(snapshot) {
@@ -260,13 +279,15 @@ impl Effects {
     }
 
     /// Replaces every definition with an embedded set (an export job, a
-    /// collected project, `pm-cli`, tests).
+    /// collected project, `pm-cli`, tests, the interactive engine's view).
+    /// Definitions whose source did not change keep their program and their
+    /// watchdog record (an effect the watchdog turned off stays off); a
+    /// changed or removed one is translated again or dropped.
     pub fn set_snapshot(
         &mut self,
         snapshot: &DefinitionSetSnapshot,
     ) -> Result<Vec<EngineError>, UpdateError> {
         let mut set = DefinitionSet::default();
-        // Ids already missing first, then the definitions, as one full update.
         let generation = snapshot.generation.max(Seq::new(1).expect("safe"));
         let update = DefinitionsUpdate {
             generation,
@@ -278,7 +299,12 @@ impl Effects {
         self.missing_ids = snapshot.missing.iter().cloned().collect();
         self.set = set;
         self.configured = true;
-        self.entries.clear();
+        let live: std::collections::BTreeSet<_> = snapshot
+            .definitions
+            .iter()
+            .map(|d| (d.kind, d.id.clone()))
+            .collect();
+        self.drop_entries(|k| !live.contains(k));
         let mut failures = Vec::new();
         for snapshot in &snapshot.definitions {
             if let Some(e) = self.translate(snapshot) {
@@ -288,12 +314,22 @@ impl Effects {
         Ok(failures)
     }
 
+    /// Drops the entries `gone` selects, with their watchdog records.
+    fn drop_entries(&mut self, gone: impl Fn(&(DefinitionKind, DefinitionId)) -> bool) {
+        let removed: Vec<_> = self.entries.keys().filter(|k| gone(k)).cloned().collect();
+        for key in removed {
+            self.entries.remove(&key);
+            self.watchdog.forget(key.0, &key.1);
+        }
+    }
+
     /// Forgets every definition: effects and transitions are routed again.
     pub fn clear(&mut self) {
         self.set = DefinitionSet::default();
         self.configured = false;
         self.missing_ids.clear();
         self.entries.clear();
+        self.watchdog.reset();
     }
 
     /// The definition set an export job or Collect Project embeds.
@@ -364,6 +400,14 @@ impl Effects {
             .iter()
             .filter_map(|((_, id), e)| definition_error(id, &e.status))
             .collect()
+    }
+
+    /// Whether a definition's GPU program is built (it is on first use, and
+    /// kept while its source does not change).
+    pub fn has_program(&self, kind: DefinitionKind, id: &str) -> bool {
+        self.entries
+            .get(&(kind, DefinitionId::from(id)))
+            .is_some_and(|e| e.program.is_some())
     }
 
     /// The source hash of a definition's program (content keys).

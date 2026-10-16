@@ -639,10 +639,26 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
         max_diff(&next, &base) <= 1.0 / 1024.0,
         "disabled, its data kept"
     );
-    // Registering it again re-enables it.
-    let set: DefinitionSetSnapshot = builtin_definitions();
-    r.set_definitions(&set).unwrap();
+    // The same definitions pushed again (any unrelated registration, a
+    // second view's set) keep it off: its program and record are kept.
+    let mut set: DefinitionSetSnapshot = builtin_definitions();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
     r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    let kept = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert!(max_diff(&kept, &base) <= 1.0 / 1024.0, "still disabled");
+    assert!(r.watchdog_reports(true).is_empty(), "not reported again");
+    // A changed source (a hot reload, a new registration) re-enables it.
+    let blur = set
+        .definitions
+        .iter_mut()
+        .find(|d| d.id.as_str() == "blur")
+        .unwrap();
+    blur.glsl
+        .as_mut()
+        .unwrap()
+        .source
+        .push_str("\n// reloaded\n");
+    assert!(r.set_definitions(&set).unwrap().is_empty());
     let again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(again, first);
 }
