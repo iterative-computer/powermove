@@ -670,3 +670,25 @@ pm-electron-lock cargo run --release -p pm-audio --example device_probe   # open
   ```sh
   pm-electron-lock bunx playwright test e2e/native-engine-transport.spec.ts --workers=1
   ```
+
+## Gaps
+
+- **J/K/L keys** need Jude's sign-off. Powermove's keymap is After Effects's, where J and K
+  step between timeline events and L reveals audio levels, so J, K, and L shuttle only
+  while the new engine plays (ahead of those bindings, declining otherwise); Control-J
+  starts backward playback from a pause and Control-Shift-Space plays around. The
+  commands are in the palette too. With the legacy engine they decline and nothing
+  changes.
+- **Reverse shuttle and stretched clips.** Backward J/K/L renders each chunk on its own,
+  so clips that preserve pitch resample there (their pitch follows their speed while
+  shuttling backwards). Forward shuttles and every export keep the stretch.
+- **Conformed frame rates** follow the formats lane's `interpret` shape; the picture's
+  conform is that lane's (`feat/ne-formats`, not merged here), so until both are merged
+  only the soundtrack follows an override.
+- **Listening.** Stretch quality is measured against the library's one-shot stretch,
+  FFmpeg's `atempo`, and tones; no listening test was run.
+- **Waveform peaks** are computed on request by a streaming decode and kept per process
+  (64 files), not stored with the probe in the media index or app cache (section 14);
+  each engine launch decodes again.
+- **`cargo-deny`** is not installed on this Mac; `pm-stretch` adds only the `cc` build
+  dependency (already in the lockfile) and MIT sources (vendor README).
