@@ -526,8 +526,10 @@ fn native_content_quad<'d>(
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
-        "solid" if crate::vector::level2(layer) && js::get(&d, "radius").to_number() > 0.0 => {
-            // Level 2 honors `d.radius` (section 10).
+        "solid" if crate::vector::level2(layer) => {
+            // Level 2 solids draw at output resolution with analytic edges
+            // (section 8), honoring `d.radius` (section 10); radius 0 is a
+            // plain rectangle.
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
             let rgba = [c.rgb[0] as f32, c.rgb[1] as f32, c.rgb[2] as f32, c.alpha as f32];

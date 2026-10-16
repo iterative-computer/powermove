@@ -6,7 +6,7 @@
 //! transform; coverage comes from Vello (or `vello_cpu`), and the engine's
 //! float paint pass composites each item ([`super::cache`]).
 
-use pm_vector::kurbo::{Affine, RoundedRect, Shape};
+use pm_vector::kurbo::{Affine, Rect, RoundedRect, Shape};
 use pm_eval::transform::Mat2d;
 use pm_vector::canvas2d::shape::{PathColors, ShapeColors};
 use pm_vector::path::PathLayer;
@@ -38,12 +38,18 @@ pub fn paths_scene(layer: &PathLayer, colors: &[PathColors], world: &Mat2d) -> C
     scene
 }
 
-/// A level 2 solid with `radius`: a rounded rectangle (`min(r, w/2, h/2)`
-/// circular corners) filled with the solid's color, its box from (0, 0) as
-/// today's solid quad.
+/// A level 2 solid: a rectangle with `min(r, w/2, h/2)` circular corners
+/// (a plain rectangle when `radius` is 0, negative, or not a number) filled
+/// with the solid's color, its box from (0, 0) as today's solid quad.
 pub fn solid_scene(w: f64, h: f64, radius: f64, rgba: [f32; 4], world: &Mat2d) -> CoverageScene {
-    let r = radius.min(w.abs() / 2.0).min(h.abs() / 2.0).max(0.0);
-    let path = RoundedRect::new(0.0, 0.0, w, h, r).to_path(1e-3);
+    // `NaN > 0` is false: a missing radius is no radius.
+    let radius = if radius > 0.0 { radius } else { 0.0 };
+    let r = radius.min(w.abs() / 2.0).min(h.abs() / 2.0);
+    let path = if r > 0.0 {
+        RoundedRect::new(0.0, 0.0, w, h, r).to_path(1e-3)
+    } else {
+        Rect::new(0.0, 0.0, w, h).to_path(1e-3)
+    };
     CoverageScene {
         items: vec![CoverageItem {
             path,
