@@ -150,6 +150,18 @@ fn three_d_inside_a_precomp_reports_its_depth() {
         (d - 4.0).abs() < 0.01,
         "the nested surface's depth, got {d}"
     );
+    // Off center: `a` (raised, farther away) shows above b in the upper
+    // half only, at its own depth, so the nested surface is upright too.
+    let a_rows: Vec<u32> = (0..H)
+        .filter(|&y| {
+            let (d, _, a) = at(&s, W / 2, y);
+            a == 1.0 && (d - 7.5).abs() < 0.05
+        })
+        .collect();
+    assert!(
+        !a_rows.is_empty() && a_rows.iter().all(|&y| y < H / 2),
+        "{a_rows:?}"
+    );
     // Outside the models: the precomp covers (its background) without 3D.
     assert!(at(&s, 2, 2).0.is_infinite());
 }
