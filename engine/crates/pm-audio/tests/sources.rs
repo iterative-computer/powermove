@@ -194,6 +194,70 @@ fn long_coarse_timebase_sources_decode_in_linear_time() {
     }
 }
 
+/// HE-AAC v2 (Parametric Stereo, `afconvert -d aacp`, common for low-bit-
+/// rate stereo and podcasts): legacy decodes the file in one pass, so every
+/// cached block, decoded cold in any order, must be that decode's samples.
+/// A fresh decoder outputs the mono core on both channels until a PS header
+/// (Apple's encoder repeats it about every 1.8 s); with AAC's usual pre-roll
+/// almost every block was off by the signal's level for over a second.
+#[test]
+fn he_aac_v2_blocks_match_the_one_pass_decode() {
+    let dir = temp_dir("he-aac-v2");
+    let wav = dir.join("ps.wav");
+    let m4a = dir.join("ps.m4a");
+    generate(
+        &wav,
+        "aevalsrc=exprs='0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)':s=48000:d=60",
+        &["-c:a", "pcm_s16le"],
+    );
+    if !m4a.exists() {
+        let Ok(status) = Command::new("afconvert")
+            .args(["-f", "m4af", "-d", "aacp", "-b", "32000"])
+            .arg(&wav)
+            .arg(&m4a)
+            .status()
+        else {
+            eprintln!("afconvert is missing: HE-AAC v2 not covered");
+            return;
+        };
+        assert!(status.success());
+    }
+    let mut d = pm_media::audio::AudioDecoder::open(&m4a, None).unwrap();
+    assert!(d.info().parametric_stereo);
+    let mut pcm = vec![Vec::new(); 2];
+    while d.read(&mut pcm, 8192).unwrap() > 0 {}
+    let blocks = pcm[0].len().div_ceil(BLOCK) as u64;
+    let mut worst = 0f32;
+    let mut slowest = 0u128;
+    let mut decoded = 0;
+    // Reverse, then a stride that jumps around the file, each pass on a cold
+    // cache.
+    let reverse: Vec<u64> = (0..blocks).rev().collect();
+    let stride: Vec<u64> = (0..blocks).map(|k| (k * 7) % blocks).collect();
+    for order in [reverse, stride] {
+        let cache = SourceCache::new(64 << 20, 0);
+        let source = cache.open(&m4a, None).unwrap();
+        for k in order {
+            let t = Instant::now();
+            let b = cache.block(&source, k, true).unwrap().unwrap();
+            slowest = slowest.max(t.elapsed().as_micros());
+            decoded += 1;
+            let at = k as usize * BLOCK;
+            for (x, y) in b.channels.iter().zip(&pcm) {
+                let diff = x
+                    .iter()
+                    .zip(&y[at..])
+                    .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+                worst = worst.max(diff);
+                assert!(diff < 1e-3, "block {k} differs by {diff}");
+            }
+        }
+    }
+    eprintln!(
+        "HE-AAC v2: {decoded} cold blocks within {worst:e} of the one-pass decode, slowest {slowest} µs"
+    );
+}
+
 /// The export path: a tick range renders to `round(duration × sr)` frames
 /// as 24-bit, float, and dithered 16-bit WAV.
 #[test]

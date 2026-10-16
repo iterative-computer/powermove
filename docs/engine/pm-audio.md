@@ -35,7 +35,8 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   frame size) counts the samples of every packet exactly as a decode from the start does
   and keeps anchors: packets with a unique timestamp at least 4,096 samples apart, whose
   program sample is known. A seek starts a fresh decoder exactly at the last anchor at
-  least the pre-roll before its target and counts from there, so it costs the same
+  least the lead (the pre-roll, and at least the codec delay) before its target and
+  counts from there, so it costs the same
   anywhere in the file. The scan runs once per source, only as far as seeks need, and
   the anchors are a function of the file alone. Where no packet length is known (ALAC
   in Matroska has no parser), a seek decodes from the start, and a seek forward
@@ -47,16 +48,52 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   past its 2,048-sample packets, so its first frame is the third packet's and starts
   4,224 samples into the anchor (checked against the moved timestamp). Until this was
   handled, every anchored seek on HE-AAC (M4A and Matroska) landed one frame early
-  (measured 0.18 off a tone; now within 2.4e-4, SBR's noise).
+  (measured 0.18 off a tone; now within 2.8e-4 on both channels, SBR's noise). The codec
+  delay (4,224) is longer than AAC's pre-roll (4,096), so the anchor is the last one at
+  least the longer of the two before the target: with the pre-roll alone, 128 of every
+  4,096 targets put their first sample after the target (36 of 1,171 targets swept by
+  7 from 958,464 on the `afconvert` file, for example 960,389) and decoded the stream
+  from the start, 475 packets instead of 5
+  (`he_aac_seeks_inside_the_codec_delay_window`: every target now 3 to 5 packets).
+- **Seeks that land after their target** (a demuxer index coarser than its packets, a
+  delay the lead does not cover) start one anchor (or, placed by timestamps, one lead)
+  earlier, up to twice, before decoding from the start. They depend on the target, not
+  the stream, so they never count against its anchors
+  (`a_seek_that_lands_after_its_target_starts_an_anchor_earlier`).
 - **Anchor failures.** An anchor that cannot be found again, or whose first frame does
-  not fit it, comes from the demuxer or the codec and repeats for the stream's other
-  anchors: the first failure switches the stream to counting from the start, and reads
-  in order continue that decode (`failed_anchors_fall_back_once`: 30 blocks with every
-  anchor moved off its packet decode the stream once plus one block). A read error in
-  the demux-only scan ends the scan there; seeks resolve against the anchors found
-  before it, and the decode reports the error if it reaches that spot.
-- **Seeks.** `seek(n)` starts a per-codec pre-roll earlier (AAC 4096, MP3 8 × 1152, Opus
-  500 ms, Vorbis 8192, AC-3 3072, lossless 0) from a freshly opened decoder and discards
+  not fit it, comes from the demuxer or the codec and usually repeats for the stream's
+  other anchors. Each such seek decodes from the start; after 3 in a row the stream
+  counts from the start for good, and reads in order continue that decode
+  (`failed_anchors_fall_back_after_a_few`: 30 blocks with every anchor moved off its
+  packet decode the stream once plus 6 blocks). A seek that places its anchor resets the
+  count, so one stray anchor costs one decode from the start and nothing after
+  (`a_stray_failed_anchor_does_not_stick`). A read error in the demux-only scan ends the
+  scan there; seeks resolve against the anchors found before it, and the decode reports
+  the error if it reaches that spot.
+- **HE-AAC v2 (Parametric Stereo).** A fresh decoder applies no stereo until a frame
+  carries a PS header: FFmpeg copies the mono core to both channels until then, and once
+  PS runs it changes the left channel too, so both channels are off by about the
+  signal's level. Apple's encoder repeats the header about every 1.8 s. Measured on
+  `afconvert -d aacp` encodes (32, 44.1 and 48 kHz; stereo, swept, gated, mono and noise
+  content; 24 to 48 kbit/s; a fresh start every 0.25 s over 60 s), a fresh decoder was
+  off by up to 0.3 on a 0.3 tone for as long as 1.86 s (1.66 s at 32 kHz), then within
+  the sequential decode's SBR noise (4e-5 to 6e-5 on tones). With AAC's 4,096-sample
+  pre-roll nearly every 65,536-sample block of such a source was off by 0.3 for its
+  first 1.2 to 1.9 s. Streams FFmpeg reports as `HE-AACv2` (the codec configuration, or
+  the probe's decode for implicit signalling in ADTS) pre-roll 4 s
+  (`PS_PREROLL_SECONDS`, about twice the longest wait measured), and every block, read
+  in any order from a fresh decoder, is within 6.5e-5 of the sequential decode on both
+  channels in M4A, Matroska, MP4 and ADTS at all three rates
+  (`he_aac_v2_blocks_match_the_sequential_decode`; `pm-audio/tests/sources.rs`
+  `he_aac_v2_blocks_match_the_one_pass_decode`: 88 cold blocks in reverse and strided
+  order through `SourceCache`, within 5.1e-5, at most 4.5 ms a block). A block costs
+  about 4 s of decode more (95 to 128 packets at 32 to 48 kHz instead of 4 to 6), which
+  FFmpeg decodes at over 1,000× real time. An encoder that repeats the header less often
+  than every 4 s would still differ for the rest of its wait; only Apple's encoder was
+  available to measure (our LGPL build has no PS encoder).
+- **Seeks.** `seek(n)` starts a per-codec pre-roll earlier (AAC 4096, HE-AAC v2 4 s,
+  MP3 8 × 1152, Opus 500 ms, Vorbis 8192, AC-3 3072, lossless 0; at least the codec
+  delay) from a freshly opened decoder and discards
   to `n`. A fresh decoder matters: FFmpeg's AAC decoder keeps its noise-substitution
   generator across a flush, so a flushed decoder answers differently depending on history.
   Opus asks for 80 ms (RFC 7845), but CELT predicts band energies from the previous frame
@@ -85,9 +122,11 @@ keep every sample on its timestamp (`gaps_are_silence_and_overlaps_are_dropped`)
 Coarse timebases (`coarse_timebase_seeks_start_near_their_target`, 40 s in Matroska and
 WebM): seeks equal the sequential decode exactly for FLAC, PCM, ALAC, Vorbis, and AAC
 without noise substitution; within 2e-7 for Opus, 4e-5 for AC-3, E-AC-3 and MP2, and
-7.2e-3 for AAC with noise substitution (its noise generator runs across frames), and
-2.4e-4 for HE-AAC (from macOS `afconvert`, in M4A and remuxed to Matroska). A seek
-decodes 3 to 32 packets wherever it lands (ALAC: from the start). Lossless codecs have no
+7.2e-3 for AAC with noise substitution (its noise generator runs across frames),
+2.8e-4 for HE-AAC and 3.7e-5 for HE-AAC v2 (from macOS `afconvert`, in M4A and remuxed to
+Matroska), every channel compared, and the same for 65,536-sample blocks read in order
+and in reverse. A seek decodes 3 to 32 packets wherever it lands (HE-AAC v2: 95 to 97,
+its 4 s pre-roll; ALAC: from the start). Lossless codecs have no
 pre-roll, so a seek up to 2 s ahead of the running decode decodes forward instead (FLAC
 and PCM: 42 packets for the seek to 1 s + 123 after the one at 0.5 s), and blocks read in
 order cost the stream once plus a pre-roll per block.
@@ -117,7 +156,8 @@ FFmpeg's HE-AAC decoder runs 962 samples (481 core samples) later than Apple's: 
 line 962 samples behind its source, and through `afconvert` on the sample. The priming
 (4,224, from the edit list or `CodecDelay`) is honored; the extra delay is the decoder's.
 It is not compensated here; whether legacy (Chromium's decode) shows the same offset is
-unmeasured.
+unmeasured. A legacy parity capture with HE-AAC and HE-AAC v2 sources would settle both this
+offset and the v2 pre-roll against Chromium's one-pass decode.
 
 ## Resampling (`kernel`)
 
