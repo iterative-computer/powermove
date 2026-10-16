@@ -269,8 +269,10 @@ All measured on 2026-10-14 and 2026-10-15 at this branch (the vectors, seeds, co
 - **e2e rerun after the self-space and bake-time fixes** (2026-10-15, same 10
   specs and conditions; `native-edit-kernels.spec.ts` now also asserts that the
   page reports the mode the build was made with, so a build without the flag
-  cannot pass as `off`): `audit`, `on`, and `off` each 18 passed, 1 failed (the
-  quarantined `precomp.spec.ts:46`). `audit`: 30,522 dual answers over 19 page
+  cannot pass as `off`), run again after merging the integration tip (wave 3
+  audio): `audit`, `on`, and `off` each 18 passed, 1 failed (the quarantined
+  `precomp.spec.ts:46`), both times. `audit` on the merged tip: 30,689 dual
+  answers over 19 page
   sessions, 27 of them `edit.*` (align 1, anchor moved 2, anchor reference 1,
   size anchor capture 2, group placement 8, leave attributes 2, move to group 2,
   reparent 3, split text 2, material peers 2, ungroup 2), 0 mismatches; 128
