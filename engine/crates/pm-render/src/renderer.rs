@@ -71,6 +71,8 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
+    /// The 3D pass's planning options (view override, mesh definitions).
+    options3d: crate::scene3d::Options3d,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
 }
@@ -88,6 +90,7 @@ impl Renderer {
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
+            options3d: crate::scene3d::Options3d::default(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -125,6 +128,22 @@ impl Renderer {
     /// directory.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
         self.scene3d.set_program_cache(dir);
+    }
+
+    /// The view override of the following renders (contract 2's
+    /// `FrameRequest.view`): the editor camera, Wireframe and X-ray looks,
+    /// and Local View. Exports and agent captures must pass `None`.
+    pub fn set_view(&mut self, view: Option<&pm_protocol::frame::ViewOverride>) {
+        self.options3d.view = view.map(crate::scene3d::View3d::from_override);
+    }
+
+    /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`) by
+    /// definition id, so legacy OBJ mesh layers render natively.
+    pub fn set_mesh_definitions(
+        &mut self,
+        definitions: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
+    ) {
+        self.options3d.mesh_definitions = Arc::new(definitions);
     }
 
     /// 3D layers render without MSAA when `false` (only for the parity
@@ -255,7 +274,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build(
+        let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -264,6 +283,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.options3d.clone(),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -477,7 +497,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build(
+        let (plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -486,6 +506,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.options3d.clone(),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

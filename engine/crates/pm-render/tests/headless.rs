@@ -406,23 +406,22 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     assert!(f.contains(&Feature::Masks), "{f:?}");
     let f = variant(|d| d["color"] = json!({ "mode": "standard", "linearBlending": true }));
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
-    // 3D beyond the Phase 2 primitive.
+    // The 3D scene pass draws shadows, every light type, several objects
+    // per composition (depth sets), transparency, every primitive and
+    // source kind, missing models, and maps; what it routes is listed.
     let scene = |f: &[Feature], what: &str| {
         f.iter()
             .any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)))
     };
+    let no_3d = |f: &[Feature]| !f.iter().any(|x| matches!(x, Feature::Scene3d(_)));
     let f = variant(|d| {
         let i = layer_at(d, "cam");
         d["layers"][i]["d"]["data"]["environment"]["shadows"] = json!(true);
         let i = layer_at(d, "sun");
         d["layers"][i]["d"]["data"]["light"]["castShadow"] = json!(true);
-    });
-    assert!(scene(&f, "shadows"), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "sun");
         d["layers"][i]["d"]["data"]["light"]["type"] = json!("point");
     });
-    assert!(scene(&f, "point lights"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         d["layers"].as_array_mut().unwrap().push(object3d(
             "obj2",
@@ -433,37 +432,44 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             H,
             2.0,
         ));
-    });
-    assert!(scene(&f, "more than one 3D object"), "{f:?}");
-    let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["p"]["opacity"] = ch(json!(0.5));
-    });
-    assert!(scene(&f, "transparent materials"), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "capsule" });
     });
-    assert!(scene(&f, "capsule"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
+    // A model whose asset is not in the document is the missing-model box.
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
+        d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
+    });
+    assert!(no_3d(&f), "{f:?}");
+    // An imported model that exists is the glTF lane's.
+    let f = variant(|d| {
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
+        d["assets"]["model"] =
+            json!({ "id": "model", "kind": "model", "format": "glb", "name": "m.glb" });
     });
     assert!(scene(&f, "imported models"), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
+        d["assets"]["tex"] =
+            json!({ "id": "tex", "kind": "image", "format": "svg", "name": "t.svg" });
     });
-    assert!(scene(&f, "texture maps"), "{f:?}");
-    // No camera layer: the studio environment has shadows on and the sun
-    // layer casts by default.
+    assert!(scene(&f, "SVG texture maps"), "{f:?}");
     let f = variant(|d| {
-        let i = layer_at(d, "cam");
-        d["layers"].as_array_mut().unwrap().remove(i);
-        let i = layer_at(d, "sun");
-        d["layers"][i]["d"]["data"]["light"]["castShadow"] = json!(true);
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["generation"] =
+            json!({ "groupId": "g", "partId": "p" });
     });
-    assert!(scene(&f, "shadows"), "{f:?}");
+    assert!(scene(&f, "recipe parts"), "{f:?}");
+    let f = variant(|d| {
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
+    });
+    assert!(scene(&f, "knot primitives"), "{f:?}");
     // Nested compositions are checked too.
     let f = variant(|d| {
         d["comps"]["inner"]["layers"]

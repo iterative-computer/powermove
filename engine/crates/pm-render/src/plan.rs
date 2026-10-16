@@ -112,6 +112,9 @@ pub struct Build<'r> {
     pub unsupported: Vec<Unsupported>,
     retime: RetimeCache,
     precomp_depth: u32,
+    /// The 3D state of the compositing passes being built (innermost last).
+    pass3d: Vec<crate::scene3d::Pass3d>,
+    options3d: crate::scene3d::Options3d,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -130,12 +133,41 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
+    build_with(
+        ev,
+        root_comp,
+        project,
+        time,
+        width,
+        height,
+        scale,
+        assets,
+        crate::scene3d::Options3d::default(),
+    )
+}
+
+/// [`build`] with the 3D pass's options (view override, mesh layer
+/// definitions).
+#[allow(clippy::too_many_arguments)]
+pub fn build_with<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    options3d: crate::scene3d::Options3d,
+) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
         failures: Vec::new(),
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
         precomp_depth: 0,
+        pass3d: Vec::new(),
+        options3d,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -206,6 +238,31 @@ fn comp_pass<'d>(
             }
         }
     };
+    // `compositionOrderedLayers` and the pass's 3D state.
+    let pass = match crate::scene3d::order_pass(
+        scope,
+        &b.pass3d,
+        pass,
+        time,
+        width,
+        height,
+        b.assets,
+        b.options3d.view.as_ref(),
+        b.precomp_depth == 0,
+    ) {
+        Ok((ordered, ctx)) => {
+            b.pass3d.push(ctx);
+            ordered
+        }
+        Err(e) => {
+            b.failures.push(LayerFailure {
+                composition: comp_id,
+                layer: group_parent.map(js::layer_id).unwrap_or_default(),
+                message: e.to_string(),
+            });
+            return plan;
+        }
+    };
     let solo = all.iter().any(|l| js::flag(l, "solo"));
     let matte_sources: Vec<JsValue> = all
         .iter()
@@ -226,6 +283,7 @@ fn comp_pass<'d>(
             }
         }
     }
+    b.pass3d.pop();
     plan
 }
 
@@ -641,11 +699,11 @@ fn native_content_quad<'d>(
             let def = js::string(js::get(&d, "definition"));
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
-                    match crate::scene3d::plan_object(scope, layer, time, width, height) {
-                        Ok(Ok(plan)) => Ok(Some(Quad::Screen {
+                    match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
+                        Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
                         })),
-                        Ok(Err(reason)) => {
+                        Err(reason) => {
                             b.unsupported.push(Unsupported::layer(
                                 &comp_id,
                                 layer,
@@ -653,18 +711,45 @@ fn native_content_quad<'d>(
                             ));
                             Ok(None)
                         }
-                        Err(e) => Err(e),
                     }
                 }
                 Some(_) => Ok(None),
-                None => {
-                    b.unsupported.push(Unsupported::layer(
-                        &comp_id,
-                        layer,
-                        Feature::ExtensionDefinition(def),
-                    ));
-                    Ok(None)
-                }
+                None => match crate::scene3d::legacy::plan_extension(
+                    scope,
+                    layer,
+                    &d,
+                    &def,
+                    time,
+                    (width, height),
+                    scale,
+                    b.assets,
+                    &b.options3d,
+                )? {
+                    Some(Ok((source, w, h))) => Ok(Some(Quad::Texture {
+                        source,
+                        w,
+                        h,
+                        ax: 0.0,
+                        ay: 0.0,
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                    })),
+                    Some(Err(reason)) => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::Scene3d(reason),
+                        ));
+                        Ok(None)
+                    }
+                    None => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::ExtensionDefinition(def),
+                        ));
+                        Ok(None)
+                    }
+                },
             }
         }
         "null" | "audio" | "group" => Ok(None),

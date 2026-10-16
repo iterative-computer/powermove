@@ -204,11 +204,31 @@ impl Exec<'_> {
                                 self.depth_id,
                             ) {
                                 Ok(out) => {
-                                    // The pass renders in GL row order.
-                                    r.view = Some(out.color.view.clone());
+                                    // The pass renders in GL row order; with
+                                    // linear blending on, its E output becomes
+                                    // linear light (section 9).
+                                    let color = if self.working == WorkingEncoding::LinearLight {
+                                        let format = if self.precision == Precision::Float32 {
+                                            wgpu::TextureFormat::Rgba32Float
+                                        } else {
+                                            wgpu::TextureFormat::Rgba16Float
+                                        };
+                                        let linear = self.scene3d.to_linear(
+                                            self.device,
+                                            encoder,
+                                            self.pool,
+                                            &out.color,
+                                            format,
+                                        );
+                                        self.taken.push(out.color);
+                                        linear
+                                    } else {
+                                        out.color
+                                    };
+                                    r.view = Some(color.view.clone());
                                     r.from_fbo = true;
                                     r.depth = out.depth.as_ref().map(|d| d.view.clone());
-                                    self.taken.push(out.color);
+                                    self.taken.push(color);
                                     if let Some(d) = out.depth {
                                         self.taken.push(d);
                                     }
