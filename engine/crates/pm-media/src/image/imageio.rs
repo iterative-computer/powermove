@@ -79,6 +79,206 @@ unsafe extern "C" {
     ) -> CGContextRef;
     fn CGContextDrawImage(ctx: CGContextRef, rect: CGRect, img: CGImageRef);
     fn CGContextRelease(ctx: CGContextRef);
+    static kCGColorSpaceExtendedLinearSRGB: CFStringRef;
+    fn CGColorSpaceCreateWithICCData(data: CFTypeRef) -> CGColorSpaceRef;
+    fn CGColorSpaceGetNumberOfComponents(space: CGColorSpaceRef) -> usize;
+    fn CGDataProviderCreateWithCFData(data: CFTypeRef) -> *mut c_void;
+    fn CGDataProviderRelease(provider: *mut c_void);
+    fn CGImageCreate(
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bits_per_pixel: usize,
+        bytes_per_row: usize,
+        space: CGColorSpaceRef,
+        bitmap_info: u32,
+        provider: *mut c_void,
+        decode: *const f64,
+        should_interpolate: bool,
+        intent: i32,
+    ) -> CGImageRef;
+    fn CGImageRelease(img: CGImageRef);
+    fn CGContextSetRenderingIntent(ctx: CGContextRef, intent: i32);
+    fn CGContextSetInterpolationQuality(ctx: CGContextRef, quality: i32);
+}
+
+/// `kCGRenderingIntentRelativeColorimetric`.
+const RELATIVE_COLORIMETRIC: i32 = 2;
+/// `kCGInterpolationNone`.
+const INTERPOLATION_NONE: i32 = 1;
+/// `kCGImageAlphaLast`, `kCGImageAlphaNoneSkipLast`.
+const ALPHA_LAST: u32 = 3;
+
+/// Converts a still tagged with an ICC profile that is neither equivalent to
+/// sRGB nor Display P3 (Adobe RGB, ProPhoto, camera and printer RGB
+/// profiles, gray gamma 2.2, ...) through ColorSync, relative colorimetric,
+/// into extended linear sRGB in float: values outside 0..1 are kept (no
+/// clip until output, section 9). The result is premultiplied, linear, with
+/// Rec.709 primaries and no profile.
+pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
+    let Some(profile) = still.color.icc.as_ref() else {
+        return Err(MediaError::invalid("the still has no ICC profile"));
+    };
+    let f = &still.frame;
+    if f.format.layout != crate::frame::Layout::Rgba || f.format.is_float() {
+        return Err(MediaError::unsupported(
+            "ColorSync conversion of float or planar stills",
+        ));
+    }
+    let (w, h) = (f.format.width, f.format.height);
+    let sixteen = f.format.planes[0].format == crate::frame::PlaneFormat::Rgba16;
+    let bits = f.format.bits;
+    // Source samples, scaled to the full 8 or 16-bit range.
+    let src: Vec<u8> = f.with_planes(|pl| {
+        let p = &pl[0];
+        let mut out = Vec::with_capacity(w * h * if sixteen { 8 } else { 4 });
+        for y in 0..h {
+            let row = unsafe {
+                std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * if sixteen { 8 } else { 4 })
+            };
+            if sixteen && bits < 16 {
+                let max = ((1u32 << bits) - 1) as f64;
+                for c in row.chunks_exact(2) {
+                    let v = u16::from_le_bytes([c[0], c[1]]) as f64;
+                    out.extend(((v * 65535.0 / max).round() as u16).to_le_bytes());
+                }
+            } else {
+                out.extend_from_slice(row);
+            }
+        }
+        out
+    })?;
+    let premultiplied = f.format.rgba_premultiplied;
+    let has_alpha = !matches!(still.color.alpha, AlphaMode::Opaque);
+    unsafe {
+        let icc = Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            profile.as_ptr(),
+            profile.len() as isize,
+        ))
+        .ok_or_else(|| MediaError::Image("ICC data".into()))?;
+        let space = CGColorSpaceCreateWithICCData(icc.as_ptr());
+        if space.is_null() {
+            return Err(MediaError::Image(
+                "ColorSync cannot use this ICC profile".into(),
+            ));
+        }
+        let comps = CGColorSpaceGetNumberOfComponents(space);
+        // Gray profiles take gray and alpha samples; RGB profiles RGBA.
+        let (data, spp) = match comps {
+            1 => {
+                let bpc = if sixteen { 2 } else { 1 };
+                let mut g = Vec::with_capacity(w * h * 2 * bpc);
+                for px in src.chunks_exact(4 * bpc) {
+                    g.extend_from_slice(&px[..bpc]);
+                    g.extend_from_slice(&px[3 * bpc..4 * bpc]);
+                }
+                (g, 2)
+            }
+            3 => (src, 4),
+            n => {
+                CGColorSpaceRelease(space);
+                return Err(MediaError::unsupported(format!(
+                    "an ICC profile with {n} components on an RGB still"
+                )));
+            }
+        };
+        let bpc = if sixteen { 16 } else { 8 };
+        let bytes = Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            data.as_ptr(),
+            data.len() as isize,
+        ))
+        .ok_or_else(|| MediaError::Image("pixel data".into()))?;
+        let provider = CGDataProviderCreateWithCFData(bytes.as_ptr());
+        let alpha = if !has_alpha {
+            5 // kCGImageAlphaNoneSkipLast
+        } else if premultiplied {
+            PREMULTIPLIED_LAST
+        } else {
+            ALPHA_LAST
+        };
+        let info = alpha | if sixteen { ORDER_16_LITTLE } else { 0 };
+        let img = CGImageCreate(
+            w,
+            h,
+            bpc,
+            bpc * spp,
+            w * spp * bpc / 8,
+            space,
+            info,
+            provider,
+            std::ptr::null(),
+            false,
+            RELATIVE_COLORIMETRIC,
+        );
+        CGDataProviderRelease(provider);
+        CGColorSpaceRelease(space);
+        if img.is_null() {
+            return Err(MediaError::Image(
+                "could not describe the still to ColorSync".into(),
+            ));
+        }
+        let mut out = vec![0f32; w * h * 4];
+        let dst = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        let ctx = CGBitmapContextCreate(
+            out.as_mut_ptr().cast(),
+            w,
+            h,
+            32,
+            w * 16,
+            dst,
+            PREMULTIPLIED_LAST | FLOAT | ORDER_32_LITTLE,
+        );
+        CGColorSpaceRelease(dst);
+        if ctx.is_null() {
+            CGImageRelease(img);
+            return Err(MediaError::Image("could not create a float context".into()));
+        }
+        CGContextSetRenderingIntent(ctx, RELATIVE_COLORIMETRIC);
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+        CGImageRelease(img);
+        let frame = pool_rgba(
+            pool,
+            w,
+            h,
+            Rgba::F32(&out),
+            true,
+            32,
+            format!("ColorSync extended linear sRGB from {}", f.format.label),
+        )?;
+        Ok(StillImage {
+            frame,
+            format: still.format,
+            backend: still.backend,
+            bit_depth: 32,
+            float: true,
+            color: ImageColor {
+                icc: None,
+                icc_bytes: None,
+                icc_class: None,
+                transfer: Transfer::Linear,
+                alpha: if has_alpha {
+                    AlphaMode::Premultiplied
+                } else {
+                    AlphaMode::Opaque
+                },
+                chromaticities: None,
+            },
+            orientation: still.orientation,
+        })
+    }
 }
 
 const MODEL_MONOCHROME: i32 = 0;

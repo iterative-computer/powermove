@@ -1374,3 +1374,100 @@ fn audio_seeks() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Stills with ICC profiles (section 9): sRGB-equivalent profiles pass
+/// through; Display P3 converts in float by matrix (`pm_color::primaries`);
+/// every other profile converts through ColorSync, relative colorimetric,
+/// into extended linear sRGB. Each matches ColorSync's own conversion to
+/// sRGB (sips) within 1 CV wherever that conversion did not clip.
+#[test]
+#[ignore]
+fn icc_stills() {
+    use pm_media::image::icc::IccClass;
+    let dir = formats().join("image");
+    let pool = FramePool::new(0);
+    let encode = |v: f64| pm_color::transfer::display_encode_f32(v as f32) as f64;
+    for (file, class) in [
+        ("icc-adobergb.png", IccClass::Other),
+        ("icc-p3.png", IccClass::DisplayP3),
+        ("icc-prophoto16.png", IccClass::Other),
+        // Apple's "Generic Gray Gamma 2.2" curve has a linear toe and lies
+        // within 1/1024 of the sRGB curve everywhere: it passes through.
+        ("icc-gray22.png", IccClass::GraySrgb),
+    ] {
+        let s = image::read(&dir.join(file), &pool).unwrap();
+        assert_eq!(s.color.icc_class, Some(class), "{file}");
+        let reference = image::read(&dir.join(format!("ref-srgb-{file}")), &pool).unwrap();
+        // sips writes an `sRGB` chunk rather than a profile.
+        assert!(
+            matches!(reference.color.icc_class, None | Some(IccClass::Srgb)),
+            "{file} reference: {:?}",
+            reference.color.icc_class
+        );
+        let want = still_rgba(&reference);
+        // Display-encoded sRGB values from our conversion.
+        let ours: Vec<[f64; 4]> = match class {
+            IccClass::GraySrgb => still_rgba(&s),
+            IccClass::DisplayP3 => {
+                let m = pm_color::primaries::conversion(Primaries::DisplayP3, Primaries::Bt709)
+                    .unwrap();
+                still_rgba(&s)
+                    .iter()
+                    .map(|p| {
+                        let lin = [0, 1, 2]
+                            .map(|c| pm_color::transfer::display_decode_f32(p[c] as f32) as f64);
+                        let l = pm_color::primaries::apply(&m, lin);
+                        [encode(l[0]), encode(l[1]), encode(l[2]), p[3]]
+                    })
+                    .collect()
+            }
+            _ => {
+                let c = image::imageio::convert_to_linear_srgb(&s, &pool).unwrap();
+                assert!(c.float && c.color.transfer == Transfer::Linear);
+                still_rgba(&c)
+                    .iter()
+                    .map(|p| {
+                        let a = if p[3] > 0.0 { p[3] } else { 1.0 };
+                        [encode(p[0] / a), encode(p[1] / a), encode(p[2] / a), p[3]]
+                    })
+                    .collect()
+            }
+        };
+        let mut max = 0f64;
+        let mut sum = 0f64;
+        let mut compared = 0;
+        let mut out_of_gamut = 0;
+        for (o, r) in ours.iter().zip(&want) {
+            if o[..3]
+                .iter()
+                .any(|v| !(-0.5 / 255.0..=1.0 + 0.5 / 255.0).contains(v))
+            {
+                out_of_gamut += 1;
+                continue;
+            }
+            compared += 1;
+            for c in 0..3 {
+                let d = (o[c] - r[c]).abs() * 255.0;
+                max = max.max(d);
+                sum += d;
+            }
+        }
+        let mean = sum / (3 * compared.max(1)) as f64;
+        eprintln!(
+            "{file}: {class:?}, |Δ| max {max:.3} mean {mean:.3} CV against ColorSync over {compared} pixels ({out_of_gamut} outside sRGB kept unclipped)"
+        );
+        assert!(compared > ours.len() / 2, "{file}");
+        // The reference is ColorSync's 8-bit output (±0.5 CV). Display P3
+        // converts by matrix from the standard chromaticities, ColorSync from
+        // the profile's s15.16 D50 colorants: they differ by up to 1.1 CV.
+        let (tol_max, tol_mean) = if class == IccClass::DisplayP3 {
+            (1.5, 0.3)
+        } else {
+            (1.0, 0.3)
+        };
+        assert!(
+            max <= tol_max && mean <= tol_mean,
+            "{file}: max {max:.3} mean {mean:.3} CV"
+        );
+    }
+}

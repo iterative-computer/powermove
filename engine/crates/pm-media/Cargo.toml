@@ -24,6 +24,7 @@ resvg = { version = "0.48", default-features = false, features = ["text", "syste
 
 [dev-dependencies]
 proptest.workspace = true
+pm-color = { path = "../pm-color" }
 
 [build-dependencies]
 bindgen = "0.72"
