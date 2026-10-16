@@ -132,8 +132,32 @@ const RUNS = [
   { name: 'app-latency-engine-idle-move', ...latency, app: true, mode: 'engine', load: false, rawGestures: false, inputModes: ['pan'] },
   { name: 'app-latency-engine-load-move', ...latency, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', rawGestures: false, inputModes: ['pan'] },
   { name: 'app-latency-engine-idle', ...latency, app: true, mode: 'engine', load: false, inputModes: ['pan'] },
-  { name: 'app-latency-engine-load', ...latency, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', inputModes: ['pan'] }
+  { name: 'app-latency-engine-load', ...latency, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', inputModes: ['pan'] },
+  // The Phase 2 tracer bullet (docs/engine/tracer.md): the app's own engine
+  // connection draws a synthetic project of slice features (Use New
+  // Engine on); "today" is the WebGL viewer on the same project. Summaries
+  // go to docs/engine/tracer-measurements/.
+  ...tracerRuns()
 ];
+
+/** The tracer's runs: layer drag on 500 layers (engine and today, idle and
+ *  under load), an inspector edit every 250 ms during playback of 1,000
+ *  layers, and cadence at 23.976 and 25 fps. */
+function tracerRuns() {
+  const doc = { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' };
+  const s500 = { layers: 500, images: 2 };
+  const s1000 = { layers: 1000, images: 2, dur: 90 };
+  return [
+    { name: 'tracer-drag-today-500-idle', ...latency, app: true, tracer: true, mode: 'today', load: false, synthetic: s500, inputModes: ['drag'] },
+    { name: 'tracer-drag-engine-500-idle', ...latency, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s500, inputModes: ['drag'], env: doc },
+    { name: 'tracer-drag-today-500-load', ...latency, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: s500, inputModes: ['drag'] },
+    { name: 'tracer-drag-engine-500-load', ...latency, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: s500, inputModes: ['drag'], env: doc },
+    { name: 'tracer-edit-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, edits: { everyMs: 250 }, startS: 0, env: doc },
+    { name: 'tracer-playback-engine-25', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
+    { name: 'tracer-playback-engine-23976', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc },
+    { name: 'tracer-playback-engine-30-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0, env: doc }
+  ];
+}
 const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
 
 /* ── build ─────────────────────────────────────────────────────────── */
@@ -175,7 +199,7 @@ if (selected.some((run) => run.app)) {
   await build({ ...common, entryPoints: { 'app-main': path.join(desktop, 'src/main/engine/integration/measure-app-main.ts') }, outdir: work, platform: 'node', format: 'cjs', target: 'node22', external: ['electron'] });
   await build({ ...common, entryPoints: { 'app-page': path.join(desktop, 'src/main/engine/integration/measure-app-page.ts') }, outdir: work, platform: 'browser', format: 'iife', target: 'es2023' });
   if (!fs.existsSync(path.join(desktop, 'out/main/index.js'))) throw new Error('the app is not built: bun run build');
-  if (!fs.existsSync(project)) throw new Error(`the corpus project is missing: ${project}`);
+  if (selected.some((run) => run.app && !run.synthetic) && !fs.existsSync(project)) throw new Error(`the corpus project is missing: ${project}`);
 }
 fs.writeFileSync(
   path.join(work, 'measure.html'),
@@ -368,7 +392,7 @@ function contentFrames(raw, fps) {
   const m0 = mediaAt(line, host(rec.startMs));
   const m1 = mediaAt(line, host(rec.endMs));
   // Draws of timed content frames: [rafMs, pts].
-  const draws = page.mode === 'engine' ? page.engineTrace.draws.filter((d) => d[7] === 1).map((d) => [d[0], d[3], d[5]]) : page.today.draws.map((d) => [d[0], d[2], null]);
+  const draws = page.mode === 'engine' || page.mode === 'tracer' ? page.engineTrace.draws.filter((d) => d[7] === 1).map((d) => [d[0], d[3], d[5]]) : page.today.draws.map((d) => [d[0], d[2], null]);
   const byPts = new Map();
   const submits = new Map();
   for (const [rafMs, pts, submitMs] of draws) {
@@ -397,7 +421,8 @@ function analyzePlayback(raw) {
   const byPts = { get: rafOf };
   // A presentation worker's canvas has no PipelineReporter: its frames are
   // timed on viz's side (traceContext.vizFrame).
-  const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
+  const engineLike = page.mode === 'engine' || page.mode === 'tracer';
+  const offMain = engineLike && !!page.presenter?.offMainThread;
   const sink = offMain ? ctx.sinkFor(page.engineTrace.draws.map((d) => d[5])) : null;
   if (offMain && !sink) throw new Error('no viz frame sink matches the worker canvas (was graphics.pipeline traced?)');
   const presentedFrame = (k, rafMs) => (offMain ? ctx.vizFrame(sink, rafMs, submitOf(k)) : ctx.frameAt(rafMs));
@@ -447,7 +472,7 @@ function analyzePlayback(raw) {
           timing: 'PipelineReporter',
           // The viz timing applied to the page's own frames, against
           // PipelineReporter: how far apart the two put the same frame.
-          vizCheck: page.mode === 'engine' ? (() => {
+          vizCheck: engineLike ? (() => {
             const pageSink = ctx.sinkFor(page.engineTrace.draws.map((d) => d[5]));
             const diffs = [];
             for (let k = kFirst; k <= kLast; k++) {
@@ -469,7 +494,8 @@ function analyzePlayback(raw) {
     // Presentation minus due time on the clock line (the A/V offset the
     // jitter numbers remove; section 15 keeps A/V sync within ±10 ms).
     dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
-    ...(page.mode === 'engine'
+    ...(page.edits?.length ? { edits: analyzeEdits(page, ctx, sink, offMain) } : {}),
+    ...(engineLike
       ? (() => {
           const t = page.engineTrace;
           // Renderer time of each draw (rAF to submit), and when each timed
@@ -492,6 +518,27 @@ function analyzePlayback(raw) {
     presenter: page.presenter,
     receiver: page.receiver
   };
+}
+
+/**
+ * Inspector edits during playback (tracer): how long the renderer held its
+ * main thread to apply each one and hand it to the engine, and from the
+ * edit to the presentation of the first engine frame whose revision
+ * includes it (viz timing for the worker's canvas).
+ */
+function analyzeEdits(page, ctx, sink, offMain) {
+  const draws = page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[2], submitMs: d[5] })).sort((a, b) => a.rafMs - b.rafMs);
+  const applyMs = [];
+  const toPresentMs = [];
+  let unpresented = 0;
+  for (const [rev, t0, t1] of page.edits) {
+    applyMs.push(t1 - t0);
+    const d = draws.find((x) => x.rev >= rev && x.rafMs >= t0);
+    const pf = d ? (offMain ? ctx.vizFrame(sink, d.rafMs, d.submitMs) : ctx.frameAt(d.rafMs)) : null;
+    if (pf && PRESENTED.has(pf.state)) toPresentMs.push((pf.end - ctx.toTrace(t0)) / 1000);
+    else unpresented++;
+  }
+  return { n: page.edits.length, applyMs: dist(applyMs, 3), editToPresentMs: dist(toPresentMs, 2), unpresented };
 }
 
 /**
@@ -596,12 +643,15 @@ function analyzeLatency(raw) {
     const page = run.page;
     const revOf = new Map();
     for (const [rev, seqs] of page.inputs) for (const s of seqs) if (!revOf.has(s)) revOf.set(s, rev);
-    const draws = (page.mode === 'engine' ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[6], submitMs: d[5], arrivedMs: d[4] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    // Engine frames echo the view sequence (pans) or, on the tracer, the
+    // document revision (layer drags).
+    const engineLike = page.mode === 'engine' || page.mode === 'tracer';
+    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: page.mode === 'tracer' ? d[2] : d[6], submitMs: d[5], arrivedMs: d[4] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
     // When the page handled each input (ms, page clock): the first dispatch
     // that carried it.
     const handledOf = new Map();
     for (const [, seqs, , handledMs] of page.inputs) for (const s of seqs) if (!handledOf.has(s)) handledOf.set(s, handledMs);
-    const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
+    const offMain = engineLike && !!page.presenter?.offMainThread;
     const sink = offMain ? ctx.sinkFor(draws.map((d) => d.submitMs)) : null;
     const lat = [];
     // Every matched event, an unpresented first frame counted up to the
@@ -640,7 +690,7 @@ function analyzeLatency(raw) {
         if (handled != null) {
           const handledUs = ctx.toTrace(handled);
           hops.inputToHandled.push((handledUs - ctx.hostToTrace(tsUs)) / 1000);
-          if (page.mode === 'engine' && d.arrivedMs != null) {
+          if (engineLike && d.arrivedMs != null) {
             hops.handledToArrival.push(d.arrivedMs - handled);
             hops.arrivalToSubmit.push(d.submitMs - d.arrivedMs);
             if (pf.received != null) {
@@ -649,7 +699,7 @@ function analyzeLatency(raw) {
               hops.receivedToDraw.push((pf.swapBegin - pf.received) / 1000);
               hops.drawToPresent.push((pf.end - pf.swapBegin) / 1000);
             }
-          } else if (page.mode !== 'engine') {
+          } else if (!engineLike) {
             hops.handledToRaf.push(d.rafMs - handled);
             hops.rafToPresent.push((pf.end - ctx.toTrace(d.rafMs)) / 1000);
           }
@@ -706,7 +756,7 @@ try {
         POWERMOVE_BACKGROUND_TEST: '1',
         POWERMOVE_USER_DATA: profile,
         POWERMOVE_DEVTOOLS: '0',
-        POWERMOVE_NEW_ENGINE: run.mode === 'engine' ? '1' : '0',
+        POWERMOVE_NEW_ENGINE: run.mode === 'engine' || run.mode === 'tracer' ? '1' : '0',
         // The engine's test source at the project's rate (the Powermove ad is 30 fps).
         POWERMOVE_BRIDGE_TEST_FPS: String(run.fps ?? 30),
         CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
@@ -749,7 +799,8 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, app: !!run.app, mainRate: run.mainRate || undefined, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode === 'engine' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
+        config: { scenario: run.scenario, app: !!run.app, mainRate: run.mainRate || undefined, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode !== 'today' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode !== 'today' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes, synthetic: run.synthetic, edits: run.edits },
+        ...(raw.synthetic ? { synthetic: raw.synthetic } : {}),
         versions: raw.versions,
         display: raw.display,
         ...(from ? {} : { displayState: { before: displayBefore, after: displayAfter } }),
@@ -770,7 +821,9 @@ try {
       process.stdout.write(`   analysis failed: ${error.message}\n${(raw.log ?? []).slice(-15).join('\n')}\n`);
       continue;
     }
-    fs.writeFileSync(path.join(summaries, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
+    const dir = run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;
     if (summary.playback) {
       const p = summary.playback;
