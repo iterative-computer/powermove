@@ -7,11 +7,17 @@
  *
  * Usage (under the machine-wide Electron lock):
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
- *     bun engine/crates/pm-render/tools/effects/webgl.ts [--corpus <dir>] [--angle metal|swiftshader] [--filter <s>] [--perturb [k]]
+ *     bun engine/crates/pm-render/tools/effects/webgl.ts [--corpus <dir>] [--angle metal|swiftshader] [--filter <s>] [--perturb [k]] [--perturb-input]
  * Default corpus: the newest glsl-* capture in the engine corpus folder.
  * Output: <corpus>/webgl-<angle>[-perturbed<k>]/<case>/<variant>.f16 and status.json
  * (`compiled`, the link log, and any GL error the draws raised: a program that
  * links but whose draw WebGL rejects renders nothing in the compositor).
+ *
+ * --perturb-input moves every non-zero input texel value one binary16 step
+ * away from zero (into <corpus>/webgl-<angle>-input-perturbed): a shader
+ * whose output moves by more than the parity tolerance under it is
+ * ill-conditioned in WebGL itself (amendment 9's WebGL-unstable class), so
+ * any renderer that computes its input slightly differently differs there.
  *
  * The browser is headless; nothing is shown on screen.
  */
@@ -29,12 +35,13 @@ const filter = args.includes('--filter') ? args[args.indexOf('--filter') + 1]! :
 const perturb = args.includes('--perturb');
 const perturbArg = perturb ? args[args.indexOf('--perturb') + 1] : undefined;
 const perturbK = perturbArg !== undefined && /^-?\d+(\.\d+)?$/.test(perturbArg) ? Number(perturbArg) : 1;
+const perturbInput = args.includes('--perturb-input');
 const ROOT = join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
 const corpusDir = args.includes('--corpus')
   ? resolve(args[args.indexOf('--corpus') + 1]!)
   : join(ROOT, (await readdir(ROOT)).filter((d) => d.startsWith('glsl-')).sort().at(-1) ?? 'missing');
 const corpus = JSON.parse(await readFile(join(corpusDir, 'corpus.json'), 'utf8'));
-const out = join(corpusDir, `webgl-${angle}${perturb ? `-perturbed${perturbK === 1 ? '' : perturbK}` : ''}`);
+const out = join(corpusDir, `webgl-${angle}${perturb ? `-perturbed${perturbK === 1 ? '' : perturbK}` : ''}${perturbInput ? '-input-perturbed' : ''}`);
 await mkdir(out, { recursive: true });
 
 const launchArgs = angle === 'swiftshader'
@@ -46,7 +53,18 @@ await page.goto('about:blank');
 
 const images: Record<string, { width: number; height: number; data: string }> = {};
 for (const image of corpus.images) {
-  images[image.name] = { width: image.width, height: image.height, data: (await readFile(join(corpusDir, image.file))).toString('base64') };
+  const bytes = await readFile(join(corpusDir, image.file));
+  if (perturbInput) {
+    // binary16 bits + 1 on the magnitude: the next value away from zero.
+    for (let i = 0; i < bytes.length; i += 2) {
+      const h = bytes[i]! | (bytes[i + 1]! << 8);
+      if ((h & 0x7fff) !== 0 && (h & 0x7c00) !== 0x7c00) {
+        const n = h + 1;
+        bytes[i] = n & 0xff; bytes[i + 1] = n >> 8;
+      }
+    }
+  }
+  images[image.name] = { width: image.width, height: image.height, data: bytes.toString('base64') };
 }
 
 const renderer = await page.evaluate(({ vertex, images }) => {

@@ -35,13 +35,14 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 }
 
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
-/// or the newest `v1-*` corpus capture and the newest `render-*` capture
-/// (the render parity cases, `engine/corpus/src/projects/render.ts`).
+/// or the newest `v1-*` corpus capture, the newest `render-*` capture (the
+/// render parity cases, `engine/corpus/src/projects/render.ts`), and the
+/// newest `effects-*` capture (`render-effects.ts`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
     }
-    ["v1-", "render-"]
+    ["v1-", "render-", "effects-"]
         .iter()
         .filter_map(|p| newest_capture(p))
         .collect()

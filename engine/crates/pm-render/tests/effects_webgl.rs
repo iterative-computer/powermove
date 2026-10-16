@@ -405,3 +405,69 @@ fn effects_transitions_and_probes_match_webgl() {
     }
     assert_eq!(failed, 0, "{failed} shader parity failures");
 }
+
+/// Amendment 9's WebGL-unstable class: WebGL against itself with every
+/// input texel one binary16 step away from zero (`webgl.ts
+/// --perturb-input`). A variant whose output moves past the Standard
+/// tolerance under that is ill-conditioned in WebGL: any renderer whose
+/// input differs at rounding level (pm-render's layer buffer is within
+/// 1 CV of today's, not bit-identical) differs there too. Reports every
+/// such built-in variant.
+#[test]
+fn webgl_instability_under_a_one_step_input_perturbation() {
+    let Some(dir) = corpus_dir() else {
+        eprintln!("no shader corpus; skipped");
+        return;
+    };
+    let perturbed = dir.join("webgl-metal-input-perturbed");
+    if !perturbed.exists() {
+        eprintln!("no input-perturbed WebGL run (webgl.ts --perturb-input); skipped");
+        return;
+    }
+    let corpus: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("corpus.json")).unwrap()).unwrap();
+    let mut unstable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut compared = 0;
+    for case in corpus["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        let folder = id.replace('/', "__");
+        for variant in case["variants"].as_array().unwrap() {
+            let name = variant["name"].as_str().unwrap();
+            let (Some(a), Some(b)) = (
+                read_f16(
+                    &dir.join("webgl-metal")
+                        .join(&folder)
+                        .join(format!("{name}.f16")),
+                ),
+                read_f16(&perturbed.join(&folder).join(format!("{name}.f16"))),
+            ) else {
+                continue;
+            };
+            compared += 1;
+            let a: Vec<f32> = a
+                .iter()
+                .map(|h| pm_gpu::readback::half_to_f32(*h))
+                .collect();
+            let m = compare(&a, &b);
+            if !m.pass() {
+                unstable.entry(id.to_owned()).or_default().push(format!(
+                    "{name}: {} px over 1 CV, max {} CV",
+                    m.over_one, m.max_cv
+                ));
+            }
+        }
+    }
+    eprintln!("{compared} variants compared with their input-perturbed WebGL output");
+    for (id, variants) in &unstable {
+        eprintln!("WebGL-unstable: {id}");
+        for v in variants {
+            eprintln!("  {v}");
+        }
+    }
+    if compared > 0 {
+        assert!(
+            unstable.contains_key("builtin/effect/posterize"),
+            "Posterize is a step function of its input; expected it to move under a one-step perturbation"
+        );
+    }
+}

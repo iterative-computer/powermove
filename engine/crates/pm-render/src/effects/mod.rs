@@ -42,6 +42,16 @@ pub use watchdog::Watchdog;
 /// The compositor's vertex shader every legacy program links with.
 pub use pm_glsl::VERTEX;
 
+/// Built-in effects in amendment 9's WebGL-unstable class: today's WebGL
+/// output itself moves past the Standard tolerance when its input moves by
+/// one binary16 step (`tests/effects_webgl.rs`,
+/// `webgl_instability_under_a_one_step_input_perturbation`: Posterize and
+/// Levels are step functions at some parameters, Color's hue rotation at
+/// saturated extremes). Where the engine's input to them differs from
+/// today's at rounding level, their output differs at isolated pixels;
+/// such frames are judged by review, not by the Standard class alone.
+pub const WEBGL_UNSTABLE: &[&str] = &["posterize", "levels", "color"];
+
 /// Where a definition stands.
 #[derive(Debug, Clone)]
 pub enum Status {

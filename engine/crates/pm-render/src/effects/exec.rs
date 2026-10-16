@@ -320,13 +320,7 @@ impl Exec<'_> {
                 },
             ],
         });
-        let mut pass = begin(
-            encoder,
-            target,
-            "pm stage composite",
-            wgpu::LoadOp::Load,
-            None,
-        );
+        let mut pass = begin(encoder, target, "pm stage composite", wgpu::LoadOp::Load);
         pass.set_pipeline(self.pipelines.draw(target.format()));
         pass.set_bind_group(0, &quad, &[0]);
         pass.set_bind_group(1, &tex, &[]);
@@ -375,6 +369,9 @@ impl Exec<'_> {
                 instance: Some(EffectInstanceId::from(step.instance.as_str())),
             })
         });
+        if let (Some(timer), Some((b, _))) = (&self.timer, span) {
+            timer.mark(device, encoder, &input.view, b);
+        }
         let mut outputs: Vec<Target> = Vec::new();
         for pass in 0..step.passes {
             let mut calls: Vec<(String, Call)> = vec![("u_tex".into(), Call::I(0))];
@@ -407,9 +404,6 @@ impl Exec<'_> {
                 backdrop.filter(|_| step.backdrop),
             ];
             let out = self.pool.take_working(device, w, h, self.precision);
-            let first = pass == 0;
-            let last = pass + 1 == step.passes;
-            let timestamps = span.map(|(b, e)| (first.then_some(b), last.then_some(e)));
             self.legacy_pass(
                 encoder,
                 DefinitionKind::Effect,
@@ -417,9 +411,11 @@ impl Exec<'_> {
                 &calls,
                 &units,
                 &out,
-                timestamps,
             );
             outputs.push(out);
+        }
+        if let (Some(timer), Some((_, e)), Some(last)) = (&self.timer, span, outputs.last()) {
+            timer.mark(device, encoder, &last.view, e);
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
@@ -484,7 +480,9 @@ impl Exec<'_> {
             .expect("built above");
         param_calls(program, &step.params, &mut calls);
         let out = self.pool.take_working(device, w, h, self.precision);
-        let timestamps = span.map(|(b, e)| (Some(b), Some(e)));
+        if let (Some(timer), Some((b, _))) = (&self.timer, span) {
+            timer.mark(device, encoder, &from.view, b);
+        }
         self.legacy_pass(
             encoder,
             DefinitionKind::Transition,
@@ -492,8 +490,10 @@ impl Exec<'_> {
             &calls,
             &[Some(from), Some(to)],
             &out,
-            timestamps,
         );
+        if let (Some(timer), Some((_, e))) = (&self.timer, span) {
+            timer.mark(device, encoder, &out.view, e);
+        }
         Some(out)
     }
 
@@ -509,14 +509,12 @@ impl Exec<'_> {
         calls: &[(String, Call)],
         units: &[Option<&Target>],
         out: &Target,
-        timestamps: Option<(Option<u32>, Option<u32>)>,
     ) {
         let device = self.device;
         let queue = self.queue;
         let format = out.format();
         let dummy = self.effects.dummy(device, queue, format);
         let linear = &self.pipelines.linear;
-        let timer = self.timer.as_ref();
         let program = self
             .effects
             .program(device, kind, definition, format)
@@ -583,22 +581,11 @@ impl Exec<'_> {
             .pipeline(device, format)
             .expect("built above")
             .clone();
-        let timestamp_writes = match (timer, timestamps) {
-            (Some(timer), Some((b, e))) if b.is_some() || e.is_some() => {
-                Some(wgpu::RenderPassTimestampWrites {
-                    query_set: &timer.set,
-                    beginning_of_pass_write_index: b,
-                    end_of_pass_write_index: e,
-                })
-            }
-            _ => None,
-        };
         let mut pass = begin(
             encoder,
             out,
             "pm legacy glsl",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            timestamp_writes,
         );
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &fragment, &[]);
@@ -626,7 +613,6 @@ impl Exec<'_> {
             out,
             "pm effect clamp",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            None,
         );
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &group, &[]);
@@ -639,7 +625,6 @@ fn begin<'e>(
     target: &Target,
     label: &str,
     load: wgpu::LoadOp<wgpu::Color>,
-    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
 ) -> wgpu::RenderPass<'e> {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
@@ -653,7 +638,7 @@ fn begin<'e>(
             },
         })],
         depth_stencil_attachment: None,
-        timestamp_writes,
+        timestamp_writes: None,
         occlusion_query_set: None,
         multiview_mask: None,
     })

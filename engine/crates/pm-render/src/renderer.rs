@@ -515,9 +515,7 @@ impl Renderer {
             (legend, exec.taken, exec.unsupported, exec.failures, timer)
         };
         if let Some(timer) = timer {
-            self.effects
-                .watchdog
-                .finish(&self.device, &mut encoder, timer);
+            self.effects.watchdog.finish(&mut encoder, timer);
         }
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
