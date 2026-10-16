@@ -994,7 +994,13 @@ fn measure_heavy_precomp_band_cost() {
         }
     }
     let mut renderer = Renderer::headless().unwrap();
-    for (layers, width) in [(96usize, 720u32), (96, 1920), (96, 3840), (400, 3840), (1500, 3840)] {
+    for (layers, width) in [
+        (96usize, 720u32),
+        (96, 1920),
+        (96, 3840),
+        (400, 3840),
+        (1500, 3840),
+    ] {
         let doc = load(&heavy_precomp(layers));
         for bands in [false, true] {
             let mut line = format!(
