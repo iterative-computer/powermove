@@ -41,7 +41,13 @@ from the renderer are notifications; the clock samples are the answer.
    epoch or `seq` advances. A loop wrap is not a discontinuity: the line
    carries the loop range and invariant 1 wraps it, so one epoch spans
    every pass of a looped run (consumers can prepare the loop start ahead
-   of the wrap). Changing the loop range publishes a new `seq`.
+   of the wrap). Changing the loop range publishes a new `seq`. A sample
+   carries `loop_range` only while the media heard is inside the loop and
+   the run wraps at its end: a run from a playhead before the loop start
+   is a straight line (no range) until it enters the loop, where a new
+   `seq` with the range follows; a run past the loop end, a play around,
+   a scrub grain, and a stopped clock carry none. The range published is
+   the sample-aligned one the audio wraps at.
 3. **Latency is folded in.** `host_time` is when `media_time` reaches the
    listener, output latency included; `output_latency_us` is for logs only.
 4. **State and rate agree.** A stopped clock has rate 0 and a running clock
