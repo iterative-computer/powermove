@@ -1,0 +1,294 @@
+{
+  "run": "playback-engine-agent-snapshots-jobexport-r3",
+  "config": {
+    "scenario": "playback",
+    "app": false,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "env": {
+      "POWERMOVE_ENGINE_STATUS_LOG_MS": "500"
+    },
+    "mode": "engine",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 60,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      6.0546875,
+      5.35888671875,
+      5.63671875
+    ],
+    "after": [
+      5.0458984375,
+      5.23193359375,
+      5.56884765625
+    ]
+  },
+  "clock": {
+    "rttUs": 30,
+    "offsetUs": 303378866479
+  },
+  "load": null,
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.39a64e62d27fd380b544d1f96abe66f2",
+    "accepted": {
+      "pid": 61609,
+      "pidversion": 4081205
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 530841600
+    },
+    "live": 8
+  },
+  "agentSnapshots": {
+    "batches": 3,
+    "frames": 12,
+    "routed": [],
+    "failures": [],
+    "sizes": [
+      "720x405",
+      "720x405",
+      "720x405",
+      "720x405"
+    ],
+    "batchMsP50": 142.2,
+    "batchMsP95": 142.2,
+    "batchMsMax": 269.1,
+    "failureCount": 0,
+    "routedCount": 0,
+    "pendingAtEndMs": 54004.3,
+    "settledAfterStopMs": 73.5,
+    "playbackSignals": [
+      [
+        604.991583,
+        true
+      ],
+      [
+        62123.001417,
+        false
+      ]
+    ],
+    "jobsAtEnd": {
+      "gate": {
+        "abandoned": 0,
+        "calibrations": 2,
+        "duringPlayback": 127,
+        "gpuTimed": 127,
+        "knownOverBound": 0,
+        "lastUnitTooLargeUs": 0,
+        "maxPlaybackGpuUs": 5986.5,
+        "maxPlaybackUs": 5986.5,
+        "measuredOverBound": 1,
+        "overBoundDuringPlayback": 3,
+        "oversizeProbes": 0,
+        "probeLimitReached": 0,
+        "slicedSubmissions": 125,
+        "submissions": 127,
+        "waitedForStop": 0
+      },
+      "jobs": 0,
+      "queued": {
+        "agentExports": 0,
+        "snapshots": 0,
+        "user": 0
+      },
+      "service": {
+        "batchesDuringPlayback": 3,
+        "exportsCancelled": 0,
+        "exportsDone": 0,
+        "exportsFailed": 0,
+        "exportsRouted": 0,
+        "frameBatches": 3,
+        "framesRendered": 12,
+        "maxQueuedMs": 28
+      },
+      "lagMs": 954
+    },
+    "jobsAfterSettle": {
+      "gate": {
+        "abandoned": 0,
+        "calibrations": 2,
+        "duringPlayback": 127,
+        "gpuTimed": 131,
+        "knownOverBound": 0,
+        "lastUnitTooLargeUs": 0,
+        "maxPlaybackGpuUs": 5986.5,
+        "maxPlaybackUs": 5986.5,
+        "measuredOverBound": 1,
+        "overBoundDuringPlayback": 3,
+        "oversizeProbes": 0,
+        "probeLimitReached": 0,
+        "slicedSubmissions": 125,
+        "submissions": 131,
+        "waitedForStop": 1
+      },
+      "jobs": 0,
+      "queued": {
+        "agentExports": 0,
+        "snapshots": 0,
+        "user": 0
+      },
+      "service": {
+        "batchesDuringPlayback": 4,
+        "exportsCancelled": 0,
+        "exportsDone": 0,
+        "exportsFailed": 0,
+        "exportsRouted": 0,
+        "frameBatches": 4,
+        "framesRendered": 16,
+        "maxQueuedMs": 28
+      }
+    },
+    "queuedMsMax": 28,
+    "jobEngineLog": [
+      "0.140 info: the job engine started (pid 61610, protocol-ec2dc3a830649ec9, clock delivered after 28892871469 µs)",
+      "0.141 info: the job engine is ready (generation 1, pid 61610)",
+      "0.142 info: [job engine] port 2 negotiated with Host",
+      "0.142 info: [job engine] port 5 negotiated with InteractiveEngine"
+    ]
+  },
+  "playback": {
+    "window": {
+      "seconds": 60.01,
+      "displayHz": 120.0006103515625,
+      "contentFps": 60,
+      "reporterFrames": 7487
+    },
+    "presentation": {
+      "thread": "main",
+      "timing": "PipelineReporter",
+      "vizCheck": {
+        "sink": null,
+        "vizMinusReporterMs": {
+          "n": 0
+        }
+      }
+    },
+    "frames": {
+      "expected": 3587,
+      "notDrawn": 0,
+      "notPresented": 0,
+      "drops": 0,
+      "presented": 3587,
+      "offSlot": 6
+    },
+    "jitterAbsMs": {
+      "n": 3587,
+      "p50": 0.115,
+      "p95": 3.913,
+      "p99": 3.932,
+      "max": 12.265
+    },
+    "intervalErrorAbsMs": {
+      "n": 3586,
+      "p50": 0,
+      "p95": 0.001,
+      "p99": 0.001,
+      "max": 9.921
+    },
+    "irregularIntervals": 10,
+    "rafToPresentMs": {
+      "n": 3587,
+      "p50": 19.18,
+      "p95": 19.58,
+      "p99": 20.74,
+      "max": 20.9
+    },
+    "dueToPresentMs": {
+      "n": 3587,
+      "p50": 18.25,
+      "p95": 18.48,
+      "p99": 18.53,
+      "max": 18.54
+    },
+    "drawMainThreadMs": {
+      "n": 3600,
+      "p50": 0.2,
+      "p95": 2.4,
+      "p99": 3.4,
+      "max": 4
+    },
+    "arrivalLeadMs": {
+      "n": 3601,
+      "p50": -60.14,
+      "p95": -56.97,
+      "p99": -55.41,
+      "max": -51.71
+    },
+    "rafGapMs": {
+      "n": 7200,
+      "p50": 8.3,
+      "p95": 9.4,
+      "p99": 10.2,
+      "max": 11
+    },
+    "rafGapsOver25Ms": 0,
+    "missing": [],
+    "pipelineDepthRefreshes": {
+      "1": 2,
+      "2": 3567,
+      "3": 18
+    },
+    "presenter": {
+      "received": 3693,
+      "drawn": 3689,
+      "dropped": {},
+      "released": 3689,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 4,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 1,
+      "offMainThread": false
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 8,
+      "received": 8,
+      "released": 0,
+      "videoFrames": 3693,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

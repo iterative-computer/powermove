@@ -8,7 +8,7 @@ const native = vi.hoisted(() => ({ showSaveDialog: vi.fn(), window: { isDestroye
 vi.mock('electron',()=>({app:{ getAppPath: () => '.', getPath: () => '/tmp', on: vi.fn() },
   BrowserWindow: { fromWebContents: () => native.window }, dialog:{ showSaveDialog: native.showSaveDialog }}));
 afterEach(() => vi.restoreAllMocks());
-import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs} from './render-encoder';
+import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs,routeToCurrentExporter,takeRoutedDestination} from './render-encoder';
 import {resolveFfmpeg} from './ffmpeg-binary';
 const tools=resolveFfmpeg({packaged:false,resourcesPath:'',appPath:path.resolve(__dirname,'../..')}),binary=tools.ffmpeg;
 /** ffprobe's view of the first video stream. */
@@ -89,5 +89,37 @@ it.each([false, true])('finishes real video with automatic agent delivery=%s', a
       expect((await readFile(destination)).length).toBeGreaterThan(0);
       expect(native.showSaveDialog).toHaveBeenCalledTimes(automatic ? 0 : 1);
     });
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+describe('exports the job engine routed here',()=>{
+ it('write the file the user already chose, once, with its extension, while fresh',()=>{
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',1000);
+  expect(takeRoutedDestination(8,'mov',1000)).toBeUndefined();
+  expect(takeRoutedDestination(7,'mp4',1000)).toBeUndefined();
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',1000);
+  expect(takeRoutedDestination(7,'mov',2000)).toBe('/Users/x/Cut.mov');
+  expect(takeRoutedDestination(7,'mov',2000)).toBeUndefined();
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',0);
+  expect(takeRoutedDestination(7,'mov',11*60_000)).toBeUndefined();
+ });
+});
+it('an agent export never takes a routed destination the user chose', async () => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'powermove-render-routed-'));
+  const handlers = new Map<string, any>();
+  registerRenderEncoder({ handle: (channel: string, handler: any) => handlers.set(channel, handler) } as any, { isTrustedSender: () => true, ffmpeg: binary });
+  native.showSaveDialog.mockReset();
+  const event = { sender: { id: 9, isDestroyed: () => false } };
+  const chosen = path.join(folder, 'User cut.mp4');
+  try {
+    // An export sheet job routed here never reached renderStart.
+    routeToCurrentExporter(9, chosen);
+    await withAgentExport(event.sender, folder, async () => {
+      const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Agent cut' });
+      await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
+      expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: path.join(folder, 'Agent cut.mp4') });
+    });
+    await expect(readFile(chosen)).rejects.toThrow();
+    // The user's own export still takes it.
+    expect(takeRoutedDestination(9, 'mp4')).toBe(chosen);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

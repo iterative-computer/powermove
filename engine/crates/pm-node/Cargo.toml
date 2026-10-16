@@ -29,15 +29,25 @@ napi-derive = { version = "3.6", optional = true }
 # and the check-in with main.
 [target.'cfg(target_os = "macos")'.dependencies]
 pm-bridge = { path = "../pm-bridge" }
-# Without decode-in until media reaches the engine (no FFmpeg in the addon yet).
 pm-gpu = { path = "../pm-gpu", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+# The job engine's render and export service (sections 17 and 20): pm-render
+# frames, pm-audio's offline mix, VideoToolbox and AVAssetWriter through
+# pm-export. This links FFmpeg (pm-media) into the addon.
+pm-export = { path = "../pm-export" }
+pm-render = { path = "../pm-render" }
+# Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
+pm-media = { path = "../pm-media" }
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]
 # The C′ prototype (pm-gpu `remote-layer`): measurement builds only. Without
 # it, POWERMOVE_BRIDGE_REMOTE_LAYER=1 reports that this build has no C′.
 remote-layer = ["pm-gpu/remote-layer"]
+
+[dev-dependencies]
+pm-model = { path = "../pm-model" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [[test]]
 # Runs on the main thread (the CoreText registry uses AppKit's font manager).

@@ -174,6 +174,10 @@ pub enum Overwrite {
     Fail,
     /// Atomically replace the existing file.
     Replace,
+    /// The destination is a temporary file host services created for this job
+    /// (contract 14, `outputDestination`): the export is written beside it and
+    /// renamed over it, and the host moves it into place after `commitOutput`.
+    InPlace,
 }
 
 /// Linear PCM audio handed to the exporter: interleaved `f32` at `sample_rate`.

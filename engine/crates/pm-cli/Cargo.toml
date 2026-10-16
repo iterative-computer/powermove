@@ -15,10 +15,23 @@ path = "src/main.rs"
 test = true
 
 [dependencies]
+pm-export = { path = "../pm-export" }
+pm-render = { path = "../pm-render" }
 pm-model = { path = "../pm-model" }
 pm-eval = { path = "../pm-eval" }
 pm-text = { path = "../pm-text", features = ["system"] }
 # The renderer's mirror, run natively for the native/wasm32 identity check
 # and as the production expression engine.
 pm-wasm = { path = "../pm-wasm" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-time = { path = "../pm-time" }
+# Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
+pm-media = { path = "../pm-media" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+png = "0.18"
+libc = "0.2"
+
+[dev-dependencies]
 serde_json.workspace = true

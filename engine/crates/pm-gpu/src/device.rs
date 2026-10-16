@@ -36,12 +36,14 @@ pub fn required_features() -> wgpu::Features {
 }
 
 /// Features the render graph uses when present: `rgba32float` filtering
-/// and blending (32-bit precision), and passthrough shaders (Metal's safe
-/// math mode for color-critical programs, `crate::msl`).
+/// and blending (32-bit precision), passthrough shaders (Metal's safe
+/// math mode for color-critical programs, `crate::msl`), and pass
+/// timestamps (the job engine's GPU time per submission, contract 13).
 pub fn optional_features() -> wgpu::Features {
     wgpu::Features::FLOAT32_FILTERABLE
         | wgpu::Features::FLOAT32_BLENDABLE
         | wgpu::Features::PASSTHROUGH_SHADERS
+        | wgpu::Features::TIMESTAMP_QUERY
 }
 
 impl Gpu {

@@ -1902,11 +1902,20 @@ version = "0.1.0"
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pm-eval",
+ "pm-export",
+ "pm-media",
  "pm-model",
+ "pm-protocol",
+ "pm-render",
  "pm-text",
+ "pm-time",
  "pm-wasm",
+ "png",
+ "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1963,6 +1972,8 @@ name = "pm-export"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "image",
+ "libc",
  "libm",
  "objc2",
  "objc2-av-foundation",
@@ -1974,9 +1985,18 @@ dependencies = [
  "objc2-foundation",
  "objc2-io-surface",
  "objc2-video-toolbox",
+ "pm-audio",
+ "pm-eval",
+ "pm-export",
+ "pm-media",
+ "pm-model",
+ "pm-protocol",
+ "pm-render",
  "pm-time",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "wgpu",
 ]
 
 [[package]]
@@ -2062,14 +2082,19 @@ dependencies = [
 name = "pm-node"
 version = "0.1.0"
 dependencies = [
+ "image",
  "libc",
  "napi",
  "napi-build",
  "napi-derive",
  "pm-bridge",
  "pm-engine",
+ "pm-export",
  "pm-gpu",
+ "pm-media",
+ "pm-model",
  "pm-protocol",
+ "pm-render",
  "pm-text",
  "serde",
  "serde_json",

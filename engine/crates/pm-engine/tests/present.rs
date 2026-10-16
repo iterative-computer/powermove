@@ -380,3 +380,110 @@ fn a_pool_past_the_lease_is_charged_over_and_logged() {
     ));
     assert_eq!(engine.lease().used_in(Category::SurfacePool), 1 << 20);
 }
+
+/// The host's deadline signals among `actions` (contract 13).
+fn deadlines(actions: &[pm_engine::Action]) -> Vec<pm_protocol::slicing::DeadlineSignal> {
+    sent(actions, HOST)
+        .into_iter()
+        .filter_map(|e| match e.message {
+            Message::Event {
+                body: Event::Deadline(signal),
+            } => Some(signal),
+            _ => None,
+        })
+        .collect()
+}
+
+fn open_viewer(engine: &mut Engine, port: PortId, id: u64) -> SessionId {
+    let out = send(
+        engine,
+        port,
+        request(
+            id,
+            Request::OpenSession(OpenSession {
+                document: "doc".into(),
+                process: EngineProcess::Interactive,
+                role: SessionRole::Interactive,
+                color: pm_protocol::color::ProjectColor::DEFAULT,
+            }),
+            None,
+        ),
+    );
+    match &sent(&out, port)[0].message {
+        Message::Response {
+            body: Response::SessionOpened { session },
+            ..
+        } => *session,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Playback in any viewer tells the host (which relays it to the job
+/// engine) so agent snapshots and exports slice their GPU work; the last
+/// viewer to stop, close, or go away ends it.
+#[test]
+fn viewer_playback_sends_playback_started_and_stopped_to_the_host() {
+    use pm_protocol::slicing::DeadlineSignal as D;
+    let (mut engine, _calls, a) = setup(0);
+    let b = open_viewer(&mut engine, OTHER, 9);
+    let play = |rate| Event::Transport(TransportCommand::Play { rate });
+    let out = send(
+        &mut engine,
+        WINDOW,
+        event(play(PlaybackRate::NORMAL), Some(a)),
+    );
+    assert_eq!(
+        deadlines(&out),
+        vec![D::PlaybackStarted {
+            at: at(10),
+            rate: PlaybackRate::NORMAL,
+            frame_budget_us: 16_667
+        }]
+    );
+    assert!(engine.is_playing());
+    // A second viewer joining, seeking, or a repeated play sends nothing.
+    assert!(
+        deadlines(&send(
+            &mut engine,
+            OTHER,
+            event(play(PlaybackRate::NORMAL), Some(b))
+        ))
+        .is_empty()
+    );
+    assert!(
+        deadlines(&send(
+            &mut engine,
+            WINDOW,
+            event(play(PlaybackRate::NORMAL), Some(a))
+        ))
+        .is_empty()
+    );
+    let seek = Event::Transport(TransportCommand::Step { frames: 1 });
+    assert!(deadlines(&send(&mut engine, WINDOW, event(seek, Some(a)))).is_empty());
+    // One viewer pausing leaves the other playing.
+    let pause = Event::Transport(TransportCommand::Pause);
+    assert!(deadlines(&send(&mut engine, WINDOW, event(pause, Some(a)))).is_empty());
+    // The last one going away stops playback.
+    let out = engine.detach(OTHER);
+    assert!(matches!(deadlines(&out)[..], [D::PlaybackStopped { .. }]));
+    assert!(!engine.is_playing());
+    // Reverse playback counts; closing the session of a playing viewer stops it.
+    let out = send(
+        &mut engine,
+        WINDOW,
+        event(play(PlaybackRate { num: -2, den: 1 }), Some(a)),
+    );
+    assert!(matches!(
+        deadlines(&out)[..],
+        [D::PlaybackStarted {
+            rate: PlaybackRate { num: -2, den: 1 },
+            ..
+        }]
+    ));
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(3, Request::CloseSession, Some(a)),
+    );
+    assert!(matches!(deadlines(&out)[..], [D::PlaybackStopped { .. }]));
+}
