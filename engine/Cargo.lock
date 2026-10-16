@@ -2012,6 +2012,7 @@ name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "pm-model",
  "serde_json",
  "sha2",
 ]
