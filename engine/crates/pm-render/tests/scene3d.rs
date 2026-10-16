@@ -696,3 +696,82 @@ fn programs_and_uniforms_equal_three_js() {
         );
     }
 }
+
+#[test]
+fn programs_come_from_the_disk_cache_and_keys_follow_content() {
+    // A scene with shadows of every kind and maps (no capture needed).
+    let Some(c) = fixture()
+        .iter()
+        .find(|c| text(obj(c).get("id")) == Some("five-casting-lights".into()))
+        .map(|c| case(c, Path::new("/nonexistent")))
+    else {
+        panic!("case")
+    };
+    let gpu = pm_gpu::Gpu::new("pm-render 3d cache test").expect("a Metal device");
+    let dir = std::env::temp_dir().join(format!("pm-render-programs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plan = &c.outputs[0].0;
+    let render = |r: &mut Scene3dRenderer| {
+        let mut pool = pm_gpu::TargetPool::new();
+        let t0 = std::time::Instant::now();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let out = r
+            .render(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &mut pool,
+                plan,
+                false,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let bytes =
+            pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+        (bytes, t0.elapsed())
+    };
+    let mut cold = Scene3dRenderer::default();
+    cold.set_program_cache(Some(dir.clone()));
+    let (a, translate) = render(&mut cold);
+    assert_eq!(cold.program_cache_stats(), (0, 0));
+    let stored = std::fs::read_dir(&dir).unwrap().count();
+    assert!(
+        stored >= 3,
+        "standard, depth, and distance programs stored ({stored})"
+    );
+    let mut warm = Scene3dRenderer::default();
+    warm.set_program_cache(Some(dir.clone()));
+    let (b, cached) = render(&mut warm);
+    assert_eq!(warm.program_cache_stats(), (stored as u64, 0));
+    assert!(a == b, "cached programs render the same pixels");
+    eprintln!("first frame: translated {translate:?}, from the disk cache {cached:?}");
+    for e in std::fs::read_dir(&dir).unwrap() {
+        std::fs::write(e.unwrap().path(), "{").unwrap();
+    }
+    let mut again = Scene3dRenderer::default();
+    again.set_program_cache(Some(dir.clone()));
+    let (d, _) = render(&mut again);
+    assert_eq!(
+        again.program_cache_stats(),
+        (0, 0),
+        "damaged entries are misses"
+    );
+    assert!(a == d);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // Content keys: equal for equal renders, different when any input moves.
+    let key = plan.content_key();
+    assert_eq!(key, plan.clone().content_key());
+    let mut moved = (*plan.scene).clone();
+    moved.lights[0].intensity *= 1.01;
+    let other = Object3dPlan {
+        scene: Arc::new(moved),
+        ..plan.clone()
+    };
+    assert_ne!(key, other.content_key());
+    let mut bg = plan.clone();
+    if let Render3d::Layer { background, .. } = &mut bg.kind {
+        *background = !*background;
+    }
+    assert_ne!(key, bg.content_key());
+}

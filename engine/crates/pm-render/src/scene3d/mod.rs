@@ -76,3 +76,43 @@ pub struct Object3dPlan {
     pub scene: Arc<Scene3d>,
     pub kind: Render3d,
 }
+
+impl Object3dPlan {
+    /// The content key of the render (section 8, "Content keys"): every
+    /// quality-affecting input of the scene and of what this render draws
+    /// (geometry by source hash, materials, maps by file and its size and
+    /// modification time, lights, camera, environment, look, canvas size),
+    /// and the 3D pass's translation revision. Equal keys render equal
+    /// pixels on one device and math mode.
+    pub fn content_key(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"pm-render scene3d content 1");
+        h.update(format!("{:?}", self.kind).as_bytes());
+        h.update(format!("{:?}", self.scene).as_bytes());
+        // Map images are files: their version is part of the content.
+        for o in &self.scene.objects {
+            for m in &o.meshes {
+                let list: Vec<&Material3d> = match &m.materials {
+                    Materials::Single(x) => vec![x.as_ref()],
+                    Materials::Slots(v) => v.iter().collect(),
+                };
+                for mat in list {
+                    for (_, t) in mat.maps.all() {
+                        if let Some(t) = t
+                            && let Ok(meta) = std::fs::metadata(&t.path)
+                        {
+                            h.update(meta.len().to_le_bytes());
+                            if let Ok(time) = meta.modified()
+                                && let Ok(d) = time.duration_since(std::time::UNIX_EPOCH)
+                            {
+                                h.update(d.as_nanos().to_le_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        h.finalize().into()
+    }
+}

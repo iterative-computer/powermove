@@ -422,3 +422,75 @@ fn obj_models_and_mesh_layers_render() {
     assert_eq!(px(2, 2), [0.0, 0.0, 0.0]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The 3D pass's frame time at 1920 × 1080 with shadows of every kind:
+/// six models and a floor in one depth set, a casting sun, spot, and point
+/// light (the point light's 4096 × 2048 cube atlas), 4× MSAA, the shared
+/// prepass rendered once per frame and every layer's color pass. Release
+/// build: `cargo test --release -p pm-render --test scene3d_document -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn frame_time_3d_shadows_at_1080p() {
+    let mut layers = vec![camera("cam", [0.0, 2.0, 7.0], true, 4.0)];
+    let mut light = |id: &str, ty: &str, pos: [f64; 3]| {
+        let mut l = sun(id, pos, true, 4.0);
+        l["d"]["data"]["light"]["type"] = json!(ty);
+        l["d"]["data"]["light"]["p"]["intensity"] = ch(json!(if ty == "sun" { 1.5 } else { 20.0 }));
+        layers.push(l);
+    };
+    light("sun", "sun", [-3.0, 5.0, 4.0]);
+    light("spot", "spot", [2.0, 4.0, 2.0]);
+    light("bulb", "point", [0.0, 2.0, 1.0]);
+    for (i, p) in ["box", "sphere", "cylinder", "cone", "torus", "capsule"]
+        .iter()
+        .enumerate()
+    {
+        let mut o = object3d(&format!("o{i}"), p, json!({}), "#C7C4FF", 1920, 1080, 4.0);
+        set(&mut o, "position.x", json!(i as f64 * 1.2 - 3.0));
+        set(
+            &mut o,
+            "rotation.y",
+            keys(json!(0), &[(0.0, json!(0)), (4.0, json!(360))]),
+        );
+        layers.push(o);
+    }
+    let mut floor = object3d(
+        "floor",
+        "plane",
+        json!({ "width": 14, "height": 10 }),
+        "#808080",
+        1920,
+        1080,
+        4.0,
+    );
+    set(&mut floor, "position.y", json!(-0.6));
+    set(&mut floor, "rotation.x", json!(-90));
+    layers.push(floor);
+    let doc = load(&project(1920, 1080, 4.0, solid_fill("#000000"), layers));
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16);
+    let mut times = Vec::new();
+    for i in 0..45 {
+        let t0 = std::time::Instant::now();
+        let frame = r
+            .render(
+                &doc,
+                "Ptest-root",
+                ticks(f64::from(i) / 30.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        if i >= 5 {
+            times.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "3D 1920×1080, 7 layers, 3 shadow lights: median {:.2} ms, p95 {:.2} ms (CPU plan + GPU)",
+        times[times.len() / 2],
+        times[times.len() * 95 / 100]
+    );
+}

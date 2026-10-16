@@ -123,6 +123,9 @@ pub struct Scene3dRenderer {
     samples: u32,
     math: MathMode,
     programs: HashMap<u64, Arc<Compiled>>,
+    /// Program parameters (by a hash of their debug form) to their program,
+    /// so a draw does not regenerate its sources.
+    by_parameters: HashMap<u64, (u64, Arc<Compiled>)>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     meshes: HashMap<u64, Arc<GpuMesh>>,
     attachments: Option<Attachments>,
@@ -144,6 +147,7 @@ impl Default for Scene3dRenderer {
             samples: SAMPLES,
             math: MathMode::Safe,
             programs: HashMap::new(),
+            by_parameters: HashMap::new(),
             pipelines: HashMap::new(),
             meshes: HashMap::new(),
             attachments: None,
@@ -261,6 +265,7 @@ impl Scene3dRenderer {
     /// amendment 11; fast only for comparisons).
     pub fn set_math_mode(&mut self, math: MathMode) {
         self.math = math;
+        self.by_parameters.clear();
     }
 
     /// The math mode the programs compile with on `device` (fast when the
@@ -285,6 +290,23 @@ impl Scene3dRenderer {
     }
 
     fn program(
+        &mut self,
+        device: &wgpu::Device,
+        params: &Parameters,
+    ) -> Result<(u64, Arc<Compiled>), String> {
+        let pkey = hash_of(&[
+            format!("{params:?}").as_bytes(),
+            format!("{:?}", self.math).as_bytes(),
+        ]);
+        if let Some(found) = self.by_parameters.get(&pkey) {
+            return Ok(found.clone());
+        }
+        let found = self.program_of(device, params)?;
+        self.by_parameters.insert(pkey, found.clone());
+        Ok(found)
+    }
+
+    fn program_of(
         &mut self,
         device: &wgpu::Device,
         params: &Parameters,

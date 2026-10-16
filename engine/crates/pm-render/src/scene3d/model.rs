@@ -670,11 +670,14 @@ pub fn source_of(source: &Map) -> Result<Source, Unsupported> {
 /// Builds [`Scene3d`]s, keeping built geometry across frames.
 #[derive(Default)]
 pub struct SceneBuilder {
-    geometries: HashMap<u64, (Arc<Geometry>, Sphere)>,
+    geometries: GeometryCache,
 }
 
 /// A bounding sphere: center and radius.
 pub type Sphere = ([f64; 3], f64);
+
+/// Built geometry by source hash.
+type GeometryCache = HashMap<u64, (Arc<Geometry>, Sphere)>;
 
 /// How a scene's objects and lights are placed.
 pub enum Placement<'a> {
@@ -701,15 +704,33 @@ pub struct LayerFacts {
 impl SceneBuilder {
     fn geometry(&mut self, source: &Source) -> Geometry3d {
         let key = sha_key(&[format!("{source:?}").as_bytes()]);
-        let (g, sphere) = self
-            .geometries
-            .entry(key)
-            .or_insert_with(|| {
+        if let Some((g, sphere)) = self.geometries.get(&key) {
+            return Geometry3d {
+                key,
+                geometry: g.clone(),
+                sphere: *sphere,
+            };
+        }
+        // Built geometry is kept across scenes and frames (bounded).
+        static SHARED: std::sync::OnceLock<std::sync::Mutex<GeometryCache>> =
+            std::sync::OnceLock::new();
+        let shared = SHARED.get_or_init(Default::default);
+        let found = shared.lock().unwrap().get(&key).cloned();
+        let (g, sphere) = match found {
+            Some(f) => f,
+            None => {
                 let g = source.geometry();
                 let sphere = bounding_sphere(&g);
-                (Arc::new(g), sphere)
-            })
-            .clone();
+                let entry = (Arc::new(g), sphere);
+                let mut map = shared.lock().unwrap();
+                if map.len() >= 512 {
+                    map.clear();
+                }
+                map.insert(key, entry.clone());
+                entry
+            }
+        };
+        self.geometries.insert(key, (g.clone(), sphere));
         Geometry3d {
             key,
             geometry: g,
