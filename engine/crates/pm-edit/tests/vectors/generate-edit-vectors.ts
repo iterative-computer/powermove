@@ -255,6 +255,40 @@ function makeDoc(index: number, bounded: boolean): any {
   };
 }
 
+/**
+ * Two cameras or lights with keyframed transforms: L0 (no parent) and L5
+ * (parented to L1), and groups L2 and L6 whose members are L3, L4 and L7.
+ * With `loop`, L2 is parented to L0 and L6 to L5, so reparenting L0 onto L3
+ * or L4, or L5 onto L7, makes a space that moves with the camera, and the
+ * app allows it (`PM.wouldCycle` checks group ancestors only when the
+ * reparented layer is a group); without it the groups have no parent and
+ * the same reparents are ordinary. Off-grid starts, a 29.97 fps composition.
+ */
+function selfSpaceDoc(index: number, role: 'camera' | 'light', loop: boolean): any {
+  const layer = (i: number, type: string, extra: any = {}): any => {
+    const p = transformChannels(true);
+    for (const key of ['position.x', 'position.y', 'rotation', 'scale.x']) p[key] = channel(p[key].v, 120, true);
+    return { id: `L${i}`, name: `Layer ${i}`, type, from: 0, dur: 4, on: true, lock: false, solo: false, threeD: false, parent: null, group: null, matteSource: null, p, d: {}, ...extra };
+  };
+  const aimed = (i: number, extra: any = {}) => layer(i, 'extension', {
+    threeD: true, ...extra,
+    d: { definition: `powermove.3d.${role}`, data: { [role]: { p: {
+      targetX: channel(range(-5, 5), 3, true), targetY: channel(range(-5, 5), 3, true), targetZ: channel(range(-5, 5), 3, false),
+    } } } },
+  });
+  const layers = [
+    aimed(0, { from: 0.4333 }),
+    layer(1, 'null'),
+    layer(2, 'group', { parent: loop ? 'L0' : null }),
+    layer(3, 'solid', { group: 'L2', d: { w: 200, h: 100 } }),
+    layer(4, 'null', { group: 'L2', parent: 'L1', from: 1 / 30 * 7 }),
+    aimed(5, { parent: 'L1' }),
+    layer(6, 'group', { parent: loop ? 'L5' : null, threeD: true }),
+    layer(7, 'shape', { group: 'L6', d: { shape: 'rect', w: 80, h: 80, stroke: 0, color: '#ff0000' } }),
+  ];
+  return { id: `P${index}`, compId: `C${index}`, compName: 'Edits', name: 'Edits', w: 1920, h: 1080, fps: 29.97, dur: 4, layers, comps: {}, params: {} };
+}
+
 /* ── edits ──────────────────────────────────────────────────────────────── */
 type Case = Record<string, unknown>;
 
@@ -279,11 +313,44 @@ function reparentCases(doc: string, T: number, out: Case[]): void {
     });
     if (!options.length) continue;
     const pi = pick(options);
-    open(doc, T);
-    const live = PM.proj.layers;
-    const result = run(() => { Parenting.preserveParentPose(PM, live[li], pi === null ? null : live[pi], T); return null; });
-    out.push({ kind: 'reparent', t: hex(T), layer: li, parent: pi, out: result.throw ? result : enc(layersAfter(doc)) });
+    reparentCase(doc, T, li, pi, out);
   }
+}
+function reparentCase(doc: string, T: number, li: number, pi: number | null, out: Case[]): void {
+  // pm-edit leaves these to the legacy edit (`pm_edit::LEGACY_ONLY`): the
+  // replay checks it declines exactly these.
+  const L = open(doc, T);
+  const selfSpace = Parenting.aimProperties3D(L[li]).length > 0 && spaceReadsLayer(L[li], pi === null ? null : L[pi]);
+  const live = open(doc, T);
+  const result = run(() => { Parenting.preserveParentPose(PM, live[li], pi === null ? null : live[pi], T); return null; });
+  out.push({ kind: 'reparent', t: hex(T), layer: li, parent: pi, ...(selfSpace ? { selfSpace: true } : {}), out: result.throw ? result : enc(layersAfter(doc)) });
+}
+/**
+ * Whether `parent3D(PM, layer, T, parent)` multiplies in `layer`'s own
+ * transform (`space-3d.ts`'s walk, recording instead of multiplying): a
+ * camera reparented onto a member of a group parented to the camera. The
+ * legacy aim then reads the camera's keyframed channels through the
+ * evaluation cache the pose write left stale.
+ */
+function spaceReadsLayer(layer: any, parent: any): boolean {
+  const groups = new Set<string>();
+  let found = false;
+  const appendParents = (from: any, first = from.parent ? PM.L(from.parent) : null) => {
+    const seen = new Set<any>([from]);
+    let count = 0;
+    for (let cur = first; cur && !seen.has(cur) && count < 256; cur = cur.parent ? PM.L(cur.parent) : null) {
+      seen.add(cur); count++;
+      if (cur === layer) found = true;
+      appendGroups(cur);
+    }
+  };
+  const appendGroups = (from: any) => {
+    for (const group of (PM.groupAncestors?.(from) || []).slice().reverse())
+      if (!groups.has(group.id)) { groups.add(group.id); appendParents(group); if (group === layer) found = true; }
+  };
+  appendGroups(layer);
+  appendParents(layer, parent);
+  return found;
 }
 
 function moveCases(doc: string, T: number, out: Case[]): void {
@@ -762,6 +829,17 @@ if (CORPUS) {
   for (let index = 0; index < 40 * SCALE; index++) {
     const doc = fontDoc(index);
     add(doc, (text, T, out) => { fontAnchorCases(text, T, out); measuredSplitCases(text, T, out); }, [0, range(0, 3)]);
+  }
+  // Cameras and lights reparented into a space that moves with them (left to
+  // the legacy edit), and the same shapes without the loop (compared).
+  for (let index = 0; index < 4 * SCALE; index++) {
+    for (const loop of [true, false]) {
+      const doc = selfSpaceDoc(2000 + index * 2 + (loop ? 0 : 1), index % 2 ? 'light' : 'camera', loop);
+      add(doc, (text, T, out) => {
+        reparentCase(text, T, 0, 3, out); reparentCase(text, T, 0, 4, out);
+        reparentCase(text, T, 5, 7, out); reparentCase(text, T, 5, null, out);
+      }, [0, Math.round(range(0, doc.dur) * doc.fps) / doc.fps, range(0, doc.dur)]);
+    }
   }
 }
 

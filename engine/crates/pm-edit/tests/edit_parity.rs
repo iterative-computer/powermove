@@ -11,17 +11,20 @@
 //! created or moved are on the tick grid (section 5, rule 4 with amendment
 //! 1): they may differ from the TypeScript float sum by the rounding of its
 //! terms (`KEY_TIME_TICKS`) and, on NTSC compositions stored with a float
-//! rate, by the float grid's drift; values of such keys sampled against
-//! other keys on the tick grid by their track's slope over `KEY_VALUE_TICKS`
-//! ticks. Snapping never counts as a mismatch. Ids an edit creates
+//! rate, by the float grid's drift. Snapping never counts as a mismatch.
+//! Values carry no such allowance: a bake samples its own keys at their
+//! float times and moves them to the tick grid only when it is done
+//! (`groups::ungroup`). Ids an edit creates
 //! (`i`, `id` absent from the input) are renamed by order of first
 //! appearance on both sides. Messages of user-facing `Error`s must match;
 //! engine-internal `TypeError`s only need to throw. The font anchor's cases
 //! (`captureFontAnchor`, `anchorReference`/`anchorMoved` with `anchor:
 //! "font"`) and measured split text measure on the generator's synthetic
 //! canvas (`Synth`). Cases a kernel leaves to the host (three.js bounds of 3D
-//! objects and model groups) or that measure text without that canvas (the
-//! vectors carry no fonts) are counted apart.
+//! objects and model groups), to the legacy edit (a camera or light
+//! reparented into a space that moves with it, which the generator marks
+//! `selfSpace`: the kernel must decline exactly those), or that measure text
+//! without that canvas (the vectors carry no fonts) are counted apart.
 //!
 //! `PM_EDIT_VECTORS=<file>` replays another set (a `PM_EDIT_SCALE` run, or
 //! the corpus set from `PM_EDIT_CORPUS`).
@@ -268,7 +271,8 @@ enum Outcome {
         answer: Option<V>,
     },
     Threw(JsThrow),
-    /// Left to the host (three.js) or to text measurement.
+    /// Left to the host (three.js), to text measurement, or to the legacy
+    /// edit (`pm_edit::LEGACY_ONLY`).
     Skipped(&'static str),
 }
 
@@ -465,6 +469,7 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
     };
     match result {
         Err(e) if e.kind == HOST_ONLY => Outcome::Skipped("host"),
+        Err(e) if e.kind == pm_edit::LEGACY_ONLY => Outcome::Skipped("legacy"),
         _ if text.asked => Outcome::Skipped("text"),
         Err(e) => Outcome::Threw(e),
         Ok(answer) => {
@@ -488,47 +493,6 @@ const TICK: f64 = 1.0 / 705_600_000.0;
 /// 1), plus the float error of the TypeScript sum.
 const KEY_TIME_TICKS: f64 = 2.0;
 
-/// A value in a key a kernel created (or whose time it moved) may have been
-/// sampled against other keys on the tick grid: a parent baked on the same
-/// ticks, or a group baked by an earlier group of the same ungroup.
-/// Those are read within [`KEY_TIME_TICKS`] of their stored time, so the
-/// value moves by the sampled track's slope over that time, propagated
-/// through the parent's transform. The comparison allows the key's own
-/// track slope over `KEY_VALUE_TICKS` ticks (twice the time allowance; the
-/// slope is estimated from the key's neighbours) or `KEY_VALUE_RELATIVE` of
-/// the value's magnitude, which admits a parent track moving up to ~350
-/// times the value's magnitude per second (2.8 ns × 350 ≈ 1e-6).
-const KEY_VALUE_TICKS: f64 = 4.0;
-const KEY_VALUE_RELATIVE: f64 = 1e-6;
-
-/// `|Δv / Δt|` toward each neighbour of every key of a track (0 where it has
-/// none, or where the times or values are not finite numbers).
-fn key_slopes(keys: &[V]) -> Vec<f64> {
-    let tv = |k: &V| match k {
-        V::O(m) => match (m.get("t"), m.get("v")) {
-            (Some(V::N(t)), Some(V::N(v))) if t.is_finite() && v.is_finite() => Some((*t, *v)),
-            _ => None,
-        },
-        _ => None,
-    };
-    let pairs: Vec<Option<(f64, f64)>> = keys.iter().map(tv).collect();
-    let slope = |a: Option<(f64, f64)>, b: Option<(f64, f64)>| match (a, b) {
-        (Some((ta, va)), Some((tb, vb))) if ta != tb => ((vb - va) / (tb - ta)).abs(),
-        _ => 0.0,
-    };
-    (0..keys.len())
-        .map(|i| {
-            let before = if i > 0 {
-                slope(pairs[i - 1], pairs[i])
-            } else {
-                0.0
-            };
-            let after = pairs.get(i + 1).map_or(0.0, |n| slope(pairs[i], *n));
-            before.max(after)
-        })
-        .collect()
-}
-
 #[derive(Default)]
 struct Stats {
     numbers: usize,
@@ -540,17 +504,6 @@ struct Stats {
     ticked: usize,
     /// The largest such difference on exact rates, in ticks.
     max_ticks: f64,
-    /// Values of such keys beyond section 25's tolerance and within the
-    /// sampling allowance (`KEY_VALUE_TICKS`, `KEY_VALUE_RELATIVE`).
-    sampled: usize,
-    /// The largest such difference relative to `1 + |value|`.
-    max_value_error: f64,
-    /// The slope of the track at the key being compared (set by the track's
-    /// array for its elements).
-    key_slope: Option<f64>,
-    /// Set while comparing the members of a key a kernel created or whose
-    /// time it moved to the tick grid: the track's slope there.
-    moved_key_slope: Option<f64>,
     /// The composition and layer start of the key times being compared:
     /// the float grid's relative drift from the exact rate (0 for exact
     /// rates), and the layer's `from`.
@@ -716,16 +669,6 @@ impl Stats {
                 ) {
                     return true;
                 }
-                if key == "v"
-                    && let Some(slope) = self.moved_key_slope
-                {
-                    let e = (x - y).abs();
-                    if e <= KEY_VALUE_TICKS * TICK * slope + KEY_VALUE_RELATIVE * (1.0 + y.abs()) {
-                        self.sampled += 1;
-                        self.max_value_error = self.max_value_error.max(e / (1.0 + y.abs()));
-                        return true;
-                    }
-                }
                 if key == "t" && path.contains(".kf[") && self.key_time_moved(*x, *y) {
                     self.ticked += 1;
                     if self.drift == 0.0 {
@@ -749,15 +692,11 @@ impl Stats {
                 false
             }
             (V::A(x), V::A(y)) => {
-                // A keyframe track: each key knows its track's slope.
-                let slopes = (key == "kf").then(|| key_slopes(y));
                 x.len() == y.len()
                     && x.iter().zip(y).enumerate().all(|(i, (p, q))| {
                         let len = path.len();
                         path.push_str(&format!("[{i}]"));
-                        self.key_slope = slopes.as_ref().map(|s| s[i]);
                         let ok = self.same(p, q, key, ours, want, path);
-                        self.key_slope = None;
                         if ok {
                             path.truncate(len);
                         }
@@ -773,19 +712,7 @@ impl Stats {
                     ));
                     return false;
                 }
-                // A key a kernel created (an id the input lacks) or whose
-                // time it moved on the tick grid: its value may have been
-                // sampled against keys placed on that grid.
-                let was = self.moved_key_slope;
-                if let Some(slope) = self.key_slope.take() {
-                    let created = matches!(y.get("i"), Some(V::S(id)) if !want.known.contains(id));
-                    let moved = matches!((x.get("t"), y.get("t")),
-                        (Some(V::N(tx)), Some(V::N(ty))) if tx.to_bits() != ty.to_bits() && self.key_time_moved(*tx, *ty));
-                    if created || moved {
-                        self.moved_key_slope = Some(slope);
-                    }
-                }
-                let ok = x.iter().zip(y).all(|((k, p), (_, q))| {
+                x.iter().zip(y).all(|((k, p), (_, q))| {
                     let len = path.len();
                     path.push('.');
                     path.push_str(k);
@@ -794,9 +721,7 @@ impl Stats {
                         path.truncate(len);
                     }
                     ok
-                });
-                self.moved_key_slope = was;
-                ok
+                })
             }
             (x, y) => x == y,
         }
@@ -930,6 +855,7 @@ fn edits_match_typescript() {
                     m.remove_key(&JsString::from("out"));
                     m.remove_key(&JsString::from("doc"));
                     m.remove_key(&JsString::from("layouts"));
+                    m.remove_key(&JsString::from("selfSpace"));
                 }
                 format!("{kind} {}", pm_model::json::to_canonical_string(&c))
             };
@@ -954,6 +880,23 @@ fn edits_match_typescript() {
                     names: HashMap::new(),
                 },
             );
+            // The generator marks the reparents whose legacy aim reads the
+            // camera's own transform through a stale cache (`selfSpace`,
+            // computed by its own walk of `parent3D`): the kernel leaves
+            // exactly those to the legacy edit.
+            let declined = matches!(outcome, Outcome::Skipped("legacy"));
+            let self_space = matches!(get(case, "selfSpace"), Some(Value::Bool(true)));
+            if declined != self_space && stats.failures.len() < 30 {
+                stats.failures.push(format!(
+                    "{}: {}",
+                    what(),
+                    if declined {
+                        "left to the legacy edit, but the generator found no self-space"
+                    } else {
+                        "a self-space reparent the kernel answered"
+                    }
+                ));
+            }
             let mut path = String::new();
             let ok = match (outcome, &want) {
                 (Outcome::Skipped(why), _) => {
@@ -1087,15 +1030,13 @@ fn edits_match_typescript() {
         }
     }
     eprintln!(
-        "edit vectors: {} cases {cases:?}; {} numbers ({} bit-identical, {} angles equal modulo 360, {} created or moved key times on the tick grid (at most {:.2} ticks off outside the NTSC drift), {} values of such keys sampled against keys on the tick grid (max relative error {:.3e}), max relative error {:.3e}); {} error messages identical, {} internal throws; skipped {skipped:?}",
+        "edit vectors: {} cases {cases:?}; {} numbers ({} bit-identical, {} angles equal modulo 360, {} created or moved key times on the tick grid (at most {:.2} ticks off outside the NTSC drift), max relative error {:.3e}); {} error messages identical, {} internal throws; skipped {skipped:?}",
         cases.values().sum::<usize>(),
         stats.numbers,
         stats.exact,
         stats.wrapped,
         stats.ticked,
         stats.max_ticks,
-        stats.sampled,
-        stats.max_value_error,
         stats.max_error,
         stats.messages,
         stats.internal,

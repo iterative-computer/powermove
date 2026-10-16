@@ -319,3 +319,108 @@ fn a_throw_after_measuring_without_fonts_is_unanswered() {
     );
     assert!(bad.as_object().unwrap().get("throw").is_some());
 }
+
+/// A camera (keyframed, at 0) and a group holding a solid; with `looped`
+/// the group is parented to the camera.
+fn camera_project(looped: bool) -> String {
+    let mut camera = layer(
+        "CAM",
+        "extension",
+        0.0,
+        "null",
+        "null",
+        &[(
+            "position.x",
+            r#"{"v":0,"kf":[{"t":0,"v":0,"i":"k1"},{"t":2,"v":400,"i":"k2"}],"expr":null}"#,
+        )],
+    );
+    let target = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+    camera = camera.replace(
+        r##""d":{"color":"#ff0000","w":200,"h":100,"radius":0}"##,
+        &format!(
+            r#""threeD":true,"d":{{"definition":"powermove.3d.camera","data":{{"camera":{{"p":{{"targetX":{},"targetY":{},"targetZ":{}}}}}}}}}"#,
+            target(10.0),
+            target(20.0),
+            target(30.0)
+        ),
+    );
+    assert!(camera.contains("powermove.3d.camera"));
+    let parent = if looped { r#""CAM""# } else { "null" };
+    let layers = [
+        camera,
+        layer("G", "group", 0.0, parent, "null", &[("rotation", "30")]),
+        layer("S", "solid", 0.0, "null", r#""G""#, &[("position.x", "40")]),
+    ];
+    format!(
+        r#"{{"id":"P1","name":"Test","compId":"C1","revision":0,"assets":{{}},"params":{{}},"comps":{{"C1":{{"id":"C1","name":"Main","w":1920,"h":1080,"fps":29.97,"dur":2,"layers":[{}]}}}}}}"#,
+        layers.join(",")
+    )
+}
+
+#[test]
+fn a_camera_reparented_into_a_space_that_moves_with_it_is_left_to_the_legacy_edit() {
+    let request = r#"{"op":"edit.reparent","comp":"C1","layer":0,"parent":2,"t":0.5}"#;
+    // S sits in G, which hangs from the camera: the legacy aim reads the
+    // camera's keys through a stale cache there (`pm_edit::LEGACY_ONLY`).
+    let mut e = Engine::new();
+    e.resync(camera_project(true).as_bytes(), 1).unwrap();
+    let reply = q(&mut e, request);
+    assert_eq!(member(&reply, "legacy"), &Value::Bool(true));
+    assert_eq!(e.revision(), 1);
+    // The same reparent without the loop is answered.
+    let mut e = Engine::new();
+    e.resync(camera_project(false).as_bytes(), 1).unwrap();
+    let reply = ok(&mut e, request);
+    assert!(
+        !ops::ops_from_value(member(&reply, "ops"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn baked_keys_settle_on_the_tick_grid_for_off_grid_starts() {
+    // M starts off the 29.97 grid: its baked keys are written at the legacy
+    // float times while the ungroup samples, then moved to their ticks.
+    let mut e = Engine::new();
+    e.resync(
+        project()
+            .replace(
+                r#""id":"M","type":"solid","name":"M","from":0"#,
+                r#""id":"M","type":"solid","name":"M","from":0.4333"#,
+            )
+            .as_bytes(),
+        1,
+    )
+    .unwrap();
+    let reply = ok(
+        &mut e,
+        r#"{"op":"edit.ungroup","comp":"C1","groups":[2],"t":0.25}"#,
+    );
+    apply(&mut e, &reply);
+    let doc = parse(&e.to_json()).unwrap();
+    let m = &member(member(member(&doc, "comps"), "C1"), "layers")
+        .as_array()
+        .unwrap()[2];
+    assert_eq!(member(m, "from").as_f64(), Some(0.4333));
+    let keys = member(member(member(m, "p"), "position.x"), "kf")
+        .as_array()
+        .unwrap();
+    assert!(keys.len() > 60);
+    const TICKS: f64 = 705_600_000.0;
+    for k in keys {
+        let t = member(k, "t").as_f64().unwrap();
+        let ticks = t * TICKS;
+        assert!(
+            (ticks - ticks.round()).abs() < 1e-3,
+            "{t} is not on the tick grid"
+        );
+    }
+    // Frame 30 less the start, on 30000/1001 rather than the float grid.
+    let frame = 30.0 * 1001.0 / 30000.0;
+    let want = ((frame * TICKS).round() - (0.4333 * TICKS).round()) / TICKS;
+    assert!(
+        keys.iter().any(|k| member(k, "t").as_f64() == Some(want)),
+        "{want}"
+    );
+}
