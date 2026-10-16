@@ -222,7 +222,9 @@ fn compare_sample(
         three_d: None,
         error,
     };
-    let request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+    // The capture's motion blur: 16 samples opaque, 20 transparent.
+    let mut request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
     let rgba = match frame(renderer, p, s.time, &request) {
         Ok(f) => f,
         Err(e) => {
@@ -269,6 +271,7 @@ fn compare_sample(
     if let Some(float) = &s.float {
         let mut transparent = request;
         transparent.background = false;
+        transparent.motion_blur = pm_render::motion::MotionBlur::Samples(20);
         let reference = corpus::read_float(float);
         match (frame(renderer, p, s.time, &transparent), reference) {
             (Ok(ours_f), Ok(reference_f)) if ours_f.len() == reference_f.len() => {

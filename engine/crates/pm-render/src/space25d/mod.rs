@@ -22,6 +22,10 @@
 use pm_eval::{JsResult, Scope};
 use pm_model::Node;
 
+/// Layer types drawn as 2.5D planes and compared with today's (groups
+/// supply the space; the capability check routes other 3D layer types).
+pub const DRAWN_TYPES: [&str; 5] = ["solid", "image", "video", "precomp", "group"];
+
 /// A unit quad to target pixels: column-major 3×3 (today's `projected`
 /// `Float32Array`), applied to `(u, v, 1)`.
 pub type Plane = [f64; 9];

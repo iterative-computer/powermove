@@ -389,16 +389,47 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["layers"][i]["fx"] = json!([{ "id": "e1", "type": "blur", "on": true, "p": {} }]);
     });
     assert!(f.contains(&Feature::Effects), "{f:?}");
+    // Motion blur and 2.5D planes are drawn for the compared types
+    // (docs/engine/motion.md); other types keep routing.
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["mblur"] = json!(true);
-    });
-    assert!(f.contains(&Feature::MotionBlur), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "back");
         d["layers"][i]["threeD"] = json!(true);
     });
+    assert!(!f.contains(&Feature::MotionBlur), "{f:?}");
+    assert!(!f.contains(&Feature::TwoAndAHalfD), "{f:?}");
+    let f = variant(|d| {
+        let mut shape = layer("sh", "shape", json!({ "shape": "rect" }), 0.0, 0.0, 2.0);
+        shape["mblur"] = json!(true);
+        shape["threeD"] = json!(true);
+        d["layers"].as_array_mut().unwrap().push(shape);
+    });
+    assert!(f.contains(&Feature::MotionBlur), "{f:?}");
     assert!(f.contains(&Feature::TwoAndAHalfD), "{f:?}");
+    // A layer of another type inside a 3D group or a blurred group is
+    // listed; a compared type in the same group is not.
+    let (mut doc, _) = everything();
+    let mut g = layer("g3", "group", json!({}), 0.0, 0.0, 2.0);
+    g["threeD"] = json!(true);
+    g["mblur"] = json!(true);
+    let mut shape = layer("sh", "shape", json!({ "shape": "rect" }), 0.0, 0.0, 2.0);
+    shape["group"] = json!("g3");
+    let mut solid = layer("so", "solid", json!({ "color": "#FFFFFF" }), 0.0, 0.0, 2.0);
+    solid["group"] = json!("g3");
+    let layers = doc["layers"].as_array_mut().unwrap();
+    layers.push(shape);
+    layers.push(solid);
+    layers.push(g);
+    let listed = unsupported(&load(&doc), "Ptest-root");
+    let has = |id: &str, feature: Feature| {
+        listed
+            .iter()
+            .any(|u| u.layer.as_deref() == Some(id) && u.feature == feature)
+    };
+    assert!(has("sh", Feature::MotionBlur), "{listed:?}");
+    assert!(has("sh", Feature::TwoAndAHalfD), "{listed:?}");
+    assert!(!has("so", Feature::MotionBlur) && !has("so", Feature::TwoAndAHalfD));
+    assert!(!has("g3", Feature::MotionBlur) && !has("g3", Feature::TwoAndAHalfD));
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["masks"] = json!([{ "id": "m1", "on": true }]);

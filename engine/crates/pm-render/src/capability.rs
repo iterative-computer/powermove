@@ -322,19 +322,40 @@ fn check_composition(
                 Feature::BlendMode(node::js_value_opt(Some(b)).to_js_string().to_string_lossy()),
             );
         }
+        // Motion blur and 2.5D planes are drawn for the layer types their
+        // parity cases cover (`crate::motion`, `crate::space25d`;
+        // docs/engine/motion.md); other types keep routing until their own
+        // renderers are compared with them.
         let mblur = node::member(Some(layer), "mblur");
-        if is_property(mblur) || node::truthy(mblur) {
+        if (is_property(mblur) || node::truthy(mblur))
+            && !crate::motion::DRAWN_TYPES.contains(&ty.as_str())
+        {
             add(layer, Feature::MotionBlur);
         }
         // 3D object, light, and camera layers draw in screen space; their
         // 3D switch does not make them 2.5D planes. Nulls and audio draw
-        // nothing (a 3D null only places its children). A 3D group is
-        // listed itself, which covers its members.
+        // nothing (a 3D null only places its children). A 3D group's
+        // members are planes of its space; each member is checked itself.
         if js::flag(layer, "threeD")
             && pm_eval::parenting::Role3d::of(layer).is_none()
             && !NOT_VISUAL.contains(&ty.as_str())
+            && !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
         {
             add(layer, Feature::TwoAndAHalfD);
+        }
+        // Members of a 3D group are planes of its space, and members of a
+        // blurred group are sampled with it: other types keep routing.
+        if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
+            && !NOT_VISUAL.contains(&ty.as_str())
+            && pm_eval::parenting::Role3d::of(layer).is_none()
+        {
+            let (three_d, blurred) = enclosing_groups(layers, layer);
+            if three_d {
+                add(layer, Feature::TwoAndAHalfD);
+            }
+            if blurred {
+                add(layer, Feature::MotionBlur);
+            }
         }
         if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0) {
             add(layer, Feature::CompatLevel2);
@@ -383,6 +404,32 @@ fn check_composition(
             });
         }
     }
+}
+
+/// Whether any group enclosing `layer` (its `group` chain within `layers`)
+/// has the 3D switch, and whether any has motion blur (on or animated).
+fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
+    let id_of = |n: Option<&Node>| {
+        n.filter(|g| node::truthy(Some(g)))
+            .map(|g| node::js_value_opt(Some(g)).to_js_string().to_string_lossy())
+    };
+    let (mut three_d, mut blurred) = (false, false);
+    let mut next = id_of(node::member(Some(layer), "group"));
+    // A cycle in group membership ends at the layer count.
+    for _ in 0..layers.len() {
+        let Some(id) = next else { break };
+        let Some(group) = layers
+            .iter()
+            .find(|l| js::layer_id(l) == id && js::layer_type(l) == "group")
+        else {
+            break;
+        };
+        three_d |= js::flag(group, "threeD");
+        let mblur = node::member(Some(group), "mblur");
+        blurred |= is_property(mblur) || node::truthy(mblur);
+        next = id_of(node::member(Some(group), "group"));
+    }
+    (three_d, blurred)
 }
 
 /// `L.fx` holds an effect that is not marked missing (enabled or not: the

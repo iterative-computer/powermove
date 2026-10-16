@@ -57,13 +57,32 @@ fn project(source_paths: bool, with_text: bool) -> Value {
     if with_text {
         layers.push(layer("t", "text", json!({ "text": "Routed" }), 10.0, 10.0));
     }
-    layers.push(layer("img", "image", json!({ "asset": "still", "fit": "contain", "w": 160, "h": 90 }), 80.0, 45.0));
-    let mut tone = layer("tone", "audio", json!({ "asset": "tone", "gain": 1, "trim": 0, "fadeIn": 0, "fadeOut": 0 }), 0.0, 0.0);
+    layers.push(layer(
+        "img",
+        "image",
+        json!({ "asset": "still", "fit": "contain", "w": 160, "h": 90 }),
+        80.0,
+        45.0,
+    ));
+    let mut tone = layer(
+        "tone",
+        "audio",
+        json!({ "asset": "tone", "gain": 1, "trim": 0, "fadeIn": 0, "fadeOut": 0 }),
+        0.0,
+        0.0,
+    );
     tone["from"] = json!(0);
     layers.push(tone);
-    layers.push(layer("bg", "solid", json!({ "color": "#3FCF8E", "w": 320, "h": 180 }), 0.0, 0.0));
+    layers.push(layer(
+        "bg",
+        "solid",
+        json!({ "color": "#3FCF8E", "w": 320, "h": 180 }),
+        0.0,
+        0.0,
+    ));
     let mut still = json!({ "id": "still", "name": "still-alpha.png", "kind": "image", "format": "png", "w": 64, "h": 64 });
-    let mut tone_asset = json!({ "id": "tone", "name": "tone.wav", "kind": "audio", "format": "wav", "dur": 2 });
+    let mut tone_asset =
+        json!({ "id": "tone", "name": "tone.wav", "kind": "audio", "format": "wav", "dur": 2 });
     if source_paths {
         still["sourcePath"] = json!(fixture("still-alpha.png"));
         tone_asset["sourcePath"] = json!(fixture("tone.wav"));
@@ -84,7 +103,9 @@ fn pmv3(document: &Value, media: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
         records.push(json!({ "id": id, "type": ty, "offset": offset, "length": data.len() }));
         offset += data.len();
     }
-    let header = serde_json::to_vec(&json!({ "document": { "proj": document, "v": 1 }, "media": records })).unwrap();
+    let header =
+        serde_json::to_vec(&json!({ "document": { "proj": document, "v": 1 }, "media": records }))
+            .unwrap();
     let mut out = b"PMV3\n".to_vec();
     out.extend_from_slice(&(header.len() as u32).to_le_bytes());
     out.extend_from_slice(&header);
@@ -118,7 +139,11 @@ fn json_projects_with_linked_media_render_to_verified_files() {
     let project_file = dir.join("p.json");
     std::fs::write(&project_file, project(true, false).to_string()).unwrap();
     let out_file = dir.join("master.mov");
-    let s = summary(&cli(&[project_file.to_str().unwrap(), "-o", out_file.to_str().unwrap()]));
+    let s = summary(&cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        out_file.to_str().unwrap(),
+    ]));
     assert_eq!(s["codec"], "apch", "{s}");
     assert_eq!(s["frames"], 25);
     assert_eq!(s["audioSamples"], 48_000);
@@ -146,13 +171,35 @@ fn json_projects_with_linked_media_render_to_verified_files() {
     assert_eq!(s["colr"], json!([1, 1, 1]));
     // An existing file is kept without --force, replaced with it.
     let before = std::fs::read(&web).unwrap();
-    let again = cli(&[project_file.to_str().unwrap(), "-o", web.to_str().unwrap(), "--preset", "web"]);
-    assert_eq!(again.status.code(), Some(1), "{}", String::from_utf8_lossy(&again.stderr));
+    let again = cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        web.to_str().unwrap(),
+        "--preset",
+        "web",
+    ]);
+    assert_eq!(
+        again.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
     assert_eq!(std::fs::read(&web).unwrap(), before);
-    summary(&cli(&[project_file.to_str().unwrap(), "-o", web.to_str().unwrap(), "--preset", "web", "--force"]));
+    summary(&cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        web.to_str().unwrap(),
+        "--preset",
+        "web",
+        "--force",
+    ]));
     assert_ne!(std::fs::read(&web).unwrap(), before);
     // ProRes is written to MOV only.
-    let wrong = cli(&[project_file.to_str().unwrap(), "-o", dir.join("x.mp4").to_str().unwrap()]);
+    let wrong = cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        dir.join("x.mp4").to_str().unwrap(),
+    ]);
     assert_eq!(wrong.status.code(), Some(2));
     let names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -171,13 +218,27 @@ fn pmv_projects_render_from_embedded_media() {
     let bytes = pmv3(
         &project(false, false),
         &[
-            ("still", "image/png", std::fs::read(fixture("still-alpha.png")).unwrap()),
-            ("tone", "audio/wav", std::fs::read(fixture("tone.wav")).unwrap()),
+            (
+                "still",
+                "image/png",
+                std::fs::read(fixture("still-alpha.png")).unwrap(),
+            ),
+            (
+                "tone",
+                "audio/wav",
+                std::fs::read(fixture("tone.wav")).unwrap(),
+            ),
         ],
     );
     std::fs::write(&file, bytes).unwrap();
     let out_file = dir.join("alpha.mov");
-    let s = summary(&cli(&[file.to_str().unwrap(), "-o", out_file.to_str().unwrap(), "--preset", "master-alpha"]));
+    let s = summary(&cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out_file.to_str().unwrap(),
+        "--preset",
+        "master-alpha",
+    ]));
     assert_eq!(s["codec"], "ap4h");
     assert_eq!(s["pixelFormat"], "4:4:4:4");
     assert_eq!(s["audioSamples"], 48_000);
@@ -189,9 +250,22 @@ fn projects_the_engine_cannot_render_exit_3_and_write_nothing() {
     let dir = scratch("routed");
     let project_file = dir.join("p.json");
     std::fs::write(&project_file, project(true, true).to_string()).unwrap();
-    let out = cli(&[project_file.to_str().unwrap(), "-o", dir.join("x.mov").to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        dir.join("x.mov").to_str().unwrap(),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("text"));
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the project");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "only the project"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
