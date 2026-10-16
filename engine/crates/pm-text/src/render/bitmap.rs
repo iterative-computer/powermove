@@ -64,6 +64,12 @@ pub fn has_colr(face: FaceRef<'_>) -> bool {
         .is_some_and(|f| f.colr().is_ok() && f.cpal().is_ok())
 }
 
+/// Whether `glyph` is a color vector glyph (`COLR`) of the face.
+pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
+    face.font()
+        .is_some_and(|f| f.color_glyphs().get(GlyphId::new(glyph)).is_some())
+}
+
 /// The bitmap glyph cache.
 #[derive(Default)]
 pub struct Bitmaps {

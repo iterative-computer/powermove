@@ -39,3 +39,8 @@ png = "0.18"
 # manager.
 name = "text_raster"
 harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_corpus"
+harness = false

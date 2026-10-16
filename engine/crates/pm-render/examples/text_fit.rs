@@ -251,7 +251,8 @@ mod fit {
                     let start = base.at(size);
                     renderer.text().set_profile(base.clone());
                     let before = mean(&mut renderer, &set);
-                    let mut x = vec![start.expand_x, start.expand_y, start.dy, start.gamma];
+                    let _ = start;
+                    let mut x = vec![0.05, 0.05, -0.05, 1.0];
                     let mut step = vec![0.04, 0.04, 0.04, 0.1];
                     let best = search(
                         &mut x,
@@ -276,17 +277,101 @@ mod fit {
             }
             "dark" => {
                 let set: Vec<&Case> = cases.iter().filter(|c| c.group == "fit-color").collect();
-                let mut x = vec![base.dark_gamma];
-                let mut step = vec![0.1];
-                let best = search(&mut x, &mut step, &[0.3], &[4.0], &mut |v| {
-                    renderer.text().set_profile(Profile { dark_gamma: v[0], ..base.clone() });
+                let mut x = vec![base.mix];
+                let mut step = vec![0.2];
+                let best = search(&mut x, &mut step, &[0.0], &[6.0], &mut |v| {
+                    renderer.text().set_profile(Profile { mix: v[0], ..base.clone() });
                     mean(&mut renderer, &set)
                 });
-                println!("dark_gamma {:.3}: mean {best:.4}", x[0]);
-                renderer.text().set_profile(Profile { dark_gamma: x[0], ..base.clone() });
+                println!("mix {:.3}: mean {best:.4}", x[0]);
+                renderer.text().set_profile(Profile { mix: x[0], ..base.clone() });
                 for c in &set {
                     let (ink, ratio) = score(&mut renderer, c);
                     println!("{:<18} {:>5}px {} ink {ink:.4} ratio {ratio:.3}", c.id, c.size, c.color);
+                }
+            }
+            "probe" => {
+                // Edge profiles of Menlo's full block: reference against
+                // plain coverage at Skia's positions.
+                let plain = Profile {
+                    points: Cow::Owned(vec![Point { size: 0.0, expand_x: 0.0, expand_y: 0.0, dy: 0.0, gamma: 1.0 }]),
+                    snap: pm_text::render::profile::Snap::QuarterRound,
+                    path_above: None,
+                    light: Cow::Borrowed(&pm_text::render::profile::LINEAR),
+                    dark: Cow::Borrowed(&pm_text::render::profile::LINEAR),
+                    mix: 1.0,
+                    fake_bold: 1.0,
+                    stroke: base.stroke,
+                };
+                renderer.text().set_profile(plain);
+                for c in &cases {
+                    let o = ours(&mut renderer, c);
+                    let w = c.width;
+                    // The first block: rows where our plain alpha is full in its middle column.
+                    let alpha = |img: &[u8], x: usize, y: usize| f64::from(img[(y * w + x) * 4 + 3]) / 255.0;
+                    let row: Vec<usize> = (0..c.height).filter(|&y| (0..w).any(|x| alpha(&o, x, y) > 0.99)).collect();
+                    if row.is_empty() { continue; }
+                    let ym = row[row.len() / 2];
+                    let cols: Vec<usize> = (0..w).filter(|&x| (0..c.height).any(|y| alpha(&o, x, y) > 0.99)).collect();
+                    let xm = cols[0] + 2;
+                    let xs: Vec<String> = (cols[0].saturating_sub(3)..cols[0] + 2)
+                        .map(|x| format!("{:.2}/{:.2}", alpha(&o, x, ym), alpha(&c.reference, x, ym)))
+                        .collect();
+                    let top = row[0];
+                    let ys: Vec<String> = (top.saturating_sub(3)..top + 2)
+                        .map(|y| format!("{:.2}/{:.2}", alpha(&o, xm, y), alpha(&c.reference, xm, y)))
+                        .collect();
+                    let bot = *row.last().unwrap();
+                    let yb: Vec<String> = (bot - 1..(bot + 4).min(c.height))
+                        .map(|y| format!("{:.2}/{:.2}", alpha(&o, xm, y), alpha(&c.reference, xm, y)))
+                        .collect();
+                    println!("{:<16} {:>6.2}px {}  L[{}]  T[{}]  B[{}]", c.id, c.size, c.color, xs.join(" "), ys.join(" "), yb.join(" "));
+                    // Edge positions: rows above `bot` summed as coverage (plain: linear; reference: inverse white curve).
+                    let inv = |a: f64| -> f64 {
+                        let curve = [0.0, 0.10, 0.20, 0.29, 0.39, 0.48, 0.56, 0.64, 0.71, 0.78, 0.84, 0.88, 0.93, 0.96, 0.98, 1.0, 1.0f64];
+                        if a >= 1.0 { return 0.9375; }
+                        for i in 0..16 {
+                            if a <= curve[i + 1] {
+                                let t = (a - curve[i]) / (curve[i + 1] - curve[i]).max(1e-9);
+                                return (i as f64 + t) / 16.0;
+                            }
+                        }
+                        1.0
+                    };
+                    let top_of = |img: &[u8], lin: bool| -> f64 {
+                        let mut sum = 0.0;
+                        for y in 0..=bot {
+                            let a = alpha(img, xm, y);
+                            sum += if lin { a } else if a >= 0.999 { 1.0 } else { inv(a) };
+                        }
+                        bot as f64 + 1.0 - sum
+                    };
+                    let bot_of = |img: &[u8], lin: bool| -> f64 {
+                        let mut sum = 0.0;
+                        for y in top..c.height {
+                            let a = alpha(img, xm, y);
+                            sum += if lin { a } else if a >= 0.999 { 1.0 } else { inv(a) };
+                        }
+                        top as f64 + sum
+                    };
+                    println!("   edges: plain top {:.3} bottom {:.3} | ref top {:.3} bottom {:.3} | dtop {:+.3} dbot {:+.3}",
+                        top_of(&o, true), bot_of(&o, true), top_of(&c.reference, false), bot_of(&c.reference, false),
+                        top_of(&c.reference, false) - top_of(&o, true), bot_of(&c.reference, false) - bot_of(&o, true));
+                }
+            }
+            "bold" => {
+                let set: Vec<&Case> = cases.iter().filter(|c| c.group == "synthetic").collect();
+                let mut x = vec![base.fake_bold];
+                let mut step = vec![0.2];
+                let best = search(&mut x, &mut step, &[0.0], &[2.0], &mut |v| {
+                    renderer.text().set_profile(Profile { fake_bold: v[0], ..base.clone() });
+                    mean(&mut renderer, &set)
+                });
+                println!("fake_bold {:.3}: mean {best:.4}", x[0]);
+                renderer.text().set_profile(Profile { fake_bold: x[0], ..base.clone() });
+                for c in &set {
+                    let (ink, ratio) = score(&mut renderer, c);
+                    println!("{:<18} {:>5}px ink {ink:.4} ratio {ratio:.3}", c.id, c.size);
                 }
             }
             "stroke" => {

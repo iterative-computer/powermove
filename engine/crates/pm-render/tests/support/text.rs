@@ -62,3 +62,60 @@ impl pm_render::text::TextFonts for MainThreadFonts {
         self.0.compat().resolver_mut().em_advance(face, size)
     }
 }
+
+fn layer_lists(root: &mut pm_model::Value) -> Vec<&mut Vec<pm_model::Value>> {
+    let mut out = Vec::new();
+    let Some(map) = root.as_object_mut() else { return out };
+    let mut comps = None;
+    for (k, v) in map.iter_mut() {
+        match k.to_string_lossy().as_str() {
+            "layers" => {
+                if let Some(a) = v.as_array_mut() {
+                    out.push(a);
+                }
+            }
+            "comps" => comps = Some(v),
+            _ => {}
+        }
+    }
+    if let Some(comps) = comps.and_then(|c| c.as_object_mut()) {
+        for (_, c) in comps.iter_mut() {
+            if let Some(a) = c.as_object_mut().and_then(|c| c.get_mut("layers")).and_then(|l| l.as_array_mut()) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+fn is_text_layer(l: &pm_model::Value) -> bool {
+    matches!(
+        l.as_object().and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+        Some("text" | "captions")
+    )
+}
+
+/// Whether any composition of the document holds text or captions layers.
+pub fn has_text(doc: &pm_model::Document) -> bool {
+    let Some(mut root) = doc.to_value() else { return false };
+    layer_lists(&mut root).iter().any(|l| l.iter().any(is_text_layer))
+}
+
+/// The document with every text and captions layer at opacity 0 (drawn by
+/// nothing, every other layer unchanged).
+pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
+    let mut root = doc.to_value().expect("a document");
+    for list in layer_lists(&mut root) {
+        for l in list.iter_mut().filter(|l| is_text_layer(l)) {
+            let Some(p) = l.as_object_mut().and_then(|o| o.get_mut("p")).and_then(|p| p.as_object_mut()) else {
+                continue;
+            };
+            let mut ch = pm_model::json::Map::new();
+            ch.insert("v", pm_model::Value::Number(0.0));
+            ch.insert("kf", pm_model::Value::Array(Vec::new()));
+            ch.insert("expr", pm_model::Value::Null);
+            p.insert("opacity", pm_model::Value::Object(ch));
+        }
+    }
+    pm_model::Document::new(Some(root), doc.revision() + 1)
+}

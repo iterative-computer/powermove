@@ -37,6 +37,16 @@ struct ItemUniform {
     inv0: [f32; 4],
     inv1: [f32; 4],
     isize: [f32; 4],
+    /// The coverage curve, 17 values (20 slots).
+    curve: [[f32; 4]; 5],
+}
+
+fn curve_slots(curve: &pm_text::render::profile::Curve) -> [[f32; 4]; 5] {
+    let mut out = [[0.0f32; 4]; 5];
+    for (i, v) in curve.iter().enumerate() {
+        out[i / 4][i % 4] = *v;
+    }
+    out
 }
 
 #[repr(C)]
@@ -540,7 +550,7 @@ impl TextGpu {
         for i in range {
             let item = &scene.items[i];
             match &item.content {
-                ItemContent::Coverage { gamma, .. } => {
+                ItemContent::Coverage { curve, .. } => {
                     let a = item.color[3] * item.opacity;
                     let color = [
                         (item.color[0] * a) as f32,
@@ -568,7 +578,8 @@ impl TextGpu {
                                     0.0,
                                 ],
                                 color,
-                                params: [0.0, *gamma, tw, th],
+                                params: [0.0, 0.0, tw, th],
+                                curve: curve_slots(curve),
                                 ..Default::default()
                             },
                         });

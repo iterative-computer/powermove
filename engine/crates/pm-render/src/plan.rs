@@ -717,7 +717,7 @@ fn text_quad<'d>(
         b.unsupported.push(Unsupported::layer(
             &comp_id,
             layer,
-            Feature::LayerType(format!("{ty} (no fonts configured)")),
+            Feature::Text(format!("{ty} layers without configured fonts")),
         ));
         return Ok(None);
     };
@@ -731,6 +731,10 @@ fn text_quad<'d>(
     } else {
         text.captions_layer(scope, layer, time, raster_scale)?
     };
+    for what in text.take_unsupported() {
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+    }
     Ok(quad.map(|q| Quad::Texture {
         source: Source::Text(Box::new(q.plan)),
         w: q.w,

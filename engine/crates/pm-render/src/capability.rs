@@ -73,6 +73,9 @@ pub enum Feature {
     Media(String),
     /// A request option (view override, editor looks).
     Request(String),
+    /// Text content this renderer does not draw (color vector glyphs, no
+    /// configured fonts).
+    Text(String),
 }
 
 impl Unsupported {
@@ -115,6 +118,7 @@ impl fmt::Display for Feature {
             Feature::ImageSequence => write!(f, "animated images and image sequences"),
             Feature::Media(m) => write!(f, "media: {m}"),
             Feature::Request(r) => write!(f, "request: {r}"),
+            Feature::Text(t) => write!(f, "text: {t}"),
         }
     }
 }
@@ -130,8 +134,10 @@ impl fmt::Display for Unsupported {
     }
 }
 
-/// Layer types this renderer draws (or knows draw nothing).
-const DRAWN: [&str; 5] = ["solid", "image", "video", "precomp", "group"];
+/// Layer types this renderer draws (or knows draw nothing). Text and
+/// captions need fonts (`Renderer::set_text_fonts`); without them a render
+/// fails with `RenderError::Unsupported`.
+const DRAWN: [&str; 7] = ["solid", "image", "video", "precomp", "group", "text", "captions"];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.

@@ -93,6 +93,7 @@ pub struct TextContext {
     profile: Profile,
     generation: u64,
     captions_hidden: bool,
+    unsupported: Vec<String>,
 }
 
 impl Default for TextContext {
@@ -104,6 +105,7 @@ impl Default for TextContext {
             profile: Profile::CANVAS2D,
             generation: 0,
             captions_hidden: false,
+            unsupported: Vec::new(),
         }
     }
 }
@@ -137,6 +139,11 @@ impl TextContext {
 
     pub fn captions_hidden(&self) -> bool {
         self.captions_hidden
+    }
+
+    /// What the last layer built could not draw.
+    pub(crate) fn take_unsupported(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unsupported)
     }
 }
 
@@ -252,9 +259,11 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
             item.opacity.to_bits().hash(&mut h);
             item.blur.to_bits().hash(&mut h);
             match &item.content {
-                ItemContent::Coverage { paths, gamma } => {
+                ItemContent::Coverage { paths, curve } => {
                     0u8.hash(&mut h);
-                    gamma.to_bits().hash(&mut h);
+                    for v in curve {
+                        v.to_bits().hash(&mut h);
+                    }
                     for p in paths {
                         for c in p.transform.as_coeffs() {
                             c.to_bits().hash(&mut h);
@@ -322,15 +331,17 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
 }
 
 impl TextContext {
-    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts) {
+    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
                 profile: self.profile.clone(),
+                unsupported: Vec::new(),
             },
             fonts,
+            &mut self.unsupported,
         )
     }
 
@@ -399,7 +410,7 @@ impl TextContext {
                     height: ch,
                     items: Vec::new(),
                 };
-                let (mut painter, fonts) = self.painter();
+                let (mut painter, fonts, unsupported) = self.painter();
                 let mut style_color = color::BLACK;
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
                     if !(g.opacity > 0.0) {
@@ -434,6 +445,7 @@ impl TextContext {
                         blur,
                     );
                 }
+                unsupported.append(&mut painter.unsupported);
                 let anchor = (raster.anchor_x, raster.anchor_y);
                 return Ok(self
                     .finish(scene)
@@ -459,7 +471,7 @@ impl TextContext {
             height: ch,
             items: Vec::new(),
         };
-        let (mut painter, fonts) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter();
         let lines = fonts.line_runs(&tc);
         let m = Affine::scale(density);
         for line in &lines {
@@ -467,6 +479,7 @@ impl TextContext {
             let refs = run_refs(&line.runs, &faces);
             painter.fill_text(&mut scene.items, &refs, (g.x, g.pad), m, fill, 1.0, 0.0);
         }
+        unsupported.append(&mut painter.unsupported);
         Ok(self
             .finish(scene)
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
@@ -530,7 +543,7 @@ impl TextContext {
             0.0
         };
         let stroke_color = hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0);
-        let (mut painter, fonts) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter();
         let mut fill_previous = color::BLACK;
         for line in &layout.lines {
             for word in &line.words {
@@ -587,6 +600,7 @@ impl TextContext {
                 );
             }
         }
+        unsupported.append(&mut painter.unsupported);
         (scene, w, h, margin - block.x0, margin - block.y0)
     }
 }

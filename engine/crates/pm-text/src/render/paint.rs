@@ -11,7 +11,7 @@
 use kurbo::Point;
 
 use super::atlas::Atlas;
-use super::profile::coverage_curve;
+use super::profile::curve_at;
 use super::scene::{Item, ItemContent, TextScene, blur_radius};
 
 /// A premultiplied float RGBA image.
@@ -87,7 +87,7 @@ fn paint_item(
     let [x0, y0, x1, y1] = rect;
     let a = (item.color[3] * item.opacity) as f32;
     match &item.content {
-        ItemContent::Coverage { gamma, .. } => {
+        ItemContent::Coverage { curve, .. } => {
             let rgb = [item.color[0] as f32, item.color[1] as f32, item.color[2] as f32];
             for y in y0.max(0)..y1.min(i64::from(layer.height)) {
                 for x in x0.max(0)..x1.min(i64::from(layer.width)) {
@@ -95,7 +95,7 @@ fn paint_item(
                     if c <= 0.0 {
                         continue;
                     }
-                    let k = coverage_curve(f64::from(c), f64::from(*gamma)) as f32 * a;
+                    let k = curve_at(curve, f64::from(c)) as f32 * a;
                     let o = (y as usize * layer.width as usize + x as usize) * 4;
                     let s = [rgb[0] * k, rgb[1] * k, rgb[2] * k, k];
                     for ch in 0..4 {

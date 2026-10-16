@@ -67,6 +67,31 @@ pub struct Point {
     pub gamma: f64,
 }
 
+/// Points of a coverage curve: the value at coverage `i / 16`.
+pub const CURVE_POINTS: usize = 17;
+
+/// A coverage curve the paint pass applies (linear between points).
+pub type Curve = [f32; CURVE_POINTS];
+
+/// The identity curve.
+pub const LINEAR: Curve = {
+    let mut c = [0.0f32; CURVE_POINTS];
+    let mut i = 0;
+    while i < CURVE_POINTS {
+        c[i] = i as f32 / 16.0;
+        i += 1;
+    }
+    c
+};
+
+/// Evaluates a curve at coverage `c`.
+pub fn curve_at(curve: &[f32], c: f64) -> f64 {
+    let x = c.clamp(0.0, 1.0) * (curve.len() - 1) as f64;
+    let i = (x.floor() as usize).min(curve.len() - 2);
+    let t = x - i as f64;
+    f64::from(curve[i]) + (f64::from(curve[i + 1]) - f64::from(curve[i])) * t
+}
+
 /// The stroke pass of stroked text (`strokeText`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrokeProfile {
@@ -87,11 +112,22 @@ pub struct Profile {
     /// glyphs larger than its 256 px atlas limit as paths, without
     /// CoreGraphics smoothing.
     pub path_above: Option<f64>,
-    /// The coverage exponent for black paint is `gamma × dark_gamma`; paint
-    /// in between interpolates by `1 − luminance` (Rec. 709 luma of the
-    /// E-encoded color).
-    pub dark_gamma: f64,
+    /// Coverage curves for white and for black paint (`CURVE_POINTS`
+    /// values each). Paint in between mixes them by `luma^mix` (Rec. 709
+    /// luma of the E-encoded color). Canvas2D's glyph masks are CoreText's
+    /// smoothed masks through Skia's luminance-dependent "preblend".
+    pub light: Cow<'static, [f32]>,
+    pub dark: Cow<'static, [f32]>,
+    pub mix: f64,
+    /// Scales Skia's fake-bold outset (`outline::synthetic_bold_width`) for
+    /// synthesized bold faces.
+    #[serde(default = "one")]
+    pub fake_bold: f64,
     pub stroke: StrokeProfile,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 const fn p(size: f64, expand_x: f64, expand_y: f64, dy: f64, gamma: f64) -> Point {
@@ -112,13 +148,37 @@ const CORETEXT_POINTS: &[Point] = &[
     p(19.428571, 0.34, 0.34, -0.30, 1.0),
 ];
 
-/// Canvas2D fit (`docs/engine/text-render.md`, "Canvas2D profile").
+/// Canvas2D fit (`docs/engine/text-render.md`, "Canvas2D profile"): per
+/// device size, horizontal expansion, vertical expansion with the ink moved
+/// up by the same amount (CoreGraphics smoothing grows glyphs upward and
+/// leaves their bottoms in place; measured on Menlo's full block), and the
+/// exponent applied after the measured coverage curve. Fitted on
+/// `text-fit` (10 families, 2 weights, 24 sizes), smoothed.
 const CANVAS2D_POINTS: &[Point] = &[
-    p(0.0, 0.11, 0.11, -0.0715, 1.0),
-    p(29.333333, 0.33, 0.33, -0.2145, 1.0),
-    p(32.0, 0.35, 0.35, -0.2275, 1.0),
-    p(46.153846, 0.4561538, 0.4561538, -0.2965, 1.0),
-    p(46.666667, 0.46, 0.46, -0.30, 1.0),
+    p(8.0, 0.05, 0.05, -0.05, 1.15),
+    p(12.0, 0.075, 0.09, -0.09, 1.12),
+    p(16.0, 0.088, 0.11, -0.11, 1.14),
+    p(20.0, 0.125, 0.13, -0.13, 1.1),
+    p(24.0, 0.135, 0.145, -0.145, 1.11),
+    p(28.0, 0.158, 0.168, -0.168, 1.125),
+    p(32.0, 0.18, 0.192, -0.192, 1.145),
+    p(40.0, 0.228, 0.235, -0.235, 1.19),
+    p(48.0, 0.272, 0.282, -0.282, 1.24),
+    p(64.0, 0.305, 0.31, -0.31, 1.18),
+    p(160.0, 0.305, 0.32, -0.32, 1.16),
+];
+
+/// Canvas2D's coverage curve for white paint, measured on the bottom edge
+/// of Menlo's full block at 8 to 40 px in 1/4 px steps (an edge CoreGraphics
+/// smoothing does not move; `text-probe`): the same values at every size.
+const CANVAS2D_LIGHT: Curve = [
+    0.0, 0.10, 0.20, 0.29, 0.39, 0.48, 0.56, 0.64, 0.71, 0.78, 0.84, 0.88, 0.93, 0.96, 0.98, 1.0, 1.0,
+];
+
+/// The same for black paint (measured at coverage 1/4, 1/2, 3/4: 0.22,
+/// 0.46, 0.72; in between `1 − (1 − c)^0.89`).
+const CANVAS2D_DARK: Curve = [
+    0.0, 0.0558, 0.1121, 0.1687, 0.22, 0.2836, 0.3418, 0.4007, 0.46, 0.5209, 0.5823, 0.6448, 0.72, 0.7746, 0.8429, 0.9152, 1.0,
 ];
 
 impl Profile {
@@ -127,7 +187,10 @@ impl Profile {
         points: Cow::Borrowed(&[p(0.0, 0.0, 0.0, 0.0, 1.0)]),
         snap: Snap::Exact,
         path_above: None,
-        dark_gamma: 1.0,
+        light: Cow::Borrowed(&LINEAR),
+        dark: Cow::Borrowed(&LINEAR),
+        mix: 1.0,
+        fake_bold: 1.0,
         stroke: StrokeProfile {
             snap: Snap::Exact,
             widen: 0.0,
@@ -141,7 +204,10 @@ impl Profile {
         points: Cow::Borrowed(CORETEXT_POINTS),
         snap: Snap::Exact,
         path_above: None,
-        dark_gamma: 1.0,
+        light: Cow::Borrowed(&LINEAR),
+        dark: Cow::Borrowed(&LINEAR),
+        mix: 1.0,
+        fake_bold: 1.0,
         stroke: StrokeProfile {
             snap: Snap::Exact,
             widen: 0.0,
@@ -155,7 +221,10 @@ impl Profile {
         points: Cow::Borrowed(CANVAS2D_POINTS),
         snap: Snap::QuarterRound,
         path_above: Some(256.0),
-        dark_gamma: 1.0,
+        light: Cow::Borrowed(&CANVAS2D_LIGHT),
+        dark: Cow::Borrowed(&CANVAS2D_DARK),
+        mix: 1.0,
+        fake_bold: 1.0,
         stroke: StrokeProfile {
             snap: Snap::QuarterRound,
             widen: 0.0,
@@ -226,15 +295,23 @@ impl Profile {
         self.stroke.snap.apply(x, y)
     }
 
-    /// The fill pass's coverage curve exponent at `size` device px for
-    /// paint `rgb` (E-encoded).
-    pub fn gamma(&self, size: f64, rgb: [f64; 3]) -> f64 {
+    /// The fill pass's coverage curve at `size` device px for paint `rgb`
+    /// (E-encoded): the light and dark curves mixed by luma, then the
+    /// size's exponent `1 − (1 − v)^gamma`.
+    pub fn curve(&self, size: f64, rgb: [f64; 3]) -> Curve {
         if self.as_path(size) {
-            return 1.0;
+            return LINEAR;
         }
-        let white = self.at(size).gamma;
+        let gamma = self.at(size).gamma;
         let luma = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]).clamp(0.0, 1.0);
-        (white * (1.0 + (self.dark_gamma - 1.0) * (1.0 - luma))).max(0.05)
+        let w = luma.powf(self.mix.max(0.0));
+        let mut out = LINEAR;
+        for (i, o) in out.iter_mut().enumerate() {
+            let c = i as f64 / 16.0;
+            let v = curve_at(&self.dark, c) * (1.0 - w) + curve_at(&self.light, c) * w;
+            *o = coverage_curve(v, gamma) as f32;
+        }
+        out
     }
 }
 
@@ -278,11 +355,24 @@ mod tests {
     }
 
     #[test]
-    fn dark_paint_scales_gamma() {
+    fn paint_luminance_mixes_the_curves() {
         let mut p = Profile::CANVAS2D;
-        p.dark_gamma = 1.5;
-        assert!((p.gamma(20.0, [1.0; 3]) - 1.0).abs() < 1e-12);
-        assert!((p.gamma(20.0, [0.0; 3]) - 1.5).abs() < 1e-12);
+        p.points = Cow::Owned(vec![Point {
+            size: 0.0,
+            expand_x: 0.0,
+            expand_y: 0.0,
+            dy: 0.0,
+            gamma: 1.0,
+        }]);
+        let white = p.curve(20.0, [1.0; 3]);
+        let black = p.curve(20.0, [0.0; 3]);
+        assert!((white[4] - 0.39).abs() < 1e-6);
+        assert!((black[4] - 0.22).abs() < 1e-6);
+        let gray = p.curve(20.0, [0.5; 3]);
+        assert!(gray[4] > black[4] && gray[4] < white[4]);
+        assert_eq!(p.curve(300.0, [1.0; 3]), LINEAR);
+        assert_eq!(Profile::CORETEXT.curve(20.0, [1.0; 3]), LINEAR);
+        assert!((curve_at(&LINEAR, 0.3) - 0.3).abs() < 1e-6);
     }
 
     #[test]

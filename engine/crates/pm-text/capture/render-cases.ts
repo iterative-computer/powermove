@@ -223,10 +223,32 @@ export function buildFitCases(): RenderCase[] {
   return [...cases, ...caps];
 }
 
+/** Edge probes (`--set probe`): Menlo's full block (a rectangle) at many
+    sizes, so edges cross every subpixel phase; the plain coverage of a
+    rectangle is known exactly, which separates the smoothing's dilation
+    from its coverage curve. */
+export function buildProbeCases(): RenderCase[] {
+  const cases: RenderCase[] = [];
+  const add = (group: string, d: TextCase['d'], scale = 1) =>
+    cases.push({ id: `${group}-${String(cases.length).padStart(4, '0')}`, group, kind: 'text', d, scale });
+  for (const color of ['#FFFFFF', '#000000']) {
+    for (let size = 8; size <= 40; size += color === '#FFFFFF' ? 0.25 : 1) {
+      add(color === '#FFFFFF' ? 'probe-white' : 'probe-black', text({ text: '\u2588 \u2588 \u2588 \u2588', font: 'Menlo', size, weight: 400, color }));
+    }
+  }
+  // Where Skia stops drawing glyph masks: a short glyph and a tall one.
+  for (let size = 150; size <= 300; size += 10) {
+    add('probe-large-h', text({ text: 'H', font: 'Menlo', size, weight: 400 }));
+    add('probe-large-block', text({ text: '\u2588', font: 'Menlo', size, weight: 400 }));
+  }
+  return cases;
+}
+
 if (import.meta.main) {
   const out = process.argv[2];
   if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit]');
-  const cases = process.argv[3] === 'fit' ? buildFitCases() : buildRenderCases();
+  const set = process.argv[3];
+  const cases = set === 'fit' ? buildFitCases() : set === 'probe' ? buildProbeCases() : buildRenderCases();
   await Bun.write(out, JSON.stringify({ variableSources: VARIABLE_SOURCES, projectFonts: PROJECT_FONTS, cases }));
   const groups = new Map<string, number>();
   for (const item of cases) groups.set(item.group, (groups.get(item.group) ?? 0) + 1);

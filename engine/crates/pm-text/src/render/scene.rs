@@ -40,8 +40,8 @@ pub struct PlacedPath {
 pub enum ItemContent {
     Coverage {
         paths: Vec<PlacedPath>,
-        /// Coverage curve exponent (`profile::coverage_curve`).
-        gamma: f32,
+        /// The coverage curve the paint pass applies (`profile::Curve`).
+        curve: super::profile::Curve,
     },
     Image {
         image: Arc<Rgba8>,
@@ -138,6 +138,9 @@ pub struct Painter<'c> {
     pub outlines: &'c mut Outlines,
     pub bitmaps: &'c mut Bitmaps,
     pub profile: Profile,
+    /// What the scene could not draw (color vector glyphs): the renderer
+    /// refuses such a layer rather than drawing it wrong.
+    pub unsupported: Vec<String>,
 }
 
 /// A layout-to-device transform split into a uniform scale (the device
@@ -176,6 +179,15 @@ fn union(r: &mut Option<Rect>, b: Rect) {
 }
 
 impl Painter<'_> {
+    /// The fake-bold outset per side for a synthesized bold run.
+    fn fake_bold(&self, synthetic: bool, device_size: f64) -> f64 {
+        if synthetic {
+            super::outline::synthetic_bold_width(device_size) / 2.0 * self.profile.fake_bold
+        } else {
+            0.0
+        }
+    }
+
     /// `fillText` of the runs with `fillStyle = color`, `globalAlpha =
     /// opacity`, `filter: blur(blur px)`, the context transform `m` (layout
     /// px to device px), and the text origin `origin` in layout px. Outline
@@ -204,10 +216,11 @@ impl Painter<'_> {
             let device_size = f64::from(run.size) * place.scale;
             let dsize = device_size as f32;
             let bitmap_face = has_bitmaps(run.face);
+            let colr = super::bitmap::has_colr(run.face);
             let (ex, ey) = self.profile.expansion(device_size, false);
             let style = GlyphStyle {
                 size: dsize,
-                synthetic_bold: run.synthetic_bold,
+                synthetic_bold: self.fake_bold(run.synthetic_bold, device_size),
                 synthetic_italic: run.synthetic_italic,
                 expand: (ex, ey),
             };
@@ -239,6 +252,13 @@ impl Painter<'_> {
                     });
                     continue;
                 }
+                if colr && super::bitmap::is_colr_glyph(run.face, g.id) {
+                    let what = "color vector glyphs (COLR)".to_owned();
+                    if !self.unsupported.contains(&what) {
+                        self.unsupported.push(what);
+                    }
+                    continue;
+                }
                 let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
                     continue;
                 };
@@ -259,7 +279,7 @@ impl Painter<'_> {
             out.push(Item {
                 content: ItemContent::Coverage {
                     paths,
-                    gamma: self.profile.gamma(gamma_size, [color[0], color[1], color[2]]) as f32,
+                    curve: self.profile.curve(gamma_size, [color[0], color[1], color[2]]),
                 },
                 color,
                 opacity,
@@ -299,7 +319,7 @@ impl Painter<'_> {
             let device_size = f64::from(run.size) * place.scale;
             let style = GlyphStyle {
                 size: device_size as f32,
-                synthetic_bold: run.synthetic_bold,
+                synthetic_bold: self.fake_bold(run.synthetic_bold, device_size),
                 synthetic_italic: run.synthetic_italic,
                 expand: (0.0, 0.0),
             };
@@ -330,7 +350,7 @@ impl Painter<'_> {
             out.push(Item {
                 content: ItemContent::Coverage {
                     paths,
-                    gamma: self.profile.stroke.gamma as f32,
+                    curve: stroke_curve(self.profile.stroke.gamma),
                 },
                 color,
                 opacity,
@@ -339,6 +359,14 @@ impl Painter<'_> {
             });
         }
     }
+}
+
+fn stroke_curve(gamma: f64) -> super::profile::Curve {
+    let mut c = super::profile::LINEAR;
+    for v in &mut c {
+        *v = super::profile::coverage_curve(f64::from(*v), gamma) as f32;
+    }
+    c
 }
 
 fn placed(outline: &Outline, transform: Affine, style: PathStyle) -> PlacedPath {
@@ -362,7 +390,7 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
                 transform: m,
                 style: PathStyle::Fill,
             }],
-            gamma: 1.0,
+            curve: super::profile::LINEAR,
         },
         color,
         opacity,

@@ -22,7 +22,7 @@ const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? a
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
 const corpusRoot = process.env.PM_ENGINE_CORPUS_ROOT ?? join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
 const set = flag('--set') ?? 'main';
-const out = resolve(flag('--out') ?? join(corpusRoot, `${set === 'fit' ? 'text-fit' : 'text-raster'}-${stamp}`));
+const out = resolve(flag('--out') ?? join(corpusRoot, `${set === 'main' ? 'text-raster' : `text-${set}`}-${stamp}`));
 if (out.startsWith(resolve(repo) + '/')) throw new Error('refusing to write captured pixels inside the repository');
 if (existsSync(join(out, 'manifest.json'))) throw new Error(`${out} already holds a capture`);
 mkdirSync(out, { recursive: true });
@@ -35,7 +35,7 @@ const run = async (cmd: string[]) => {
   if (code !== 0) throw new Error(`${cmd.join(' ')} exited ${code}`);
 };
 await run(['bun', join(import.meta.dir, 'build.ts'), work]);
-await run(['bun', join(import.meta.dir, 'render-cases.ts'), join(out, 'cases.json'), ...(set === 'fit' ? ['fit'] : [])]);
+await run(['bun', join(import.meta.dir, 'render-cases.ts'), join(out, 'cases.json'), ...(set === 'main' ? [] : [set])]);
 await run([electron, join(import.meta.dir, 'electron-main.cjs'), `--page=${join(work, 'capture', 'render.html')}`,
   `--corpus=${join(out, 'cases.json')}`, `--out=${out}`, '--timeout=1800']);
 console.log(`captured into ${out}`);
