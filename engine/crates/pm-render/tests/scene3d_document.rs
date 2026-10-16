@@ -420,6 +420,30 @@ fn obj_models_and_mesh_layers_render() {
     assert!((corner[2] - 0x12 as f32 / 255.0).abs() < 2e-3, "{corner:?}");
     assert!(px(W / 2, H / 2)[0] > 0.2, "the mesh shading at the center");
     assert_eq!(px(2, 2), [0.0, 0.0, 0.0]);
+    // The built-in OBJ model layer needs no snapshot, and the static check
+    // agrees.
+    let mut builtin = support::doc::layer(
+        "m",
+        "extension",
+        json!({
+            "definition": "powermove.3d.obj-model", "version": 1, "w": 160, "h": 90, "params": {},
+            "data": { "assetId": "cube" }
+        }),
+        0.0,
+        0.0,
+        2.0,
+    );
+    builtin["p"]["anchor.x"] = ch(json!(0));
+    let mut doc = project(W, H, 2.0, solid_fill("#000000"), vec![builtin]);
+    doc["assets"]["cube"] =
+        json!({ "id": "cube", "kind": "model", "format": "obj", "name": "cube.obj" });
+    let doc = load(&doc);
+    assert!(pm_render::unsupported(&doc, "Ptest-root").is_empty());
+    let mut r = Renderer::headless().unwrap();
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

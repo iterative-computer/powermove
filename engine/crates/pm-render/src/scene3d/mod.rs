@@ -42,12 +42,21 @@ pub use layers::{View3d, scene_from_json};
 
 /// Planning options of the 3D pass: the view override (editor camera,
 /// looks, Local View) and the mesh layer definitions known to the host.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options3d {
     pub view: Option<View3d>,
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`), by
-    /// definition id.
+    /// definition id. The built-in OBJ model layer is known by default.
     pub mesh_definitions: Arc<std::collections::HashMap<String, legacy::MeshDefinition>>,
+}
+
+impl Default for Options3d {
+    fn default() -> Self {
+        Options3d {
+            view: None,
+            mesh_definitions: Arc::new(legacy::builtin_mesh_definitions()),
+        }
+    }
 }
 
 /// What a 3D render draws.

@@ -138,12 +138,16 @@ impl Renderer {
     }
 
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`) by
-    /// definition id, so legacy OBJ mesh layers render natively.
+    /// definition id, so legacy OBJ mesh layers render natively. The
+    /// built-in OBJ model layer is always known; a snapshot for its id
+    /// replaces it.
     pub fn set_mesh_definitions(
         &mut self,
         definitions: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     ) {
-        self.options3d.mesh_definitions = Arc::new(definitions);
+        let mut all = crate::scene3d::legacy::builtin_mesh_definitions();
+        all.extend(definitions);
+        self.options3d.mesh_definitions = Arc::new(all);
     }
 
     /// 3D layers render without MSAA when `false` (only for the parity

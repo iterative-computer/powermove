@@ -284,8 +284,10 @@ fn check_composition(
                         pm_eval::parenting::Role3d::LIGHT | pm_eval::parenting::Role3d::CAMERA => {
                             has_3d = true;
                         }
-                        // Legacy scene layers: the 3D pass renders them whole.
-                        crate::scene3d::legacy::SCENE3D_DEFINITION => {}
+                        // Legacy scene layers: the 3D pass renders them whole;
+                        // the built-in OBJ model layer with its fixed shading.
+                        crate::scene3d::legacy::SCENE3D_DEFINITION
+                        | crate::scene3d::legacy::OBJ_MODEL_DEFINITION => {}
                         _ => add(layer, Feature::ExtensionDefinition(def)),
                     }
                 }

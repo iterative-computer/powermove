@@ -1155,6 +1155,16 @@ impl Scene3dRenderer {
         self.linear.convert(device, encoder, pool, source, format)
     }
 
+    /// Keeps only the shadow maps `scene`'s casting lights use (at most 4).
+    fn keep_shadows(&mut self, scene: &Scene3d) {
+        self.shadows.retain(|&i, _| {
+            scene
+                .lights
+                .get(i)
+                .is_some_and(|l| l.cast_shadow && l.visible)
+        });
+    }
+
     fn output(&self, device: &wgpu::Device, pool: &mut TargetPool, w: u32, h: u32) -> Target {
         pool.take(
             device,
@@ -1192,6 +1202,7 @@ impl Scene3dRenderer {
             && k.depth_set == depth_set && k.samples == self.samples);
         if !cached {
             self.prepass = None;
+            self.keep_shadows(scene);
             for pass in describe::prepass(&layer)? {
                 self.record(device, queue, encoder, scene, &pass, None)?;
             }
@@ -1226,6 +1237,7 @@ impl Scene3dRenderer {
         self.prepass = None;
         let out = self.output(device, pool, w, h);
         let passes = describe::whole_scene(scene)?;
+        self.keep_shadows(scene);
         // The color pass clears depth too (`autoClear`).
         let a = self.attachments.as_ref().expect("attachments");
         {

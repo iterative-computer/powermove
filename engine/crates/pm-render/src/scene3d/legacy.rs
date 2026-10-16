@@ -28,6 +28,42 @@ use crate::js;
 /// The built-in legacy scene definition (`SCENE3D_DEFINITION`).
 pub const SCENE3D_DEFINITION: &str = "powermove.3d.scene";
 
+/// The built-in OBJ model layer (`extensions/layers-3d/obj-model.ts`).
+pub const OBJ_MODEL_DEFINITION: &str = "powermove.3d.obj-model";
+
+/// The built-in OBJ model layer's definition snapshot: `assetField` and
+/// every parameter's default, as `obj-model.ts` declares them.
+pub fn builtin_mesh_definitions() -> HashMap<String, MeshDefinition> {
+    let n = Value::Number;
+    let c = |s: &str| Value::String(s.into());
+    let defaults: HashMap<String, Value> = [
+        ("yaw", n(28.0)),
+        ("pitch", n(18.0)),
+        ("distance", n(4.2)),
+        ("rotationX", n(0.0)),
+        ("rotationY", n(25.0)),
+        ("rotationZ", n(0.0)),
+        ("size", n(1.35)),
+        ("roughness", n(0.25)),
+        ("metalness", n(0.7)),
+        ("objectColor", c("#C7C4FF")),
+        ("lightColor", c("#FFB36B")),
+        ("background", c("#0C0D12")),
+        ("autoRotate", Value::Bool(false)),
+        ("speed", n(25.0)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    HashMap::from([(
+        OBJ_MODEL_DEFINITION.to_owned(),
+        MeshDefinition {
+            asset_field: "assetId".into(),
+            defaults,
+        },
+    )])
+}
+
 /// The largest legacy target edge (`Math.min(4096, …)`).
 pub const MAX_TARGET: f64 = 4096.0;
 
@@ -154,14 +190,21 @@ pub(crate) fn plan_mesh_layer<'d>(
     .unwrap_or_default();
     let root = scope.comp.root();
     let record = node::member(node::member(Some(root), "assets"), &asset);
+    // `meshBuffers(asset)`: only an OBJ model asset that loaded has a mesh;
+    // anything else draws the missing-definition checkerboard.
+    let is_obj = |record: &Node| {
+        let format = node::string(node::member(Some(record), "format"))
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let name = node::string(node::member(Some(record), "name"))
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        format == "obj" || (format.is_empty() && name.ends_with(".obj"))
+    };
     let mesh = match (asset.is_empty(), record) {
-        (false, Some(record)) => match assets.path(&asset, Some(record)) {
-            Some(path) => match obj_mesh(&path) {
-                Ok(m) => Some(m),
-                Err(e) => return Ok(Err(format!("the OBJ mesh {asset}: {e}"))),
-            },
-            None => None,
-        },
+        (false, Some(record)) if is_obj(record) => assets
+            .path(&asset, Some(record))
+            .and_then(|path| obj_mesh(&path).ok()),
         _ => None,
     };
     Ok(Ok(ObjMeshPlan {
