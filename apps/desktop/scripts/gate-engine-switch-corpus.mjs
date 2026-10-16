@@ -116,6 +116,15 @@ const openStored = (page, id) => page.evaluate(async (id) => {
   return { opened: PM.proj.id === id, refused: false, missing: missing().map((a) => `${a} (${PM.proj.assets[a]?.name ?? '?'}): ${PM.assets.errors?.get?.(a) ?? 'not loaded'}`), requiresEngine: PM.proj.requiresEngine ?? null };
 }, id);
 
+/** Paths (dot and index notation) where two JSON values differ. */
+function diffPaths(a, b, at = '', out = []) {
+  if (JSON.stringify(a) === JSON.stringify(b)) return out;
+  if (a && b && typeof a === 'object' && typeof b === 'object' && Array.isArray(a) === Array.isArray(b)) {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) diffPaths(a[k], b[k], Array.isArray(a) ? `${at}[${k}]` : at ? `${at}.${k}` : k, out);
+  } else out.push(at || '(root)');
+  return out;
+}
+
 const projects = index.projects.filter((p) => !only || p.id.startsWith(only));
 const results = Object.fromEntries(projects.map((p) => [p.id, { id: p.id, media: p.media, problems: [] }]));
 const pageErrors = [];
@@ -182,7 +191,9 @@ try {
     pageErrors.push(...s.errors.map((e) => `on (import): ${e.split('\n')[0]}`));
   } finally { await close(s); }
 
-  const phases = [['on (baseline)', true], ['off', false], ['on again', true]];
+  // The control reopens with the flag still on: a difference there comes from
+  // opening itself (the loader rewrites some ids on every open), not from the switch.
+  const phases = [['on (baseline)', true], ['on (control)', true], ['off', false], ['on again', true]];
   for (const [phase, flag] of phases) {
     s = await launch(flag);
     try {
@@ -199,9 +210,10 @@ try {
           r.assets = Math.max(r.assets ?? 0, (await s.page.evaluate(() => Object.keys(window.PM.proj.assets || {}).length)));
           if (phase === 'on (baseline)') r.baseline = now;
           else if (now !== r.baseline) {
-            const a = JSON.parse(r.baseline), b = JSON.parse(now);
-            const diff = Object.keys({ ...a, ...b }).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
-            r.problems.push(`${phase}: stored project differs in ${diff.join(', ')}`);
+            const paths = diffPaths(JSON.parse(r.baseline), JSON.parse(now));
+            if (phase === 'on (control)') r.unstable = paths;
+            else if (!r.unstable || paths.some((p) => !r.unstable.includes(p))) r.problems.push(`${phase}: stored project differs at ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` and ${paths.length - 4} more` : ''}`);
+            else r.differsLikeControl = (r.differsLikeControl ?? 0) + 1;
           }
           if (!flag) await s.page.evaluate(async () => { await window.PM.Projects.put(window.PM.proj); await window.PM.store.flush?.(); });
         } catch (e) { r.problems.push(`${phase}: ${e.message.split('\n')[0]}`); }
@@ -223,11 +235,15 @@ const summary = {
   failed: list.filter((r) => r.problems.length).map((r) => ({ id: r.id, problems: r.problems })),
   skipped: list.filter((r) => r.skipped).map((r) => ({ id: r.id, reason: r.skipped })),
   stamped: list.filter((r) => r.requiresEngine).map((r) => r.id),
+  // Projects whose stored document changes on any reopen (the control), with
+  // the off and on-again reopens changing it in exactly the same places.
+  unstableOnReopen: list.filter((r) => r.unstable).map((r) => ({ id: r.id, paths: r.unstable.length, sample: r.unstable.slice(0, 3), switchLosesNothingBeyondIt: !r.problems.length })),
   pageErrors,
   seconds: Math.round((Date.now() - t0) / 1000),
 };
 process.stdout.write(`${summary.roundTripped} of ${summary.projects} corpus projects round-trip on → off → on with no loss (${summary.withMedia} with media, ${summary.assets} assets; compared ${JSON.stringify(compared)}); ${summary.failed.length} failed, ${summary.skipped.length} skipped, ${summary.stamped.length} stamped; ${summary.seconds} s\n`);
 for (const f of summary.failed) process.stdout.write(`  ${f.id}: ${f.problems.join(' | ')}\n`);
+for (const u of summary.unstableOnReopen) process.stdout.write(`  changes on any reopen (control, flag on both times) ${u.id}: ${u.paths} paths, e.g. ${u.sample.join(', ')}; the switch ${u.switchLosesNothingBeyondIt ? 'changes nothing beyond that' : 'changes more'}\n`);
 for (const k of summary.skipped) process.stdout.write(`  skipped ${k.id}: ${k.reason}\n`);
 for (const e of pageErrors) process.stdout.write(`  page error ${e}\n`);
 const json = arg('json');
