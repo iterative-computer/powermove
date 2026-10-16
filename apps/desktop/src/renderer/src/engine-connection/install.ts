@@ -112,16 +112,21 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // the batch does not wait for the next pm-wasm query (an overlay draw at
   // the next animation frame). Only while an engine session is open.
   let flushQueued = false;
+  let flushing = false;
   const flushSoon = (): void => {
-    if (flushQueued || !sessions.size) return;
+    // Marks made while this connection's own flush runs are part of it.
+    if (flushQueued || flushing || !sessions.size) return;
     flushQueued = true;
     queueMicrotask(() => {
       flushQueued = false;
       if (!sessions.size) return;
+      flushing = true;
       try {
         PM.EngineDoc?.barrier?.flush();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        flushing = false;
       }
     });
   };

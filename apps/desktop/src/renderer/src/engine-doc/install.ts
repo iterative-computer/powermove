@@ -237,8 +237,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!runFresh && !transactionDirty) return;
     transactionDirty = false;
     if (runFresh) { runFresh = false; queueMicrotask(() => { runFresh = true; }); }
-    if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); }
-    else barrier.touchAll();
+    // Speculative marks for the flush that is starting: not announced (an
+    // announcement would ask for another flush, which marks again: a
+    // microtask loop for as long as the transaction stays open).
+    if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()], 'edit', { announce: false }); }
+    else barrier.touchAll({ announce: false });
   }
   const legacyTouch = PM.touch;
   PM.touch = (paths?: PathPart[][], canonical?: boolean) => {

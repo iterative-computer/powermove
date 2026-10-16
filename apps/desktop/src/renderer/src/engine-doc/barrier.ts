@@ -218,25 +218,28 @@ export class DocumentBarrier {
   }
 
   /** Records canonical paths as dirty. */
-  touchedCanonical(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit'): void {
+  touchedCanonical(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit', options: { announce?: boolean } = {}): void {
     const was = this.pending;
     for (const path of paths) this.dirty.set(pathKey(path), [...path]);
     if (paths.length) this.bump(origin);
-    if (!was && this.pending) this.announcePending();
+    if (!was && this.pending && options.announce !== false) this.announcePending();
   }
 
   /** Records paths relative to `PM.proj` (the realized form writers see). */
-  touched(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit'): void {
+  touched(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit', options: { announce?: boolean } = {}): void {
     const rootId = this.project()?.compId;
-    this.touchedCanonical(paths.map(path => canonicalPath([...path], rootId)), origin);
+    this.touchedCanonical(paths.map(path => canonicalPath([...path], rootId)), origin, options);
   }
 
-  /** A `touch()` without a path: diff the open composition and the project's members. */
-  touchAll(): void {
+  /** A `touch()` without a path: diff the open composition and the project's members.
+   *  `announce: false` for a speculative diff the owner marks just before a
+   *  flush (an open transaction's possible writes): nobody needs telling,
+   *  the flush that asked for it follows. */
+  touchAll(options: { announce?: boolean } = {}): void {
     const was = this.pending;
     this.structural = true;
     this.bump('structuralDiff');
-    if (!was) this.announcePending();
+    if (!was && options.announce !== false) this.announcePending();
   }
 
   /** Replaces the mirror with the live document. */

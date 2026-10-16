@@ -442,6 +442,31 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.check('test')!.ok).toBe(true);
   });
 
+  it('does not announce the speculative diff a flush marks inside an open transaction', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    doc.barrier!.flush();
+    // A listener that flushes whenever told, as the engine connection does:
+    // the speculative marks of an open plain transaction must not tell it,
+    // or every flush would ask for the next one.
+    let told = 0;
+    doc.onPending(() => {
+      told += 1;
+      // Bounded, so a regression fails here instead of starving the loop.
+      if (told < 8) queueMicrotask(() => doc.barrier!.flush());
+    });
+    PM.hist.begin('Drag');
+    for (let run = 0; run < 4; run++) {
+      doc.api!.ev(L, 'position.x', 0);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(told).toBe(0);
+    PM.hist.commit('Drag');
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+
   it('diffs once per synchronous run inside a plain transaction', async () => {
     const { PM, doc } = await editor('on');
     PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
