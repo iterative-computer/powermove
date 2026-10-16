@@ -637,3 +637,88 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     let again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(again, first);
 }
+
+#[test]
+fn a_viewport_safe_chain_renders_a_padded_crop_of_the_region() {
+    let _gpu = gpu();
+    // Large enough that the padded crop (128 px of overscan plus the
+    // effects' padding) is smaller than the frame.
+    let (w, h) = (1280u32, 720u32);
+    let dur = 2.0;
+    let mut image = layer("img", "image", json!({ "asset": "still", "fit": "stretch", "w": 900, "h": 500 }), 190.0, 110.0, dur);
+    set(&mut image, "rotation", json!(-4));
+    image["fx"] = json!([
+        fx("f1", "blur", json!({ "amount": ch(json!(9)) })),
+        fx("f2", "chroma", json!({ "amount": ch(json!(6)) })),
+        fx("f3", "vignette", json!({ "amount": ch(json!(60)), "feather": ch(json!(50)) })),
+    ]);
+    let mut doc = project(w, h, dur, solid_fill("#14161C"), vec![image]);
+    asset(&mut doc, "still", "image", "png", 160, 90, 0.0);
+    let doc = load(&doc);
+    let mut res = MapResolver::default();
+    res.paths.insert("still".into(), repo_root().join("apps/desktop/e2e/fixtures/still-alpha.png"));
+    let mut r = builtins();
+    let full_req = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+    let full = render(&mut r, &doc, &res, 0.5, &full_req).unwrap();
+    let rect = PixelRect { x: 500, y: 260, width: 240, height: 160 };
+    let mut req = full_req.clone();
+    req.region = Some(rect);
+    let part = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+    let mut worst = 0.0f32;
+    let mut over = 0usize;
+    for y in 0..rect.height as usize {
+        for x in 0..rect.width as usize {
+            for c in 0..4 {
+                let a = part[(y * rect.width as usize + x) * 4 + c];
+                let b = full[((y + rect.y as usize) * w as usize + x + rect.x as usize) * 4 + c];
+                let d = (a - b).abs();
+                worst = worst.max(d);
+                if d > 1.0 / 255.0 {
+                    over += 1;
+                }
+            }
+        }
+    }
+    eprintln!("padded crop against the full frame: max {:.3} CV, {over} values over 1 CV", worst * 255.0);
+    assert!(worst <= 1.0 / 255.0, "max {} CV", worst * 255.0);
+}
+
+/// Measurement (run with `--ignored --nocapture`, release): translation of
+/// every built-in cold and from the cache, and each built-in's GPU time at
+/// UHD through the watchdog's timestamps.
+#[test]
+#[ignore]
+fn builtin_costs_at_uhd() {
+    let _gpu = gpu();
+    let set = builtin_definitions();
+    let t = std::time::Instant::now();
+    let mut r = Renderer::headless().unwrap();
+    r.set_definitions(&set).unwrap();
+    eprintln!("translate 20 built-ins (cold process): {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    let t = std::time::Instant::now();
+    r.set_definitions(&set).unwrap();
+    eprintln!("again (translation cache): {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    let (w, h) = (3840u32, 2160u32);
+    for d in set.definitions.iter().filter(|d| d.kind == DefinitionKind::Effect) {
+        let id = d.id.as_str();
+        let mut image = layer("img", "image", json!({ "asset": "still", "fit": "stretch", "w": 3000, "h": 1700 }), 400.0, 200.0, 2.0);
+        image["fx"] = json!([fx("f1", id, json!({}))]);
+        let mut doc = project(w, h, 2.0, solid_fill("#14161C"), vec![image]);
+        asset(&mut doc, "still", "image", "png", 160, 90, 0.0);
+        let doc = load(&doc);
+        let mut res = MapResolver::default();
+        res.paths.insert("still".into(), repo_root().join("apps/desktop/e2e/fixtures/still-alpha.png"));
+        let req = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+        let first = std::time::Instant::now();
+        render(&mut r, &doc, &res, 0.5, &req).unwrap();
+        let first = first.elapsed().as_secs_f64() * 1000.0;
+        for _ in 0..5 {
+            render(&mut r, &doc, &res, 0.5, &req).unwrap();
+            r.watchdog_reports(true);
+        }
+        eprintln!(
+            "{id:<14} first frame {first:>7.1} ms (pipeline build included); GPU {:.2} ms (longest of 5, defaults)",
+            r.effects().watchdog.measured_ms(DefinitionKind::Effect, id).unwrap_or(f64::NAN)
+        );
+    }
+}
