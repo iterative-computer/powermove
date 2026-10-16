@@ -172,9 +172,10 @@ impl Renderer {
         self.scene3d.set_program_cache(dir);
     }
 
-    /// The view override of the following renders (contract 2's
+    /// The view override of the following viewer renders (contract 2's
     /// `FrameRequest.view`): the editor camera, Wireframe and X-ray looks,
-    /// and Local View. Exports and agent captures must pass `None`.
+    /// and Local View. Export requests (`RenderRequest::export`) never use
+    /// it; agent captures must pass `None`.
     pub fn set_view(&mut self, view: Option<&pm_protocol::frame::ViewOverride>) {
         self.options3d.view = view.map(crate::scene3d::View3d::from_override);
     }
@@ -324,7 +325,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
-            self.options3d.clone(),
+            self.options3d.for_request(request.export),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -551,7 +552,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
-            self.options3d.clone(),
+            self.options3d.for_request(request.export),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

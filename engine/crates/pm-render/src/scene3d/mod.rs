@@ -49,6 +49,17 @@ pub struct Options3d {
     pub mesh_definitions: Arc<std::collections::HashMap<String, legacy::MeshDefinition>>,
 }
 
+impl Options3d {
+    /// The options of one render: an export never draws the view override,
+    /// whatever `Renderer::set_view` last set.
+    pub fn for_request(&self, export: bool) -> Options3d {
+        Options3d {
+            view: if export { None } else { self.view.clone() },
+            mesh_definitions: self.mesh_definitions.clone(),
+        }
+    }
+}
+
 impl Default for Options3d {
     fn default() -> Self {
         Options3d {

@@ -183,6 +183,14 @@ fn view_overrides_change_only_viewer_renders() {
     r.set_view(Some(&view(Shading3d::Wireframe, false, None)));
     let wire = render(&mut r, &doc);
     assert_ne!(wire, plain, "wireframe draws edges");
+    // An export request never draws the view override.
+    let mut export = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    export.export = true;
+    let frame = r
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &export, &MapResolver::default())
+        .unwrap();
+    assert_eq!(r.read_rgba(&frame).unwrap(), plain, "exports ignore the view");
+    assert_eq!(render(&mut r, &doc), wire, "the viewer keeps it");
     r.set_view(Some(&view(Shading3d::Solid, true, None)));
     let xray = render(&mut r, &doc);
     assert_ne!(xray, plain, "X-ray makes models see-through");
