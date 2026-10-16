@@ -134,6 +134,19 @@ function main(): void {
   });
 
   setInterval(() => run(engine.tick()), TICK_MS);
+  // Measurement harnesses only: the job service's counters (its GPU gate's
+  // submissions, probes, and waits) as a log line this often.
+  const statusEveryMs = Number(process.env['POWERMOVE_ENGINE_STATUS_LOG_MS'] ?? 0);
+  if (kind === 'job' && Number.isFinite(statusEveryMs) && statusEveryMs >= 100) {
+    setInterval(() => {
+      try {
+        const jobs = (JSON.parse(engine.status()) as { jobs?: unknown }).jobs;
+        if (jobs) notify({ type: 'log', level: 'info', message: `job service status ${JSON.stringify(jobs)}` });
+      } catch {
+        // A status the engine could not give is not worth a log line.
+      }
+    }, statusEveryMs);
+  }
   notify({ type: 'started', build: addon.buildId(), pid: process.pid, clock: addon.hostNowUs() });
 }
 

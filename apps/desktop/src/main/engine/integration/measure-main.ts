@@ -60,12 +60,16 @@ type Config = {
    *  sends a batch of `frames` agent frames to the job engine every
    *  `turnMs`, through the production agent path (agent-jobs.ts), on a
    *  `layers`-layer 4K project that changes every turn (each batch is a
-   *  new revision, so the job engine resyncs as it does after agent edits). */
-  agentSnapshots?: { turnMs: number; frames: number; width: number; layers: number };
+   *  new revision, so the job engine resyncs as it does after agent edits).
+   *  `heavy: 'precomp'` puts the layers in a full-size 4K precomposition,
+   *  which pm-render draws whole for every band of rows: a band costs about
+   *  as much as the whole frame (an over-bound pass when the frame is). */
+  agentSnapshots?: { turnMs: number; frames: number; width: number; layers: number; heavy?: 'precomp' };
 };
 
-/** A 3840 × 2160, 24 fps project of solid layers, one color per turn. */
-function snapshotProject(layers: number, turn: number): Record<string, unknown> {
+/** A 3840 × 2160, 24 fps project of solid layers, one color per turn; with
+ *  `heavy`, the solids sit in a 3840 × 2160 precomposition (not a group). */
+function snapshotProject(layers: number, turn: number, heavy?: 'precomp'): Record<string, unknown> {
   const ch = (v: unknown) => ({ v, kf: [], expr: null });
   const transform = (x: number, y: number) => Object.fromEntries([
     ['anchor.x', 0], ['anchor.y', 0], ['position.x', x], ['position.y', y], ['scale.x', 100], ['scale.y', 100],
@@ -77,6 +81,22 @@ function snapshotProject(layers: number, turn: number): Record<string, unknown> 
     p: transform((i * 157) % 3200, (i * 89) % 1800),
     d: { color: `#${((turn * 0x1f3d5b + i * 0x2a7f13) & 0xffffff).toString(16).padStart(6, '0')}`, w: 640 + (i % 5) * 240, h: 360 + (i % 3) * 200 }
   }));
+  if (heavy === 'precomp') {
+    const pre = {
+      ...list[0]!, id: 'pre', type: 'precomp', name: 'Heavy precomp', p: transform(1920, 1080), d: { comp: 'heavy', w: 3840, h: 2160 }
+    };
+    (pre.p as Record<string, unknown>)['opacity'] = ch(100);
+    return {
+      id: 'Pmeasure', name: 'measure', w: 3840, h: 2160, fps: 24, fpsRational: [24, 1], dur: 4, bg: '#101010',
+      compId: 'Pmeasure-root', compName: 'measure', markers: [], work: [0, 4], params: {}, revision: turn, layers: [pre], assets: {},
+      comps: {
+        heavy: {
+          id: 'heavy', name: 'Heavy', w: 3840, h: 2160, fps: 24, dur: 4, bg: '#000000', markers: [], layers: list,
+          backgroundFill: { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#000000', position: 0 }] }
+        }
+      }
+    };
+  }
   return {
     id: 'Pmeasure', name: 'measure', w: 3840, h: 2160, fps: 24, fpsRational: [24, 1], dur: 4, bg: '#101010',
     compId: 'Pmeasure-root', compName: 'measure', markers: [], work: [0, 4], params: {}, revision: turn, layers: list, assets: {}
@@ -103,7 +123,19 @@ const { MainLoad } = require('../../../../../../engine/spikes/s1-bridge/app/load
 
 const cfg = JSON.parse(process.env['PM_MEASURE'] ?? '{}') as Config;
 const logs: string[] = [];
+/** The job service's latest counters (POWERMOVE_ENGINE_STATUS_LOG_MS). */
+let jobStatus: { atMs: number; jobs: Record<string, unknown> } | null = null;
 const log = (message: string): void => {
+  const status = /\[job engine\] job service status (\{.*\})$/.exec(message);
+  if (status) {
+    try {
+      jobStatus = { atMs: performance.now(), jobs: JSON.parse(status[1]!) as Record<string, unknown> };
+    } catch {
+      // Not JSON: keep it as an ordinary line.
+      logs.push(`${(performance.now() / 1000).toFixed(3)} ${message}`);
+    }
+    return;
+  }
   logs.push(`${(performance.now() / 1000).toFixed(3)} ${message}`);
 };
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -292,6 +324,7 @@ async function main(): Promise<void> {
       // Counted at the end of the window; a batch still waiting then is
       // reported, and settles after playback stops.
       const agentStats = agentRun?.stop();
+      const jobsAtEnd = jobStatus;
       if (cfg.mainRate) {
         // The refresh times main's display link saw while recording.
         const ticks = harness.requestRefreshRate(0);
@@ -305,7 +338,17 @@ async function main(): Promise<void> {
       result['window'] = { startMs, endMs };
       result['page'] = await call('window.__measure.collect()');
       await call(`window.__measure.transport({ command: 'pause' })`);
-      if (agentRun && agentStats) result['agentSnapshots'] = { ...agentStats, ...(await agentRun.settled(30_000)), playbackSignals };
+      if (agentRun && agentStats) {
+        const settled = await agentRun.settled(30_000);
+        // One more status period, so the counters after the settle are in.
+        await sleep(Number(process.env['POWERMOVE_ENGINE_STATUS_LOG_MS'] ?? 0) + 100);
+        const jobsAfter = jobStatus as typeof jobStatus;
+        result['agentSnapshots'] = {
+          ...agentStats, ...settled, playbackSignals,
+          ...(jobsAtEnd ? { jobsAtEnd: { ...jobsAtEnd.jobs, lagMs: +(performance.now() - jobsAtEnd.atMs).toFixed(0) } } : {}),
+          ...(jobsAfter ? { jobsAfterSettle: jobsAfter.jobs } : {})
+        };
+      }
     } else {
       const runs: Record<string, unknown> = {};
       for (const inputMode of cfg.inputModes ?? []) {
@@ -358,7 +401,7 @@ function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Conf
       inFlightSince = t0;
       const times = Array.from({ length: opts.frames }, (_, i) => ((turn * opts.frames + i) % 96) / 24);
       try {
-        const r = await jobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(opts.layers, turn), times, width: opts.width, revision: turn });
+        const r = await jobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(opts.layers, turn, opts.heavy), times, width: opts.width, revision: turn });
         if (r.status === 'routed') stats.routed.push(r.reason);
         else {
           stats.batches++;

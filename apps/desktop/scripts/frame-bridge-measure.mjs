@@ -77,6 +77,9 @@ const RUNS = [
   // 720 px per agent turn, a turn every 2 s, a 24-layer 4K project.
   { name: 'playback-engine-agent-snapshots', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 2000, frames: 4, width: 720, layers: 24 } },
   { name: 'playback-engine-agent-snapshots-busy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 720, layers: 24 } },
+  // An over-bound pass: the layers in a full-size 4K precomposition, which
+  // renders whole for every band, at 1920 px stills (contract 13's 2 ms bound).
+  { name: 'playback-engine-agent-snapshots-heavy', ...playback, mode: 'engine', load: false, agentSnapshots: { turnMs: 0, frames: 4, width: 1920, layers: 96, heavy: 'precomp' }, env: { POWERMOVE_ENGINE_STATUS_LOG_MS: '500' } },
   { name: 'latency-today-idle', ...latency, mode: 'today', load: false, inputModes: ['baseline'] },
   { name: 'latency-engine-idle', ...latency, mode: 'engine', load: false, inputModes: ['drag', 'orbit', 'walk'] },
   { name: 'latency-engine-raw-idle', ...latency, mode: 'engine', load: false, rawInput: true, inputModes: ['drag', 'orbit', 'walk'] },
@@ -763,7 +766,7 @@ try {
         clock: raw.clock,
         load: raw.load ? { ...raw.load, events: undefined, eventCount: raw.load.events?.length } : null,
         bridge: raw.bridge,
-        ...(raw.agentSnapshots ? { agentSnapshots: { ...raw.agentSnapshots, jobEngineLog: (raw.log ?? []).filter((l) => /job engine/.test(l)).slice(-20) } } : {}),
+        ...(raw.agentSnapshots ? { agentSnapshots: { ...raw.agentSnapshots, queuedMs: undefined, queuedMsMax: Math.max(0, ...(raw.agentSnapshots.queuedMs ?? [])), jobEngineLog: (raw.log ?? []).filter((l) => /job engine/.test(l)).slice(-20) } } : {}),
         ...(raw.mainRate ? { mainRate: raw.mainRate } : {}),
         ...(run.scenario === 'playback'
           ? run.remoteLayer
@@ -782,6 +785,7 @@ try {
       process.stdout.write(`   drops ${p.frames.drops}/${p.frames.expected}  |jitter| p50 ${p.jitterAbsMs.p50} p99 ${p.jitterAbsMs.p99} ms  irregular ${p.irregularIntervals}  ${p.rafToPresentMs ? `rAF→present p50 ${p.rafToPresentMs.p50}` : `due→present p50 ${p.dueToPresentMs?.p50}`}\n`);
       const a = summary.agentSnapshots;
       if (a) process.stdout.write(`   agent snapshots: ${a.batches} batches, ${a.frames} frames (${a.sizes.join(', ')}), batch p50 ${a.batchMsP50} p95 ${a.batchMsP95} max ${a.batchMsMax} ms, failures ${a.failureCount}, routed ${a.routedCount}, playback signals ${JSON.stringify(a.playbackSignals.map(([, on]) => on))}\n`);
+      if (a?.jobsAtEnd) process.stdout.write(`   job gate at the end of the window: ${JSON.stringify(a.jobsAtEnd.gate)}\n`);
     } else {
       for (const [mode, l] of Object.entries(summary.latency)) process.stdout.write(`   ${mode}: pointer-to-pixel p50 ${l.pointerToPixelMs.p50} p99 ${l.pointerToPixelMs.p99} ms (${l.pointerToPixelMs.n} of ${l.events}, unmatched ${l.unmatched}, unpresented ${l.unpresented}; with them p50 ${l.pointerToPixelWithDropsMs.p50} p99 ${l.pointerToPixelWithDropsMs.p99} ms)\n`);
       for (const [mode, l] of Object.entries(summary.latency)) if (l.hopsMs) process.stdout.write(`   ${mode} hops p50/p99: ${Object.entries(l.hopsMs ?? {}).map(([k, d]) => `${k} ${d.p50}/${d.p99}`).join(', ')}\n`);
