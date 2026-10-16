@@ -1,0 +1,263 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
+
+import { launchApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
+
+/* Phase 3b delivery with Use New Engine on (plan section 17): the export sheet
+   offers every format at cutover and the five presets, writes a start
+   timecode and reel, streams live previews, asks before exporting offline
+   media (section 14.8), and the Render Queue panel runs jobs unattended from
+   snapshots, keeps going past a failed job, and keeps user jobs across a
+   relaunch. Run serially under the Electron lock. */
+
+const ffprobe = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
+const probe = (file: string) => JSON.parse(execFileSync(ffprobe, [
+  '-v', 'error', '-show_entries',
+  'stream=codec_name,profile,pix_fmt,nb_frames,color_transfer,color_range:stream_tags=timecode,reel_name,alpha_mode:format_tags=encoder',
+  '-of', 'json', file
+], { encoding: 'utf8' }));
+
+async function engineReady(app: ElectronApplication): Promise<void> {
+  await expect.poll(() => app.evaluate(() => {
+    const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
+    return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
+  }), { timeout: 30_000 }).toBe('ready/ready');
+}
+
+/** The next save panels answer these paths, in order; returns how many were asked. */
+async function stubSavePanels(app: ElectronApplication, files: string[]): Promise<void> {
+  await app.evaluate(({ dialog }, paths) => {
+    const g = globalThis as { __savePanels?: string[]; __saveAsked?: Array<Record<string, unknown>> };
+    g.__savePanels = [...paths];
+    g.__saveAsked = [];
+    dialog.showSaveDialog = (async (...args: unknown[]) => {
+      const options = (args.length > 1 ? args[1] : args[0]) as Record<string, unknown>;
+      g.__saveAsked!.push(options);
+      const filePath = g.__savePanels!.shift();
+      return filePath ? { canceled: false, filePath } : { canceled: true, filePath: '' };
+    }) as typeof dialog.showSaveDialog;
+  }, files);
+}
+
+const asked = (app: ElectronApplication) => app.evaluate(() => (globalThis as { __saveAsked?: Array<Record<string, unknown>> }).__saveAsked ?? []);
+
+async function solidProject(page: Page, name: string, extra: Array<Record<string, unknown>> = []): Promise<void> {
+  await page.evaluate(({ name, extra }) => {
+    const PM = (window as any).PM;
+    PM.proj = PM.mkProject({ name, w: 320, h: 180, fps: 24, dur: 1 });
+    PM.proj.work = [0, 1];
+    PM.bus.emit('project');
+    PM.Edit.apply([{ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 200, h: 120 }, duration: 1 }, ...extra], { label: 'Layers', origin: 'user' });
+  }, { name, extra });
+}
+
+const exportDone = (page: Page) => page.waitForFunction(() => !(window as any).PM.Export.busy, undefined, { timeout: 60_000 });
+
+test('the export sheet writes the new formats, presets, timecode and reel, with live previews', async () => {
+  test.setTimeout(240_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-delivery-'));
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  const { app, page } = session;
+  try {
+    await engineReady(app);
+    await session.openEditor();
+    await solidProject(page, 'Delivery');
+    // Record the job engine's statuses as the window sees them.
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__statuses = [];
+      w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__statuses.push({ state: s.state, preview: !!s.preview, frame: s.preview?.frame ?? null }));
+    });
+
+    // Master · ProRes 422 HQ from the preset, with a start timecode and reel.
+    await page.evaluate(() => (window as any).PM.Export.dialog());
+    const dialog = page.getByRole('dialog', { name: 'Export', exact: true });
+    await expect(dialog).toBeVisible();
+    const formats = await dialog.locator('select[aria-label="Format"] option').allTextContents();
+    expect(formats).toEqual(expect.arrayContaining(['QuickTime · ProRes 422 HQ', 'QuickTime · ProRes 4444 XQ', 'MP4 · H.264', 'HEVC', 'WebM · VP9', 'WebM · VP8']));
+    const presets = await dialog.locator('select[aria-label="Saved preset"] option').allTextContents();
+    expect(presets.slice(1, 6)).toEqual(['Master · ProRes 422 HQ', 'Master with alpha · ProRes 4444', 'Web · H.264', 'Web · HEVC', 'Image sequence · PNG']);
+    await dialog.locator('select[aria-label="Saved preset"]').selectOption({ label: 'Master · ProRes 422 HQ' });
+    await expect(dialog.locator('select[aria-label="Format"]')).toHaveValue('prores-hq');
+    await expect(dialog.getByText('Quality', { exact: true })).toBeHidden();
+    await expect(dialog.getByText('Start timecode', { exact: true })).toBeVisible();
+    await dialog.getByLabel('Start timecode').fill('01:00:00:00');
+    await dialog.getByLabel('Start timecode').press('Enter');
+    await dialog.getByLabel('Reel name').fill('A001');
+    await dialog.getByLabel('Reel name').press('Enter');
+    await expect(dialog.locator('.export-summary')).toContainText('≈');
+    await expect(dialog.locator('.export-summary')).toContainText('ProRes 422 HQ');
+    const master = path.join(root, 'master.mov');
+    await stubSavePanels(app, [master]);
+    await dialog.getByRole('button', { name: 'Export video', exact: true }).click();
+    await exportDone(page);
+    const hq = probe(master);
+    const video = hq.streams.find((s: any) => s.codec_name === 'prores');
+    expect(video).toMatchObject({ profile: 'HQ', nb_frames: '24', color_transfer: 'iec61966-2-1', color_range: 'tv' });
+    const tmcd = hq.streams.find((s: any) => s.tags?.timecode);
+    expect(tmcd?.tags).toMatchObject({ timecode: '01:00:00:00', reel_name: 'A001' });
+    expect((await asked(app)).length).toBe(1);
+    const statuses = await page.evaluate(() => (window as any).__statuses);
+    expect(statuses.at(-1).state).toBe('done');
+    // The progress sheet's live preview: encoded frames arrive with the statuses.
+    expect(statuses.some((s: any) => s.preview)).toBe(true);
+    expect(statuses.filter((s: any) => s.preview).at(-1).frame).toBe(23);
+
+    // HEVC 10-bit in QuickTime through the sheet's rows.
+    await page.evaluate(() => (window as any).PM.Export.dialog());
+    await dialog.locator('select[aria-label="Format"]').selectOption('hevc');
+    await dialog.locator('select[aria-label="Container"]').selectOption('mov');
+    await dialog.locator('select[aria-label="Bit depth"]').selectOption('high');
+    await expect(dialog.getByText('Transparent background')).toBeHidden();
+    const hevc = path.join(root, 'hevc10.mov');
+    await stubSavePanels(app, [hevc]);
+    await dialog.getByRole('button', { name: 'Export video', exact: true }).click();
+    await exportDone(page);
+    expect(probe(hevc).streams.find((s: any) => s.codec_name === 'hevc')).toMatchObject({ pix_fmt: 'yuv420p10le', nb_frames: '24' });
+
+    // A 16-bit PNG sequence with transparency: the save panel names a folder.
+    await page.evaluate(() => (window as any).PM.Export.dialog());
+    await dialog.getByRole('button', { name: 'Images', exact: true }).click();
+    await dialog.locator('select[aria-label="Format"]').selectOption('png');
+    await dialog.locator('select[aria-label="Bit depth"]').selectOption('high');
+    const alpha = dialog.getByRole('switch', { name: 'Transparent background', exact: true });
+    if (await alpha.getAttribute('aria-checked') !== 'true') await alpha.click();
+    const frames = path.join(root, 'Frames');
+    await stubSavePanels(app, [frames]);
+    await dialog.getByRole('button', { name: 'Export frames', exact: true }).click();
+    await exportDone(page);
+    const files = (await readdir(frames)).sort();
+    expect(files).toHaveLength(24);
+    expect(files[0]).toBe('Frames_00000.png');
+    expect(probe(path.join(frames, files[5]!)).streams[0]).toMatchObject({ codec_name: 'png', pix_fmt: 'rgba64be' });
+
+    // WebM · VP8, frame-exact.
+    const vp8 = path.join(root, 'web.webm');
+    await stubSavePanels(app, [vp8]);
+    expect(await page.evaluate(() => (window as any).PM.Export.run({ format: 'webm-vp8', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false }))).toEqual({ cancelled: false });
+    expect(probe(vp8).streams[0]).toMatchObject({ codec_name: 'vp8' });
+    // Nothing temporary remains beside the outputs.
+    expect((await readdir(root)).sort()).toEqual(['Frames', 'hevc10.mov', 'master.mov', 'web.webm']);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an export with offline media asks first with the native message', async () => {
+  test.setTimeout(120_000);
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  const { app, page } = session;
+  try {
+    await engineReady(app);
+    await session.openEditor();
+    await solidProject(page, 'Offline');
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.proj.assets = { ...(PM.proj.assets || {}), gone: { id: 'gone', name: 'A001_C003.mov', kind: 'video', format: 'mov', w: 320, h: 180, dur: 1, fps: 24 } };
+      PM.proj.layers.push({ ...PM.mkLayer('video', { d: { asset: 'gone', w: 320, h: 180 } }), id: 'offline-clip', name: 'A001_C003.mov', from: 0, dur: 1 });
+      PM.touch();
+      (window as any).__located = [];
+      PM.pickFiles = (_sequence: boolean, options: { replaceAssetId?: string }) => (window as any).__located.push(options?.replaceAssetId);
+    });
+    await app.evaluate(({ dialog }) => {
+      const g = globalThis as { __messages?: Array<Record<string, unknown>>; __answer?: number };
+      g.__messages = [];
+      dialog.showMessageBox = (async (...args: unknown[]) => {
+        const options = (args.length > 1 ? args[1] : args[0]) as Record<string, unknown>;
+        g.__messages!.push(options);
+        return { response: g.__answer ?? 1, checkboxChecked: false };
+      }) as typeof dialog.showMessageBox;
+    });
+    await stubSavePanels(app, []);
+    const options = { format: 'prores-hq', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false };
+    // Cancel: nothing is asked or written.
+    await app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 1; });
+    expect(await page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: true });
+    const messages = await app.evaluate(() => (globalThis as { __messages?: Array<Record<string, unknown>> }).__messages);
+    expect(messages).toHaveLength(1);
+    expect(messages![0]).toMatchObject({ message: '1 clip is offline', buttons: ['Locate Media…', 'Cancel'] });
+    expect(String(messages![0]!['detail'])).toContain('A001_C003.mov');
+    expect(await asked(app)).toEqual([]);
+    // Locate Media…: the Media panel's locate flow for the clip.
+    await app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 0; });
+    expect(await page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: true });
+    expect(await page.evaluate(() => (window as any).__located)).toEqual(['gone']);
+    expect(await asked(app)).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session.close();
+  }
+});
+
+test('the render queue runs jobs unattended, keeps going past a failure, and keeps user jobs across a relaunch', async () => {
+  test.setTimeout(240_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-queue-'));
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  try {
+    await engineReady(session.app);
+    await session.openEditor();
+    await solidProject(session.page, 'Queue A');
+    const a = path.join(root, 'A.mov');
+    const routed = path.join(root, 'Routed.mp4');
+    const b = path.join(root, 'B.webm');
+    await stubSavePanels(session.app, [a, routed, b]);
+    const add = (o: Record<string, unknown>) => session.page.evaluate((o) => (window as any).PM.Export.addToQueue(o), o);
+    expect(await add({ format: 'prores-422', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false, preset: 'Mine' })).toMatchObject({ status: 'added' });
+    // A project the new engine cannot render yet (a text layer) fails as a job; the queue goes on.
+    await solidProject(session.page, 'Queue routed', [{ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Routed' }, duration: 1 }]);
+    expect(await add({ format: 'h264', scale: 1, fps: 24, range: 'all', quality: 'draft', mblur: false, audio: false })).toMatchObject({ status: 'added' });
+    // Snapshots: editing the live project after queuing does not change the job.
+    await solidProject(session.page, 'Queue B');
+    expect(await add({ format: 'webm-vp9', scale: 0.5, fps: 24, range: 'all', quality: 'draft', mblur: false, audio: false })).toMatchObject({ status: 'added' });
+    await session.page.evaluate(() => { (window as any).PM.proj.name = 'Edited after queuing'; });
+
+    await session.page.evaluate(() => (window as any).PM.Export.queueDialog());
+    const panel = session.page.getByRole('dialog', { name: 'Render Queue', exact: true });
+    await expect(panel).toBeVisible();
+    const rows = panel.locator('.render-queue-job');
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText('A.mov');
+    await expect(rows.nth(0)).toContainText('Mine · QuickTime · ProRes 422');
+    await expect(rows.nth(0)).toContainText('Waiting to start');
+    await panel.getByRole('button', { name: 'Start Queue', exact: true }).click();
+    await expect(rows.nth(2)).toContainText('Done', { timeout: 120_000 });
+    await expect(rows.nth(0)).toContainText('Done');
+    await expect(rows.nth(1)).toContainText('Failed');
+    await expect(rows.nth(1)).toContainText('cannot render this project yet');
+    expect(probe(a).streams.find((s: any) => s.codec_name === 'prores')).toMatchObject({ profile: 'Standard', nb_frames: '24' });
+    expect(probe(b).streams[0]).toMatchObject({ codec_name: 'vp9' });
+    await expect(panel.getByRole('button', { name: 'Start Queue', exact: true })).toBeDisabled();
+    // A pending job and the finished ones survive a relaunch.
+    const c = path.join(root, 'C.mov');
+    await stubSavePanels(session.app, [c]);
+    await panel.getByRole('button', { name: 'Close', exact: true }).click();
+    expect(await add({ format: 'prores-proxy', scale: 0.5, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false })).toMatchObject({ status: 'added' });
+    await session.relaunch();
+    await engineReady(session.app);
+    await session.page.evaluate(() => (window as any).PM.Export.queueDialog());
+    const again = session.page.getByRole('dialog', { name: 'Render Queue', exact: true });
+    const kept = again.locator('.render-queue-job');
+    await expect(kept).toHaveCount(4);
+    await expect(kept.nth(3)).toContainText('Waiting to start');
+    await expect(kept.nth(0)).toContainText('Done');
+    await again.getByRole('button', { name: 'Start Queue', exact: true }).click();
+    await expect(kept.nth(3)).toContainText('Done', { timeout: 120_000 });
+    expect(probe(c).streams.find((s: any) => s.codec_name === 'prores')).toMatchObject({ profile: 'Proxy' });
+    // The job menu: remove a finished job.
+    await kept.nth(1).getByRole('button', { name: /actions$/ }).click();
+    await session.page.getByRole('menuitem', { name: 'Remove' }).click();
+    await expect(kept).toHaveCount(3);
+    expect((await readdir(root)).sort()).toEqual(['A.mov', 'B.webm', 'C.mov']);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
