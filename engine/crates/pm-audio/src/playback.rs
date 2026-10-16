@@ -411,6 +411,11 @@ impl Playback {
         self.stream.as_ref()
     }
 
+    /// The mix bus (project rate and speakers).
+    pub fn format(&self) -> &MixFormat {
+        &self.format
+    }
+
     /// The device's sample rate.
     pub fn device_rate(&self) -> u32 {
         self.shared.device_rate

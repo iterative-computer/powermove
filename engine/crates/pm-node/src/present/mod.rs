@@ -21,6 +21,7 @@ pub mod audio;
 pub mod clock;
 pub mod compose;
 pub mod document;
+pub mod peaks;
 pub mod render;
 pub mod schedule;
 pub mod view;
@@ -336,6 +337,19 @@ impl FramePresenter for BridgePresenter {
             key: (port, session),
             command,
             at: pm_bridge::now_us(),
+        });
+    }
+
+    fn audio(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        message: pm_protocol::clock::AudioMessage,
+    ) {
+        self.send(Command::Audio {
+            key: (port, session),
+            message,
         });
     }
 
