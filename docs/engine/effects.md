@@ -291,14 +291,18 @@ cargo test -p pm-render --release --test effects builtin_costs -- --ignored --no
   costs one leaked thread past the deadline.
 - **Device-loss recovery** for a true GPU hang is the device owner's (pm-node, pm-export)
   and not built here; the watchdog covers slow-but-finishing effects.
-- **Consumers.** pm-export's jobs and pm-cli do not pass definitions yet
-  (`Renderer::set_definitions`, `unsupported_with_definitions` are ready); without them
-  effects and transitions stay routed as before. The engine process (`pm-engine`)
-  applies `pushDefinitions` to its `DefinitionSet` without translating, so its
-  `definitionsApplied` carries no compile failures until a renderer is attached there.
-  The tracer's engine connection (not on this branch) should open its sessions with
-  `PM.EngineDefinitions.session(send)` and feed `failure` events to
-  `PM.EngineDefinitions.failure`.
+- **Export jobs and pm-cli** do not pass definitions yet, so effects and transitions
+  stay routed there as before. The pieces are ready: `Renderer::set_definitions`,
+  `capability::unsupported_with_definitions`. What is left: `pm_engine::jobs::JobDocument`
+  carries the session's `DefinitionSetSnapshot` (`job_document`), pm-node's job runner
+  calls `set_definitions` on its renderer, and `pm_export::plan_export` and
+  `StillRouting` route with `unsupported_with_definitions`; `pm-cli` reads the
+  snapshot a collected project embeds.
+- **The engine process** (`pm-engine`) applies `pushDefinitions` to the session's
+  `DefinitionSet` without translating, so `definitionsApplied` carries no failures; the
+  interactive engine's presenter translates the set when it arrives and sends each
+  failure as a `failure` event instead (definition scope). Translating a cold set of
+  the 20 built-ins takes about 150 ms on the presenter's render thread.
 - **Adjustment layers** with effects stay routed (they need `FRAG_COMPOSITE`).
 - **WebGL-unstable class** pending review (above).
 - The generated corpus was written by an agent from the docs, not produced through the
