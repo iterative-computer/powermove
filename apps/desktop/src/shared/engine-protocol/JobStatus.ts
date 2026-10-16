@@ -23,4 +23,4 @@ path: string | null, error: EngineError | null,
  * The latest encoded frame, small, for the export progress sheet
  * ([`DeliveryOptions::preview`]).
  */
-preview: JobPreview | null, };
+preview?: JobPreview | null, };

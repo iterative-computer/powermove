@@ -322,6 +322,7 @@ pub struct JobStatus {
     /// The latest encoded frame, small, for the export progress sheet
     /// ([`DeliveryOptions::preview`]).
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub preview: Option<JobPreview>,
 }
 
@@ -496,6 +497,7 @@ pub struct ExportSettings {
     pub draft_from_proxies: bool,
     /// Phase 3b delivery options; absent in Phase 2 senders (today's defaults).
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(as = "Option<DeliveryOptions>", optional))]
     pub delivery: DeliveryOptions,
 }
 

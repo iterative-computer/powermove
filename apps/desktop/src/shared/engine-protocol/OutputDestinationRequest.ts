@@ -11,4 +11,4 @@ export type OutputDestinationRequest = { job: JobId, choice: OutputChoice, overw
  * The output is a folder of files (PNG sequences): the host creates an
  * empty owner-only temporary folder instead of a file.
  */
-folder: boolean, };
+folder?: boolean, };

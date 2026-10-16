@@ -238,6 +238,7 @@ pub struct OutputDestinationRequest {
     /// The output is a folder of files (PNG sequences): the host creates an
     /// empty owner-only temporary folder instead of a file.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub folder: bool,
 }
 

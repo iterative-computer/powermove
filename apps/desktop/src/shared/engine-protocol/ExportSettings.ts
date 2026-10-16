@@ -38,4 +38,4 @@ draftFromProxies: boolean,
 /**
  * Phase 3b delivery options; absent in Phase 2 senders (today's defaults).
  */
-delivery: DeliveryOptions, };
+delivery?: DeliveryOptions, };
