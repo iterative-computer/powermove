@@ -33,7 +33,7 @@ type Status = {
 const status = (page: Page): Promise<Status> => page.evaluate(() => (window as any).PM.EngineConnection.status());
 
 /** A 640×360, 30 fps, 4 s composition with a background and two solids. */
-async function tracerProject(page: Page, extra: { fx?: boolean } = {}): Promise<string> {
+async function tracerProject(page: Page, extra: { fx?: boolean; blend?: boolean } = {}): Promise<string> {
   return page.evaluate((extra) => {
     const PM = (window as any).PM;
     const project = PM.mkProject({ name: 'Tracer', w: 640, h: 360, fps: 30, dur: 4, bg: '#203040' });
@@ -47,6 +47,7 @@ async function tracerProject(page: Page, extra: { fx?: boolean } = {}): Promise<
     bar.p['anchor.x'].v = 0; bar.p['anchor.y'].v = 0;
     bar.p['position.x'].v = 300; bar.p['position.y'].v = 250;
     if (extra.fx) box.fx.push(PM.mkEffect('invert'));
+    if (extra.blend) box.blend = 'multiply';
     project.layers = [box, bar];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
@@ -119,7 +120,7 @@ async function windowPixel(session: LaunchedApp, cssX: number, cssY: number): Pr
   }, { x: origin.x + cssX, y: origin.y + cssY });
 }
 
-async function openTracer(session: LaunchedApp, extra: { fx?: boolean } = {}): Promise<string> {
+async function openTracer(session: LaunchedApp, extra: { fx?: boolean; blend?: boolean } = {}): Promise<string> {
   await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
@@ -282,28 +283,47 @@ test.describe('Use New Engine: the tracer bullet', () => {
 
   test('a composition with unsupported features stays with the current engine, without errors', async ({ session }) => {
     const { page } = session;
-    await openTracer(session, { fx: true });
+    await openTracer(session, { blend: true });
     await waitRoute(page, 'legacy');
-    expect((await status(page)).routeReason).toMatch(/effects/);
+    expect((await status(page)).routeReason).toMatch(/blend mode/);
     expect(await enginePresenting(page)).toBe(false);
     expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('');
     // The legacy compositor draws it.
     await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.GL.gl))).toBe(true);
-    // Removing the effect brings engine frames back; adding one routes again.
+    // Removing the blend mode brings engine frames back; adding one routes again.
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.hist.do('Remove effect', () => { PM.proj.layers.find((l: any) => l.id === 'box').fx = []; });
+      PM.hist.do('Normal blending', () => { PM.proj.layers.find((l: any) => l.id === 'box').blend = 'normal'; });
       PM.touch();
     });
     await waitRoute(page, 'engine');
     await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.hist.do('Add effect', () => { PM.proj.layers.find((l: any) => l.id === 'bar').fx.push(PM.mkEffect('invert')); });
+      PM.hist.do('Screen blending', () => { PM.proj.layers.find((l: any) => l.id === 'bar').blend = 'screen'; });
       PM.touch();
     });
     await waitRoute(page, 'legacy');
     await expect.poll(() => enginePresenting(page)).toBe(false);
+    const errors = session.diagnostics.console.filter((c) => c.type === 'error');
+    expect(errors.map((e) => e.text)).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('effects are drawn by the engine with the kernel\'s definition snapshots', async ({ session }) => {
+    const { page } = session;
+    await openTracer(session, { fx: true });
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    expect(await page.evaluate(() => Boolean((window as any).PM.EngineDefinitions))).toBe(true);
+    const revision = await mirrorRevision(page);
+    await expect.poll(async () => (await engineFrame(page))?.revision ?? -1, { timeout: 20_000 }).toBeGreaterThanOrEqual(revision);
+    // Invert at 100%: #FF3300 is drawn as #00CCFF.
+    const view = await viewerGeometry(page, 'box');
+    const inside = await windowPixel(session, (view.layer.x0 + view.layer.x1) / 2, (view.layer.y0 + view.layer.y1) / 2);
+    expect(inside[0]!).toBeLessThanOrEqual(3);
+    expect(Math.abs(inside[1]! - 0xcc)).toBeLessThanOrEqual(3);
+    expect(Math.abs(inside[2]! - 0xff)).toBeLessThanOrEqual(3);
     const errors = session.diagnostics.console.filter((c) => c.type === 'error');
     expect(errors.map((e) => e.text)).toEqual([]);
     expect(session.diagnostics.pageErrors).toEqual([]);

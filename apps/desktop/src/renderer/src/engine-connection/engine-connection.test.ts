@@ -154,6 +154,14 @@ describe('the engine connection', () => {
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
+    // A frame of the routed revision or older, still in flight, is stale: it
+    // neither shows nor brings the engine back; a newer one does.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 6 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy']);
+    expect(messages).toEqual(['frame', 'routed']);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 7 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine']);
+    expect(messages).toEqual(['frame', 'routed', 'frame']);
   });
 
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {

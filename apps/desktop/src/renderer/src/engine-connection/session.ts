@@ -40,7 +40,7 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -124,6 +124,9 @@ export class DocumentSession {
   private streamRevision = 0;
   /** This session's definition stream. */
   private definitions: { full(): void; dispose(): void } | null = null;
+  /** The revision the engine routed the composition to the legacy viewer at:
+   *  frames of that revision or older, still in flight, are stale. */
+  private legacyRevision: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -275,6 +278,9 @@ export class DocumentSession {
     switch (event.type) {
       case 'frame': {
         const { type: _t, ...frame } = event;
+        const revision = Number((frame as { revision?: unknown }).revision) || 0;
+        if (this.legacyRevision !== null && revision <= this.legacyRevision) return;
+        this.legacyRevision = null;
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
@@ -299,8 +305,10 @@ export class DocumentSession {
       case 'failure': {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
+          const revision = Number(event['revision']) || 0;
+          this.legacyRevision = revision;
           this.setRoute('legacy', error.message);
-          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message }, arrivedMs);
+          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
           return;
         }
         this.failures.push(`${error.code}: ${error.message}`);
