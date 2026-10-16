@@ -27,6 +27,7 @@ the authority.
 | One `layer3d` object per composition: box, sphere, plane, cylinder, cone, torus with `MeshStandardMaterial` values, lit by suns without shadows and the hemisphere ambient | Supported | 12 three.js reference scenes and 7 corpus documents within the 3D bar, at most 1 CV anywhere (below) |
 | Region of interest, output scale, 16- and 32-bit precision | Supported | Regions equal the full frame bit for bit |
 | Depth and object-id surface (contract 2) | Supported for top-level layers | `tests/headless.rs` |
+| Text and captions (level 1 rasters, animators, every caption style; level 2 at output resolution) | Drawn with fonts configured (`Renderer::set_text_fonts`); routed otherwise | `docs/engine/text-render.md` |
 | Everything else | Routed by `unsupported` | `tests/headless.rs` capability test |
 
 ## API
