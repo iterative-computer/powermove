@@ -90,7 +90,16 @@ pub fn codec_type(spec: &ExportSpec) -> u32 {
 fn set_alpha_mode(session: &VTCompressionSession, alpha: AlphaOutput) -> Result<(), Error> {
     unsafe {
         match alpha {
-            AlphaOutput::None => Ok(()),
+            // Opaque: y416's alpha is all ones, which the ProRes encoder
+            // would still code as a 16-bit alpha channel (alpha_info 2) in
+            // every frame. Discarding it keeps opaque 4444 opaque in the
+            // bitstream too, as NLEs expect.
+            AlphaOutput::None => set(
+                session,
+                kVTCompressionPropertyKey_PreserveAlphaChannel,
+                &any_bool(false),
+                true,
+            ),
             AlphaOutput::Straight => set(
                 session,
                 kVTCompressionPropertyKey_AlphaChannelMode,

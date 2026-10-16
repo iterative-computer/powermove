@@ -300,7 +300,38 @@ fn prores_4444_xq_opaque() {
         (r.codec.as_str(), r.pixel_format.as_str(), r.alpha),
         ("ap4x", "4:4:4", false)
     );
+    // No alpha channel is coded in the frames either.
+    assert_eq!(coded_alpha(&done.path), 0);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn opaque_prores_4444_codes_no_alpha_channel() {
+    let dir = scratch("4444o");
+    let s = spec(
+        &dir,
+        "Opaque",
+        Codec::ProRes(ProResProfile::P4444),
+        Container::Mov,
+    );
+    let done = run(s).unwrap();
+    assert_eq!((done.report.depth, done.report.alpha), (12, false));
+    assert_eq!(coded_alpha(&done.path), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The `alpha_channel_type` of the first ProRes frame's header (0 none, 1
+/// 8-bit, 2 16-bit).
+fn coded_alpha(path: &Path) -> u8 {
+    let data = std::fs::read(path).unwrap();
+    let at = data
+        .windows(4)
+        .position(|w| w == b"icpf")
+        .expect("a ProRes frame");
+    // icpf, then the frame header: size (2), version (2), creator (4),
+    // width (2), height (2), flags (2), reserved, primaries, transfer,
+    // matrix, then source pixel format and alpha type in one byte.
+    data[at + 4 + 17] & 0x0f
 }
 
 #[test]
