@@ -42,16 +42,16 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-p3-heic", false),
     ("render/still-p3-jpg", false),
     ("render/still-p3-png", false),
-    ("render/still-photo-420-jpg", false),
-    ("render/still-photo-422-jpg", false),
-    ("render/still-photo-422-tall-mcu-jpg", false),
-    ("render/still-photo-444-jpg", false),
-    ("render/still-photo-444-tall-mcu-jpg", false),
+    ("render/still-photo-420-jpg", true),
+    ("render/still-photo-422-jpg", true),
+    ("render/still-photo-422-tall-mcu-jpg", true),
+    ("render/still-photo-444-jpg", true),
+    ("render/still-photo-444-tall-mcu-jpg", true),
     ("render/still-photo-alpha-webp", false),
     ("render/still-photo-avif", false),
     ("render/still-photo-lossless-webp", false),
     ("render/still-photo-orientation-6-jpg", false),
-    ("render/still-photo-progressive-jpg", false),
+    ("render/still-photo-progressive-jpg", true),
 ];
 
 #[test]

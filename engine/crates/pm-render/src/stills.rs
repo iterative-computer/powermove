@@ -10,10 +10,10 @@
 //! Standard or alpha class, so they are unsupported until the cause is
 //! fixed or decided:
 //!
-//! - Y'CbCr JPEG: pm-media decodes with zune-jpeg; Chromium with
-//!   libjpeg-turbo (islow IDCT, fancy upsampling), which reproduces the
-//!   legacy frames exactly. 4:4:4 differs by up to 3 CV, 4:2:0 by 4, 4:2:2
-//!   by 26; only 90 to 99.7% of pixels within 1 CV.
+//! - Y'CbCr JPEG was routed while pm-media decoded JPEG with zune-jpeg; it
+//!   now decodes with libjpeg-turbo as Chromium does (islow IDCT, fancy
+//!   upsampling, bit-exact with `djpeg`), and baseline and progressive
+//!   8-bit Y'CbCr JPEG is drawn (corpus `render/still-photo-*-jpg`).
 //! - Display P3 (PNG, JPEG, HEIF): converted values match within 1 CV on
 //!   texel centers, but section 9 keeps out-of-gamut values until output,
 //!   while Chromium clips at decode; filtered edges of out-of-gamut colors
@@ -120,6 +120,7 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         ImageFormat::Gif => return unsupported("GIF stills"),
         ImageFormat::Exr => return unsupported("OpenEXR stills"),
         ImageFormat::Dpx => return unsupported("DPX stills"),
+        ImageFormat::Svg => return unsupported("SVG stills"),
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
@@ -478,9 +479,8 @@ fn jpeg_frame(marker: u8, sof: &[u8], adobe_transform: Option<u8>) -> Result<(),
         3 if adobe_transform == Some(0) || comps.iter().map(|c| c[0]).eq(*b"RGB") => {
             unsupported("RGB-encoded JPEG stills")
         }
-        3 => unsupported(
-            "Y'CbCr JPEG stills (pm-media's decoder differs from Chromium's libjpeg-turbo)",
-        ),
+        // Y'CbCr: libjpeg-turbo in pm-media, as in Chromium.
+        3 => Ok(()),
         _ => unsupported("CMYK and other JPEG stills with neither 1 nor 3 components"),
     }
 }
@@ -865,10 +865,10 @@ mod tests {
         assert!(e.to_string().contains("progressive gray"), "{e}");
         let ycc = |y: u8| [(1, y), (2, 0x11), (3, 0x11)];
         for y in [0x11, 0x21, 0x22] {
-            let e = jpeg(jpeg_with(0xC0, 8, &ycc(y), None)).unwrap_err();
-            assert!(e.to_string().contains("Y'CbCr"), "{e}");
+            assert!(jpeg(jpeg_with(0xC0, 8, &ycc(y), None)).is_ok());
+            assert!(jpeg(jpeg_with(0xC2, 8, &ycc(y), None)).is_ok());
         }
-        assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_err());
+        assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_ok());
         // 12-bit, arithmetic, lossless, CMYK, RGB, malformed.
         assert!(jpeg(jpeg_with(0xC1, 12, &gray, None)).is_err());
         assert!(jpeg(jpeg_with(0xC0, 12, &gray, None)).is_err());
