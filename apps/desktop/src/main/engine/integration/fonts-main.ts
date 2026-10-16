@@ -22,9 +22,10 @@ import { app, MessageChannelMain, utilityProcess } from 'electron';
 
 import { ENGINE_FONTS_IPC } from '../../../shared/engine-fonts-ipc';
 import { EngineFontClient, installEngineFontService } from '../../engine-fonts';
-import { FONT_CLIENT_ID, hostNowUs } from '../index';
+import { FONT_CLIENT_ID } from '../index';
 import { NativeEngine } from '../native-engine';
 import type { ChildLike, PortLike } from '../ports';
+import { mainHostClock } from './main-clock';
 
 type Step = { name: string; ms: number; detail?: unknown };
 const steps: Step[] = [];
@@ -83,7 +84,7 @@ async function main(): Promise<void> {
     cacheDirectory: path.join(dir, 'Engine Cache'),
     automaticOutputDirectory: path.join(dir, 'Powermove'),
     physicalMemory: os.totalmem(),
-    hostNow: hostNowUs,
+    hostNow: mainHostClock().now,
     log: (level, message) => logs.push(`${level}: ${message}`)
   });
 
