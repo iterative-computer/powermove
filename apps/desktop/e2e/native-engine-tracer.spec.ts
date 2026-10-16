@@ -19,6 +19,7 @@ import type { Page } from 'playwright';
 
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
 import { fixturePath } from './helpers/media';
+import { buildSyntheticProject } from '../src/main/engine/integration/synthetic-project';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
 const OFF = { POWERMOVE_NEW_ENGINE: '0' };
@@ -240,6 +241,42 @@ test.describe('Use New Engine: the tracer bullet', () => {
     const restored = quadBox((await engineFrame(page)).overlay.layers.find((l: any) => l.layer === 'bar').bounds);
     expect(Math.abs(restored.x0 - view.layer.x0)).toBeLessThanOrEqual(0.75);
     expect((await status(page)).failures.filter((f) => !f.startsWith('deviceLost'))).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('dragging a precomp in a project of slice features streams every move to the engine', async ({ session }) => {
+    const { page } = session;
+    await session.openEditor();
+    await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+    await page.evaluate(buildSyntheticProject, { layers: 200, images: 1 });
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    const press = await page.evaluate(() => {
+      const V = (window as any).PM.Kernel.services.get('viewer');
+      const rect = V.stage.getBoundingClientRect();
+      for (let gy = 0.2; gy <= 0.8; gy += 0.02) for (let gx = 0.2; gx <= 0.8; gx += 0.02) {
+        const x = Math.round(rect.left + rect.width * gx), y = Math.round(rect.top + rect.height * gy);
+        const layer = V.layerAtPoint?.(x, y);
+        if (layer?.type === 'precomp') return { x, y, id: layer.id as string };
+      }
+      return null;
+    });
+    expect(press).not.toBeNull();
+    const before = await page.evaluate((id) => (window as any).PM.proj.layers.find((l: any) => l.id === id).p['position.x'].v as number, press!.id);
+    // A precomp drag is a plain history transaction: its moves reach the
+    // barrier only through the flushes queries make (a speculative diff),
+    // which must neither loop nor wait for the commit.
+    const start = await mirrorRevision(page);
+    await page.mouse.move(press!.x, press!.y);
+    await page.mouse.down();
+    for (let i = 1; i <= 30; i++) await page.mouse.move(press!.x + i * 3, press!.y + (i % 3));
+    const during = await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').engineFrame()?.revision ?? 0);
+    expect(during).toBeGreaterThan(start);
+    await page.mouse.up();
+    const after = await page.evaluate((id) => (window as any).PM.proj.layers.find((l: any) => l.id === id).p['position.x'].v as number, press!.id);
+    expect(after).not.toBe(before);
+    const wanted = await mirrorRevision(page);
+    await expect.poll(async () => (await engineFrame(page))?.revision ?? -1, { timeout: 10_000 }).toBeGreaterThanOrEqual(wanted);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
