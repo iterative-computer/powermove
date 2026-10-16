@@ -150,6 +150,21 @@ impl Renderer {
         self.bracket = bracket;
     }
 
+    /// The capability check for this renderer: `unsupported_with_media`,
+    /// with text and captions drawn when fonts are configured.
+    pub fn unsupported_with_media(
+        &self,
+        document: &Document,
+        composition: &str,
+        assets: &dyn AssetResolver,
+    ) -> Vec<Unsupported> {
+        if self.text.has_fonts() {
+            capability::unsupported_with_fonts(document, composition, Some(assets))
+        } else {
+            capability::unsupported_with_media(document, composition, assets)
+        }
+    }
+
     /// The fonts text and captions layers lay out with (`None`: those
     /// layers are unsupported and route to the legacy renderer). Dropping
     /// or replacing them clears the glyph and raster caches.

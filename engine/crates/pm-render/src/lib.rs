@@ -35,7 +35,9 @@ pub mod text;
 pub mod three;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
-pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
+pub use capability::{
+    Feature, Unsupported, unsupported, unsupported_with_fonts, unsupported_with_media,
+};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer, TextRaster};
 pub use request::RenderRequest;

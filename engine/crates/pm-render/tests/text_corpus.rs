@@ -27,7 +27,7 @@ fn main() {
     use pm_protocol::color::Precision;
     use pm_protocol::common::Size;
     use pm_render::parity::{dilate, ssim_map};
-    use pm_render::{RenderRequest, Renderer, unsupported_with_media};
+    use pm_render::{RenderRequest, Renderer};
     use support::*;
 
     let mut captures = corpus_dirs();
@@ -81,7 +81,7 @@ fn main() {
                 skipped.push((p.name.clone(), format!("media not available: {:?}", p.missing_media)));
                 continue;
             }
-            let issues = unsupported_with_media(&p.document, &p.composition, &p.resolver);
+            let issues = renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
             if !issues.is_empty() {
                 let mut reasons: Vec<String> = issues.iter().map(|u| u.feature.to_string()).collect();
                 reasons.dedup();

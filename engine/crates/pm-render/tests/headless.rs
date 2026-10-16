@@ -380,6 +380,12 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         ))
     });
     assert!(!f.iter().any(|f| matches!(f, Feature::LayerType(_))), "{f:?}");
+    // Without fonts the static check lists them; with fonts they are drawn.
+    assert!(f.iter().any(|f| matches!(f, Feature::Text(_))), "{f:?}");
+    let (mut doc, _) = everything();
+    doc["layers"].as_array_mut().unwrap().push(layer("t", "text", json!({ "text": "x" }), 0.0, 0.0, 2.0));
+    let with_fonts = pm_render::unsupported_with_fonts(&load(&doc), "Ptest-root", None);
+    assert!(!with_fonts.iter().any(|u| matches!(u.feature, Feature::Text(_))), "{with_fonts:?}");
     let f = variant(|d| {
         d["layers"].as_array_mut().unwrap().push(layer(
             "s",

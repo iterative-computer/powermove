@@ -183,9 +183,11 @@ fn is_property(v: Option<&Node>) -> bool {
     node::is_property(v)
 }
 
-/// Static check of `composition` and everything it nests.
+/// Static check of `composition` and everything it nests, for a renderer
+/// without fonts (text and captions layers are listed: they need
+/// `Renderer::set_text_fonts`).
 pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
-    check(document, composition, None)
+    check(document, composition, None, false)
 }
 
 /// [`unsupported`] plus facts read from media headers through `assets`
@@ -196,13 +198,25 @@ pub fn unsupported_with_media(
     composition: &str,
     assets: &dyn AssetResolver,
 ) -> Vec<Unsupported> {
-    check(document, composition, Some(assets))
+    check(document, composition, Some(assets), false)
+}
+
+/// [`unsupported_with_media`] for a renderer with fonts configured
+/// (`Renderer::set_text_fonts`): text and captions layers are drawn
+/// (`Renderer::unsupported_with_media` picks the right check).
+pub fn unsupported_with_fonts(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, true)
 }
 
 fn check(
     document: &Document,
     composition: &str,
     assets: Option<&dyn AssetResolver>,
+    fonts: bool,
 ) -> Vec<Unsupported> {
     let mut out = BTreeSet::new();
     let Some(root) = document.root() else {
@@ -237,7 +251,7 @@ fn check(
         let Some(comp) = composition_node(root, &id) else {
             continue;
         };
-        check_composition(root, &id, comp, assets, &mut out, &mut stack);
+        check_composition(root, &id, comp, assets, fonts, &mut out, &mut stack);
     }
     out.into_iter().collect()
 }
@@ -267,6 +281,7 @@ fn check_composition(
     comp_id: &str,
     comp: &Node,
     assets: Option<&dyn AssetResolver>,
+    fonts: bool,
     out: &mut BTreeSet<Unsupported>,
     stack: &mut Vec<String>,
 ) {
@@ -347,6 +362,9 @@ fn check_composition(
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
             add(layer, Feature::Scene3d("model groups".into()));
+        }
+        if !fonts && matches!(ty.as_str(), "text" | "captions") {
+            add(layer, Feature::Text(format!("{ty} layers without the engine's fonts")));
         }
         match ty.as_str() {
             "image" | "video" => check_media(root, layer, &ty, assets, &mut add),
