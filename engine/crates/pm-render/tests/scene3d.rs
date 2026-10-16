@@ -452,6 +452,11 @@ fn f32s(v: &serde_json::Value) -> Vec<f32> {
         .collect()
 }
 
+/// Every draw the pass issues uses a program byte-identical to one three.js
+/// linked (after the normalizations in `normalized`), with every uniform
+/// three.js set equal as f32, in three.js's order; every recorded draw that
+/// writes color or depth is matched. Samplers are compared by the pixel
+/// sweep, as is the shared shadow materials' stale `mapTransform`.
 #[test]
 fn programs_and_uniforms_equal_three_js() {
     let Some((dir, cases)) = selected() else {
@@ -461,6 +466,10 @@ fn programs_and_uniforms_equal_three_js() {
     let mut problems = Vec::new();
     let (mut draws_matched, mut values) = (0, 0);
     let mut unmatched_recorded = 0;
+    // Values equal as f32, and matched draws issued out of three.js's
+    // order (both must be complete).
+    let mut exact = 0usize;
+    let mut out_of_order = Vec::new();
     for c in &cases {
         for (k, ours) in our_draws(c) {
             let record: serde_json::Value = serde_json::from_str(
@@ -483,6 +492,7 @@ fn programs_and_uniforms_equal_three_js() {
                 .collect();
             let recorded = record["draws"].as_array().unwrap();
             let mut used = vec![false; recorded.len()];
+            let mut last_matched: Option<usize> = None;
             // A draw with neither color nor depth writes changes nothing (the
             // prepass's transparent and fading models); every other draw
             // three.js issued must be one of ours.
@@ -587,6 +597,14 @@ fn programs_and_uniforms_equal_three_js() {
                 };
                 used[i] = true;
                 draws_matched += 1;
+                if last_matched.is_some_and(|l| i < l) {
+                    out_of_order.push(format!("{} output {k} draw {n}", c.id));
+                    problems.push(format!(
+                        "{} output {k} draw {n}: issued out of three.js's order",
+                        c.id
+                    ));
+                }
+                last_matched = Some(i);
                 let textures: Vec<&str> = d.textures.iter().map(|(n, _)| n.as_str()).collect();
                 for (name, value) in recorded[i]["uniforms"].as_object().unwrap() {
                     let base = name.split('[').next().unwrap();
@@ -661,8 +679,10 @@ fn programs_and_uniforms_equal_three_js() {
                     }
                     for (a, b) in mine[..len].iter().zip(&theirs[..len]) {
                         values += 1;
-                        let d = f64::from((a - b).abs()) / f64::from(b.abs().max(1.0));
-                        if d > 1e-6 {
+                        // Equal as f32 (a NaN equals the same NaN).
+                        if a.to_bits() == b.to_bits() || a == b {
+                            exact += 1;
+                        } else {
                             problems.push(format!(
                                 "{} output {k} draw {n}: {name} ours {a} three.js {b}",
                                 c.id
@@ -684,7 +704,8 @@ fn programs_and_uniforms_equal_three_js() {
         }
     }
     eprintln!(
-        "{draws_matched} draws matched, {values} uniform values compared, {unmatched_recorded} effective recorded draws unmatched"
+        "{draws_matched} draws matched, {values} uniform values compared ({exact} equal as f32), {unmatched_recorded} effective recorded draws unmatched, {} matched draws out of three.js's order",
+        out_of_order.len()
     );
     if !problems.is_empty() {
         let mut p = problems.clone();
