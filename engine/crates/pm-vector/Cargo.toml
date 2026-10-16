@@ -52,3 +52,7 @@ required-features = ["render"]
 [[test]]
 name = "canvas2d"
 required-features = ["render"]
+
+[[test]]
+name = "svg"
+required-features = ["render"]
