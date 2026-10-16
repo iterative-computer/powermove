@@ -313,6 +313,13 @@ impl JobSlicer {
         self.in_flight = self.in_flight.saturating_add(1);
     }
 
+    /// A command buffer admitted with [`submitted`](Self::submitted) was
+    /// never measured (its render failed): frees its in-flight slot without
+    /// teaching the model anything.
+    pub fn abandoned(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
     /// A command buffer completed after `measured_us` of GPU time.
     pub fn completed(&mut self, raw_predicted_us: f64, measured_us: f64) {
         self.in_flight = self.in_flight.saturating_sub(1);

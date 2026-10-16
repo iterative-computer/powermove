@@ -85,6 +85,8 @@ pub struct GateStats {
     pub last_unit_too_large_us: f64,
     /// Single-unit probes of passes predicted above the bound.
     pub oversize_probes: u64,
+    /// Admissions released without a measurement (the render failed).
+    pub abandoned: u64,
 }
 
 /// The job engine's submission gate, shared by every lane.
@@ -292,6 +294,24 @@ impl Gate {
     }
 }
 
+impl Gate {
+    /// The admitted submission failed before it could be measured: the gate
+    /// is free again and nothing is calibrated from it.
+    fn abandoned(&self, lane: usize) {
+        let mut st = self.lock();
+        let Some(adm) = st.current.take() else {
+            return;
+        };
+        debug_assert_eq!(adm.lane, lane);
+        if adm.sliced {
+            st.slicer.abandoned();
+        }
+        st.stats.abandoned += 1;
+        drop(st);
+        self.changed.notify_all();
+    }
+}
+
 /// One lane's view of the gate, as the renderer uses it.
 #[derive(Clone)]
 pub struct LaneGate {
@@ -306,6 +326,10 @@ impl GpuGate for LaneGate {
 
     fn finished(&self, pass: u64, units: u32, measured_us: f64) {
         self.gate.finished(self.lane, pass, units, measured_us)
+    }
+
+    fn abandoned(&self, _pass: u64) {
+        self.gate.abandoned(self.lane)
     }
 }
 
@@ -445,6 +469,37 @@ mod tests {
         t.join().unwrap();
         assert_eq!(*order.lock().unwrap(), vec!["snapshot", "user"]);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A submission whose render fails frees the gate (and, while playing,
+    /// its in-flight slot) without calibrating anything.
+    #[test]
+    fn an_abandoned_submission_frees_the_gate_for_every_lane() {
+        let gate = Arc::new(Gate::new());
+        let snap = lane(&gate, SNAPSHOT_LANE);
+        let user = lane(&gate, USER_LANE);
+        let no = AtomicBool::new(false);
+        assert_eq!(snap.admit(1, 4, &no), Some(4));
+        snap.abandoned(1);
+        assert!(gate.lock().current.is_none());
+        // Not counted as the pass's cold submission either.
+        assert!(!gate.lock().seen.contains(&1));
+        let t = Instant::now();
+        assert_eq!(user.admit(2, 4, &no), Some(4));
+        assert!(t.elapsed() < Duration::from_millis(100), "admitted at once");
+        user.finished(2, 4, 40.0);
+        // While playing, an abandoned probe gives its in-flight slot back.
+        gate.signal(&started());
+        assert_eq!(snap.admit(5, 26, &no), Some(1), "uncalibrated: one unit");
+        assert_eq!(gate.lock().slicer.in_flight(), 1);
+        snap.abandoned(5);
+        assert_eq!(gate.lock().slicer.in_flight(), 0);
+        assert_eq!(gate.lock().slicer.model().raw_unit_us(PassKey(5)), None);
+        let t = Instant::now();
+        assert_eq!(snap.admit(5, 26, &no), Some(1));
+        assert!(t.elapsed() < Duration::from_millis(100), "admitted at once");
+        snap.finished(5, 1, 100.0);
+        assert_eq!(gate.stats().abandoned, 2);
     }
 
     #[test]

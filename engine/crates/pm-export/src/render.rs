@@ -134,6 +134,35 @@ pub trait GpuGate: Send + Sync {
     /// The submission admitted last completed: `units` units of `pass` in
     /// `measured_us` of GPU time (submission to completion).
     fn finished(&self, pass: u64, units: u32, measured_us: f64);
+    /// The submission admitted last never completed (the renderer returned an
+    /// error or panicked): releases the admission without measuring it.
+    /// Every [`admit`](GpuGate::admit) that returns `Some` is followed by
+    /// exactly one `finished` or `abandoned`; [`render_frame`] guarantees it
+    /// on every exit path.
+    fn abandoned(&self, pass: u64);
+}
+
+/// One admitted submission: released as abandoned when dropped before
+/// [`Admitted::finish`] (an early return, a panic).
+struct Admitted<'a> {
+    gate: &'a dyn GpuGate,
+    pass: u64,
+    open: bool,
+}
+
+impl Admitted<'_> {
+    fn finish(mut self, units: u32, measured_us: f64) {
+        self.open = false;
+        self.gate.finished(self.pass, units, measured_us);
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.gate.abandoned(self.pass);
+        }
+    }
 }
 
 /// No interactive engine to protect (the CLI, tests): whole frames.
@@ -146,6 +175,8 @@ impl GpuGate for Unrestricted {
     }
 
     fn finished(&self, _: u64, _: u32, _: f64) {}
+
+    fn abandoned(&self, _: u64) {}
 }
 
 /// A slicing pass key for one job at one output size: units of the same job
@@ -202,6 +233,11 @@ pub fn render_frame(
             .admit(pass, remaining, cancel)
             .ok_or(JobError::Cancelled)?
             .clamp(1, remaining);
+        let admission = Admitted {
+            gate,
+            pass,
+            open: true,
+        };
         let band = (admitted * BAND_ROWS).min(h - y);
         let whole = y == 0 && band == h;
         let mut req = *request;
@@ -213,14 +249,23 @@ pub fn render_frame(
                 height: band,
             });
         }
-        let frame = renderer.render(document, composition, time, &req, media)?;
+        let frame = match renderer.render(document, composition, time, &req, media) {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Whatever the failed render submitted finishes before the
+                // admission is released.
+                wait_idle(renderer);
+                drop(admission);
+                return Err(e.into());
+            }
+        };
         let submitted = Instant::now();
         wait_idle(renderer);
         let gpu_us = submitted.elapsed().as_secs_f64() * 1e6;
         let units = if whole { total_units } else { admitted };
         // The admitted command buffer's time; the readback below is its own
         // small copy and would only add a second wait behind other clients.
-        gate.finished(pass, units, gpu_us);
+        admission.finish(units, gpu_us);
         let pixels = renderer.read_rgba(&frame)?;
         let row = w as usize * 4;
         let at = y as usize * row;
@@ -734,9 +779,48 @@ pub fn encode_png(rgba8: &[u8], width: u32, height: u32) -> Result<Vec<u8>, JobE
     Ok(out)
 }
 
+/// Capability routing of agent stills (as [`plan_export`] routes exports):
+/// pm-render's `unsupported_with_media` for each composition, checked once
+/// per batch because it opens media headers.
+#[derive(Debug, Default)]
+pub struct StillRouting {
+    checked: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl StillRouting {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `Err(Unsupported)` when the engine cannot render `composition`; the
+    /// host renders such stills on the current engine.
+    pub fn check(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        media: &MediaPaths,
+    ) -> Result<(), JobError> {
+        let problems = self
+            .checked
+            .entry(composition.to_owned())
+            .or_insert_with(|| {
+                pm_render::unsupported_with_media(document, composition, media)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            });
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(JobError::Unsupported(problems.clone()))
+        }
+    }
+}
+
 /// One agent still: the composition at `time`, opaque (today's
 /// `renderFrameTo` with the background), 16-bit intermediates, motion blur
-/// off. Capability routing as for exports.
+/// off. Capability routing as for exports, through `routing`, before any
+/// GPU work is admitted.
 #[allow(clippy::too_many_arguments)]
 pub fn render_still(
     renderer: &mut Renderer,
@@ -745,10 +829,12 @@ pub fn render_still(
     time: Ticks,
     max_dimension: u32,
     media: &MediaPaths,
+    routing: &mut StillRouting,
     gate: &dyn GpuGate,
     seed: u64,
     cancel: &AtomicBool,
 ) -> Result<ReadFrame, JobError> {
+    routing.check(document, composition, media)?;
     let (cw, ch) = composition_size(document, composition)?;
     let size = still_size(cw, ch, max_dimension);
     let request = RenderRequest::sized(size, Precision::Float16);

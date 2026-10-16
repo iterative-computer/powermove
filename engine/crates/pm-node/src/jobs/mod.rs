@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
-    ExportJob, JobError, MediaPaths, Progress, asset_ids, encode_jpeg, encode_png, plan_export,
-    render_still, run_export_into, to_rgba8,
+    ExportJob, JobError, MediaPaths, Progress, StillRouting, asset_ids, encode_jpeg, encode_png,
+    plan_export, render_still, run_export_into, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -820,6 +820,7 @@ fn run_frames(
         },
     );
     let playing_at_start = shared.gate.is_playing();
+    let mut routing = StillRouting::new();
     let mut outcomes = Vec::with_capacity(request.frames.len());
     let mut bytes = 0usize;
     for (index, frame) in request.frames.iter().enumerate() {
@@ -842,6 +843,7 @@ fn run_frames(
             frame.time,
             request.max_dimension,
             &media,
+            &mut routing,
             gate,
             still_seed(frame.composition.as_str()),
             cancel,
