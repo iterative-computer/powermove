@@ -32,7 +32,12 @@ import { app, BrowserWindow, contentTracing, dialog, ipcMain, screen } from 'ele
 
 type AppConfig = {
   scenario: 'playback' | 'latency';
-  mode: 'today' | 'engine';
+  /** `tracer`: the app's own engine connection draws the document (Use New Engine). */
+  mode: 'today' | 'engine' | 'tracer';
+  /** A synthetic project of slice features instead of the corpus project. */
+  synthetic?: { layers: number; fps?: number; fpsRational?: [number, number] | null; images?: number; seed?: number };
+  /** Playback only: an inspector edit every `everyMs` while recording (tracer). */
+  edits?: { everyMs: number };
   load: boolean;
   loadProfile?: 'gate' | 'no-autosave';
   durationMs: number;
@@ -175,8 +180,8 @@ async function run(config: AppConfig): Promise<void> {
     }
 
     // Open the corpus project the way a user does (Open Project), from a copy.
-    const copy = path.join(app.getPath('userData'), path.basename(config.project));
-    copyFileSync(config.project, copy);
+    const copy = config.synthetic ? '' : path.join(app.getPath('userData'), path.basename(config.project));
+    if (!config.synthetic) copyFileSync(config.project, copy);
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [copy] })) as typeof dialog.showOpenDialog;
     dialog.showMessageBox = (async () => ({ response: 2, checkboxChecked: false })) as typeof dialog.showMessageBox;
     await run('editor', `(() => { const PM = window.PM; if (PM.ProjectsScreen.isOpen) { window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Measurement' }) })); PM.ProjectsScreen.hide(); } })()`);
@@ -191,7 +196,15 @@ async function run(config: AppConfig): Promise<void> {
     // "Unknown project read token": try once more (the media store already
     // holds most of it), then give up.
     const opened = (): Promise<boolean> => call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`);
-    for (let attempt = 1; ; attempt++) {
+    let pageInjected = false;
+    if (config.synthetic) {
+      // The synthetic project is built in the page (synthetic-project.ts).
+      await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
+      pageInjected = true;
+      result['synthetic'] = await call(`window.__measureApp.synthetic(${JSON.stringify(config.synthetic)})`);
+      log(`synthetic project: ${JSON.stringify(result['synthetic'])}`);
+    }
+    for (let attempt = 1; !config.synthetic; attempt++) {
       const openStart = performance.now();
       await run('open project', 'window.PM.openProject()');
       log(`open ${attempt} returned after ${((performance.now() - openStart) / 1000).toFixed(1)} s (load ${os.loadavg()[0]!.toFixed(1)})`);
@@ -245,7 +258,7 @@ async function run(config: AppConfig): Promise<void> {
         })
       : null;
 
-    await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
+    if (!pageInjected) await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
     await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false, offMainThread: config.offMainThread !== false })})`);
     if (config.mode === 'engine') {
       const installed = (globalThis as { __powermoveNativeEngine?: { engine?: { reconnectClient(id: number): void } } }).__powermoveNativeEngine;
@@ -310,7 +323,12 @@ async function run(config: AppConfig): Promise<void> {
         await contents.debugger.sendCommand('Profiler.start');
       }
       const startMs = await call<number>(`window.__measureApp.mark('pm-record-start')`);
+      // Inspector edits while it plays (the "inspector edit during playback" row).
+      const editTimer = config.edits ? setInterval(() => {
+        if (!win.isDestroyed()) void call('window.__measureApp.edit()').catch(() => undefined);
+      }, config.edits.everyMs) : null;
       await sleep(config.durationMs);
+      if (editTimer) clearInterval(editTimer);
       const endMs = await call<number>(`window.__measureApp.mark('pm-record-end')`);
       result['recordWindow'] = { startMs, endMs };
       if (profilePath) {

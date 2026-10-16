@@ -10,8 +10,18 @@ const F = TICKS_PER_SECOND / 60;
 
 class FakeFrame {
   closed = false;
+  /** Clones made of this frame (what the page transfers to the worker). */
+  clones: FakeFrame[] = [];
+  /** Whether every clone was closed when this frame closed. */
+  closedLast: boolean | null = null;
   constructor(readonly id: string, readonly codedWidth = 640, readonly codedHeight = 360) {}
+  clone(): FakeFrame {
+    const clone = new FakeFrame(this.id, this.codedWidth, this.codedHeight);
+    this.clones.push(clone);
+    return clone;
+  }
   close(): void {
+    if (!this.closed) this.closedLast = this.clones.every((c) => c.closed);
     this.closed = true;
   }
 }
@@ -205,7 +215,9 @@ describe('WorkerPresenter and the presentation worker', () => {
     // The frame crossed as a transfer, with the page's arrival time.
     const sent = pair.posted.find((m) => m.type === 'frame') as Extract<ToWorker, { type: 'frame' }>;
     expect(sent.arrivedMs).toBe(5);
-    expect(sent.frame).toBe(source.frames[0]);
+    // A clone crossed; the page keeps its own reference until the worker is done.
+    expect(sent.frame).toBe(source.frames[0]!.clones[0]);
+    expect(source.frames[0]!.closed).toBe(false);
     // A worker canvas commits on its own: drawn without waiting for an animation frame.
     expect(pair.painter.draws).toHaveLength(1);
     // Worker times are on the page's clock: worker 10 ms is page 1010 ms.
@@ -215,6 +227,7 @@ describe('WorkerPresenter and the presentation worker', () => {
     pair.painter.finishGpu();
     await settle();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(source.frames[0]!.closedLast).toBe(true);
     expect(presenter.stats.drawn).toBe(1);
     expect(presenter.stats.received).toBe(1);
     // The worker's last stats went out with the draw, before the GPU let
@@ -298,6 +311,10 @@ describe('WorkerPresenter and the presentation worker', () => {
     await settle();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(source.frames[0]!.closed).toBe(true);
+    // The worker got a clone and closed it first: the page's reference is
+    // the last, so Electron's release callback runs on the page's thread.
+    expect(source.frames[0]!.clones).toHaveLength(1);
+    expect(source.frames[0]!.closedLast).toBe(true);
     expect(pair.fromWorker.some((m) => m.type === 'closed')).toBe(true);
     host.dispose();
     await settle();

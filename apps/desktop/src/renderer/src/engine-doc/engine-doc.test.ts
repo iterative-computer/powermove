@@ -187,6 +187,24 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(batches[1].revision).toBe(batches[0].revision + 1);
   });
 
+  it('tells its pending listeners once when a write leaves something to flush', async () => {
+    const { PM, doc } = await editor();
+    populate(PM, rng(11), 6);
+    doc.barrier!.flush();
+    let told = 0;
+    const off = doc.onPending(() => { told += 1; });
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 12 });
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 13 });
+    expect(told).toBe(1);
+    doc.barrier!.flush();
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 14 });
+    expect(told).toBe(2);
+    off();
+    doc.barrier!.flush();
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 15 });
+    expect(told).toBe(2);
+  });
+
   it('resyncs when the project changes and diffs when a version of it replaces it', async () => {
     const { PM, doc } = await editor();
     populate(PM, rng(9), 6);
@@ -421,6 +439,31 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.api!.ev(added, 'position.x', 0)).toBe(PM.ev(added, 'position.x', 0));
     expect(doc.api!.stats.repairs).toBe(0);
     PM.hist.commit('Draw');
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+
+  it('does not announce the speculative diff a flush marks inside an open transaction', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    doc.barrier!.flush();
+    // A listener that flushes whenever told, as the engine connection does:
+    // the speculative marks of an open plain transaction must not tell it,
+    // or every flush would ask for the next one.
+    let told = 0;
+    doc.onPending(() => {
+      told += 1;
+      // Bounded, so a regression fails here instead of starving the loop.
+      if (told < 8) queueMicrotask(() => doc.barrier!.flush());
+    });
+    PM.hist.begin('Drag');
+    for (let run = 0; run < 4; run++) {
+      doc.api!.ev(L, 'position.x', 0);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(told).toBe(0);
+    PM.hist.commit('Drag');
     expect(doc.check('test')!.ok).toBe(true);
   });
 

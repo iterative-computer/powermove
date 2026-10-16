@@ -1,6 +1,12 @@
 //! The presenter's render thread: GPU device, surface pools, the bridge
 //! client, the transport clock, and frame delivery.
 //!
+//! With a document source (the Phase 2 tracer bullet) the thread keeps a
+//! mirror of each session's document ([`super::document`]), routes its
+//! composition to the engine or the legacy viewer, draws engine frames with
+//! `pm-render` ([`super::compose`]), follows the audio device clock
+//! ([`super::audio`]), and rebuilds its GPU device after a loss.
+//!
 //! Commands arrive from the engine's JavaScript thread; descriptors, clock
 //! samples, surface pool announcements, and frame responses leave through
 //! the sink straight to the viewer's port. A descriptor is sent only after
@@ -8,13 +14,15 @@
 //! never written while the viewer holds it (contract 2's `PoolLedger`).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pm_bridge::rendezvous::{Client, SendRight};
 use pm_bridge::wire::{PixelFormat, SurfaceInfo};
+use pm_engine::document::DocumentUpdate;
 use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
@@ -23,12 +31,12 @@ use pm_gpu::bridge_out::remote_layer::{
     Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device, take_display_ticks,
 };
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
-use pm_protocol::clock::TransportCommand;
+use pm_protocol::clock::{TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::WorkingEncoding;
 use pm_protocol::common::{RequestId, Revision, Seq, SessionId, Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::envelope::{Envelope, Event, Message, Response};
-use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
+use pm_protocol::error::{EngineError, ErrorCode, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, PoolLedger, PreviewResolution,
     Representation, ViewerState,
@@ -37,7 +45,10 @@ use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 use serde::Serialize;
 
+use super::audio::{AudioCtl, AudioLink, AudioStatus};
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
+use super::compose::Composer;
+use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
@@ -148,6 +159,19 @@ pub enum Command {
     ClosePort {
         port: PortId,
     },
+    /// The session's document changed (document source).
+    Document {
+        key: Key,
+        update: DocumentUpdate,
+    },
+    /// An asset's file, or `None` when it is offline or gone.
+    Media {
+        key: Key,
+        asset: String,
+        path: Option<PathBuf>,
+    },
+    /// Destroys the GPU device as a real loss would (the recovery test).
+    LoseDevice,
     Shutdown,
 }
 
@@ -176,6 +200,12 @@ pub struct ThreadConfig {
     /// While the C′ layer plays, ask the display for a multiple of the
     /// content rate (plan section 15, ProMotion).
     pub remote_rate: bool,
+    /// Frames draw the session's document with pm-render (otherwise the
+    /// bridge test source).
+    pub document: bool,
+    /// Play without the audio device: the line runs on the host clock
+    /// (tests on machines without an output, and the S1 harness).
+    pub host_clock: bool,
 }
 
 /// One frame's record for the S1 harness.
@@ -231,6 +261,23 @@ pub struct Stats {
     pub remote_error: Option<String>,
     /// The refresh rate the C′ prototype asked for while playing.
     pub remote_rate_hz: Option<f64>,
+    /// Document frames drawn, and the CPU time of the slowest.
+    pub document_frames: u64,
+    pub compose_us_max: i64,
+    pub compose_us_total: i64,
+    /// Frames that failed to render (logged), and layer failures.
+    pub render_errors: u64,
+    pub layer_failures: u64,
+    /// Times a composition was routed to the legacy viewer.
+    pub routed_legacy: u64,
+    /// The last routing decision per view, as text.
+    pub routes: BTreeMap<String, String>,
+    /// GPU device losses recovered from.
+    pub device_losses: u64,
+    /// Runs that fell back to the host clock (no audio output).
+    pub host_clock_runs: u64,
+    /// Audio playback, per view.
+    pub audio: BTreeMap<String, AudioStatus>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -241,6 +288,10 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     display: DisplayTransform,
+    /// Draws documents (made with the first document frame).
+    composer: Option<Composer>,
+    /// Set by the device-lost callback; the thread rebuilds the device.
+    lost: Arc<AtomicBool>,
 }
 
 struct Live {
@@ -248,7 +299,8 @@ struct Live {
     pool: SurfacePool,
     ledger: PoolLedger,
     working: WorkingTexture,
-    source: TestSource,
+    /// The bridge test source; `None` for documents.
+    source: Option<TestSource>,
     /// The C′ prototype's layer for this pool's size and format.
     remote: Option<RemoteLayer>,
 }
@@ -267,6 +319,14 @@ struct View {
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
+    /// The route last reported to the viewer (document source).
+    reported: Option<Route>,
+    /// A Play waits for the audio clock's first playing sample: the host
+    /// µs after which it starts on the host clock instead, and the audio
+    /// epoch that was current when it was asked (not the answer).
+    awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
+    /// The audio clock version last followed.
+    audio_version: u64,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -275,6 +335,12 @@ struct View {
     rate_tried: bool,
 }
 
+type PlaybackRateValue = pm_protocol::common::PlaybackRate;
+
+/// How long a Play waits for the audio device before the line starts on
+/// the host clock.
+pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
+
 struct Thread {
     config: ThreadConfig,
     sink: Sink,
@@ -282,12 +348,27 @@ struct Thread {
     bridge: Option<Client>,
     gpu: Option<Gpu>,
     views: BTreeMap<Key, View>,
+    /// Each session's document (document source), kept from its first
+    /// update, which may come before the viewer state.
+    docs: BTreeMap<Key, ViewDocument>,
+    /// Each session's audio playback, from its first Play.
+    audio: BTreeMap<Key, AudioLink>,
     frame_ticks: i64,
     generations: Generations,
 }
 
 fn now() -> i64 {
     pm_bridge::now_us()
+}
+
+/// Host µs (`mach_absolute_time`), as the bridge and the clocks read it.
+pub fn now_us() -> i64 {
+    now()
+}
+
+/// The stats key of a view.
+fn view_name(key: Key) -> String {
+    format!("{}:{}", key.0.0, key.1.get())
 }
 
 /// The render thread's body.
@@ -308,6 +389,8 @@ pub fn run(
         bridge: None,
         gpu: None,
         views: BTreeMap::new(),
+        docs: BTreeMap::new(),
+        audio: BTreeMap::new(),
         generations,
     };
     thread.check_in();
@@ -375,14 +458,51 @@ impl Thread {
 
     fn gpu(&mut self) -> Option<&Gpu> {
         if self.gpu.is_none() {
-            match pm_gpu::bridge_out::metal_device("interactive engine viewer") {
+            // Documents need the render graph's features (16-bit planes,
+            // safe-math passthrough shaders, rgba32float when present).
+            let made = if self.config.document {
+                pm_gpu::Gpu::new("interactive engine viewer")
+                    .map(|g| (g.device, g.queue, g.info))
+                    .map_err(|e| e.to_string())
+            } else {
+                pm_gpu::bridge_out::metal_device("interactive engine viewer")
+                    .map_err(|e| e.to_string())
+            };
+            match made {
                 Ok((device, queue, info)) => {
                     let display = DisplayTransform::new(&device, &queue);
                     self.stats().adapter = Some(info.name.clone());
+                    let lost = Arc::new(AtomicBool::new(false));
+                    let flag = lost.clone();
+                    let sink = self.sink.clone();
+                    device.set_device_lost_callback(move |reason, message| {
+                        flag.store(true, Ordering::Release);
+                        sink(vec![Action::Log {
+                            level: LogLevel::Warn,
+                            message: format!(
+                                "frame bridge: GPU device lost ({reason:?}): {message}"
+                            ),
+                        }]);
+                    });
+                    // A validation error must not take the engine down: log it.
+                    // Out-of-memory and internal errors rebuild the device.
+                    let flag = lost.clone();
+                    let sink = self.sink.clone();
+                    device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                        if !matches!(error, wgpu::Error::Validation { .. }) {
+                            flag.store(true, Ordering::Release);
+                        }
+                        sink(vec![Action::Log {
+                            level: LogLevel::Error,
+                            message: format!("frame bridge: GPU error: {error}"),
+                        }]);
+                    }));
                     self.gpu = Some(Gpu {
                         device,
                         queue,
                         display,
+                        composer: None,
+                        lost,
                     });
                 }
                 Err(error) => {
@@ -395,6 +515,57 @@ impl Thread {
             }
         }
         self.gpu.as_ref()
+    }
+
+    /// Rebuilds the GPU device after a loss: every pool is retired and made
+    /// again on the new device as a new generation (the viewer imports the
+    /// new surfaces), and every view redraws.
+    fn recover_gpu(&mut self) {
+        let Some(gpu) = self.gpu.take() else {
+            return;
+        };
+        drop(gpu);
+        self.stats().device_losses += 1;
+        let keys: Vec<Key> = self.views.keys().copied().collect();
+        let mut remake = Vec::new();
+        for key in keys {
+            if let Some(live) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+                let spec = live.spec;
+                self.retire_pool(key, live);
+                remake.push((key, spec));
+            }
+            // The viewer hears why its frames paused (it keeps the last one).
+            let error = EngineError::new(
+                ErrorCode::DeviceLost,
+                ErrorScope::Session { session: key.1 },
+                "The GPU device was lost; it is being rebuilt.",
+            )
+            .with_retry(Retry::After { ms: 0 });
+            let revision = self
+                .views
+                .get(&key)
+                .map(|v| v.revision)
+                .unwrap_or(Revision::ZERO);
+            self.event(
+                key,
+                Event::Failure(FailureReport { revision, error }),
+                Some(revision),
+            );
+        }
+        self.log(
+            LogLevel::Warn,
+            format!(
+                "frame bridge: rebuilding the GPU device and {} pool(s)",
+                remake.len()
+            ),
+        );
+        for (key, spec) in remake {
+            let spec = PoolSpec {
+                generation: self.generations.next(),
+                ..spec
+            };
+            self.make_pool(key, spec, 0, None);
+        }
     }
 
     /// Sends one envelope on a port.
@@ -443,17 +614,7 @@ impl Thread {
                     stats.release_mismatches += 1;
                 }
             }
-            Command::Transport { key, command, at } => {
-                if let Some(view) = self.views.get_mut(&key)
-                    && view.clock.apply(command, at)
-                {
-                    view.schedule.reset();
-                    view.sample_due = true;
-                    if !view.clock.is_playing() {
-                        view.dirty = true;
-                    }
-                }
-            }
+            Command::Transport { key, command, at } => self.transport(key, command, at),
             Command::Render {
                 key,
                 id,
@@ -472,6 +633,7 @@ impl Thread {
                 if let Some(view) = self.views.remove(&key) {
                     self.retire(view);
                 }
+                self.forget_session(key);
             }
             Command::ClosePort { port } => {
                 let keys: Vec<Key> = self.views.keys().filter(|k| k.0 == port).copied().collect();
@@ -480,9 +642,229 @@ impl Thread {
                         self.retire(view);
                     }
                 }
+                let keys: Vec<Key> = self
+                    .docs
+                    .keys()
+                    .chain(self.audio.keys())
+                    .filter(|k| k.0 == port)
+                    .copied()
+                    .collect();
+                for key in keys {
+                    self.forget_session(key);
+                }
+            }
+            Command::Document { key, update } => self.document(key, update),
+            Command::Media { key, asset, path } => {
+                let doc = self.docs.entry(key).or_default();
+                doc.set_media(&asset, path);
+                let media = doc.media().clone();
+                if let Some(audio) = self.audio.get(&key) {
+                    audio.send(AudioCtl::Media(media));
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
+            Command::LoseDevice => {
+                if let Some(gpu) = &self.gpu {
+                    gpu.lost.store(true, Ordering::Release);
+                    gpu.device.destroy();
+                }
             }
         }
         true
+    }
+
+    fn forget_session(&mut self, key: Key) {
+        self.docs.remove(&key);
+        self.audio.remove(&key);
+        let mut stats = self.stats();
+        stats.routes.remove(&view_name(key));
+        stats.audio.remove(&view_name(key));
+    }
+
+    /// A document update: the mirror, the audio thread's mirror, the frame
+    /// grid, and a redraw.
+    fn document(&mut self, key: Key, update: DocumentUpdate) {
+        let doc = self.docs.entry(key).or_default();
+        if let Err(error) = doc.update(&update) {
+            // The engine applied this batch to its own mirror; this one could
+            // not. Ask the renderer for a resync rather than draw a wrong frame.
+            let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+            let failure = EngineError::new(
+                ErrorCode::StaleRevision,
+                ErrorScope::Session { session: key.1 },
+                format!("The viewer's document did not apply a batch ({error}); resync."),
+            )
+            .with_retry(Retry::AfterResync);
+            self.event(
+                key,
+                Event::Failure(FailureReport {
+                    revision,
+                    error: failure,
+                }),
+                Some(revision),
+            );
+        }
+        if let Some(audio) = self.audio.get(&key) {
+            audio.send(AudioCtl::Document(update));
+        }
+        self.refresh_timing(key);
+        if let Some(view) = self.views.get_mut(&key) {
+            view.dirty = true;
+        }
+    }
+
+    /// The frame grid and end of the composition a view shows.
+    fn refresh_timing(&mut self, key: Key) {
+        let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get(&key)) else {
+            return;
+        };
+        if !doc.has_document() {
+            return;
+        }
+        let Ok(comp) = pm_eval::Comp::resolve(doc.document(), view.state.composition.as_str())
+        else {
+            return;
+        };
+        if let Some(rate) = comp.rate() {
+            let num = rate.rate.num();
+            let den = rate.rate.den();
+            if num > 0 && den > 0 {
+                let ticks = TICKS_PER_SECOND * den / num;
+                if ticks != view.clock.frame_ticks() {
+                    view.clock.set_frame_ticks(ticks);
+                    view.schedule.reset();
+                }
+            }
+        }
+        let dur = comp.duration();
+        view.clock.set_end(
+            (dur.is_finite() && dur > 0.0).then(|| (dur * TICKS_PER_SECOND as f64).round() as i64),
+        );
+    }
+
+    /// A transport command from the viewer. With a document, Play goes to
+    /// the audio device and the line starts with its first playing sample
+    /// (the audio clock is the master); without an output device, and for
+    /// the test source, the line runs on the host clock.
+    fn transport(&mut self, key: Key, command: TransportCommand, at: i64) {
+        let document = self.config.document;
+        let host_clock = self.config.host_clock;
+        let Some(view) = self.views.get_mut(&key) else {
+            return;
+        };
+        if !document {
+            if view.clock.apply(command, at) {
+                view.schedule.reset();
+                view.sample_due = true;
+                if !view.clock.is_playing() {
+                    view.dirty = true;
+                }
+            }
+            return;
+        }
+        match command {
+            TransportCommand::Play { rate } => {
+                if view.clock.is_playing() || view.awaiting.is_some() {
+                    return;
+                }
+                // Routed to the legacy viewer: the legacy transport plays.
+                if view.reported != Some(Route::Engine) {
+                    return;
+                }
+                let from = view.clock.media_at(at);
+                let wants_audio = !host_clock && rate == PlaybackRateValue::NORMAL;
+                if wants_audio && self.audio_for(key).is_some() {
+                    let audio = &self.audio[&key];
+                    let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
+                    audio.send(AudioCtl::Play { from, rate });
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
+                    view.sample_due = true;
+                } else {
+                    self.stats().host_clock_runs += 1;
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.clock.apply(TransportCommand::Play { rate }, at);
+                    view.schedule.reset();
+                    view.sample_due = true;
+                }
+            }
+            TransportCommand::Pause => {
+                view.awaiting = None;
+                if view.clock.apply(TransportCommand::Pause, at) {
+                    view.schedule.reset();
+                    view.sample_due = true;
+                    view.dirty = true;
+                }
+                if let Some(audio) = self.audio.get(&key) {
+                    audio.send(AudioCtl::Pause);
+                }
+            }
+            TransportCommand::Seek { time, mode } => {
+                let playing = view.clock.following() && view.clock.is_playing();
+                let awaiting = view.awaiting;
+                view.clock.apply(TransportCommand::Seek { time, mode }, at);
+                if playing || awaiting.is_some() {
+                    // The audio seeks and starts a new run; the line holds the
+                    // target until its first sample.
+                    view.clock.hold(time.get(), at);
+                    let before = self
+                        .audio
+                        .get(&key)
+                        .and_then(|a| a.clock())
+                        .and_then(|c| c.latest())
+                        .map(|s| s.epoch);
+                    let rate = awaiting.map_or(PlaybackRateValue::NORMAL, |a| a.2);
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
+                    if let Some(audio) = self.audio.get(&key) {
+                        audio.send(AudioCtl::Seek(time.get()));
+                    }
+                }
+                let view = self.views.get_mut(&key).expect("checked");
+                view.schedule.reset();
+                view.sample_due = true;
+                view.dirty = true;
+            }
+            TransportCommand::SetLoop { range } => {
+                view.clock.apply(TransportCommand::SetLoop { range }, at);
+                view.sample_due = true;
+                if let Some(audio) = self.audio.get(&key) {
+                    audio.send(AudioCtl::SetLoop(range));
+                }
+            }
+            other => {
+                // Steps (paused), play around, audio scrub: the line only.
+                if view.clock.apply(other, at) {
+                    view.schedule.reset();
+                    view.sample_due = true;
+                    view.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// The view's audio playback, started at its first use; `None` when no
+    /// output device opens (the run uses the host clock).
+    fn audio_for(&mut self, key: Key) -> Option<&AudioLink> {
+        if !self.audio.contains_key(&key) {
+            let doc = self.docs.get(&key)?;
+            let composition = self.views.get(&key)?.state.composition.as_str().to_owned();
+            let loop_range = self.views.get(&key)?.clock.loop_range();
+            match AudioLink::start(doc.document().clone(), composition, doc.media().clone()) {
+                Ok(link) => {
+                    link.send(AudioCtl::SetLoop(loop_range));
+                    self.audio.insert(key, link);
+                }
+                Err(error) => {
+                    self.log(LogLevel::Error, format!("viewer audio: {error}"));
+                    return None;
+                }
+            }
+        }
+        let link = self.audio.get(&key)?;
+        (!link.failed()).then_some(link)
     }
 
     fn retire(&mut self, mut view: View) {
@@ -544,6 +926,9 @@ impl Thread {
             dirty: true,
             requests: VecDeque::new(),
             retry: None,
+            reported: None,
+            awaiting: None,
+            audio_version: 0,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -555,6 +940,7 @@ impl Thread {
             a.vsync = state.vsync;
             a == state
         };
+        let composition_changed = view.state.composition != state.composition;
         view.state = state;
         if let Some(revision) = revision {
             view.revision = view.revision.max(revision);
@@ -562,15 +948,31 @@ impl Thread {
         if !hint_only {
             view.dirty = true;
         }
-        let Some(spec) = pool else {
+        let refresh = composition_changed || !view.clock.is_playing();
+        if composition_changed {
+            view.reported = None;
+        }
+        match pool {
             // The same pool as before. If making it failed and the retries
             // ran out, this new viewer state tries again.
-            if let Some(retry) = view.retry.as_mut() {
-                retry.rearm(now());
+            None => {
+                if let Some(retry) = view.retry.as_mut() {
+                    retry.rearm(now());
+                }
             }
+            Some(_) => view.retry = None,
+        }
+        if composition_changed && let Some(audio) = self.audio.get(&key) {
+            audio.send(AudioCtl::Composition(
+                self.views[&key].state.composition.as_str().to_owned(),
+            ));
+        }
+        if refresh {
+            self.refresh_timing(key);
+        }
+        let Some(spec) = pool else {
             return;
         };
-        view.retry = None;
         // The C′ prototype's layer moves to the new pool: main keeps
         // hosting its context, so a live resize never leaves it unhosted.
         let mut carried = None;
@@ -665,6 +1067,7 @@ impl Thread {
             return Err("the frame bridge did not check in with main".into());
         }
         let extra_passes = self.config.extra_passes;
+        let document = self.config.document;
         let gpu = self.gpu().ok_or("no GPU device")?;
         let pool = SurfacePool::new(
             &gpu.device,
@@ -675,7 +1078,7 @@ impl Thread {
         )
         .map_err(|e| e.to_string())?;
         let working = WorkingTexture::new(&gpu.device, spec.size);
-        let source = TestSource::new(&gpu.device, spec.size, extra_passes);
+        let source = (!document).then(|| TestSource::new(&gpu.device, spec.size, extra_passes));
         let bridge = self.bridge.as_ref().ok_or("no bridge")?;
         let format = match spec.format {
             SurfaceFormat::Bgra8Unorm => PixelFormat::Bgra8,
@@ -950,6 +1353,16 @@ impl Thread {
             if view.dirty || !view.requests.is_empty() || view.sample_due {
                 return Duration::ZERO;
             }
+            if view.awaiting.is_some() || view.clock.following() {
+                // Follow the audio clock promptly (it publishes on its own).
+                wake = wake.min(now + 2_000);
+            }
+            if let Some(entry) = view.clock.loop_entry_at() {
+                let entry = entry.ceil() as i64;
+                if entry > now {
+                    wake = wake.min(entry);
+                }
+            }
             if view.clock.is_playing() {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
@@ -970,6 +1383,13 @@ impl Thread {
     }
 
     fn work(&mut self) {
+        if self
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.lost.load(Ordering::Acquire))
+        {
+            self.recover_gpu();
+        }
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
@@ -1025,9 +1445,150 @@ impl Thread {
         }
     }
 
+    /// The audio clock, the host-clock fallback, the end of a run, and the
+    /// routing decision of a document view. Returns whether the engine
+    /// draws its frames now.
+    fn document_step(&mut self, key: Key) -> bool {
+        let t = now();
+        let Some(view) = self.views.get_mut(&key) else {
+            return false;
+        };
+        let mut fell_back = false;
+        if let Some(link) = self.audio.get(&key) {
+            if let Some(handle) = link.clock() {
+                let version = handle.version();
+                if version != view.audio_version {
+                    view.audio_version = version;
+                    if let Some(sample) = handle.latest() {
+                        let accept = match view.awaiting {
+                            Some((_, before, _)) => {
+                                sample.state != TransportState::Stopped
+                                    && Some(sample.epoch) != before
+                            }
+                            None => view.clock.following(),
+                        };
+                        if accept {
+                            if view.clock.follow(&sample) {
+                                view.schedule.reset();
+                                if !view.clock.is_playing() {
+                                    view.dirty = true;
+                                }
+                            }
+                            if view.clock.is_playing() {
+                                view.awaiting = None;
+                            }
+                            view.sample_due = true;
+                        }
+                    }
+                }
+            }
+            if let Some((deadline, _, rate)) = view.awaiting
+                && (link.failed() || t >= deadline)
+            {
+                // No playing sample from the device: start on the host clock.
+                view.awaiting = None;
+                view.clock.apply(TransportCommand::Play { rate }, t);
+                view.schedule.reset();
+                view.sample_due = true;
+                link.send(AudioCtl::Pause);
+                fell_back = true;
+            }
+        }
+        if view.clock.stop_at_end(t) {
+            view.schedule.reset();
+            view.sample_due = true;
+            view.dirty = true;
+        }
+        if let Some(entry) = view.clock.loop_entry_at()
+            && entry <= t as f64
+            && view.last_sample.is_some_and(|l| (l as f64) < entry)
+        {
+            view.sample_due = true;
+        }
+        let composition = view.state.composition.as_str().to_owned();
+        let route = self.docs.entry(key).or_default().route(&composition);
+        let view = self.views.get_mut(&key).expect("checked");
+        let changed = view.reported.as_ref() != Some(&route);
+        let mut stop = false;
+        if changed {
+            view.reported = Some(route.clone());
+            match &route {
+                Route::Engine => view.dirty = true,
+                Route::Legacy(_) | Route::Pending(_) => {
+                    stop = view.clock.is_playing() || view.awaiting.is_some();
+                }
+            }
+        }
+        if stop {
+            view.awaiting = None;
+            view.clock.apply(TransportCommand::Pause, t);
+            view.schedule.reset();
+            view.sample_due = true;
+            if let Some(link) = self.audio.get(&key) {
+                link.send(AudioCtl::Pause);
+            }
+        }
+        if fell_back {
+            self.stats().host_clock_runs += 1;
+            self.log(
+                LogLevel::Warn,
+                "viewer audio did not start; playing on the host clock".into(),
+            );
+        }
+        if changed {
+            let text = match &route {
+                Route::Engine => "engine".to_owned(),
+                Route::Legacy(reasons) => format!("legacy: {}", reasons.join("; ")),
+                Route::Pending(why) => format!("pending: {why}"),
+            };
+            {
+                let mut stats = self.stats();
+                stats.routes.insert(view_name(key), text);
+                if matches!(route, Route::Legacy(_)) {
+                    stats.routed_legacy += 1;
+                }
+            }
+            if let Route::Legacy(reasons) = &route {
+                self.report_legacy(key, reasons);
+            }
+        }
+        if let Some(link) = self.audio.get(&key) {
+            let status = link.status();
+            self.stats().audio.insert(view_name(key), status);
+        }
+        route == Route::Engine
+    }
+
+    /// Tells the viewer its composition is drawn by the legacy engine
+    /// (capability routing, section 21): a session-scope `unsupported`
+    /// failure at the revision decided.
+    fn report_legacy(&self, key: Key, reasons: &[String]) {
+        let revision = self
+            .docs
+            .get(&key)
+            .and_then(|d| Revision::new(d.revision()).ok())
+            .unwrap_or(Revision::ZERO);
+        let mut message = format!("Drawn by the current engine: {}.", reasons.join("; "));
+        if message.len() > 2_000 {
+            message.truncate(1_997);
+            message.push_str("...");
+        }
+        let error = EngineError::new(
+            ErrorCode::Unsupported,
+            ErrorScope::Session { session: key.1 },
+            message,
+        );
+        self.event(
+            key,
+            Event::Failure(FailureReport { revision, error }),
+            Some(revision),
+        );
+    }
+
     fn work_view(&mut self, key: Key) {
         let lead = self.config.lead;
         self.retry_pool(key);
+        let draws = !self.config.document || self.document_step(key);
         // Clock samples.
         if let Some(view) = self.views.get_mut(&key) {
             let t = now();
@@ -1041,6 +1602,22 @@ impl Thread {
                 let sample = view.clock.sample(t);
                 self.event(key, Event::Clock(sample), None);
             }
+        }
+        if !draws {
+            // Requests wait while the legacy viewer draws this composition.
+            while let Some((id, _, _)) = self
+                .views
+                .get_mut(&key)
+                .and_then(|view| view.requests.pop_front())
+            {
+                self.error(
+                    key,
+                    id,
+                    ErrorCode::Unsupported,
+                    "The current engine draws this composition.",
+                );
+            }
+            return;
         }
         // Frame requests (viewer and scrub): shown at the next refresh.
         while let Some((id, request, revision)) = self
@@ -1092,11 +1669,16 @@ impl Thread {
                     let f = view.clock.frame_ticks();
                     let media = view.clock.wrap(k * f);
                     let shown_for = super::schedule::Schedule::frame_us(&view.clock);
+                    let started = now();
                     let rendered = self.render(key, media, k, Some((shown_from, shown_for)));
                     let Some(view) = self.views.get_mut(&key) else {
                         return;
                     };
                     view.schedule.rendered(&view.clock, k);
+                    if rendered.is_some() {
+                        // What the next frames will cost (deadline-aware skips).
+                        view.schedule.observe((now() - started) as f64);
+                    }
                     let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
                     if let Some(descriptor) = rendered {
                         if remote {
@@ -1186,24 +1768,74 @@ impl Thread {
         timing: Option<(f64, f64)>,
     ) -> Option<FrameDescriptor> {
         let trace = self.config.trace;
-        let gpu = self.gpu.as_ref()?;
+        let document = self.config.document;
+        let gpu = self.gpu.as_mut()?;
         let view = self.views.get_mut(&key)?;
         let live = view.pool.as_mut()?;
         let index = live.ledger.free()?;
         let seq = view.next_seq;
-        let scene = view::scene(&view.state);
-        let frame = TestFrame {
-            time_s: (media as f64 / TICKS_PER_SECOND as f64) as f32,
-            seq,
-            view_seq: view.state.view_seq.get(),
-            composition: scene.composition,
-            marker: scene.marker,
-            camera: scene.camera,
-        };
         let start = now();
+        let overlay;
+        if document {
+            let doc = self.docs.get_mut(&key)?;
+            let composer = gpu
+                .composer
+                .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
+            let composition = view.state.composition.as_str().to_owned();
+            match composer.compose(
+                doc.document(),
+                &composition,
+                doc.media(),
+                Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
+                &view.state,
+                &live.working,
+            ) {
+                Ok(composed) => {
+                    view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    overlay = composed.overlay;
+                    let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    stats.document_frames += 1;
+                    stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
+                    stats.compose_us_total += composed.cpu_us;
+                    stats.layer_failures += composed.failures.len() as u64;
+                }
+                Err(pm_render::RenderError::Unsupported(list)) => {
+                    let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+                    doc.force_legacy(&composition, reasons);
+                    // The next turn reports the route and stops a run.
+                    view.dirty = true;
+                    return None;
+                }
+                Err(error) => {
+                    self.stats
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .render_errors += 1;
+                    (self.sink)(vec![Action::Log {
+                        level: LogLevel::Error,
+                        message: format!("viewer: the frame could not be rendered: {error}"),
+                    }]);
+                    return None;
+                }
+            }
+        } else {
+            let scene = view::scene(&view.state);
+            overlay = scene.overlay;
+            let frame = TestFrame {
+                time_s: (media as f64 / TICKS_PER_SECOND as f64) as f32,
+                seq,
+                view_seq: view.state.view_seq.get(),
+                composition: scene.composition,
+                marker: scene.marker,
+                camera: scene.camera,
+            };
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            live.source
+                .as_ref()?
+                .encode(&gpu.queue, &mut encoder, &live.working, &frame);
+            gpu.queue.submit([encoder.finish()]);
+        }
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        live.source
-            .encode(&gpu.queue, &mut encoder, &live.working, &frame);
         let params = DisplayParams {
             working: WorkingEncoding::Standard,
             canvas: view.state.color_space,
@@ -1262,7 +1894,7 @@ impl Thread {
                 draft_3d: false,
                 cached: false,
             },
-            overlay: Some(scene.overlay),
+            overlay: Some(overlay),
             depth_id: None,
             view_seq: view.state.view_seq,
             duration,

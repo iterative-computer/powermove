@@ -76,6 +76,8 @@ type JobStats = ();
 pub struct EngineHost {
     engine: Engine,
     presenter: Option<PresenterStats>,
+    #[cfg(target_os = "macos")]
+    control: Option<present::PresenterControl>,
     jobs: Option<JobStats>,
     process: EngineProcess,
     /// The font service, created when main first attaches a font port.
@@ -104,6 +106,8 @@ impl EngineHost {
         #[allow(unused_mut)]
         let mut job_stats = None;
         #[cfg(target_os = "macos")]
+        let mut control = None;
+        #[cfg(target_os = "macos")]
         {
             if let (Some(sink), Some(config)) = (
                 sink.clone(),
@@ -111,6 +115,7 @@ impl EngineHost {
             ) {
                 let bridge = present::BridgePresenter::start(config, sink)?;
                 presenter = Some(bridge.stats_handle());
+                control = Some(bridge.control());
                 engine.set_presenter(Box::new(bridge));
             }
             // The job engine renders exports and agent frames (sections 17
@@ -131,11 +136,26 @@ impl EngineHost {
         Ok(Self {
             engine,
             presenter,
+            #[cfg(target_os = "macos")]
+            control,
             jobs: job_stats,
             process,
             fonts: None,
             font_ports: Default::default(),
         })
+    }
+
+    /// Simulates a GPU device loss in the viewer presenter (the recovery
+    /// test): the device is destroyed as a real loss would leave it, and
+    /// the presenter rebuilds it, makes every pool again, and redraws.
+    /// False when this engine does not present.
+    pub fn simulate_gpu_loss(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(control) = &self.control {
+            control.lose_device();
+            return true;
+        }
+        false
     }
 
     /// The presenter's per-frame trace as JSON (S1 harness), emptied.

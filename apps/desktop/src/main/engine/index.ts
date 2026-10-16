@@ -73,10 +73,18 @@ function loadBridgeAddon(file: string, log: Log): BridgeAddon | null {
   }
 }
 
-/** The shared host clock in µs: libuv's hrtime reads the same
- *  `mach_absolute_time` as the engines' `CLOCK_UPTIME_RAW` (contract 13). */
+/** Main's monotonic clock in µs (libuv's hrtime). On macOS it counts the
+ *  time the Mac slept, unlike the engines' `CLOCK_UPTIME_RAW`
+ *  (`mach_absolute_time`), so after a sleep the two differ by the sleep:
+ *  use `engineHostNowUs` where a value meets an engine's clock. */
 export function hostNowUs(): number {
   return Number(process.hrtime.bigint() / 1000n);
+}
+
+/** The engines' host clock (contract 9 `HostMicros`, `CLOCK_UPTIME_RAW`)
+ *  through pm-bridge, when its addon loaded; else main's own clock. */
+export function engineClock(addon: { nowUs(): number } | null): () => number {
+  return addon && typeof addon.nowUs === 'function' ? () => addon.nowUs() : hostNowUs;
 }
 
 export type InstallNativeEngineOptions = {
@@ -158,6 +166,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     return statusMessage(options.enabled, engine?.status() ?? null);
   });
+  options.ipc.on(ENGINE_IPC.enabledSync, (event) => {
+    event.returnValue = options.isTrustedSender(event) && options.enabled;
+  });
 
   if (!options.enabled) {
     return { engine: null, agentJobs: null, attachWindow: () => {}, dispose: async () => {} };
@@ -185,13 +196,23 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       })
     : null;
 
+  const engineNowUs = engineClock(bridgeAddon);
   engine = new NativeEngine({
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...env, ...(launch?.env ?? {}), POWERMOVE_ENGINE_PROCESS: process, POWERMOVE_ENGINE_ADDON: addon }
+        // The interactive engine draws the session's document (the Phase 2
+        // tracer bullet); POWERMOVE_ENGINE_FRAME_SOURCE overrides it
+        // (`test-pattern` for the bridge harnesses).
+        env: {
+          POWERMOVE_ENGINE_FRAME_SOURCE: 'document',
+          ...env,
+          ...(launch?.env ?? {}),
+          POWERMOVE_ENGINE_PROCESS: process,
+          POWERMOVE_ENGINE_ADDON: addon
+        }
       });
       if (launch) {
         child.once('spawn', () => launch.spawned(child.pid));
@@ -208,7 +229,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     cacheDirectory: path.join(options.userData, 'Engine Cache'),
     automaticOutputDirectory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
-    hostNow: hostNowUs,
+    hostNow: engineNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     log
   });
@@ -230,6 +251,17 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
 
+  // The shared host clock for the renderer's engine connection: it maps
+  // performance.now() onto the engines' host µs (clock samples, the
+  // viewer's presentation) from the round trip with the least delay.
+  options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
+    if (!options.isTrustedSender(event)) return;
+    engine!.reconnectClient(event.sender.id);
+  });
+  options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return engineNowUs();
+  });
   options.ipc.handle(ENGINE_IPC.stageDocument, async (event, request: unknown): Promise<StageDocumentResult> => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!validStageRequest(request)) throw new Error('A staged document names an engine, a session, and its bytes.');
@@ -350,6 +382,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      options.ipc.removeHandler(ENGINE_IPC.hostTime);
+      options.ipc.removeAllListeners(ENGINE_IPC.requestPorts);
       options.ipc.removeHandler(ENGINE_IPC.exportVideo);
       options.ipc.removeHandler(ENGINE_IPC.cancelExport);
       uninstallFonts();

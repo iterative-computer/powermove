@@ -2,7 +2,7 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_NODE").is_some() {
         napi_build::setup();
     }
-    // The job engine's renderer links Powermove's FFmpeg (pm-media). The addon
+    // The viewer's and the job engine's renderer links Powermove's FFmpeg (pm-media). The addon
     // finds the dylibs beside the app (`Contents/Resources/ffmpeg/lib`, two
     // levels up from `app.asar.unpacked/native`) or, in development, in the
     // build pm-media linked against.

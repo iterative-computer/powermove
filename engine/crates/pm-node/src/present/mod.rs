@@ -10,13 +10,17 @@
 //! rendering, the transport clock, and delivery of descriptors to the
 //! viewer's port.
 //!
-//! Frames come from a frame source. Until pm-render draws real frames the
-//! only source is the bridge test source, selected with
-//! `POWERMOVE_ENGINE_FRAME_SOURCE=test-pattern` (tests and the S1 harness);
-//! without a source the engine produces no viewer frames and the viewer
-//! keeps the current engine's.
+//! Frames come from a frame source: the session's document drawn by
+//! pm-render (`POWERMOVE_ENGINE_FRAME_SOURCE=document`, what main starts the
+//! interactive engine with; the Phase 2 tracer bullet), or the bridge test
+//! source (`test-pattern`, the bridge tests and the S1 harness). Without a
+//! source the engine produces no viewer frames and the viewer keeps the
+//! current engine's.
 
+pub mod audio;
 pub mod clock;
+pub mod compose;
+pub mod document;
 pub mod render;
 pub mod schedule;
 pub mod view;
@@ -77,7 +81,13 @@ pub const DEFAULT_LEAD: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSource {
     TestPattern,
+    /// The session's document, drawn by pm-render.
+    Document,
 }
+
+/// `1`: play on the host clock rather than the audio device (machines
+/// without an output, and runs that must not open one).
+pub const HOST_CLOCK_ENV: &str = "POWERMOVE_ENGINE_HOST_CLOCK";
 
 #[derive(Debug, Clone)]
 pub struct PresenterConfig {
@@ -120,12 +130,27 @@ impl PresenterConfig {
                 remote_layer: env(REMOTE_LAYER_ENV).as_deref() == Some("1"),
                 remote_trace: env(REMOTE_TRACE_ENV).filter(|p| !p.is_empty()),
                 remote_rate: env(REMOTE_RATE_ENV).as_deref() == Some("1"),
+                document: env(SOURCE_ENV).as_deref() == Some("document"),
+                host_clock: env(HOST_CLOCK_ENV).as_deref() == Some("1"),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),
+                Some("document") => Some(FrameSource::Document),
                 _ => None,
             },
         })
+    }
+}
+
+/// Reaches the render thread from the engine's host.
+#[derive(Clone)]
+pub struct PresenterControl(Sender<Command>);
+
+impl PresenterControl {
+    /// Destroys the GPU device as a real loss would; the render thread
+    /// rebuilds it, makes every pool again, and redraws.
+    pub fn lose_device(&self) {
+        let _ = self.0.send(Command::LoseDevice);
     }
 }
 
@@ -179,6 +204,12 @@ impl BridgePresenter {
     /// Counters for the engine's status.
     pub fn stats(&self) -> Stats {
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// A handle that reaches the render thread after the presenter moved
+    /// into the engine (the GPU-loss recovery test).
+    pub fn control(&self) -> PresenterControl {
+        PresenterControl(self.tx.clone())
     }
 
     /// Takes the per-frame trace (S1 harness).
@@ -345,6 +376,38 @@ impl FramePresenter for BridgePresenter {
             self.forget(ctx, key);
         }
         self.send(Command::ClosePort { port });
+    }
+
+    fn renders_documents(&self) -> bool {
+        self.config.source == Some(FrameSource::Document)
+    }
+
+    fn document(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        update: pm_engine::document::DocumentUpdate,
+    ) {
+        self.send(Command::Document {
+            key: (port, session),
+            update,
+        });
+    }
+
+    fn media(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        asset: &str,
+        path: Option<std::path::PathBuf>,
+    ) {
+        self.send(Command::Media {
+            key: (port, session),
+            asset: asset.to_owned(),
+            path,
+        });
     }
 }
 

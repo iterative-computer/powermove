@@ -17,6 +17,8 @@ export const STATIC_KEYS = [
   'restoreWindows',
   'autoDownloadCloudMedia',
   'previewMemoryMiB',
+  // "Use New Engine" (main reads it once at launch; Settings › General).
+  'useNewEngine',
   'projectTrash',
   'takes',
   'workspaces',

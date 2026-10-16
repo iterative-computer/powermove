@@ -50,22 +50,28 @@ test('Use New Engine on: the editor window gets a live port to each engine', asy
     });
     await session.page.waitForFunction(() => (window as unknown as { __enginePorts: unknown[] }).__enginePorts.length >= 2);
 
-    // Negotiate over each port from the page as a renderer.
+    // The kernel's engine connection (Use New Engine) negotiates the
+    // interactive engine's port itself (a second hello on it is refused):
+    // it is connected, on the first launch.
+    await expect.poll(() => session.page.evaluate(() => {
+      const status = (window as any).PM.EngineConnection?.status();
+      return status ? `${status.connected}/${status.generation}` : 'missing';
+    }), { timeout: 15_000 }).toBe('true/1');
+    // The job engine's port is the page's to negotiate as a renderer.
     const hello = Array.from(encode({ wire: 1, session: null, revision: null, message: { kind: 'hello', ...hostHello(), role: 'renderer' } }));
-    const replies = await session.page.evaluate(async (bytes) => {
+    const reply = await session.page.evaluate(async (bytes) => {
       const w = window as unknown as { __enginePorts: Array<{ process: string; generation: number; port: MessagePort }> };
-      return Promise.all(w.__enginePorts.slice(-2).map(({ process, generation, port }) => new Promise<{ process: string; generation: number; reply: number[] }>((resolve) => {
-        port.onmessage = (event) => resolve({ process, generation, reply: Array.from(new Uint8Array(event.data as Uint8Array)) });
-        port.postMessage(new Uint8Array(bytes));
-      })));
+      const job = w.__enginePorts.filter((p) => p.process === 'job').at(-1)!;
+      return new Promise<{ generation: number; reply: number[] }>((resolve) => {
+        job.port.onmessage = (event) => resolve({ generation: job.generation, reply: Array.from(new Uint8Array(event.data as Uint8Array)) });
+        job.port.postMessage(new Uint8Array(bytes));
+      });
     }, hello);
-    expect(replies.map((r) => r.process).sort()).toEqual(['interactive', 'job']);
-    for (const { process, generation, reply } of replies) {
-      const message = (decode(new Uint8Array(reply)) as { message: { kind: string; role: string } }).message;
-      expect(message.kind).toBe('welcome');
-      expect(message.role).toBe(process === 'interactive' ? 'interactiveEngine' : 'jobEngine');
-      expect(generation).toBe(1);
-    }
+    const message = (decode(new Uint8Array(reply.reply)) as { message: { kind: string; role: string } }).message;
+    expect(message.kind).toBe('welcome');
+    expect(message.role).toBe('jobEngine');
+    expect(reply.generation).toBe(1);
+    expect(await session.page.evaluate(() => (window as unknown as { __enginePorts: Array<{ process: string }> }).__enginePorts.map((p) => p.process))).toEqual(expect.arrayContaining(['interactive', 'job']));
     const engines = await engineProcesses(session.app);
     expect(engines, JSON.stringify(engines)).toHaveLength(2);
     expect(engines.join()).toMatch(/Interactive Engine.*Job Engine/);

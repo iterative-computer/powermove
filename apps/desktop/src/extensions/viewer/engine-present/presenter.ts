@@ -57,6 +57,11 @@ export type PresentedFrame = {
   overlay: OverlayGeometry | null;
   rafMs: number;
   timed: boolean;
+  /** Host µs at which this refresh is predicted to reach the display (the
+   *  instant the frame was picked for: the A/V sync measurement compares
+   *  it with the audio clock); null for frames drawn on arrival or before
+   *  the host clock is known. */
+  displayUs: number | null;
 };
 
 export type PresenterOptions = {
@@ -151,6 +156,8 @@ export class EnginePresenter implements Presenter {
   private clock: ClockSample | null = null;
   /** performance.now() ms → host µs: host = ms × 1000 + offset. */
   private hostOffsetUs: number | null = null;
+  /** The estimate came from a run's first sample only (see `onClock`). */
+  private provisionalOffset = false;
   private generation = 0;
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
@@ -243,6 +250,10 @@ export class EnginePresenter implements Presenter {
 
   private onClock(sample: ClockSample, arrivedMs: number): void {
     if (this.clock && sample.seq <= this.clock.seq && sample.epoch === this.clock.epoch) return;
+    // A run's first sample may name a host time still ahead (where the run
+    // starts: the pre-roll or the audio output's latency), so it is no
+    // bound: it serves only until any other sample arrives.
+    const runStart = sample.state !== 'stopped' && sample.epoch !== this.clock?.epoch;
     this.clock = sample;
     // The sample was made at its host time and arrived here no earlier, so
     // host = ms × 1000 + offset gives offset ≥ hostTime − arrivedMs × 1000:
@@ -255,7 +266,15 @@ export class EnginePresenter implements Presenter {
     // session (measured in the real app: about 110 ms, so the jitter buffer
     // held twice its render-ahead and the engine ran out of free slots).
     const offset = sample.hostTime - arrivedMs * 1000;
-    if (this.hostOffsetUs === null || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
+    if (runStart) {
+      if (this.hostOffsetUs === null) {
+        this.hostOffsetUs = offset;
+        this.provisionalOffset = true;
+      }
+      return;
+    }
+    if (this.hostOffsetUs === null || this.provisionalOffset || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
+    this.provisionalOffset = false;
   }
 
   /** Host µs (the engine's clock) for a performance.now() time. */
@@ -349,7 +368,9 @@ export class EnginePresenter implements Presenter {
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
-    if (show) this.draw(show, rafMs);
+    // The display instant itself, without the shift that puts frame
+    // boundaries halfway between decisions.
+    if (show) this.draw(show, rafMs, this.hostUs(decisionMs - this.offsetUs / 1000));
   }
 
   takeTrace(): Promise<TraceRecord | null> {
@@ -394,7 +415,7 @@ export class EnginePresenter implements Presenter {
     return decision + this.offsetUs / 1000;
   }
 
-  private draw(item: Queued<Payload>, rafMs: number): void {
+  private draw(item: Queued<Payload>, rafMs: number, displayUs: number | null = null): void {
     const { desc } = item;
     const { frame } = item.payload;
     try {
@@ -423,7 +444,8 @@ export class EnginePresenter implements Presenter {
       pts: desc.pts,
       overlay: desc.overlay,
       rafMs,
-      timed: desc.duration !== null
+      timed: desc.duration !== null,
+      displayUs
     };
     for (const listener of this.listeners) listener(presented);
   }
