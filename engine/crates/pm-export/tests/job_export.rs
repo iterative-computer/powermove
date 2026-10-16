@@ -870,3 +870,178 @@ fn alpha_survives_an_opaque_first_frame() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Gates that measure get each submission's GPU time from timestamps on
+/// devices that have them; the span grows with the work and stays within
+/// the wall time an idle GPU takes for it.
+#[test]
+fn measuring_gates_get_gpu_time_from_timestamps() {
+    struct Spans(Mutex<Vec<(f64, bool)>>);
+    impl GpuGate for Spans {
+        fn admit(&self, _: u64, units: u32, _: &AtomicBool) -> Option<u32> {
+            Some(units)
+        }
+        fn finished(&self, _: u64, _: u32, _: f64) {
+            panic!("the renderer reports through finished_timed");
+        }
+        fn finished_timed(&self, _: u64, _: u32, us: f64, gpu: bool) {
+            self.0.lock().unwrap().push((us, gpu));
+        }
+        fn abandoned(&self, _: u64) {}
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    if !renderer
+        .device()
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
+        eprintln!("no timestamp queries on this device: wall time only");
+        return;
+    }
+    let mut median = |layers: usize, width: u32| {
+        let doc = load(&heavy_precomp(layers));
+        let gate = Spans(Mutex::new(vec![]));
+        let mut routing = StillRouting::new();
+        for _ in 0..5 {
+            render_still(
+                &mut renderer,
+                &doc,
+                "Ptest-root",
+                Ticks::ZERO,
+                width,
+                &MediaPaths::default(),
+                &mut routing,
+                &gate,
+                1,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        }
+        let samples = gate.0.into_inner().unwrap();
+        assert!(
+            samples.iter().all(|&(us, gpu)| gpu && us > 0.0),
+            "{samples:?}"
+        );
+        let mut us: Vec<f64> = samples[1..].iter().map(|s| s.0).collect();
+        us.sort_by(f64::total_cmp);
+        us[us.len() / 2]
+    };
+    let light = median(4, 320);
+    let heavy = median(200, 3840);
+    eprintln!("GPU span: light {light:.0} µs, heavy {heavy:.0} µs");
+    assert!(
+        heavy > 4.0 * light,
+        "light {light:.0} µs, heavy {heavy:.0} µs"
+    );
+    // Unrestricted (the CLI, exports without playback) does not time.
+    assert!(!Unrestricted.measures());
+}
+
+/// The harness's over-bound pass (`frame-bridge-measure.mjs`
+/// `playback-engine-agent-snapshots-heavy`): `layers` solids of the 4K
+/// measurement project inside a full-size 4K precomposition.
+fn heavy_precomp(layers: usize) -> Value {
+    let dur = 4.0;
+    let solids: Vec<Value> = (0..layers)
+        .map(|i| {
+            let mut l = layer(
+                &format!("s{i}"),
+                "solid",
+                json!({ "color": format!("#{:06x}", (i * 0x2a7f13) & 0xffffff), "w": 640 + (i % 5) * 240, "h": 360 + (i % 3) * 200 }),
+                ((i * 157) % 3200) as f64,
+                ((i * 89) % 1800) as f64,
+                dur,
+            );
+            set(&mut l, "opacity", json!(85));
+            l
+        })
+        .collect();
+    let pre = layer(
+        "pre",
+        "precomp",
+        json!({ "comp": "heavy", "w": 3840, "h": 2160 }),
+        1920.0,
+        1080.0,
+        dur,
+    );
+    let mut doc = project(3840, 2160, dur, solid_fill("#101010"), vec![pre]);
+    composition(&mut doc, "heavy", 3840, 2160, dur, solids);
+    doc
+}
+
+/// Uncontended GPU time of the heavy pass: whole agent stills and single
+/// 16-row bands (each renders the whole precomposition), as GPU timestamp
+/// spans and as wall time. Run with `--ignored --nocapture` on an otherwise
+/// idle GPU.
+#[test]
+#[ignore = "timing measurement"]
+fn measure_heavy_precomp_band_cost() {
+    struct Timed {
+        samples: Mutex<Vec<f64>>,
+        bands: bool,
+        gpu: bool,
+    }
+    impl GpuGate for Timed {
+        fn admit(&self, _: u64, units: u32, _: &AtomicBool) -> Option<u32> {
+            Some(if self.bands { 1 } else { units })
+        }
+        fn finished(&self, _: u64, _: u32, us: f64) {
+            self.samples.lock().unwrap().push(us);
+        }
+        fn abandoned(&self, _: u64) {}
+        fn measures(&self) -> bool {
+            self.gpu
+        }
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    for (layers, width) in [(96usize, 720u32), (96, 1920), (96, 3840), (400, 3840), (1500, 3840)] {
+        let doc = load(&heavy_precomp(layers));
+        for bands in [false, true] {
+            let mut line = format!(
+                "{layers} layers, {width} px, {}:",
+                if bands {
+                    "one band each"
+                } else {
+                    "whole frames"
+                }
+            );
+            for gpu in [true, false] {
+                let gate = Timed {
+                    samples: Mutex::new(vec![]),
+                    bands,
+                    gpu,
+                };
+                let mut routing = StillRouting::new();
+                for _ in 0..4 {
+                    render_still(
+                        &mut renderer,
+                        &doc,
+                        "Ptest-root",
+                        Ticks::ZERO,
+                        width,
+                        &MediaPaths::default(),
+                        &mut routing,
+                        &gate,
+                        1,
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap();
+                }
+                let samples = gate.samples.into_inner().unwrap();
+                // The first frame's submissions are cold.
+                let mut us: Vec<f64> = samples[samples.len() / 4..].to_vec();
+                us.sort_by(f64::total_cmp);
+                let p = |q: f64| us[((us.len() - 1) as f64 * q).round() as usize];
+                line += &format!(
+                    "  {} p50 {:.0} p90 {:.0} max {:.0} µs (n {})",
+                    if gpu { "GPU span" } else { "wall" },
+                    p(0.5),
+                    p(0.9),
+                    p(1.0),
+                    us.len()
+                );
+            }
+            println!("{line}");
+        }
+    }
+}
