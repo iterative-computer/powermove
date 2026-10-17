@@ -551,9 +551,9 @@ fn interpreted_stills_convert_other_profiles_through_colorsync() {
             .is_err(),
         "Adobe RGB stills are routed without an interpretation"
     );
-    // Any interpretation (here the file's own primaries) draws it, converted
-    // by ColorSync into linear Rec.709 and re-encoded with E.
-    let (doc, res) = still_document(&adobe, (w, h), Some(json!({ "primaries": "bt709" })));
+    // Any interpretation that leaves color alone (here square pixels) draws
+    // it, converted by ColorSync into linear Rec.709 and re-encoded with E.
+    let (doc, res) = still_document(&adobe, (w, h), Some(json!({ "pixelAspect": [1, 1] })));
     let ours = render(&mut r, &doc, (w, h), 0.0, &res);
     let pool = pm_media::pool::FramePool::new(0);
     let want = pm_media::image::read(&reference, &pool).unwrap();
@@ -582,7 +582,34 @@ fn interpreted_stills_convert_other_profiles_through_colorsync() {
         }
     }
     eprintln!("icc-adobergb.png through the renderer: max |Δ| {max:.3} CV over {compared} pixels");
-    assert!(compared > 30_000 && max <= 1.0, "{max} over {compared}");
+    // ColorSync's 8-bit path differs from its float path by up to 1.42 CV
+    // near black at the gamut edge (pm-media's `icc_stills` checks the float
+    // path against the f64 matrix/TRC conversion).
+    assert!(compared > 30_000 && max <= 1.5, "{max} over {compared}");
+    // A primaries override sets the profile aside: the stored samples are
+    // read as sRGB, exactly.
+    let (doc, res) = still_document(&adobe, (w, h), Some(json!({ "primaries": "bt709" })));
+    let ours = render(&mut r, &doc, (w, h), 0.0, &res);
+    let stored = pm_media::image::read(&adobe, &pool).unwrap();
+    let stored_px = stored
+        .frame
+        .with_planes(|p| {
+            (0..h as usize)
+                .flat_map(|y| {
+                    let row = unsafe {
+                        std::slice::from_raw_parts(p[0].ptr.add(y * p[0].stride), w as usize * 4)
+                    };
+                    row.to_vec()
+                })
+                .collect::<Vec<u8>>()
+        })
+        .unwrap();
+    let max = ours
+        .chunks_exact(4)
+        .zip(stored_px.chunks_exact(4))
+        .flat_map(|(o, s)| (0..3).map(move |c| (f64::from(o[c]) * 255.0 - f64::from(s[c])).abs()))
+        .fold(0f64, f64::max);
+    assert!(max < 1e-3, "profile set aside: max {max} CV");
 }
 
 #[test]
@@ -604,4 +631,180 @@ fn interpreted_stills_take_alpha_overrides() {
         "{:?}",
         &straight[i..i + 4]
     );
+}
+
+/// Adobe RGB (1998) → linear Rec.709, analytically: gamma 563/256, its
+/// chromaticities, D65 (the oracle for ColorSync's matrix/TRC conversion).
+fn adobe_to_linear_709(c: [f64; 3]) -> [f64; 3] {
+    use pm_color::primaries::{Chromaticities, apply, chromaticities, rgb_to_xyz};
+    let adobe = rgb_to_xyz(&Chromaticities {
+        r: [0.64, 0.33],
+        g: [0.21, 0.71],
+        b: [0.15, 0.06],
+        w: [0.3127, 0.3290],
+    });
+    let m = rgb_to_xyz(&chromaticities(pm_protocol::color::Primaries::Bt709).unwrap());
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let inv = [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det,
+        ],
+    ];
+    let lin = c.map(|v| v.max(0.0).powf(563.0 / 256.0));
+    apply(&inv, apply(&adobe, lin))
+}
+
+/// A 64 × 8 RGBA8 PNG tagged with macOS's Adobe RGB (1998) profile: varied
+/// colors per column, alpha from 255 down to 0 per row (straight in the
+/// file). None where the system profile is missing.
+fn adobe_png_with_alpha() -> Option<(PathBuf, Vec<[u8; 4]>)> {
+    let profile = std::fs::read("/System/Library/ColorSync/Profiles/AdobeRGB1998.icc").ok()?;
+    let alphas = [255u8, 230, 180, 128, 90, 64, 20, 0];
+    let (w, h) = (64usize, alphas.len());
+    let mut px = Vec::with_capacity(w * h);
+    for (y, &a) in alphas.iter().enumerate() {
+        for x in 0..w {
+            // Saturated, dark, light and mid colors without a pattern.
+            let v = |k: usize| ((x * (37 + 23 * k) + 11 * k + 5 * y) % 256) as u8;
+            px.push([v(0), v(1), v(2), a]);
+        }
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pm-render-footage-adobe-alpha-{}.png",
+        std::process::id()
+    ));
+    let mut info = png::Info::with_size(w as u32, h as u32);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    info.icc_profile = Some(profile.into());
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = png::Encoder::with_info(std::io::BufWriter::new(file), info)
+        .unwrap()
+        .write_header()
+        .unwrap();
+    writer.write_image_data(px.as_flattened()).unwrap();
+    writer.finish().unwrap();
+    Some((path, px))
+}
+
+/// Interpret Footage on a still whose ICC profile is neither sRGB nor
+/// Display P3 (section 9): alpha overrides change how ColorSync's input is
+/// read, never its output; primaries and transfer overrides set the
+/// profile aside and read the stored samples, as on every other still.
+#[test]
+fn interpreted_icc_stills_read_alpha_and_profile_overrides() {
+    let Some((path, px)) = adobe_png_with_alpha() else {
+        eprintln!("AdobeRGB1998.icc missing (skipped)");
+        return;
+    };
+    let (w, h) = (64u32, 8u32);
+    let mut r = Renderer::headless().unwrap();
+    let e = |v: f64| f64::from(pm_color::transfer::display_encode_f32(v as f32));
+    let d = |v: f64| f64::from(pm_color::transfer::display_decode_f32(v as f32));
+    let unit = |p: [u8; 4]| [p[0], p[1], p[2], p[3]].map(|v| f64::from(v) / 255.0);
+    // Each case: the override, and the expected premultiplied display-encoded
+    // pixel (None: not comparable, e.g. premultiplied data with color above
+    // alpha).
+    type Want = Box<dyn Fn([f64; 4]) -> Option<[f64; 4]>>;
+    let colorsync = move |s: [f64; 3], a: f64| {
+        let l = adobe_to_linear_709(s);
+        Some([e(l[0]) * a, e(l[1]) * a, e(l[2]) * a, a])
+    };
+    let matte = [1.0, 128.0 / 255.0, 0.0];
+    let cases: Vec<(&str, Value, Want)> = vec![
+        (
+            "as the file says (straight)",
+            json!({ "pixelAspect": [1, 1] }),
+            Box::new(move |c| colorsync([c[0], c[1], c[2]], c[3])),
+        ),
+        (
+            "alpha ignore",
+            json!({ "alpha": "ignore" }),
+            Box::new(move |c| colorsync([c[0], c[1], c[2]], 1.0)),
+        ),
+        (
+            "alpha straight",
+            json!({ "alpha": "straight" }),
+            Box::new(move |c| colorsync([c[0], c[1], c[2]], c[3])),
+        ),
+        (
+            "alpha premultiplied",
+            json!({ "alpha": "premultiplied" }),
+            Box::new(move |c| {
+                let a = c[3];
+                (a > 0.0 && c[..3].iter().all(|&v| v <= a))
+                    .then(|| colorsync([c[0] / a, c[1] / a, c[2] / a], a))
+                    .flatten()
+            }),
+        ),
+        (
+            "alpha premultiplied with color",
+            json!({ "alpha": "premultipliedWithColor", "alphaMatte": "#FF8000" }),
+            Box::new(move |c| {
+                let a = c[3];
+                let removed = [0, 1, 2].map(|k| c[k] - (1.0 - a) * matte[k]);
+                (a > 0.0 && removed.iter().all(|&v| (0.0..=a).contains(&v)))
+                    .then(|| colorsync(removed.map(|v| v / a), a))
+                    .flatten()
+            }),
+        ),
+        (
+            "transfer gamma 2.2 sets the profile aside",
+            json!({ "transfer": "gamma22" }),
+            Box::new(move |c| {
+                let l = [0, 1, 2].map(|k| pm_color::transfer::gamma22_decode(c[k]));
+                Some([e(l[0]) * c[3], e(l[1]) * c[3], e(l[2]) * c[3], c[3]])
+            }),
+        ),
+        (
+            "primaries Display P3 set the profile aside",
+            json!({ "primaries": "displayP3" }),
+            Box::new(move |c| {
+                let m = pm_color::primaries::conversion(
+                    pm_protocol::color::Primaries::DisplayP3,
+                    pm_protocol::color::Primaries::Bt709,
+                )
+                .unwrap();
+                let l = pm_color::primaries::apply(&m, [d(c[0]), d(c[1]), d(c[2])]);
+                Some([e(l[0]) * c[3], e(l[1]) * c[3], e(l[2]) * c[3], c[3]])
+            }),
+        ),
+    ];
+    for (name, interp, want) in cases {
+        let (doc, res) = still_document(&path, (w, h), Some(interp));
+        let ours = render(&mut r, &doc, (w, h), 0.0, &res);
+        let (mut max, mut compared) = (0f64, 0usize);
+        for (i, p) in px.iter().enumerate() {
+            let Some(want) = want(unit(*p)) else {
+                continue;
+            };
+            compared += 1;
+            for k in 0..4 {
+                let d = (f64::from(ours[i * 4 + k]) - want[k]).abs() * 255.0;
+                assert!(
+                    d <= 0.75,
+                    "{name}: pixel {i} channel {k}: {:?} want {want:?} (stored {p:?})",
+                    &ours[i * 4..i * 4 + 4]
+                );
+                max = max.max(d);
+            }
+        }
+        eprintln!("{name}: max |Δ| {max:.3} CV over {compared} pixels");
+        assert!(compared >= 64, "{name}: {compared} pixels compared");
+    }
+    let _ = std::fs::remove_file(&path);
 }

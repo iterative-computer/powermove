@@ -5,11 +5,11 @@
 
 use crate::error::{MediaError, Result};
 use crate::image::{self, ImageFormat};
-use crate::interpret::{Field, Interpretation, Origin, resolve_still, resolve_video};
+use crate::interpret::{Field, Interpretation, Origin, resolve_video};
 use crate::pool::FramePool;
 use crate::probe::color::HdrFormat;
 use crate::probe::{FieldOrder, MediaProbe, StreamKind, VideoProbe};
-use pm_protocol::color::{AlphaMode, Primaries, Subsampling, Transfer};
+use pm_protocol::color::{AlphaMode, Subsampling};
 use pm_protocol::media::{FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind};
 use serde::Serialize;
 use std::path::Path;
@@ -319,65 +319,8 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
     let pool = FramePool::new(0);
     let s = image::read(path, &pool)?;
     let (w, h) = (s.frame.format.width as u32, s.frame.format.height as u32);
-    let icc = s.color.icc_class;
-    use crate::image::icc::IccClass;
-    let (primaries, p_origin) = match icc {
-        None => (
-            Primaries::Bt709,
-            Origin::Default {
-                rule: "Stills without a profile read as sRGB".into(),
-            },
-        ),
-        Some(IccClass::Srgb | IccClass::GraySrgb) => (
-            Primaries::Bt709,
-            Origin::File {
-                source: "ICC profile equivalent to sRGB (passed through)".into(),
-            },
-        ),
-        Some(IccClass::DisplayP3) => (
-            Primaries::DisplayP3,
-            Origin::File {
-                source: "ICC profile (Display P3)".into(),
-            },
-        ),
-        Some(IccClass::Other) => (
-            Primaries::Bt709,
-            Origin::File {
-                source: "ICC profile (converted by ColorSync)".into(),
-            },
-        ),
-    };
-    let transfer_origin = if s.float {
-        Origin::Default {
-            rule: "Floating-point stills are linear".into(),
-        }
-    } else {
-        Origin::Default {
-            rule: "Integer stills read with the display encoding (sRGB curve)".into(),
-        }
-    };
     let has_alpha = s.color.alpha != AlphaMode::Opaque;
-    let alpha_origin = if has_alpha {
-        Origin::File {
-            source: "alpha channel".into(),
-        }
-    } else {
-        Origin::Default {
-            rule: "No alpha channel".into(),
-        }
-    };
-    let transfer = if icc == Some(IccClass::Other) {
-        Transfer::Linear
-    } else {
-        s.color.transfer
-    };
-    let r = resolve_still(
-        (primaries, p_origin),
-        (transfer, transfer_origin),
-        (s.color.alpha, alpha_origin),
-        has_alpha,
-        interp,
-    );
+    let r = crate::interpret::interpret_still(&s.color, s.float, interp).reading;
     let mut facts = vec![
         line("Format", format!("{:?}", s.format)),
         line("Size", format!("{w} × {h}")),

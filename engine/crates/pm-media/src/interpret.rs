@@ -608,6 +608,99 @@ pub fn resolve_still(
     }
 }
 
+/// A still's reading under an interpretation, and how its samples get there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StillInterpretation {
+    pub reading: StillReading,
+    /// The embedded ICC profile (neither sRGB nor Display P3) is the
+    /// reading: ColorSync converts the samples, read with `reading.alpha`,
+    /// to premultiplied linear Rec.709
+    /// ([`crate::image::imageio::convert_to_linear_srgb`]) before the source
+    /// pass.
+    pub colorsync: bool,
+}
+
+/// Resolves a still's reading from its reader's color facts and the
+/// asset's overrides.
+///
+/// A primaries or transfer override replaces the embedded profile's reading
+/// of that value, for every still class. A profile that is neither sRGB nor
+/// Display P3 describes primaries and curve together and cannot be split, so
+/// either override sets it aside as a whole: the samples are read as stored
+/// with the overrides, and the value not overridden takes the default of a
+/// still without a profile (Rec.709 primaries; the display encoding for
+/// integer stills, linear for float). Alpha overrides replace the file's
+/// alpha reading of the stored samples in every case.
+pub fn interpret_still(
+    color: &crate::image::ImageColor,
+    float: bool,
+    interp: &Interpretation,
+) -> StillInterpretation {
+    use crate::image::icc::IccClass;
+    let other = color.icc_class == Some(IccClass::Other);
+    let colorsync = other && interp.primaries.is_none() && interp.transfer.is_none();
+    let set_aside = other && !colorsync;
+    let file = |source: &str| Origin::File {
+        source: source.into(),
+    };
+    let default = |rule: &str| Origin::Default { rule: rule.into() };
+    let primaries = match color.icc_class {
+        None => (
+            Primaries::Bt709,
+            default("Stills without a profile read as sRGB"),
+        ),
+        Some(IccClass::Srgb | IccClass::GraySrgb) => (
+            Primaries::Bt709,
+            file("ICC profile equivalent to sRGB (passed through)"),
+        ),
+        Some(IccClass::DisplayP3) => (Primaries::DisplayP3, file("ICC profile (Display P3)")),
+        Some(IccClass::Other) if colorsync => (
+            Primaries::Bt709,
+            file("ICC profile, converted by ColorSync to Rec.709"),
+        ),
+        Some(IccClass::Other) => (
+            Primaries::Bt709,
+            default(
+                "The ICC profile is set aside by the override; stills without a profile read as sRGB",
+            ),
+        ),
+    };
+    let transfer = if colorsync {
+        (
+            Transfer::Linear,
+            file("ICC profile, converted by ColorSync to linear light"),
+        )
+    } else {
+        let rule = match (set_aside, float) {
+            (false, true) => "Floating-point stills are linear",
+            (false, false) => "Integer stills read with the display encoding (sRGB curve)",
+            (true, true) => {
+                "The ICC profile is set aside by the override; floating-point stills are linear"
+            }
+            (true, false) => {
+                "The ICC profile is set aside by the override; integer stills read with the display encoding (sRGB curve)"
+            }
+        };
+        (color.transfer, default(rule))
+    };
+    let has_alpha = color.alpha != AlphaMode::Opaque;
+    let alpha_origin = if has_alpha {
+        file("alpha channel")
+    } else {
+        default("No alpha channel")
+    };
+    StillInterpretation {
+        reading: resolve_still(
+            primaries,
+            transfer,
+            (color.alpha, alpha_origin),
+            has_alpha,
+            interp,
+        ),
+        colorsync,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,5 +810,73 @@ mod tests {
             1000.0
         );
         assert_eq!(hdr_tone_map(Transfer::DisplayE, None), None);
+    }
+
+    fn other_profile(alpha: AlphaMode) -> crate::image::ImageColor {
+        crate::image::ImageColor {
+            icc: Some(vec![0; 4]),
+            icc_bytes: Some(4),
+            icc_class: Some(crate::image::icc::IccClass::Other),
+            transfer: Transfer::DisplayE,
+            alpha,
+            chromaticities: None,
+        }
+    }
+
+    #[test]
+    fn other_profiles_convert_through_colorsync_with_the_alpha_reading() {
+        let color = other_profile(AlphaMode::Straight);
+        let si = interpret_still(&color, false, &Interpretation::default());
+        assert!(si.colorsync);
+        assert_eq!(si.reading.transfer.value, Transfer::Linear);
+        assert!(matches!(si.reading.transfer.origin, Origin::File { .. }));
+        assert_eq!(si.reading.primaries.value, Primaries::Bt709);
+        assert_eq!(si.reading.alpha.value, AlphaMode::Straight);
+        // An alpha override keeps the conversion and changes how its input
+        // is read.
+        let (i, _) = Interpretation::from_json(&serde_json::json!({ "alpha": "premultiplied" }));
+        let si = interpret_still(&color, false, &i);
+        assert!(si.colorsync);
+        assert_eq!(si.reading.alpha.value, AlphaMode::Premultiplied);
+        assert_eq!(si.reading.alpha.origin, Origin::Override);
+        assert_eq!(si.reading.alpha.automatic, AlphaMode::Straight);
+    }
+
+    #[test]
+    fn primaries_or_transfer_overrides_set_other_profiles_aside() {
+        let color = other_profile(AlphaMode::Opaque);
+        let (i, _) = Interpretation::from_json(&serde_json::json!({ "transfer": "gamma22" }));
+        let si = interpret_still(&color, false, &i);
+        assert!(!si.colorsync);
+        assert_eq!(si.reading.transfer.value, Transfer::Gamma22);
+        assert_eq!(si.reading.transfer.origin, Origin::Override);
+        // What Automatic means: the profile, through ColorSync.
+        assert_eq!(si.reading.transfer.automatic, Transfer::DisplayE);
+        assert_eq!(si.reading.primaries.value, Primaries::Bt709);
+        let Origin::Default { rule } = &si.reading.primaries.origin else {
+            panic!("{:?}", si.reading.primaries.origin);
+        };
+        assert!(rule.contains("set aside"), "{rule}");
+        let (i, _) = Interpretation::from_json(&serde_json::json!({ "primaries": "displayP3" }));
+        let si = interpret_still(&color, true, &i);
+        assert!(!si.colorsync);
+        assert_eq!(si.reading.primaries.value, Primaries::DisplayP3);
+        assert_eq!(si.reading.transfer.value, Transfer::DisplayE);
+        let Origin::Default { rule } = &si.reading.transfer.origin else {
+            panic!("{:?}", si.reading.transfer.origin);
+        };
+        assert!(
+            rule.contains("set aside") && rule.contains("floating-point"),
+            "{rule}"
+        );
+        // sRGB and Display P3 profiles: an override replaces that value and
+        // the profile keeps the other.
+        let mut p3 = other_profile(AlphaMode::Opaque);
+        p3.icc_class = Some(crate::image::icc::IccClass::DisplayP3);
+        let (i, _) = Interpretation::from_json(&serde_json::json!({ "transfer": "gamma22" }));
+        let si = interpret_still(&p3, false, &i);
+        assert!(!si.colorsync);
+        assert_eq!(si.reading.primaries.value, Primaries::DisplayP3);
+        assert_eq!(si.reading.transfer.value, Transfer::Gamma22);
     }
 }

@@ -124,55 +124,72 @@ pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(
     interpreted_image_color(&still, interp).map(|_| ())
 }
 
-/// A still's reading with Interpret Footage overrides: profiles other than
-/// sRGB and Display P3 are read after the ColorSync conversion
-/// ([`pm_media::image::imageio::convert_to_linear_srgb`]); primaries,
-/// transfer, and alpha overrides replace the file's.
+/// How the renderer reads a still with Interpret Footage overrides.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterpretedStill {
+    /// The source pass's reading of the texture it receives.
+    pub color: SourceColor,
+    /// ColorSync converts the stored samples first, reading their alpha
+    /// this way ([`pm_media::image::imageio::convert_to_linear_srgb`]); the
+    /// texture is then premultiplied linear Rec.709, as `color` says.
+    pub colorsync: Option<AlphaMode>,
+}
+
+/// A still's reading with Interpret Footage overrides
+/// ([`pm_media::interpret::interpret_still`], which the sheet shows): every
+/// override replaces the file's reading of that value. A profile that is
+/// neither sRGB nor Display P3 is converted by ColorSync unless a primaries
+/// or transfer override sets it aside; alpha overrides are applied by that
+/// conversion, never on top of it.
 pub fn interpreted_image_color(
     still: &pm_media::image::StillImage,
     interp: &Interpretation,
-) -> Result<SourceColor, ProbeIssue> {
-    let mut color = if still.color.icc_class == Some(IccClass::Other) {
-        // Converted to extended linear sRGB before the source pass.
-        SourceColor {
-            transfer: Transfer::Linear,
-            primaries: Primaries::Bt709,
-            matrix: MatrixCoefficients::Identity,
-            siting: ChromaSiting::Center,
-            alpha: match still.color.alpha {
-                AlphaMode::Opaque => AlphaMode::Opaque,
-                _ => AlphaMode::Premultiplied,
+) -> Result<InterpretedStill, ProbeIssue> {
+    let si = pm_media::interpret::interpret_still(&still.color, still.float, interp);
+    let r = &si.reading;
+    if si.colorsync {
+        return Ok(InterpretedStill {
+            color: SourceColor {
+                transfer: Transfer::Linear,
+                primaries: Primaries::Bt709,
+                matrix: MatrixCoefficients::Identity,
+                siting: ChromaSiting::Center,
+                alpha: match r.alpha.value {
+                    AlphaMode::Opaque => AlphaMode::Opaque,
+                    _ => AlphaMode::Premultiplied,
+                },
+                tone_map: None,
             },
-            tone_map: None,
-        }
-    } else {
-        image_color(still)?
-    };
-    if let Some(p) = interp.primaries {
-        color.primaries = p;
-    }
-    if let Some(t) = interp.transfer {
-        color.transfer = t;
-        color.tone_map = matches!(t, Transfer::Pq | Transfer::Hlg).then_some(ToneMap {
-            transfer: t,
-            peak_nits: 1000.0,
+            colorsync: Some(r.alpha.value),
         });
     }
-    if let Some(a) = interp.alpha
-        && still.color.alpha != AlphaMode::Opaque
+    if interp.primaries.is_none()
+        && let Some(ch) = still.color.chromaticities
     {
-        color.alpha = match a {
-            pm_media::interpret::AlphaChoice::Ignore => AlphaMode::Opaque,
-            pm_media::interpret::AlphaChoice::Straight => AlphaMode::Straight,
-            pm_media::interpret::AlphaChoice::Premultiplied => AlphaMode::Premultiplied,
-            pm_media::interpret::AlphaChoice::PremultipliedWithColor => {
-                AlphaMode::PremultipliedWithColor {
-                    matte: interp.alpha_matte,
-                }
-            }
-        };
+        let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
+        if ch.iter().zip(rec709).any(|(a, b)| (a - b).abs() > 1e-4) {
+            return Err(ProbeIssue::Unsupported(Feature::Media(
+                "OpenEXR chromaticities other than Rec.709".into(),
+            )));
+        }
     }
-    Ok(color)
+    // A PQ or HLG reading, from the file or an override: the tone map
+    // assumes BT.2020 and has no still test, so HDR stills stay with the
+    // legacy renderer (a non-HDR transfer override reads one as SDR).
+    if matches!(r.transfer.value, Transfer::Pq | Transfer::Hlg) {
+        return Err(ProbeIssue::Unsupported(Feature::Media("HDR stills".into())));
+    }
+    Ok(InterpretedStill {
+        color: SourceColor {
+            transfer: r.transfer.value,
+            primaries: r.primaries.value,
+            matrix: MatrixCoefficients::Identity,
+            siting: ChromaSiting::Center,
+            alpha: r.alpha.value,
+            tone_map: r.tone_map,
+        },
+        colorsync: None,
+    })
 }
 
 /// Whether an image file can be drawn: readable, not animated, in a tested
@@ -613,12 +630,15 @@ impl MediaCache {
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         let color = match interpret {
             Some(i) => {
-                let color = interpreted_image_color(&still, i).map_err(issue)?;
-                if still.color.icc_class == Some(IccClass::Other) {
-                    still = pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool)
-                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                let read = interpreted_image_color(&still, i).map_err(issue)?;
+                if let Some(alpha) = read.colorsync {
+                    still =
+                        pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool, alpha)
+                            .map_err(|e| {
+                                MediaFailure::Failed(format!("{}: {e}", path.display()))
+                            })?;
                 }
-                color
+                read.color
             }
             None => image_color(&still).map_err(issue)?,
         };

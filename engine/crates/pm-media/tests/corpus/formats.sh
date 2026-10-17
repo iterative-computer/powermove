@@ -251,14 +251,15 @@ cwebp -quiet -q 90 png8-rgb.png -o webp-lossy.webp
 cwebp -quiet -lossless png8-rgba.png -o webp-lossless-alpha.webp
 sips -s format heic png8-rgb.png --out heic.heic >/dev/null
 # ICC-tagged stills converted by ColorSync (sips): Adobe RGB, Display P3,
-# ProPhoto (ROMM), and gray gamma 2.2; and the same converted back to sRGB as
-# ColorSync's reference.
+# ProPhoto (ROMM), gray gamma 2.2 (sRGB-equivalent) and generic gray (gamma
+# 1.8); and the same converted back to sRGB as ColorSync's reference.
 P=/System/Library/ColorSync/Profiles
 sips -m "$P/AdobeRGB1998.icc" png8-rgb.png --out icc-adobergb.png >/dev/null
 sips -m "$P/Display P3.icc" png8-rgb.png --out icc-p3.png >/dev/null
 sips -m "$P/ROMM RGB.icc" png16-rgb.png --out icc-prophoto16.png >/dev/null
 sips -m "$P/Generic Gray Gamma 2.2 Profile.icc" png8-gray.png --out icc-gray22.png >/dev/null
-for f in icc-adobergb icc-p3 icc-prophoto16 icc-gray22; do
+sips -m "$P/Generic Gray Profile.icc" png8-gray.png --out icc-gray18.png >/dev/null
+for f in icc-adobergb icc-p3 icc-prophoto16 icc-gray22 icc-gray18; do
   sips -m "$P/sRGB Profile.icc" "$f.png" --out "ref-srgb-$f.png" >/dev/null
 done
 "${TOOLS[@]}" svg vector.svg

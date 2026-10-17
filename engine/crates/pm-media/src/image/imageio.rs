@@ -13,7 +13,7 @@ use super::{
 use crate::apple::cf::*;
 use crate::error::{MediaError, Result};
 use crate::pool::FramePool;
-use pm_protocol::color::{AlphaMode, Transfer};
+use pm_protocol::color::{AlphaMode, Transfer, may_unpremultiply};
 use std::ffi::c_void;
 use std::path::Path;
 
@@ -106,16 +106,28 @@ unsafe extern "C" {
 const RELATIVE_COLORIMETRIC: i32 = 2;
 /// `kCGInterpolationNone`.
 const INTERPOLATION_NONE: i32 = 1;
-/// `kCGImageAlphaLast`, `kCGImageAlphaNoneSkipLast`.
-const ALPHA_LAST: u32 = 3;
 
 /// Converts a still tagged with an ICC profile that is neither equivalent to
 /// sRGB nor Display P3 (Adobe RGB, ProPhoto, camera and printer RGB
 /// profiles, gray gamma 2.2, ...) through ColorSync, relative colorimetric,
 /// into extended linear sRGB in float: values outside 0..1 are kept (no
-/// clip until output, section 9). The result is premultiplied, linear, with
-/// Rec.709 primaries and no profile.
-pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
+/// clip until output, section 9).
+///
+/// `alpha` is how the stored samples are read: the file's alpha mode, or an
+/// Interpret Footage override replacing it. The profile transforms colors,
+/// never alpha, so the color is taken out of its alpha reading first, in the
+/// stored encoding as the source pass does (a matte removed, then
+/// unpremultiplied above
+/// [`UNPREMULTIPLY_ALPHA_FLOOR`](pm_protocol::color::UNPREMULTIPLY_ALPHA_FLOOR); pixels below it are
+/// converted as stored, the way the source pass keeps them), converted as
+/// opaque color, and premultiplied again in linear light. The result is
+/// premultiplied linear light with Rec.709 primaries and no profile;
+/// `Opaque` reads every alpha as 1.
+pub fn convert_to_linear_srgb(
+    still: &StillImage,
+    pool: &FramePool,
+    alpha: AlphaMode,
+) -> Result<StillImage> {
     let Some(profile) = still.color.icc.as_ref() else {
         return Err(MediaError::invalid("the still has no ICC profile"));
     };
@@ -127,29 +139,57 @@ pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<St
     }
     let (w, h) = (f.format.width, f.format.height);
     let sixteen = f.format.planes[0].format == crate::frame::PlaneFormat::Rgba16;
-    let bits = f.format.bits;
-    // Source samples, scaled to the full 8 or 16-bit range.
-    let src: Vec<u8> = f.with_planes(|pl| {
+    let max = if sixteen {
+        ((1u32 << f.format.bits.clamp(1, 16)) - 1) as f32
+    } else {
+        255.0
+    };
+    // Stored samples as 0..1 RGBA.
+    let stored: Vec<f32> = f.with_planes(|pl| {
         let p = &pl[0];
-        let mut out = Vec::with_capacity(w * h * if sixteen { 8 } else { 4 });
+        let mut out = Vec::with_capacity(w * h * 4);
         for y in 0..h {
             let row = unsafe {
                 std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * if sixteen { 8 } else { 4 })
             };
-            if sixteen && bits < 16 {
-                let max = ((1u32 << bits) - 1) as f64;
-                for c in row.chunks_exact(2) {
-                    let v = u16::from_le_bytes([c[0], c[1]]) as f64;
-                    out.extend(((v * 65535.0 / max).round() as u16).to_le_bytes());
-                }
+            if sixteen {
+                out.extend(
+                    row.chunks_exact(2)
+                        .map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / max),
+                );
             } else {
-                out.extend_from_slice(row);
+                out.extend(row.iter().map(|&v| f32::from(v) / max));
             }
         }
         out
     })?;
-    let premultiplied = f.format.rgba_premultiplied;
-    let has_alpha = !matches!(still.color.alpha, AlphaMode::Opaque);
+    // The color to convert (straight, stored encoding), the alpha to keep,
+    // and whether the pixel is premultiplied again after conversion.
+    let mut color = Vec::with_capacity(w * h * 4);
+    let mut alphas = Vec::with_capacity(w * h);
+    let mut kept = Vec::with_capacity(w * h);
+    for px in stored.chunks_exact(4) {
+        let a = px[3];
+        let (rgb, a, premultiply) = match alpha {
+            AlphaMode::Opaque => ([px[0], px[1], px[2]], 1.0, false),
+            AlphaMode::Straight => ([px[0], px[1], px[2]], a, true),
+            AlphaMode::Premultiplied | AlphaMode::PremultipliedWithColor { .. } => {
+                let matte = match alpha {
+                    AlphaMode::PremultipliedWithColor { matte } => matte.map(|m| m as f32),
+                    _ => [0.0; 3],
+                };
+                let removed = [0, 1, 2].map(|c| px[c] - (1.0 - a) * matte[c]);
+                if may_unpremultiply(f64::from(a)) {
+                    (removed.map(|v| v / a), a, true)
+                } else {
+                    (removed, a, false)
+                }
+            }
+        };
+        color.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
+        alphas.push(a);
+        kept.push(!premultiply);
+    }
     unsafe {
         let icc = Cf::from_create(CFDataCreate(
             std::ptr::null(),
@@ -164,18 +204,12 @@ pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<St
             ));
         }
         let comps = CGColorSpaceGetNumberOfComponents(space);
-        // Gray profiles take gray and alpha samples; RGB profiles RGBA.
-        let (data, spp) = match comps {
-            1 => {
-                let bpc = if sixteen { 2 } else { 1 };
-                let mut g = Vec::with_capacity(w * h * 2 * bpc);
-                for px in src.chunks_exact(4 * bpc) {
-                    g.extend_from_slice(&px[..bpc]);
-                    g.extend_from_slice(&px[3 * bpc..4 * bpc]);
-                }
-                (g, 2)
-            }
-            3 => (src, 4),
+        // Gray profiles take gray samples; RGB profiles RGB and a skipped
+        // component. Float samples, so unpremultiplied colors keep their
+        // precision.
+        let (data, spp, alpha_info): (Vec<f32>, usize, u32) = match comps {
+            1 => (color.chunks_exact(4).map(|p| p[0]).collect(), 1, 0),
+            3 => (color, 4, NONE_SKIP_LAST),
             n => {
                 CGColorSpaceRelease(space);
                 return Err(MediaError::unsupported(format!(
@@ -183,30 +217,21 @@ pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<St
                 )));
             }
         };
-        let bpc = if sixteen { 16 } else { 8 };
         let bytes = Cf::from_create(CFDataCreate(
             std::ptr::null(),
-            data.as_ptr(),
-            data.len() as isize,
+            data.as_ptr().cast(),
+            (data.len() * 4) as isize,
         ))
         .ok_or_else(|| MediaError::Image("pixel data".into()))?;
         let provider = CGDataProviderCreateWithCFData(bytes.as_ptr());
-        let alpha = if !has_alpha {
-            5 // kCGImageAlphaNoneSkipLast
-        } else if premultiplied {
-            PREMULTIPLIED_LAST
-        } else {
-            ALPHA_LAST
-        };
-        let info = alpha | if sixteen { ORDER_16_LITTLE } else { 0 };
         let img = CGImageCreate(
             w,
             h,
-            bpc,
-            bpc * spp,
-            w * spp * bpc / 8,
+            32,
+            32 * spp,
+            w * spp * 4,
             space,
-            info,
+            alpha_info | FLOAT | ORDER_32_LITTLE,
             provider,
             std::ptr::null(),
             false,
@@ -249,12 +274,23 @@ pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<St
         );
         CGContextRelease(ctx);
         CGImageRelease(img);
+        // The source was opaque: `out` holds straight linear color.
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+            let a = alphas[i];
+            if !kept[i] {
+                for v in &mut px[..3] {
+                    *v *= a;
+                }
+            }
+            px[3] = a;
+        }
+        let opaque = matches!(alpha, AlphaMode::Opaque);
         let frame = pool_rgba(
             pool,
             w,
             h,
             Rgba::F32(&out),
-            true,
+            !opaque,
             32,
             format!("ColorSync extended linear sRGB from {}", f.format.label),
         )?;
@@ -269,10 +305,10 @@ pub fn convert_to_linear_srgb(still: &StillImage, pool: &FramePool) -> Result<St
                 icc_bytes: None,
                 icc_class: None,
                 transfer: Transfer::Linear,
-                alpha: if has_alpha {
-                    AlphaMode::Premultiplied
-                } else {
+                alpha: if opaque {
                     AlphaMode::Opaque
+                } else {
+                    AlphaMode::Premultiplied
                 },
                 chromaticities: None,
             },
@@ -289,6 +325,8 @@ const ORDER_MASK: u32 = 0x7000;
 const ORDER_16_LITTLE: u32 = 1 << 12;
 const ORDER_32_LITTLE: u32 = 2 << 12;
 const PREMULTIPLIED_LAST: u32 = 1;
+/// `kCGImageAlphaNoneSkipLast`.
+const NONE_SKIP_LAST: u32 = 5;
 
 fn source(path: &Path) -> Result<Cf> {
     let url = cf_file_url(path).ok_or_else(|| MediaError::invalid("path"))?;

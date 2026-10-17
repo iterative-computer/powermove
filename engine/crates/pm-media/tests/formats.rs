@@ -1382,8 +1382,10 @@ fn audio_seeks() {
 /// Stills with ICC profiles (section 9): sRGB-equivalent profiles pass
 /// through; Display P3 converts in float by matrix (`pm_color::primaries`);
 /// every other profile converts through ColorSync, relative colorimetric,
-/// into extended linear sRGB. Each matches ColorSync's own conversion to
-/// sRGB (sips) within 1 CV wherever that conversion did not clip.
+/// into extended linear sRGB. Each matches ColorSync's own 8-bit conversion
+/// to sRGB (sips) within 1.6 CV wherever that conversion did not clip, and
+/// the ColorSync-converted ones match the profile's matrix/TRC (or gray
+/// TRC) evaluated in f64 within 0.5 CV.
 #[test]
 #[ignore]
 fn icc_stills() {
@@ -1398,6 +1400,8 @@ fn icc_stills() {
         // Apple's "Generic Gray Gamma 2.2" curve has a linear toe and lies
         // within 1/1024 of the sRGB curve everywhere: it passes through.
         ("icc-gray22.png", IccClass::GraySrgb),
+        // "Generic Gray" is gamma 1.8: a gray profile ColorSync converts.
+        ("icc-gray18.png", IccClass::Other),
     ] {
         let s = image::read(&dir.join(file), &pool).unwrap();
         assert_eq!(s.color.icc_class, Some(class), "{file}");
@@ -1426,7 +1430,7 @@ fn icc_stills() {
                     .collect()
             }
             _ => {
-                let c = image::imageio::convert_to_linear_srgb(&s, &pool).unwrap();
+                let c = image::imageio::convert_to_linear_srgb(&s, &pool, s.color.alpha).unwrap();
                 assert!(c.float && c.color.transfer == Transfer::Linear);
                 still_rgba(&c)
                     .iter()
@@ -1464,16 +1468,187 @@ fn icc_stills() {
         // The reference is ColorSync's 8-bit output (±0.5 CV). Display P3
         // converts by matrix from the standard chromaticities, ColorSync from
         // the profile's s15.16 D50 colorants: they differ by up to 1.1 CV.
-        let (tol_max, tol_mean) = if class == IccClass::DisplayP3 {
-            (1.5, 0.3)
-        } else {
-            (1.0, 0.3)
-        };
+        // Other profiles convert through ColorSync from float samples (so
+        // unpremultiplied colors keep their precision); ColorSync's 8-bit
+        // path differs from its float path by up to 1.5 CV on channels near
+        // black at the gamut edge (Adobe RGB 1.42, ProPhoto 1.51 measured),
+        // where the float path is the one that matches the profiles'
+        // matrix/TRC conversion evaluated in f64 (checked below, within
+        // 0.5 CV).
+        let (tol_max, tol_mean) = (1.6, 0.3);
+        if class == IccClass::Other {
+            let profile = MatrixTrc::parse(s.color.icc.as_ref().unwrap());
+            let (mut max, mut sum) = (0f64, 0f64);
+            for (o, p) in ours.iter().zip(still_rgba(&s)) {
+                let l = matrix_trc_to_linear_srgb(&profile, [p[0], p[1], p[2]]);
+                for c in 0..3 {
+                    let d = (o[c] - encode(l[c])).abs() * 255.0;
+                    max = max.max(d);
+                    sum += d;
+                }
+            }
+            let mean = sum / (3 * ours.len()) as f64;
+            eprintln!(
+                "{file}: |Δ| max {max:.3} mean {mean:.3} CV against the f64 matrix/TRC conversion over {} pixels",
+                ours.len()
+            );
+            assert!(
+                max <= 0.5 && mean <= 0.1,
+                "{file}: matrix/TRC max {max:.3} mean {mean:.3} CV"
+            );
+        }
         assert!(
             max <= tol_max && mean <= tol_mean,
             "{file}: max {max:.3} mean {mean:.3} CV"
         );
     }
+}
+
+/// A matrix/TRC or gray TRC ICC profile, read for an f64 oracle: its
+/// colorants (`rXYZ`, `gXYZ`, `bXYZ`, D50 PCS) as linear RGB → XYZ (None
+/// for a gray profile), and its red or gray tone curve (`curv` or `para`;
+/// the test profiles use one curve for all three channels).
+struct MatrixTrc {
+    colorants: Option<[[f64; 3]; 3]>,
+    curve: Vec<u8>,
+}
+
+impl MatrixTrc {
+    fn parse(icc: &[u8]) -> MatrixTrc {
+        let be = |o: usize| u32::from_be_bytes(icc[o..o + 4].try_into().unwrap());
+        let tag = |sig: &[u8; 4]| {
+            (0..be(128) as usize)
+                .map(|i| 132 + 12 * i)
+                .find(|&e| &icc[e..e + 4] == sig)
+                .map(|e| (be(e + 4) as usize, be(e + 8) as usize))
+        };
+        let xyz = |sig: &[u8; 4]| {
+            let o = tag(sig).unwrap().0 + 8;
+            [0, 1, 2].map(|k| f64::from(be(o + 4 * k) as i32) / 65536.0)
+        };
+        if let Some((o, n)) = tag(b"kTRC") {
+            return MatrixTrc {
+                colorants: None,
+                curve: icc[o..o + n].to_vec(),
+            };
+        }
+        let (r, g, b) = (xyz(b"rXYZ"), xyz(b"gXYZ"), xyz(b"bXYZ"));
+        let (o, n) = tag(b"rTRC").unwrap();
+        MatrixTrc {
+            colorants: Some([0, 1, 2].map(|row| [r[row], g[row], b[row]])),
+            curve: icc[o..o + n].to_vec(),
+        }
+    }
+
+    /// The tone curve at `x` (ICC.1:2010 `curv` and `parametricCurveType`).
+    fn linear(&self, x: f64) -> f64 {
+        let c = &self.curve;
+        let x = x.clamp(0.0, 1.0);
+        let u16_at = |o: usize| f64::from(u16::from_be_bytes([c[o], c[o + 1]]));
+        let s15 =
+            |o: usize| f64::from(i32::from_be_bytes(c[o..o + 4].try_into().unwrap())) / 65536.0;
+        match &c[..4] {
+            b"curv" => {
+                let n = u32::from_be_bytes(c[8..12].try_into().unwrap()) as usize;
+                match n {
+                    0 => x,
+                    1 => x.powf(u16_at(12) / 256.0),
+                    _ => {
+                        let p = x * (n - 1) as f64;
+                        let i = (p.floor() as usize).min(n - 2);
+                        let t = p - i as f64;
+                        (u16_at(12 + 2 * i) * (1.0 - t) + u16_at(14 + 2 * i) * t) / 65535.0
+                    }
+                }
+            }
+            b"para" => {
+                let kind = u16_at(8);
+                let p = |k: usize| s15(12 + 4 * k);
+                let g = p(0);
+                match kind as u16 {
+                    0 => x.powf(g),
+                    1 => {
+                        if x >= -p(2) / p(1) {
+                            (p(1) * x + p(2)).powf(g)
+                        } else {
+                            0.0
+                        }
+                    }
+                    2 => {
+                        if x >= -p(2) / p(1) {
+                            (p(1) * x + p(2)).powf(g) + p(3)
+                        } else {
+                            p(3)
+                        }
+                    }
+                    3 => {
+                        if x >= p(4) {
+                            (p(1) * x + p(2)).powf(g)
+                        } else {
+                            p(3) * x
+                        }
+                    }
+                    4 => {
+                        if x >= p(4) {
+                            (p(1) * x + p(2)).powf(g) + p(5)
+                        } else {
+                            p(3) * x + p(6)
+                        }
+                    }
+                    k => panic!("parametric curve type {k}"),
+                }
+            }
+            t => panic!("tone curve {t:?}"),
+        }
+    }
+}
+
+fn invert3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let cof =
+        |r0: usize, c0: usize, r1: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    [
+        [
+            cof(1, 1, 2, 2) / det,
+            -cof(0, 1, 2, 2) / det,
+            cof(0, 1, 1, 2) / det,
+        ],
+        [
+            -cof(1, 0, 2, 2) / det,
+            cof(0, 0, 2, 2) / det,
+            -cof(0, 0, 1, 2) / det,
+        ],
+        [
+            cof(1, 0, 2, 1) / det,
+            -cof(0, 0, 2, 1) / det,
+            cof(0, 0, 1, 1) / det,
+        ],
+    ]
+}
+
+/// A matrix/TRC profile's samples → linear sRGB through the D50 PCS,
+/// evaluated in f64: the profile's curve and colorants, then macOS's sRGB
+/// profile colorants (the primaries of `kCGColorSpaceExtendedLinearSRGB`).
+/// A gray profile's curve gives the luminance relative to the media white,
+/// which relative colorimetric maps to sRGB white: equal channels.
+fn matrix_trc_to_linear_srgb(profile: &MatrixTrc, c: [f64; 3]) -> [f64; 3] {
+    use pm_color::primaries::apply;
+    static SRGB: std::sync::OnceLock<[[f64; 3]; 3]> = std::sync::OnceLock::new();
+    let Some(colorants) = &profile.colorants else {
+        return [profile.linear(c[0]); 3];
+    };
+    let srgb = SRGB.get_or_init(|| {
+        let p = "/System/Library/ColorSync/Profiles/sRGB Profile.icc";
+        invert3(
+            &MatrixTrc::parse(&std::fs::read(p).unwrap())
+                .colorants
+                .unwrap(),
+        )
+    });
+    let xyz = apply(colorants, c.map(|v| profile.linear(v)));
+    apply(srgb, xyz)
 }
 
 /// Interpret Footage's facts: settings with their values, automatic values,
@@ -1563,6 +1738,26 @@ fn interpret_footage_facts() {
     assert_eq!(facts.kind, MediaKind::Still);
     assert!(
         matches!(get(&facts, "primaries").origin, FactOrigin::File { ref source } if source.contains("ColorSync"))
+    );
+    // The profile's curve, applied by ColorSync: linear, from the file.
+    let transfer = get(&facts, "transfer");
+    assert!(
+        transfer.value == "linear"
+            && matches!(transfer.origin, FactOrigin::File { ref source } if source.contains("ColorSync")),
+        "{transfer:?}"
+    );
+    // A transfer override sets the profile aside: the samples are read as
+    // stored, and the primaries fall back to the default without a profile.
+    let facts = media_facts(
+        &dir.join("image/icc-adobergb.png"),
+        Some(r#"{"transfer":"gamma22"}"#),
+    )
+    .unwrap();
+    assert_eq!(get(&facts, "transfer").origin, FactOrigin::Override);
+    assert!(
+        matches!(get(&facts, "primaries").origin, FactOrigin::Default { ref rule } if rule.contains("set aside")),
+        "{:?}",
+        get(&facts, "primaries")
     );
     let facts = media_facts(&dir.join("sequence/seq_png_0001.png"), None).unwrap();
     assert!(
