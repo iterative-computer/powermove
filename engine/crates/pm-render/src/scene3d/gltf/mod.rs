@@ -102,17 +102,19 @@ impl MaterialExt {
 
 /// `geometry.morphAttributes` as `WebGLMorphtargets` packs them: a
 /// `DataArrayTexture` of `width × height` texels per target (RGBA f32).
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub struct MorphTexture {
     pub key: u64,
     pub width: u32,
     pub height: u32,
     pub layers: u32,
-    pub data: Vec<f32>,
+    pub data: Arc<Vec<f32>>,
 }
 
-/// Attributes of a glTF geometry beyond position, normal, and `uv`.
-#[derive(Debug, PartialEq)]
+/// Attributes of a glTF geometry beyond position, normal, and `uv`
+/// (named by the geometry's key, which the debug form and content keys
+/// carry instead of the data).
+#[derive(PartialEq)]
 pub struct VertexExtra {
     pub tangent: Option<Vec<f32>>,
     /// `color` and its item size (3 or 4).
@@ -130,7 +132,7 @@ pub struct VertexExtra {
 }
 
 /// Skinning state of a `SkinnedMesh` draw.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Skinning {
     pub bind_matrix: Mat4,
     pub bind_matrix_inverse: Mat4,
@@ -141,7 +143,7 @@ pub struct Skinning {
 }
 
 /// What a glTF drawable adds to [`Mesh3d`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MeshExt {
     pub mode: Mode,
     pub skinning: Option<Skinning>,
@@ -153,6 +155,72 @@ pub struct MeshExt {
     pub skinned: bool,
     /// `object.id` order.
     pub id: u64,
+}
+
+// Debug forms name large data by its content key (content keys hash the
+// debug form of a scene; `Geometry3d` does the same).
+impl std::fmt::Debug for MorphTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MorphTexture")
+            .field("key", &format_args!("{:016x}", self.key))
+            .field("size", &(self.width, self.height, self.layers))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for VertexExtra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexExtra")
+            .field("mode", &self.mode)
+            .field("tangent", &self.tangent.is_some())
+            .field("color", &self.color.as_ref().map(|c| c.1))
+            .field(
+                "uv",
+                &(
+                    self.has_uv,
+                    self.uv1.is_some(),
+                    self.uv2.is_some(),
+                    self.uv3.is_some(),
+                ),
+            )
+            .field("normal", &self.has_normal)
+            .field("skin", &self.skin_index.is_some())
+            .field("morph", &self.morph)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Skinning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Skinning")
+            .field("bind_matrix", &self.bind_matrix)
+            .field("bind_matrix_inverse", &self.bind_matrix_inverse)
+            .field("bones", &format_args!("{:016x} ({}²)", self.key, self.size))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MeshExt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshExt")
+            .field("mode", &self.mode)
+            .field("skinning", &self.skinning)
+            .field(
+                "instances",
+                &self.instances.as_ref().map(|(k, i)| {
+                    format!(
+                        "{k:016x} ×{} color {}",
+                        i.matrices.len(),
+                        i.colors.is_some()
+                    )
+                }),
+            )
+            .field("influences", &self.influences)
+            .field("sphere", &self.sphere)
+            .field("skinned", &self.skinned)
+            .field("id", &self.id)
+            .finish()
+    }
 }
 
 fn key(parts: &[&[u8]]) -> u64 {
@@ -233,7 +301,7 @@ fn morph_texture(
         width: width as u32,
         height: height as u32,
         layers: count as u32,
-        data,
+        data: Arc::new(data),
     }))
 }
 

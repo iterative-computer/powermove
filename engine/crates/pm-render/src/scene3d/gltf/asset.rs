@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use pm_geom3d::gltf::{self, Model};
 
-/// A decoded image: straight RGBA8 rows, top row first.
-#[derive(Debug, PartialEq, Eq)]
+/// A decoded image: straight RGBA8 rows, top row first (its debug form
+/// names it by content key).
+#[derive(PartialEq, Eq)]
 pub struct DecodedImage {
     /// Content hash (the GPU texture cache key).
     pub key: u64,
@@ -22,8 +23,17 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
+impl std::fmt::Debug for DecodedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DecodedImage({:016x}, {}×{})",
+            self.key, self.width, self.height
+        )
+    }
+}
+
 /// An imported glTF or GLB model.
-#[derive(Debug)]
 pub struct GltfAsset {
     /// The file version's key.
     pub key: u64,
@@ -31,6 +41,12 @@ pub struct GltfAsset {
     /// Per glTF image: the decoded pixels, or `None` when Chromium would
     /// not decode it.
     pub images: Vec<Option<Arc<DecodedImage>>>,
+}
+
+impl std::fmt::Debug for GltfAsset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GltfAsset({:016x})", self.key)
+    }
 }
 
 impl PartialEq for GltfAsset {

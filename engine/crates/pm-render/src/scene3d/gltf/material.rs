@@ -5,8 +5,6 @@
 //! vertex colors, tangents, flat shading, alpha test, morph targets, and
 //! the shadow pass's depth and distance materials for such objects.
 
-use std::sync::Arc;
-
 use pm_geom3d::gltf::Mode;
 
 use super::{MapSource, MeshExt, VertexExtra};
@@ -612,7 +610,7 @@ pub fn object_uniforms(
                 height: texture.height,
                 layers: texture.layers,
                 array: true,
-                data: Arc::new(texture.data.clone()),
+                data: texture.data.clone(),
             },
         ));
     }

@@ -1045,3 +1045,40 @@ fn gltf_picks_equal_three_js() {
             .join("\n")
     );
 }
+
+/// Content keys follow the pose (bone matrices, morph influences) and
+/// stay cheap: the debug form names images, bones, morph targets, and
+/// instances by content key instead of their data.
+#[test]
+fn content_keys_follow_the_pose() {
+    let Some((_, cases)) = selected() else {
+        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        return;
+    };
+    let plan = |id: &str| {
+        cases
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.outputs[0].0.clone())
+    };
+    let (Some(a), Some(b), Some(grid)) =
+        (plan("skinned-0.35"), plan("skinned-0.7"), plan("pbr-ext"))
+    else {
+        return;
+    };
+    assert_eq!(a.content_key(), a.clone().content_key());
+    assert_ne!(
+        a.content_key(),
+        b.content_key(),
+        "a new pose is new content"
+    );
+    for p in [&a, &grid] {
+        let text = format!("{:?}", p.scene);
+        assert!(
+            text.len() < 256 * 1024,
+            "debug form of {} is {} bytes",
+            p.layer,
+            text.len()
+        );
+    }
+}
