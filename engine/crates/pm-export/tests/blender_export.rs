@@ -571,3 +571,43 @@ fn a_missing_blender_or_surface_fails_the_export_and_nothing_is_routed() {
     ));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cycles_devices_are_resolved_and_recorded_per_job() {
+    let dir = scratch("devices");
+    let Some(backend) = local(&dir) else { return };
+    let mut renderer = Renderer::headless().unwrap();
+    let mut blender = ExportBlender::new(
+        BlenderStage::new(SurfaceCache::new(64 << 20, Some(dir.join("cache")))),
+        Box::new(backend),
+    );
+    let request = RenderRequest::sized(Size::new(W, H), Precision::Float32);
+    for device in ["cpu", "auto"] {
+        let mut doc = scene(1.0, "cycles", 4);
+        doc["render3d"]["device"] = json!(device);
+        let document = load(&doc);
+        blender
+            .prepare(
+                &mut renderer,
+                &document,
+                "Ptest-root",
+                Ticks::ZERO,
+                &request,
+                &MediaPaths::default(),
+                &AtomicBool::new(false),
+                &mut |_, _| {},
+            )
+            .unwrap()
+            .unwrap();
+    }
+    eprintln!("Cycles devices: {:?}", blender.stage.devices);
+    assert_eq!(blender.stage.devices.len(), 2);
+    assert_eq!(blender.stage.devices[0], ResolvedDevice::Cpu);
+    // `auto` resolves to the GPU on this Mac and is named.
+    assert!(
+        matches!(&blender.stage.devices[1], ResolvedDevice::Metal { name } if !name.is_empty()),
+        "{:?}",
+        blender.stage.devices[1]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
