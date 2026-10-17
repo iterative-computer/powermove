@@ -1050,7 +1050,11 @@ fn native_content_quad<'d>(
         }
         "extension" => {
             let def = js::string(js::get(&d, "definition"));
+            // Legacy scene layers and mesh layers the 3D pass knows are its
+            // own (`crate::scene3d::legacy`), by id as today.
             if pm_eval::parenting::Role3d::of(layer).is_none()
+                && def != crate::scene3d::legacy::SCENE3D_DEFINITION
+                && !b.options3d.mesh_definitions.contains_key(&def)
                 && let Some(planned) = crate::shader_layers::plan::extension_layer(
                     scope,
                     layer,
