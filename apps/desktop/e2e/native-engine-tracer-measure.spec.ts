@@ -549,10 +549,21 @@ test.describe("Today's viewer (Use New Engine off): scrub", () => {
           }
           dragResults.push({ step, asked, distinctAsked: requested.size, framesSeeked: shown.size, lagMs: [...shown.values()] });
         }
-        return { latencies, timeouts, drags: dragResults };
+        // Which media today's compositor decodes: the original, or the
+        // all-intra editing copy (`intra-1280`) it builds after import and
+        // uses under Automatic performance or a reduced quality.
+        const asset = PM.assets.get(PM.proj.layers.find((l: any) => l.type === 'video').d.asset);
+        const media = {
+          editingCopy: Boolean(asset?.preview?.el),
+          editingCopyInUse: Boolean(asset?.preview?.el) && Boolean(PM.perf?.auto || PM.quality < 1),
+          quality: PM.quality,
+          perfAuto: Boolean(PM.perf?.auto)
+        };
+        return { latencies, timeouts, drags: dragResults, media };
       }, { count: 60, drags: DRAGS });
       await record(`${clip.row}-today`, {
         file: clip.file,
+        media: result.media,
         seekToDrawMs: dist(result.latencies),
         timeouts: result.timeouts,
         drags: result.drags.map((d: any) => ({ ...d, lagMs: undefined, requestToSeekedMs: dist(d.lagMs) }))
