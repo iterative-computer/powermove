@@ -1127,8 +1127,11 @@ const onEngineViewerChanged = () => syncEnginePresentation();
 window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
 eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
 listen('layout', () => V.layout());
-// Shading and X-ray are part of the engine's view override.
-const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation());
+// Shading and X-ray are part of the engine's view override. The 3D viewport
+// reports on every project and selection change; the stage keeps the size
+// the last layout measured (a resize lays out again), so measuring it here
+// only forced the editor's layout once more per edit (docs/engine/perf.md).
+const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation(stageGeometry ?? undefined));
 if (viewportChange) eventOffs.push(() => viewportChange.dispose());
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
