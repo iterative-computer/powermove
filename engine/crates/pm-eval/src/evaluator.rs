@@ -717,12 +717,32 @@ impl Evaluator {
 
     /// `PM.active(L, T)`: whether the layer is on and its time span holds `T`.
     pub fn active(&mut self, cx: &Comp<'_>, layer: Option<&Node>, time: f64) -> JsResult<bool> {
-        let base = self.active_base(cx, layer, time)?;
+        let base = self.active_base(cx, layer, time, false)?;
         let hooks = self.hooks.clone();
         hooks.active(cx, layer, time, base, self)
     }
 
-    fn active_base(&mut self, cx: &Comp<'_>, layer: Option<&Node>, time: f64) -> JsResult<bool> {
+    /// `PM.active({ ...L, on: true }, T)`: the track matte pass's reading of
+    /// a matte source, which renders even when the source is switched off
+    /// (its enclosing groups and time span still apply).
+    pub fn active_forced_on(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        time: f64,
+    ) -> JsResult<bool> {
+        let base = self.active_base(cx, layer, time, true)?;
+        let hooks = self.hooks.clone();
+        hooks.active(cx, layer, time, base, self)
+    }
+
+    fn active_base(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        time: f64,
+        forced_on: bool,
+    ) -> JsResult<bool> {
         if let Some(l) = layer
             && node::truthy(node::member(Some(l), "group"))
         {
@@ -734,7 +754,7 @@ impl Evaluator {
         }
         let start = node::to_number(node::member(layer, "from"));
         let duration = node::to_number(node::member(layer, "dur"));
-        if !self.on(cx, layer, time)?
+        if !(forced_on || self.on(cx, layer, time)?)
             || !start.is_finite()
             || !duration.is_finite()
             || duration <= 0.0

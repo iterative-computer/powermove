@@ -10,27 +10,41 @@
  * engine again.
  *
  * Native-only features, from the section 6 table, as their fields exist
- * today: linked media (asset `storage: "linked"` or `link`) and
- * interpretation overrides (asset `interpret`). Lanes that add the other
- * native-only fields (precomp `keepFrameRate`, clip `pitch`, project
- * `color`) add a check to NATIVE_ONLY_CHECKS.
+ * today: linked media (asset `storage: "linked"` or `link`), interpretation
+ * overrides (asset `interpret`), non-default project color settings
+ * (root `color`: linear blending, 32-bit precision), and a clip whose pitch
+ * follows its speed (`d.pitch: "follow"`). Lanes that add the other
+ * native-only fields (precomp `keepFrameRate`) add a check to
+ * NATIVE_ONLY_CHECKS.
  */
 import { REQUIRES_NATIVE_MESSAGE } from './media-store';
+import { hasProjectColor } from './project-color';
 
 export { REQUIRES_NATIVE_MESSAGE };
 export const REQUIRES_ENGINE_NATIVE = 'native';
 
 const isRecord = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 
-export type NativeOnlyFeature = 'linkedMedia' | 'interpretation';
+export type NativeOnlyFeature = 'linkedMedia' | 'interpretation' | 'projectColor' | 'clipPitch';
 
 type Check = { feature: NativeOnlyFeature; test(project: Record<string, any>): boolean };
 
 const assets = (project: Record<string, any>): any[] => (isRecord(project['assets']) ? Object.values(project['assets']) : []);
 
+/** Every layer of the open composition (the root) and of every nested one. */
+const layers = (project: Record<string, any>): any[] => [
+  ...(Array.isArray(project['layers']) ? project['layers'] : []),
+  ...(isRecord(project['comps'])
+    ? Object.values(project['comps']).flatMap((comp) => (isRecord(comp) && Array.isArray(comp['layers']) ? comp['layers'] : []))
+    : [])
+];
+
 export const NATIVE_ONLY_CHECKS: readonly Check[] = [
   { feature: 'linkedMedia', test: (project) => assets(project).some((asset) => isRecord(asset) && (asset['storage'] === 'linked' || asset['link'] != null)) },
-  { feature: 'interpretation', test: (project) => assets(project).some((asset) => isRecord(asset) && asset['interpret'] != null) }
+  { feature: 'interpretation', test: (project) => assets(project).some((asset) => isRecord(asset) && asset['interpret'] != null) },
+  { feature: 'projectColor', test: (project) => hasProjectColor(project) },
+  // Clip `pitch` (section 6): requires the new engine when not the default.
+  { feature: 'clipPitch', test: (project) => layers(project).some((layer) => isRecord(layer) && isRecord(layer['d']) && layer['d']['pitch'] === 'follow') }
 ];
 
 /** The native-only features a project uses. */

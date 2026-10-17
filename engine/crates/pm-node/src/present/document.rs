@@ -40,6 +40,13 @@ pub enum Route {
 #[derive(Debug, Clone, Default)]
 pub struct MediaMap(pub Arc<BTreeMap<String, Option<PathBuf>>>);
 
+impl MediaMap {
+    /// The file an asset resolved to, when it did.
+    pub fn path(&self, asset: &str) -> Option<PathBuf> {
+        self.0.get(asset).cloned().flatten()
+    }
+}
+
 impl pm_render::AssetResolver for MediaMap {
     fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
         self.0.get(asset).cloned().flatten()
@@ -209,6 +216,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::Scene3d(s) => format!("3D: {s}"),
         Feature::Effects => "effects".into(),
         Feature::Masks => "masks".into(),
+        Feature::PathMasks => "path masks".into(),
         Feature::TrackMatte => "track mattes".into(),
         Feature::Transition => "transitions".into(),
         Feature::BlendMode(m) => format!("blend mode {m}"),

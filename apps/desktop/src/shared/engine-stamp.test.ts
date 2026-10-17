@@ -20,6 +20,30 @@ describe('requiresEngine stamp', () => {
     expect('requiresEngine' in project).toBe(false);
   });
 
+  it('stamps non-default project color settings', () => {
+    const project: any = { assets: {} };
+    project.color = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
+    expect(nativeOnlyFeatures(project)).toEqual([]);
+    project.color.linearBlending = true;
+    expect(nativeOnlyFeatures(project)).toEqual(['projectColor']);
+    expect(applyEngineStamp(project)).toBe(true);
+    expect(project.requiresEngine).toBe('native');
+    delete project.color;
+    expect(applyEngineStamp(project)).toBe(true);
+    expect('requiresEngine' in project).toBe(false);
+  });
+
+  it('stamps a clip whose pitch follows its speed, in any composition', () => {
+    const project: any = { assets: {}, layers: [{ id: 'v', type: 'video', d: { pitch: 'preserve' } }], comps: { c2: { layers: [{ id: 'a', type: 'audio', d: {} }] } } };
+    expect(nativeOnlyFeatures(project)).toEqual([]);
+    project.comps.c2.layers[0].d.pitch = 'follow';
+    expect(nativeOnlyFeatures(project)).toEqual(['clipPitch']);
+    expect(applyEngineStamp(project)).toBe(true);
+    project.comps.c2.layers[0].d.pitch = 'preserve';
+    expect(applyEngineStamp(project)).toBe(true);
+    expect('requiresEngine' in project).toBe(false);
+  });
+
   it('leaves a stamp it does not know alone', () => {
     const project: any = { assets: {}, requiresEngine: 'future' };
     expect(applyEngineStamp(project)).toBe(false);

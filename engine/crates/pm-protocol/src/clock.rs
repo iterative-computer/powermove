@@ -144,6 +144,121 @@ pub enum TransportCommand {
     },
 }
 
+/// The mix's monitor and its data for the renderer's audio panels (plan
+/// section 16, appendix C: "Timeline waveforms; mixer meters, solo, retune |
+/// Engine"). One event carries the four messages, each naming its
+/// direction; all are session-bound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "audio"
+)]
+pub enum AudioMessage {
+    /// Renderer → engine: the mixer's monitor solo, the strips heard (top-
+    /// level layer ids; empty: every strip). A listening aid: never part of
+    /// the document or an export.
+    Monitor { solo: Vec<String> },
+    /// Engine → renderer: the levels of what is heard now, about 30 times
+    /// a second while the engine plays, and once (silent) when it stops.
+    Levels(AudioLevels),
+    /// Renderer → engine: the waveform envelope of an asset of the
+    /// session's document. Answered with [`AudioMessage::Peaks`].
+    PeaksWanted { asset: String },
+    /// Engine → renderer: an asset's waveform envelope (`peakEnvelope` of
+    /// today's engine: `peaks_per_second` buckets a second of the source,
+    /// each the largest magnitude over every channel), or why there is none.
+    Peaks(AudioPeaks),
+}
+
+/// Linear levels per bus channel (peak magnitude and RMS over the last
+/// render), with the media time they were heard at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevels {
+    pub media_time: Ticks,
+    pub master: ChannelLevels,
+    pub strips: Vec<StripLevels>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StripLevels {
+    /// The strip's top-level layer id.
+    pub id: String,
+    pub levels: ChannelLevels,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelLevels {
+    pub peak: Vec<f32>,
+    pub rms: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPeaks {
+    pub asset: String,
+    pub peaks_per_second: f64,
+    /// Program seconds of the source.
+    pub duration: f64,
+    pub peaks: Vec<f32>,
+    /// Why there are no peaks (no audio stream, offline media, a decode
+    /// failure).
+    pub error: Option<String>,
+}
+
+/// The most strips a levels message carries.
+pub const MAX_LEVEL_STRIPS: usize = 4096;
+/// The most buckets a peaks message carries (about 40 hours at 100 a
+/// second; the 16 MiB message limit holds 4 bytes a bucket).
+pub const MAX_PEAKS: usize = 3_600_000;
+
+impl Validate for AudioMessage {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::Clock;
+        let finite = |l: &ChannelLevels| {
+            l.peak.len() == l.rms.len()
+                && l.peak.len() <= 32
+                && l.peak
+                    .iter()
+                    .chain(&l.rms)
+                    .all(|v| v.is_finite() && *v >= 0.0)
+        };
+        match self {
+            AudioMessage::Monitor { solo } => ensure(solo.len() <= MAX_LEVEL_STRIPS, C, || {
+                "too many solo strips".into()
+            }),
+            AudioMessage::Levels(levels) => ensure(
+                levels.strips.len() <= MAX_LEVEL_STRIPS
+                    && finite(&levels.master)
+                    && levels.strips.iter().all(|s| finite(&s.levels)),
+                C,
+                || "levels must be finite, non-negative, and per channel".into(),
+            ),
+            AudioMessage::PeaksWanted { asset } => {
+                ensure(!asset.is_empty(), C, || "peaks need an asset".into())
+            }
+            AudioMessage::Peaks(peaks) => ensure(
+                peaks.peaks.len() <= MAX_PEAKS
+                    && peaks.peaks_per_second.is_finite()
+                    && peaks.peaks_per_second > 0.0
+                    && peaks.duration.is_finite()
+                    && peaks.duration >= 0.0
+                    && peaks.peaks.iter().all(|v| v.is_finite() && *v >= 0.0),
+                C,
+                || "peaks must be finite and non-negative".into(),
+            ),
+        }
+    }
+}
+
 /// J/K/L rates: 1× and 2× forward and reverse (section 15).
 pub const JKL_RATES: [PlaybackRate; 4] = [
     PlaybackRate { num: 1, den: 1 },

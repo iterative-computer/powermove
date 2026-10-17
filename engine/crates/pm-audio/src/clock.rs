@@ -90,16 +90,23 @@ impl ClockCore {
         presented_us: u64,
         latency_us: u32,
     ) -> Option<ClockSample> {
-        let media = heard.tag.media_ticks + heard.offset as i64 * ticks_per_frame(self.sample_rate);
         let state = heard.tag.state;
-        let loop_range: Option<TickRange> = heard.tag.loop_range;
         let rate = if state == TransportState::Stopped {
             PlaybackRate::STOPPED
         } else {
-            PlaybackRate::NORMAL
+            heard.tag.rate
         };
+        // Frames advance the media by the chunk's rate (J/K/L): exact in
+        // ticks for every supported rate.
+        let media = heard.tag.media_ticks
+            + (heard.offset as i128
+                * ticks_per_frame(self.sample_rate) as i128
+                * heard.tag.rate.num as i128
+                / heard.tag.rate.den.max(1) as i128) as i64;
+        let loop_range: Option<TickRange> = heard.tag.loop_range;
         if let Some(last) = &self.last {
-            let same_line = last.epoch == heard.tag.epoch && last.state == state;
+            let same_line =
+                last.epoch == heard.tag.epoch && last.state == state && last.rate == rate;
             // An underrun or a loop wrap moves the media off the line: publish
             // at once (a new `seq` replaces the line).
             let on_line = HostMicros::new(presented_us).is_ok_and(|at| {
@@ -219,9 +226,35 @@ mod tests {
                 state: TransportState::Playing,
                 frames: 256,
                 loop_range,
+                rate: PlaybackRate::NORMAL,
             },
             offset,
         }
+    }
+
+    /// J/K/L: frames heard at −2× move the line back two frames each, and
+    /// a rate change starts a new line at once.
+    #[test]
+    fn lines_follow_the_chunk_rate() {
+        let mut core = ClockCore::new(48_000, Arc::default());
+        let mut h = heard(10 * TICKS_PER_SECOND, 1, 0);
+        h.tag.rate = PlaybackRate { num: -2, den: 1 };
+        h.tag.state = TransportState::Shuttling;
+        let a = core.observe(h, 1_000_000, 0).unwrap();
+        assert_eq!(a.rate, PlaybackRate { num: -2, den: 1 });
+        assert!(a.validate_ok());
+        // 480 frames in: 10 s − 2 × 10 ms, on the line.
+        let mut later = h;
+        later.offset = 480;
+        assert!(core.observe(later, 1_010_000, 0).is_none());
+        assert_eq!(
+            a.media_time_at(HostMicros::new(1_010_000).unwrap()).get(),
+            10 * TICKS_PER_SECOND - TICKS_PER_SECOND / 50
+        );
+        let mut forward = later;
+        forward.tag.rate = PlaybackRate { num: 2, den: 1 };
+        let b = core.observe(forward, 1_010_000, 0).unwrap();
+        assert_eq!(b.rate.num, 2);
     }
 
     #[test]

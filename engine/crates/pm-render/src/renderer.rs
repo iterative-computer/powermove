@@ -8,11 +8,12 @@ use std::sync::Arc;
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
-use pm_protocol::color::{Precision, ProjectColor};
+use pm_protocol::color::Precision;
 use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
+use crate::composite::{ColorSettings, EffectHost};
 use crate::error::{LayerFailure, RenderError};
 use crate::exec::{Exec, Region};
 use crate::expr::PmExprEngine;
@@ -103,8 +104,11 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
+    vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
+    /// Prepares and runs layer effects (`composite::EffectHost`).
+    effects: Option<Arc<dyn EffectHost>>,
 }
 
 impl Renderer {
@@ -120,11 +124,19 @@ impl Renderer {
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
+            vector: crate::vector::cache::VectorCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
             bracket: None,
+            effects: None,
         }
+    }
+
+    /// Runs layer effects and adjustment layers through `host` (the effects
+    /// lane's runner); `None` routes compositions with effects.
+    pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
+        self.effects = host;
     }
 
     /// Records `bracket` around every following frame's commands (`None`:
@@ -167,9 +179,40 @@ impl Renderer {
             .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
     }
 
-    /// Frees idle intermediate targets down to `bytes` (lease pressure).
+    /// Frees idle intermediate targets and cached vector textures so that
+    /// together they hold at most `bytes` (lease pressure): the pool trims
+    /// first, and the vector cache gets what the pool leaves.
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
+        self.vector.trim(bytes.saturating_sub(self.pool.bytes()));
+    }
+
+    /// The vector cache's standing bound, enforced while frames render
+    /// (default: today's raster cache, 192 MiB and 4096 entries).
+    pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
+        self.vector.set_budget(max_bytes, max_entries);
+    }
+
+    /// Cached vector textures.
+    pub fn vector_cache_len(&self) -> usize {
+        self.vector.len()
+    }
+
+    /// Bytes of cached vector textures (shape rasters and level 2 scenes):
+    /// the render cache category of the lease.
+    pub fn vector_cache_bytes(&self) -> u64 {
+        self.vector.bytes()
+    }
+
+    /// Selects the level 2 coverage backend (Vello on the GPU with the
+    /// `vello_cpu` fallback, or `vello_cpu` always).
+    pub fn set_vector_backend(&mut self, backend: crate::vector::cache::CoverageBackend) {
+        self.vector.set_backend(backend);
+    }
+
+    /// The backend that rendered the last level 2 scene.
+    pub fn last_vector_backend(&self) -> Option<&'static str> {
+        self.vector.last_backend
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
@@ -190,12 +233,16 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
+        let precision = match document.root().map(project_settings) {
+            Some(Ok(c)) => effective_precision(request.precision, c.precision),
+            _ => request.precision,
+        };
         let target = Target::new(
             &self.device,
             "pm frame",
             size.width,
             size.height,
-            working_format(request.precision),
+            working_format(precision),
             pm_gpu::target::working_usage(),
         );
         let depth_id = request.depth_id.then(|| {
@@ -245,7 +292,12 @@ impl Renderer {
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
-        if !self.supports_precision(request.precision) {
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let color = project_settings(root)?;
+        let precision = effective_precision(request.precision, color.precision);
+        if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
             )]));
@@ -260,21 +312,6 @@ impl Renderer {
                 size.height
             )));
         }
-        let root = document
-            .root()
-            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
-        if let Some(color) = pm_eval::node::member(Some(root), "color")
-            && !pm_eval::node::is_nullish(Some(color))
-            && capability::unsupported(document, composition)
-                .iter()
-                .any(|u| u.feature == Feature::ProjectColor)
-        {
-            return Err(RenderError::Unsupported(vec![Unsupported {
-                composition: None,
-                layer: None,
-                feature: Feature::ProjectColor,
-            }]));
-        }
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
         let open = capability::open_composition_id(root);
@@ -287,7 +324,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build(
+        let (mut plan, build) = plan::build_with_effects(
             &mut self.evaluator,
             &comp,
             &project,
@@ -296,6 +333,7 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.effects.as_deref(),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -311,6 +349,9 @@ impl Renderer {
             width: r.width,
             height: r.height,
         });
+        // The previous frame's vector textures become evictable, and the
+        // cache returns within its bound.
+        self.vector.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -327,8 +368,10 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
-                precision: request.precision,
-                working: ProjectColor::DEFAULT.working(),
+                vector: &mut self.vector,
+                precision,
+                working: color.working,
+                blend_domain: color.blend_domain,
                 export: request.export,
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
@@ -351,7 +394,7 @@ impl Renderer {
             // so media caches filled by this encoder stay valid.
             let complete = exec.unsupported.is_empty();
             if complete {
-                exec.flip(&mut encoder, &gl_rows, target);
+                exec.flip_color(&mut encoder, &gl_rows, target);
             }
             exec.taken.push(gl_rows);
             if let Some(ids) = depth_id.filter(|_| complete) {
@@ -511,7 +554,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build(
+        let (plan, build) = plan::build_with_effects(
             &mut self.evaluator,
             &comp,
             &project,
@@ -520,10 +563,36 @@ impl Renderer {
             h,
             scale,
             assets,
+            self.effects.as_deref(),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         Ok((plan, build.failures))
+    }
+}
+
+/// The project's color settings, or the routing answer for settings this
+/// build cannot render.
+fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError> {
+    crate::composite::project_color(root)
+        .map(|c| ColorSettings::of(&c))
+        .map_err(|_| {
+            RenderError::Unsupported(vec![Unsupported {
+                composition: None,
+                layer: None,
+                feature: Feature::ProjectColor,
+            }])
+        })
+}
+
+/// The precision intermediates use: the request's, raised to the project's
+/// (Settings › Project › Color › Precision is a floor for every render of
+/// the project; exports raise it further by amendment 8).
+pub fn effective_precision(request: Precision, project: Precision) -> Precision {
+    if request == Precision::Float32 || project == Precision::Float32 {
+        Precision::Float32
+    } else {
+        Precision::Float16
     }
 }

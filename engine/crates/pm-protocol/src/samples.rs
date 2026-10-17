@@ -13,7 +13,10 @@ use crate::blender::{
     RequestedDevice, ResolvedDevice, ShutterSample, SnapshotEncoding, SnapshotRef,
     SurfaceRequest as BlenderSurfaceRequest,
 };
-use crate::clock::{ClockSample, SeekMode, TransportCommand, TransportState};
+use crate::clock::{
+    AudioLevels, AudioMessage, AudioPeaks, ChannelLevels, ClockSample, SeekMode, StripLevels,
+    TransportCommand, TransportState,
+};
 use crate::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, OutputColor, Precision,
     Primaries, ProjectColor, Range, Subsampling, ToneMapping3d, Transfer, ViewerColorSpace,
@@ -1075,6 +1078,33 @@ pub fn events() -> Vec<Envelope> {
             time: ticks(-705_600_000),
             mode: SeekMode::Scrub,
         })),
+        event(Event::Audio(AudioMessage::Levels(AudioLevels {
+            media_time: ticks(1_234_567_890),
+            master: ChannelLevels {
+                peak: vec![0.5, 0.25],
+                rms: vec![0.125, 0.0625],
+            },
+            strips: vec![StripLevels {
+                id: "layer-1".into(),
+                levels: ChannelLevels {
+                    peak: vec![0.5, 0.25],
+                    rms: vec![0.125, 0.0625],
+                },
+            }],
+        }))),
+        event(Event::Audio(AudioMessage::Monitor {
+            solo: vec!["layer-1".into()],
+        })),
+        event(Event::Audio(AudioMessage::PeaksWanted {
+            asset: "asset-7".into(),
+        })),
+        event(Event::Audio(AudioMessage::Peaks(AudioPeaks {
+            asset: "asset-7".into(),
+            peaks_per_second: 100.0,
+            duration: 0.03,
+            peaks: vec![0.0, 0.5, 0.25],
+            error: None,
+        }))),
         event(Event::Clock(ClockSample {
             seq: seq(99),
             epoch: 4,
@@ -1266,7 +1296,7 @@ pub fn all() -> Vec<(String, Envelope)> {
                 _ => unreachable!("typed samples"),
             };
             let mut name = format!("{prefix}-{tag}");
-            // Facts and deadline signals have several samples each, named by their inner tag.
+            // Facts, deadline signals, and audio messages have several samples each, named by their inner tag.
             let inner = match &envelope.message {
                 Message::Event {
                     body: Event::Fact(fact),
@@ -1278,6 +1308,11 @@ pub fn all() -> Vec<(String, Envelope)> {
                 } => serde_json::to_value(signal)
                     .ok()
                     .and_then(|v| v["signal"].as_str().map(str::to_owned)),
+                Message::Event {
+                    body: Event::Audio(message),
+                } => serde_json::to_value(message)
+                    .ok()
+                    .and_then(|v| v["audio"].as_str().map(str::to_owned)),
                 _ => None,
             };
             if let Some(inner) = inner {
@@ -1380,9 +1415,10 @@ pub const fn event_index(event: &Event) -> usize {
         Event::BlenderSurface(_) => 15,
         Event::Fact(_) => 16,
         Event::InFlight(_) => 17,
+        Event::Audio(_) => 18,
     }
 }
-pub const EVENT_VARIANTS: usize = 18;
+pub const EVENT_VARIANTS: usize = 19;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

@@ -45,6 +45,9 @@ pub enum Feature {
     Effects,
     /// Layer masks.
     Masks,
+    /// Bezier path masks (today's Canvas2D coverage route, which also takes
+    /// every other mask of the layer).
+    PathMasks,
     /// A track matte, or a layer used as one.
     TrackMatte,
     /// Transitions.
@@ -101,6 +104,7 @@ impl fmt::Display for Feature {
             Feature::Scene3d(s) => write!(f, "3D: {s}"),
             Feature::Effects => write!(f, "effects"),
             Feature::Masks => write!(f, "masks"),
+            Feature::PathMasks => write!(f, "path masks"),
             Feature::TrackMatte => write!(f, "track mattes"),
             Feature::Transition => write!(f, "transitions"),
             Feature::BlendMode(m) => write!(f, "blend mode {m}"),
@@ -131,7 +135,7 @@ impl fmt::Display for Unsupported {
 }
 
 /// Layer types this renderer draws (or knows draw nothing).
-const DRAWN: [&str; 5] = ["solid", "image", "video", "precomp", "group"];
+const DRAWN: [&str; 6] = ["solid", "image", "video", "precomp", "group", "shape"];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.
@@ -203,10 +207,7 @@ fn check(
         return vec![];
     };
     // Project-level settings.
-    if let Some(color) = node::member(Some(root), "color")
-        && !node::is_nullish(Some(color))
-        && !is_default_color(color)
-    {
+    if crate::composite::project_color(root).is_err() {
         out.insert(Unsupported {
             composition: None,
             layer: None,
@@ -234,26 +235,6 @@ fn check(
         check_composition(root, &id, comp, assets, &mut out, &mut stack);
     }
     out.into_iter().collect()
-}
-
-/// Whether a stored `color` field is decision 1's default.
-fn is_default_color(color: &Node) -> bool {
-    let Some(map) = (match color.kind() {
-        NodeKind::Object(m) => Some(m),
-        _ => None,
-    }) else {
-        return false;
-    };
-    map.iter().all(|(k, v)| {
-        let k = k.to_string_lossy();
-        match k.as_str() {
-            "mode" => node::is_str(Some(v), "standard"),
-            "linearBlending" => matches!(v.kind(), NodeKind::Bool(false)),
-            "precision" => node::is_str(Some(v), "float16"),
-            "blendDomain" => node::is_str(Some(v), "hdrSafe"),
-            _ => false,
-        }
-    })
 }
 
 fn check_composition(
@@ -300,27 +281,28 @@ fn check_composition(
         if has_effects(layer) && ty != "adjustment" {
             add(layer, Feature::Effects);
         }
-        if node::array(node::member(Some(layer), "masks")).is_some_and(|m| !m.is_empty())
-            || is_property(node::member(Some(layer), "masks"))
+        // Parametric masks, track mattes, and blend modes are drawn
+        // (`crate::composite`); bezier path masks and masks that are not an
+        // array are not.
+        let masks = node::member(Some(layer), "masks");
+        if is_property(masks) || (node::truthy(masks) && node::array(masks).is_none()) {
+            add(layer, Feature::Masks);
+        }
+        // Masks on 3D object layers (today's slow path turns the scene
+        // pass; not matched yet).
+        if pm_eval::parenting::Role3d::of(layer).is_some()
+            && node::array(masks).is_some_and(|m| !m.is_empty())
         {
             add(layer, Feature::Masks);
         }
-        if js::flag(layer, "matteSource") {
-            add(layer, Feature::TrackMatte);
+        if node::array(masks).is_some_and(|m| {
+            m.iter()
+                .any(|mask| node::truthy(node::member(Some(mask), "path")))
+        }) {
+            add(layer, Feature::PathMasks);
         }
         if js::flag(layer, "transitionIn") || js::flag(layer, "transitionOut") {
             add(layer, Feature::Transition);
-        }
-        let blend = node::member(Some(layer), "blend");
-        if is_property(blend) {
-            add(layer, Feature::BlendMode("animated".into()));
-        } else if let Some(b) = blend.filter(|b| node::truthy(Some(b)))
-            && !node::is_str(Some(b), "normal")
-        {
-            add(
-                layer,
-                Feature::BlendMode(node::js_value_opt(Some(b)).to_js_string().to_string_lossy()),
-            );
         }
         let mblur = node::member(Some(layer), "mblur");
         if is_property(mblur) || node::truthy(mblur) {
@@ -336,7 +318,12 @@ fn check_composition(
         {
             add(layer, Feature::TwoAndAHalfD);
         }
-        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0) {
+        // Level 2 shape, solid, and SVG image content is drawn
+        // (crate::vector); other level 2 content keeps routing.
+        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
+            && !matches!(ty.as_str(), "shape" | "solid")
+            && !(ty == "image" && asset_format(root, layer).as_deref() == Some("svg"))
+        {
             add(layer, Feature::CompatLevel2);
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
@@ -350,18 +337,6 @@ fn check_composition(
                 }
             }
             _ => {}
-        }
-    }
-    // Layers used as track mattes by others.
-    let sources: BTreeSet<String> = layers
-        .iter()
-        .filter_map(|l| node::member(Some(l), "matteSource"))
-        .filter(|s| node::truthy(Some(s)))
-        .map(|s| node::js_value_opt(Some(s)).to_js_string().to_string_lossy())
-        .collect();
-    for layer in layers {
-        if sources.contains(&js::layer_id(layer)) {
-            add(layer, Feature::TrackMatte);
         }
     }
     if has_3d {
@@ -398,6 +373,14 @@ fn has_effects(layer: &Node) -> bool {
     })
 }
 
+/// The lowercase `format` of a layer's asset record, if it has one.
+fn asset_format(root: &Node, layer: &Node) -> Option<String> {
+    let asset = node::member(node::member(Some(layer), "d"), "asset")?;
+    let asset_id = node::js_value_opt(Some(asset)).to_js_string().to_string_lossy();
+    let record = node::member(node::member(Some(root), "assets"), &asset_id)?;
+    Some(js::member_string(record, "format").unwrap_or_default().to_ascii_lowercase())
+}
+
 fn check_media(
     root: &Node,
     layer: &Node,
@@ -420,7 +403,18 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        add(layer, Feature::SvgImage);
+        // Level 1 SVG images (today's `<img>` buckets) are routed; level 2
+        // ones are drawn unless they have text (crate::vector::svg).
+        if !crate::vector::level2(layer) {
+            add(layer, Feature::SvgImage);
+        } else if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
+            match crate::vector::svg::document(&path) {
+                Ok((doc, _)) if doc.has_text() => add(layer, Feature::SvgImage),
+                Ok(_) => {}
+                Err(m) => add(layer, Feature::Media(m)),
+            }
+        }
+        return;
     }
     if ty == "video"
         && (node::member(Some(record), "imageSequence").is_some_and(|s| node::truthy(Some(s)))
