@@ -286,6 +286,10 @@ impl Composer {
         &mut self,
         owner: impl std::hash::Hash,
         definitions: Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
+        registered: &[(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )],
     ) -> Option<Vec<pm_protocol::error::EngineError>> {
         let owner = owner_hash(owner);
         let version = definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version));
@@ -301,6 +305,11 @@ impl Composer {
                 .unwrap_or_else(|| (self.renderer.effects().sibling(), None));
             self.renderer.swap_effects(&mut set);
             self.definitions = Some((owner, loaded));
+        }
+        // Registered again (a register or hot reload of the id, even with
+        // the same source): the watchdog starts over for it.
+        for (kind, id) in registered {
+            self.renderer.effects_mut().watchdog.forget(*kind, id);
         }
         let current = self.definitions.as_mut().expect("set above");
         if current.1 == version {

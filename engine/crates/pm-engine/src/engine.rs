@@ -863,7 +863,18 @@ impl Engine {
                 if result.is_ok() {
                     // The presenter renders with the session's definitions.
                     let (session_port, set) = (session.port, session.definitions.snapshot());
-                    self.with_presenter(out, |p, ctx| p.definitions(ctx, session_port, sid, &set));
+                    let registered: Vec<_> = if update.full {
+                        Vec::new()
+                    } else {
+                        update
+                            .upserts
+                            .iter()
+                            .map(|d| (d.kind, d.id.clone()))
+                            .collect()
+                    };
+                    self.with_presenter(out, |p, ctx| {
+                        p.definitions(ctx, session_port, sid, &set, &registered)
+                    });
                 }
                 match result {
                     Ok(()) => self.respond(

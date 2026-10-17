@@ -251,6 +251,12 @@ impl Effects {
     /// Applies a kernel update (contract 10) and translates what changed.
     /// Returns the failures of the definitions it upserted, for
     /// `DefinitionsApplied`.
+    ///
+    /// A delta's upserts are registrations (a register or a hot reload of
+    /// that id): each starts with a fresh watchdog record, so an effect the
+    /// watchdog turned off runs again even when its source is unchanged. A
+    /// full update (session start, after a refused push) re-sends the set
+    /// and keeps the records of unchanged definitions.
     pub fn apply(&mut self, update: &DefinitionsUpdate) -> Result<Vec<EngineError>, UpdateError> {
         self.set.apply(update)?;
         self.configured = true;
@@ -271,6 +277,9 @@ impl Effects {
             self.drop_entries(|k| *k == key);
         }
         for snapshot in &update.upserts {
+            if !update.full {
+                self.watchdog.forget(snapshot.kind, &snapshot.id);
+            }
             if let Some(e) = self.translate(snapshot) {
                 failures.push(e);
             }

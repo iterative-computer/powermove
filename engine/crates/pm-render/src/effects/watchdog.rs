@@ -405,7 +405,7 @@ impl Watchdog {
             },
         };
         let message = format!(
-            "{} took {ms:.1} ms of GPU time in one frame (budget {} ms) and is turned off until it is registered again.",
+            "{} took {ms:.1} ms of GPU time in one frame (budget {} ms) and is turned off until it is registered or reloaded again.",
             span.definition.as_str(),
             self.budget.as_millis()
         );

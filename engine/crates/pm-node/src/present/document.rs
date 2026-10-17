@@ -78,16 +78,56 @@ pub struct ViewDocument {
     media_version: u64,
     /// The session's definitions (contract 10) and their version.
     definitions: Option<(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
+    /// Definitions registered again since the renderer last loaded the set.
+    registered: Vec<(
+        pm_protocol::definitions::DefinitionKind,
+        pm_protocol::common::DefinitionId,
+    )>,
     cached: Option<Cached>,
 }
 
 impl ViewDocument {
     /// The session's definitions: effects and transitions are drawn with
     /// them (`pm_render::effects`), routed without them.
-    pub fn set_definitions(&mut self, set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>) {
+    /// `registered`: the definitions the update registered again (a delta's
+    /// upserts).
+    pub fn set_definitions(
+        &mut self,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    ) {
         let version = self.definitions.as_ref().map_or(1, |(_, v)| v + 1);
         self.definitions = Some((set, version));
+        self.keep_registered(registered);
         self.cached = None;
+    }
+
+    /// The definitions registered again that the renderer has not seen.
+    pub fn take_registered(
+        &mut self,
+    ) -> Vec<(
+        pm_protocol::definitions::DefinitionKind,
+        pm_protocol::common::DefinitionId,
+    )> {
+        std::mem::take(&mut self.registered)
+    }
+
+    /// Keeps `registered` for the renderer's next load of the set.
+    pub fn keep_registered(
+        &mut self,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    ) {
+        for r in registered {
+            if !self.registered.contains(&r) {
+                self.registered.push(r);
+            }
+        }
     }
 
     pub fn definitions(

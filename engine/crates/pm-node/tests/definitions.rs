@@ -4,6 +4,7 @@
 //! source (any unrelated registration, dispose, or hot reload) keeps the
 //! definition's program and its watchdog record, so an effect the watchdog
 //! turned off stays off; another view drawing in between does not reset it.
+//! A definition registered again (a delta's upsert) starts over.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,7 +105,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     // View A draws the blur; a 1 ns budget makes it overrun.
     let a = 1u64;
     let b = 2u64;
-    composer.use_definitions(a, Some(&(builtins.clone(), 1)));
+    composer.use_definitions(a, Some(&(builtins.clone(), 1)), &[]);
     let base = render(&mut composer, &plain);
     composer
         .renderer()
@@ -135,7 +136,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
 
     // An unrelated registration reaches view A as a new set version.
     let extended = Arc::new(with_extra(&builtins, 2));
-    let failures = composer.use_definitions(a, Some(&(extended.clone(), 2)));
+    let failures = composer.use_definitions(a, Some(&(extended.clone(), 2)), &[]);
     assert_eq!(failures.map(|f| f.len()), Some(0), "the new set loaded");
     let effects = composer.renderer().effects();
     assert!(
@@ -155,7 +156,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
 
     // View B on the same device draws the blur with its own set; A's state
     // survives the swaps both ways.
-    composer.use_definitions(b, Some(&(builtins.clone(), 1)));
+    composer.use_definitions(b, Some(&(builtins.clone(), 1)), &[]);
     assert!(
         !composer
             .renderer()
@@ -170,7 +171,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         "view B draws the blur"
     );
     assert_eq!(
-        composer.use_definitions(a, Some(&(extended.clone(), 2))),
+        composer.use_definitions(a, Some(&(extended.clone(), 2)), &[]),
         None,
         "A's set is current: nothing to load"
     );
@@ -186,9 +187,44 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
             .has_program(DefinitionKind::Effect, "blur")
     );
 
+    // The blur registered again with the same source (a kernel delta's
+    // upsert: a register or hot reload of that id) re-enables it.
+    composer
+        .renderer()
+        .effects_mut()
+        .watchdog
+        .set_budget(Duration::from_secs(5));
+    let same = Arc::new(with_extra(&builtins, 3));
+    composer.use_definitions(
+        a,
+        Some(&(same, 3)),
+        &[(DefinitionKind::Effect, "blur".into())],
+    );
+    let registered = render(&mut composer, &doc);
+    assert!(
+        max_diff(&registered, &first) <= 1.0 / 1024.0,
+        "re-enabled by the registration"
+    );
+    // Off again for the rest (a fresh overrun).
+    composer
+        .renderer()
+        .effects_mut()
+        .watchdog
+        .set_budget(Duration::from_nanos(1));
+    let mut overran = false;
+    for _ in 0..20 {
+        render(&mut composer, &doc);
+        if !composer.renderer().watchdog_reports(true).is_empty() {
+            overran = true;
+            break;
+        }
+    }
+    assert!(overran);
+    assert!(max_diff(&render(&mut composer, &doc), &base) <= 1.0 / 1024.0);
+
     // A hot reload that changes the blur's source re-enables it.
     let mut reloaded = (*extended).clone();
-    reloaded.generation = Seq::new(3).unwrap();
+    reloaded.generation = Seq::new(4).unwrap();
     let blur = reloaded
         .definitions
         .iter_mut()
@@ -204,7 +240,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         .effects_mut()
         .watchdog
         .set_budget(Duration::from_secs(5));
-    composer.use_definitions(a, Some(&(Arc::new(reloaded), 3)));
+    composer.use_definitions(a, Some(&(Arc::new(reloaded), 4)), &[]);
     let again = render(&mut composer, &doc);
     assert!(max_diff(&again, &first) <= 1.0 / 1024.0, "re-enabled");
 
