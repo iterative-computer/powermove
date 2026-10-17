@@ -3,8 +3,13 @@
 //! project sample positions. The render thread asks it what to render next;
 //! every discontinuity starts a new epoch.
 //!
-//! Phase 2 plays at 1× only. J/K/L at 2× and in reverse is Phase 3b; a
-//! `Play` at another rate is refused with [`AudioError::Unsupported`].
+//! J/K/L (section 15): `Play` at 1× and 2×, forward and reverse
+//! ([`JKL_RATES`](pm_protocol::clock::JKL_RATES)). A segment's frames are
+//! output frames; at 2× each covers two project samples (the render thread
+//! stretches them to one, pitch preserved), in reverse the samples play
+//! backwards. Reverse runs stop at the composition start and wrap at the
+//! loop start into the loop end, mirroring forward runs. Faster shuttles
+//! are after cutover and refused with [`AudioError::Unsupported`].
 //!
 //! Audio scrub (open question 2 of contract 6, decided here): scrub audio
 //! rides on `Shuttling` samples. A scrub seek or a frame step while paused,
@@ -28,6 +33,8 @@ enum Mode {
     Playing {
         /// Play around: stop here and return to `back`.
         until: Option<(i64, i64)>,
+        /// Project samples per output frame: 1, 2, −1, −2.
+        rate: i64,
     },
     Grain {
         start: i64,
@@ -51,6 +58,30 @@ pub struct Segment {
     /// the loop start, past the loop end, in a play around, and in a grain,
     /// where the line runs straight.
     pub loop_range: Option<TickRange>,
+    /// Project samples per output frame (1, 2, −1, −2). Output frame `j`
+    /// plays project sample `start + j × rate`; a 2× segment covers
+    /// `2 × frames` samples.
+    pub rate: i64,
+}
+
+impl Segment {
+    /// The project samples the segment plays, `[lo, hi)`, whatever its
+    /// direction.
+    pub fn media_span(&self) -> (i64, i64) {
+        let n = self.frames as i64 * self.rate.abs();
+        if self.rate > 0 {
+            (self.start, self.start + n)
+        } else {
+            (self.start - n + 1, self.start + 1)
+        }
+    }
+}
+
+/// The J/K/L rate of a `Play`, as project samples per output frame.
+pub fn jkl_rate(rate: pm_protocol::common::PlaybackRate) -> Option<i64> {
+    pm_protocol::clock::JKL_RATES
+        .contains(&rate)
+        .then_some(rate.num as i64)
 }
 
 /// What a command changed.
@@ -108,8 +139,17 @@ impl Transport {
     pub fn state(&self) -> TransportState {
         match self.mode {
             Mode::Stopped => TransportState::Stopped,
-            Mode::Playing { .. } => TransportState::Playing,
-            Mode::Grain { .. } => TransportState::Shuttling,
+            Mode::Playing { rate: 1, .. } => TransportState::Playing,
+            Mode::Playing { .. } | Mode::Grain { .. } => TransportState::Shuttling,
+        }
+    }
+
+    /// Project samples per output frame of the run (0 when stopped).
+    pub fn play_rate(&self) -> i64 {
+        match self.mode {
+            Mode::Stopped => 0,
+            Mode::Playing { rate, .. } => rate,
+            Mode::Grain { .. } => 1,
         }
     }
     pub fn is_running(&self) -> bool {
@@ -185,21 +225,30 @@ impl Transport {
             .map_err(|v| AudioError::invalid(format!("{v:?}")))?;
         Ok(match *command {
             TransportCommand::Play { rate } => {
-                if rate.num as i64 != rate.den as i64 {
+                let Some(rate) = jkl_rate(rate) else {
                     return Err(AudioError::Unsupported(format!(
-                        "playback at {}/{}× (J/K/L shuttle is Phase 3b)",
+                        "playback at {}/{}× (J/K/L plays at 1× and 2×, forward and reverse; \
+                         faster shuttles come after cutover)",
                         rate.num, rate.den
                     )));
-                }
+                };
                 if let Mode::Grain { back, .. } = self.mode {
                     self.position = back;
                 }
-                if let (Some(end), None) = (self.end, self.loop_samples)
+                if rate > 0
+                    && let (Some(end), None) = (self.end, self.loop_samples)
                     && self.position >= end
                 {
                     self.position = 0;
                 }
-                self.mode = Mode::Playing { until: None };
+                // Reverse from the composition end plays its last sample.
+                if rate < 0
+                    && let Some(end) = self.end
+                    && self.position >= end
+                {
+                    self.position = end - 1;
+                }
+                self.mode = Mode::Playing { until: None, rate };
                 self.restart()
             }
             TransportCommand::Pause => match self.mode {
@@ -219,9 +268,9 @@ impl Transport {
             TransportCommand::Seek { time, mode } => {
                 let at = self.sample_of(time.get());
                 match self.mode {
-                    Mode::Playing { .. } => {
+                    Mode::Playing { rate, .. } => {
                         self.position = at;
-                        self.mode = Mode::Playing { until: None };
+                        self.mode = Mode::Playing { until: None, rate };
                         self.restart()
                     }
                     _ if mode == SeekMode::Scrub && self.audio_scrub => self.start_grain(at),
@@ -286,6 +335,7 @@ impl Transport {
                 self.position = from;
                 self.mode = Mode::Playing {
                     until: Some((until, here)),
+                    rate: 1,
                 };
                 self.restart()
             }
@@ -317,11 +367,13 @@ impl Transport {
                     epoch: self.epoch,
                     grain: Some((start, end)),
                     loop_range: None,
+                    rate: 1,
                 };
                 self.position += n as i64;
                 Some(seg)
             }
-            Mode::Playing { until } => loop {
+            Mode::Playing { rate, .. } if rate < 0 => self.next_reverse(max, rate, state),
+            Mode::Playing { until, rate } => loop {
                 let looping = match (until, self.loop_samples) {
                     (None, Some((a, b))) if self.position < b => Some((a, b)),
                     _ => None,
@@ -348,7 +400,13 @@ impl Transport {
                 let entry = looping
                     .filter(|&(a, _)| self.position < a)
                     .map_or(limit, |(a, _)| a);
-                let n = ((entry.min(limit) - self.position) as usize).min(max);
+                // Output frames: at 2× each takes two samples (a last odd
+                // sample before a limit is skipped).
+                let n = (((entry.min(limit) - self.position) / rate) as usize).min(max);
+                if n == 0 {
+                    self.position = entry.min(limit);
+                    continue;
+                }
                 // Only a segment inside the loop wraps; one before it is a
                 // straight line.
                 let loop_range = looping
@@ -361,8 +419,9 @@ impl Transport {
                     epoch: self.epoch,
                     grain: None,
                     loop_range,
+                    rate,
                 };
-                self.position += n as i64;
+                self.position += n as i64 * rate;
                 if let Some((a, b)) = looping
                     && self.position >= b
                 {
@@ -370,6 +429,57 @@ impl Transport {
                 }
                 return Some(seg);
             },
+        }
+    }
+
+    /// The next segment of a reverse run (`rate` < 0): samples play from the
+    /// position down; the run stops after sample 0, or, inside the loop,
+    /// wraps from the loop start to its last sample. A run from past the
+    /// loop end plays down into it and then wraps (forward runs from before
+    /// the loop mirror this).
+    fn next_reverse(&mut self, max: usize, rate: i64, state: TransportState) -> Option<Segment> {
+        let speed = -rate;
+        loop {
+            let looping = self.loop_samples.filter(|&(a, _)| self.position >= a);
+            let floor = looping.map_or(0, |(a, _)| a);
+            // Below sample 0 (a looping run wraps before it gets there).
+            if self.position < floor {
+                return None;
+            }
+            // A segment above the loop ends on the loop's last sample.
+            let ceiling = looping.filter(|&(_, b)| self.position >= b).map(|(_, b)| b);
+            let lowest = ceiling.unwrap_or(floor);
+            // Whole frames whose samples stay at or above `lowest` (at 2× a
+            // last odd sample is skipped).
+            let n = (((self.position - lowest + 1) / speed) as usize).min(max);
+            let wrap = |t: &mut Transport| {
+                if let Some((a, b)) = looping
+                    && t.position < a
+                    && ceiling.is_none()
+                {
+                    t.position += b - a;
+                }
+            };
+            if n == 0 {
+                self.position = lowest - 1;
+                wrap(self);
+                continue;
+            }
+            let loop_range = looping
+                .filter(|&(_, b)| self.position < b)
+                .map(|(a, b)| self.loop_ticks_of(a, b));
+            let seg = Segment {
+                start: self.position,
+                frames: n,
+                state,
+                epoch: self.epoch,
+                grain: None,
+                loop_range,
+                rate,
+            };
+            self.position -= n as i64 * speed;
+            wrap(self);
+            return Some(seg);
         }
     }
 
@@ -385,10 +495,14 @@ impl Transport {
                 self.epoch += 1;
                 Effect::Stopped
             }
-            Mode::Playing { until } => {
+            Mode::Playing { until, rate } => {
                 self.mode = Mode::Stopped;
                 if let Some((_, back)) = until {
                     self.position = back;
+                }
+                // A reverse run that played sample 0 rests on it.
+                if rate < 0 {
+                    self.position = self.position.max(0);
                 }
                 self.epoch += 1;
                 Effect::Stopped
@@ -588,12 +702,121 @@ mod tests {
     }
 
     #[test]
-    fn other_rates_are_phase_3b() {
+    fn faster_shuttles_are_refused() {
         let mut tr = Transport::new(48_000);
-        let r = tr.apply(&TransportCommand::Play {
+        for rate in [
+            PlaybackRate { num: 4, den: 1 },
+            PlaybackRate { num: 1, den: 2 },
+            PlaybackRate { num: -3, den: 1 },
+        ] {
+            let r = tr.apply(&TransportCommand::Play { rate });
+            assert!(matches!(r, Err(AudioError::Unsupported(_))), "{rate:?}");
+        }
+        for rate in pm_protocol::clock::JKL_RATES {
+            tr.apply(&TransportCommand::Seek {
+                time: t(1.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+            assert_eq!(
+                tr.apply(&TransportCommand::Play { rate }).unwrap(),
+                Effect::Restart
+            );
+            assert_eq!(tr.play_rate(), rate.num as i64);
+            let expected = if rate.num == 1 {
+                TransportState::Playing
+            } else {
+                TransportState::Shuttling
+            };
+            assert_eq!(tr.state(), expected);
+        }
+    }
+
+    /// 2× forward covers two samples per frame; −1× plays the samples
+    /// backwards down to sample 0 and stops there.
+    #[test]
+    fn jkl_segments_cover_the_media_in_play_order() {
+        let mut tr = Transport::new(48_000);
+        tr.set_composition(Some(Rate::FPS_30), Some(2 * TICKS_PER_SECOND));
+        tr.apply(&TransportCommand::Seek {
+            time: t(1.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        tr.apply(&TransportCommand::Play {
             rate: PlaybackRate { num: 2, den: 1 },
-        });
-        assert!(matches!(r, Err(AudioError::Unsupported(_))));
+        })
+        .unwrap();
+        let s = tr.next(256).unwrap();
+        assert_eq!((s.start, s.frames, s.rate), (48_000, 256, 2));
+        assert_eq!(s.media_span(), (48_000, 48_512));
+        let mut last = s.media_span().1;
+        while let Some(s) = tr.next(256) {
+            assert_eq!(s.media_span().0, last);
+            last = s.media_span().1;
+        }
+        assert_eq!(last, 96_000, "2× runs to the composition end");
+        tr.take_stop();
+        // Reverse from 0.01 s: 480, 479, ..., 0.
+        tr.apply(&TransportCommand::Seek {
+            time: t(0.01),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        tr.apply(&TransportCommand::Play {
+            rate: PlaybackRate { num: -1, den: 1 },
+        })
+        .unwrap();
+        let s = tr.next(256).unwrap();
+        assert_eq!((s.start, s.frames), (480, 256));
+        assert_eq!(s.media_span(), (225, 481));
+        let s = tr.next(256).unwrap();
+        assert_eq!((s.start, s.frames), (224, 225));
+        assert_eq!(s.media_span(), (0, 225));
+        assert!(tr.next(256).is_none());
+        assert_eq!(tr.take_stop(), Effect::Stopped);
+        assert_eq!(tr.position(), 0);
+    }
+
+    /// Reverse inside the loop wraps from its start to its last sample;
+    /// from past its end, a reverse run plays down into it first.
+    #[test]
+    fn reverse_runs_wrap_at_the_loop_start() {
+        let mut tr = Transport::new(48_000);
+        tr.set_composition(Some(Rate::FPS_30), Some(20 * TICKS_PER_SECOND));
+        let range = TickRange {
+            start: t(1.0),
+            end: t(1.01),
+        };
+        tr.apply(&TransportCommand::SetLoop { range: Some(range) })
+            .unwrap();
+        tr.apply(&TransportCommand::Seek {
+            time: t(1.02),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        tr.apply(&TransportCommand::Play {
+            rate: PlaybackRate { num: -2, den: 1 },
+        })
+        .unwrap();
+        // 48_960 down to 48_480 (the loop's end) at 2 samples a frame:
+        // 240 frames play 48_960 to 48_481, outside the loop.
+        let s = tr.next(1_000).unwrap();
+        assert_eq!(s.loop_range, None);
+        assert_eq!(s.media_span(), (48_481, 48_961));
+        let mut wraps = 0;
+        let mut prev = s.start - s.frames as i64 * 2;
+        for _ in 0..20 {
+            let s = tr.next(100).unwrap();
+            assert_eq!(s.loop_range, Some(range), "inside at {}", s.start);
+            let (lo, hi) = s.media_span();
+            assert!(lo >= 48_000 && hi <= 48_480, "{lo}..{hi}");
+            if s.start != prev {
+                wraps += 1;
+            }
+            prev = s.start - s.frames as i64 * 2;
+        }
+        assert!(wraps >= 3, "{wraps}");
     }
 
     #[test]

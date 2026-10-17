@@ -291,6 +291,8 @@ describe('the transport driver', () => {
     driver.play(1.5);
     const commands = port.events('transport').map((e) => (e.message as { body: { command: string } }).body);
     expect(commands).toEqual([
+      // A session the driver becomes active on learns the audio scrub switch.
+      { type: 'transport', command: 'audioScrub', enabled: false },
       { type: 'transport', command: 'setLoop', range: { start: 0, end: 2 * TICKS_PER_SECOND } },
       { type: 'transport', command: 'seek', time: ticks(1.5), mode: 'exact' },
       { type: 'transport', command: 'play', rate: { num: 1, den: 1 } }
@@ -314,6 +316,45 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 4, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'masks', retry: { kind: 'never' }, detail: null } } } as never, 5));
     driver.refresh();
     expect(changes).toEqual([true, false]);
+  });
+
+  it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    driver.refresh();
+    driver.setAudioScrub(true);
+    driver.shuttle(4, -1);
+    const sent = () => port.events('transport').map((e) => (e.message as { body: Record<string, unknown> }).body);
+    expect(sent()).toEqual([
+      { type: 'transport', command: 'audioScrub', enabled: false },
+      { type: 'transport', command: 'audioScrub', enabled: true },
+      { type: 'transport', command: 'seek', time: ticks(4), mode: 'exact' },
+      { type: 'transport', command: 'play', rate: { num: -1, den: 1 } }
+    ]);
+    // Backwards at 2×: the playhead runs back two seconds a second.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 2, state: 'shuttling', hostTime: 1_000_000, mediaTime: ticks(4), rate: { num: -2, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.rate()).toBe(-2);
+    expect(driver.now(1500)!.time).toBeCloseTo(3, 9);
+    // A new rate while the line moves continues from what is heard: no seek.
+    const before = sent().length;
+    driver.shuttle(3, 2);
+    expect(sent().slice(before)).toEqual([{ type: 'transport', command: 'play', rate: { num: 2, den: 1 } }]);
+    driver.playAround(2.5, 2, 1);
+    expect(sent().slice(-2)).toEqual([
+      { type: 'transport', command: 'seek', time: ticks(2.5), mode: 'exact' },
+      { type: 'transport', command: 'playAround', preRoll: ticks(2), postRoll: ticks(1) }
+    ]);
+    // The play around's run ends back on its frame.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 3, state: 'playing', hostTime: 2_000_000, mediaTime: ticks(0.5), rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.now(2100)!.time).toBeCloseTo(0.6, 9);
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 4, state: 'stopped', hostTime: 5_000_000, mediaTime: ticks(2.5), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.now(5100)).toEqual({ time: 2.5, playing: false, ended: true });
+    expect(driver.rate()).toBe(0);
   });
 
   it('wraps a looping line as contract 6 does', () => {

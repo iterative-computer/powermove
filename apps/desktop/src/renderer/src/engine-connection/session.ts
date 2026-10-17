@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
@@ -66,6 +66,8 @@ export type SessionOptions = {
   onRoute?: (route: Route, reason: string | null) => void;
   /** Every clock sample of the session. */
   onClock?: (sample: ClockSample) => void;
+  /** The engine's audio messages (levels, waveform peaks; contract 6). */
+  onAudio?: (message: AudioMessage) => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
   /** Definition snapshots for the session (with "Use New Engine" on). */
@@ -299,6 +301,11 @@ export class DocumentSession {
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
         return;
       }
+      case 'audio': {
+        const { type: _t, ...message } = event;
+        this.options.onAudio?.(message as unknown as AudioMessage);
+        return;
+      }
       case 'patchesApplied':
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
@@ -342,6 +349,11 @@ export class DocumentSession {
 
   transport(command: TransportCommand): void {
     if (this.id !== null && !this.closed) this.options.connection.event({ type: 'transport', ...command } as never, this.id);
+  }
+
+  /** An audio message for the engine's mix (monitor solo, peak requests). */
+  audio(message: AudioMessage): void {
+    if (this.id !== null && !this.closed) this.options.connection.event({ type: 'audio', ...message } as never, this.id);
   }
 
   /** Ends the session from this side. */

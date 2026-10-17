@@ -109,6 +109,8 @@ pub enum Source {
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
+    /// Shape content (`crate::vector`).
+    Vector(Box<crate::vector::VectorSource>),
 }
 
 /// Inputs and outputs of a build.
@@ -538,6 +540,15 @@ fn draw_layer<'d>(
                 alpha,
             },
         },
+        Quad::Device { source, rect } => Draw {
+            layer: id.clone(),
+            matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
+            content: Content::Texture {
+                source,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                alpha,
+            },
+        },
     };
     if slow {
         return wrap(scope, b, vec![draw], 1.0);
@@ -701,6 +712,8 @@ enum Quad {
     },
     /// Screen-space content covering the whole target (3D layers).
     Screen { source: Source },
+    /// Target-space content covering exactly `rect` (level 2 vectors).
+    Device { source: Source, rect: [f64; 4] },
 }
 
 /// `contentQuad(L, T, W, H)`: `nativeContentQuad` plus the size anchor.
@@ -717,7 +730,7 @@ fn content_quad<'d>(
     let Some(mut quad) = quad else {
         return Ok(None);
     };
-    if matches!(quad, Quad::Screen { .. }) {
+    if matches!(quad, Quad::Screen { .. } | Quad::Device { .. }) {
         return Ok(Some(quad));
     }
     let offset = scope.size_anchor_offset(layer, time)?;
@@ -727,7 +740,7 @@ fn content_quad<'d>(
                 *ax -= offset.x;
                 *ay -= offset.y;
             }
-            Quad::Screen { .. } => {}
+            Quad::Screen { .. } | Quad::Device { .. } => {}
         }
     }
     Ok(Some(quad))
@@ -748,6 +761,33 @@ fn native_content_quad<'d>(
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
+        "solid" if crate::vector::level2(layer) => {
+            // Level 2 solids draw at output resolution with analytic edges
+            // (section 8), honoring `d.radius` (section 10); radius 0 is a
+            // plain rectangle.
+            let color = js::string(js::get(&d, "color"));
+            let c = pm_color::standard::parse_hex(&color);
+            let rgba = [c.rgb[0] as f32, c.rgb[1] as f32, c.rgb[2] as f32, c.alpha as f32];
+            let world = vector_world(scope, layer, time, scale)?;
+            let scene = crate::vector::level2::solid_scene(
+                js::or_number(js::get(&d, "w"), wf),
+                js::or_number(js::get(&d, "h"), hf),
+                js::get(&d, "radius").to_number(),
+                rgba,
+                &world,
+            );
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            Ok(scene.pixel_bounds(target).map(|rect| device_quad(crate::vector::VectorQuad::Device {
+                source: crate::vector::VectorSource::Scene { scene, rect },
+                rect,
+            })))
+        }
+        "shape" => {
+            let world = vector_world(scope, layer, time, scale)?;
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
+            Ok(quad.map(device_quad))
+        }
         "solid" => {
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
@@ -777,9 +817,36 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
-                return Ok(None);
+                // Level 2 SVG images draw at output resolution
+                // (crate::vector::svg); level 1 and SVG text stay routed.
+                if !crate::vector::level2(layer) {
+                    b.unsupported
+                        .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    return Ok(None);
+                }
+                let sw = js::or_number(&rec("w"), 1.0);
+                let sh = js::or_number(&rec("h"), 1.0);
+                let bw = js::or_number(js::get(&d, "w"), wf);
+                let bh = js::or_number(js::get(&d, "h"), hf);
+                let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                let world = vector_world(scope, layer, time, scale)?;
+                let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
+                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => Ok(quad.map(|q| device_quad(*q))),
+                    Ok(crate::vector::svg::SvgPlan::Text) => {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                        Ok(None)
+                    }
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        Ok(None)
+                    }
+                };
             }
             if ty == "video"
                 && (rec("imageSequence").truthy()
@@ -911,6 +978,37 @@ fn native_content_quad<'d>(
             ));
             Ok(None)
         }
+    }
+}
+
+/// The world matrix of a vector layer in target pixels, including the size
+/// anchor offset `contentQuad` applies to its quad.
+fn vector_world<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Mat2d> {
+    let world = scaled_world(scope, layer, time, scale)?;
+    let offset = scope.size_anchor_offset(layer, time)?;
+    Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
+}
+
+/// A planned vector quad as the render graph's quad.
+fn device_quad(q: crate::vector::VectorQuad) -> Quad {
+    match q {
+        crate::vector::VectorQuad::Layer { source, w, h, ax, ay } => Quad::Texture {
+            source: Source::Vector(Box::new(source)),
+            w,
+            h,
+            ax,
+            ay,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        },
+        crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
+            source: Source::Vector(Box::new(source)),
+            rect: [f64::from(rect.x), f64::from(rect.y), f64::from(rect.width), f64::from(rect.height)],
+        },
     }
 }
 

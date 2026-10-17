@@ -147,7 +147,7 @@ fn renders_are_identical_from_any_start() {
             0.3,
             3.0,
             &format!(
-                r#"{{"asset":"a48","trim":0.1,"speed":{},"embeddedAudio":true,"audioGain":0.8}}"#,
+                r#"{{"asset":"a48","trim":0.1,"speed":{},"embeddedAudio":true,"audioGain":0.8,"pitch":"follow"}}"#,
                 keys(&[(0.0, 0.5), (3.0, 1.7)])
             ),
             "",
@@ -369,7 +369,8 @@ fn speed_and_remaps_are_followed() {
             "click at {f}, expected {e}"
         );
     }
-    // Pitch follows speed: a 1 kHz tone at speed 1.5 sounds at 1.5 kHz.
+    // With `pitch: "follow"` the pitch follows the speed: a 1 kHz tone at
+    // speed 1.5 sounds at 1.5 kHz.
     let tone_file = dir.join("tone.wav");
     write_wav(&tone_file, SR, &[tone(SR, 4.0, 1000.0, 0.5)]);
     let v = layer(
@@ -377,7 +378,7 @@ fn speed_and_remaps_are_followed() {
         "video",
         0.0,
         2.0,
-        r#"{"asset":"t","speed":1.5,"embeddedAudio":true}"#,
+        r#"{"asset":"t","speed":1.5,"embeddedAudio":true,"pitch":"follow"}"#,
         "",
     );
     let doc = project(30.0, 2.0, &[v], &[], "");
@@ -487,6 +488,7 @@ fn monitor_solo_and_meters() {
         wait: true,
         monitor_solo: Some(["B".to_string()].into_iter().collect()),
         meters: true,
+        ..Default::default()
     };
     m.render(1000, 4096, &mut out, &options).unwrap();
     assert!((out[0][100] - 0.25).abs() < 1e-7, "{}", out[0][100]); // B × master 0.5
@@ -650,6 +652,7 @@ fn live_edits_glide_without_clicks() {
         wait: true,
         monitor_solo: Some(["B".to_string()].into_iter().collect()),
         meters: false,
+        ..Default::default()
     };
     m.render(256, 1024, &mut out, &solo).unwrap();
     assert!((out[0][0] - 0.5).abs() < 1e-6, "starts on the old mix");

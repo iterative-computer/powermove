@@ -50,6 +50,9 @@ function makeEditor() {
     /* `blurField` is the fall-through binding under Escape; shadowing it would
        swallow the chord before `deselect` ever sees it. */
     if (id === 'blurField') continue;
+    /* The J/K/L shuttle declines without the new engine's transport, so the
+       After Effects bindings under it are what these tests see. */
+    if (['shuttleBackward', 'shuttleStop', 'shuttleForward', 'playAround'].includes(id)) continue;
     PM.Kernel.commands.register('test', {
       id,
       label: id,
@@ -290,11 +293,12 @@ describe('AE-style keymap dispatch', () => {
   it('registers every editor binding as a keymap-default entry at priority 100', () => {
     const bindings = PM.Kernel.listBindings();
     expect(bindings).toHaveLength(activatedBindings.length);
+    const shuttle = ['shuttleBackward', 'shuttleStop', 'shuttleForward', 'playAround'];
     const editorBindings = bindings.filter((binding: any) => binding.command !== 'blurField');
     expect(editorBindings.length).toBeGreaterThan(50);
     for (const binding of editorBindings) {
       expect(binding.ownerId).toBe('keymap-default');
-      expect(binding.priority).toBe(100);
+      expect(binding.priority).toBe(shuttle.includes(binding.command) ? 90 : 100);
       expect(binding.inFields).toBe(['save', 'saveAs', 'settings', 'contextPaste'].includes(binding.command));
     }
     expect(bindings.find((binding: any) => binding.command === 'blurField')).toMatchObject({

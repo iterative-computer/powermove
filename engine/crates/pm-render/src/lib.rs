@@ -36,6 +36,7 @@ mod request;
 pub mod scene3d;
 pub mod stills;
 pub mod three;
+pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{

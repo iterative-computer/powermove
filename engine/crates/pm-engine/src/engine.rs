@@ -349,6 +349,7 @@ fn event_name(event: &Event) -> &'static str {
         Event::BlenderProgress(_) => "blenderProgress",
         Event::BlenderSurface(_) => "blenderSurface",
         Event::Fact(_) => "fact",
+        Event::Audio(_) => "audio",
     }
 }
 
@@ -1378,7 +1379,10 @@ impl Engine {
             }
             (Event::Crash(report), PeerKind::Host) => self.on_crash_report(&report, out),
             (
-                event @ (Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_)),
+                event @ (Event::ReleaseFrame(_)
+                | Event::Viewer(_)
+                | Event::Transport(_)
+                | Event::Audio(_)),
                 PeerKind::Renderer,
             ) if self.presenter.is_some() => {
                 let Some(sid) =
@@ -1398,6 +1402,7 @@ impl Engine {
                     Event::Viewer(state) => p.viewer(ctx, port, sid, state, revision),
                     Event::ReleaseFrame(release) => p.release(port, sid, release),
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
+                    Event::Audio(message) => p.audio(ctx, port, sid, message),
                     _ => {}
                 });
                 if let Some(command) = transport {
@@ -1405,7 +1410,7 @@ impl Engine {
                 }
             }
             (
-                Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_),
+                Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_) | Event::Audio(_),
                 PeerKind::Renderer,
             )
             | (Event::BlenderProgress(_) | Event::BlenderSurface(_), PeerKind::Host) => self
