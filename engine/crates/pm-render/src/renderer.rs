@@ -576,6 +576,7 @@ impl Renderer {
                 "text without configured fonts",
             )]));
         }
+        let comp_id = comp.id().to_string_lossy();
         let mut scope = pm_eval::Scope::new(&mut self.evaluator, &comp, &project);
         let node = scope
             .layers()
@@ -587,8 +588,19 @@ impl Renderer {
             "text" => self.text.text_layer(&mut scope, node, seconds, scale),
             "captions" => self.text.captions_layer(&mut scope, node, seconds, scale),
             other => return Err(RenderError::Request(format!("layer {layer} is {other}"))),
+        };
+        // What the layer could not draw is refused here, as `render` refuses
+        // it, and never left for a later layer to report.
+        let refused: Vec<Unsupported> = self
+            .text
+            .take_unsupported()
+            .into_iter()
+            .map(|what| Unsupported::layer(&comp_id, node, Feature::Text(what)))
+            .collect();
+        let quad = quad.map_err(|e| RenderError::Request(e.to_string()))?;
+        if !refused.is_empty() {
+            return Err(RenderError::Unsupported(refused));
         }
-        .map_err(|e| RenderError::Request(e.to_string()))?;
         let Some(quad) = quad else { return Ok(None) };
         let mut encoder = self
             .device

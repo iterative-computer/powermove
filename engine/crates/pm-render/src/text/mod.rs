@@ -268,33 +268,59 @@ fn canvas_px(n: f64, density: f64) -> u32 {
     }
 }
 
-/// `c.fillStyle = value` on a context whose style is `previous`.
-fn fill_style(value: &JsValue, previous: Rgba) -> Rgba {
-    match value {
-        JsValue::String(s) => color::parse_or(&s.to_string_lossy(), previous),
-        // Canvas stringifies non-strings (numbers never parse as colors).
-        JsValue::Undefined | JsValue::Null => previous,
-        other => color::parse_or(&other.to_js_string().to_string_lossy(), previous),
+/// `c.fillStyle = value` on a context whose style is `previous`. A string
+/// the setter rejects keeps `previous`; a CSS color the parser does not
+/// reproduce is recorded in `unsupported` (the layer is refused).
+fn fill_style(value: &JsValue, previous: Rgba, unsupported: &mut Vec<String>) -> Rgba {
+    // Canvas stringifies non-strings (`undefined`, `null` and numbers never
+    // parse as colors).
+    let s = match value {
+        JsValue::String(s) => s.to_string_lossy(),
+        other => other.to_js_string().to_string_lossy(),
+    };
+    css_color(&s, previous, unsupported)
+}
+
+/// [`color::classify`] as a canvas setter on a context whose style is
+/// `previous`.
+fn css_color(s: &str, previous: Rgba, unsupported: &mut Vec<String>) -> Rgba {
+    match color::classify(s) {
+        Ok(c) => c,
+        Err(color::Rejected::Invalid) => previous,
+        Err(color::Rejected::Unsupported) => {
+            let what = format!("text color {s:?}");
+            if !unsupported.contains(&what) {
+                unsupported.push(what);
+            }
+            previous
+        }
     }
 }
 
-/// `hexToRgba(hex, opacity)` of `captions/render.ts`.
-fn hex_to_rgba(hex: &str, opacity: f64) -> Rgba {
-    let v = hex.trim_start_matches('#');
+/// `hexToRgba(hex, opacity)` of `captions/render.ts` as the canvas setter
+/// takes the `rgba(...)` string it builds: `None` when the string holds a
+/// `NaN` (a short or non-hex code) and the setter keeps its previous style.
+fn hex_to_rgba(hex: &str, opacity: f64) -> Option<Rgba> {
+    // `hex.replace('#', '')` (the first `#`), sliced in UTF-16 units.
+    let value: Vec<u16> = hex.replacen('#', "", 1).encode_utf16().collect();
     let part = |a: usize, b: usize| -> f64 {
-        let s = v.get(a..b.min(v.len())).unwrap_or("");
-        let n = pm_eval::js_sem::parse_int(&JsString::from(s), 16);
-        if n.is_nan() { 0.0 } else { n }
+        let s = String::from_utf16_lossy(value.get(a..b.min(value.len())).unwrap_or(&[]));
+        pm_eval::js_sem::parse_int(&JsString::from(s.as_str()), 16)
     };
     let (r, g, b) = (part(0, 2), part(2, 4), part(4, 6));
-    let a = if v.len() >= 8 {
+    let a = if value.len() >= 8 {
         part(6, 8) / 255.0
     } else {
         1.0
     };
     let alpha = libm::round(a * opacity * 1000.0) / 1000.0;
-    // The `rgba(...)` string the canvas parses: channels are integers.
-    [r / 255.0, g / 255.0, b / 255.0, alpha.clamp(0.0, 1.0)]
+    // `rgba(NaN,...)` and `Infinity` are not CSS numbers; the integer
+    // channels and the alpha clamp to their ranges.
+    if ![r, g, b, alpha].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let ch = |v: f64| v.clamp(0.0, 255.0) / 255.0;
+    Some([ch(r), ch(g), ch(b), alpha.clamp(0.0, 1.0)])
 }
 
 /// Hashes the scene into a 128-bit content key.
@@ -462,7 +488,6 @@ impl TextContext {
                     items: Vec::new(),
                 };
                 let (mut painter, fonts, unsupported) = self.painter();
-                let mut style_color = color::BLACK;
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
@@ -475,7 +500,9 @@ impl TextContext {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
                     };
-                    style_color = fill_style(&fill, style_color);
+                    // Each glyph draws between `save()` and `restore()`: a
+                    // rejected color leaves the canvas default, black.
+                    let style_color = fill_style(&fill, color::BLACK, &mut painter.unsupported);
                     let blur = if g.blur > 0.01 { g.blur * density } else { 0.0 };
                     let style = text_content(&g.style);
                     let runs = fonts.text_runs(&style, &g.unit.text, 0.0);
@@ -511,7 +538,7 @@ impl TextContext {
                 JsValue::from("#fff")
             }
         };
-        let fill = fill_style(&fill, color::BLACK);
+        let fill = fill_style(&fill, color::BLACK, &mut self.unsupported);
         let mut scene = TextScene {
             width: cw,
             height: ch,
@@ -566,7 +593,11 @@ impl TextContext {
         let fill = {
             let c = get(&d, "color");
             let fallback = JsValue::from("#fff");
-            fill_style(if c.truthy() { c } else { &fallback }, color::BLACK)
+            fill_style(
+                if c.truthy() { c } else { &fallback },
+                color::BLACK,
+                &mut self.unsupported,
+            )
         };
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         let Some(l2) = fonts.level2() else {
@@ -702,11 +733,17 @@ impl TextContext {
         let layout = &f.layout;
         let block = f.block;
         let pad = if style.boxed { style.box_padding } else { 0.0 };
+        // The style each word's `save()` restores: the box fill once the box
+        // is drawn, else the canvas default, black.
+        let mut restored = color::BLACK;
         if style.boxed && style.box_opacity > 0.0 {
+            // A rejected box color fills with the canvas default, black.
             let fill = hex_to_rgba(
                 &style.box_color.to_string_lossy(),
                 style.box_opacity / 100.0,
-            );
+            )
+            .unwrap_or(color::BLACK);
+            restored = fill;
             let path = rounded_rect(
                 0.0,
                 0.0,
@@ -726,9 +763,11 @@ impl TextContext {
         } else {
             0.0
         };
-        let stroke_color = hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0);
+        // `strokeStyle` is set inside each word's `save()`; a rejected color
+        // keeps the canvas default, black.
+        let stroke_color =
+            hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
         let (mut painter, fonts, unsupported) = self.painter();
-        let mut fill_previous = color::BLACK;
         for line in &layout.lines {
             for word in &line.words {
                 let state =
@@ -774,16 +813,8 @@ impl TextContext {
                 } else {
                     &style.fill
                 };
-                fill_previous = color::parse_or(&fill.to_string_lossy(), fill_previous);
-                painter.fill_text(
-                    &mut scene.items,
-                    &refs,
-                    (x, y),
-                    m,
-                    fill_previous,
-                    state.alpha,
-                    0.0,
-                );
+                let fill = css_color(&fill.to_string_lossy(), restored, &mut painter.unsupported);
+                painter.fill_text(&mut scene.items, &refs, (x, y), m, fill, state.alpha, 0.0);
             }
         }
         unsupported.append(&mut painter.unsupported);
@@ -868,8 +899,20 @@ mod tests {
 
     #[test]
     fn caption_colors_follow_hex_to_rgba() {
-        assert_eq!(hex_to_rgba("#000000", 0.72), [0.0, 0.0, 0.0, 0.72]);
-        assert_eq!(hex_to_rgba("#00000099", 1.0), [0.0, 0.0, 0.0, 0.6]);
-        assert_eq!(hex_to_rgba("#FFFFFF", 0.94), [1.0, 1.0, 1.0, 0.94]);
+        assert_eq!(hex_to_rgba("#000000", 0.72), Some([0.0, 0.0, 0.0, 0.72]));
+        assert_eq!(hex_to_rgba("#00000099", 1.0), Some([0.0, 0.0, 0.0, 0.6]));
+        assert_eq!(hex_to_rgba("#FFFFFF", 0.94), Some([1.0, 1.0, 1.0, 0.94]));
+        assert_eq!(hex_to_rgba("FF0000", 2.0), Some([1.0, 0.0, 0.0, 1.0]));
+        // `rgba(255,15,NaN,1)`, `rgba(NaN,...)` and `rgba(...,NaN)`: the
+        // canvas rejects them.
+        assert_eq!(hex_to_rgba("#fff", 1.0), None);
+        assert_eq!(hex_to_rgba("red", 1.0), None);
+        assert_eq!(hex_to_rgba("#000000zz", 1.0), None);
+        assert_eq!(hex_to_rgba("#000000", f64::NAN), None);
+        // `parseInt` takes a hex prefix: `1g` is 1.
+        assert_eq!(
+            hex_to_rgba("#1g0000", 1.0),
+            Some([1.0 / 255.0, 0.0, 0.0, 1.0])
+        );
     }
 }

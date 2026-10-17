@@ -55,3 +55,8 @@ harness = false
 # Runs on the main thread (the CoreText font registry and reference).
 name = "text_level2"
 harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_colors"
+harness = false
