@@ -294,6 +294,36 @@ impl Textures {
             return Ok(e.texture.clone());
         }
         let (w, h, rgba) = decode(path, &self.pool)?;
+        let texture = self.upload_rgba(device, queue, encoder, w, h, &rgba, srgb, true);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let t = Arc::new(MapTexture { texture, view });
+        self.maps
+            .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
+        self.maps.insert(
+            key,
+            MapEntry {
+                texture: t.clone(),
+                used: self.generation,
+            },
+        );
+        Ok(t)
+    }
+
+    /// An RGBA8 texture from tight rows (top row first), with
+    /// `generateMipmap`'s chain when `mips` (box filters, in linear light
+    /// for sRGB textures).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_rgba(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        srgb: bool,
+        mips: bool,
+    ) -> wgpu::Texture {
         self.samplers(device);
         self.mip_pipelines(device);
         let format = if srgb {
@@ -301,7 +331,7 @@ impl Textures {
         } else {
             wgpu::TextureFormat::Rgba8Unorm
         };
-        let levels = mip_levels(w, h);
+        let levels = if mips { mip_levels(w, h) } else { 1 };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("3d map"),
             size: wgpu::Extent3d {
@@ -325,7 +355,7 @@ impl Textures {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(w * 4),
@@ -385,18 +415,7 @@ impl Textures {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let t = Arc::new(MapTexture { texture, view });
-        self.maps
-            .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
-        self.maps.insert(
-            key,
-            MapEntry {
-                texture: t.clone(),
-                used: self.generation,
-            },
-        );
-        Ok(t)
+        texture
     }
 
     /// Starts 3D frame `generation`: maps no 3D frame used since

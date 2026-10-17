@@ -649,6 +649,9 @@ pub struct Model {
     /// `loadGltf`'s counts over meshes (points and lines excluded).
     pub vertices: usize,
     pub triangles: usize,
+    /// Per object: the world position a light's `target` keeps on the
+    /// runtime's clone (directional and spot lights).
+    pub light_targets: Vec<Option<Vec3>>,
 }
 
 impl Model {

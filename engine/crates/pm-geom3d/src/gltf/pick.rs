@@ -56,13 +56,18 @@ pub struct Ray {
 }
 
 impl Ray {
-    /// `Ray.applyMatrix4`.
+    /// `Ray.applyMatrix4`: the origin as a point, the direction through
+    /// `transformDirection` (normalized).
     pub fn apply(&self, m: &Mat4) -> Ray {
-        let origin = math::apply(m, self.origin);
-        let tip = math::apply(m, add(self.direction, self.origin));
+        let (x, y, z) = (self.direction[0], self.direction[1], self.direction[2]);
+        let d = [
+            m[0] * x + m[4] * y + m[8] * z,
+            m[1] * x + m[5] * y + m[9] * z,
+            m[2] * x + m[6] * y + m[10] * z,
+        ];
         Ray {
-            origin,
-            direction: normalize(sub(tip, origin)),
+            origin: math::apply(m, self.origin),
+            direction: normalize(d),
         }
     }
 

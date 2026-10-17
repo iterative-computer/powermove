@@ -23,6 +23,32 @@ pub enum TextureRef {
     Shadow(usize),
     Ltc1,
     Ltc2,
+    /// A glTF texture (its image, sampler, and color space).
+    Gltf(super::gltf::GltfMap),
+    /// A float data texture (`boneTexture`, `morphTargetsTexture`; RGBA
+    /// f32, nearest, `layers` > 1 for an array texture).
+    Data {
+        key: u64,
+        width: u32,
+        height: u32,
+        layers: u32,
+        /// Sampled as an array texture (`sampler2DArray`).
+        array: bool,
+        data: std::sync::Arc<Vec<f32>>,
+    },
+    /// The transmission render target of the layer's color pass.
+    Transmission,
+}
+
+/// What a draw rasterizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Topology {
+    #[default]
+    Triangles,
+    /// `LineSegments` and `LineLoop` (converted to segments).
+    Lines,
+    LineStrip,
+    Points,
 }
 
 /// Fixed-function state of a draw (`WebGLState.setMaterial`).
@@ -38,6 +64,10 @@ pub struct DrawState {
     pub front_face_cw: bool,
     /// `material.wireframe`: lines over the wireframe index.
     pub lines: bool,
+    /// The primitive's topology (glTF points and lines).
+    pub topology: Topology,
+    /// Into the transmission target (RGBA half float) instead of the canvas.
+    pub hdr: bool,
 }
 
 /// One `renderBufferDirect`.
@@ -58,6 +88,16 @@ pub struct DrawDesc {
 /// A pass of the layer's render.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PassDesc {
+    /// The transmission pass of the layer's color pass
+    /// (`renderTransmissionPass`): its opaque items into the transmission
+    /// target (cleared to `clear`, linear, untoned), resolved and
+    /// mipmapped; then the back faces of double-sided transmissive items,
+    /// resolved and mipmapped again.
+    Transmission {
+        clear: [f64; 4],
+        opaque: Vec<DrawDesc>,
+        back: Vec<DrawDesc>,
+    },
     /// A light's shadow map: cleared to white, one viewport per camera.
     Shadow {
         light: usize,
@@ -139,7 +179,15 @@ pub fn frustum(m: &Mat4) -> [[f64; 4]; 6] {
 /// planes. Culled meshes draw nothing either way; culling keeps the draw
 /// list three.js's.
 fn visible_in(planes: &[[f64; 4]; 6], mesh: &super::model::Mesh3d) -> bool {
-    let (c, r) = mesh.geometry.sphere;
+    let (c, r) = match &mesh.gltf {
+        // Skinned meshes are never culled (three.js keeps the first pose's
+        // sphere, which this engine does not reproduce).
+        Some(g) => match g.sphere {
+            Some(s) => s,
+            None => return true,
+        },
+        None => mesh.geometry.sphere,
+    };
     let center = lights::apply(&mesh.world, c);
     let te = &mesh.world;
     let sx = te[0] * te[0] + te[1] * te[1] + te[2] * te[2];
@@ -193,7 +241,46 @@ fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<I
     out
 }
 
-fn program(material: &Material3d, side: Side, counts: &LightCounts) -> Result<Parameters, String> {
+/// Whether a mesh is glTF points or lines. Today's per-layer render
+/// edits only meshes' materials (`child.isMesh`), so points and lines keep
+/// their own visibility and writes: every layer's depth prepass and color
+/// pass draws the points and lines of every visible object.
+fn loose(mesh: &super::model::Mesh3d) -> bool {
+    mesh.gltf
+        .as_ref()
+        .is_some_and(|g| g.mode != pm_geom3d::gltf::Mode::Triangles)
+}
+
+/// The points and lines of every visible object but `except`.
+fn loose_items<'s>(
+    scene: &'s Scene3d,
+    planes: &[[f64; 4]; 6],
+    except: Option<usize>,
+) -> Vec<Item<'s>> {
+    let mut out = Vec::new();
+    for o in 0..scene.objects.len() {
+        if Some(o) == except || !scene.objects[o].meshes.iter().any(loose) {
+            continue;
+        }
+        out.extend(
+            items(scene, o, planes)
+                .into_iter()
+                .filter(|i| loose(&scene.objects[i.object].meshes[i.mesh])),
+        );
+    }
+    out
+}
+
+fn program(
+    mesh: &super::model::Mesh3d,
+    material: &Material3d,
+    side: Side,
+    counts: &LightCounts,
+    target: super::gltf::material::Target,
+) -> Result<Parameters, String> {
+    if mesh.gltf.is_some() {
+        return super::gltf::material::parameters(mesh, material, side, counts, target);
+    }
     match material.kind {
         MaterialKind::Standard => materials::standard(&materials::Standard {
             name: material.name.clone(),
@@ -203,7 +290,15 @@ fn program(material: &Material3d, side: Side, counts: &LightCounts) -> Result<Pa
             lights: *counts,
         }),
         MaterialKind::Basic => materials::basic(&material.name, side, material.transparent, counts),
+        MaterialKind::Physical | MaterialKind::Points | MaterialKind::Line => {
+            Err("a glTF material class on a scene mesh".into())
+        }
     }
+}
+
+/// Whether a material is lit (`materialNeedsLights`).
+fn lit(m: &Material3d) -> bool {
+    matches!(m.kind, MaterialKind::Standard | MaterialKind::Physical)
 }
 
 fn state(
@@ -222,6 +317,20 @@ fn state(
         cull: material_side != Side::Double,
         front_face_cw: (material_side == Side::Back) != mirrored,
         lines,
+        topology: Topology::Triangles,
+        hdr: false,
+    }
+}
+
+/// A glTF primitive's topology.
+fn topology(mesh: &super::model::Mesh3d) -> Topology {
+    match mesh.gltf.as_ref().map(|g| g.mode) {
+        Some(pm_geom3d::gltf::Mode::Points) => Topology::Points,
+        Some(pm_geom3d::gltf::Mode::LineSegments | pm_geom3d::gltf::Mode::LineLoop) => {
+            Topology::Lines
+        }
+        Some(pm_geom3d::gltf::Mode::LineStrip) => Topology::LineStrip,
+        _ => Topology::Triangles,
     }
 }
 
@@ -319,6 +428,29 @@ fn shading_draw(
     color: bool,
     depth: bool,
 ) -> Result<DrawDesc, String> {
+    draw_to(
+        scene,
+        ls,
+        light_uniforms,
+        item,
+        side,
+        color,
+        depth,
+        super::gltf::material::Target::Canvas,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_to(
+    scene: &Scene3d,
+    ls: &LightState,
+    light_uniforms: &[(String, Vec<f64>)],
+    item: &Item<'_>,
+    side: Side,
+    color: bool,
+    depth: bool,
+    target: super::gltf::material::Target,
+) -> Result<DrawDesc, String> {
     let (w, h) = scene.canvas();
     let mesh = &scene.objects[item.object].meshes[item.mesh];
     let m = item.material;
@@ -330,31 +462,41 @@ fn shading_draw(
         &scene.camera.projection_matrix(w, h),
         &view,
         &scene.camera.world,
-        scene.camera.orthographic(),
+        scene.camera.orthographic() && !matches!(m.kind, MaterialKind::Points | MaterialKind::Line),
     );
     object_uniforms(&mut u, &view, &mesh.world);
-    material_uniforms(&mut u, &mut t, m, side);
+    if mesh.gltf.is_some() {
+        super::gltf::material::uniforms(&mut u, &mut t, m, side, h, (w, h));
+        super::gltf::material::object_uniforms(&mut u, &mut t, mesh);
+    } else {
+        material_uniforms(&mut u, &mut t, m, side);
+    }
     u.push(("toneMappingExposure".into(), vec![scene.exposure]));
-    if m.kind == MaterialKind::Standard {
+    if lit(m) {
         u.extend(light_uniforms.iter().cloned());
+        t.extend(light_textures(scene, ls));
+    }
+    if lit(m) || mesh.gltf.is_some() {
         u.push((
             "receiveShadow".into(),
             vec![f64::from(u8::from(mesh.receive_shadow))],
         ));
-        t.extend(light_textures(scene, ls));
     }
+    let mut st = state(
+        side,
+        &mesh.world,
+        color,
+        depth,
+        color && m.transparent,
+        m.wireframe,
+    );
+    st.topology = topology(mesh);
+    st.hdr = target == super::gltf::material::Target::Transmission;
     Ok(DrawDesc {
-        params: program(m, side, &ls.counts)?,
+        params: program(mesh, m, side, &ls.counts, target)?,
         uniforms: u,
         textures: t,
-        state: state(
-            side,
-            &mesh.world,
-            color,
-            depth,
-            color && m.transparent,
-            m.wireframe,
-        ),
+        state: st,
         object: item.object,
         mesh: item.mesh,
         range: item.range,
@@ -372,7 +514,9 @@ fn shadow_draw(
     let side = item.material.side.shadow();
     let point = light.kind == LightKind::Point;
     let map = item.material.maps.color.as_ref();
-    let params = if point {
+    let params = if mesh.gltf.is_some() {
+        super::gltf::material::shadow_parameters(mesh, item.material, side, point, &ls.counts)?
+    } else if point {
         materials::distance(side, map.is_some(), &ls.counts)?
     } else {
         materials::depth_rgba(side, map.is_some(), &ls.counts)?
@@ -385,7 +529,10 @@ fn shadow_draw(
     u.push(("modelMatrix".into(), mesh.world.to_vec()));
     u.push(("opacity".into(), vec![1.0]));
     let mut textures = Vec::new();
-    if let Some(map) = map {
+    if mesh.gltf.is_some() {
+        super::gltf::material::shadow_uniforms(&mut u, &mut textures, item.material);
+        super::gltf::material::object_uniforms(&mut u, &mut textures, mesh);
+    } else if let Some(map) = map {
         textures.push(("map".to_owned(), TextureRef::Map(map.clone())));
         u.push(("mapTransform".into(), map.transform.to_vec()));
     }
@@ -394,10 +541,15 @@ fn shadow_draw(
         u.push(("nearDistance".into(), vec![view.near]));
         u.push(("farDistance".into(), vec![view.far]));
     }
+    // Scene casters sample no map in the depth pass (it packs depth only);
+    // glTF casters bind theirs for the alpha test.
+    if mesh.gltf.is_none() {
+        textures.clear();
+    }
     Ok(DrawDesc {
         params,
         uniforms: u,
-        textures: Vec::new(),
+        textures,
         state: state(
             side,
             &mesh.world,
@@ -465,7 +617,10 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
             continue;
         }
         for item in items(scene, o, &planes) {
-            if item.material.transparent || !item.material.depth_write {
+            if item.material.transparent
+                || !item.material.depth_write
+                || loose(&scene.objects[item.object].meshes[item.mesh])
+            {
                 continue;
             }
             draws.push(shading_draw(
@@ -478,6 +633,39 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
                 true,
             )?);
         }
+    }
+    // Points and lines keep their writes in the prepass too (its color is
+    // discarded). With glTF drawables the draws follow three.js's lists:
+    // opaque in painter order, then transmissive, then transparent.
+    let gltf = scene
+        .objects
+        .iter()
+        .any(|o| o.meshes.iter().any(|m| m.gltf.is_some()));
+    if gltf {
+        let mut all: Vec<Item<'_>> = Vec::new();
+        for &o in layer.depth_set {
+            let object = &scene.objects[o];
+            if !(object.layer_opacity >= 0.999 && object.occludes) {
+                continue;
+            }
+            all.extend(items(scene, o, &planes).into_iter().filter(|i| {
+                !i.material.transparent
+                    && i.material.depth_write
+                    && !loose(&scene.objects[i.object].meshes[i.mesh])
+            }));
+        }
+        all.extend(loose_items(scene, &planes, None));
+        let is_loose = |i: &Item<'_>| loose(&scene.objects[i.object].meshes[i.mesh]);
+        draws = list_draws_with(
+            scene,
+            &ls,
+            &light_uniforms,
+            &all,
+            |i| i.material.depth_write,
+            is_loose,
+            super::gltf::material::Target::Canvas,
+            (true, true, true),
+        )?;
     }
     passes.push(PassDesc::Prepass(draws));
     Ok(passes)
@@ -540,6 +728,267 @@ pub fn color(layer: &Layer3d<'_>) -> Result<PassDesc, String> {
     Ok(PassDesc::Color { clear, draws })
 }
 
+/// Whether an item belongs to the transmissive list (`material.transmission > 0`).
+fn transmissive(m: &Material3d) -> bool {
+    m.kind == MaterialKind::Physical && m.ext.as_ref().is_some_and(|e| e.source.transmission > 0.0)
+}
+
+/// The sort keys of a glTF item: material order, clip z of its bounding
+/// sphere center, object id.
+fn sort_keys(scene: &Scene3d, item: &Item<'_>, proj_screen: &Mat4) -> (u64, f64, u64) {
+    let mesh = &scene.objects[item.object].meshes[item.mesh];
+    let (center, id) = match &mesh.gltf {
+        Some(g) => (g.sphere.map_or(mesh.geometry.sphere.0, |s| s.0), g.id),
+        None => (mesh.geometry.sphere.0, item.mesh as u64),
+    };
+    let p = clip4(&mesh.world, [center[0], center[1], center[2], 1.0]);
+    let z = clip4(proj_screen, p)[2];
+    // `material.id`: creation order (objects in scene order, a mesh's
+    // materials in slot order).
+    let order = item.material.ext.as_ref().map_or_else(
+        || {
+            let slot = mesh
+                .materials
+                .iter()
+                .position(|m| std::ptr::eq(m, item.material))
+                .unwrap_or(0);
+            ((item.object as u64) << 32) | ((item.mesh as u64) << 16) | slot as u64
+        },
+        |e| e.order,
+    );
+    (order, z, id)
+}
+
+/// The draws of render items in three.js's lists: opaque (painter order),
+/// transmissive, then transparent (reverse painter order), double-sided
+/// transparent items back face first.
+#[allow(clippy::too_many_arguments)]
+fn list_draws(
+    scene: &Scene3d,
+    ls: &LightState,
+    light_uniforms: &[(String, Vec<f64>)],
+    all: &[Item<'_>],
+    depth: impl Fn(&Item<'_>) -> bool,
+    target: super::gltf::material::Target,
+    lists: (bool, bool, bool),
+) -> Result<Vec<DrawDesc>, String> {
+    list_draws_with(
+        scene,
+        ls,
+        light_uniforms,
+        all,
+        depth,
+        |_| true,
+        target,
+        lists,
+    )
+}
+
+/// [`list_draws`] with each item's color writes.
+#[allow(clippy::too_many_arguments)]
+fn list_draws_with(
+    scene: &Scene3d,
+    ls: &LightState,
+    light_uniforms: &[(String, Vec<f64>)],
+    all: &[Item<'_>],
+    depth: impl Fn(&Item<'_>) -> bool,
+    color: impl Fn(&Item<'_>) -> bool,
+    target: super::gltf::material::Target,
+    lists: (bool, bool, bool),
+) -> Result<Vec<DrawDesc>, String> {
+    let (w, h) = scene.canvas();
+    let proj_screen = math::multiply(&scene.camera.projection_matrix(w, h), &scene.camera.view());
+    let mut keyed: Vec<((u64, f64, u64), &Item<'_>)> = all
+        .iter()
+        .map(|i| (sort_keys(scene, i, &proj_screen), i))
+        .collect();
+    let painter = |a: &(u64, f64, u64), b: &(u64, f64, u64)| {
+        a.0.cmp(&b.0)
+            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.2.cmp(&b.2))
+    };
+    keyed.sort_by(|a, b| painter(&a.0, &b.0));
+    let mut draws = Vec::new();
+    let emit = |item: &Item<'_>, draws: &mut Vec<DrawDesc>| -> Result<(), String> {
+        let m = item.material;
+        let sides: &[Side] = if m.transparent && m.side == Side::Double {
+            &[Side::Back, Side::Front]
+        } else {
+            std::slice::from_ref(&m.side)
+        };
+        for &side in sides {
+            draws.push(draw_to(
+                scene,
+                ls,
+                light_uniforms,
+                item,
+                side,
+                color(item),
+                depth(item),
+                target,
+            )?);
+        }
+        Ok(())
+    };
+    if lists.0 {
+        for (_, item) in keyed
+            .iter()
+            .filter(|(_, i)| !transmissive(i.material) && !i.material.transparent)
+        {
+            emit(item, &mut draws)?;
+        }
+    }
+    // Transmissive and transparent lists: `reversePainterSortStable` (back
+    // to front, then object id).
+    let reverse = |list: &mut Vec<&((u64, f64, u64), &Item<'_>)>| {
+        list.sort_by(|a, b| {
+            b.0.1
+                .partial_cmp(&a.0.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.2.cmp(&b.0.2))
+        });
+    };
+    if lists.1 {
+        let mut list: Vec<&((u64, f64, u64), &Item<'_>)> = keyed
+            .iter()
+            .filter(|(_, i)| transmissive(i.material))
+            .collect();
+        reverse(&mut list);
+        for (_, item) in list {
+            emit(item, &mut draws)?;
+        }
+    }
+    if lists.2 {
+        let mut list: Vec<&((u64, f64, u64), &Item<'_>)> = keyed
+            .iter()
+            .filter(|(_, i)| !transmissive(i.material) && i.material.transparent)
+            .collect();
+        reverse(&mut list);
+        for (_, item) in list {
+            emit(item, &mut draws)?;
+        }
+    }
+    Ok(draws)
+}
+
+/// The transmission pass (`renderTransmissionPass`) for `items`, cleared
+/// to `clear`.
+fn transmission_pass(
+    scene: &Scene3d,
+    ls: &LightState,
+    light_uniforms: &[(String, Vec<f64>)],
+    items: &[Item<'_>],
+    clear: [f64; 4],
+    depth: impl Fn(&Item<'_>) -> bool + Copy,
+) -> Result<Option<PassDesc>, String> {
+    use super::gltf::material::Target;
+    if !items.iter().any(|i| transmissive(i.material)) {
+        return Ok(None);
+    }
+    let opaque = list_draws(
+        scene,
+        ls,
+        light_uniforms,
+        items,
+        depth,
+        Target::Transmission,
+        (true, false, false),
+    )?;
+    // Back faces of double-sided transmissive items, in the transmissive
+    // list's order (`reversePainterSortStable`).
+    let (w, h) = scene.canvas();
+    let proj_screen = math::multiply(&scene.camera.projection_matrix(w, h), &scene.camera.view());
+    let mut list: Vec<((u64, f64, u64), &Item<'_>)> = items
+        .iter()
+        .filter(|i| transmissive(i.material) && i.material.side == Side::Double)
+        .map(|i| (sort_keys(scene, i, &proj_screen), i))
+        .collect();
+    list.sort_by(|a, b| {
+        b.0.1
+            .partial_cmp(&a.0.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.2.cmp(&b.0.2))
+    });
+    let mut back = Vec::new();
+    for (_, item) in list {
+        back.push(draw_to(
+            scene,
+            ls,
+            light_uniforms,
+            item,
+            Side::Back,
+            true,
+            depth(item),
+            Target::Transmission,
+        )?);
+    }
+    Ok(Some(PassDesc::Transmission {
+        clear,
+        opaque,
+        back,
+    }))
+}
+
+/// The layer's color pass, preceded by its transmission pass when the
+/// layer's object has transmissive glTF materials. Objects with glTF
+/// drawables use three.js's sorted lists; others [`color`].
+pub fn color_passes(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
+    let scene = layer.scene;
+    let gltf = scene.objects[layer.object]
+        .meshes
+        .iter()
+        .any(|m| m.gltf.is_some());
+    let any_loose = scene.objects.iter().any(|o| o.meshes.iter().any(loose));
+    if !gltf && !any_loose {
+        return Ok(vec![color(layer)?]);
+    }
+    let ls = lights::state(scene);
+    let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
+    let background = match (layer.background, scene.background) {
+        (true, Some(c)) => Some([
+            math::linear_to_srgb(c[0]),
+            math::linear_to_srgb(c[1]),
+            math::linear_to_srgb(c[2]),
+            1.0,
+        ]),
+        _ => None,
+    };
+    let clear = background.unwrap_or([0.0; 4]);
+    let planes = camera_frustum(scene);
+    let own = items(scene, layer.object, &planes);
+    let mut all: Vec<Item<'_>> = if layer.depth_set.contains(&layer.object) {
+        own
+    } else {
+        // The layer's meshes are hidden; its points and lines still draw.
+        own.into_iter()
+            .filter(|i| loose(&scene.objects[i.object].meshes[i.mesh]))
+            .collect()
+    };
+    all.extend(loose_items(scene, &planes, Some(layer.object)));
+    // Points and lines keep their depth writes in the color pass.
+    let depth =
+        |i: &Item<'_>| loose(&scene.objects[i.object].meshes[i.mesh]) && i.material.depth_write;
+    let mut passes = Vec::new();
+    // The transmission target clears to the canvas clear color while it is
+    // opaque (the GL clear color holds its sRGB-encoded values), else to
+    // half-transparent white (premultiplied).
+    let t_clear = background.unwrap_or([0.5, 0.5, 0.5, 0.5]);
+    if let Some(p) = transmission_pass(scene, &ls, &light_uniforms, &all, t_clear, depth)? {
+        passes.push(p);
+    }
+    let draws = list_draws(
+        scene,
+        &ls,
+        &light_uniforms,
+        &all,
+        depth,
+        super::gltf::material::Target::Canvas,
+        (true, true, true),
+    )?;
+    passes.push(PassDesc::Color { clear, draws });
+    Ok(passes)
+}
+
 /// `Vector4.applyMatrix4(m)` (no divide).
 fn clip4(m: &Mat4, v: [f64; 4]) -> [f64; 4] {
     let (x, y, z, w) = (v[0], v[1], v[2], v[3]);
@@ -581,9 +1030,49 @@ pub fn whole_scene(scene: &Scene3d) -> Result<Vec<PassDesc>, String> {
         .collect();
     let ls = lights::state(scene);
     let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
+    let planes = camera_frustum(scene);
+    if scene
+        .objects
+        .iter()
+        .any(|o| o.meshes.iter().any(|m| m.gltf.is_some()))
+    {
+        let all: Vec<Item<'_>> = (0..scene.objects.len())
+            .flat_map(|o| items(scene, o, &planes))
+            .collect();
+        let clear = match scene.background {
+            Some(c) => [
+                math::linear_to_srgb(c[0]),
+                math::linear_to_srgb(c[1]),
+                math::linear_to_srgb(c[2]),
+                1.0,
+            ],
+            None => [0.0; 4],
+        };
+        // The background renders into the transmission target too
+        // (linear, forced clear); without one it clears to white at 0.5.
+        let t_clear = match scene.background {
+            Some(c) => [c[0], c[1], c[2], 1.0],
+            None => [0.5, 0.5, 0.5, 0.5],
+        };
+        if let Some(p) = transmission_pass(scene, &ls, &light_uniforms, &all, t_clear, |i| {
+            i.material.depth_write
+        })? {
+            passes.push(p);
+        }
+        let draws = list_draws(
+            scene,
+            &ls,
+            &light_uniforms,
+            &all,
+            |i| i.material.depth_write,
+            super::gltf::material::Target::Canvas,
+            (true, true, true),
+        )?;
+        passes.push(PassDesc::Color { clear, draws });
+        return Ok(passes);
+    }
     let mut opaque = Vec::new();
     let mut transparent = Vec::new();
-    let planes = camera_frustum(scene);
     for o in 0..scene.objects.len() {
         for item in items(scene, o, &planes) {
             if item.material.transparent {

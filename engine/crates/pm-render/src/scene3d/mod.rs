@@ -21,6 +21,7 @@
 //! draw of it unpremultiplies, decodes, and re-premultiplies (section 9).
 
 pub mod describe;
+pub mod gltf;
 pub mod gpu;
 pub mod layers;
 pub mod legacy;

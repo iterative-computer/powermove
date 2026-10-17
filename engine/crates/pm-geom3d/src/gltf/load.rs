@@ -49,7 +49,6 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
 
 const GLB_MAGIC: u32 = 0x4654_6c67;
 const CHUNK_JSON: u32 = 0x4e4f_534a;
-const CHUNK_BIN: u32 = 0x004e_4942;
 
 /// The JSON document and the GLB `BIN` chunk, with `loadGltf`'s container
 /// checks.
@@ -62,33 +61,16 @@ fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
         if u32_at(bytes, 16) != CHUNK_JSON || 20 + length > bytes.len() {
             return err("Invalid GLB scene chunk");
         }
-        // The `gltf` crate reads the container and the document schema
-        // (without its extension validation, which refuses extensions r180
-        // loads); extensions come from the raw JSON as GLTFLoader reads them.
-        let gltf = gltf::Gltf::from_slice_without_validation(bytes)
-            .map_err(|e| Error(format!("glTF: {e}")))?;
-        let json: Value = serde_json::from_slice(&bytes[20..20 + length])
-            .map_err(|e| Error(format!("GLB JSON: {e}")))?;
-        // GLTFBinaryExtension: the first chunk after the JSON chunk, if BIN.
-        let mut at = 20 + length;
-        let mut body = None;
-        while at + 8 <= bytes.len() {
-            let len = u32_at(bytes, at) as usize;
-            let kind = u32_at(bytes, at + 4);
-            if at + 8 + len > bytes.len() {
-                break;
-            }
-            if kind == CHUNK_BIN {
-                body = Some(bytes[at + 8..at + 8 + len].to_vec());
-                break;
-            }
-            at += 8 + len;
-        }
-        let body = body.or_else(|| gltf.blob.clone());
+        // The `gltf` crate reads the GLB container; the document is read
+        // as raw JSON, as GLTFLoader reads it (the crate's typed schema
+        // refuses valid files with extensions it does not model, such as
+        // `KHR_animation_pointer` channels without a node).
+        let glb = gltf::Glb::from_slice(bytes).map_err(|e| Error(format!("GLB: {e}")))?;
+        let json: Value =
+            serde_json::from_slice(&glb.json).map_err(|e| Error(format!("GLB JSON: {e}")))?;
+        let body = glb.bin.map(|b| b.into_owned());
         Ok((json, body))
     } else {
-        gltf::Gltf::from_slice_without_validation(bytes)
-            .map_err(|e| Error(format!("glTF: {e}")))?;
         let text = std::str::from_utf8(bytes).map_err(|e| Error(format!("glTF JSON: {e}")))?;
         let json: Value =
             serde_json::from_str(text).map_err(|e| Error(format!("glTF JSON: {e}")))?;
@@ -434,6 +416,8 @@ struct Loader<'a> {
     skinned_meshes: Vec<bool>,
     bones: Vec<bool>,
     skins_out: Vec<Skin>,
+    /// Light objects `_getNodeRef` cloned (several nodes use the light).
+    cloned_lights: Vec<usize>,
 }
 
 /// A loaded mesh: one object, or a group of primitive objects.
@@ -1351,7 +1335,9 @@ impl Loader<'_> {
             let o = match Self::node_ref(&mut self.light_refs, li) {
                 Some(n) => {
                     let nm = format!("{}_instance_{n}", self.objects[base].name);
-                    self.clone_tree(base, nm)
+                    let c = self.clone_tree(base, nm);
+                    self.cloned_lights.push(c);
+                    c
                 }
                 None => base,
             };
@@ -1714,6 +1700,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         skinned_meshes: skinned,
         bones,
         skins_out: Vec::new(),
+        cloned_lights: Vec::new(),
     };
     // `loadScene(json.scene || 0)`.
     let scene_index = json["scene"].as_u64().filter(|&s| s != 0).unwrap_or(0) as usize;
@@ -1741,6 +1728,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     }
     let clips = clips(&mut loader)?;
     let skins = loader.skins_out.clone();
+    let cloned_lights = loader.cloned_lights.clone();
     let Loader {
         objects,
         geometries,
@@ -1780,6 +1768,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         },
         vertices: 0,
         triangles: 0,
+        light_targets: Vec::new(),
     };
     // `loadGltf`: counts over meshes, then the fit from `Box3.setFromObject`.
     let mut vertices = 0usize;
@@ -1795,10 +1784,43 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
             triangles += g.index.as_ref().map_or(n, Vec::len) as f64 / 3.0;
         }
     }
+    for i in model.traversal() {
+        if let ObjectKind::Drawable(d) = &model.objects[i].kind
+            && d.skinned
+            && d.skin.is_none()
+        {
+            // `SkinnedMesh.computeBoundingBox` without a skeleton throws.
+            return err("a skinned mesh without a skin");
+        }
+    }
     if vertices == 0 || triangles > limits.triangles as f64 {
         return err("GLB has no supported geometry or exceeds 500,000 triangles");
     }
     let rest = super::pose::Pose::rest(&model);
+    // A directional or spot light's `target` on the runtime's clone is a
+    // detached copy (`DirectionalLight.copy`: `target.clone()`), whose
+    // world matrix stays the one the loader computed (the glTF scene's
+    // rest pose; the origin for a light `_getNodeRef` cloned, whose target
+    // was copied before any update).
+    let rest_world = super::pose::world(&model, &rest, None);
+    model.light_targets = vec![None; model.objects.len()];
+    for (i, o) in model.objects.iter().enumerate() {
+        if !matches!(o.kind, ObjectKind::Light(_)) {
+            continue;
+        }
+        let target = o
+            .children
+            .iter()
+            .find(|&&c| model.objects[c].kind == ObjectKind::LightTarget)
+            .copied();
+        if let Some(t) = target {
+            model.light_targets[i] = Some(if cloned_lights.contains(&i) {
+                [0.0; 3]
+            } else {
+                [rest_world[t][12], rest_world[t][13], rest_world[t][14]]
+            });
+        }
+    }
     let (lo, hi) = super::pose::scene_box(&model, &rest)
         .ok_or_else(|| Error("GLB model has no measurable size".into()))?;
     let center = [

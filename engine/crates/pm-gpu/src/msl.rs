@@ -82,6 +82,19 @@ pub fn write(
     slots: &[Slot],
     mode: MathMode,
 ) -> Result<(String, String), String> {
+    write_with(module, info, stage, slots, mode, false)
+}
+
+/// [`write`], optionally keeping the vertex stage's point size output
+/// (programs drawn as points; Metal reads `[[point_size]]` for them).
+pub fn write_with(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+    stage: naga::ShaderStage,
+    slots: &[Slot],
+    mode: MathMode,
+    point_size: bool,
+) -> Result<(String, String), String> {
     let ep = module
         .entry_points
         .iter()
@@ -135,7 +148,7 @@ pub fn write(
     };
     let pipeline = msl::PipelineOptions {
         entry_point: Some((stage, ep.name.clone())),
-        allow_and_force_point_size: false,
+        allow_and_force_point_size: point_size && stage == naga::ShaderStage::Vertex,
         vertex_pulling_transform: false,
         vertex_buffer_mappings: Vec::new(),
         binding_array_length_map: Default::default(),

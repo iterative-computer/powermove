@@ -114,6 +114,44 @@ struct PipelineKey {
     math: MathMode,
     samples: u32,
     state: DrawState,
+    color4: bool,
+}
+
+/// The vertex inputs a program reads, by location.
+fn vertex_inputs(compiled: &Compiled) -> Vec<(u32, &'static str)> {
+    const NAMES: [&str; 15] = [
+        "position",
+        "normal",
+        "uv",
+        "uv1",
+        "uv2",
+        "uv3",
+        "tangent",
+        "color",
+        "skinIndex",
+        "skinWeight",
+        "instanceMatrix_pmc0",
+        "instanceMatrix_pmc1",
+        "instanceMatrix_pmc2",
+        "instanceMatrix_pmc3",
+        "instanceColor",
+    ];
+    let mut inputs: Vec<(u32, &'static str)> = NAMES
+        .iter()
+        .filter_map(|n| compiled.attributes.get(*n).map(|&l| (l, *n)))
+        .collect();
+    inputs.sort();
+    inputs
+}
+
+/// The matrix column an `instanceMatrix` input reads (0 otherwise).
+fn instance_column(name: &str) -> u64 {
+    match name {
+        "instanceMatrix_pmc1" => 1,
+        "instanceMatrix_pmc2" => 2,
+        "instanceMatrix_pmc3" => 3,
+        _ => 0,
+    }
 }
 
 struct Attachments {
@@ -207,6 +245,7 @@ pub struct Scene3dRenderer {
     cache_hits: u64,
     cache_write_failures: u64,
     pub(crate) legacy: super::legacy::MeshRenderer,
+    gltf: super::gltf::gpu::GltfGpu,
 }
 
 impl Default for Scene3dRenderer {
@@ -231,6 +270,7 @@ impl Default for Scene3dRenderer {
             cache_hits: 0,
             cache_write_failures: 0,
             legacy: Default::default(),
+            gltf: Default::default(),
         }
     }
 }
@@ -334,15 +374,19 @@ impl Scene3dRenderer {
         self.meshes.retain(|_, (_, used)| *used >= keep_from);
         self.textures.evict(self.generation, keep_from);
         self.legacy.evict(self.generation, keep_from);
+        self.gltf.evict(self.generation, keep_from);
     }
 
     /// The meshes and maps resident on the GPU.
     pub fn resident(&self) -> Resident3d {
         let (maps, map_bytes) = self.textures.resident();
         let (legacy, legacy_bytes) = self.legacy.resident();
+        let (gltf, gltf_bytes) = self.gltf.resident();
         Resident3d {
-            meshes: self.meshes.len() + legacy,
-            mesh_bytes: self.meshes.values().map(|(m, _)| m.bytes()).sum::<u64>() + legacy_bytes,
+            meshes: self.meshes.len() + legacy + gltf,
+            mesh_bytes: self.meshes.values().map(|(m, _)| m.bytes()).sum::<u64>()
+                + legacy_bytes
+                + gltf_bytes,
             maps,
             map_bytes,
         }
@@ -491,7 +535,9 @@ impl Scene3dRenderer {
             )
             .map_err(|e| format!("3D program: {e}"))?;
             for (name, t) in &program.textures {
-                if t.dim != glsl::naga::ImageDimension::D2 || t.arrayed {
+                // `morphTargetsTexture` is r180's one array sampler.
+                let array_ok = name == "morphTargetsTexture" && t.arrayed;
+                if t.dim != glsl::naga::ImageDimension::D2 || (t.arrayed && !array_ok) {
                     return Err(format!("3D program samples {name} as a non-2D texture"));
                 }
             }
@@ -544,6 +590,7 @@ impl Scene3dRenderer {
             s
         };
         let safe = self.math != MathMode::Fast && pm_gpu::msl::supported(device);
+        let points = params.shader_type == "PointsMaterial";
         let (
             vertex,
             fragment,
@@ -562,12 +609,13 @@ impl Scene3dRenderer {
                     let program = translate()?;
                     let (block_size, uniforms, textures, attributes) = reflection(&program);
                     let s = slots(&textures);
-                    let (vertex_msl, vertex_entry) = pm_gpu::msl::write(
+                    let (vertex_msl, vertex_entry) = pm_gpu::msl::write_with(
                         &program.vertex,
                         &program.vertex_info,
                         glsl::naga::ShaderStage::Vertex,
                         &s,
                         self.math,
+                        points,
                     )?;
                     let (fragment_msl, fragment_entry) = pm_gpu::msl::write(
                         &program.fragment,
@@ -649,13 +697,17 @@ impl Scene3dRenderer {
             },
             count: None,
         }];
-        for (_, t, _) in &sorted {
+        for (name, t, _) in &sorted {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *t,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: if name == "morphTargetsTexture" {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    },
                     multisampled: false,
                 },
                 count: None,
@@ -730,6 +782,12 @@ impl Scene3dRenderer {
         } else {
             geometry.uvs.clone()
         };
+        // No `normal` attribute (flat-shaded glTF): WebGL's constant zero.
+        let normals = if geometry.normals.len() < count * 3 {
+            vec![0f32; count * 3]
+        } else {
+            geometry.normals.clone()
+        };
         let index = |v: &[u32]| v.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<u8>>();
         let wire = wireframe.then(|| {
             let w = geometry.wireframe_indices();
@@ -744,11 +802,7 @@ impl Scene3dRenderer {
                 f(&geometry.positions),
                 wgpu::BufferUsages::VERTEX,
             ),
-            normal: buffer(
-                "3d normal",
-                f(&geometry.normals),
-                wgpu::BufferUsages::VERTEX,
-            ),
+            normal: buffer("3d normal", f(&normals), wgpu::BufferUsages::VERTEX),
             uv: buffer("3d uv", f(&uvs), wgpu::BufferUsages::VERTEX),
             index: buffer(
                 "3d index",
@@ -843,33 +897,32 @@ impl Scene3dRenderer {
         compiled: &Compiled,
         samples: u32,
         state: DrawState,
+        extra: Option<Arc<super::gltf::VertexExtra>>,
     ) -> wgpu::RenderPipeline {
+        // The color attribute's item size is part of the vertex layout.
+        let color4 = extra
+            .as_ref()
+            .and_then(|x| x.color.as_ref())
+            .is_some_and(|c| c.1 == 4);
         let key = PipelineKey {
             program,
             math: compiled.math,
             samples,
             state,
+            color4,
         };
         if let Some(p) = self.pipelines.get(&key) {
             return p.clone();
         }
-        let mut inputs: Vec<(u32, &str)> = Vec::new();
-        for name in ["position", "normal", "uv"] {
-            if let Some(&location) = compiled.attributes.get(name) {
-                inputs.push((location, name));
-            }
-        }
-        inputs.sort();
-        let formats = |name: &str| match name {
-            "uv" => (wgpu::VertexFormat::Float32x2, 8),
-            _ => (wgpu::VertexFormat::Float32x3, 12),
-        };
+        let inputs = vertex_inputs(compiled);
         let attrs: Vec<[wgpu::VertexAttribute; 1]> = inputs
             .iter()
             .map(|(loc, name)| {
+                let (format, _, _) = super::gltf::gpu::attribute_format(name, extra.as_deref())
+                    .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
                 [wgpu::VertexAttribute {
-                    format: formats(name).0,
-                    offset: 0,
+                    format,
+                    offset: instance_column(name) * 16,
                     shader_location: *loc,
                 }]
             })
@@ -878,9 +931,18 @@ impl Scene3dRenderer {
             .iter()
             .zip(attrs.iter())
             .map(|((_, name), a)| {
+                let (_, stride, instance) = super::gltf::gpu::attribute_format(
+                    name,
+                    extra.as_deref(),
+                )
+                .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
                 Some(wgpu::VertexBufferLayout {
-                    array_stride: formats(name).1,
-                    step_mode: wgpu::VertexStepMode::Vertex,
+                    array_stride: stride,
+                    step_mode: if instance {
+                        wgpu::VertexStepMode::Instance
+                    } else {
+                        wgpu::VertexStepMode::Vertex
+                    },
                     attributes: a,
                 })
             })
@@ -917,11 +979,21 @@ impl Scene3dRenderer {
                 topology: if state.lines {
                     wgpu::PrimitiveTopology::LineList
                 } else {
-                    wgpu::PrimitiveTopology::TriangleList
+                    match state.topology {
+                        describe::Topology::Triangles => wgpu::PrimitiveTopology::TriangleList,
+                        describe::Topology::Lines => wgpu::PrimitiveTopology::LineList,
+                        describe::Topology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+                        describe::Topology::Points => wgpu::PrimitiveTopology::PointList,
+                    }
                 },
-                strip_index_format: None,
+                strip_index_format: (!state.lines
+                    && state.topology == describe::Topology::LineStrip)
+                    .then_some(wgpu::IndexFormat::Uint32),
                 front_face,
-                cull_mode: (state.cull && !state.lines).then_some(wgpu::Face::Back),
+                cull_mode: (state.cull
+                    && !state.lines
+                    && state.topology == describe::Topology::Triangles)
+                    .then_some(wgpu::Face::Back),
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
@@ -943,7 +1015,11 @@ impl Scene3dRenderer {
                 entry_point: compiled.fragment_entry.as_deref(),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: if state.hdr {
+                        wgpu::TextureFormat::Rgba16Float
+                    } else {
+                        wgpu::TextureFormat::Rgba8Unorm
+                    },
                     blend,
                     write_mask: if state.color_write {
                         wgpu::ColorWrites::ALL
@@ -1000,7 +1076,15 @@ impl Scene3dRenderer {
         samples: u32,
     ) -> Result<Prepared, Error3d> {
         let (key, compiled) = self.program(device, &draw.params)?;
-        let pipeline = self.pipeline(device, key, &compiled, samples, draw.state);
+        let mesh_desc = &scene.objects[draw.object].meshes[draw.mesh];
+        let pipeline = self.pipeline(
+            device,
+            key,
+            &compiled,
+            samples,
+            draw.state,
+            mesh_desc.geometry.extra.clone(),
+        );
         let mut block = vec![0u8; compiled.block_size.max(16) as usize];
         for (name, v) in &draw.uniforms {
             write_uniform(&compiled.uniforms, &mut block, name, v);
@@ -1043,6 +1127,28 @@ impl Scene3dRenderer {
                         .clone(),
                     self.textures.clamp_nearest.clone().expect("samplers"),
                 ),
+                Some(TextureRef::Gltf(m)) => {
+                    self.gltf.map(device, queue, encoder, &mut self.textures, m)
+                }
+                Some(TextureRef::Data {
+                    key,
+                    width,
+                    height,
+                    layers,
+                    array,
+                    data,
+                }) => self
+                    .gltf
+                    .data(device, queue, *key, *width, *height, *layers, *array, data),
+                // Before the layer's transmission pass (the depth prepass of
+                // a transmissive object, which writes no color) any texture.
+                Some(TextureRef::Transmission) => match self.gltf.transmission_binding(device) {
+                    Some(b) => b,
+                    None => (
+                        self.empty_texture(device, queue),
+                        self.textures.clamp_nearest.clone().expect("samplers"),
+                    ),
+                },
                 Some(TextureRef::Ltc1) | Some(TextureRef::Ltc2) => {
                     let (a, b) = self
                         .textures
@@ -1083,22 +1189,34 @@ impl Scene3dRenderer {
             layout: &compiled.layout,
             entries: &entries,
         });
-        let object = &scene.objects[draw.object];
-        let mesh_desc = &object.meshes[draw.mesh];
         let mesh = self.mesh(device, &mesh_desc.geometry, draw.state.lines);
-        let mut inputs: Vec<(u32, &str)> = ["position", "normal", "uv"]
-            .iter()
-            .filter_map(|n| compiled.attributes.get(*n).map(|&l| (l, *n)))
-            .collect();
-        inputs.sort();
-        let buffers = inputs
-            .iter()
-            .map(|(_, n)| match *n {
+        let mut buffers = Vec::new();
+        for (_, n) in vertex_inputs(&compiled) {
+            let b = match n {
                 "position" => mesh.position.clone(),
                 "normal" => mesh.normal.clone(),
-                _ => mesh.uv.clone(),
-            })
-            .collect();
+                "uv" => mesh.uv.clone(),
+                n if n.starts_with("instance") => {
+                    let ext = mesh_desc
+                        .gltf
+                        .as_ref()
+                        .ok_or("instance attributes on a scene mesh")?;
+                    self.gltf
+                        .instance(device, ext, n)
+                        .ok_or("an instanced program without instances")?
+                }
+                n => self
+                    .gltf
+                    .vertex(device, &mesh_desc.geometry, n)
+                    .ok_or_else(|| format!("3D program attribute {n}"))?,
+            };
+            buffers.push(b);
+        }
+        let instances = mesh_desc
+            .gltf
+            .as_ref()
+            .and_then(|g| g.instances.as_ref())
+            .map_or(1, |(_, i)| i.matrices.len() as u32);
         let factor = if draw.state.lines { 2 } else { 1 };
         let (index, total) = if draw.state.lines {
             mesh.wireframe.clone().expect("wireframe index")
@@ -1118,6 +1236,7 @@ impl Scene3dRenderer {
             buffers,
             index,
             range,
+            instances,
         })
     }
 
@@ -1178,6 +1297,84 @@ impl Scene3dRenderer {
                     for p in list {
                         p.draw(&mut rp);
                     }
+                }
+            }
+            PassDesc::Transmission {
+                clear,
+                opaque,
+                back,
+            } => {
+                let (w, h) = scene.canvas();
+                self.gltf.transmission(device, w, h);
+                let samples = super::gltf::gpu::TRANSMISSION_SAMPLES;
+                for (k, draws) in [opaque, back].into_iter().enumerate() {
+                    if k == 1 && draws.is_empty() {
+                        break;
+                    }
+                    let mut list = Vec::new();
+                    for d in draws {
+                        list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    }
+                    let resolve = self
+                        .gltf
+                        .transmission_level0()
+                        .expect("transmission target");
+                    let t = self
+                        .gltf
+                        .transmission
+                        .as_ref()
+                        .expect("transmission target");
+                    // The back faces sample the resolved texture while they
+                    // draw into the multisampled target, so their pass resolves
+                    // separately (`updateMultisampleRenderTarget` after them).
+                    for step in 0..(1 + usize::from(k == 1)) {
+                        let resolve_now = k == 0 || step == 1;
+                        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("3d transmission"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &t.msaa,
+                                depth_slice: None,
+                                resolve_target: resolve_now.then_some(&resolve),
+                                ops: wgpu::Operations {
+                                    load: if k == 0 {
+                                        wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: clear[0],
+                                            g: clear[1],
+                                            b: clear[2],
+                                            a: clear[3],
+                                        })
+                                    } else {
+                                        wgpu::LoadOp::Load
+                                    },
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &t.depth,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: if k == 0 {
+                                            wgpu::LoadOp::Clear(1.0)
+                                        } else {
+                                            wgpu::LoadOp::Load
+                                        },
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        if step == 0 {
+                            for p in &list {
+                                p.draw(&mut rp);
+                            }
+                        }
+                    }
+                    let texture = t.texture.clone();
+                    self.gltf.generate_mips(device, encoder, &texture);
                 }
             }
             PassDesc::Prepass(draws) => {
@@ -1364,8 +1561,9 @@ impl Scene3dRenderer {
             });
         }
         let out = self.output(device, pool, w, h);
-        let color = describe::color(&layer)?;
-        self.record(device, queue, encoder, scene, &color, Some(&out.view))?;
+        for pass in describe::color_passes(&layer)? {
+            self.record(device, queue, encoder, scene, &pass, Some(&out.view))?;
+        }
         let depth = if depth_surface {
             Some(self.render_depth_surface(device, queue, encoder, pool, scene, &[object])?)
         } else {
@@ -1612,6 +1810,7 @@ struct Prepared {
     buffers: Vec<wgpu::Buffer>,
     index: wgpu::Buffer,
     range: std::ops::Range<u32>,
+    instances: u32,
 }
 
 impl Prepared {
@@ -1625,6 +1824,6 @@ impl Prepared {
             pass.set_vertex_buffer(i as u32, b.slice(..));
         }
         pass.set_index_buffer(self.index.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(self.range.clone(), 0, 0..1);
+        pass.draw_indexed(self.range.clone(), 0, 0..self.instances);
     }
 }
