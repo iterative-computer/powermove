@@ -1,0 +1,21 @@
+{
+ "name": "dissolve-discard",
+ "kind": "shader",
+ "covers": [
+  "discard",
+  "helper-noise",
+  "iProgress"
+ ],
+ "prompt": "A noise dissolve: the layer shows a warm gradient that burns away with a glowing edge as the layer progresses; dissolved pixels should be discarded.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "784dc83db6d2a7fc9e4adc72aa77ba75cd0445f004ad3b7354fa319c98a9c8cc",
+  "seconds": 18.864,
+  "generated": "2026-10-17T07:32:10.354Z"
+ },
+ "code": "// Noise dissolve — warm gradient burns away with a glowing edge over the layer's progress.\nuniform vec3  uColorTop;   // @param #FFB347\nuniform vec3  uColorBot;   // @param #E2412A\nuniform vec3  uEdgeColor;  // @param #FFC45A\nuniform vec3  uCharColor;  // @param #2A0E05\nuniform float uScale;      // @param 4.0 0.5 16\nuniform float uEdge;       // @param 0.08 0.005 0.3\nuniform float uGlow;       // @param 2.5 0 8\nuniform float uDrift;      // @param 0.08 0 1\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n\n  // Dissolve noise, remapped to roughly 0..1\n  float n = fbm(p * uScale + vec2(iTime * uDrift, -iTime * uDrift * 0.7));\n  n = 0.75 * n + 0.25 * fbm(p * uScale * 3.1 + 7.3);\n  n = clamp((n - 0.2) / 0.6, 0.0, 1.0);\n\n  // Threshold sweeps so progress 0 = intact, progress 1 = fully gone\n  float e = max(uEdge, 1e-3);\n  float thr = mix(-e - 0.01, 1.01, clamp(iProgress, 0.0, 1.0));\n  if (n < thr) discard;\n\n  // Edge factor: 1 at the burn front, 0 once uEdge away from it\n  float edge = 1.0 - smoothstep(0.0, e, n - thr);\n\n  // Warm gradient with a gentle sheen\n  float g = clamp(uv.y + 0.08 * sin(uv.x * 6.2831 + iTime * 0.5), 0.0, 1.0);\n  vec3 col = mix(uColorBot, uColorTop, g);\n\n  // Char band then glowing rim\n  col = mix(col, uCharColor, smoothstep(0.0, 0.6, edge));\n  col += uEdgeColor * uGlow * pow(edge, 3.0);\n\n  fragColor = vec4(col, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a shader layer that fills the layer with a warm vertical gradient. As iProgress goes from 0 to 1, fbm noise burns it away with a charred band and a glowing edge, and burned pixels are discarded. It wasn't compiled or rendered because no live Powermove tools were attached. You can adjust the colors, uScale, uEdge, uGlow and uDrift in the Inspector."
+}

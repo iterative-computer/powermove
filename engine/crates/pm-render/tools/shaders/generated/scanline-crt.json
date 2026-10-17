@@ -1,0 +1,21 @@
+{
+ "name": "scanline-crt",
+ "kind": "shader",
+ "covers": [
+  "precision",
+  "iResolution",
+  "gl_FragCoord"
+ ],
+ "prompt": "CRT test pattern: color bars with scanlines and a subtle vignette; declare mediump precision for the helper functions.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "a673a3a9a61c83eb9aaafe7d00ad1c6146e0e466121f9abd5d65fa66d42956b5",
+  "seconds": 32.472,
+  "generated": "2026-10-17T07:32:42.163Z"
+ },
+ "code": "// CRT test pattern — SMPTE-style color bars, scanlines, subtle vignette.\n// Helper functions are compiled at mediump; main() restores highp.\nuniform float uBrightness;   // @param 1.0 0 2\nuniform float uScanline;     // @param 0.35 0 1\nuniform float uScanPixels;   // @param 3.0 1 8\nuniform float uVignette;     // @param 0.3 0 1\nuniform float uFlicker;      // @param 0.025 0 0.2\nuniform float uRoll;         // @param 0.06 0 0.3\nuniform float uRollSpeed;    // @param 0.12 0 1\n\nprecision mediump float;\n\n// Top band: seven 75% bars\nvec3 topBar(float x) {\n  float i = clamp(floor(x * 7.0), 0.0, 6.0);\n  if (i < 0.5) return vec3(0.75, 0.75, 0.75);\n  if (i < 1.5) return vec3(0.75, 0.75, 0.0);\n  if (i < 2.5) return vec3(0.0, 0.75, 0.75);\n  if (i < 3.5) return vec3(0.0, 0.75, 0.0);\n  if (i < 4.5) return vec3(0.75, 0.0, 0.75);\n  if (i < 5.5) return vec3(0.75, 0.0, 0.0);\n  return vec3(0.0, 0.0, 0.75);\n}\n\n// Middle strip: reverse castellations\nvec3 midBar(float x) {\n  float i = clamp(floor(x * 7.0), 0.0, 6.0);\n  if (i < 0.5) return vec3(0.0, 0.0, 0.75);\n  if (i < 1.5) return vec3(0.075);\n  if (i < 2.5) return vec3(0.75, 0.0, 0.75);\n  if (i < 3.5) return vec3(0.075);\n  if (i < 4.5) return vec3(0.0, 0.75, 0.75);\n  if (i < 5.5) return vec3(0.075);\n  return vec3(0.75, 0.75, 0.75);\n}\n\n// Bottom: -I, 100% white, +Q, black, PLUGE, black\nvec3 lowBar(float x) {\n  if (x < 5.0 / 28.0)  return vec3(0.0, 0.13, 0.30);\n  if (x < 10.0 / 28.0) return vec3(1.0);\n  if (x < 15.0 / 28.0) return vec3(0.20, 0.0, 0.42);\n  if (x < 5.0 / 7.0)   return vec3(0.075);\n  if (x < 6.0 / 7.0) {\n    float k = floor((x - 5.0 / 7.0) * 21.0);\n    return vec3(k < 0.5 ? 0.035 : (k < 1.5 ? 0.075 : 0.115));\n  }\n  return vec3(0.075);\n}\n\nvec3 testPattern(vec2 q) {\n  // q.y measured from the top of the layer\n  if (q.y < 0.67) return topBar(q.x);\n  if (q.y < 0.75) return midBar(q.x);\n  return lowBar(q.x);\n}\n\n// phase is fract(pixelY / linePitch), computed at highp by the caller\nfloat scanlineMask(float phase, float amount) {\n  float s = 0.5 + 0.5 * cos(6.28318 * phase);\n  return 1.0 - amount * (1.0 - s * s);\n}\n\nfloat vignette(vec2 q, float amount) {\n  vec2 d = q - 0.5;\n  float r = dot(d, d) * 2.0;\n  return 1.0 - amount * smoothstep(0.15, 1.0, r);\n}\n\nprecision highp float;\n\nvoid main() {\n  vec2 q = vec2(uv.x, 1.0 - uv.y);\n  vec3 col = testPattern(q) * uBrightness;\n\n  // Scanlines locked to layer pixels\n  float py = uv.y * iResolution.y;\n  float phase = fract(py / max(uScanPixels, 1.0));\n  col *= scanlineMask(phase, uScanline);\n\n  // Faint rolling refresh band\n  float roll = fract(q.y - iTime * uRollSpeed);\n  col *= 1.0 + uRoll * smoothstep(0.92, 1.0, roll) * (1.0 - smoothstep(0.0, 0.02, 1.0 - roll) * 0.0);\n\n  // Frame-rate flicker\n  col *= 1.0 - uFlicker * hash1(floor(iTime * 30.0));\n\n  col *= vignette(uv, uVignette);\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "The CRT test pattern shader layer is ready, but I haven't compiled or rendered it because no Powermove tools were attached to this run. It shows SMPTE-style 75% color bars, a middle strip and a bottom row with calibration patches, plus scanlines, a faint rolling bright band, a slight flicker and a subtle vignette. The helper functions are declared at mediump precision and main() switches back to highp; the bars put y=0 at the bottom of the layer, so they'll be upside down if v_uv works the other way. Controls you can adjust: uBrightness, uScanline, uScanPixels, uVignette, uFlicker, uRoll and uRollSpeed."
+}

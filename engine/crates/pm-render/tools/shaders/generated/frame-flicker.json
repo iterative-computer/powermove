@@ -1,0 +1,21 @@
+{
+ "name": "frame-flicker",
+ "kind": "shader",
+ "covers": [
+  "iFrame",
+  "helper-hash",
+  "integer-bitwise"
+ ],
+ "prompt": "Old film flicker as a shader layer: brightness should jump randomly once per frame (not smoothly), with some dust specks that change every frame.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "f37f60a527ba464a4e74f04d413e0180a644b72852b90bd1addbd8b74d10e582",
+  "seconds": 23.102,
+  "generated": "2026-10-17T07:30:48.959Z"
+ },
+ "code": "// Old film flicker — brightness steps randomly once per frame, dust re-rolls every frame.\nuniform float uFlicker;   // @param 0.25 0 1\nuniform float uDust;      // @param 0.5 0 1\nuniform float uDustSize;  // @param 1.0 0.2 4\nuniform float uScratches; // @param 0.35 0 1\nuniform float uGrain;     // @param 0.08 0 0.5\nuniform float uVignette;  // @param 0.6 0 1.5\nuniform vec3  uTint;      // @param #CDB892\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = (uv - 0.5) * vec2(aspect, 1.0);\n  float f = float(iFrame);\n\n  // Base film image: soft sepia exposure with a slow, faint density variation\n  float dens = 0.75 + 0.25 * fbm(p * 1.8 + 3.7);\n  vec3 col = uTint * dens;\n\n  // Per-frame flicker: one random value per frame, no interpolation\n  float r1 = hash1(f * 0.7313 + 1.17);\n  float r2 = hash1(f * 1.9177 + 4.31);\n  float flick = 1.0 + ((r1 + r2) - 1.0) * uFlicker;\n  col *= flick;\n\n  // Dust specks: new random set every frame\n  float px = 1.0 / iResolution.y;\n  float dust = 0.0;\n  for (int i = 0; i < 32; i++) {\n    float fi = float(i);\n    float seed = f * 17.13 + fi * 3.71;\n    if (hash1(seed + 0.5) > uDust) continue;\n    vec2 c = (vec2(hash1(seed + 1.1), hash1(seed + 2.3)) - 0.5) * vec2(aspect, 1.0);\n    float rad = (1.5 + 5.0 * pow(hash1(seed + 3.7), 3.0)) * px * uDustSize;\n    // slightly irregular shape\n    vec2 d = p - c;\n    d *= vec2(1.0, 0.6 + 0.8 * hash1(seed + 5.9));\n    float irr = 1.0 + 0.4 * (noise(d / max(rad, 1e-5) * 1.5 + seed) - 0.5);\n    float speck = 1.0 - smoothstep(rad * 0.6 * irr, rad * irr, length(d));\n    // mostly dark specks, occasional bright ones (dirt on negative)\n    float sgn = hash1(seed + 7.7) < 0.8 ? -1.0 : 1.0;\n    dust += sgn * speck * (0.5 + 0.5 * hash1(seed + 8.3));\n  }\n  col += dust * 0.7 * vec3(1.0);\n\n  // Vertical scratches that jump per frame\n  for (int i = 0; i < 3; i++) {\n    float seed = f * 5.31 + float(i) * 11.7;\n    if (hash1(seed) > uScratches) continue;\n    float x = hash1(seed + 1.3);\n    float w = (0.6 + 1.2 * hash1(seed + 2.1)) / iResolution.x;\n    float wob = 0.002 * sin(uv.y * 9.0 + seed);\n    float line = 1.0 - smoothstep(0.0, w, abs(uv.x - x - wob));\n    float fade = smoothstep(0.0, 0.3, noise(vec2(uv.y * 6.0, seed)));\n    col += line * fade * 0.35 * (hash1(seed + 4.4) < 0.5 ? -1.0 : 1.0);\n  }\n\n  // Grain, re-rolled each frame\n  float g = hash(floor(uv * iResolution) + vec2(f * 13.7, f * 7.1)) - 0.5;\n  col += g * uGrain;\n\n  // Vignette\n  float vig = 1.0 - uVignette * dot(p, p) * 1.2;\n  col *= clamp(vig, 0.0, 1.0);\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote an old-film flicker shader that uses iFrame, so brightness and dust (up to 32 specks, mostly dark) re-randomise every frame with no smoothing between frames. Scratches and grain also change each frame, over a sepia base with a vignette; controls are uFlicker, uDust, uDustSize, uScratches, uGrain, uVignette and uTint. It hasn't been compiled or rendered because no Powermove tools were available in this run."
+}
