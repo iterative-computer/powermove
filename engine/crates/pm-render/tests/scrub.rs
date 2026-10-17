@@ -59,7 +59,7 @@ fn draw(
         .expect("render");
     assert!(rendered.failures.is_empty(), "{:?}", rendered.failures);
     let bytes = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
-    (bytes, rendered.stand_ins)
+    (bytes, rendered.stand_ins.len())
 }
 
 #[test]

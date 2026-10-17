@@ -86,7 +86,7 @@ fn a_scrub_frame_reports_stand_ins_until_the_exact_video_lands() {
             .compose(&document, "P-root", &media, at(t), &s, &working)
             .unwrap();
         assert!(c.failures.is_empty(), "{:?}", c.failures);
-        c.stand_ins
+        c.stand_ins.len()
     };
     // A paused frame: exact.
     assert_eq!(compose(&mut composer, 0.1), 0);

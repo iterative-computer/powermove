@@ -127,8 +127,8 @@ pub struct Composed {
     /// Render and placement time on the CPU (µs), the GPU work submitted.
     pub cpu_us: i64,
     /// Video layers drawn with a stand-in while their exact frame decodes
-    /// (scrub renders, docs/engine/scrub.md).
-    pub stand_ins: usize,
+    /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
+    pub stand_ins: Vec<usize>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -286,7 +286,7 @@ impl Composer {
         let queue = self.renderer.queue().clone();
         let mut failures = Vec::new();
         let mut quads = Vec::new();
-        let mut stand_ins = 0;
+        let mut stand_ins = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,

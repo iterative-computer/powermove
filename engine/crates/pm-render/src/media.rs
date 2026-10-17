@@ -414,8 +414,9 @@ pub struct MediaCache {
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
-    /// Video layers drawn with a stand-in frame since the counter was reset.
-    pub stand_ins: usize,
+    /// The frame (presented index in its source) of each video layer drawn
+    /// with a stand-in since the list was reset.
+    pub stand_ins: Vec<usize>,
     /// Converted video frames replaced during the current render, and those
     /// replaced earlier (free to overwrite: every read of them is
     /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
@@ -454,7 +455,7 @@ impl MediaCache {
             viewer: ViewerDecode::new(service.clone()),
             service,
             scrub: false,
-            stand_ins: 0,
+            stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
@@ -611,7 +612,7 @@ impl MediaCache {
                 .fetch(&src, instance, n, want)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if !fetched.exact {
-                self.stand_ins += 1;
+                self.stand_ins.push(fetched.shown);
             }
             (fetched.shown, fetched.frame)
         };
@@ -652,7 +653,9 @@ impl MediaCache {
         let reuse = self
             .free_frames
             .iter()
-            .position(|t| t.width() == w && t.height() == h && t.format() == working_format(precision))
+            .position(|t| {
+                t.width() == w && t.height() == h && t.format() == working_format(precision)
+            })
             .map(|i| self.free_frames.swap_remove(i));
         let target = convert(
             device,

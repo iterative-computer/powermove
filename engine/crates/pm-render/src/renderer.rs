@@ -59,9 +59,10 @@ pub struct Rendered {
     /// each of them.
     pub quads: Vec<LayerQuad>,
     /// Video layers drawn with the nearest decoded frame while their exact
-    /// frame decodes (scrub renders only, [`Renderer::set_scrub`]); 0 when
+    /// frame decodes (scrub renders only, [`Renderer::set_scrub`]): the
+    /// frame each shows (its presented index in its source). Empty when
     /// every video layer shows its exact frame.
-    pub stand_ins: usize,
+    pub stand_ins: Vec<usize>,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -411,7 +412,7 @@ impl Renderer {
             bracket.begin(&mut encoder);
         }
         // Exports never draw stand-ins (docs/engine/scrub.md).
-        self.media.stand_ins = 0;
+        self.media.stand_ins.clear();
         let scrub = self.media.scrub;
         self.media.scrub = scrub && !request.export;
         let (legend, taken, unsupported, exec_failures) = {

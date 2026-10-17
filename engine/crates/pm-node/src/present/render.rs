@@ -287,6 +287,10 @@ pub struct Stats {
     /// again once the exact video arrived (docs/engine/scrub.md).
     pub stand_in_frames: u64,
     pub stand_in_redraws: u64,
+    /// Stand-in frames sent: (seq, the source frame the first stand-in
+    /// layer shows), for measurements that count the distinct frames a
+    /// drag showed.
+    pub stand_in_log: Vec<(u64, usize)>,
     /// The display decode workers (scrubbing, look-ahead, cancellation).
     pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
     #[serde(skip)]
@@ -294,6 +298,9 @@ pub struct Stats {
 }
 
 const TRACE_CAP: usize = 200_000;
+
+/// Entries kept in [`Stats::stand_in_log`].
+const STAND_IN_LOG_CAP: usize = 20_000;
 
 /// How often a frame drawn with stand-ins checks whether its video decoded.
 const STAND_IN_POLL_US: i64 = 1_000;
@@ -1961,6 +1968,7 @@ impl Thread {
         let start = now();
         let overlay;
         let mut stand_in = false;
+        let mut stand_in_shown = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu
@@ -1987,8 +1995,9 @@ impl Thread {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
-                    stand_in = composed.stand_ins > 0;
+                    stand_in = !composed.stand_ins.is_empty();
                     view.stand_in = stand_in.then_some(landed_before);
+                    stand_in_shown = composed.stand_ins.first().copied();
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
@@ -2108,6 +2117,11 @@ impl Thread {
             stats.timed_frames += 1;
         } else {
             stats.immediate_frames += 1;
+        }
+        if let Some(shown) = stand_in_shown
+            && stats.stand_in_log.len() < STAND_IN_LOG_CAP
+        {
+            stats.stand_in_log.push((seq, shown));
         }
         stats.gpu_us_max = stats.gpu_us_max.max(gpu_done - start);
         stats.gpu_us_total += gpu_done - start;
