@@ -282,12 +282,15 @@ impl Schedule {
                 self.redo = None;
                 break;
             }
-            let Some((from, until)) = Self::interval(clock, j) else {
+            let Some((from, _)) = Self::interval(clock, j) else {
                 self.redo = None;
                 break;
             };
-            if until < now_f || until < ready {
-                // Too late to replace: the stale frame stays.
+            // A replacement must reach the viewer before the frame starts
+            // showing: the viewer takes a frame from its queue for the refresh
+            // that shows its start, and a copy arriving after that is dropped.
+            // Too late to replace: the stale frame stays.
+            if from < ready {
                 self.redo = Some(j + step);
                 continue;
             }
@@ -522,31 +525,31 @@ mod tests {
         schedule.observe(5_000.0);
         assert_eq!(render_due(&mut schedule, &clock, 0), vec![600, 601]);
         assert_eq!(render_due(&mut schedule, &clock, 34_000), vec![602, 603]);
-        // An edit at 55 ms: 600 is on display; 601 (until 83.3 ms) cannot be
-        // ready before 85 ms (5 ms render, 25 ms delivery); 602 and 603 can.
+        // An edit at 40 ms: a frame rendered now reaches the viewer at 70 ms
+        // (5 ms render, 25 ms delivery), after 600 and 601 start showing;
+        // 602 (from 83.3 ms) and 603 can still be replaced.
         schedule.invalidate();
         assert!(matches!(
-            schedule.next(&clock, 55_000, 4),
+            schedule.next(&clock, 40_000, 4),
             Next::Render { k: 602, .. }
         ));
         assert!(schedule.redoing(602));
         schedule.rendered(&clock, 602);
         assert!(matches!(
-            schedule.next(&clock, 55_000, 4),
+            schedule.next(&clock, 40_000, 4),
             Next::Render { k: 603, .. }
         ));
         schedule.rendered(&clock, 603);
-        // Then new frames, in order: 604 is due (shown from 116.7 ms).
+        // Then new frames, in order: 604 is due at 50 ms (shown from 116.7 ms).
+        match schedule.next(&clock, 40_000, 4) {
+            Next::WaitUntil(at) => assert!((at - 50_000.0).abs() < 1.0, "{at}"),
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
-            schedule.next(&clock, 55_000, 4),
+            schedule.next(&clock, 50_000, 4),
             Next::Render { k: 604, .. }
         ));
         assert!(!schedule.redoing(604));
-        schedule.rendered(&clock, 604);
-        match schedule.next(&clock, 55_000, 4) {
-            Next::WaitUntil(_) => {}
-            other => panic!("{other:?}"),
-        }
     }
 
     #[test]
