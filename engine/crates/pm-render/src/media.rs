@@ -302,6 +302,7 @@ pub(crate) fn convert(
     working: WorkingEncoding,
     precision: Precision,
     factors: Factors,
+    reuse: Option<Target>,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -312,14 +313,18 @@ pub(crate) fn convert(
         ),
     };
     let (w, h) = (luma.width(), luma.height());
-    let out = Target::new(
-        device,
-        "pm source",
-        w,
-        h,
-        working_format(precision),
-        pm_gpu::target::working_usage(),
-    );
+    let out = reuse
+        .filter(|t| t.width() == w && t.height() == h && t.format() == working_format(precision))
+        .unwrap_or_else(|| {
+            Target::new(
+                device,
+                "pm source",
+                w,
+                h,
+                working_format(precision),
+                pm_gpu::target::working_usage(),
+            )
+        });
     let uniform = source_uniform(color, working, precision, chroma_info);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
@@ -411,6 +416,11 @@ pub struct MediaCache {
     pub scrub: bool,
     /// Video layers drawn with a stand-in frame since the counter was reset.
     pub stand_ins: usize,
+    /// Converted video frames replaced during the current render, and those
+    /// replaced earlier (free to overwrite: every read of them is
+    /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
+    retired_frames: Vec<Target>,
+    free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
     /// Open video sources with the file's size and modification time when
@@ -445,6 +455,8 @@ impl MediaCache {
             service,
             scrub: false,
             stand_ins: 0,
+            retired_frames: Vec::new(),
+            free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
             sources: BTreeMap::new(),
@@ -512,6 +524,7 @@ impl MediaCache {
             working,
             precision,
             Factors { x: 1, y: 1 },
+            None,
         );
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
@@ -633,6 +646,14 @@ impl MediaCache {
             },
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
+        // A converted frame retired by an earlier render (its reads are
+        // submitted) is overwritten instead of allocating another.
+        let (w, h) = (frame.format.width as u32, frame.format.height as u32);
+        let reuse = self
+            .free_frames
+            .iter()
+            .position(|t| t.width() == w && t.height() == h && t.format() == working_format(precision))
+            .map(|i| self.free_frames.swap_remove(i));
         let target = convert(
             device,
             queue,
@@ -643,15 +664,24 @@ impl MediaCache {
             working,
             precision,
             factors,
+            reuse,
         );
+        self.importer()?.recycle(normalized);
         drop(imported);
-        // Keep only the newest frame per source and precision.
-        self.frames.retain(|k, _| {
-            k.path != key.path
+        // Keep only the newest frame per source and precision. The older
+        // one may still be read by this render: it is reused from the next.
+        let mut retired = Vec::new();
+        self.frames.retain(|k, t| {
+            let keep = k.path != key.path
                 || k.precision != key.precision
                 || k.export != key.export
-                || k.linear != key.linear
+                || k.linear != key.linear;
+            if !keep {
+                retired.push(t.clone());
+            }
+            keep
         });
+        self.retired_frames.extend(retired);
         self.frames.insert(key, target.clone());
         self.recount();
         Ok(Some(target))
@@ -698,6 +728,8 @@ impl MediaCache {
             .images
             .values()
             .chain(self.frames.values())
+            .chain(&self.retired_frames)
+            .chain(&self.free_frames)
             .map(Target::bytes)
             .sum();
     }
@@ -712,10 +744,16 @@ impl MediaCache {
         self.viewer.stats()
     }
 
-    /// Releases CoreVideo texture cache entries no longer in use.
-    pub fn flush(&self) {
+    /// After a render's commands are submitted: releases CoreVideo texture
+    /// cache entries no longer in use, and makes converted frames this
+    /// render replaced free for reuse (two are kept).
+    pub fn flush(&mut self) {
         if let Some(i) = &self.importer {
             i.flush_cache();
         }
+        self.free_frames.append(&mut self.retired_frames);
+        let excess = self.free_frames.len().saturating_sub(2);
+        self.free_frames.drain(..excess);
+        self.recount();
     }
 }

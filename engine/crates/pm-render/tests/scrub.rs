@@ -117,3 +117,121 @@ fn exports_never_draw_stand_ins() {
     );
     assert!(bytes == exact);
 }
+
+/// Converted video frames are reused from one render to the next: two
+/// layers of one clip at different times, over several renders, equal
+/// fresh renders (no frame is overwritten while a render still reads it).
+#[test]
+fn reused_frame_textures_never_change_what_a_render_reads() {
+    let at = |id: &str, x: f64, trim: f64| {
+        layer(
+            id,
+            "video",
+            json!({ "asset": "clip", "fit": "stretch", "w": 80, "h": 90, "trim": trim, "speed": 1 }),
+            x,
+            0.0,
+            2.0,
+        )
+    };
+    let mut doc = project(
+        160,
+        90,
+        2.0,
+        no_fill(),
+        vec![at("a", 0.0, 0.0), at("b", 80.0, 1.0)],
+    );
+    asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
+    let doc = load(&doc);
+    let (_, resolver) = clip();
+    let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
+    let mut r = Renderer::headless().unwrap();
+    for t in [0.2, 0.4, 0.6, 0.4, 0.9] {
+        let (bytes, _) = draw(&mut r, &doc, t, &request, &resolver);
+        let (fresh, _) = draw(
+            &mut Renderer::headless().unwrap(),
+            &doc,
+            t,
+            &request,
+            &resolver,
+        );
+        assert!(bytes == fresh, "render at {t} s");
+    }
+}
+
+/// The cost of drawing one decoded UHD frame into a 1080p viewer frame
+/// (import, normalization, the source pass, compositing, GPU wait), with
+/// the frames already decoded: what a drag through cached frames pays per
+/// refresh. `PM_SCRUB_CLIP` names a long-GOP UHD clip (docs/engine/tracer.md).
+#[test]
+#[ignore]
+fn drawing_cached_uhd_frames() {
+    let Some(path) = std::env::var_os("PM_SCRUB_CLIP") else {
+        return;
+    };
+    let v = layer(
+        "v",
+        "video",
+        json!({ "asset": "clip", "fit": "stretch", "w": 1920, "h": 1080, "trim": 0, "speed": 1 }),
+        0.0,
+        0.0,
+        30.0,
+    );
+    let mut doc = project(1920, 1080, 30.0, no_fill(), vec![v]);
+    asset(&mut doc, "clip", "video", "mp4", 3840, 2160, 30.0);
+    let doc = load(&doc);
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path.into());
+    let request = RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16);
+    let mut r = Renderer::headless().unwrap();
+    let target = pm_gpu::Target::new(
+        r.device(),
+        "scrub bench",
+        1920,
+        1080,
+        pm_gpu::working_format(Precision::Float16),
+        pm_gpu::target::working_usage(),
+    );
+    let t = |k: u32| f64::from(k) * 1001.0 / 30000.0 + 0.001;
+    // Decode 24 frames (the frame cache keeps them).
+    for k in 1..=24 {
+        r.render_into(
+            &doc,
+            "Ptest-root",
+            ticks(t(k)),
+            &request,
+            &resolver,
+            &target,
+            None,
+        )
+        .unwrap();
+    }
+    let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
+    let mut times = vec![];
+    for round in 0..3 {
+        for k in 1..=24 {
+            let t0 = std::time::Instant::now();
+            r.render_into(
+                &doc,
+                "Ptest-root",
+                ticks(t(k)),
+                &request,
+                &resolver,
+                &target,
+                None,
+            )
+            .unwrap();
+            let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
+            if round > 0 {
+                times.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "cached UHD frame into 1080p: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms; {:?}",
+        times[times.len() / 2],
+        times[times.len() * 95 / 100],
+        times[times.len() - 1],
+        r.scrub_stats()
+    );
+}
