@@ -285,7 +285,12 @@ Electron runs, against about 7 before, so the gains are if anything understated)
 - vitest over `src/renderer`, `src/extensions`, `src/shared`: 3,360 passed.
 - e2e with Use New Engine on: `native-engine-tracer.spec.ts` and
   `native-engine.spec.ts` 12 of 12; `native-engine-tracer-measure.spec.ts` 9 of 9.
-- The e2e ledger with Use New Engine off: see the report of this lane.
+- The e2e ledger with Use New Engine off (`playwright.ledger.config.ts`,
+  `--workers=1 --retries=0`, 23:12 to 23:32, load 9 to 14): 562 run, 529
+  passed, 3 failed, 30 skipped. The three failures are the gate's
+  (`phase2-gate.md`): `chatgpt-connection.spec.ts:5` (environment: the
+  developer's Claude settings) and `import-image-sequence.spec.ts:7` at 12 and
+  120 fps (R1, the intermittent export regression of the storage lane).
 
 ## Gaps
 
