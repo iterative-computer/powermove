@@ -133,6 +133,29 @@ it('the journal keeps one copy of what each edit rewrites whole and replays to t
   assert.equal(entries.length, 5, 'every edit keeps its entry');
   assert.deepEqual(entries.map(e => e.patches.filter(p => p.path[0] === 'edits').length), [0, 0, 0, 0, 1], 'one provenance log');
   assert.deepEqual(entries.map(e => e.patches.length), [1, 1, 1, 1, 3]);
+  // A checkpoint drops the journal; the next edit starts a new one.
+  PM.Projects.put(PM.proj);
+  assert.equal(mem.has('projectJournal.J1'), false);
+  PM.bus.emit('history:project-patch', { projectId: 'J1', revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] });
+  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] }]);
+});
+
+it('checkpoints the project when the journal would pass its bound, to the byte', () => {
+  const MAX = 4 * 1024 * 1024;
+  const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  for (const over of [0, 1]) {
+    const { PM, mem } = projectsModel();
+    PM.proj = { id: 'B1', name: 'Big', revision: 0, layers: [] };
+    PM.Projects.put(PM.proj);
+    const first = { revision: 1, patches: [{ path: ['layers', 0], exists: true, value: { id: 'L1' } }] };
+    PM.bus.emit('history:project-patch', { projectId: 'B1', ...first });
+    const second = (note) => ({ revision: 2, patches: [{ path: ['layers', 1], exists: true, value: { id: 'L2', note } }] });
+    // The journal's JSON at exactly the bound, or one byte over it.
+    const n = MAX - bytes([first, second('')]) + over;
+    PM.bus.emit('history:project-patch', { projectId: 'B1', ...second('é'.repeat(n / 2) + 'x'.repeat(n % 2)) });
+    if (over) assert.equal(mem.has('projectJournal.B1'), false, 'one byte over checkpoints the project');
+    else assert.equal(bytes(mem.get('projectJournal.B1')), MAX, 'the bound itself fits');
+  }
 });
 
 it('stores a project written for a newer reader once and never autosaves it afterwards', () => {
