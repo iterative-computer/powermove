@@ -1112,31 +1112,30 @@ where
                         cancel,
                     )
                 })
-            .and_then(|f| {
-                if f.failures.is_empty() {
-                    Ok(f)
-                } else if let Some(l) = f
-                    .failures
-                    .iter()
-                    .find(|l| l.message == pm_render::blender::NOT_PREPARED)
-                {
-                    // A Blender surface is missing: the export fails
-                    // (contract 11 invariant 7), it is never routed.
-                    Err(JobError::Blender(pm_blender::BlenderError::Failed(format!(
-                        "layer {} in {}: {}",
-                        l.layer, l.composition, l.message
-                    ))))
-                } else {
-                    Err(JobError::Unsupported(
-                        f.failures
-                            .iter()
-                            .map(|l| {
-                                format!("layer {} in {}: {}", l.layer, l.composition, l.message)
-                            })
-                            .collect(),
-                    ))
-                }
-            });
+                .and_then(|f| {
+                    if f.failures.is_empty() {
+                        Ok(f)
+                    } else if let Some(l) = f
+                        .failures
+                        .iter()
+                        .find(|l| l.message == pm_render::blender::NOT_PREPARED)
+                    {
+                        // A Blender surface is missing: the export fails
+                        // (contract 11 invariant 7), it is never routed.
+                        Err(JobError::Blender(pm_blender::BlenderError::Failed(
+                            format!("layer {} in {}: {}", l.layer, l.composition, l.message),
+                        )))
+                    } else {
+                        Err(JobError::Unsupported(
+                            f.failures
+                                .iter()
+                                .map(|l| {
+                                    format!("layer {} in {}: {}", l.layer, l.composition, l.message)
+                                })
+                                .collect(),
+                        ))
+                    }
+                });
             match rendered {
                 Ok(f) => {
                     if tx.send(Rendered::Frame(n, f.rgba)).is_err() {

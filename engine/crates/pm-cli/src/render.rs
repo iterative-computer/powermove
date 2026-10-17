@@ -547,11 +547,12 @@ fn member_array(doc: &Document, key: &str) -> Option<(f64, f64)> {
     Some((n(0)?, n(1)?)).filter(|(a, b)| b > a)
 }
 
-/// Runs `pm-cli render`. Returns the JSON summary printed on success.
 /// A Blender stage on the installed Blender when the job's composition
 /// renders with Blender (`render3d.enabled`): surfaces cached under the
 /// user's caches folder.
-fn blender_stage(job: &ExportJob) -> Result<Option<pm_export::blender::ExportBlender>, pm_blender::BlenderError> {
+fn blender_stage(
+    job: &ExportJob,
+) -> Result<Option<pm_export::blender::ExportBlender>, pm_blender::BlenderError> {
     let needs = pm_render::unsupported_with_media(&job.document, &job.composition, &*job.media)
         .iter()
         .any(|u| u.feature == pm_render::Feature::Blender);
@@ -563,10 +564,15 @@ fn blender_stage(job: &ExportJob) -> Result<Option<pm_export::blender::ExportBle
         .unwrap_or_else(std::env::temp_dir)
         .join("Library/Caches/powermove-cli/Blender Surfaces");
     let backend = pm_blender::job::LocalBackend::discover(&std::env::temp_dir())?;
-    let stage = pm_blender::job::BlenderStage::new(pm_blender::SurfaceCache::new(512 << 20, Some(caches)));
-    Ok(Some(pm_export::blender::ExportBlender::new(stage, Box::new(backend))))
+    let stage =
+        pm_blender::job::BlenderStage::new(pm_blender::SurfaceCache::new(512 << 20, Some(caches)));
+    Ok(Some(pm_export::blender::ExportBlender::new(
+        stage,
+        Box::new(backend),
+    )))
 }
 
+/// Runs `pm-cli render`. Returns the JSON summary printed on success.
 pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     let ext = options
         .output
@@ -636,11 +642,11 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
                 blender.as_mut(),
             )
         })
-    .map_err(|e| match e {
-        JobError::Unsupported(list) => Failure::Unsupported(list),
-        JobError::Cancelled => Failure::Failed("interrupted; nothing was written".into()),
-        other => Failure::Failed(other.to_string()),
-    })?;
+        .map_err(|e| match e {
+            JobError::Unsupported(list) => Failure::Unsupported(list),
+            JobError::Cancelled => Failure::Failed("interrupted; nothing was written".into()),
+            other => Failure::Failed(other.to_string()),
+        })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();
     Ok(serde_json::json!({

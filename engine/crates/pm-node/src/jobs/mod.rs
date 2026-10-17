@@ -1430,9 +1430,10 @@ fn lane_blender<'b>(
     class: PriorityClass,
     job: &JobId,
 ) -> Result<Option<&'b mut pm_export::blender::ExportBlender>, EngineError> {
-    let needs = pm_render::unsupported_with_media(&export.document, &export.composition, &*export.media)
-        .iter()
-        .any(|u| u.feature == pm_render::Feature::Blender);
+    let needs =
+        pm_render::unsupported_with_media(&export.document, &export.composition, &*export.media)
+            .iter()
+            .any(|u| u.feature == pm_render::Feature::Blender);
     if !needs {
         return Ok(None);
     }
@@ -1456,7 +1457,8 @@ fn lane_blender<'b>(
         let area = backend
             .area()
             .map_err(|e| job_error(job, ErrorCode::BlenderFailed, e.to_string()))?;
-        let cache = pm_blender::SurfaceCache::new(BLENDER_SURFACE_BYTES, Some(area.0.join("surfaces")));
+        let cache =
+            pm_blender::SurfaceCache::new(BLENDER_SURFACE_BYTES, Some(area.0.join("surfaces")));
         blender.stage = Some(pm_export::blender::ExportBlender::new(
             pm_blender::job::BlenderStage::new(cache),
             Box::new(backend),
