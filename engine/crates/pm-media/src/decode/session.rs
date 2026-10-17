@@ -328,15 +328,7 @@ impl Session {
                     self.stats.disposable_skipped += 1;
                     continue;
                 }
-                // Pictures shown well before the target are only references
-                // on the way: decoded without an output buffer.
-                let far = behind
-                    && self.shown_at[k].saturating_add(self.window_limit) < self.shown_at[target];
-                if far {
-                    self.decoder.send_reference_only(p, out)?;
-                } else {
-                    self.decoder.send(p, out)?;
-                }
+                self.decoder.send(p, out)?;
                 self.stats.samples_fed += 1;
             }
             self.stats.send_us += t.elapsed().as_micros() as u64;

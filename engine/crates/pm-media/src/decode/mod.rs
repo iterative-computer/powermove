@@ -118,21 +118,6 @@ impl Decoder {
         }
     }
 
-    /// Sends a sample whose picture is needed only as a reference for later
-    /// ones. VideoToolbox decodes it without emitting an image buffer;
-    /// other backends decode it as usual (the session drops the output).
-    pub fn send_reference_only(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>) -> Result<()> {
-        match self {
-            Decoder::Vt { dec, pool, .. } => {
-                let from = out.len();
-                let r = dec.send_reference_only(p, out);
-                track(pool, &mut out[from..]);
-                r
-            }
-            _ => self.send(p, out),
-        }
-    }
-
     /// Whether every sent sample's frame is available after [`sync`]
     /// without further input (no reorder delay inside the decoder).
     ///

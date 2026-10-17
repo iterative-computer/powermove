@@ -489,9 +489,6 @@ struct Collector {
 /// `sourceFrameRefCon` of end-of-sequence samples.
 const EOS_REFCON: usize = 1;
 const ASYNC: u32 = 1; // kVTDecodeFrame_EnableAsynchronousDecompression
-/// kVTDecodeFrame_DoNotOutputFrame: the picture is decoded (references
-/// stay correct) but no image buffer is emitted for it.
-const NO_OUTPUT: u32 = 1 << 1;
 
 unsafe extern "C" fn on_output(
     refcon: *mut c_void,
@@ -638,16 +635,6 @@ impl VtDecoder {
 
     /// Submits one sample (asynchronous decompression).
     pub fn send(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>) -> Result<()> {
-        self.send_flags(p, out, ASYNC)
-    }
-
-    /// Submits one sample whose picture is only needed as a reference: it
-    /// is decoded, but VideoToolbox emits no image buffer for it.
-    pub fn send_reference_only(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>) -> Result<()> {
-        self.send_flags(p, out, ASYNC | NO_OUTPUT)
-    }
-
-    fn send_flags(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>, flags: u32) -> Result<()> {
         let converted;
         let data: &[u8] = if self.annexb {
             converted = annexb_to_length_prefixed(&p.data);
@@ -662,7 +649,7 @@ impl VtDecoder {
         } else {
             &p.data
         };
-        let st = self.submit(data, p, flags, 0)?;
+        let st = self.submit(data, p, ASYNC, 0)?;
         if st != 0 {
             self.failures.push((p.pts, st));
         }
@@ -787,8 +774,7 @@ impl VtDecoder {
     fn collect(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
         let got = std::mem::take(&mut *self.collector.frames.lock().unwrap());
         for (status, flags, buf, pts) in got {
-            if flags & kVTDecodeInfo_FrameDropped != 0 || (status == 0 && buf.is_none()) {
-                // Dropped, or decoded without output (`send_reference_only`).
+            if flags & kVTDecodeInfo_FrameDropped != 0 {
                 continue;
             }
             if !pts.is_valid() || pts.timescale != self.timescale || pts.value % self.unit != 0 {
