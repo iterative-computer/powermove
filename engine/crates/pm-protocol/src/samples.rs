@@ -196,6 +196,7 @@ pub fn frame_descriptor() -> FrameDescriptor {
             representation: Representation::Proxy,
             draft_3d: false,
             cached: true,
+            stand_in: false,
         },
         overlay: Some(OverlayGeometry {
             viewport: Rect {
@@ -834,6 +835,7 @@ pub fn responses() -> Vec<Envelope> {
                     representation: Representation::Original,
                     draft_3d: true,
                     cached: false,
+                    stand_in: false,
                 },
                 image: ImagePayload::Inline {
                     bytes: Bytes(vec![0x89, b'P', b'N', b'G']),

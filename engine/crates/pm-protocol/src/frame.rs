@@ -324,6 +324,15 @@ pub struct FrameQuality {
     pub draft_3d: bool,
     /// Served from the engine memory cache (cached preview).
     pub cached: bool,
+    /// A scrub frame in which a video layer shows the nearest decoded frame
+    /// of its source while its exact frame decodes (`SeekMode::Scrub`, as
+    /// today's viewer draws a video element's last decoded picture). The
+    /// exact frame follows when it decodes. Never set on timed frames,
+    /// exports, or captures. Added after `protocol-a6aa78d4b8a57c0d`
+    /// (RFC 02 version notes); a peer that does not send it decodes as
+    /// `false`.
+    #[serde(default)]
+    pub stand_in: bool,
 }
 
 /// A quad in view pixels, clockwise from top-left.

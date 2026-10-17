@@ -57,6 +57,9 @@ export type PresentedFrame = {
   overlay: OverlayGeometry | null;
   rafMs: number;
   timed: boolean;
+  /** A scrub frame with stand-ins for video still decoding (the exact
+   *  frame follows; docs/engine/scrub.md). */
+  standIn: boolean;
   /** Host µs at which this refresh is predicted to reach the display (the
    *  instant the frame was picked for: the A/V sync measurement compares
    *  it with the audio clock); null for frames drawn on arrival or before
@@ -445,6 +448,7 @@ export class EnginePresenter implements Presenter {
       overlay: desc.overlay,
       rafMs,
       timed: desc.duration !== null,
+      standIn: desc.quality.standIn === true,
       displayUs
     };
     for (const listener of this.listeners) listener(presented);
