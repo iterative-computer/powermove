@@ -13,6 +13,7 @@ pm-protocol = { path = "../pm-protocol", default-features = false }
 pm-model = { path = "../pm-model" }
 pm-eval = { path = "../pm-eval" }
 pm-media = { path = "../pm-media" }
+pm-stretch = { path = "../pm-stretch" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

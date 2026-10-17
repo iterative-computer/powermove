@@ -18,15 +18,24 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(192);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(191);
+    expect(captured).toHaveLength(197);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(196);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
       inFields: true,
       priority: 50
     });
-    expect(captured.filter(({ command }) => command !== 'blurField').every(({ priority }) => priority === 100)).toBe(true);
+    const shuttle = new Set(['shuttleBackward', 'shuttleStop', 'shuttleForward', 'playAround']);
+    expect(captured.filter(({ command }) => command !== 'blurField' && !shuttle.has(command)).every(({ priority }) => priority === 100)).toBe(true);
+    // J/K/L shuttle ahead of the After Effects meanings, which it declines to when paused.
+    expect(captured.filter(({ command }) => shuttle.has(command))).toEqual([
+      { key: 'j', command: 'shuttleBackward', args: [false], priority: 90 },
+      { key: 'k', command: 'shuttleStop', priority: 90 },
+      { key: 'l', command: 'shuttleForward', args: [false], priority: 90 },
+      { key: 'ctrl+j', command: 'shuttleBackward', args: [true], priority: 90 },
+      { key: 'ctrl+shift+space', command: 'playAround', priority: 90 }
+    ]);
   });
 
   it('matches the After Effects tool shortcuts', () => {

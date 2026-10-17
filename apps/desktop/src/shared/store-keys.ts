@@ -19,6 +19,8 @@ export const STATIC_KEYS = [
   'previewMemoryMiB',
   // "Use New Engine" (main reads it once at launch; Settings › General).
   'useNewEngine',
+  // "Scrub audio" (the new engine's transport; Settings › General › Engine).
+  'audioScrub',
   'projectTrash',
   'takes',
   'workspaces',

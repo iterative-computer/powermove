@@ -46,6 +46,9 @@ pub struct TransportClock {
     followed: Option<u32>,
     /// Output latency (µs) and sample rate of the audio device followed.
     device: (u32, u32),
+    /// A host-clock play around: where it stops (unwrapped media) and
+    /// where the line returns to.
+    around: Option<(i64, i64)>,
 }
 
 impl TransportClock {
@@ -63,6 +66,7 @@ impl TransportClock {
             end: None,
             followed: None,
             device: (0, 48_000),
+            around: None,
         }
     }
 
@@ -153,9 +157,44 @@ impl TransportClock {
         self.followed.is_some()
     }
 
+    /// Plays around `here` on the host clock (no audio device): from
+    /// `pre` ticks before to `post` ticks after, then back to `here`.
+    pub fn play_around(&mut self, here: i64, pre: i64, post: i64, now: i64) {
+        let from = (here - pre.max(0)).max(0);
+        self.apply(
+            TransportCommand::Seek {
+                time: Ticks::new(from).unwrap_or(Ticks::ZERO),
+                mode: SeekMode::Exact,
+            },
+            now,
+        );
+        self.apply(
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            now,
+        );
+        self.around = Some((here + post.max(0), here));
+    }
+
     /// Stops a host-clock run that reached the composition end at host µs
-    /// `now` (not while looping). Returns true when it stopped.
+    /// `now` (not while looping), or the end of a host-clock play around
+    /// (back where it began). Returns true when it stopped.
     pub fn stop_at_end(&mut self, now: i64) -> bool {
+        if let Some((until, back)) = self.around {
+            if !self.is_playing() || self.followed.is_some() {
+                self.around = None;
+            } else if self.unwrapped_at(now) >= until {
+                self.around = None;
+                self.anchor_media = back;
+                self.anchor_host = now;
+                self.run_start = back;
+                self.rate = PlaybackRate::STOPPED;
+                self.state = TransportState::Stopped;
+                self.discontinuity();
+                return true;
+            }
+        }
         let Some(end) = self.end else {
             return false;
         };
@@ -254,6 +293,7 @@ impl TransportClock {
     /// Applies a transport command at host µs `now`. Returns whether the
     /// line changed (a sample is due).
     pub fn apply(&mut self, command: TransportCommand, now: i64) -> bool {
+        self.around = None;
         match command {
             TransportCommand::Play { rate } if rate.num != 0 && rate.den > 0 => {
                 let media = self.media_at(now);
@@ -657,5 +697,38 @@ mod tests {
         assert!(!clock.stop_at_end(t));
         assert!(clock.stop_at_end(PREROLL_US + 1_000_000));
         assert_eq!(clock.media_at(PREROLL_US + 5_000_000), 120 * FRAME);
+    }
+
+    /// Without an audio device, play around runs on the host clock from
+    /// the pre-roll and stops back where it began.
+    #[test]
+    fn play_around_on_the_host_clock_returns_to_its_frame() {
+        let mut clock = TransportClock::new(FRAME);
+        clock.set_end(Some(100 * TICKS_PER_SECOND));
+        let here = 10 * TICKS_PER_SECOND;
+        clock.apply(
+            TransportCommand::Seek {
+                time: Ticks::new(here).unwrap(),
+                mode: SeekMode::Exact,
+            },
+            0,
+        );
+        clock.play_around(here, 2 * TICKS_PER_SECOND, TICKS_PER_SECOND, 1_000_000);
+        let start = 1_000_000 + PREROLL_US;
+        assert_eq!(clock.media_at(start), 8 * TICKS_PER_SECOND);
+        assert!(!clock.stop_at_end(start + 2_900_000));
+        assert!(clock.stop_at_end(start + 3_000_000));
+        assert!(!clock.is_playing());
+        assert_eq!(clock.media_at(start + 4_000_000), here);
+        // Any other command ends a play around.
+        clock.play_around(here, 0, TICKS_PER_SECOND, 10_000_000);
+        clock.apply(TransportCommand::Pause, 10_100_000);
+        clock.apply(
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            10_200_000,
+        );
+        assert!(!clock.stop_at_end(10_200_000 + PREROLL_US + 2_000_000));
     }
 }

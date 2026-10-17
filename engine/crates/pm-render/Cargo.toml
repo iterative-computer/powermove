@@ -15,9 +15,9 @@ pm-eval = { path = "../pm-eval" }
 pm-expr = { path = "../pm-expr" }
 pm-color = { path = "../pm-color" }
 pm-geom3d = { path = "../pm-geom3d" }
-pm-vector = { path = "../pm-vector" }
 pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
 pm-media = { path = "../pm-media" }
+pm-vector = { path = "../pm-vector", features = ["gpu"] }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 thiserror.workspace = true
 libm.workspace = true

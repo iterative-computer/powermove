@@ -29,7 +29,7 @@ use std::time::Duration;
 use pm_eval::Evaluator;
 use pm_model::Document;
 use pm_protocol::clock::{ClockSample, TransportCommand, TransportState};
-use pm_protocol::common::{TICKS_PER_SECOND, TickRange};
+use pm_protocol::common::{PlaybackRate, TICKS_PER_SECOND, TickRange};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType};
 
@@ -41,8 +41,9 @@ use crate::kernel;
 use crate::meter::Meters;
 use crate::mixer::{MixFormat, Mixer, RenderOptions};
 use crate::ring::{CHUNK, Consumer, Ring, Tag};
+use crate::shuttle::Shuttle;
 use crate::source::SourceCache;
-use crate::transport::{Effect, Segment, Transport};
+use crate::transport::{Effect, Transport};
 
 /// Groups of control points ([`crate::mixer::READ_GROUP`]) of time-mapped
 /// voices the look-ahead bounds per turn of the render loop: 4 to 7 ms of
@@ -260,6 +261,7 @@ impl Playback {
             config,
             solo: None,
             converter: None,
+            shuttle: None,
             device_rate,
             ring_channels,
             stopped_published: false,
@@ -409,6 +411,11 @@ impl Playback {
         self.stream.as_ref()
     }
 
+    /// The mix bus (project rate and speakers).
+    pub fn format(&self) -> &MixFormat {
+        &self.format
+    }
+
     /// The device's sample rate.
     pub fn device_rate(&self) -> u32 {
         self.shared.device_rate
@@ -444,6 +451,8 @@ struct Run {
     state: TransportState,
     /// The loop its clock line wraps by.
     loop_range: Option<TickRange>,
+    /// Media project samples per stream frame (J/K/L: ±1, ±2).
+    rate: i64,
 }
 
 /// Project-to-device rate conversion with its media bookkeeping.
@@ -568,6 +577,7 @@ impl Converter {
         epoch: u32,
         state: TransportState,
         loop_range: Option<TickRange>,
+        rate: i64,
         ring_channels: usize,
         out: &mut Vec<(Tag, Vec<f32>)>,
     ) {
@@ -579,7 +589,8 @@ impl Converter {
             Some(run)
                 if self.next_input == Some(start)
                     && run.state == state
-                    && run.loop_range == loop_range =>
+                    && run.loop_range == loop_range
+                    && run.rate == rate =>
             {
                 run.frames += frames as u64;
             }
@@ -589,9 +600,10 @@ impl Converter {
                 ticks,
                 state,
                 loop_range,
+                rate,
             }),
         }
-        self.next_input = Some(start + frames as i64);
+        self.next_input = Some(start + frames as i64 * rate);
         let mut done = 0;
         while done < frames {
             let at = self.input_fill;
@@ -714,7 +726,8 @@ impl Converter {
             // Device frame j sits `position(j)/d − offset` project frames
             // into its run.
             let into = self.position(self.emitted) - run.offset as i128 * d;
-            let media = run.ticks as i128 + into * TICKS_PER_SECOND as i128 / (p * d);
+            let media = run.ticks as i128
+                + (into * TICKS_PER_SECOND as i128 * run.rate as i128).div_euclid(p * d);
             out.push((
                 Tag {
                     media_ticks: media as i64,
@@ -722,6 +735,10 @@ impl Converter {
                     state: run.state,
                     frames: n as u32,
                     loop_range: run.loop_range,
+                    rate: PlaybackRate {
+                        num: run.rate as i32,
+                        den: 1,
+                    },
                 },
                 inter,
             ));
@@ -739,6 +756,8 @@ struct RenderThread {
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
     converter: Option<Converter>,
+    /// The 2× J/K/L stretch, made at the first 2× run.
+    shuttle: Option<Shuttle>,
     device_rate: u32,
     ring_channels: usize,
     stopped_published: bool,
@@ -819,11 +838,18 @@ impl RenderThread {
             if lookahead_pending
                 || last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4)
             {
-                lookahead_pending = !self.mixer.prefetch_within(
-                    position,
-                    (self.config.lookahead_ms as i64 * rate / 1000) as usize,
-                    LOOKAHEAD_GROUPS,
-                );
+                // J/K/L reads ahead in its direction, as far as it plays.
+                let speed = self.transport.play_rate();
+                let ahead = self.config.lookahead_ms as i64 * rate / 1000 * speed.abs().max(1);
+                let from = if speed < 0 {
+                    position - ahead
+                } else {
+                    position
+                };
+                lookahead_pending =
+                    !self
+                        .mixer
+                        .prefetch_within(from, ahead as usize, LOOKAHEAD_GROUPS);
                 last_prefetch = Some(position);
             }
         }
@@ -862,12 +888,15 @@ impl RenderThread {
     fn control(&mut self, c: Control) -> bool {
         match c {
             Control::Command(cmd, reply) => {
+                // A pause, a step, a play around, or a new J/K/L rate while
+                // running starts from what is heard.
                 if self.transport.is_running()
                     && matches!(
                         cmd,
                         TransportCommand::Pause
                             | TransportCommand::Step { .. }
                             | TransportCommand::PlayAround { .. }
+                            | TransportCommand::Play { .. }
                     )
                     && let Some(heard) = self.heard_sample()
                 {
@@ -992,15 +1021,25 @@ impl RenderThread {
         self.mixer.end_glides();
         let position = self.transport.position();
         let rate = self.transport.rate() as i64;
-        let frames = (self.config.preroll_ms as i64 * rate / 1000) as usize;
-        self.mixer.prefetch(position, frames);
+        let speed = self.transport.play_rate();
+        let frames = self.config.preroll_ms as i64 * rate / 1000 * speed.abs().max(1);
+        let from = if speed < 0 {
+            position - frames
+        } else {
+            position
+        };
+        let frames = frames as usize;
+        self.mixer.prefetch(from, frames);
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
-        while !self.mixer.is_ready(position, frames) && std::time::Instant::now() < deadline {
+        while !self.mixer.is_ready(from, frames) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
         if let Some(c) = &mut self.converter {
             c.reset();
+        }
+        if let Some(s) = &mut self.shuttle {
+            s.reset();
         }
     }
 
@@ -1014,7 +1053,8 @@ impl RenderThread {
         while self.ring.queued() < target {
             let Some(seg) = self.transport.next(CHUNK) else {
                 if self.transport.take_stop() == Effect::Stopped {
-                    // The converter's tail and partial chunk belong to the run.
+                    // The shuttle's and the converter's tails belong to the run.
+                    self.finish_shuttle();
                     self.flush_converter();
                     // Let what is queued play out; the clock stops at the
                     // run's end position once it has.
@@ -1023,15 +1063,18 @@ impl RenderThread {
                 }
                 return;
             };
+            // The samples the segment plays, mixed forward; reverse runs
+            // play them backwards. Reverse renders each chunk on its own,
+            // so stretched voices resample there (see RenderOptions).
+            let (lo, hi) = seg.media_span();
             let options = RenderOptions {
                 wait: !self.mixer.cache().has_workers(),
                 monitor_solo: self.solo.clone(),
                 meters: true,
+                no_stretch: seg.rate < 0,
             };
-            match self
-                .mixer
-                .render(seg.start, seg.frames, &mut planar, &options)
-            {
+            let n = (hi - lo) as usize;
+            match self.mixer.render(lo, n, &mut planar, &options) {
                 Ok(report) => {
                     if report.starved > 0 {
                         self.shared.starved.fetch_add(1, Ordering::Relaxed);
@@ -1044,8 +1087,13 @@ impl RenderThread {
                     self.error(e.to_string());
                     for c in &mut planar {
                         c.clear();
-                        c.resize(seg.frames, 0.0);
+                        c.resize(n, 0.0);
                     }
+                }
+            }
+            if seg.rate < 0 {
+                for c in &mut planar {
+                    c.reverse();
                 }
             }
             if let Some(g) = seg.grain {
@@ -1056,59 +1104,137 @@ impl RenderThread {
                     }
                 }
             }
-            if let Some(row) = &self.mono_fold {
-                for i in 0..seg.frames {
-                    let v: f32 = row.iter().zip(&planar).map(|(m, c)| m * c[i]).sum();
-                    planar[0][i] = v;
-                }
-            }
             {
                 let mut meters = self.shared.meters.lock().unwrap_or_else(|e| e.into_inner());
-                meters.push_back(self.mixer.meters(seg.start + seg.frames as i64));
+                let at = if seg.rate < 0 { lo } else { hi };
+                meters.push_back(self.mixer.meters(at));
                 while meters.len() > 64 {
                     meters.pop_front();
                 }
             }
-            let ticks = self.transport.ticks_of(seg.start);
-            if self.converter.is_some() {
-                self.push_converted(&planar, &seg, ticks);
-            } else {
-                let mut inter = Vec::with_capacity(seg.frames * self.ring_channels);
-                for i in 0..seg.frames {
-                    for c in 0..self.ring_channels {
-                        inter.push(planar.get(c).map_or(0.0, |p| p[i]));
-                    }
-                }
-                let tag = Tag {
-                    media_ticks: ticks,
-                    epoch: seg.epoch,
-                    state: seg.state,
-                    frames: seg.frames as u32,
-                    loop_range: seg.loop_range,
+            if seg.rate.abs() == 2 {
+                let mut pieces = Vec::new();
+                let shuttle = match self.shuttle.as_mut() {
+                    Some(s) => s,
+                    None => match Shuttle::new(channels, self.transport.rate()) {
+                        Ok(s) => self.shuttle.insert(s),
+                        Err(e) => {
+                            self.error(e.to_string());
+                            continue;
+                        }
+                    },
                 };
-                while !self.ring.push(tag, &inter) {
-                    std::thread::sleep(Duration::from_millis(1));
+                if let Err(e) = shuttle.push(
+                    &planar,
+                    seg.start,
+                    seg.rate.signum(),
+                    seg.epoch,
+                    seg.state,
+                    seg.loop_range,
+                    &mut pieces,
+                ) {
+                    self.error(e.to_string());
                 }
+                for p in pieces {
+                    self.emit(p.planar, p.start, p.rate, seg.epoch, p.state, p.loop_range);
+                }
+            } else {
+                let out = std::mem::replace(&mut planar, vec![Vec::new(); channels]);
+                self.emit(
+                    out,
+                    seg.start,
+                    seg.rate,
+                    seg.epoch,
+                    seg.state,
+                    seg.loop_range,
+                );
             }
         }
     }
 
-    fn push_converted(&mut self, planar: &[Vec<f32>], seg: &Segment, ticks: i64) {
+    /// Queues output frames (planar, at the project rate) that play media
+    /// from sample `start` at `rate` samples a frame: folded for a mono
+    /// device, converted to the device rate, in ring chunks.
+    fn emit(
+        &mut self,
+        mut planar: Vec<Vec<f32>>,
+        start: i64,
+        rate: i64,
+        epoch: u32,
+        state: TransportState,
+        loop_range: Option<TickRange>,
+    ) {
+        let frames = planar.first().map_or(0, Vec::len);
+        if frames == 0 {
+            return;
+        }
+        if let Some(row) = &self.mono_fold {
+            for i in 0..frames {
+                let v: f32 = row.iter().zip(&planar).map(|(m, c)| m * c[i]).sum();
+                planar[0][i] = v;
+            }
+        }
+        let ticks = self.transport.ticks_of(start);
         let ring_channels = self.ring_channels;
-        let mut chunks = Vec::new();
-        let c = self.converter.as_mut().expect("converter");
-        c.feed(
-            planar,
-            seg.start,
-            seg.frames,
-            ticks,
-            seg.epoch,
-            seg.state,
-            seg.loop_range,
-            ring_channels,
-            &mut chunks,
-        );
-        self.push_chunks(chunks);
+        if let Some(c) = self.converter.as_mut() {
+            let mut chunks = Vec::new();
+            c.feed(
+                &planar,
+                start,
+                frames,
+                ticks,
+                epoch,
+                state,
+                loop_range,
+                rate,
+                ring_channels,
+                &mut chunks,
+            );
+            self.push_chunks(chunks);
+            return;
+        }
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(CHUNK);
+            let mut inter = Vec::with_capacity(n * self.ring_channels);
+            for i in done..done + n {
+                for c in 0..self.ring_channels {
+                    inter.push(planar.get(c).map_or(0.0, |p| p[i]));
+                }
+            }
+            let tag = Tag {
+                media_ticks: self.transport.ticks_of(start + done as i64 * rate),
+                epoch,
+                state,
+                frames: n as u32,
+                loop_range,
+                rate: PlaybackRate {
+                    num: rate as i32,
+                    den: 1,
+                },
+            };
+            while !self.ring.push(tag, &inter) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            done += n;
+        }
+    }
+
+    /// The end of a 2× run: the stretch's tail, on the run's epoch.
+    fn finish_shuttle(&mut self) {
+        let mut pieces = Vec::new();
+        let Some(s) = self.shuttle.as_mut() else {
+            return;
+        };
+        let Some(epoch) = s.epoch() else {
+            return;
+        };
+        if let Err(e) = s.finish(&mut pieces) {
+            self.error(e.to_string());
+        }
+        for p in pieces {
+            self.emit(p.planar, p.start, p.rate, epoch, p.state, p.loop_range);
+        }
     }
 
     fn flush_converter(&mut self) {

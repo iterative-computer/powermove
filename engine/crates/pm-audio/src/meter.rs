@@ -87,6 +87,46 @@ pub struct Meters {
     pub master: Vec<Level>,
 }
 
+impl Meters {
+    /// The contract 6 levels message for these meters (`sample_rate`: the
+    /// project rate, for the media time).
+    pub fn to_levels(&self, sample_rate: u32) -> pm_protocol::clock::AudioLevels {
+        use pm_protocol::clock::{AudioLevels, ChannelLevels, StripLevels};
+        let channels = |levels: &[Level]| ChannelLevels {
+            peak: levels.iter().map(|l| l.peak).collect(),
+            rms: levels.iter().map(|l| l.rms).collect(),
+        };
+        let ticks = self.position as i128 * pm_protocol::common::TICKS_PER_SECOND as i128
+            / sample_rate.max(1) as i128;
+        AudioLevels {
+            media_time: pm_protocol::common::Ticks::saturating_from_i128(ticks.max(0)),
+            master: channels(&self.master),
+            strips: self
+                .strips
+                .iter()
+                .map(|(id, levels)| StripLevels {
+                    id: id.clone(),
+                    levels: channels(levels),
+                })
+                .collect(),
+        }
+    }
+
+    /// Silence on every strip (the levels sent when playback stops).
+    pub fn silent(&self) -> Meters {
+        let zero = |l: &[Level]| vec![Level::default(); l.len()];
+        Meters {
+            position: self.position,
+            strips: self
+                .strips
+                .iter()
+                .map(|(id, l)| (id.clone(), zero(l)))
+                .collect(),
+            master: zero(&self.master),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

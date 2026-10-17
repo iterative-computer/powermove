@@ -19,7 +19,7 @@ use ts_rs::TS;
 use crate::blender::{
     BlenderJobRequest, BlenderModelJob, BlenderProgress, BlenderStatus, BlenderSurface,
 };
-use crate::clock::{ClockSample, TransportCommand};
+use crate::clock::{AudioMessage, ClockSample, TransportCommand};
 use crate::color::ProjectColor;
 use crate::common::{CompositionId, DocumentId, RequestId, Revision, SessionId, Ticks};
 use crate::definitions::{DefinitionsApplied, DefinitionsUpdate};
@@ -311,6 +311,9 @@ pub enum Event {
     BlenderSurface(BlenderSurface),
     /// Engine → renderer: a fact that may become a document write.
     Fact(EngineFact),
+    /// Renderer ↔ interactive engine (session-bound): the mix's monitor
+    /// solo, levels, and waveform peaks (contract 6, [`AudioMessage`]).
+    Audio(AudioMessage),
 }
 
 /// Response kinds, for correlating answers with requests.
@@ -454,7 +457,7 @@ impl Event {
             Event::ApplyPatches(_) | Event::PatchesApplied(_) | Event::Fact(_) => ContractId::Patch,
             Event::Frame(_) | Event::ReleaseFrame(_) | Event::Viewer(_) => ContractId::Frame,
             Event::SurfacePool(_) => ContractId::GpuInterop,
-            Event::Transport(_) | Event::Clock(_) => ContractId::Clock,
+            Event::Transport(_) | Event::Clock(_) | Event::Audio(_) => ContractId::Clock,
             Event::Deadline(_) | Event::Slicing(_) => ContractId::Slicing,
             Event::Failure(_) | Event::Crash(_) | Event::InFlight(_) => ContractId::Errors,
             Event::LeaseUsage(_) => ContractId::Lease,
@@ -472,6 +475,7 @@ impl Event {
                 | Event::ReleaseFrame(_)
                 | Event::Viewer(_)
                 | Event::Transport(_)
+                | Event::Audio(_)
         )
     }
 }
@@ -554,6 +558,7 @@ impl Validate for Event {
             Event::SurfacePool(pool) => pool.validate(),
             Event::Transport(command) => command.validate(),
             Event::Clock(sample) => sample.validate(),
+            Event::Audio(message) => message.validate(),
             Event::Slicing(policy) => policy.validate(),
             Event::Deadline(signal) => signal.validate(),
             Event::LeaseUsage(usage) => usage.validate(),

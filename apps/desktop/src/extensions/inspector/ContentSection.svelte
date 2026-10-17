@@ -40,6 +40,17 @@
   const IMPORT_SOURCE = '__powermove_import_source__';
 
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
+  /* Pitch follows the new engine's clips (plan section 6, clip `pitch`):
+     preserved by default as speed changes, or following the speed. The
+     legacy engine plays clip sound at its own speed, so the row shows only
+     while the new engine runs (`engine.viewer` is registered). */
+  const newEngine = $derived(api.services.get('engine.viewer') != null);
+  const pitchBinding: EditBinding = {
+    mode: 'command',
+    label: 'Preserve pitch',
+    origin: 'inspector',
+    command: (value: unknown) => ({ type: 'set_content', target: layer.id, patch: { pitch: value ? 'preserve' : 'follow' } })
+  };
   const edit = (key: string, label: string): EditBinding =>
     contentBinding(layer.id, key, { label, origin: 'inspector' });
 
@@ -353,6 +364,9 @@
     {#if content.embeddedAudio === true}
       <AnimatedRow {layer} label="Mute audio"><ToggleField {api} {mixed} get={get('audioMuted', false)} edit={edit('audioMuted', 'Mute audio')} label="Mute audio" /></AnimatedRow>
       <AnimatedRow {layer} label="Audio gain" path="c.audioGain"><NumField {api} {mixed} get={get('audioGain', 1)} edit={edit('audioGain', 'Audio gain')} label="Audio gain" step={0.05} precision={2} min={0} max={4} /></AnimatedRow>
+      {#if newEngine}
+        <AnimatedRow {layer} label="Preserve pitch"><ToggleField {api} {mixed} get={() => content.pitch !== 'follow'} edit={pitchBinding} label="Preserve pitch" /></AnimatedRow>
+      {/if}
     {/if}
   {/if}
 {:else if layer.type === 'audio'}

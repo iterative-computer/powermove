@@ -1137,3 +1137,226 @@ fn a_pause_before_the_loop_stops_where_heard() {
         "paused at {paused_at}, heard {heard_now}"
     );
 }
+
+/// The media positions every frame heard plays (the ramp's left channel),
+/// with the host µs at which each frame reaches the listener.
+fn heard_positions(dev: &SimDevice, from: usize) -> Vec<(f64, i64)> {
+    let mut out = vec![];
+    for (host, buf) in &dev.log[from..] {
+        for (i, f) in buf.chunks(2).enumerate() {
+            if f[1] == 0.5 {
+                let at = *host as f64 + LATENCY_US as f64 + i as f64 * 1e6 / dev.rate as f64;
+                out.push((at, position_of(f[0])));
+            }
+        }
+    }
+    out
+}
+
+/// J/K/L at −1×: the mix plays backwards, sample by sample, on a clock line
+/// running backwards; the run stops after sample 0 and the clock rests
+/// there.
+#[test]
+fn reverse_playback_plays_backwards_on_its_clock() {
+    let dir = temp_dir("jkl-reverse");
+    let file = ramp_file(&dir, 4);
+    let (playback, mut dev, _rig) = setup(&file, 4.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(0.8),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate { num: -1, den: 1 },
+        })
+        .unwrap();
+    dev.run(30);
+    let clock = playback.clock().unwrap();
+    assert_eq!(clock.rate, PlaybackRate { num: -1, den: 1 });
+    assert_eq!(clock.state, TransportState::Shuttling);
+    let heard = heard_positions(&dev, 0);
+    assert_eq!(
+        heard[0].1,
+        (0.8 * SR as f64) as i64,
+        "starts on the playhead"
+    );
+    for w in heard.windows(2) {
+        assert_eq!(w[1].1, w[0].1 - 1, "one sample back per frame");
+    }
+    let mut worst = 0f64;
+    for (at, pos) in &heard[heard.len() / 2..] {
+        let predicted = clock
+            .media_time_at(HostMicros::new(*at as u64).unwrap())
+            .get() as f64
+            / TICKS_PER_SECOND as f64;
+        worst = worst.max((predicted - *pos as f64 / SR as f64).abs());
+    }
+    eprintln!("−1×: worst |line − heard| {:.1} µs", worst * 1e6);
+    assert!(worst < 1e-3, "{worst}");
+    // On to sample 0, then stopped there.
+    dev.run(90);
+    let end = playback.clock().unwrap();
+    assert_eq!(end.state, TransportState::Stopped);
+    assert_eq!(end.media_time.get(), 0);
+    let heard = heard_positions(&dev, 0);
+    assert_eq!(heard.last().unwrap().1, 0, "the run plays sample 0 last");
+}
+
+/// J/K/L at 2×, −2×, and −1× (also through the device-rate converter):
+/// the line runs at the rate in either
+/// direction; what plays is the mix at twice the speed at its pitch (a
+/// 1 kHz tone stays 1 kHz), and sounds land where the line says (bursts
+/// heard within 2 ms of the line's instant for their media).
+#[test]
+fn jkl_rates_keep_pitch_and_stay_on_their_line() {
+    let dir = temp_dir("jkl-double");
+    let file = dir.join("bursts.wav");
+    let n = SR as usize * 8;
+    let mut left = vec![0f32; n];
+    let bursts: Vec<i64> = (1..8).map(|s| s * SR as i64).collect();
+    for (i, v) in left.iter_mut().enumerate() {
+        let t = i as f64 / SR as f64;
+        *v = (0.2 * (std::f64::consts::TAU * 1000.0 * t).sin()) as f32;
+    }
+    for &b in &bursts {
+        for d in -64i64..64 {
+            let w = 0.5 + 0.5 * (std::f64::consts::PI * d as f64 / 64.0).cos();
+            left[(b + d) as usize] +=
+                (0.7 * w * (std::f64::consts::TAU * 6000.0 * d as f64 / SR as f64).sin()) as f32;
+        }
+    }
+    write_wav(&file, SR, &[left, vec![0.5; n]]);
+    for (rate, from, device) in [
+        (2i32, 0.5f64, SR),
+        (-2, 7.5, SR),
+        (2, 0.5, 44_100),
+        (-1, 7.5, 44_100),
+    ] {
+        let (playback, mut dev, _rig) = setup(&file, 8.0, device, 0.0);
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(from),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate { num: rate, den: 1 },
+            })
+            .unwrap();
+        dev.run(220); // 2.3 s: 4.7 s of media at 2×
+        let clock = playback.clock().unwrap();
+        assert_eq!(clock.rate.num, rate);
+        // The heard signal (left channel) with its listener instants.
+        let mut heard: Vec<(f64, f32)> = vec![];
+        for (host, buf) in &dev.log {
+            for (i, f) in buf.chunks(2).enumerate() {
+                let at = *host as f64 + LATENCY_US as f64 + i as f64 * 1e6 / device as f64;
+                heard.push((at, f[0]));
+            }
+        }
+        // Pitch of the bed between bursts: zero crossings over 0.25 s.
+        let line = |at: f64| {
+            clock
+                .media_time_at(HostMicros::new(at as u64).unwrap())
+                .get() as f64
+                / TICKS_PER_SECOND as f64
+        };
+        let quiet: Vec<f32> = heard
+            .iter()
+            .filter(|(at, _)| {
+                let m = line(*at);
+                (m.fract() - 0.5).abs() < 0.3 && (m - from).abs() > 0.4
+            })
+            .map(|(_, v)| *v)
+            .collect();
+        let seconds = quiet.len() as f64 / device as f64;
+        let crossings = quiet
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count();
+        let hz = crossings as f64 / seconds;
+        // Burst positions: energy of the first difference (above the bed).
+        let mut errors = vec![];
+        for &b in &bursts {
+            let media = b as f64 / SR as f64;
+            let near: Vec<(f64, f64)> = heard
+                .windows(2)
+                .filter(|w| (line(w[1].0) - media).abs() < 0.04)
+                .map(|w| (w[1].0, ((w[1].1 - w[0].1) as f64).powi(2)))
+                .collect();
+            let energy: f64 = near.iter().map(|x| x.1).sum();
+            if near.len() < 800 || energy < 1.0 {
+                continue;
+            }
+            let centroid = near.iter().map(|x| x.0 * x.1).sum::<f64>() / energy;
+            // Where the line puts the burst's media, in host µs.
+            let expected = clock.host_time.get() as f64
+                + (media - clock.media_time.get() as f64 / TICKS_PER_SECOND as f64) * 1e6
+                    / rate as f64;
+            errors.push((centroid - expected) / 1000.0);
+        }
+        eprintln!(
+            "{rate}× on a {device} Hz device: bed {hz:.1} Hz over {seconds:.2} s, burst offsets {errors:.2?} ms"
+        );
+        assert!((hz - 1000.0).abs() < 15.0, "{rate}×: {hz} Hz");
+        assert!(errors.len() >= 3, "{rate}×: {errors:?}");
+        for e in &errors {
+            assert!(e.abs() < 2.0, "{rate}×: {errors:?}");
+        }
+    }
+}
+
+/// A new J/K/L rate while playing continues from what is heard, on a new
+/// epoch.
+#[test]
+fn a_rate_change_continues_from_what_is_heard() {
+    let dir = temp_dir("jkl-change");
+    let file = ramp_file(&dir, 8);
+    let (playback, mut dev, _rig) = setup(&file, 8.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(2.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(60);
+    let before = playback.clock().unwrap();
+    let (last_host, last_buf) = dev
+        .log
+        .iter()
+        .rev()
+        .find(|(_, b)| b[1] == 0.5)
+        .unwrap()
+        .clone();
+    let heard_now = position_of(last_buf[0]) as f64 / SR as f64
+        + (host_now_us() as f64 - (last_host + LATENCY_US as u64) as f64) / 1e6;
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate { num: -1, den: 1 },
+        })
+        .unwrap();
+    let mark = dev.log.len();
+    dev.run(40);
+    let after = playback.clock().unwrap();
+    assert!(after.epoch > before.epoch);
+    assert_eq!(after.rate.num, -1);
+    let first = heard_positions(&dev, mark)
+        .into_iter()
+        .map(|(_, p)| p)
+        .find(|_| true)
+        .unwrap();
+    let first_s = first as f64 / SR as f64;
+    eprintln!("1× → −1×: heard {heard_now:.4} s at the command, reverse starts at {first_s:.4} s");
+    assert!(
+        (first_s - heard_now).abs() < 0.03,
+        "{first_s} vs {heard_now}"
+    );
+}

@@ -11,7 +11,13 @@
 //!
 //! When no output device opens, [`AudioLink::failed`] says so and the
 //! presenter runs its line on the host clock instead.
+//!
+//! J/K/L, play around, and audio scrub (section 15) go to pm-audio's
+//! transport; the mixer's monitor solo follows the renderer's mixer panel,
+//! and the levels of what is heard go back to it about 30 times a second
+//! while playing ([`LEVELS_INTERVAL`]).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -21,7 +27,7 @@ use std::time::{Duration, Instant};
 use pm_audio::playback::{ClockHandle, Playback, PlaybackConfig};
 use pm_audio::{MixFormat, SourceCache};
 use pm_engine::document::DocumentUpdate;
-use pm_protocol::clock::{SeekMode, TransportCommand};
+use pm_protocol::clock::{AudioLevels, SeekMode, TransportCommand, TransportState};
 use pm_protocol::common::{PlaybackRate, TickRange, Ticks};
 use serde::Serialize;
 
@@ -29,6 +35,13 @@ use super::document::MediaMap;
 
 /// The shortest interval between two mixes of new revisions.
 pub const PROJECT_INTERVAL: Duration = Duration::from_millis(30);
+
+/// Levels go to the renderer this often while playing (the mixer panel
+/// draws at the display rate and steps its own ballistics in between).
+pub const LEVELS_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Where the levels of what is heard go (the renderer's port).
+pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
 
 /// Decoded audio kept per viewer.
 const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
@@ -46,6 +59,18 @@ pub enum AudioCtl {
     Pause,
     /// A seek while playing.
     Seek(i64),
+    /// A scrub seek while paused: a grain at `ticks` when audio scrub is on.
+    Scrub(i64),
+    /// Play around `at` (ticks): from `pre` before to `post` after, then
+    /// back to `at`.
+    PlayAround {
+        at: i64,
+        pre: Ticks,
+        post: Ticks,
+    },
+    AudioScrub(bool),
+    /// The mixer panel's monitor solo (strip ids; `None`: every strip).
+    Solo(Option<HashSet<String>>),
     SetLoop(Option<TickRange>),
     Shutdown,
 }
@@ -72,11 +97,13 @@ pub struct AudioLink {
 }
 
 impl AudioLink {
-    /// Starts the control thread with the view's document and media.
+    /// Starts the control thread with the view's document and media;
+    /// `levels` receives the levels of what is heard while playing.
     pub fn start(
         doc: pm_model::Document,
         composition: String,
         media: MediaMap,
+        levels: LevelsSink,
     ) -> Result<AudioLink, String> {
         let (tx, rx) = channel();
         let clock = Arc::new(Mutex::new(None));
@@ -98,6 +125,12 @@ impl AudioLink {
                     broken: false,
                     loop_range: None,
                     last_project: None,
+                    audio_scrub: false,
+                    solo: None,
+                    levels,
+                    last_levels: None,
+                    levels_running: false,
+                    watch_until: None,
                 }
                 .run()
             },
@@ -160,6 +193,15 @@ struct Control {
     broken: bool,
     loop_range: Option<TickRange>,
     last_project: Option<Instant>,
+    audio_scrub: bool,
+    solo: Option<HashSet<String>>,
+    levels: LevelsSink,
+    last_levels: Option<Instant>,
+    /// Levels went out while playing; one silent message follows the stop.
+    levels_running: bool,
+    /// After a play, a scrub, or a play around, the device starts within the
+    /// pre-roll and the output latency: watch for its levels until then.
+    watch_until: Option<Instant>,
 }
 
 impl Control {
@@ -169,6 +211,15 @@ impl Control {
                 (Some(_), true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
                 (Some(_), true, None) => Duration::ZERO,
                 _ => Duration::from_secs(3600),
+            };
+            // Levels while the device plays (or is about to).
+            let watching = self.watch_until.is_some_and(|w| Instant::now() < w);
+            let timeout = if self.running() || self.levels_running || watching {
+                timeout.min(self.last_levels.map_or(Duration::ZERO, |l| {
+                    LEVELS_INTERVAL.saturating_sub(l.elapsed())
+                }))
+            } else {
+                timeout
             };
             let first = match self.rx.recv_timeout(timeout) {
                 Ok(ctl) => Some(ctl),
@@ -191,9 +242,43 @@ impl Control {
             if self.playback.is_some() && self.dirty && due {
                 self.set_project();
             }
+            self.send_levels();
             self.report();
         }
         self.shutdown();
+    }
+
+    /// Whether the device plays a run (or a grain).
+    fn running(&self) -> bool {
+        self.playback
+            .as_ref()
+            .and_then(|p| p.clock())
+            .is_some_and(|c| c.state != TransportState::Stopped)
+    }
+
+    /// The levels of what is heard, at most every [`LEVELS_INTERVAL`]; once
+    /// silent after a run stops.
+    fn send_levels(&mut self) {
+        let Some(playback) = &self.playback else {
+            return;
+        };
+        if self
+            .last_levels
+            .is_some_and(|l| l.elapsed() < LEVELS_INTERVAL)
+        {
+            return;
+        }
+        let running = self.running();
+        if !running && !self.levels_running {
+            return;
+        }
+        let Some(meters) = playback.meters() else {
+            return;
+        };
+        let meters = if running { meters } else { meters.silent() };
+        (self.levels)(meters.to_levels(playback.format().sample_rate));
+        self.last_levels = Some(Instant::now());
+        self.levels_running = running;
     }
 
     fn shutdown(&mut self) {
@@ -234,6 +319,47 @@ impl Control {
                 time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
                 mode: SeekMode::Exact,
             }),
+            AudioCtl::Scrub(at) => {
+                if !self.audio_scrub {
+                    return true;
+                }
+                if self.playback.is_none() && !self.open() {
+                    return true;
+                }
+                if self.dirty {
+                    self.set_project();
+                }
+                self.command(TransportCommand::Seek {
+                    time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
+                    mode: SeekMode::Scrub,
+                });
+            }
+            AudioCtl::PlayAround { at, pre, post } => {
+                if self.playback.is_none() && !self.open() {
+                    return true;
+                }
+                if self.dirty {
+                    self.set_project();
+                }
+                self.command(TransportCommand::Seek {
+                    time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
+                    mode: SeekMode::Exact,
+                });
+                self.command(TransportCommand::PlayAround {
+                    pre_roll: pre,
+                    post_roll: post,
+                });
+            }
+            AudioCtl::AudioScrub(enabled) => {
+                self.audio_scrub = enabled;
+                self.command(TransportCommand::AudioScrub { enabled });
+            }
+            AudioCtl::Solo(solo) => {
+                self.solo = solo.clone();
+                if let Some(playback) = &self.playback {
+                    playback.set_monitor_solo(solo);
+                }
+            }
             AudioCtl::Play { from, rate } => {
                 if self.playback.is_none() && !self.open() {
                     return true;
@@ -258,6 +384,17 @@ impl Control {
         let Some(playback) = &self.playback else {
             return;
         };
+        if matches!(
+            command,
+            TransportCommand::Play { .. }
+                | TransportCommand::PlayAround { .. }
+                | TransportCommand::Seek {
+                    mode: SeekMode::Scrub,
+                    ..
+                }
+        ) {
+            self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
+        }
         if let Err(error) = playback.command(command) {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             status.problems.push(format!("transport: {error}"));
@@ -285,6 +422,10 @@ impl Control {
                 drop(status);
                 *self.clock.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(playback.clock_handle());
+                playback.set_monitor_solo(self.solo.clone());
+                let _ = playback.command(TransportCommand::AudioScrub {
+                    enabled: self.audio_scrub,
+                });
                 self.playback = Some(playback);
                 self.dirty = true;
                 true
