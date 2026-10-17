@@ -268,7 +268,9 @@ function normalizeAudioContent(raw: unknown): AudioContent {
     trim: Math.max(0, finite(source.trim)),
     gain: clamp(finite(source.gain, 1), 0, 4),
     fadeIn: Math.max(0, finite(source.fadeIn)),
-    fadeOut: Math.max(0, finite(source.fadeOut))
+    fadeOut: Math.max(0, finite(source.fadeOut)),
+    // Additive (section 6): the new engine's pitch choice, kept when set.
+    ...(source.pitch === 'follow' || source.pitch === 'preserve' ? { pitch: source.pitch } : {})
   };
 }
 

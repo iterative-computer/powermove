@@ -16,6 +16,14 @@
 //! the clip's local time. Linear time maps (no remap, no speed) place every
 //! sample exactly; other maps interpolate the source position between
 //! control points.
+//!
+//! # Pitch
+//!
+//! A time-mapped voice whose clip preserves pitch (the default) plays
+//! through a time stretch ([`crate::stretch`]), whose deterministic
+//! pre-roll keeps the render a function of the sample range and of where
+//! rendering starts. Clips that follow speed, and constant rates within
+//! [`crate::stretch::unity_band`] of 1, resample (pitch follows the speed).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,6 +39,7 @@ use crate::kernel::{self, Bank};
 use crate::layout;
 use crate::meter::{Meters, Tap};
 use crate::source::{Source, SourceCache};
+use crate::stretch::{self, MapPoint, StretchRun};
 
 /// Samples between automation control points (3 kHz at 48 kHz).
 pub const CONTROL: i64 = 16;
@@ -96,6 +105,10 @@ pub struct RenderOptions {
     pub monitor_solo: Option<HashSet<String>>,
     /// Update the level taps.
     pub meters: bool,
+    /// Resample stretched voices instead (their pitch follows the speed):
+    /// reverse shuttle renders each chunk on its own, which a stretch's
+    /// pre-roll would make far too costly.
+    pub no_stretch: bool,
 }
 
 /// What a render met.
@@ -109,6 +122,7 @@ pub struct RenderReport {
     pub errors: Vec<(String, String)>,
 }
 
+#[derive(Clone)]
 enum Reader {
     /// Source rate equals project rate and the map is linear: integer copy.
     Copy { shift: i64 },
@@ -129,6 +143,20 @@ struct Voice {
     reader: Reader,
     matrix: Vec<Vec<f32>>,
     strip: usize,
+    /// The pitch-preserving stretch of a time-mapped voice, shared with a
+    /// glide's outgoing mix while the map is the same.
+    stretch: Option<Arc<std::sync::Mutex<StretchRun>>>,
+    /// Reads the source at the project rate (the stretch's input).
+    project_reader: Option<Reader>,
+}
+
+/// Whether a voice plays through the time stretch.
+pub fn stretches(plan: &VoicePlan, project: u32) -> bool {
+    plan.pitch == crate::conform::Pitch::Preserve
+        && plan.offset.is_none()
+        && plan
+            .constant_rate
+            .is_none_or(|r| stretch::stretches_constant(r, project))
 }
 
 /// A mix being left by a retune glide: the state it played with and how far
@@ -290,13 +318,44 @@ impl Mixer {
 
     fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
         let p = self.format.sample_rate;
+        // Stretches in progress carry over to voices whose map did not
+        // change (a fader drag during playback must not restart them).
+        let mut runs: HashMap<(String, u64), Arc<std::sync::Mutex<StretchRun>>> = HashMap::new();
+        let previous = self.graph.voices.iter().zip(&self.voices).chain(
+            self.outgoing
+                .last()
+                .map(|g| g.graph.voices.iter().zip(&g.voices))
+                .into_iter()
+                .flatten(),
+        );
+        for (plan, voice) in previous {
+            if let Some(run) = &voice.stretch {
+                runs.entry((plan.id.clone(), plan.map_key))
+                    .or_insert_with(|| run.clone());
+            }
+        }
         self.voices = graph
             .voices
             .iter()
-            .map(|v| Voice {
-                reader: reader_for(v, p),
-                matrix: layout::matrix(&v.source.info.speakers, &self.format.speakers),
-                strip: graph.strips.iter().position(|s| *s == v.strip).unwrap_or(0),
+            .map(|v| {
+                let stretched = stretches(v, p);
+                Voice {
+                    reader: reader_for(v, p),
+                    matrix: layout::matrix(&v.source.info.speakers, &self.format.speakers),
+                    strip: graph.strips.iter().position(|s| *s == v.strip).unwrap_or(0),
+                    stretch: stretched.then(|| {
+                        runs.get(&(v.id.clone(), v.map_key))
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Arc::new(std::sync::Mutex::new(StretchRun::new(
+                                    v.source.channels(),
+                                    p,
+                                    v.map_key,
+                                )))
+                            })
+                    }),
+                    project_reader: stretched.then(|| linear_reader(v.source.sample_rate(), p)),
+                }
             })
             .collect();
         if self.taps.len() != graph.strips.len() {
@@ -581,6 +640,28 @@ impl Mixer {
                 self.locals.push(local);
             }
         }
+        if let (Some(run), Some(reader), false) = (
+            self.voices[vi].stretch.clone(),
+            &self.voices[vi].project_reader,
+            options.no_stretch,
+        ) {
+            // A stretch advances whatever the level (a run's state must not
+            // depend on where gains happen to be zero).
+            return self
+                .render_stretched(
+                    vi,
+                    plan,
+                    comps,
+                    open,
+                    a,
+                    n,
+                    offset,
+                    &run,
+                    reader.clone(),
+                    options,
+                )
+                .map(Some);
+        }
         if self.gains.iter().all(|&g| g == 0.0) {
             return Ok(None);
         }
@@ -708,6 +789,76 @@ impl Mixer {
         Ok(Some(!complete))
     }
 
+    /// Mixes a stretched voice (see [`crate::stretch`]) into its strip,
+    /// with the gains [`Self::render_voice`] computed. Returns whether it
+    /// was starved.
+    #[allow(clippy::too_many_arguments)]
+    fn render_stretched(
+        &mut self,
+        vi: usize,
+        plan: &VoicePlan,
+        comps: &[pm_eval::Comp<'_>],
+        open: &pm_eval::Comp<'_>,
+        a: i64,
+        n: usize,
+        offset: usize,
+        run: &Arc<std::sync::Mutex<StretchRun>>,
+        reader: Reader,
+        options: &RenderOptions,
+    ) -> Result<bool> {
+        let p = self.format.sample_rate as f64;
+        let mut run = run.lock().unwrap_or_else(|e| e.into_inner());
+        // The control points the gains used, as map points.
+        if !self.points.is_empty() {
+            let c0 = a.div_euclid(CONTROL);
+            run.offer(
+                c0,
+                self.points.iter().map(|pt| MapPoint {
+                    x: pt.source_time * p,
+                    on: pt.active && pt.in_span,
+                }),
+            );
+        }
+        let source = plan.source.clone();
+        let cache = self.cache.clone();
+        let wait = options.wait;
+        let project = self.format.sample_rate;
+        let (ev, retime) = (&mut self.ev, &mut self.retime);
+        let mut map = |c: i64| -> Result<MapPoint> {
+            let pt = plan.evaluate(ev, comps, open, (c * CONTROL) as f64 / p, retime)?;
+            Ok(MapPoint {
+                x: pt.source_time * p,
+                on: pt.active && pt.in_span,
+            })
+        };
+        self.voice_out.resize_with(source.channels(), Vec::new);
+        let mut src = std::mem::take(&mut self.src);
+        let mut read = |lo: i64, len: usize, out: &mut [Vec<f32>]| -> Result<bool> {
+            read_linear(
+                &cache, &source, project, &reader, lo, len, out, &mut src, wait,
+            )
+        };
+        let complete = run.render(a, n, &mut map, &mut read, &mut self.voice_out);
+        self.src = src;
+        let complete = complete?;
+        drop(run);
+        let voice = &self.voices[vi];
+        let strip = &mut self.strips[voice.strip];
+        for (bus, row) in strip.iter_mut().zip(&voice.matrix) {
+            for (c, &m) in row.iter().enumerate() {
+                if m == 0.0 {
+                    continue;
+                }
+                let src = &self.voice_out[c];
+                let dst = &mut bus[offset..offset + n];
+                for i in 0..n {
+                    dst[i] += src[i] * (m * self.gains[i]);
+                }
+            }
+        }
+        Ok(!complete)
+    }
+
     /// The source sample spans `[lo, hi)` a render of project samples
     /// `[start, start + frames)` reads: linear voices first, then
     /// time-mapped voices in time order.
@@ -768,10 +919,30 @@ impl Mixer {
         let span = CONTROL * READ_GROUP;
         let mut left = budget;
         let mut complete = true;
-        for g in start.div_euclid(span)..=(end - 1).div_euclid(span) {
+        let block_p = (p * pm_stretch::DEFAULT_BLOCK_SECONDS).ceil();
+        // A stretched voice reads from its fresh start (up to a grid step
+        // and the pre-roll before `start`) and one output latency beyond
+        // `end`.
+        let pre = stretch::GRID + stretch::preroll(self.format.sample_rate);
+        let groups = |from: i64, to: i64| from.div_euclid(span)..=(to - 1).div_euclid(span);
+        let all = groups(start - pre, end + 2 * block_p as i64);
+        for g in all {
             let (g0, g1) = (g * span, (g + 1) * span);
             for &(vi, first, last) in &mapped {
                 if g1 <= first || g0 >= last {
+                    continue;
+                }
+                let stretched = self.voices[vi].stretch.is_some();
+                let (lo, hi) = if stretched {
+                    (
+                        start.div_euclid(stretch::GRID) * stretch::GRID
+                            - stretch::preroll(self.format.sample_rate),
+                        end + 2 * block_p as i64,
+                    )
+                } else {
+                    (start, end)
+                };
+                if g1 <= lo || g0 >= hi {
                     continue;
                 }
                 let plan = &graph.voices[vi];
@@ -796,6 +967,7 @@ impl Mixer {
                             g,
                             p,
                             (first, last),
+                            stretched.then_some(block_p),
                         )
                         .unwrap_or_default()
                         .into();
@@ -838,6 +1010,7 @@ impl Mixer {
 /// The merged source spans a time-mapped voice reads in control-point group
 /// `g` (control points `g × READ_GROUP` to `(g + 1) × READ_GROUP`), for a
 /// voice heard in project samples `[window.0, window.1)`.
+#[allow(clippy::too_many_arguments)]
 fn group_spans(
     plan: &VoicePlan,
     ev: &mut Evaluator,
@@ -846,6 +1019,7 @@ fn group_spans(
     g: i64,
     p: f64,
     window: (i64, i64),
+    stretch_block: Option<f64>,
 ) -> Result<Vec<(i64, i64)>> {
     let open = &comps[0];
     let rate = plan.source.sample_rate() as f64;
@@ -867,8 +1041,14 @@ fn group_spans(
                 // The filter `render_voice` reads this interval with.
                 let step = (r.source_time - l.source_time).abs() * rate / CONTROL as f64;
                 let bank = kernel::free_bank(step.max(1.0));
-                let lo = x0.min(x1).floor() as i64 - bank.before() as i64;
-                let hi = x0.max(x1).floor() as i64 + (bank.taps - bank.before()) as i64;
+                // A stretch reads ahead of its position by its latencies
+                // (under two analysis blocks of output), in either
+                // direction, through the project-rate reader.
+                let pad = stretch_block.map_or(0, |b| {
+                    (2.0 * b * step.max(rate / p)).ceil() as i64 + kernel::TAPS as i64
+                });
+                let lo = x0.min(x1).floor() as i64 - bank.before() as i64 - pad;
+                let hi = x0.max(x1).floor() as i64 + (bank.taps - bank.before()) as i64 + pad;
                 spans.push((lo, hi));
             }
         }
@@ -904,6 +1084,111 @@ pub fn sample_at(t: f64, rate: f64) -> i64 {
         return i64::MIN / 4;
     }
     (t * rate).ceil() as i64
+}
+
+/// A reader of the source at the project rate, sample 0 on sample 0 (the
+/// input of a stretch).
+fn linear_reader(source: u32, project: u32) -> Reader {
+    if source == project {
+        return Reader::Copy { shift: 0 };
+    }
+    match kernel::grid_bank(source, project) {
+        Some(bank) => {
+            let g = kernel::gcd(source as u64, project as u64) as i128;
+            Reader::Grid {
+                phases: bank.phases as i128,
+                bank,
+                step: source as i128 / g,
+                origin: 0,
+            }
+        }
+        None => Reader::Free,
+    }
+}
+
+/// Project-rate samples `[lo, lo + n)` of `source` through a linear
+/// reader (one vector per source channel, resized to `n`); `src` is
+/// scratch. Returns whether every source sample was decoded.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn read_linear(
+    cache: &SourceCache,
+    source: &Arc<Source>,
+    project: u32,
+    reader: &Reader,
+    lo: i64,
+    n: usize,
+    out: &mut [Vec<f32>],
+    src: &mut Vec<Vec<f32>>,
+    wait: bool,
+) -> Result<bool> {
+    let sc = source.channels();
+    for c in out.iter_mut() {
+        c.clear();
+        c.resize(n, 0.0);
+    }
+    if n == 0 {
+        return Ok(true);
+    }
+    match reader {
+        Reader::Copy { shift } => {
+            let mut views: Vec<&mut [f32]> = out.iter_mut().map(|c| &mut c[..n]).collect();
+            cache.read(source, lo - shift, n, &mut views, wait)
+        }
+        Reader::Grid {
+            bank,
+            step,
+            origin,
+            phases,
+        } => {
+            let unit = |s: i64| *origin + s as i128 * *step;
+            let first = unit(lo).div_euclid(*phases) as i64 - bank.before() as i64;
+            let last = unit(lo + n as i64 - 1).div_euclid(*phases) as i64
+                + (bank.taps - bank.before()) as i64;
+            let span = (last - first) as usize;
+            src.resize_with(sc, Vec::new);
+            for c in src.iter_mut() {
+                c.clear();
+                c.resize(span, 0.0);
+            }
+            let mut views: Vec<&mut [f32]> = src.iter_mut().map(|c| &mut c[..span]).collect();
+            let complete = cache.read(source, first, span, &mut views, wait)?;
+            for i in 0..n {
+                let u = unit(lo + i as i64);
+                let (si, ph) = (u.div_euclid(*phases) as i64, u.rem_euclid(*phases) as usize);
+                for c in 0..sc {
+                    out[c][i] = bank.grid(&src[c], first, si, ph);
+                }
+            }
+            Ok(complete)
+        }
+        Reader::Free => {
+            // A rate pair without an exact-phase bank: free positions.
+            let ratio = source.sample_rate() as f64 / project as f64;
+            let bank = kernel::free_bank(ratio);
+            let pos = |i: usize| (lo + i as i64) as f64 * ratio;
+            let first = pos(0).floor() as i64 - bank.before() as i64;
+            let last = pos(n - 1).floor() as i64 + (bank.taps - bank.before()) as i64;
+            let span = (last - first) as usize;
+            src.resize_with(sc, Vec::new);
+            for c in src.iter_mut() {
+                c.clear();
+                c.resize(span, 0.0);
+            }
+            let mut views: Vec<&mut [f32]> = src.iter_mut().map(|c| &mut c[..span]).collect();
+            let complete = cache.read(source, first, span, &mut views, wait)?;
+            let mut kern = vec![0f32; bank.taps];
+            for i in 0..n {
+                let x = pos(i);
+                let fl = x.floor();
+                bank.free_kernel(x - fl, &mut kern);
+                let at = (fl as i64 - bank.before() as i64 - first) as usize;
+                for c in 0..sc {
+                    out[c][i] = kernel::dot(&src[c][at..at + bank.taps], &kern);
+                }
+            }
+            Ok(complete)
+        }
+    }
 }
 
 fn reader_for(plan: &VoicePlan, project: u32) -> Reader {

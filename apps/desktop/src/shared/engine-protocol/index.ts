@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-ec2dc3a830649ec9";
+export const PROTOCOL_BUILD = "protocol-f4877199bb70e0a4";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -15,6 +15,9 @@ export type { AgentImageFormat } from "./AgentImageFormat";
 export type { AgentRunId } from "./AgentRunId";
 export type { AlphaOutput } from "./AlphaOutput";
 export type { AssetId } from "./AssetId";
+export type { AudioLevels } from "./AudioLevels";
+export type { AudioMessage } from "./AudioMessage";
+export type { AudioPeaks } from "./AudioPeaks";
 export type { Background } from "./Background";
 export type { BlendDomain } from "./BlendDomain";
 export type { BlendMode } from "./BlendMode";
@@ -39,6 +42,7 @@ export type { CancelJobs } from "./CancelJobs";
 export type { CapabilityHandle } from "./CapabilityHandle";
 export type { CapabilityKind } from "./CapabilityKind";
 export type { Caret } from "./Caret";
+export type { ChannelLevels } from "./ChannelLevels";
 export type { ClockSample } from "./ClockSample";
 export type { CloseProject } from "./CloseProject";
 export type { ColorMode } from "./ColorMode";
@@ -202,6 +206,7 @@ export type { Size } from "./Size";
 export type { SlicingPolicy } from "./SlicingPolicy";
 export type { SnapshotEncoding } from "./SnapshotEncoding";
 export type { SnapshotRef } from "./SnapshotRef";
+export type { StripLevels } from "./StripLevels";
 export type { SubmitJob } from "./SubmitJob";
 export type { SurfaceDescriptor } from "./SurfaceDescriptor";
 export type { SurfaceFormat } from "./SurfaceFormat";

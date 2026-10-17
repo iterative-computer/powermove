@@ -12,6 +12,12 @@
 //! centers at −3 dB to both sides, surround and back channels at −3 dB to
 //! their side, back center at −6 dB to both, LFE dropped. That is a
 //! deliberate improvement: a 7.1 file keeps its center and surrounds.
+//!
+//! Streams whose channels have no speaker meaning (ambisonics, unknown
+//! orders) fold as Web Audio folds every stream, by channel count: 1, 2,
+//! 4, and 6 channels by its speaker rules, other counts "discretely" (the
+//! first two channels are left and right). A channel without a meaning
+//! inside a named layout folds as a center.
 
 use pm_media::audio::Speaker;
 
@@ -50,7 +56,7 @@ fn stereo_fold(s: Speaker) -> (f32, f32) {
         FrontCenter | TopCenter | TopFrontCenter | BottomFrontCenter => (FOLD, FOLD),
         BackCenter | TopBackCenter => (0.5, 0.5),
         LowFrequency | LowFrequency2 => (0.0, 0.0),
-        Other(_) => (0.0, 0.0),
+        Other(_) => (FOLD, FOLD),
         s => match side(s) {
             -1 => (FOLD, 0.0),
             1 => (0.0, FOLD),
@@ -92,6 +98,26 @@ pub fn matrix(from: &[Speaker], to: &[Speaker]) -> Vec<Vec<f32>> {
         BackRight,
     ];
     let single = from.len() == 1;
+    // Channels without meaning: Web Audio's rules by count.
+    if from.len() > 1 && from.iter().all(|s| matches!(s, Other(_))) {
+        let named: Option<Vec<Speaker>> = match from.len() {
+            2 => Some(st.to_vec()),
+            4 => Some(quad.to_vec()),
+            6 => Some(five_one_back.to_vec()),
+            _ => None,
+        };
+        return match named {
+            Some(named) => matrix(&named, to),
+            None => {
+                // Discrete: the first two channels are left and right.
+                let mut d = matrix(&st, to);
+                for row in &mut d {
+                    row.resize(from.len(), 0.0);
+                }
+                d
+            }
+        };
+    }
     if is(to, &st) {
         // Web Audio's rules where it has them.
         if single {
@@ -119,11 +145,6 @@ pub fn matrix(from: &[Speaker], to: &[Speaker]) -> Vec<Vec<f32>> {
             let (l, r) = stereo_fold(s);
             m[0][c] = l;
             m[1][c] = r;
-        }
-        // Unnamed channels of a two-channel stream are left and right.
-        if from.len() == 2 && from.iter().all(|s| matches!(s, Other(_))) {
-            m[0][0] = 1.0;
-            m[1][1] = 1.0;
         }
         return m;
     }
