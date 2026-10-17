@@ -2,7 +2,8 @@
 //! `tests/fixtures/three-obj.json`, files in the model corpus outside the
 //! repository):
 //!
-//! - `obj::parse` against the kernel's `parseObj`: counts, bounds, the
+//! - `obj::parse_obj` against the kernel's `parseObj`: counts, center and
+//!   radius, the
 //!   Float32 output buffers by SHA-256, and the error messages of malformed
 //!   sources.
 //! - `obj::prepare_import` against `prepareModelImport` (OBJLoader,
@@ -51,9 +52,9 @@ fn close(a: f64, b: f64) -> bool {
 /// Compares one parse result with the reference entry; returns failures.
 fn check_parse(label: &str, source: &str, want: &Value) -> Vec<String> {
     let mut out = vec![];
-    match (obj::parse(source), want["error"].as_str()) {
-        (Err(e), Some(w)) if e.0 == w => {}
-        (Err(e), w) => out.push(format!("{label}: error {:?} vs {w:?}", e.0)),
+    match (obj::parse_obj(source), want["error"].as_str()) {
+        (Err(e), Some(w)) if e == w => {}
+        (Err(e), w) => out.push(format!("{label}: error {e:?} vs {w:?}")),
         (Ok(_), Some(w)) => out.push(format!("{label}: parsed, parseObj threw {w:?}")),
         (Ok(m), None) => {
             for (k, ours) in [
@@ -67,13 +68,11 @@ fn check_parse(label: &str, source: &str, want: &Value) -> Vec<String> {
             }
             let b = &want["bounds"];
             let vec3 = |v: &Value| -> Vec<f64> { v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect() };
-            for (k, ours) in [("min", m.bounds.min), ("max", m.bounds.max), ("center", m.bounds.center)] {
-                if ours.iter().zip(vec3(&b[k])).any(|(a, w)| !close(*a, w)) {
-                    out.push(format!("{label}: {k} {ours:?} vs {}", b[k]));
-                }
+            if m.center.iter().zip(vec3(&b["center"])).any(|(a, w)| !close(*a, w)) {
+                out.push(format!("{label}: center {:?} vs {}", m.center, b["center"]));
             }
-            if !close(m.bounds.radius, b["radius"].as_f64().unwrap()) {
-                out.push(format!("{label}: radius {} vs {}", m.bounds.radius, b["radius"]));
+            if !close(m.radius, b["radius"].as_f64().unwrap()) {
+                out.push(format!("{label}: radius {} vs {}", m.radius, b["radius"]));
             }
             for (k, ours) in [("positions", &m.positions), ("normals", &m.normals), ("texcoords", &m.texcoords)] {
                 if Some(floats(ours).as_str()) != want[k].as_str() {

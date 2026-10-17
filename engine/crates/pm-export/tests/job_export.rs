@@ -377,7 +377,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
     let job = job(&doc, media.clone(), s, PathBuf::from("/unused.mp4"));
     let plan = plan_export(&job).unwrap();
     let timeline = plan.timeline;
-    let request = plan.request;
+    let request = plan.request.clone();
     let out = run_export_into(
         &mut renderer,
         &job,

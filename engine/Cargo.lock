@@ -2192,6 +2192,7 @@ dependencies = [
  "gltf",
  "image",
  "libm",
+ "pm-model",
  "serde_json",
  "sha2",
 ]

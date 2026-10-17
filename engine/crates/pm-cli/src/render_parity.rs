@@ -136,7 +136,7 @@ fn three_d_masks(
     request: &RenderRequest,
     ours: &[u8],
 ) -> Result<Masks3d, String> {
-    let mut with_ids = *request;
+    let mut with_ids = request.clone();
     with_ids.depth_id = true;
     let ids = renderer
         .render(

@@ -165,9 +165,32 @@ impl Exec<'_> {
                                 None => (child.width, child.height),
                             };
                             let target = self.pool.take_working(self.device, w, h, self.precision);
-                            self.render_comp(encoder, child, child_region, &target);
+                            let inner = self.render_comp(encoder, child, child_region, &target);
                             r.view = Some(target.view.clone());
                             r.from_fbo = true;
+                            // The depth and id surface sees 3D inside the
+                            // composition: its own surface's depth (GL row
+                            // order, like the color) stands in for a 3D
+                            // layer's depth texture.
+                            if self.depth_id && inner.iter().any(|d| d.depth.is_some()) {
+                                let ids = self.pool.take(
+                                    self.device,
+                                    w,
+                                    h,
+                                    wgpu::TextureFormat::Rgba16Float,
+                                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                                );
+                                self.render_ids(
+                                    encoder,
+                                    &inner,
+                                    child_region,
+                                    (child.width, child.height),
+                                    &ids,
+                                );
+                                r.depth = Some(ids.view.clone());
+                                self.taken.push(ids);
+                            }
                             if let (true, Some(g)) = (group, region) {
                                 r.matrix = [
                                     f64::from(g.width),
@@ -250,7 +273,14 @@ impl Exec<'_> {
                                         self.taken.push(d);
                                     }
                                 }
-                                Err(message) => {
+                                Err(crate::scene3d::Error3d::Unsupported(why)) => self.fail(
+                                    plan,
+                                    draw,
+                                    MediaFailure::Unsupported(crate::capability::Feature::Scene3d(
+                                        why,
+                                    )),
+                                ),
+                                Err(crate::scene3d::Error3d::Failed(message)) => {
                                     self.fail(plan, draw, MediaFailure::Failed(message))
                                 }
                             }

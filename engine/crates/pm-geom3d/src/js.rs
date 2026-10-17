@@ -1,8 +1,6 @@
-#![cfg_attr(not(feature = "import"), allow(dead_code))]
-
 //! The JavaScript string and number semantics the ported loaders depend on
-//! (`trim`, `\s`, `Number`, `parseFloat`, `parseInt`, `Math.hypot`,
-//! `Math.min`/`Math.max`), so inputs parse as they do in the app.
+//! (`trim`, `\s`, `parseFloat`, `parseInt`, `Math.min`/`Math.max`,
+//! `decodeURIComponent`), so inputs parse as they do in the app.
 
 /// ECMAScript WhiteSpace and LineTerminator (what `trim` and `\s` match):
 /// unlike Rust's `char::is_whitespace`, U+FEFF is included and U+0085 is not.
@@ -119,29 +117,6 @@ fn decimal_value(s: &str) -> f64 {
     if negative { -v } else { v }
 }
 
-/// `Number(s)` (StringToNumber).
-pub fn number(s: &str) -> f64 {
-    let s = trim(s);
-    if s.is_empty() {
-        return 0.0;
-    }
-    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0o", 8), ("0O", 8), ("0b", 2), ("0B", 2)] {
-        if let Some(digits) = s.strip_prefix(prefix) {
-            if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-                return f64::NAN;
-            }
-            return digits
-                .chars()
-                .fold(0.0, |v, c| v * f64::from(radix) + f64::from(c.to_digit(radix).unwrap()));
-        }
-    }
-    if decimal_prefix(s) == s.len() {
-        decimal_value(s)
-    } else {
-        f64::NAN
-    }
-}
-
 /// `parseFloat(s)`.
 pub fn parse_float(s: &str) -> f64 {
     let s = trim_start(s);
@@ -165,38 +140,6 @@ pub fn parse_int(s: &str) -> f64 {
     }
     let v: f64 = digits[..n].parse().unwrap_or(f64::NAN);
     if negative { -v } else { v }
-}
-
-/// `Math.hypot(...values)` as V8 and JavaScriptCore compute it: scaled by
-/// the largest magnitude, Kahan-summed squares.
-pub fn hypot(values: &[f64]) -> f64 {
-    let mut max = 0.0f64;
-    let mut nan = false;
-    for v in values {
-        let a = v.abs();
-        if a == f64::INFINITY {
-            return f64::INFINITY;
-        }
-        nan |= a.is_nan();
-        if a > max {
-            max = a;
-        }
-    }
-    if nan {
-        return f64::NAN;
-    }
-    if max == 0.0 {
-        return 0.0;
-    }
-    let (mut sum, mut compensation) = (0.0f64, 0.0f64);
-    for v in values {
-        let n = v.abs() / max;
-        let summand = n * n - compensation;
-        let preliminary = sum + summand;
-        compensation = (preliminary - sum) - summand;
-        sum = preliminary;
-    }
-    sum.sqrt() * max
 }
 
 /// `Math.min(a, b)` (NaN wins).
@@ -244,15 +187,6 @@ mod tests {
 
     #[test]
     fn numbers_parse_as_javascript_parses_them() {
-        assert_eq!(number("1e3"), 1000.0);
-        assert_eq!(number(" .5 "), 0.5);
-        assert_eq!(number("5."), 5.0);
-        assert_eq!(number("0x10"), 16.0);
-        assert!(number("-0x10").is_nan());
-        assert!(number("1,5").is_nan());
-        assert_eq!(number("-Infinity"), f64::NEG_INFINITY);
-        assert!(number("inf").is_nan());
-        assert_eq!(number(""), 0.0);
         assert_eq!(parse_float("1.5abc"), 1.5);
         assert_eq!(parse_float("  -2e2x"), -200.0);
         assert_eq!(parse_float("5.e1"), 50.0);
@@ -264,13 +198,10 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_and_hypot_follow_javascript() {
+    fn whitespace_and_helpers_follow_javascript() {
         assert_eq!(trim("\u{FEFF} a \u{85}"), "a \u{85}");
         assert_eq!(split_ws("a  b\tc "), vec!["a", "b", "c", ""]);
         assert_eq!(split_ws(""), vec![""]);
-        assert_eq!(hypot(&[3.0, 4.0]), 5.0);
-        assert_eq!(hypot(&[0.0, 0.0, 0.0]), 0.0);
-        assert!(hypot(&[f64::NAN, 1.0]).is_nan());
         assert_eq!(u8_clamp(127.5), 128);
         assert_eq!(u8_clamp(126.5), 126);
         assert_eq!(decode_uri_component("a%20b").as_deref(), Some("a b"));

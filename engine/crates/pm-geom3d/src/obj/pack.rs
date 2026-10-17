@@ -321,7 +321,7 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
     }
     let source = text(&files[model].bytes);
     // Validate geometry before allocating it.
-    super::parse(&source)?;
+    super::parse_obj(&source).map_err(Error)?;
     let mtls: Vec<&ImportFile> = files.iter().filter(|f| ends_with_ci(&f.name, &[".mtl"])).collect();
     if mtls.is_empty() {
         return err("Include the OBJ material (.mtl) file with its textures");

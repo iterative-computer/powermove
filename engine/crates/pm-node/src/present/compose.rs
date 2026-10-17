@@ -292,6 +292,7 @@ impl Composer {
                 depth_id: false,
                 background: true,
                 export: false,
+                view: None,
             };
             let reuse = self
                 .scratch

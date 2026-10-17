@@ -24,7 +24,7 @@ the authority.
 | Groups: transform-only flattened, opacity boundaries composited | Supported | Corpus `render/groups` |
 | Solo, hidden layers and groups, in and out points, matte sources skipped | Supported | Corpus `render/solo`, `render/groups` |
 | Composition backgrounds (none, solid with alpha, linear, radial) | Supported | Corpus `render/background-*` |
-| One `layer3d` object per composition: box, sphere, plane, cylinder, cone, torus with `MeshStandardMaterial` values, lit by suns without shadows and the hemisphere ambient | Supported | 12 three.js reference scenes and 7 corpus documents within the 3D bar, at most 1 CV anywhere (below) |
+| 3D layers: the full scene pass (depth sets, shadows, every light, maps, transparency, editor looks, legacy `scene3d` and OBJ mesh layers) | Supported | docs/engine/scene3d.md (Phase 3a 3D lane) |
 | Region of interest, output scale, 16- and 32-bit precision | Supported | Regions equal the full frame bit for bit |
 | Depth and object-id surface (contract 2) | Supported for top-level layers | `tests/headless.rs` |
 | Everything else | Routed by `unsupported` | `tests/headless.rs` capability test |
@@ -308,14 +308,8 @@ native port of the three.js r180 path):
   pass writes linear view depth (`r32float`, +inf where nothing drew) in GL
   row order; the id pass reads it for the 3D layer.
 
-Not drawn yet (routed): shadows (any casting light with environment shadows
-on; the studio sun casts and the studio environment has shadows on when no
-light or camera layer is active for the whole composition), point, spot, and
-area lights, more than one object per composition (shared depth sets and
-ordering), transparent materials, texture maps, node materials, slots, source
-materials, imported models, mesh, lathe, and extrude sources, capsule and
-icosahedron primitives, recipe parts, legacy `scene3d`, OBJ, and Studio Cube
-layers, Blender surfaces, editor looks.
+The Phase 3a 3D lane extends this pass to the full section 8 scope; what it
+draws, routes, and measures is in docs/engine/scene3d.md.
 
 ## Depth and id surface
 
@@ -323,7 +317,7 @@ layers, Blender surfaces, editor looks.
 3D surface in world units (+inf where the top layer is 2D or nothing), g and b
 the low and high 11 bits of the top layer's legend index, a is 1 where a layer
 covers the pixel (its own alpha at least 0.5/255). Precomps report their
-precomp layer and +inf depth; 3D inside a precomp has no depth here yet.
+precomp layer, with the depth of 3D inside them (docs/engine/scene3d.md).
 
 ## Capability routing
 
@@ -362,8 +356,7 @@ classes re-measured 2026-10-14 against Chromium 152.
 | Test | What | Result |
 |---|---|---|
 | `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 70 frames, 0 failures (`v1-20261012-230504`, `render-20261014-131536`); every 3D frame within 1 CV everywhere; the routing of each `render/still-*` project is pinned, and the newest `render-*` capture missing one fails the test (with no `render-*` capture at all the pin, like every corpus comparison, reports and passes vacuously) |
-| `tests/scene3d.rs` | 12 scenes against three.js renders through the production `SceneRuntime` (`tools/three-ref`), section 2 3D bar | All pass: 100% within 2 CV, max 1 CV, SSIM ≥ 0.99998 (safe math) |
-| `tests/scene3d.rs` | Uniform values against the recorded draws | 858 values equal in f32 |
+| `tests/scene3d*.rs` | The 3D sweep, programs and uniforms, mesh layers, documents | docs/engine/scene3d.md |
 | `tests/three_programs.rs` | Generated program sources against WebGL's | 12 of 12 byte-identical |
 | `pm-geom3d` | Primitive buffers against three.js | 18 of 18 bit-identical |
 | `tests/color.rs` | Invariant (2): 512 solids at 16- and 32-bit | sRGB PNG exact; 10/16-bit RGB 0 CV; 8-bit limited Y′CbCr ≤ 2 CV, greys neutral; 10- and 12-bit Y′CbCr ≤ 1 CV |
@@ -406,7 +399,6 @@ output share the matrix.
 ## Gaps
 
 - 3D layers render at the full output size even for a region of interest.
-- The depth and id surface carries no depth for 3D inside precomps.
 - 3D output stays 8-bit (as today's canvas) at 32-bit precision.
 - The video class's FFmpeg plus zimg reference (section 25) is not compared
   here; video parity is against Chromium only.

@@ -1,6 +1,7 @@
 //! three.js r180 primitive geometry (`BoxGeometry`, `SphereGeometry`,
-//! `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`), as
-//! `primitiveGeometry` in `core/scene3d/runtime.ts` builds them.
+//! `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`,
+//! `CapsuleGeometry`, `IcosahedronGeometry`), as `primitiveGeometry` in
+//! `core/scene3d/runtime.ts` builds them.
 //!
 //! Every value is computed in f64 in three.js's operation order and stored as
 //! f32, as `Float32BufferAttribute` stores JavaScript numbers, so the buffers
@@ -11,7 +12,16 @@
 
 use std::f64::consts::PI;
 
-/// Indexed triangle geometry with three.js's standard attributes.
+/// A `BufferGeometry` group: a range of the draw (indices of an indexed
+/// geometry, vertices otherwise) drawn with one material of an array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Group {
+    pub start: u32,
+    pub count: u32,
+    pub material_index: u32,
+}
+
+/// Triangle geometry with three.js's standard attributes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Geometry {
     /// xyz per vertex.
@@ -20,13 +30,28 @@ pub struct Geometry {
     pub normals: Vec<f32>,
     /// uv per vertex.
     pub uvs: Vec<f32>,
-    /// Triangle list.
+    /// Triangle list. A geometry without an index (`indexed` false) lists
+    /// its vertices in order, which draws exactly as `drawArrays`.
     pub indices: Vec<u32>,
+    /// Whether three.js's geometry has an index (`geometry.index !== null`).
+    pub indexed: bool,
+    /// `geometry.groups` in insertion order.
+    pub groups: Vec<Group>,
 }
 
 impl Geometry {
     pub fn vertex_count(&self) -> usize {
         self.positions.len() / 3
+    }
+
+    /// The edge list `WebGLGeometries.getWireframeAttribute` draws for
+    /// `material.wireframe`: `a, b, b, c, c, a` per triangle, in order.
+    pub fn wireframe_indices(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.indices.len() * 2);
+        for t in self.indices.chunks_exact(3) {
+            out.extend_from_slice(&[t[0], t[1], t[1], t[2], t[2], t[0]]);
+        }
+        out
     }
 
     /// Axis-aligned bounds of the positions (`computeBoundingBox`).
@@ -80,6 +105,18 @@ pub enum Primitive {
         radial_segments: f64,
         tubular_segments: f64,
     },
+    /// `new CapsuleGeometry(radius, height, 8, radialSegments)`.
+    Capsule {
+        radius: f64,
+        height: f64,
+        cap_segments: f64,
+        radial_segments: f64,
+    },
+    /// `new IcosahedronGeometry(radius, detail)`.
+    Icosahedron {
+        radius: f64,
+        detail: f64,
+    },
 }
 
 /// The primitive's parameters (`source.parameters`), each `None` when absent.
@@ -111,8 +148,7 @@ fn nullish(a: Option<f64>, b: f64) -> f64 {
 
 impl Primitive {
     /// `primitiveGeometry(source)` for `{ primitive, parameters }`. `None`
-    /// for primitives this module does not build (`capsule`,
-    /// `icosahedron`) and unknown names.
+    /// for unknown names.
     pub fn from_parameters(name: &str, p: &Parameters) -> Option<Primitive> {
         let s = or(p.segments, 48.0);
         Some(match name {
@@ -146,6 +182,16 @@ impl Primitive {
                 tube: or(p.tube, 0.18),
                 radial_segments: 8f64.max((s / 2.0).floor()),
                 tubular_segments: s,
+            },
+            "capsule" => Primitive::Capsule {
+                radius: or(p.radius, 0.3),
+                height: or(p.height, 0.7),
+                cap_segments: 8.0,
+                radial_segments: s,
+            },
+            "icosahedron" => Primitive::Icosahedron {
+                radius: or(p.radius, 0.5),
+                detail: nullish(p.detail, 2.0),
             },
             _ => return None,
         })
@@ -182,33 +228,62 @@ impl Primitive {
                 radial_segments,
                 tubular_segments,
             } => torus_geometry(radius, tube, radial_segments, tubular_segments),
+            Primitive::Capsule {
+                radius,
+                height,
+                cap_segments,
+                radial_segments,
+            } => capsule_geometry(radius, height, cap_segments, radial_segments),
+            Primitive::Icosahedron { radius, detail } => icosahedron_geometry(radius, detail),
         }
     }
 }
 
 #[derive(Default)]
-struct Buffers {
-    vertices: Vec<f64>,
-    normals: Vec<f64>,
-    uvs: Vec<f64>,
-    indices: Vec<u32>,
+pub(crate) struct Buffers {
+    pub vertices: Vec<f64>,
+    pub normals: Vec<f64>,
+    pub uvs: Vec<f64>,
+    pub indices: Vec<u32>,
+    pub groups: Vec<Group>,
 }
 
 impl Buffers {
-    fn finish(self) -> Geometry {
-        let f = |v: Vec<f64>| v.into_iter().map(|x| x as f32).collect();
+    /// `addGroup(start, count, materialIndex)`.
+    pub fn group(&mut self, start: u32, count: u32, material_index: u32) {
+        self.groups.push(Group {
+            start,
+            count,
+            material_index,
+        });
+    }
+
+    /// An indexed geometry (`setIndex` then `Float32BufferAttribute`s).
+    pub fn finish(self) -> Geometry {
         Geometry {
-            positions: f(self.vertices),
-            normals: f(self.normals),
-            uvs: f(self.uvs),
+            positions: to_f32(&self.vertices),
+            normals: to_f32(&self.normals),
+            uvs: to_f32(&self.uvs),
             indices: self.indices,
+            indexed: true,
+            groups: self.groups,
         }
     }
 }
 
+/// `Float32BufferAttribute` from JavaScript numbers.
+pub(crate) fn to_f32(v: &[f64]) -> Vec<f32> {
+    v.iter().map(|x| *x as f32).collect()
+}
+
+/// A non-indexed geometry's draw order.
+pub(crate) fn sequential(vertices: usize) -> Vec<u32> {
+    (0..vertices as u32).collect()
+}
+
 /// `Vector3.normalize()`: `divideScalar(length() || 1)`, which multiplies by
 /// the reciprocal.
-fn normalize(v: [f64; 3]) -> [f64; 3] {
+pub(crate) fn normalize(v: [f64; 3]) -> [f64; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     let len = if len == 0.0 || len.is_nan() { 1.0 } else { len };
     let s = 1.0 / len;
@@ -229,7 +304,8 @@ pub fn box_geometry(width: f64, height: f64, depth: f64) -> Geometry {
         (0, 1, 2, 1.0, -1.0, width, height, depth),
         (0, 1, 2, -1.0, -1.0, width, height, -depth),
     ];
-    for (u, v, w, udir, vdir, pw, ph, pd) in planes {
+    let mut group_start = 0u32;
+    for (material_index, (u, v, w, udir, vdir, pw, ph, pd)) in planes.into_iter().enumerate() {
         let (grid_x, grid_y) = (1.0f64, 1.0f64);
         let segment_width = pw / grid_x;
         let segment_height = ph / grid_y;
@@ -262,6 +338,8 @@ pub fn box_geometry(width: f64, height: f64, depth: f64) -> Geometry {
         let c = vertices_so_far + (ix + 1) + gx1 * (iy + 1);
         let d = vertices_so_far + (ix + 1) + gx1 * iy;
         b.indices.extend_from_slice(&[a, bb, d, bb, c, d]);
+        b.group(group_start, 6, material_index as u32);
+        group_start += 6;
         vertices_so_far += count;
     }
     b.finish()
@@ -383,6 +461,8 @@ pub fn cylinder_geometry(
         }
         index_array.push(row);
     }
+    let mut group_start = 0u32;
+    let mut group_count = 0u32;
     for x in 0..rn as usize {
         for y in 0..hn as usize {
             let a = index_array[y][x];
@@ -391,12 +471,16 @@ pub fn cylinder_geometry(
             let d = index_array[y][x + 1];
             if radius_top > 0.0 || y != 0 {
                 b.indices.extend_from_slice(&[a, bb, d]);
+                group_count += 3;
             }
             if radius_bottom > 0.0 || y != hn as usize - 1 {
                 b.indices.extend_from_slice(&[bb, c, d]);
+                group_count += 3;
             }
         }
     }
+    b.group(group_start, group_count, 0);
+    group_start += group_count;
     // Caps.
     for top in [true, false] {
         let radius = if top { radius_top } else { radius_bottom };
@@ -413,6 +497,7 @@ pub fn cylinder_geometry(
             index += 1;
         }
         let center_end = index;
+        let mut group_count = 0u32;
         for x in 0..=rn {
             let u = f64::from(x) / radial;
             let theta = u * theta_length + theta_start;
@@ -436,7 +521,10 @@ pub fn cylinder_geometry(
             } else {
                 b.indices.extend_from_slice(&[i + 1, i, c]);
             }
+            group_count += 3;
         }
+        b.group(group_start, group_count, if top { 1 } else { 2 });
+        group_start += group_count;
     }
     b.finish()
 }
@@ -482,6 +570,239 @@ pub fn torus_geometry(
     b.finish()
 }
 
+/// `new CapsuleGeometry(radius, height, capSegments, radialSegments)` (one
+/// height segment).
+pub fn capsule_geometry(
+    radius: f64,
+    height: f64,
+    cap_segments: f64,
+    radial_segments: f64,
+) -> Geometry {
+    let height = height.max(0.0);
+    let cap = 1f64.max(cap_segments.floor());
+    let radial = 3f64.max(radial_segments.floor());
+    let height_segments = 1.0f64;
+    let half_height = height / 2.0;
+    let cap_arc_length = (PI / 2.0) * radius;
+    let cylinder_part_length = height;
+    let total_arc_length = 2.0 * cap_arc_length + cylinder_part_length;
+    let vertical = (cap * 2.0 + height_segments) as u32;
+    let (cn, rn) = (cap as u32, radial as u32);
+    let per_row = rn + 1;
+    let mut b = Buffers::default();
+    for iy in 0..=vertical {
+        let fy = f64::from(iy);
+        let (profile_y, profile_radius, normal_y, arc);
+        if iy <= cn {
+            let progress = fy / cap;
+            let angle = (progress * PI) / 2.0;
+            profile_y = -half_height - radius * libm::cos(angle);
+            profile_radius = radius * libm::sin(angle);
+            normal_y = -radius * libm::cos(angle);
+            arc = progress * cap_arc_length;
+        } else if iy <= cn + 1 {
+            let progress = (fy - cap) / height_segments;
+            profile_y = -half_height + progress * height;
+            profile_radius = radius;
+            normal_y = 0.0;
+            arc = cap_arc_length + progress * cylinder_part_length;
+        } else {
+            let progress = (fy - cap - height_segments) / cap;
+            let angle = (progress * PI) / 2.0;
+            profile_y = half_height + radius * libm::sin(angle);
+            profile_radius = radius * libm::cos(angle);
+            normal_y = radius * libm::sin(angle);
+            arc = cap_arc_length + cylinder_part_length + progress * cap_arc_length;
+        }
+        let v = 0f64.max(1f64.min(arc / total_arc_length));
+        let u_offset = if iy == 0 {
+            0.5 / radial
+        } else if iy == vertical {
+            -0.5 / radial
+        } else {
+            0.0
+        };
+        for ix in 0..=rn {
+            let u = f64::from(ix) / radial;
+            let theta = u * PI * 2.0;
+            let sin_theta = libm::sin(theta);
+            let cos_theta = libm::cos(theta);
+            b.vertices.extend_from_slice(&[
+                -profile_radius * cos_theta,
+                profile_y,
+                profile_radius * sin_theta,
+            ]);
+            b.normals.extend_from_slice(&normalize([
+                -profile_radius * cos_theta,
+                normal_y,
+                profile_radius * sin_theta,
+            ]));
+            b.uvs.push(u + u_offset);
+            b.uvs.push(v);
+        }
+        if iy > 0 {
+            let prev = (iy - 1) * per_row;
+            for ix in 0..rn {
+                let i1 = prev + ix;
+                let i2 = prev + ix + 1;
+                let i3 = iy * per_row + ix;
+                let i4 = iy * per_row + ix + 1;
+                b.indices.extend_from_slice(&[i1, i2, i3, i2, i4, i3]);
+            }
+        }
+    }
+    b.finish()
+}
+
+/// `Vector3.lerp(v, alpha)` on a copy of `a`.
+fn lerp(a: [f64; 3], v: [f64; 3], alpha: f64) -> [f64; 3] {
+    [
+        a[0] + (v[0] - a[0]) * alpha,
+        a[1] + (v[1] - a[1]) * alpha,
+        a[2] + (v[2] - a[2]) * alpha,
+    ]
+}
+
+/// `new IcosahedronGeometry(radius, detail)`.
+pub fn icosahedron_geometry(radius: f64, detail: f64) -> Geometry {
+    let t = (1.0 + 5f64.sqrt()) / 2.0;
+    let vertices: [f64; 36] = [
+        -1.0, t, 0.0, 1.0, t, 0.0, -1.0, -t, 0.0, 1.0, -t, 0.0, 0.0, -1.0, t, 0.0, 1.0, t, 0.0,
+        -1.0, -t, 0.0, 1.0, -t, t, 0.0, -1.0, t, 0.0, 1.0, -t, 0.0, -1.0, -t, 0.0, 1.0,
+    ];
+    let indices: [usize; 60] = [
+        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7,
+        1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9,
+        8, 1,
+    ];
+    polyhedron_geometry(&vertices, &indices, radius, detail)
+}
+
+/// `new PolyhedronGeometry(vertices, indices, radius, detail)`: subdivided,
+/// projected onto the sphere, spherical UVs with the seam corrections, flat
+/// normals at detail 0 and smooth ones otherwise. Not indexed.
+pub fn polyhedron_geometry(
+    vertices: &[f64],
+    indices: &[usize],
+    radius: f64,
+    detail: f64,
+) -> Geometry {
+    let mut buffer: Vec<f64> = Vec::new();
+    let vertex = |i: usize| [vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]];
+    for f in indices.chunks_exact(3) {
+        let (a, b, c) = (vertex(f[0]), vertex(f[1]), vertex(f[2]));
+        // `subdivideFace(a, b, c, detail)`.
+        let cols = detail + 1.0;
+        let n = cols as usize;
+        let mut v: Vec<Vec<[f64; 3]>> = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let fi = i as f64;
+            let aj = lerp(a, c, fi / cols);
+            let bj = lerp(b, c, fi / cols);
+            let rows = cols - fi;
+            let mut row = Vec::new();
+            for j in 0..=(rows as usize) {
+                if j == 0 && i == n {
+                    row.push(aj);
+                } else {
+                    row.push(lerp(aj, bj, j as f64 / rows));
+                }
+            }
+            v.push(row);
+        }
+        for i in 0..n {
+            for j in 0..(2 * (n - i) - 1) {
+                let k = j / 2;
+                let tri = if j % 2 == 0 {
+                    [v[i][k + 1], v[i + 1][k], v[i][k]]
+                } else {
+                    [v[i][k + 1], v[i + 1][k + 1], v[i + 1][k]]
+                };
+                for p in tri {
+                    buffer.extend_from_slice(&p);
+                }
+            }
+        }
+    }
+    // `applyRadius`.
+    for p in buffer.chunks_exact_mut(3) {
+        let n = normalize([p[0], p[1], p[2]]);
+        p[0] = n[0] * radius;
+        p[1] = n[1] * radius;
+        p[2] = n[2] * radius;
+    }
+    // `generateUVs`.
+    let azimuth = |v: [f64; 3]| libm::atan2(v[2], -v[0]);
+    let inclination = |v: [f64; 3]| libm::atan2(-v[1], (v[0] * v[0] + v[2] * v[2]).sqrt());
+    let mut uvs: Vec<f64> = Vec::with_capacity(buffer.len() / 3 * 2);
+    for p in buffer.chunks_exact(3) {
+        let v = [p[0], p[1], p[2]];
+        let u = azimuth(v) / 2.0 / PI + 0.5;
+        let w = inclination(v) / PI + 0.5;
+        uvs.push(u);
+        uvs.push(1.0 - w);
+    }
+    // `correctUVs`.
+    let mut i = 0;
+    let mut j = 0;
+    while i + 8 < buffer.len() {
+        let a = [buffer[i], buffer[i + 1], buffer[i + 2]];
+        let b = [buffer[i + 3], buffer[i + 4], buffer[i + 5]];
+        let c = [buffer[i + 6], buffer[i + 7], buffer[i + 8]];
+        let uv = [uvs[j], uvs[j + 2], uvs[j + 4]];
+        let third = 1.0 / 3.0;
+        let centroid = [
+            (a[0] + b[0] + c[0]) * third,
+            (a[1] + b[1] + c[1]) * third,
+            (a[2] + b[2] + c[2]) * third,
+        ];
+        let azi = azimuth(centroid);
+        for (k, p) in [a, b, c].into_iter().enumerate() {
+            let stride = j + 2 * k;
+            if azi < 0.0 && uv[k] == 1.0 {
+                uvs[stride] = uv[k] - 1.0;
+            }
+            if p[0] == 0.0 && p[2] == 0.0 {
+                uvs[stride] = azi / 2.0 / PI + 0.5;
+            }
+        }
+        i += 9;
+        j += 6;
+    }
+    // `correctSeam`.
+    let mut i = 0;
+    while i + 4 < uvs.len() {
+        let (x0, x1, x2) = (uvs[i], uvs[i + 2], uvs[i + 4]);
+        let max = x0.max(x1).max(x2);
+        let min = x0.min(x1).min(x2);
+        if max > 0.9 && min < 0.1 {
+            for k in [0, 2, 4] {
+                if uvs[i + k] < 0.2 {
+                    uvs[i + k] += 1.0;
+                }
+            }
+        }
+        i += 6;
+    }
+    let positions = to_f32(&buffer);
+    let count = positions.len() / 3;
+    let normals = if detail == 0.0 {
+        crate::normals::compute_vertex_normals(&positions, None)
+    } else {
+        let mut n = positions.clone();
+        crate::normals::normalize_normals(&mut n);
+        n
+    };
+    Geometry {
+        positions,
+        normals,
+        uvs: to_f32(&uvs),
+        indices: sequential(count),
+        indexed: false,
+        groups: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,8 +846,14 @@ mod tests {
                 radial_segments: 48.0
             })
         );
-        assert_eq!(Primitive::from_parameters("capsule", &none), None);
-        assert_eq!(Primitive::from_parameters("icosahedron", &none), None);
+        assert_eq!(
+            Primitive::from_parameters("icosahedron", &none),
+            Some(Primitive::Icosahedron {
+                radius: 0.5,
+                detail: 2.0
+            })
+        );
+        assert_eq!(Primitive::from_parameters("knot", &none), None);
     }
 
     #[test]
