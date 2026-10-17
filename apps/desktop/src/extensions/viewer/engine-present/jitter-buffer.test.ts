@@ -65,6 +65,24 @@ describe('JitterBuffer', () => {
     expect(later.drop.map((d) => d.item.desc.seq)).toEqual([3, 4]);
   });
 
+  it('replaces a queued frame with a newer revision of the same frame, in place', () => {
+    const buffer = new JitterBuffer<string>();
+    const at = (seq: number, k: number, revision: number) => item({ ...desc(seq, k * F), revision });
+    for (let k = 0; k < 4; k++) buffer.push(at(k + 1, k, 1));
+    // An edit: frames 1 to 3 rendered again at revision 2.
+    expect(buffer.push(at(5, 1, 2)).map((q) => q.desc.seq)).toEqual([2]);
+    expect(buffer.push(at(6, 2, 2)).map((q) => q.desc.seq)).toEqual([3]);
+    expect(buffer.size).toBe(4);
+    // An older revision arriving late never replaces a newer one.
+    expect(buffer.push(at(7, 2, 1)).map((q) => q.desc.seq)).toEqual([7]);
+    // The same revision twice (a loop's next lap) is kept as before.
+    expect(buffer.push(at(8, 3, 1))).toEqual([]);
+    const c = clock();
+    expect(buffer.pick(1_025_000, c).show?.desc.seq).toBe(5);
+    expect(buffer.pick(1_040_000, c).show?.desc.seq).toBe(6);
+    expect(buffer.pick(1_055_000, c).show?.desc.seq).toBe(4);
+  });
+
   it('keeps frames that are not due yet', () => {
     const buffer = new JitterBuffer<string>();
     buffer.push(item(desc(1, 10 * F)));
