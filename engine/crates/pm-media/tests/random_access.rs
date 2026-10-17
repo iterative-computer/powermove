@@ -23,6 +23,23 @@ fn e2e_fixtures() {
     run_all(&videos(&fixtures_dir(), &|_| true), DecodePurpose::Display);
 }
 
+/// The corpus files whose names start with `PM_MEDIA_ONLY` (comma
+/// separated prefixes), for looking into one file.
+#[test]
+#[ignore]
+fn only() {
+    let Ok(only) = std::env::var("PM_MEDIA_ONLY") else {
+        return;
+    };
+    let prefixes: Vec<&str> = only.split(',').collect();
+    run_all(
+        &videos(&corpus_dir(), &|n| {
+            prefixes.iter().any(|p| n.starts_with(p))
+        }),
+        DecodePurpose::Display,
+    );
+}
+
 /// The S6 corpus: long GOP (B-pyramid, open-GOP H.264 and HEVC), 4:2:2
 /// 10-bit, ProRes, edit lists, VP9 and VP8 with alpha, AV1, coarse
 /// timebases (1 ms WebM, 90 kHz TS, 1/600 MOV at 23.976 and 29.97), and 4K.

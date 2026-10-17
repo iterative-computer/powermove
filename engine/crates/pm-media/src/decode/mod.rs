@@ -15,8 +15,10 @@
 //! | Everything else (DNxHD/DNxHR, CineForm, MJPEG, DV, MPEG-2, ...) | FFmpeg |
 
 pub mod arbiter;
+pub mod scrub;
 pub mod service;
 pub mod session;
+pub mod skip;
 
 use crate::dav1d::Dav1dDecoder;
 use crate::error::{MediaError, Result};
@@ -113,6 +115,21 @@ impl Decoder {
             Decoder::Ff(d) => d.send(Some(p), out),
             Decoder::Dav1d(d) => d.send(Some(p), out),
             Decoder::Alpha(d) => d.send(Some(p), out),
+        }
+    }
+
+    /// Sends a sample whose picture is needed only as a reference for later
+    /// ones. VideoToolbox decodes it without emitting an image buffer;
+    /// other backends decode it as usual (the session drops the output).
+    pub fn send_reference_only(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>) -> Result<()> {
+        match self {
+            Decoder::Vt { dec, pool, .. } => {
+                let from = out.len();
+                let r = dec.send_reference_only(p, out);
+                track(pool, &mut out[from..]);
+                r
+            }
+            _ => self.send(p, out),
         }
     }
 

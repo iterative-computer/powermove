@@ -231,8 +231,27 @@ impl SessionGuard<'_> {
         self.session.as_ref().unwrap().stats.clone()
     }
 
+    /// See [`Session::set_skip_disposable`].
+    pub fn set_skip_disposable(&mut self, on: bool) {
+        self.session.as_mut().unwrap().set_skip_disposable(on);
+    }
+
     /// Presented frame `n`, through the cache.
     pub fn frame(&mut self, n: usize) -> Result<DecodedFrame> {
+        match self.frame_with(n, &mut |_| false)? {
+            Some(f) => Ok(f),
+            None => unreachable!("never stopped"),
+        }
+    }
+
+    /// As [`frame`](SessionGuard::frame), asking `stop` between batches of
+    /// samples whether to give up ([`Session::sample_with`]). Frames decoded
+    /// on the way are cached whether or not the request finished.
+    pub fn frame_with(
+        &mut self,
+        n: usize,
+        stop: &mut dyn FnMut(super::session::Progress) -> bool,
+    ) -> Result<Option<DecodedFrame>> {
         let sample = self
             .source
             .index
@@ -246,10 +265,10 @@ impl SessionGuard<'_> {
             purpose: self.key.purpose,
         };
         if let Some(f) = self.service.cache.get(&key) {
-            return Ok(f);
+            return Ok(Some(f));
         }
         let s = self.session.as_mut().unwrap();
-        let f = s.sample(sample)?;
+        let f = s.sample_with(sample, stop);
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
             let key = FrameKey {
@@ -266,7 +285,27 @@ impl SessionGuard<'_> {
         if self.service.decoders_over() {
             s.clear_window();
         }
-        Ok(f)
+        f
+    }
+
+    /// Whether a request for presented frame `n` continues the session's
+    /// current run ([`Session::continues`]).
+    pub fn continues(&self, n: usize) -> bool {
+        self.source
+            .index
+            .frames
+            .get(n)
+            .is_some_and(|f| self.session.as_ref().unwrap().continues(f.sample))
+    }
+
+    /// See [`Session::set_window`].
+    pub fn set_window(&mut self, frames: usize) {
+        self.session.as_mut().unwrap().set_window(frames);
+    }
+
+    /// See [`Session::set_keep_before`].
+    pub fn set_keep_before(&mut self, frames: usize) {
+        self.session.as_mut().unwrap().set_keep_before(frames);
     }
 
     /// Rule 7 selection then decode; `None` before the first frame.
