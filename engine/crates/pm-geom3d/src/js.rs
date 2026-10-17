@@ -7,20 +7,14 @@
 pub fn is_ws(c: char) -> bool {
     matches!(
         c,
-        '\t' | '\n'
-            | '\u{0B}'
-            | '\u{0C}'
-            | '\r'
-            | ' '
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -106,7 +100,8 @@ fn decimal_value(s: &str) -> f64 {
     } else {
         // Rust rejects a trailing `.` before an exponent ("5.e3"); JS does not.
         let fixed;
-        let text = if unsigned.contains(".e") || unsigned.contains(".E") || unsigned.ends_with('.') {
+        let text = if unsigned.contains(".e") || unsigned.contains(".E") || unsigned.ends_with('.')
+        {
             fixed = unsigned.replacen('.', ".0", 1);
             fixed.as_str()
         } else {
@@ -144,12 +139,20 @@ pub fn parse_int(s: &str) -> f64 {
 
 /// `Math.min(a, b)` (NaN wins).
 pub fn min(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) }
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
 }
 
 /// `Math.max(a, b)` (NaN wins).
 pub fn max(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
 }
 
 /// Uint8ClampedArray assignment (ToUint8Clamp: round half to even).
