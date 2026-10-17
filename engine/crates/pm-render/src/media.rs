@@ -21,8 +21,8 @@ use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::image::icc::IccClass;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
-use pm_media::probe::FieldOrder;
 use pm_media::probe::color::HdrFormat;
+use pm_media::probe::{FieldOrder, VideoProbe};
 use pm_media::vt::DecodePurpose;
 use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
@@ -74,6 +74,14 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
                 "an ICC profile other than sRGB or Display P3".into(),
             )));
         }
+        // CMYK, Lab, and indexed stills ImageIO converted to sRGB: never
+        // compared with the legacy renderer's conversion.
+        Some(IccClass::ConvertedToSrgb) => {
+            return Err(ProbeIssue::Unsupported(Feature::Media(
+                "stills in a color model other than RGB or gray (converted to sRGB by ImageIO)"
+                    .into(),
+            )));
+        }
     };
     if let Some(ch) = c.chromaticities {
         let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
@@ -96,33 +104,64 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
     })
 }
 
-type ProbeCache = Mutex<BTreeMap<(PathBuf, u64, u128), Result<(), ProbeIssue>>>;
+/// Answers about a file kept per path, size, and modification time:
+/// capability routing asks at every document revision, and decoding a still
+/// or opening and indexing a video must not repeat each time.
+type StampCache<T> = OnceLock<Mutex<HashMap<(PathBuf, u64, u128), T>>>;
 
-fn probe_cache() -> &'static ProbeCache {
-    static CACHE: OnceLock<ProbeCache> = OnceLock::new();
-    CACHE.get_or_init(Default::default)
+/// `compute`'s answer for `path` as it is on disk, computed once per size
+/// and modification time; None when the file is offline.
+fn per_stamp<T: Clone>(
+    cache: &'static StampCache<T>,
+    path: &Path,
+    compute: impl FnOnce() -> T,
+) -> Option<T> {
+    let (len, modified) = stamp(path)?;
+    let key = (path.to_path_buf(), len, modified);
+    let map = cache.get_or_init(Default::default);
+    if let Some(v) = map.lock().unwrap().get(&key) {
+        return Some(v.clone());
+    }
+    let v = compute();
+    map.lock().unwrap().insert(key, v.clone());
+    Some(v)
+}
+
+fn offline(path: &Path) -> String {
+    format!("{} is offline", path.display())
+}
+
+/// What the interpreted probe of a still reads: the reader's color facts
+/// and whether the samples are float, or why the file cannot be drawn
+/// (unreadable, or animated). Independent of the interpretation, so one
+/// decode serves every edit of the asset's overrides.
+fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), ProbeIssue> {
+    static CACHE: StampCache<Result<(pm_media::image::ImageColor, bool), ProbeIssue>> =
+        OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        if let Ok(Some(a)) = pm_media::image::animation(path)
+            && a.frames > 1
+        {
+            return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
+        }
+        let pool = FramePool::new(0);
+        let still = pm_media::image::read(path, &pool)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        Ok((still.color, still.float))
+    })
+    .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
 
 /// [`probe_image`] for an asset with Interpret Footage overrides (only this
 /// engine reads them, so there is no legacy look to match): readable, not
 /// animated, and a reading the renderer converts (every ICC profile, through
 /// ColorSync where it is neither sRGB nor Display P3; Rec.709 OpenEXR).
+///
+/// The file is decoded once per size and modification time
+/// ([`still_facts`]); each interpretation is then resolved from its facts.
 pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
-    if stamp(path).is_none() {
-        return Err(ProbeIssue::Unreadable(format!(
-            "{} is offline",
-            path.display()
-        )));
-    }
-    if let Ok(Some(a)) = pm_media::image::animation(path)
-        && a.frames > 1
-    {
-        return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
-    }
-    let pool = FramePool::new(0);
-    let still = pm_media::image::read(path, &pool)
-        .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-    interpreted_image_color(&still, interp).map(|_| ())
+    let (color, float) = still_facts(path)?;
+    interpreted_color(&color, float, interp).map(|_| ())
 }
 
 /// How the renderer reads a still with Interpret Footage overrides.
@@ -146,7 +185,15 @@ pub fn interpreted_image_color(
     still: &pm_media::image::StillImage,
     interp: &Interpretation,
 ) -> Result<InterpretedStill, ProbeIssue> {
-    let si = pm_media::interpret::interpret_still(&still.color, still.float, interp);
+    interpreted_color(&still.color, still.float, interp)
+}
+
+fn interpreted_color(
+    color: &pm_media::image::ImageColor,
+    float: bool,
+    interp: &Interpretation,
+) -> Result<InterpretedStill, ProbeIssue> {
+    let si = pm_media::interpret::interpret_still(color, float, interp);
     let r = &si.reading;
     if si.colorsync {
         return Ok(InterpretedStill {
@@ -165,7 +212,7 @@ pub fn interpreted_image_color(
         });
     }
     if interp.primaries.is_none()
-        && let Some(ch) = still.color.chromaticities
+        && let Some(ch) = color.chromaticities
     {
         let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
         if ch.iter().zip(rec709).any(|(a, b)| (a - b).abs() > 1e-4) {
@@ -196,17 +243,8 @@ pub fn interpreted_image_color(
 /// Whether an image file can be drawn: readable, not animated, in a tested
 /// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
-    let Some((len, modified)) = stamp(path) else {
-        return Err(ProbeIssue::Unreadable(format!(
-            "{} is offline",
-            path.display()
-        )));
-    };
-    let key = (path.to_path_buf(), len, modified);
-    if let Some(r) = probe_cache().lock().unwrap().get(&key) {
-        return r.clone();
-    }
-    let result = (|| {
+    static CACHE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
@@ -217,9 +255,8 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
         image_color(&still).map(|_| ())
-    })();
-    probe_cache().lock().unwrap().insert(key, result.clone());
-    result
+    })
+    .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
 
 /// Whether a video file is drawn without routing: it opens and indexes,
@@ -244,32 +281,28 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 /// routing asks at every document revision, and opening a source indexes
 /// it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
-    type VideoProbes = Mutex<HashMap<(PathBuf, u64, u128), Result<(), String>>>;
-    static CACHE: OnceLock<VideoProbes> = OnceLock::new();
-    let key = stamp(path).map(|(len, modified)| (path.to_path_buf(), len, modified));
-    if let Some(key) = &key
-        && let Some(r) = CACHE.get_or_init(Default::default).lock().unwrap().get(key)
-    {
-        return r.clone();
-    }
-    let result = MediaSource::open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))
-        .and_then(|src| video_supported(&src));
-    if let Some(key) = key {
-        CACHE
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert(key, result.clone());
-    }
-    result
+    static CACHE: StampCache<Result<(), String>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        MediaSource::open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|src| video_supported(&src))
+    })
+    .unwrap_or_else(|| Err(offline(path)))
 }
 
 /// [`probe_video`] for an asset with Interpret Footage overrides: only what
-/// the renderer cannot draw at all is refused.
+/// the renderer cannot draw at all is refused. The file is opened and
+/// indexed once per size and modification time; each interpretation is
+/// then resolved from its video probe.
 pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(), String> {
-    let src = MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    video_drawable(&src, interp)
+    static CACHE: StampCache<Result<Option<VideoProbe>, String>> = OnceLock::new();
+    let video = per_stamp(&CACHE, path, || {
+        MediaSource::open(path)
+            .map(|src| src.probe.video.clone())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
+    .unwrap_or_else(|| Err(offline(path)))?;
+    video_probe_drawable(video.as_ref(), interp)
 }
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {
@@ -332,7 +365,11 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
 /// reading except display rotations off the quarter turns and Dolby Vision
 /// without a base layer other decoders can show.
 pub fn video_drawable(src: &MediaSource, interp: &Interpretation) -> Result<(), String> {
-    let Some(v) = src.probe.video.as_ref() else {
+    video_probe_drawable(src.probe.video.as_ref(), interp)
+}
+
+fn video_probe_drawable(video: Option<&VideoProbe>, interp: &Interpretation) -> Result<(), String> {
+    let Some(v) = video else {
         return Err("no video stream".into());
     };
     let r = v.rotation.unwrap_or(0.0);
