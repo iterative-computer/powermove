@@ -31,11 +31,19 @@ export function mountCompTabs(api: PowermoveAPI, host: HTMLElement): () => void 
   host.setAttribute('role', 'tablist');
   host.setAttribute('aria-label', 'Open compositions');
 
+  /* What the strip shows, to skip rebuilding an identical one: the strip is
+     asked to render on every project change (three times per edit), and
+     each rebuild ended in `scrollIntoView`, a forced layout of the editor
+     (docs/engine/perf.md). */
+  let shown: { model: Comps; key: string } | null = null;
   const render = () => {
     const model = comps();
-    if (!model) { host.replaceChildren(); return; }
+    if (!model) { shown = null; host.replaceChildren(); return; }
     const tabs = model.openTabs().map(id => model.get(id)).filter(Boolean) as Array<{ id: string; name: string }>;
     const closable = tabs.length > 1;
+    const key = JSON.stringify(tabs.map(comp => [comp.id, comp.name, model.isOpen(comp.id)]));
+    if (shown && shown.model === model && shown.key === key && host.childElementCount === tabs.length) return;
+    shown = { model, key };
     host.replaceChildren(...tabs.map(comp => {
       const tab = document.createElement('div');
       tab.className = 'tl-comp-tab';
