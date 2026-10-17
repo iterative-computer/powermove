@@ -44,10 +44,24 @@ export type ViewerMessage =
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
-  session(send: (update: DefinitionsUpdate) => boolean | void): { full(): void; dispose(): void };
+  session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
   applied(applied: DefinitionsApplied): void;
   failure(report: FailureReport): void;
 }
+
+/** One session's definition stream (`SessionDefinitions`). */
+export interface DefinitionStream {
+  /** Sends the whole set now. */
+  full(): void;
+  /** Makes the next registry change send the whole set. */
+  stale(): void;
+  dispose(): void;
+}
+
+/** A refused definitions push is retried as a full update: at once the first time, then after this delay, doubling per refusal in a row. */
+export const DEFINITIONS_RETRY_MS = 250;
+/** Refusals in a row before the session stops retrying until the next registry change. */
+export const DEFINITIONS_RETRIES = 6;
 
 export type SessionHandlers = {
   message(message: ViewerMessage, arrivedMs: number): void;
@@ -72,6 +86,8 @@ export type SessionOptions = {
   inlineLimit?: number;
   /** Definition snapshots for the session (with "Use New Engine" on). */
   definitions?: () => DefinitionsSource | null;
+  /** The first backoff after a second refused definitions push (ms; doubles per refusal). */
+  definitionsRetryMs?: number;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -125,7 +141,10 @@ export class DocumentSession {
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
   /** This session's definition stream. */
-  private definitions: { full(): void; dispose(): void } | null = null;
+  private definitions: DefinitionStream | null = null;
+  /** Definitions pushes the engine refused in a row, and the pending retry. */
+  private definitionRefusals = 0;
+  private definitionRetry: ReturnType<typeof setTimeout> | null = null;
   /** The revision the engine routed the composition to the legacy viewer at:
    *  frames of that revision or older, still in flight, are stale. */
   private legacyRevision: number | null = null;
@@ -172,12 +191,32 @@ export class DocumentSession {
       if (this.closed) return false;
       void this.options.connection.request({ type: 'pushDefinitions', ...update } as Request, id).then(
         (response) => {
-          if ((response as { type?: string }).type === 'definitionsApplied') source.applied(response as unknown as DefinitionsApplied);
+          if ((response as { type?: string }).type !== 'definitionsApplied') return;
+          this.definitionRefusals = 0;
+          source.applied(response as unknown as DefinitionsApplied);
         },
         (error) => {
           if (this.closed) return;
-          this.options.log('warn', `engine definitions refused: ${error instanceof Error ? error.message : String(error)}`);
-          this.definitions?.full();
+          this.definitionRefusals += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          if (this.definitionRefusals > DEFINITIONS_RETRIES) {
+            // An engine that keeps refusing (a snapshot it cannot validate,
+            // an engine-side bug): stop until the registries change.
+            this.options.log('warn', `engine definitions refused ${this.definitionRefusals - 1} times in a row; retrying on the next registration (${message})`);
+            this.definitionRefusals = 0;
+            this.definitions?.stale();
+            return;
+          }
+          this.options.log('warn', `engine definitions refused: ${message}`);
+          // The first refusal (a generation gap after an engine restart)
+          // resends the whole set at once; later ones back off.
+          if (this.definitionRefusals === 1) return this.definitions?.full();
+          if (this.definitionRetry) return;
+          const delay = (this.options.definitionsRetryMs ?? DEFINITIONS_RETRY_MS) * 2 ** (this.definitionRefusals - 2);
+          this.definitionRetry = setTimeout(() => {
+            this.definitionRetry = null;
+            if (!this.closed) this.definitions?.full();
+          }, delay);
         }
       );
       return true;
@@ -375,6 +414,8 @@ export class DocumentSession {
     this.closed = true;
     this.definitions?.dispose();
     this.definitions = null;
+    if (this.definitionRetry) clearTimeout(this.definitionRetry);
+    this.definitionRetry = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.unlisten?.();

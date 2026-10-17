@@ -12,7 +12,7 @@ import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWE
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE } from './install';
-import { DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
+import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
 import { createEngineDefinitions } from '../kernel/engine-definitions';
 import { createKernel } from '../kernel/registries';
@@ -218,6 +218,59 @@ describe('the engine connection', () => {
     kernel.registerEffect('local', { id: 'late', label: 'Late', group: 'X', params: [], frag: 'o = vec4(0.0);' });
     await flush();
     expect(pushes.at(-1)!.ids).not.toContain('late');
+  });
+
+  it('backs off from an engine that keeps refusing definitions, then waits for the next registration', async () => {
+    const pushes: Array<{ at: number; full: boolean }> = [];
+    let refuse = true;
+    const base = engine();
+    const port = new FakePort((message, p) => {
+      const m = message.message;
+      if (m.kind === 'request' && (m.body as Request).type === 'pushDefinitions') {
+        const body = m.body as unknown as { generation: number; full: boolean };
+        pushes.push({ at: Date.now(), full: body.full });
+        const refused = refuse;
+        queueMicrotask(() =>
+          p.deliver(
+            refused
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'bad snapshot', retry: { kind: 'afterResync' }, detail: null } } as never)
+              : envelope({ kind: 'response', id: m.id, body: { type: 'definitionsApplied', generation: body.generation, failures: [] } } as never, 5)
+          )
+        );
+        return;
+      }
+      (base as unknown as { reply: (m: Envelope, p: FakePort) => void }).reply(message, p);
+    });
+    const { connection } = await connected(port);
+    const kernel = createKernel();
+    const PM: any = { GLSL_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', TRANSITION_PRE: '', SHADER_HEADER: '', proj: { layers: [], comps: {} } };
+    kernel.registerEffect('local', { id: 'glow2', label: 'Glow', group: 'Light', params: [], frag: 'o = vec4(1.0);' });
+    const definitions = createEngineDefinitions(PM, kernel);
+    const logs: string[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: (_l, m) => logs.push(m), handlers: { message: () => {}, closed: () => {} }, definitions: () => definitions, definitionsRetryMs: 4 });
+    expect(definitions.sessionCount()).toBe(0);
+    await session.start();
+    expect(definitions.sessionCount()).toBe(1);
+    // The first push, an immediate full retry, then DEFINITIONS_RETRIES - 1
+    // retries backing off from 4 ms: 4, 8, 16, 32, 64 ms.
+    await vi.waitFor(() => expect(logs.some((l) => l.includes('times in a row'))).toBe(true), { timeout: 2000 });
+    const settled = pushes.length;
+    expect(settled).toBe(1 + DEFINITIONS_RETRIES);
+    expect(pushes.every((p) => p.full)).toBe(true);
+    const gaps = pushes.slice(2).map((p, i) => p.at - pushes[i + 1]!.at);
+    gaps.forEach((gap, i) => expect(gap).toBeGreaterThanOrEqual(4 * 2 ** i - 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(pushes.length).toBe(settled); // no endless loop
+    // The next registration sends the whole set again.
+    refuse = false;
+    kernel.registerEffect('local', { id: 'third', label: 'Third', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    await flush();
+    expect(pushes.length).toBe(settled + 1);
+    expect(pushes.at(-1)!.full).toBe(true);
+    // A closed session leaves the kernel's list.
+    session.close();
+    expect(definitions.sessionCount()).toBe(0);
   });
 
   it('resyncs after a revision gap, a load batch, and a stale failure', async () => {

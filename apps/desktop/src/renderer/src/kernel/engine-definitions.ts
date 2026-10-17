@@ -121,6 +121,8 @@ export interface EngineDefinitions {
   session(send: (update: DefinitionsUpdate) => boolean | void): SessionDefinitions;
   applied(applied: DefinitionsApplied): void;
   failure(report: FailureReport): void;
+  /** The open session streams. */
+  sessionCount(): number;
   dispose(): void;
 }
 
@@ -140,17 +142,22 @@ export function createEngineDefinitions(PM: any, registries: DefinitionRegistrie
     publisher,
     meta,
     session(send) {
-      const session = new SessionDefinitions(publisher, (update) => {
+      const session: SessionDefinitions = new SessionDefinitions(publisher, (update) => {
         meta.pushed(update);
         return send(update);
+      }, () => {
+        // A closed session leaves the list (one per viewer session opened).
+        const i = sessions.indexOf(session);
+        if (i >= 0) sessions.splice(i, 1);
       });
       sessions.push(session);
       return session;
     },
     applied: (applied) => meta.applied(applied),
     failure: (report) => meta.failure(report),
+    sessionCount: () => sessions.length,
     dispose() {
-      for (const s of sessions) s.dispose();
+      for (const s of [...sessions]) s.dispose();
       publisher.dispose();
     },
   };

@@ -239,7 +239,7 @@ export class SessionDefinitions {
   private needsFull = true;
   private off: (() => void) | null;
 
-  constructor(private readonly publisher: DefinitionPublisher, private readonly send: (update: DefinitionsUpdate) => boolean | void) {
+  constructor(private readonly publisher: DefinitionPublisher, private readonly send: (update: DefinitionsUpdate) => boolean | void, private onDispose: (() => void) | null = null) {
     this.off = publisher.subscribe((change) => this.delta(change));
     this.full();
   }
@@ -250,9 +250,16 @@ export class SessionDefinitions {
     this.deliver({ generation: ++this.generation, full: true, upserts: this.publisher.all(), removals: [] });
   }
 
+  /** The receiver lost track (refusals it stopped retrying): the next change sends the whole set. */
+  stale(): void {
+    this.needsFull = true;
+  }
+
   dispose(): void {
     this.off?.();
     this.off = null;
+    this.onDispose?.();
+    this.onDispose = null;
   }
 
   private delta(change: DefinitionChange): void {
