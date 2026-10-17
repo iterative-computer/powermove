@@ -367,7 +367,8 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             .position(|l| l["id"] == id)
             .unwrap()
     };
-    // Layer types and effects.
+    // Layer types and effects. Text and captions are drawn (with fonts
+    // configured; tests/text_raster.rs and tests/text_corpus.rs).
     let f = variant(|d| {
         d["layers"].as_array_mut().unwrap().push(layer(
             "t",
@@ -378,7 +379,28 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             2.0,
         ))
     });
-    assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
+    assert!(
+        !f.iter().any(|f| matches!(f, Feature::LayerType(_))),
+        "{f:?}"
+    );
+    // Without fonts the static check lists them; with fonts they are drawn.
+    assert!(f.iter().any(|f| matches!(f, Feature::Text(_))), "{f:?}");
+    let (mut doc, _) = everything();
+    doc["layers"].as_array_mut().unwrap().push(layer(
+        "t",
+        "text",
+        json!({ "text": "x" }),
+        0.0,
+        0.0,
+        2.0,
+    ));
+    let with_fonts = pm_render::unsupported_with_fonts(&load(&doc), "Ptest-root", None);
+    assert!(
+        !with_fonts
+            .iter()
+            .any(|u| matches!(u.feature, Feature::Text(_))),
+        "{with_fonts:?}"
+    );
     // Blend modes, parametric masks, and track mattes are drawn
     // (`pm_render::composite`); bezier path masks are not.
     let f = variant(|d| {
@@ -487,7 +509,7 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             .unwrap()
             .push(layer("t", "text", json!({}), 0.0, 0.0, 2.0))
     });
-    assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
+    assert!(f.iter().any(|f| matches!(f, Feature::Text(_))), "{f:?}");
 }
 
 #[test]

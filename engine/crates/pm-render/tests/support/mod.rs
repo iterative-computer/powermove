@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod text;
 
 use std::path::{Path, PathBuf};
 

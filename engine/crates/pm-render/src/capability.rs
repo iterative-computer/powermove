@@ -82,6 +82,9 @@ pub enum Feature {
     /// A definition WebGL draws but the native pipeline cannot translate:
     /// it needs the decision 19 fallback runner.
     ShaderFallback(String),
+    /// Text content this renderer does not draw (color vector glyphs, no
+    /// configured fonts).
+    Text(String),
 }
 
 impl Unsupported {
@@ -127,6 +130,7 @@ impl fmt::Display for Feature {
             Feature::Request(r) => write!(f, "request: {r}"),
             Feature::Definition(d) => write!(f, "no definition for {d}"),
             Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
+            Feature::Text(t) => write!(f, "text: {t}"),
         }
     }
 }
@@ -142,8 +146,12 @@ impl fmt::Display for Unsupported {
     }
 }
 
-/// Layer types this renderer draws (or knows draw nothing).
-const DRAWN: [&str; 6] = ["solid", "image", "video", "precomp", "group", "shape"];
+/// Layer types this renderer draws (or knows draw nothing). Text and
+/// captions need fonts (`Renderer::set_text_fonts`); without them a render
+/// fails with `RenderError::Unsupported`.
+const DRAWN: [&str; 8] = [
+    "solid", "image", "video", "precomp", "group", "shape", "text", "captions",
+];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.
@@ -189,9 +197,11 @@ fn is_property(v: Option<&Node>) -> bool {
     node::is_property(v)
 }
 
-/// Static check of `composition` and everything it nests.
+/// Static check of `composition` and everything it nests, for a renderer
+/// without fonts (text and captions layers are listed: they need
+/// `Renderer::set_text_fonts`).
 pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
-    check(document, composition, None, None)
+    check(document, composition, None, None, false)
 }
 
 /// [`unsupported`] (with media facts when `assets` is given) for a renderer
@@ -199,13 +209,14 @@ pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
 /// those with no definition that is not marked missing
 /// ([`Feature::Definition`]) and definitions that need the fallback runner
 /// ([`Feature::ShaderFallback`]), on layers and adjustment layers alike.
+/// Text and captions are listed as for a renderer without fonts.
 pub fn unsupported_with_definitions(
     document: &Document,
     composition: &str,
     assets: Option<&dyn AssetResolver>,
     effects: &crate::effects::Effects,
 ) -> Vec<Unsupported> {
-    check(document, composition, assets, Some(effects))
+    check(document, composition, assets, Some(effects), false)
 }
 
 /// [`unsupported`] plus facts read from media headers through `assets`
@@ -216,7 +227,18 @@ pub fn unsupported_with_media(
     composition: &str,
     assets: &dyn AssetResolver,
 ) -> Vec<Unsupported> {
-    check(document, composition, Some(assets), None)
+    check(document, composition, Some(assets), None, false)
+}
+
+/// [`unsupported_with_media`] for a renderer with fonts configured
+/// (`Renderer::set_text_fonts`): text and captions layers are drawn
+/// (`Renderer::unsupported_with_media` picks the right check).
+pub fn unsupported_with_fonts(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, None, true)
 }
 
 fn check(
@@ -224,6 +246,7 @@ fn check(
     composition: &str,
     assets: Option<&dyn AssetResolver>,
     effects: Option<&crate::effects::Effects>,
+    fonts: bool,
 ) -> Vec<Unsupported> {
     let mut out = BTreeSet::new();
     let Some(root) = document.root() else {
@@ -255,17 +278,21 @@ fn check(
         let Some(comp) = composition_node(root, &id) else {
             continue;
         };
-        check_composition(root, &id, comp, assets, effects, &mut out, &mut stack);
+        check_composition(
+            root, &id, comp, assets, effects, fonts, &mut out, &mut stack,
+        );
     }
     out.into_iter().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_composition(
     root: &Node,
     comp_id: &str,
     comp: &Node,
     assets: Option<&dyn AssetResolver>,
     effects: Option<&crate::effects::Effects>,
+    fonts: bool,
     out: &mut BTreeSet<Unsupported>,
     stack: &mut Vec<String>,
 ) {
@@ -380,6 +407,12 @@ fn check_composition(
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
             add(layer, Feature::Scene3d("model groups".into()));
+        }
+        if !fonts && matches!(ty.as_str(), "text" | "captions") {
+            add(
+                layer,
+                Feature::Text(format!("{ty} layers without the engine's fonts")),
+            );
         }
         match ty.as_str() {
             "image" | "video" => check_media(root, layer, &ty, assets, &mut add),

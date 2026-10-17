@@ -159,6 +159,11 @@ fn corpus_render_parity() {
             ));
             continue;
         }
+        // Text and captions are judged by the text class (tests/text_corpus.rs).
+        if support::text::has_text(&p.document) {
+            skipped.push((p.name.clone(), "text class: tests/text_corpus.rs".into()));
+            continue;
+        }
         let issues = unsupported_with_definitions(
             &p.document,
             &p.composition,

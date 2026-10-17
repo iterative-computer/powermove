@@ -111,6 +111,8 @@ pub enum Source {
     Object3d(Box<Object3dPlan>),
     /// Shape content (`crate::vector`).
     Vector(Box<crate::vector::VectorSource>),
+    /// A text or captions raster (`crate::text`).
+    Text(Box<crate::text::TextPlan>),
 }
 
 /// Inputs and outputs of a build.
@@ -132,6 +134,8 @@ pub struct Build<'r> {
     /// The matte source a matte pass renders, which draws even when it is
     /// switched off (`{ ...source, on: true }`).
     forced_on: Option<*const Node>,
+    /// Text layout and glyph caches (`None`: text layers are unsupported).
+    text: Option<&'r mut crate::text::TextContext>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -180,11 +184,14 @@ pub fn build_with_effects<'r>(
         assets,
         effects,
         crate::scene3d::Options3d::default(),
+        None,
     )
 }
 
 /// [`build_with_effects`] with the 3D pass's options (view override, mesh
-/// layer definitions).
+/// layer definitions) and text layout: text and captions layers draw
+/// through `text` (its fonts and glyph caches; `None`: they are
+/// unsupported).
 #[allow(clippy::too_many_arguments)]
 pub fn build_with<'r>(
     ev: &mut Evaluator,
@@ -197,6 +204,7 @@ pub fn build_with<'r>(
     assets: &'r dyn AssetResolver,
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
+    text: Option<&'r mut crate::text::TextContext>,
 ) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
@@ -209,6 +217,7 @@ pub fn build_with<'r>(
         effects,
         matte_depth: 0,
         forced_on: None,
+        text,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -772,7 +781,8 @@ enum Quad {
     },
     /// Screen-space content covering the whole target (3D layers).
     Screen { source: Source },
-    /// Target-space content covering exactly `rect` (level 2 vectors).
+    /// Target-space content covering exactly `rect` (x, y, width, height):
+    /// level 2 vectors, and level 2 text drawn at output resolution.
     Device { source: Source, rect: [f64; 4] },
 }
 
@@ -1065,6 +1075,7 @@ fn native_content_quad<'d>(
                 },
             }
         }
+        "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -1117,6 +1128,74 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
             ],
         },
     }
+}
+
+/// A text or captions layer's raster quad (`crate::text`), at the density
+/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+#[allow(clippy::too_many_arguments)]
+fn text_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    target: (u32, u32),
+    scale: (f64, f64),
+) -> JsResult<Option<Quad>> {
+    let comp_id = scope.comp.id().to_string_lossy();
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        b.unsupported.push(Unsupported::layer(
+            &comp_id,
+            layer,
+            Feature::Text(format!("{ty} layers without configured fonts")),
+        ));
+        return Ok(None);
+    };
+    if ty == "captions" && text.captions_hidden() {
+        return Ok(None);
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    // `compat` level 2: drawn at output resolution, no raster.
+    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 {
+        let offset = scope.size_anchor_offset(layer, time)?;
+        let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
+        let m = kurbo::Affine::new(m);
+        let plan = if ty == "text" {
+            text.text_layer_level2(scope, layer, time, m, target)?
+        } else {
+            text.captions_layer_level2(scope, layer, time, m, target)?
+        };
+        for what in text.take_unsupported() {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        return Ok(plan.map(|p| {
+            let [x0, y0, x1, y1] = p.crop.map(f64::from);
+            let rect = [x0, y0, x1 - x0, y1 - y0];
+            Quad::Device {
+                source: Source::Text(Box::new(p)),
+                rect,
+            }
+        }));
+    }
+    let raster_scale = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, raster_scale)?
+    } else {
+        text.captions_layer(scope, layer, time, raster_scale)?
+    };
+    for what in text.take_unsupported() {
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+    }
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
+    }))
 }
 
 /// `Math.max(1, Number(d.w || comp.w || W))` before the `max`.

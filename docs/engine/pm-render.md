@@ -28,6 +28,7 @@ the authority.
 | Region of interest, output scale, 16- and 32-bit precision | Supported | Regions equal the full frame bit for bit |
 | Depth and object-id surface (contract 2) | Supported for top-level layers | `tests/headless.rs` |
 | Effects and transitions (renderer given definitions, contract 10): the 16 built-in effects, 4 transitions, and any registered GLSL through `pm-glsl` | Supported, see `docs/engine/effects.md` | `tests/effects_webgl.rs` (shader level against WebGL2), `tests/corpus.rs` (`effects-*` capture), `tests/effects.rs` |
+| Text and captions (level 1 rasters, animators, every caption style; level 2 at output resolution) | Drawn with fonts configured (`Renderer::set_text_fonts`); routed otherwise | `docs/engine/text-render.md` |
 | Everything else | Routed by `unsupported` | `tests/headless.rs` capability test |
 
 ## API
