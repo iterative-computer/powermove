@@ -228,6 +228,11 @@ stand-ins for the newer requests, so few frames are exact while 174 distinct
 frames are shown. A 7-frame reverse drag needs a seek from the GOP start for
 every 32 frames.
 
+After merging the integration branch (effects and text lanes, load 7.2),
+the 2160p row again: seek to draw p50 63.7, p95 201.2, max 211.9 ms (first
+frame p95 10.2 ms); drags 362 (361), 316 (315), 174 (1), 179 (121); and
+`native-engine-tracer.spec.ts` passes (11 of 11).
+
 Earlier runs of the same spec while the work landed, for the record: after
 the decode changes only (load 12.9), 2160p seek p95 297.0 ms and the
 forward drag 256 exact frames (drawing a cached UHD frame cost 7.7 ms);

@@ -81,7 +81,7 @@ fn a_scrub_frame_reports_stand_ins_until_the_exact_video_lands() {
     let document = doc();
     let s = state();
     let at = |seconds: f64| Ticks::new((seconds * 705_600_000.0) as i64).unwrap();
-    let mut compose = |composer: &mut Composer, t: f64| {
+    let compose = |composer: &mut Composer, t: f64| {
         let c = composer
             .compose(&document, "P-root", &media, at(t), &s, &working)
             .unwrap();
