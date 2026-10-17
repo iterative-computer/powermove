@@ -121,6 +121,30 @@ export function coverPaths(paths: readonly PathPart[][]): PathPart[][] {
 
 const idOf = (v: any) => (isRecord(v) && typeof v.id === 'string' ? v.id : undefined);
 
+/** The layer members a composition's shape is made of: identity, kind,
+ *  parenting, group membership, the 3D switch, and locks. */
+const SHAPE_MEMBERS = new Set(['id', 'type', 'parent', 'group', 'threeD', 'lock']);
+
+/**
+ * Whether a canonical patch path can change the shape of a composition: its
+ * set or order of layers, or a layer's `id`, `type`, `parent`, `group`,
+ * `threeD`, or `lock`; also which composition is open, or the compositions
+ * themselves. Channel values, content, timing, composition settings, and
+ * project members such as `edits` and `revision` cannot. Structural answers
+ * (group ancestry, parenting cycles, the 3D switch, transform roots) depend
+ * on the shape only, so they hold until it changes (`shapeRevision`).
+ */
+export function changesShape(path: readonly PathPart[]): boolean {
+  if (path.length === 0) return true;
+  const [head] = path;
+  // A document without an open composition id keeps its layers at the root.
+  if (head === 'layers') return path.length < 3 || SHAPE_MEMBERS.has(String(path[2]));
+  if (head !== 'comps') return head === 'compId';
+  if (path.length < 3) return true;
+  if (path[2] !== 'layers') return false;
+  return path.length < 5 || SHAPE_MEMBERS.has(String(path[4]));
+}
+
 /**
  * Where to diff for a dirty path: the path itself, cut at the first array
  * whose length or `id` order differs between the shadow and the live
@@ -145,6 +169,12 @@ export function anchorPath(shadow: any, live: any, path: readonly PathPart[]): P
 
 export class DocumentBarrier {
   revision = 0;
+  /**
+   * The revision of the last batch that could change a composition's shape
+   * (`changesShape`; every resync). Answers that depend on the shape only
+   * stay valid while it holds.
+   */
+  shapeRevision = 0;
   /** The canonical document exactly as pm-wasm has it. */
   shadow: any = undefined;
   private dirty = new Map<string, PathPart[]>();
@@ -248,6 +278,7 @@ export class DocumentBarrier {
     this.revision += 1;
     this.shadow = json === undefined ? undefined : JSON.parse(json);
     this.wasm.resync(json ?? '', this.revision);
+    this.shapeRevision = this.revision;
     if (json && json.length > 4 * 1024 * 1024) this.wasm.releaseInput();
     this.dirty.clear();
     this.structural = false;
@@ -343,6 +374,7 @@ export class DocumentBarrier {
     const base = this.revision;
     const result = this.wasm.apply(body, base, base + 1);
     this.revision = base + 1;
+    if (ops.some(op => changesShape(op.path))) this.shapeRevision = this.revision;
     if (result.code !== APPLY.ok) {
       this.stats.refused += 1;
       console.warn(`[engine-doc] pm-wasm refused a batch (${result.code}: ${result.message}); resyncing`);

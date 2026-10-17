@@ -161,6 +161,8 @@ interface Indexed { layers: any[]; revision: number; index: Map<any, number>; fi
 
 export interface NativeStats {
   calls: Record<string, number>;
+  /** Structural answers served again at an unchanged shape (`shaped`). */
+  shapeHits: number;
   /** Queries that found the mirror missing a structural write and repaired it first. */
   repairs: number;
   fallbacks: Record<string, number>;
@@ -169,7 +171,25 @@ export interface NativeStats {
 }
 
 export class NativeApi {
-  readonly stats: NativeStats = { calls: {}, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
+  readonly stats: NativeStats = { calls: {}, shapeHits: 0, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
+  /**
+   * Structural answers (group ancestry, parenting cycles, the 3D switch) by
+   * live layer, valid while the document's shape is unchanged
+   * (`DocumentBarrier.shapeRevision`) and the same composition is current.
+   * The timeline asks for every row's group ancestry at each redraw and the
+   * inspector whether each layer could be a parent at each change; through
+   * pm-wasm those were a third of the page's time in a drag
+   * (docs/engine/perf.md).
+   */
+  private shapes = new WeakMap<object, Map<string, { shape: number; cur: unknown; live: unknown; value: unknown }>>();
+  private rootsAnswer: { key: string; shape: number; cur: unknown; live: unknown; value: any[] } | null = null;
+  /** Set by `layerQuery` and `answer` for `shaped`: the last answer came from
+   *  pm-wasm for a layer of the current composition. */
+  private indexedQuery = false;
+  private nativeAnswer = false;
+  /** Nesting of `answer` (a legacy fallback may ask further queries). */
+  private depth = 0;
+  private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
   private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown }>();
   /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
@@ -296,6 +316,7 @@ export class NativeApi {
   private layerQuery<T>(op: string, L: any, extra: Record<string, unknown>, map?: (v: any, ctx: Context) => T): Native<T> {
     const ctx = this.context(L);
     if (!ctx) return { fallback: 'context' };
+    if (this.depth === 1) this.indexedQuery = typeof ctx.layer === 'number';
     return this.query(op, { comp: ctx.comp, open: ctx.open, layer: ctx.layer, ...extra }, map ? (v) => map(v, ctx) : undefined);
   }
 
@@ -308,6 +329,18 @@ export class NativeApi {
    * layer's edge, a group matrix whose condition exceeds 1e5.
    */
   private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>, perturbed?: Array<() => T>, fragileWhen?: () => boolean): T {
+    this.depth += 1;
+    try {
+      const value = this.answerAt(op, native, legacy, describe, perturbed, fragileWhen);
+      if (this.depth === 1) this.nativeAnswer = this.answeredNatively;
+      return value;
+    } finally {
+      this.depth -= 1;
+      this.answeredNatively = false;
+    }
+  }
+
+  private answerAt<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>, perturbed?: Array<() => T>, fragileWhen?: () => boolean): T {
     this.count(op);
     const run = (): Native<T> => {
       try { return native(); } catch (error) { console.warn(`[engine-doc] ${op} failed natively`, error); return { fallback: 'exception' }; }
@@ -356,7 +389,63 @@ export class NativeApi {
       }
     }
     if ('threw' in got) throw got.threw;
+    this.answeredNatively = true;
     return got.value;
+  }
+
+  /**
+   * Whether `raw` is a layer of the current composition that the mirror holds
+   * at the same index (what `context` checks before every query; a miss lets
+   * the query repair a write the barrier did not see).
+   */
+  private mirrored(raw: any): boolean {
+    const c = this.comps();
+    if (!c || !Array.isArray(c.cur.layers)) return false;
+    const i = this.index(c.cur.layers).index.get(raw);
+    if (i === undefined || c.cur.layers[i] !== raw) return false;
+    const mirrored = lookup(this.barrier()!.shadow, ['comps', c.comp, 'layers', i, 'id']);
+    return mirrored.exists && mirrored.value === raw.id;
+  }
+
+  /** The composition structural answers are valid for, flushed first; null when there is none. */
+  private shapeStamp(): { shape: number; cur: unknown; live: unknown } | null {
+    if (this.dual) return null;
+    const barrier = this.barrier();
+    const wasm = this.wasm();
+    if (!barrier || !wasm || wasm.dead) return null;
+    try { barrier.flush(); } catch { return null; }
+    const live = this.PM.curComp?.() ?? this.PM.proj;
+    return { shape: barrier.shapeRevision, cur: this.unwrap(live), live };
+  }
+
+  /**
+   * A structural answer for `L` (the answer depends on the composition's
+   * shape only, `changesShape`), from the memo while the shape and the
+   * current composition are unchanged. Only native answers for layers of
+   * the current composition are kept: a layer outside it can change without
+   * the barrier seeing it. Dual mode always asks (it compares every answer).
+   */
+  private shaped<T>(op: string, L: any, key: string, compute: () => T, copy: (v: T) => T = v => v): T {
+    const raw = L && typeof L === 'object' ? this.unwrap(L) : null;
+    const stamp = raw ? this.shapeStamp() : null;
+    if (!stamp) return compute();
+    const memo = this.shapes.get(raw);
+    const hit = memo?.get(key);
+    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw)) {
+      this.count(op);
+      this.stats.shapeHits += 1;
+      return copy(hit.value as T);
+    }
+    this.indexedQuery = false;
+    this.nativeAnswer = false;
+    const value = compute();
+    const shape = this.barrier()?.shapeRevision;
+    if (this.indexedQuery && this.nativeAnswer && shape !== undefined) {
+      const entries = memo ?? new Map();
+      if (!memo) this.shapes.set(raw, entries);
+      entries.set(key, { shape, cur: stamp.cur, live: stamp.live, value: copy(value) });
+    }
+    return value;
   }
 
   private intern(wasm: PmWasm, address: Parameters<PmWasm['intern']>[0], owner: object): number {
@@ -386,6 +475,8 @@ export class NativeApi {
     this.channels = new WeakMap();
     this.refs.clear();
     this.indexed = new WeakMap();
+    this.shapes = new WeakMap();
+    this.rootsAnswer = null;
   }
 
   private noteError(prop: any, wasm: PmWasm, id: number) {
@@ -555,8 +646,10 @@ export class NativeApi {
   }
 
   wouldCycle(L: any, parentId: any): boolean {
-    return this.answer('wouldCycle', () => this.layerQuery('wouldCycle', L, { parent: parentId === undefined ? { $u: 1 } : parentId }),
+    const ask = () => this.answer('wouldCycle', () => this.layerQuery('wouldCycle', L, { parent: parentId === undefined ? { $u: 1 } : parentId }),
       () => this.legacy.wouldCycle(L, parentId), () => ({ layer: L?.id, parentId }));
+    if (parentId != null && typeof parentId !== 'string') return ask();
+    return this.shaped('wouldCycle', L, `wouldCycle:${parentId === undefined ? 'u' : parentId === null ? 'n' : `s${parentId}`}`, ask);
   }
 
   resolveContent(L: any, T: any = this.PM.time): any {
@@ -606,8 +699,10 @@ export class NativeApi {
       const c = this.comps();
       if (!c || this.unwrap(layers) !== c.cur.layers) return this.legacy.groupAncestors(L, layers);
     }
-    return this.answer('groups.ancestors', () => this.layerQuery('groupAncestors', L, {}, (indexes: number[], ctx) => indexes.map(i => ctx.live[i])),
-      () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+    return this.shaped('groups.ancestors', L, 'groupAncestors',
+      () => this.answer('groups.ancestors', () => this.layerQuery('groupAncestors', L, {}, (indexes: number[], ctx) => indexes.map(i => ctx.live[i])),
+        () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id })),
+      list => Array.isArray(list) ? list.slice() : list);
   }
 
   groupSpan(group: any): any {
@@ -623,11 +718,30 @@ export class NativeApi {
   }
 
   transformRoots(ids: any[]): any[] {
-    return this.answer('groups.transformRoots', () => {
+    const ask = () => this.answer('groups.transformRoots', () => {
       const c = this.comps();
       if (!c) return { fallback: 'context' };
+      if (this.depth === 1) this.indexedQuery = true;
       return this.query('transformRoots', { comp: c.comp, open: c.open, ids: [...ids] }, (indexes: number[]) => indexes.map(i => c.liveCur.layers[i]));
     }, () => this.legacy.transformRoots(ids), () => ({ ids }));
+    // The same selection's roots at an unchanged shape (each move of a drag asks).
+    const stamp = Array.isArray(ids) && ids.every(id => typeof id === 'string') ? this.shapeStamp() : null;
+    if (!stamp) return ask();
+    const key = JSON.stringify(ids);
+    const hit = this.rootsAnswer;
+    if (hit && hit.key === key && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live) {
+      this.count('groups.transformRoots');
+      this.stats.shapeHits += 1;
+      return hit.value.slice();
+    }
+    this.indexedQuery = false;
+    this.nativeAnswer = false;
+    const value = ask();
+    const shape = this.barrier()?.shapeRevision;
+    if (this.indexedQuery && this.nativeAnswer && shape !== undefined && Array.isArray(value)) {
+      this.rootsAnswer = { key, shape, cur: stamp.cur, live: stamp.live, value: value.slice() };
+    }
+    return value;
   }
 
   // ── space3d ───────────────────────────────────────────────────────────
@@ -657,7 +771,8 @@ export class NativeApi {
   }
 
   is3DLayer(L: any): boolean {
-    return this.answer('space3d.is3DLayer', () => this.layerQuery('is3DLayer', L, {}), () => this.legacy.is3DLayer(L), () => ({ layer: L?.id }));
+    return this.shaped('space3d.is3DLayer', L, 'is3DLayer',
+      () => this.answer('space3d.is3DLayer', () => this.layerQuery('is3DLayer', L, {}), () => this.legacy.is3DLayer(L), () => ({ layer: L?.id })));
   }
 
   perspectiveAmount(L: any, T: number): number {
