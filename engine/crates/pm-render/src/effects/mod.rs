@@ -102,7 +102,16 @@ pub(crate) enum SimpleOp {
     /// Premultiplied linear light to premultiplied E (a legacy program's
     /// input with linear blending on).
     EncodeE,
-    /// Premultiplied E back to premultiplied linear light.
+    /// Premultiplied E back to premultiplied linear light (its output).
+    ///
+    /// Legacy programs write alpha above 1 (glow adds its light over
+    /// `u_orig`, so alpha reaches 1 + intensity) and color with no alpha
+    /// (emitted light). Both passes divide by alpha only within (floor, 1];
+    /// elsewhere the premultiplied color is light and is converted per
+    /// channel, as if its alpha were 1 (the frame's output encode does the
+    /// same, `composite/ops.wgsl`). Where no linear-light blend touches the
+    /// pixel (over black or transparency) it then displays the E value it
+    /// displays in Standard.
     DecodeE,
 }
 
@@ -118,11 +127,22 @@ fn texel(p: vec4<f32>) -> vec4<f32> {
 @fragment fn clamp01(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
   return clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0));
 }
+fn coverage(a: f32) -> bool {
+  return pm_may_unpremultiply(a) && a <= 1.0;
+}
 @fragment fn encode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  return pm_premultiplied_linear_to_e(texel(p));
+  let c = texel(p);
+  if (coverage(c.a)) {
+    return pm_premultiplied_linear_to_e(c);
+  }
+  return vec4<f32>(pm_e_encode3(c.rgb), c.a);
 }
 @fragment fn decode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  return pm_premultiplied_e_to_linear(texel(p));
+  let c = texel(p);
+  if (coverage(c.a)) {
+    return pm_premultiplied_e_to_linear(c);
+  }
+  return vec4<f32>(pm_e_decode3(c.rgb), c.a);
 }
 ";
 

@@ -212,12 +212,18 @@ fn fs_copy(in: VsOut) -> @location(0) vec4<f32> {
 
 // The finished frame from GL row order to top-down rows, encoded with E
 // when the working encoding is linear light (section 9: E on output).
+// Color outside coverage (alpha above 1 or below the unpremultiply floor:
+// light a legacy effect wrote, `crate::effects::SimpleOp::DecodeE`) is
+// encoded per channel, as the effect passes decode it.
 @fragment
 fn fs_encode_flip(in: VsOut) -> @location(0) vec4<f32> {
     let h = i32(textureDimensions(ta).y);
     let at = vec2<i32>(i32(in.pos.x), h - 1 - i32(in.pos.y));
     let c = textureLoad(ta, at, 0);
     if (has(FLAG_LINEAR)) {
+        if (c.a > 1.0 || !pm_may_unpremultiply(c.a)) {
+            return vec4<f32>(pm_e_encode3(c.rgb), c.a);
+        }
         return pm_premultiplied_linear_to_e(c);
     }
     return c;
