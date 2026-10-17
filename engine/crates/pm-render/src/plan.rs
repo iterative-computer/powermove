@@ -127,6 +127,33 @@ pub struct Build<'r> {
     /// The matte source a matte pass renders, which draws even when it is
     /// switched off (`{ ...source, on: true }`).
     forced_on: Option<*const Node>,
+    /// What every pass over one composition's layers reads of all of them
+    /// (each boundary group is a pass), by the layer list's address and
+    /// length (the document is borrowed for the whole build).
+    passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+}
+
+/// Facts of a composition's layer list a compositing pass reads.
+struct PassFacts {
+    owners: pm_eval::groups::LayerOwners,
+    matte_sources: MatteSources,
+    solo: bool,
+}
+
+impl Build<'_> {
+    fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
+        let key = (layers.as_ptr() as usize, layers.len());
+        if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
+            return facts.clone();
+        }
+        let facts = std::sync::Arc::new(PassFacts {
+            owners: pm_eval::groups::LayerOwners::of(all),
+            matte_sources: MatteSources::of(all),
+            solo: all.iter().any(|l| js::flag(l, "solo")),
+        });
+        self.passes.push((key, facts.clone()));
+        facts
+    }
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -173,8 +200,11 @@ pub fn build_with_effects<'r>(
         effects,
         matte_depth: 0,
         forced_on: None,
+        passes: Vec::new(),
     };
     let mut scope = Scope::new(ev, root_comp, project);
+    // One frame at one time: each layer's local matrix once per scope.
+    scope.memoize_transforms();
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
     (plan, b)
 }
@@ -225,13 +255,15 @@ fn comp_pass<'d>(
         draws: Vec::new(),
     };
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
+    let facts = b.pass_facts(scope.layers(), &all);
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
         let known = |_: &JsString| true;
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
             s.group_creates_compositing_boundary(l, time, true, &known)
         };
-        match scope.compositing_layers(&all, parent_id.as_ref(), &mut boundary) {
+        match scope.compositing_layers_with(&all, &facts.owners, parent_id.as_ref(), &mut boundary)
+        {
             Ok(p) => p,
             Err(e) => {
                 b.failures.push(LayerFailure {
@@ -243,15 +275,11 @@ fn comp_pass<'d>(
             }
         }
     };
-    let solo = all.iter().any(|l| js::flag(l, "solo"));
-    let matte_sources: Vec<JsValue> = all
-        .iter()
-        .map(|l| node::get(l, b"matteSource").to_js())
-        .collect();
+    let solo = facts.solo;
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
         let id = node::get(layer, b"id").to_js();
-        if matte_sources.iter().any(|m| same_value_zero(m, &id)) {
+        if facts.matte_sources.contains(&id) {
             continue;
         }
         match draw_layer(scope, b, layer, time, width, height, scale, solo, &all) {
@@ -264,6 +292,44 @@ fn comp_pass<'d>(
         }
     }
     plan
+}
+
+/// Every layer's `matteSource` (`includes`, SameValueZero), as a set: the
+/// pass asks for each of its layers, and a list scan per layer was 3% of a
+/// viewer frame at 500 layers (docs/engine/perf.md).
+struct MatteSources {
+    undefined: bool,
+    strings: std::collections::BTreeSet<JsString>,
+    /// Numbers, booleans, `null`, and objects: rare, compared one by one.
+    others: Vec<JsValue>,
+}
+
+impl MatteSources {
+    fn of(layers: &[&Node]) -> MatteSources {
+        let mut set = MatteSources {
+            undefined: false,
+            strings: std::collections::BTreeSet::new(),
+            others: Vec::new(),
+        };
+        for l in layers {
+            match node::get(l, b"matteSource").to_js() {
+                JsValue::Undefined => set.undefined = true,
+                JsValue::String(s) => {
+                    set.strings.insert(s);
+                }
+                other => set.others.push(other),
+            }
+        }
+        set
+    }
+
+    fn contains(&self, id: &JsValue) -> bool {
+        match id {
+            JsValue::Undefined => self.undefined,
+            JsValue::String(s) => self.strings.contains(s),
+            _ => self.others.iter().any(|m| same_value_zero(m, id)),
+        }
+    }
 }
 
 fn same_value_zero(a: &JsValue, b: &JsValue) -> bool {
@@ -825,6 +891,7 @@ fn native_content_quad<'d>(
             let project = scope.project;
             let inner = {
                 let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
+                inner_scope.memoize_transforms();
                 comp_pass(
                     &mut inner_scope,
                     b,
