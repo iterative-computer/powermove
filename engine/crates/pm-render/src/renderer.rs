@@ -104,7 +104,8 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
-    /// The 3D pass's planning options (view override, mesh definitions).
+    /// The 3D pass's planning options (mesh definitions; the view override
+    /// comes with each request).
     options3d: crate::scene3d::Options3d,
     vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
@@ -172,14 +173,6 @@ impl Renderer {
     /// directory.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
         self.scene3d.set_program_cache(dir);
-    }
-
-    /// The view override of the following viewer renders (contract 2's
-    /// `FrameRequest.view`): the editor camera, Wireframe and X-ray looks,
-    /// and Local View. Export requests (`RenderRequest::export`) never use
-    /// it; agent captures must pass `None`.
-    pub fn set_view(&mut self, view: Option<&pm_protocol::frame::ViewOverride>) {
-        self.options3d.view = view.map(crate::scene3d::View3d::from_override);
     }
 
     /// GPU meshes and material maps the 3D pass keeps between frames
@@ -364,7 +357,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
-            self.options3d.for_request(request.export),
+            self.options3d.for_request(request),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -597,7 +590,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
-            self.options3d.for_request(request.export),
+            self.options3d.for_request(request),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

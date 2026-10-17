@@ -241,7 +241,7 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
                 height: 70,
             },
         ] {
-            let mut request = full;
+            let mut request = full.clone();
             request.region = Some(rect);
             let (part, part_ids, _) = render_bytes(&mut r, &doc, 0.6, &request, &resolver);
             let part_ids = part_ids.unwrap();

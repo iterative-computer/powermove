@@ -39,8 +39,9 @@ pub use model::{
 pub(crate) use layers::{Pass3d, check, check_legacy_scene, order_pass, plan_layer};
 pub use layers::{View3d, scene_from_json};
 
-/// Planning options of the 3D pass: the view override (editor camera,
-/// looks, Local View) and the mesh layer definitions known to the host.
+/// Planning options of the 3D pass: the view override of the render
+/// (editor camera, looks, Local View) and the mesh layer definitions known
+/// to the host.
 #[derive(Debug, Clone)]
 pub struct Options3d {
     pub view: Option<View3d>,
@@ -50,11 +51,15 @@ pub struct Options3d {
 }
 
 impl Options3d {
-    /// The options of one render: an export never draws the view override,
-    /// whatever `Renderer::set_view` last set.
-    pub fn for_request(&self, export: bool) -> Options3d {
+    /// The options of one render: the request's own view override (an
+    /// export never draws one).
+    pub fn for_request(&self, request: &crate::RenderRequest) -> Options3d {
         Options3d {
-            view: if export { None } else { self.view.clone() },
+            view: request
+                .view
+                .as_ref()
+                .filter(|_| !request.export)
+                .map(View3d::from_override),
             mesh_definitions: self.mesh_definitions.clone(),
         }
     }

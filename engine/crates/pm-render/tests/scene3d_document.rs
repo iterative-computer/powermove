@@ -167,8 +167,13 @@ fn three_d_inside_a_precomp_reports_its_depth() {
 }
 
 fn render(r: &mut Renderer, doc: &Value) -> Vec<f32> {
+    render_view(r, doc, None)
+}
+
+fn render_view(r: &mut Renderer, doc: &Value, view: Option<ViewOverride>) -> Vec<f32> {
     let doc = load(doc);
-    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    request.view = view;
     let frame = r
         .render(
             &doc,
@@ -192,12 +197,12 @@ fn view_overrides_change_only_viewer_renders() {
         xray,
         local_view: Vec::new(),
     };
-    r.set_view(Some(&view(Shading3d::Wireframe, false, None)));
-    let wire = render(&mut r, &doc);
+    let wire = render_view(&mut r, &doc, Some(view(Shading3d::Wireframe, false, None)));
     assert_ne!(wire, plain, "wireframe draws edges");
-    // An export request never draws the view override.
+    // An export request never draws a view override, even one it carries.
     let mut export = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
     export.export = true;
+    export.view = Some(view(Shading3d::Wireframe, false, None));
     let frame = r
         .render(
             &load(&doc),
@@ -212,18 +217,21 @@ fn view_overrides_change_only_viewer_renders() {
         plain,
         "exports ignore the view"
     );
-    assert_eq!(render(&mut r, &doc), wire, "the viewer keeps it");
-    r.set_view(Some(&view(Shading3d::Solid, true, None)));
-    let xray = render(&mut r, &doc);
+    // The view belongs to its request: the next render without one (an
+    // agent capture, a thumbnail) draws the document's own scene.
+    assert_eq!(render(&mut r, &doc), plain, "no view is carried over");
+    let xray = render_view(&mut r, &doc, Some(view(Shading3d::Solid, true, None)));
     assert_ne!(xray, plain, "X-ray makes models see-through");
     // X-ray applies in the draft shadings only.
-    r.set_view(Some(&view(Shading3d::Material, true, None)));
-    assert_eq!(render(&mut r, &doc), plain);
+    assert_eq!(
+        render_view(&mut r, &doc, Some(view(Shading3d::Material, true, None))),
+        plain
+    );
     // An editor camera looking from the side.
     let mut m = [0.0; 16];
     let world = pm_render::three::math::camera_world([6.0, 0.0, 0.0], [0.0; 3], [0.0, 1.0, 0.0]);
     m.copy_from_slice(&pm_render::three::math::invert(&world));
-    r.set_view(Some(&view(
+    let side = view(
         Shading3d::Solid,
         false,
         Some(EditorCamera {
@@ -234,16 +242,19 @@ fn view_overrides_change_only_viewer_renders() {
                 far: 1000.0,
             },
         }),
-    )));
-    assert_ne!(render(&mut r, &doc), plain);
+    );
+    assert_ne!(render_view(&mut r, &doc, Some(side)), plain);
     // Local View: only `a` is drawn.
-    r.set_view(Some(&ViewOverride {
-        camera: None,
-        shading: Shading3d::Solid,
-        xray: false,
-        local_view: vec!["a".into()],
-    }));
-    let local = render(&mut r, &doc);
+    let local = render_view(
+        &mut r,
+        &doc,
+        Some(ViewOverride {
+            camera: None,
+            shading: Shading3d::Solid,
+            xray: false,
+            local_view: vec!["a".into()],
+        }),
+    );
     let px = |c: &[f32], x: u32, y: u32| {
         let i = ((y * W + x) * 4) as usize;
         [c[i], c[i + 1], c[i + 2]]
@@ -253,7 +264,6 @@ fn view_overrides_change_only_viewer_renders() {
         px(&local, W / 2, H / 2)[2] < px(&plain, W / 2, H / 2)[2],
         "b is hidden in Local View"
     );
-    r.set_view(None);
     assert_eq!(render(&mut r, &doc), plain, "no override renders as before");
 }
 
@@ -556,25 +566,41 @@ fn frame_requests_carry_the_view_except_for_final_purposes() {
         local_view: Vec::new(),
     });
     request.region = None;
-    // The plain conversion refuses a view (callers that ignore it route).
-    assert!(RenderRequest::from_frame_request(&request).is_err());
-    let (r, view) = RenderRequest::from_frame_request_with_view(&request).unwrap();
-    assert_eq!(view.unwrap().shading, Shading3d::Wireframe);
+    let r = RenderRequest::from_frame_request(&request).unwrap();
+    assert_eq!(r.view.as_ref().unwrap().shading, Shading3d::Wireframe);
     assert_eq!(r.output_size, request.output_size);
-    // An export never applies the view.
-    let mut export = request.clone();
-    export.purpose = FramePurpose::Export;
-    export.priority = pm_protocol::priority::PriorityClass::UserJob;
-    export.resolution = pm_protocol::frame::PreviewResolution::Full;
-    export.media = pm_protocol::frame::MediaPreference::Originals;
-    export.color = pm_protocol::color::OutputColor::SrgbImage;
-    export.motion_blur = pm_protocol::frame::MotionBlurKind::Export;
-    export.depth_id = false;
-    export.overlay = false;
-    export.draft_3d = false;
-    export.draft_render = false;
-    let (r, view) = RenderRequest::from_frame_request_with_view(&export).unwrap();
-    assert!(view.is_none() && r.export, "exports ignore view overrides");
+    // Final purposes never apply a view (section 8): contract 2 refuses an
+    // export or agent capture that carries one, and without one the render
+    // request has none.
+    let final_request = |purpose: FramePurpose| {
+        let mut f = request.clone();
+        f.purpose = purpose;
+        f.priority = if purpose == FramePurpose::Export {
+            pm_protocol::priority::PriorityClass::UserJob
+        } else {
+            pm_protocol::priority::PriorityClass::AgentSnapshot
+        };
+        f.resolution = pm_protocol::frame::PreviewResolution::Full;
+        f.media = pm_protocol::frame::MediaPreference::Originals;
+        f.color = pm_protocol::color::OutputColor::SrgbImage;
+        f.motion_blur = pm_protocol::frame::MotionBlurKind::Export;
+        f.depth_id = false;
+        f.overlay = false;
+        f.draft_3d = false;
+        f.draft_render = false;
+        f
+    };
+    for purpose in [FramePurpose::Export, FramePurpose::AgentCapture] {
+        let mut f = final_request(purpose);
+        assert!(
+            RenderRequest::from_frame_request(&f).is_err(),
+            "{purpose:?}"
+        );
+        f.view = None;
+        let r = RenderRequest::from_frame_request(&f).unwrap();
+        assert!(r.view.is_none(), "{purpose:?}");
+        assert_eq!(r.export, purpose == FramePurpose::Export);
+    }
 }
 
 /// The corpus legacy scene layer (`3d/legacy-scene`): a cube and a torus
