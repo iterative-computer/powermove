@@ -283,11 +283,20 @@ pub struct Stats {
     pub host_clock_runs: u64,
     /// Audio playback, per view.
     pub audio: BTreeMap<String, AudioStatus>,
+    /// Frames drawn with stand-ins while scrubbing, and the frames drawn
+    /// again once the exact video arrived (docs/engine/scrub.md).
+    pub stand_in_frames: u64,
+    pub stand_in_redraws: u64,
+    /// The display decode workers (scrubbing, look-ahead, cancellation).
+    pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
 
 const TRACE_CAP: usize = 200_000;
+
+/// How often a frame drawn with stand-ins checks whether its video decoded.
+const STAND_IN_POLL_US: i64 = 1_000;
 
 struct Gpu {
     device: wgpu::Device,
@@ -332,6 +341,13 @@ struct View {
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
     /// The audio clock version last followed.
     audio_version: u64,
+    /// Paused after a `seek {scrub}`: frames may show stand-ins for video
+    /// still decoding (docs/engine/scrub.md). Exact seeks, steps, and
+    /// playback clear it.
+    scrub: bool,
+    /// The frame on screen showed stand-ins: the media "landed" counter when
+    /// it was drawn. A change draws the frame again.
+    stand_in: Option<u64>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -788,6 +804,15 @@ impl Thread {
             }
             return;
         }
+        if matches!(
+            command,
+            TransportCommand::Play { .. }
+                | TransportCommand::PlayAround { .. }
+                | TransportCommand::Pause
+        ) {
+            // Playback and the frame a pause lands on are exact.
+            view.scrub = false;
+        }
         match command {
             TransportCommand::Play { rate } => {
                 if view.awaiting.is_some_and(|a| a.2 == rate)
@@ -870,6 +895,7 @@ impl Thread {
             TransportCommand::Seek { time, mode } => {
                 let playing = view.clock.following() && view.clock.is_playing();
                 let awaiting = view.awaiting;
+                view.scrub = mode == SeekMode::Scrub && !playing && awaiting.is_none();
                 view.clock.apply(TransportCommand::Seek { time, mode }, at);
                 if playing || awaiting.is_some() {
                     // The audio seeks and starts a new run; the line holds the
@@ -910,6 +936,8 @@ impl Thread {
             }
             TransportCommand::Step { frames } => {
                 // Steps while paused: the line, and a grain where it lands.
+                // A step shows its exact frame.
+                view.scrub = false;
                 let paused = !view.clock.is_playing() && view.awaiting.is_none();
                 if view.clock.apply(TransportCommand::Step { frames }, at) {
                     view.schedule.reset();
@@ -1061,6 +1089,8 @@ impl Thread {
             reported: None,
             awaiting: None,
             audio_version: 0,
+            scrub: false,
+            stand_in: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -1485,6 +1515,10 @@ impl Thread {
             if view.dirty || !view.requests.is_empty() || view.sample_due {
                 return Duration::ZERO;
             }
+            if view.stand_in.is_some() {
+                // A frame with stand-ins waits for its video to decode.
+                wake = wake.min(now + STAND_IN_POLL_US);
+            }
             if view.awaiting.is_some() || view.clock.following() {
                 // Follow the audio clock promptly (it publishes on its own).
                 wake = wake.min(now + 2_000);
@@ -1759,6 +1793,24 @@ impl Thread {
         {
             self.answer(key, id, &request, revision);
         }
+        // A frame drawn with stand-ins is drawn again once video it asked
+        // for has decoded.
+        let landed = self
+            .gpu
+            .as_mut()
+            .and_then(|g| g.composer.as_mut())
+            .map(|c| c.renderer().media_landed());
+        if let Some(view) = self.views.get_mut(&key)
+            && let (Some(at), Some(landed)) = (view.stand_in, landed)
+            && at != landed
+        {
+            if view.clock.is_playing() {
+                view.stand_in = None;
+            } else {
+                view.dirty = true;
+                self.stats().stand_in_redraws += 1;
+            }
+        }
         // A paused frame after a view or transport change.
         let paused_dirty = self
             .views
@@ -1908,28 +1960,42 @@ impl Thread {
         let seq = view.next_seq;
         let start = now();
         let overlay;
+        let mut stand_in = false;
         if document {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu
                 .composer
                 .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
             let composition = view.state.composition.as_str().to_owned();
-            match composer.compose(
+            // Stand-ins only for paused frames after a scrub seek; read the
+            // counter first so a frame landing during the render is not
+            // missed.
+            let scrub = view.scrub && timing.is_none() && !view.clock.is_playing();
+            composer.renderer().set_scrub(scrub);
+            let landed_before = composer.renderer().media_landed();
+            let composed = composer.compose(
                 doc.document(),
                 &composition,
                 doc.media(),
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &view.state,
                 &live.working,
-            ) {
+            );
+            composer.renderer().set_scrub(false);
+            let scrub_stats = composer.renderer().scrub_stats();
+            match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    stand_in = composed.stand_ins > 0;
+                    view.stand_in = stand_in.then_some(landed_before);
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    stats.stand_in_frames += u64::from(stand_in);
+                    stats.scrub = Some(scrub_stats);
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
@@ -2025,6 +2091,7 @@ impl Thread {
                 representation: Representation::Original,
                 draft_3d: false,
                 cached: false,
+                stand_in,
             },
             overlay: Some(overlay),
             depth_id: None,
