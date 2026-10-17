@@ -175,17 +175,24 @@ describe('output destinations', () => {
     const third = await outputs.destination(folder, 1, 1);
     await writeFile(path.join(handles.resolve(third.temporary, 1, 1).path, 'Frames_00000.png'), 'x');
     expect((await outputs.commit({ job: 'job-1', temporary: third.temporary, commit: true, verification: verified(1) }, 1, 1)).path).toBe(path.join(auto, 'Frames (2)'));
-    // A chosen folder with replace: same-named frames are replaced, other files stay.
+    // A chosen folder with replace: same-named frames are replaced, the earlier
+    // longer export's extra frames go, other files stay.
     const chosen = path.join(dir, 'Seq');
     await mkdir(chosen);
     await writeFile(path.join(chosen, 'notes.txt'), 'mine');
     await writeFile(path.join(chosen, 'Seq_00000.png'), 'old');
+    await writeFile(path.join(chosen, 'Seq_00001.png'), 'old');
+    await writeFile(path.join(chosen, 'Other_00001.png'), 'other');
+    await writeFile(path.join(chosen, 'Seq_001.png'), 'digits');
+    await writeFile(path.join(chosen, 'Seq_00001.tif'), 'tif');
+    await mkdir(path.join(chosen, 'Seq_00009.png'));
     const handle = outputs.chooseDestination(chosen, 'job-s', 2, 2);
     const out = await outputs.destination({ job: 'job-s', choice: { kind: 'userChosen', destination: handle }, overwrite: 'replace', folder: true }, 2, 2);
     await writeFile(path.join(handles.resolve(out.temporary, 2, 2).path, 'Seq_00000.png'), 'new');
     expect((await outputs.commit({ job: 'job-s', temporary: out.temporary, commit: true, verification: verified(3) }, 2, 2)).path).toBe(chosen);
     expect(await readFile(path.join(chosen, 'Seq_00000.png'), 'utf8')).toBe('new');
     expect(await readFile(path.join(chosen, 'notes.txt'), 'utf8')).toBe('mine');
+    expect((await readdir(chosen)).sort()).toEqual(['Other_00001.png', 'Seq_00000.png', 'Seq_00001.tif', 'Seq_00009.png', 'Seq_001.png', 'notes.txt']);
     // An abandoned folder output is removed with its frames.
     const crashed = await outputs.destination(folder, 1, 7);
     await writeFile(path.join(handles.resolve(crashed.temporary, 1, 7).path, 'f.png'), 'x');

@@ -503,8 +503,11 @@ folder's path.
   both optional on the wire. This answers RFC 12's open question 4.
 - Contract 14: `OutputDestinationRequest.folder`: the host creates an
   owner-only temporary folder, the engine writes frames into a work folder
-  beside it, and the commit moves the folder (replace merges frames into an
-  existing folder). `pm-host` and main's `outputs.ts` implement it.
+  beside it, and the commit moves the folder. Replace moves the frames into
+  an existing folder, then removes the frames of an earlier, longer export of
+  the same sequence (same `<name>_<digits>.<ext>` name, digit count and
+  extension), so the folder never mixes old and new frames; other files stay.
+  `pm-host`, main's `outputs.ts` and `pm_export::AtomicOutput` implement it.
 
 ## Tests and measurements (Phase 3b)
 

@@ -10,7 +10,9 @@
 //! `.<name>.<random>.partial` beside the destination, which becomes the destination
 //! folder on commit (a rename, which never replaces a folder that holds anything).
 //! [`Overwrite::Replace`] moves each frame into an existing folder instead, replacing
-//! frames of the same name and leaving every other file alone.
+//! frames of the same name, then removes the frames of an earlier, longer export of the
+//! same sequence (`<name>_<digits>.<ext>` with the same name, digit count and extension)
+//! so the folder never holds a mix of old and new frames. Every other file stays.
 
 use std::fs;
 use std::io;
@@ -254,11 +256,18 @@ impl AtomicOutput {
         }
         match self.overwrite {
             Overwrite::Replace if self.destination.is_dir() => {
+                let names: Vec<String> = files
+                    .iter()
+                    .filter_map(|f| f.file_name()?.to_str().map(str::to_owned))
+                    .collect();
                 for f in &files {
                     let to = self.destination.join(f.file_name().expect("a file"));
                     fs::rename(f, &to).map_err(|e| io(e, &to))?;
                 }
                 let _ = fs::remove_dir(&self.temp);
+                // Only after every new frame is in place: stale frames of the same
+                // sequence from an earlier, longer export.
+                remove_stale_frames(&self.destination, &names)?;
             }
             _ => {
                 if let Some(mode) = self.mode {
@@ -282,6 +291,41 @@ impl AtomicOutput {
         self.committed = true;
         Ok(self.destination.clone())
     }
+}
+
+/// `<name>_<digits>.<ext>` split into (name, digit count, ext).
+fn frame_parts(file: &str) -> Option<(&str, usize, &str)> {
+    let (stem, ext) = file.rsplit_once('.')?;
+    let (name, digits) = stem.rsplit_once('_')?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && !ext.is_empty())
+        .then_some((name, digits.len(), ext))
+}
+
+/// Removes files in `folder` that belong to the same frame sequence as `written`
+/// (same name, digit count and extension) but were not written by this export.
+fn remove_stale_frames(folder: &Path, written: &[String]) -> Result<(), Error> {
+    let mut sequences: Vec<(&str, usize, &str)> =
+        written.iter().filter_map(|n| frame_parts(n)).collect();
+    sequences.sort_unstable();
+    sequences.dedup();
+    if sequences.is_empty() {
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(folder).map_err(|e| Error::Io(format!("{}: {e}", folder.display())))?;
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let stale = frame_parts(&name).is_some_and(|parts| sequences.contains(&parts))
+            && !written.iter().any(|w| w == &name)
+            && entry.file_type().is_ok_and(|t| t.is_file());
+        if stale {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+        }
+    }
+    Ok(())
 }
 
 fn create_private_dir(path: &Path) -> Result<(), Error> {
@@ -485,14 +529,26 @@ mod tests {
             AtomicOutput::folder(&dest, Overwrite::Fail, None),
             Err(Error::Exists(_))
         ));
-        // Replace: frames of the same name are replaced, other files stay.
+        // Replace: frames of the same name are replaced, frames of the earlier,
+        // longer export of the same sequence go, and other files stay (other
+        // sequences, other digit counts or extensions, folders).
         fs::write(dest.join("notes.txt"), b"mine").unwrap();
+        fs::write(dest.join("Frames_00002.png"), b"old").unwrap();
+        fs::write(dest.join("Other_00001.png"), b"other").unwrap();
+        fs::write(dest.join("Frames_001.png"), b"digits").unwrap();
+        fs::write(dest.join("Frames_00001.tif"), b"tif").unwrap();
+        fs::create_dir(dest.join("Frames_00009.png")).unwrap();
         let out = AtomicOutput::folder(&dest, Overwrite::Replace, None).unwrap();
         fs::write(out.temp_path().join("Frames_00000.png"), b"new").unwrap();
         let temp = out.temp_path().to_path_buf();
         out.commit().unwrap();
         assert_eq!(fs::read(dest.join("Frames_00000.png")).unwrap(), b"new");
+        assert!(!dest.join("Frames_00001.png").exists());
+        assert!(!dest.join("Frames_00002.png").exists());
         assert_eq!(fs::read(dest.join("notes.txt")).unwrap(), b"mine");
+        assert_eq!(fs::read(dest.join("Other_00001.png")).unwrap(), b"other");
+        assert!(dest.join("Frames_001.png").exists() && dest.join("Frames_00001.tif").exists());
+        assert!(dest.join("Frames_00009.png").is_dir());
         assert!(!temp.exists());
         // A dropped folder output removes only its own temporary folder.
         let out = AtomicOutput::folder(&dir.join("Other"), Overwrite::Fail, None).unwrap();

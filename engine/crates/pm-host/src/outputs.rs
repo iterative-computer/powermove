@@ -249,18 +249,52 @@ fn place_folder_no_clobber(temporary: &Path, candidate: &Path) -> Result<bool, P
     Ok(true)
 }
 
+/// `<name>_<digits>.<ext>` split into (name, digit count, ext).
+fn frame_parts(file: &str) -> Option<(&str, usize, &str)> {
+    let (stem, ext) = file.rsplit_once('.')?;
+    let (name, digits) = stem.rsplit_once('_')?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && !ext.is_empty())
+        .then_some((name, digits.len(), ext))
+}
+
+/// Removes files in `folder` of the frame sequences in `written` (same name,
+/// digit count and extension) that this export did not write.
+fn remove_stale_frames(folder: &Path, written: &[String]) -> std::io::Result<()> {
+    let sequences: Vec<_> = written.iter().filter_map(|n| frame_parts(n)).collect();
+    if sequences.is_empty() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(folder)?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if frame_parts(&name).is_some_and(|parts| sequences.contains(&parts))
+            && !written.contains(&name)
+            && entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Moves a verified temporary output into place by the placement's policy.
 /// A folder (PNG sequence) chosen with replace keeps the destination folder's
-/// other files and replaces only frames of the same name.
+/// other files, replaces frames of the same name, and then removes the frames
+/// of an earlier, longer export of the same sequence, so old and new frames
+/// never mix (pm_export's `AtomicOutput` and main's `outputs.ts` do the same).
 pub fn place(temporary: &Path, placement: &Placement) -> Result<PathBuf, PlaceError> {
     let folder = fs::symlink_metadata(temporary).is_ok_and(|m| m.is_dir());
     if folder {
         if let (Some(exact), OverwritePolicy::Replace) = (&placement.exact, placement.overwrite) {
             if exact.is_dir() {
+                let mut written = Vec::new();
                 for entry in fs::read_dir(temporary)?.flatten() {
                     fs::rename(entry.path(), exact.join(entry.file_name()))?;
+                    written.extend(entry.file_name().into_string());
                 }
                 let _ = fs::remove_dir(temporary);
+                remove_stale_frames(exact, &written)?;
             } else {
                 fs::rename(temporary, exact)?;
             }
@@ -391,6 +425,26 @@ mod tests {
             "an existing folder is never replaced"
         );
         assert!(placed.join("Seq_00001.png").is_file() && !temp.exists());
+        // Replace into the chosen folder: same-named frames are replaced, the
+        // earlier longer export's extra frames go, other files stay.
+        fs::write(placed.join("Seq_00002.png"), b"old").unwrap();
+        fs::write(placed.join("notes.txt"), b"mine").unwrap();
+        fs::write(placed.join("Other_00003.png"), b"other").unwrap();
+        let temp = create_temporary(&dir, "2222222222222222", true).unwrap();
+        fs::write(temp.join("Seq_00000.png"), b"new").unwrap();
+        let replace = Placement {
+            overwrite: OverwritePolicy::Replace,
+            exact: Some(placed.clone()),
+            ..placement
+        };
+        assert_eq!(place(&temp, &replace).unwrap(), placed);
+        let mut names: Vec<_> = fs::read_dir(&placed)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Other_00003.png", "Seq_00000.png", "notes.txt"]);
+        assert_eq!(fs::read(placed.join("Seq_00000.png")).unwrap(), b"new");
         // Removing a temporary folder takes its frames with it.
         let temp = create_temporary(&dir, "1111111111111111", true).unwrap();
         fs::write(temp.join("f.png"), b"x").unwrap();

@@ -19,7 +19,10 @@
  * PNG sequences are folders: the temporary output is an owner-only folder,
  * and the commit renames it into place (reserving the name by creating an
  * empty folder first, so nothing is ever replaced) or, under replace, moves
- * each frame into the existing folder and leaves its other files alone.
+ * each frame into the existing folder, then removes the frames of an earlier,
+ * longer export of the same sequence (same `<name>_<digits>.<ext>` name, digit
+ * count and extension), so the folder never mixes old and new frames; its
+ * other files stay. pm_export's AtomicOutput::commit_folder does the same.
  */
 import { randomBytes } from 'node:crypto';
 import { link, lstat, mkdir, open, readdir, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
@@ -42,6 +45,24 @@ const NAME_MAX = 255;
  *  (`pm_export::AtomicOutput::in_place`: `<temporary>.<16 hex>.partial.<ext>`),
  *  which a crashed or cancelled encode can leave behind. */
 const TEMPORARY_NAME = /^\.powermove-[0-9a-f]{16}\.part(?:\.[0-9a-f]{16}\.partial(?:\.[A-Za-z0-9]{1,16})?)?$/;
+
+/** `<name>_<digits>.<ext>` as a sequence key (name, digit count, ext), or null. */
+function frameSequence(file: string): string | null {
+  const match = /^(.*)_(\d+)\.([^.]+)$/.exec(file);
+  return match ? `${match[1]}\u0000${match[2]!.length}\u0000${match[3]}` : null;
+}
+
+/** Removes files of the sequences in `written` that this export did not write. */
+export async function removeStaleFrames(folder: string, written: readonly string[]): Promise<void> {
+  const sequences = new Set(written.map(frameSequence).filter((key): key is string => key !== null));
+  if (!sequences.size) return;
+  const mine = new Set(written);
+  for (const entry of await readdir(folder, { withFileTypes: true })) {
+    if (!entry.isFile() || mine.has(entry.name)) continue;
+    const key = frameSequence(entry.name);
+    if (key && sequences.has(key)) await unlink(path.join(folder, entry.name));
+  }
+}
 
 /** Removes one of our temporary names: a file, or a folder and its frames. */
 async function removeOwn(file: string): Promise<void> {
@@ -253,8 +274,11 @@ export class OutputDestinations {
       const existing = await lstat(pending.exact).catch(() => null);
       if (existing?.isDirectory()) {
         // Frames of the same name are replaced; the folder's other files stay.
-        for (const name of await readdir(pending.temporary)) await rename(path.join(pending.temporary, name), path.join(pending.exact, name));
+        const written = await readdir(pending.temporary);
+        for (const name of written) await rename(path.join(pending.temporary, name), path.join(pending.exact, name));
         await rmdir(pending.temporary).catch(() => {});
+        // Only once every new frame is in place: the earlier export's extra frames.
+        await removeStaleFrames(pending.exact, written);
       } else {
         if (existing) throw new OutputError('exportFailed', 'A file with that name already exists.');
         await rename(pending.temporary, pending.exact);
