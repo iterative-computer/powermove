@@ -291,6 +291,18 @@ Electron runs, against about 7 before, so the gains are if anything understated)
   (`phase2-gate.md`): `chatgpt-connection.spec.ts:5` (environment: the
   developer's Claude settings) and `import-image-sequence.spec.ts:7` at 12 and
   120 fps (R1, the intermittent export regression of the storage lane).
+- The same suite with the native evaluator in `audit` mode
+  (`VITE_POWERMOVE_NATIVE_EVALUATOR=audit`, `POWERMOVE_NATIVE_REPORT_FILE`;
+  23:33 to 23:53): 530 passed, 2 failed (`chatgpt-connection.spec.ts:5`,
+  `import-image-sequence.spec.ts:7` at 120 fps), 30 skipped. Dual answers:
+  742,860 compared, 0 mismatched, 0 stale (the structural memo is off in dual
+  mode by design). Auditor: 5,302 audits, 0 mirror mismatches, 6 missed writes,
+  none from this lane's changes: `requiresEngine` (4, and the one consistency
+  mismatch, before a save) is written by `shared/engine-stamp.ts` without an
+  announcement (the store lane's engine stamp), `assets.*.format` is
+  `import-svg.spec.ts` deleting a member directly (as `write-path.md` lists),
+  and `comps.*.work` one write of a composition's work area. Tracking-Proxy
+  violations by app writers: 0.
 
 ## Gaps
 
