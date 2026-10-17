@@ -2,9 +2,13 @@
 //!
 //! - HDR10 and HLG sources tone mapped with BT.2446 Method A equal the f64
 //!   oracle (`pm_color::tonemap`) applied to the same decode;
-//! - interlaced sources at field rate equal FFmpeg's bwdif
-//!   (`mode=send_field`) converted with the same matrix and chroma filter,
-//!   and at frame rate show each frame's first field;
+//! - interlaced sources (4:2:2 8- and 10-bit, 4:2:0, 4:1:1) at field rate
+//!   equal FFmpeg's bwdif (`mode=send_field`) run on the same decode and
+//!   converted with the same matrix and chroma filter, and at frame rate
+//!   show each frame's first field;
+//! - HDR, interlaced, rotated, non-square-pixel, cropping-clean-aperture and
+//!   wide-gamut video route to the legacy renderer unless the asset carries
+//!   `interpret` (they have no parity test against today's viewer);
 //! - display rotations and the clean aperture are exact permutations and
 //!   crops of the unrotated picture, rotated as FFmpeg's autorotate does;
 //! - `interpret` overrides in the document change the reading (matrix,
@@ -179,17 +183,23 @@ fn hdr_sources_are_tone_mapped_with_method_a() {
         let reading = resolve_video(v, &Interpretation::default());
         let tm = reading.tone_map.expect("tone mapped");
         let (w, h) = (v.width, v.height);
-        let (doc, res) = document(&path, (w, h), 25.0, None);
+        // Without overrides HDR routes to the legacy renderer (today's
+        // Chromium handling is not measured yet); interpreted, it is drawn.
         let mut r = Renderer::headless().unwrap();
-        // Drawn as probed; an override that restates the file's own reading
-        // changes nothing.
-        let (doc_i, _) = document(
+        let (doc, res) = document(
             &path,
             (w, h),
             25.0,
             Some(json!({ "transfer": if signal == HdrSignal::Pq { "pq" } else { "hlg" } })),
         );
         let ours = render(&mut r, &doc, (w, h), 0.13, &res);
+        // Overrides that restate the file's own reading change nothing.
+        let (doc_i, _) = document(
+            &path,
+            (w, h),
+            25.0,
+            Some(json!({ "primaries": "bt2020", "matrix": "bt2020Ncl" })),
+        );
         assert_eq!(render(&mut r, &doc_i, (w, h), 0.13, &res), ours);
         let n = src.select(ticks(0.13).get()).unwrap();
         let f = decode(&path, n);
@@ -233,79 +243,172 @@ fn hdr_sources_are_tone_mapped_with_method_a() {
 
 #[test]
 fn interlaced_sources_deinterlace_like_ffmpeg_bwdif() {
-    let Some(path) = formats("video/interlaced-bff.mxf") else {
-        return;
-    };
-    let src = MediaSource::open(&path).unwrap();
+    // 4:2:2 MXF (bottom field first), 4:2:2 10-bit QuickTime (top field
+    // first), DV PAL 4:2:0 and DVCPRO 4:1:1 (bottom field first): bwdif runs
+    // on each plane before chroma upsampling, so interlaced 4:2:0 and 4:1:1
+    // chroma is deinterlaced at its own resolution, as FFmpeg's is.
+    for (file, order) in [
+        ("video/interlaced-bff.mxf", "bottomFirst"),
+        ("video/interlaced-tff.mov", "topFirst"),
+        ("video/dv-pal.dv", "bottomFirst"),
+        ("video/dvcpro25-pal.mov", "bottomFirst"),
+    ] {
+        let Some(path) = formats(file) else {
+            return;
+        };
+        deinterlaces_like_bwdif(&path, order);
+    }
+}
+
+fn deinterlaces_like_bwdif(path: &Path, order: &str) {
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let src = MediaSource::open(path).unwrap();
     let v = src.probe.video.as_ref().unwrap();
-    let reading = resolve_video(v, &Interpretation::default());
+    let probed = match v.fields.order {
+        pm_media::probe::FieldOrder::TopFirst => "topFirst",
+        pm_media::probe::FieldOrder::BottomFirst => "bottomFirst",
+        other => panic!("{name}: {other:?}"),
+    };
+    assert_eq!(probed, order, "{name}: field order");
+    // Uninterpreted, interlaced video routes to the legacy renderer (today's
+    // viewer shows the woven frame); an override restating the field order
+    // draws it.
+    assert!(
+        pm_render::media::probe_video(path).is_err(),
+        "{name} is drawn without an interpretation"
+    );
+    let interp = json!({ "fieldOrder": order });
+    let reading = resolve_video(v, &Interpretation::from_json(&interp).0);
     let (w, h) = (v.width as usize, v.height as usize);
-    let (cw, ch) = (w / 2, h);
-    // FFmpeg's bwdif, one picture per field.
-    let raw = std::env::temp_dir().join(format!("pm-render-bwdif-{}.raw", std::process::id()));
+    let f0 = decode(path, 0);
+    let (lw, lh) = (f0.format.log2_chroma_w, f0.format.log2_chroma_h);
+    let (cw, ch) = (w >> lw, h >> lh);
+    let deep = f0.format.bits > 8;
+    let pix_fmt = match (lw, lh, deep) {
+        (1, 0, false) => "yuv422p",
+        (1, 0, true) if f0.format.bits == 10 => "yuv422p10le",
+        (1, 1, false) => "yuv420p",
+        (2, 0, false) => "yuv411p",
+        other => panic!("{name}: chroma {other:?}"),
+    };
+    // Our decode, as planar code values: FFmpeg's bwdif runs on the same
+    // pictures (VideoToolbox's ProRes decode and FFmpeg's are not
+    // bit-identical, and this test is about deinterlacing).
+    let (y_max, y_off, c_off) = if deep {
+        (876.0, 64.0, 512.0)
+    } else {
+        (219.0, 16.0, 128.0)
+    };
+    let c_max = y_max * 224.0 / 219.0;
+    let mut decoded = Vec::new();
+    {
+        let service = DecodeService::new(ServiceConfig::default());
+        let mut session = service
+            .session(&src, 1, pm_media::vt::DecodePurpose::Display)
+            .unwrap();
+        let push = |out: &mut Vec<u8>, v: f64| {
+            let code = v.round() as u16;
+            if deep {
+                out.extend(code.to_le_bytes());
+            } else {
+                out.push(code as u8);
+            }
+        };
+        for n in 0..src.pts.len() {
+            let (ya, cc) = session.frame(n).unwrap().reference().unwrap();
+            for p in &ya {
+                push(&mut decoded, f64::from(p[0]) * y_max + y_off);
+            }
+            for k in 0..2 {
+                for p in &cc {
+                    push(&mut decoded, f64::from(p[k]) * c_max + c_off);
+                }
+            }
+        }
+    }
+    // FFmpeg's bwdif, one picture per field, with the field order we read.
+    let tmp = std::env::temp_dir();
+    let id = format!("{}-{name}", std::process::id());
+    let input = tmp.join(format!("pm-render-bwdif-in-{id}.raw"));
+    let raw = tmp.join(format!("pm-render-bwdif-{id}.raw"));
+    std::fs::write(&input, &decoded).unwrap();
     let ffmpeg = PathBuf::from(std::env::var_os("HOME").unwrap())
         .join("Library/Caches/powermove-engine/ffmpeg/out/bin/ffmpeg");
+    let parity = if order == "topFirst" { "tff" } else { "bff" };
     let ok = std::process::Command::new(ffmpeg)
-        .args(["-v", "error", "-y", "-i"])
-        .arg(&path)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pix_fmt])
+        .args(["-s", &format!("{w}x{h}"), "-r", "25", "-i"])
+        .arg(&input)
         .args([
-            "-map",
-            "0:v:0",
             "-vf",
-            "bwdif=mode=send_field:parity=auto:deint=all",
+            &format!("bwdif=mode=send_field:parity={parity}:deint=all"),
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "yuv422p",
+            pix_fmt,
         ])
         .arg(&raw)
         .status()
         .unwrap()
         .success();
-    assert!(ok);
+    let _ = std::fs::remove_file(&input);
+    assert!(ok, "{name}: ffmpeg");
     let reference = std::fs::read(&raw).unwrap();
     let _ = std::fs::remove_file(&raw);
-    let frame_bytes = w * h + 2 * cw * ch;
+    // Limited-range code values at the source depth, as 8-bit codes
+    // (10-bit codes / 4), so one normalization serves both depths.
+    let bps = if deep { 2usize } else { 1 };
+    let norm = |b: &[u8], i: usize| {
+        if deep {
+            f32::from(u16::from_le_bytes([b[2 * i], b[2 * i + 1]])) / 4.0
+        } else {
+            f32::from(b[i])
+        }
+    };
+    let frame_bytes = (w * h + 2 * cw * ch) * bps;
+    let fields = reference.len() / frame_bytes;
+    assert!(fields >= 8, "{name}: {fields} fields from bwdif");
     let mut r = Renderer::headless().unwrap();
-    let (doc50, res) = document(&path, (w as u32, h as u32), 50.0, None);
-    let (doc25, _) = document(&path, (w as u32, h as u32), 25.0, None);
+    let (doc50, res) = document(path, (w as u32, h as u32), 50.0, Some(interp.clone()));
+    let (doc25, _) = document(path, (w as u32, h as u32), 25.0, Some(interp));
     let mut worst = 0f64;
-    for field in [0usize, 1, 2, 3, 20, 47, 48, 49] {
+    let picks = [0usize, 1, 2, 3, 20, fields - 3, fields - 2, fields - 1];
+    for field in picks {
         let t = (field as f64 + 0.25) / 50.0;
         let ours = render(&mut r, &doc50, (w as u32, h as u32), t, &res);
         let p = &reference[field * frame_bytes..][..frame_bytes];
-        let y: Vec<f32> = p[..w * h]
-            .iter()
-            .map(|&v| (f32::from(v) - 16.0) / 219.0)
-            .collect();
-        let cb: Vec<f32> = p[w * h..][..cw * ch]
-            .iter()
-            .map(|&v| (f32::from(v) - 128.0) / 224.0)
-            .collect();
-        let cr: Vec<f32> = p[w * h + cw * ch..][..cw * ch]
-            .iter()
-            .map(|&v| (f32::from(v) - 128.0) / 224.0)
-            .collect();
+        let plane = |offset: usize, n: usize, f: &dyn Fn(f32) -> f32| -> Vec<f32> {
+            (0..n).map(|i| f(norm(&p[offset * bps..], i))).collect()
+        };
+        let y = plane(0, w * h, &|v| (v - 16.0) / 219.0);
+        let cb = plane(w * h, cw * ch, &|v| (v - 128.0) / 224.0);
+        let cr = plane(w * h + cw * ch, cw * ch, &|v| (v - 128.0) / 224.0);
         let want = rgb_of(
             (w, h),
             &y,
             &cb,
             &cr,
             (cw, ch),
-            Factors { x: 2, y: 1 },
+            Factors::from_log2(lw, lh),
             reading.siting.value,
             reading.matrix.value,
         );
         let d = max_diff(&ours, &want);
         worst = worst.max(d);
-        assert!(d < 1e-5, "field {field}: max |Δ| {d}");
+        assert!(d < 1e-5, "{name} field {field}: max |Δ| {d}");
         // At 25 fps the frame shows its first field.
         if field % 2 == 0 {
             let frame = render(&mut r, &doc25, (w as u32, h as u32), t, &res);
-            assert_eq!(frame, ours, "frame-rate output keeps the first field");
+            assert_eq!(
+                frame, ours,
+                "{name}: frame-rate output keeps the first field"
+            );
         }
     }
-    eprintln!("interlaced-bff.mxf at 50 fps: max |Δ| {worst:.2e} against FFmpeg's bwdif");
+    eprintln!(
+        "{name} ({pix_fmt}, {order}) at 50 fps: max |Δ| {worst:.2e} against FFmpeg's bwdif over {} fields",
+        picks.len()
+    );
 }
 
 #[test]
@@ -358,9 +461,20 @@ fn rotations_and_clean_aperture_are_exact() {
             })
             .collect();
         assert_eq!(mapped, ff, "{file}: FFmpeg rotates the other way");
+        // Uninterpreted, rotated video routes to the legacy renderer; any
+        // interpretation (here the file's own square pixels) draws it.
+        assert!(
+            pm_render::media::probe_video(&path).is_err(),
+            "{file} is drawn without an interpretation"
+        );
         // The renderer's picture is the same permutation of the unrotated
         // picture, exactly.
-        let (doc_r, res_r) = document(&path, (ow, oh), 25.0, None);
+        let (doc_r, res_r) = document(
+            &path,
+            (ow, oh),
+            25.0,
+            Some(json!({ "pixelAspect": [1, 1] })),
+        );
         let ours = render(&mut r, &doc_r, (ow, oh), t, &res_r);
         for y in 0..oh {
             for x in 0..ow {
@@ -373,7 +487,16 @@ fn rotations_and_clean_aperture_are_exact() {
     }
     // The clean aperture: the full frame by default, the crop on request.
     let clap = formats("video/geom-clap.mov").unwrap();
-    let (doc_c, res_c) = document(&clap, (w as u32, h as u32), 25.0, None);
+    assert!(
+        pm_render::media::probe_video(&clap).is_err(),
+        "a cropping clean aperture is drawn without an interpretation"
+    );
+    let (doc_c, res_c) = document(
+        &clap,
+        (w as u32, h as u32),
+        25.0,
+        Some(json!({ "cleanAperture": false })),
+    );
     assert_eq!(
         render(&mut r, &doc_c, (w as u32, h as u32), t, &res_c),
         plain
@@ -807,4 +930,53 @@ fn interpreted_icc_stills_read_alpha_and_profile_overrides() {
         assert!(compared >= 64, "{name}: {compared} pixels compared");
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// Routing (section 25: a feature leaves `pm_render::unsupported` only with
+/// a parity test against today's viewer). HDR, interlaced, rotated,
+/// non-square-pixel, cropping-clean-aperture, and wide-gamut video are drawn
+/// natively only when the asset carries Interpret Footage overrides (which
+/// only this engine reads); without them they route to the legacy renderer.
+#[test]
+fn uncompared_video_routes_to_legacy_unless_interpreted() {
+    let cases = [
+        ("hdr/hdr10.mov", "HDR video"),
+        ("hdr/hlg.mov", "HDR video"),
+        ("hdr/pq-av1.mkv", "HDR video"),
+        ("hdr/pq-vp9.webm", "HDR video"),
+        ("hdr/dovi-8.4.mov", "HDR video"),
+        ("video/interlaced-bff.mxf", "interlaced video"),
+        ("video/interlaced-tff.mov", "interlaced video"),
+        ("video/dv-pal.dv", "interlaced video"),
+        ("video/geom-rot90.mov", "rotated video"),
+        ("video/geom-rot180.mov", "rotated video"),
+        ("video/geom-rot270.mov", "rotated video"),
+        ("video/geom-clap.mov", "a cropping clean aperture"),
+        ("video/meta-pasp.mov", "non-square pixels"),
+        ("video/color-p3.mov", "primaries"),
+    ];
+    let (restated, _) = Interpretation::from_json(&json!({ "cleanAperture": false }));
+    for (file, reason) in cases {
+        let Some(path) = formats(file) else {
+            return;
+        };
+        let routed = pm_render::media::probe_video(&path);
+        assert!(
+            routed.as_ref().is_err_and(|m| m.contains(reason)),
+            "{file}: {routed:?}"
+        );
+        assert_eq!(
+            pm_render::media::probe_interpreted_video(&path, &restated),
+            Ok(()),
+            "{file} interpreted"
+        );
+    }
+    // Progressive, unrotated, square-pixel Rec.709 and BT.601 footage is
+    // drawn as before.
+    for file in ["video/geom-base.mov", "video/color-601-625.mov"] {
+        let Some(path) = formats(file) else {
+            return;
+        };
+        assert_eq!(pm_render::media::probe_video(&path), Ok(()), "{file}");
+    }
 }

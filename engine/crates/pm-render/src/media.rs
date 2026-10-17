@@ -21,6 +21,7 @@ use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::image::icc::IccClass;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
+use pm_media::probe::FieldOrder;
 use pm_media::probe::color::HdrFormat;
 use pm_media::vt::DecodePurpose;
 use pm_protocol::color::{
@@ -222,17 +223,22 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 }
 
 /// Whether a video file is drawn without routing: it opens and indexes,
-/// the renderer can draw it ([`video_drawable`]), and its colors are ones
-/// the renderer has matched with today's viewer (Rec.709 or BT.601
-/// primaries, or an HDR source, which section 9 tone maps with BT.2446
-/// Method A where today's viewer differs: an appendix A difference by
-/// design). Display rotations, the clean aperture (shown uncropped by
-/// default, as today), non-square pixels (the layer box carries the
-/// display aspect), and interlacing (bwdif, equal to FFmpeg's) are drawn.
-/// Wide-gamut SDR footage (Display P3, BT.2020) converts without clipping
-/// where today's viewer clips at upload, the same open decision as Display
-/// P3 stills: it is drawn when its asset carries Interpret Footage
-/// overrides, which only this engine reads.
+/// the renderer can draw it ([`video_drawable`]), and it shows nothing
+/// whose look the renderer has not matched with today's viewer (section 25:
+/// a feature leaves `pm_render::unsupported` only with a parity test).
+/// Rec.709 and BT.601 primaries are matched; these are drawn only when the
+/// asset carries Interpret Footage overrides, which only this engine reads:
+///
+/// - HDR (PQ, HLG): section 9 tone maps with BT.2446 Method A, but today's
+///   Chromium handling has not been measured (`docs/engine/corpus.md`, "Not
+///   covered yet"), so the difference has no appendix A item or corpus case;
+/// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
+///   woven frame);
+/// - display rotations, non-square pixels, and a cropping clean aperture
+///   (exact, but not compared with today's viewer);
+/// - wide-gamut SDR footage (Display P3, BT.2020), which converts without
+///   clipping where today's viewer clips at upload, the same open decision
+///   as Display P3 stills.
 ///
 /// Answers are kept per file, size, and modification time: capability
 /// routing asks at every document revision, and opening a source indexes
@@ -268,18 +274,54 @@ pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {
     video_drawable(src, &Interpretation::default())?;
-    let c = &src.color;
-    let hdr = matches!(c.transfer, Transfer::Pq | Transfer::Hlg);
-    // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
-    // (`standard_video_primaries`); HDR sources are BT.2020 by definition.
-    if !hdr
-        && !matches!(
-            c.primaries,
-            Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
-        )
+    let Some(v) = src.probe.video.as_ref() else {
+        return Err("no video stream".into());
+    };
+    const WHEN: &str = "drawn when interpreted";
+    if matches!(
+        v.fields.order,
+        FieldOrder::TopFirst | FieldOrder::BottomFirst
+    ) {
+        return Err(format!(
+            "interlaced video (not compared with today's viewer; {WHEN})"
+        ));
+    }
+    if v.rotation
+        .is_some_and(|r| (0.01..359.99).contains(&r.rem_euclid(360.0)))
     {
         return Err(format!(
-            "{:?} primaries (wide-gamut footage is drawn when interpreted)",
+            "rotated video (not compared with today's viewer; {WHEN})"
+        ));
+    }
+    if v.pixel_aspect.0 != v.pixel_aspect.1 {
+        return Err(format!(
+            "non-square pixels (not compared with today's viewer; {WHEN})"
+        ));
+    }
+    if let Some(clap) = v.clean_aperture
+        && (clap.width != f64::from(v.width)
+            || clap.height != f64::from(v.height)
+            || clap.horizontal_offset != 0.0
+            || clap.vertical_offset != 0.0)
+    {
+        return Err(format!(
+            "a cropping clean aperture (not compared with today's viewer; {WHEN})"
+        ));
+    }
+    let c = &src.color;
+    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) {
+        return Err(format!(
+            "HDR video (today's viewer is not measured yet; {WHEN})"
+        ));
+    }
+    // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
+    // (`standard_video_primaries`).
+    if !matches!(
+        c.primaries,
+        Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
+    ) {
+        return Err(format!(
+            "{:?} primaries (wide-gamut footage is {WHEN})",
             c.primaries
         ));
     }
