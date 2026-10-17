@@ -2235,6 +2235,7 @@ name = "pm-render"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "pm-blender",
  "pm-color",
  "pm-eval",
  "pm-export",

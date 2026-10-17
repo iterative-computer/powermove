@@ -18,6 +18,7 @@
 //! - [`RenderRequest`]: contract 2's request as the graph sees it.
 
 pub mod assets;
+pub mod blender;
 pub mod capability;
 pub mod composite;
 mod error;

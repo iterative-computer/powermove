@@ -15,6 +15,8 @@ pm-eval = { path = "../pm-eval" }
 pm-expr = { path = "../pm-expr" }
 pm-color = { path = "../pm-color" }
 pm-geom3d = { path = "../pm-geom3d" }
+pm-blender = { path = "../pm-blender" }
+png = "0.18"
 pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
 pm-media = { path = "../pm-media" }
 pm-vector = { path = "../pm-vector", features = ["gpu"] }

@@ -843,6 +843,7 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         background: alpha == AlphaOutput::None,
         export: true,
         view: None,
+        blender: Default::default(),
     };
     Ok(ExportPlan {
         spec,

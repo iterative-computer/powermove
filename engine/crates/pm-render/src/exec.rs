@@ -241,6 +241,17 @@ impl Exec<'_> {
                                 Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                             }
                         }
+                        Source::Blender(blender) => {
+                            r.view = Some(crate::blender::gpu::upload(
+                                self.device,
+                                self.queue,
+                                &blender.surface,
+                                self.precision,
+                            ));
+                            // Premultiplied E like the native 3D output:
+                            // linear light decodes it (section 9).
+                            r.encoded = true;
+                        }
                         Source::Object3d(object) => {
                             match self.scene3d.render(
                                 self.device,

@@ -293,6 +293,7 @@ impl Composer {
                 background: true,
                 export: false,
                 view: None,
+                blender: Default::default(),
             };
             let reuse = self
                 .scratch
