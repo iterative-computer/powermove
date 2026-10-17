@@ -421,9 +421,15 @@ fn has_effects(layer: &Node) -> bool {
 /// The lowercase `format` of a layer's asset record, if it has one.
 fn asset_format(root: &Node, layer: &Node) -> Option<String> {
     let asset = node::member(node::member(Some(layer), "d"), "asset")?;
-    let asset_id = node::js_value_opt(Some(asset)).to_js_string().to_string_lossy();
+    let asset_id = node::js_value_opt(Some(asset))
+        .to_js_string()
+        .to_string_lossy();
     let record = node::member(node::member(Some(root), "assets"), &asset_id)?;
-    Some(js::member_string(record, "format").unwrap_or_default().to_ascii_lowercase())
+    Some(
+        js::member_string(record, "format")
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+    )
 }
 
 fn check_media(

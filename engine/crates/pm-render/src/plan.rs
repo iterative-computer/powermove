@@ -767,7 +767,12 @@ fn native_content_quad<'d>(
             // plain rectangle.
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
-            let rgba = [c.rgb[0] as f32, c.rgb[1] as f32, c.rgb[2] as f32, c.alpha as f32];
+            let rgba = [
+                c.rgb[0] as f32,
+                c.rgb[1] as f32,
+                c.rgb[2] as f32,
+                c.alpha as f32,
+            ];
             let world = vector_world(scope, layer, time, scale)?;
             let scene = crate::vector::level2::solid_scene(
                 js::or_number(js::get(&d, "w"), wf),
@@ -777,10 +782,12 @@ fn native_content_quad<'d>(
                 &world,
             );
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-            Ok(scene.pixel_bounds(target).map(|rect| device_quad(crate::vector::VectorQuad::Device {
-                source: crate::vector::VectorSource::Scene { scene, rect },
-                rect,
-            })))
+            Ok(scene.pixel_bounds(target).map(|rect| {
+                device_quad(crate::vector::VectorQuad::Device {
+                    source: crate::vector::VectorSource::Scene { scene, rect },
+                    rect,
+                })
+            }))
         }
         "shape" => {
             let world = vector_world(scope, layer, time, scale)?;
@@ -832,7 +839,9 @@ fn native_content_quad<'d>(
                 let world = vector_world(scope, layer, time, scale)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
-                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => Ok(quad.map(|q| device_quad(*q))),
+                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => {
+                        Ok(quad.map(|q| device_quad(*q)))
+                    }
                     Ok(crate::vector::svg::SvgPlan::Text) => {
                         b.unsupported
                             .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
@@ -997,7 +1006,13 @@ fn vector_world<'d>(
 /// A planned vector quad as the render graph's quad.
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
-        crate::vector::VectorQuad::Layer { source, w, h, ax, ay } => Quad::Texture {
+        crate::vector::VectorQuad::Layer {
+            source,
+            w,
+            h,
+            ax,
+            ay,
+        } => Quad::Texture {
             source: Source::Vector(Box::new(source)),
             w,
             h,
@@ -1007,7 +1022,12 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
         },
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
             source: Source::Vector(Box::new(source)),
-            rect: [f64::from(rect.x), f64::from(rect.y), f64::from(rect.width), f64::from(rect.height)],
+            rect: [
+                f64::from(rect.x),
+                f64::from(rect.y),
+                f64::from(rect.width),
+                f64::from(rect.height),
+            ],
         },
     }
 }

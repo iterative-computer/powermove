@@ -219,9 +219,14 @@ impl Exec<'_> {
                             }
                         }
                         Source::Vector(v) => {
-                            match self.vector.resolve(self.device, self.queue, v, self.precision) {
+                            match self
+                                .vector
+                                .resolve(self.device, self.queue, v, self.precision)
+                            {
                                 Ok(view) => r.view = Some(view),
-                                Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
                             }
                         }
                         Source::Object3d(object) => {
