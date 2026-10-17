@@ -8,6 +8,7 @@ import {
   exportFieldSupport,
   type ExportDefaults
 } from '../../core/export-defaults';
+import { writableFormat } from '../../../../shared/delivery';
 import { createSettingsSection } from './settings-section';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
@@ -300,7 +301,8 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
 
   const exports = createSettingsSection('Export');
   const format = select('Export format');
-  const formatOptions = exportFormatOptions(deliveryEngineOn());
+  const engine = deliveryEngineOn();
+  const formatOptions = exportFormatOptions(engine);
   fillOptions(format, formatOptions);
   const scale = select('Export resolution');
   const exportWidth = numberInput('Export width in pixels', MIN_DIMENSION, MAX_DIMENSION, 2);
@@ -388,7 +390,10 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       })),
       [{ v: CUSTOM, label: isPreset ? 'Custom size…' : `Custom · ${outW}×${outH}` }]
     );
-    format.value = defaults.format;
+    // A default only the engine writes shows (and exports as) the current
+    // exporter's equivalent in a launch without the engine; it stays stored.
+    const shownFormat = writableFormat(defaults.format, engine);
+    format.value = shownFormat;
     scale.value = isPreset ? String(defaults.scale) : CUSTOM;
     exportSizeRow.element.hidden = isPreset;
     if (!editing(exportWidth)) exportWidth.value = String(outW);
@@ -399,13 +404,13 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     mblur.checked = defaults.mblur;
     audio.checked = defaults.audio;
     alpha.checked = defaults.alpha;
-    const support = exportFieldSupport(defaults.format);
+    const support = exportFieldSupport(shownFormat);
     for (const [key, gated] of Object.entries(gatedRows)) {
       gated.setEnabled(support[key as keyof typeof support]);
     }
     exportSizeRow.setEnabled(support.scale);
-    const formatLabel = formatOptions.find((item) => item.v === defaults.format)?.label ?? '';
-    exports.summary.textContent = defaults.format === 'web' ? 'Web animation · full composition · code and assets' : defaults.format === 'json'
+    const formatLabel = formatOptions.find((item) => item.v === shownFormat)?.label ?? '';
+    exports.summary.textContent = shownFormat === 'web' ? 'Web animation · full composition · code and assets' : shownFormat === 'json'
       ? formatLabel
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
   };

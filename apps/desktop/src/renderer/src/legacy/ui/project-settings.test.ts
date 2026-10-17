@@ -120,6 +120,23 @@ describe('project settings control', () => {
     control.destroy();
   });
 
+  it('shows the current exporter\'s equivalent of an engine-only default without the engine', () => {
+    for (const [stored, shown, label] of [['hevc', 'h264', 'MP4 · H.264'], ['prores-hq', 'prores-4444', 'QuickTime · ProRes 4444'], ['webm-vp8', 'webm-vp9', 'WebM · VP9']] as const) {
+      const host = bridge();
+      host.applyExportDefaults({ format: stored });
+      host.applyExportDefaults.mockClear();
+      const control = createProjectSettingsControl(host.api);
+      const format = field(control, 'Export format') as HTMLSelectElement;
+      expect(format.value).toBe(shown);
+      expect(format.selectedOptions[0]?.textContent).toContain(label);
+      expect(control.element.textContent).toContain(label);
+      // Shown only: the stored default stays until the user picks a format.
+      expect(host.applyExportDefaults).not.toHaveBeenCalled();
+      expect(host.api.exportDefaults().format).toBe(stored);
+      control.destroy();
+    }
+  });
+
   it('dims and locks the export settings the chosen format ignores', () => {
     const host = bridge();
     const control = createProjectSettingsControl(host.api);

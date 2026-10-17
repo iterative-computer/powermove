@@ -23,7 +23,6 @@ import {
   expandFileName,
   formatInfo,
   isDropFrameTimecode,
-  isProRes,
   isRenderFormat,
   legacyFormatId,
   migrateFormat,
@@ -32,7 +31,8 @@ import {
   supportsAlpha,
   type ExportPreset,
   type ExportPresetOptions,
-  type SheetFormat
+  type SheetFormat,
+  writableFormat
 } from '../../../../shared/delivery';
 import type { PMRegistry } from '../registry';
 import { packProjectFileBlob } from './project-file';
@@ -156,16 +156,6 @@ X.defaults = () => normalizeExportDefaults(
 /** Whether this launch runs the native engine (Use New Engine): it writes
  *  every delivery format; the current exporter writes today's. */
 const engineOn = (): boolean => deliveryEngineOn();
-
-/** A format the current exporter writes in place of one only the engine
- *  writes (the sheet opened without the engine). */
-function writableFormat(format: string, engine: boolean): SheetFormat {
-  const f = migrateFormat(format);
-  if (engine || !formatInfo(f).engine) return f;
-  if (isProRes(f)) return 'prores-4444';
-  if (f === 'hevc') return 'h264';
-  return f === 'webm-vp8' ? 'webm-vp9' : 'h264';
-}
 
 /** The exact export frame rate when it is the composition's own. */
 const RATE_LABEL = (f: number) => (Number.isInteger(f) ? String(f) : f.toFixed(3)) + ' fps';

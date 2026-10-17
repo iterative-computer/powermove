@@ -21,7 +21,8 @@ import {
   wireAlpha,
   wireAudioCoding,
   wireColor,
-  wireFormat
+  wireFormat,
+  writableFormat
 } from './delivery';
 
 describe('formats', () => {
@@ -43,6 +44,20 @@ describe('formats', () => {
     expect(legacyFormatId('prores-hq')).toBeNull();
     expect(legacyFormatId('hevc')).toBeNull();
     expect(legacyFormatId('webm-vp8')).toBeNull();
+  });
+
+  it('fall back to what the current exporter writes in a launch without the engine', () => {
+    for (const f of ['h264', 'prores-4444', 'webm-vp9', 'png', 'still', 'web', 'json'] as const) {
+      expect(writableFormat(f, false)).toBe(f);
+    }
+    for (const f of ['prores-proxy', 'prores-lt', 'prores-422', 'prores-hq', 'prores-4444xq'] as const) {
+      expect(writableFormat(f, false)).toBe('prores-4444');
+    }
+    expect(writableFormat('hevc', false)).toBe('h264');
+    expect(writableFormat('webm-vp8', false)).toBe('webm-vp9');
+    expect(writableFormat('mp4', false)).toBe('h264');
+    expect(writableFormat('hevc', true)).toBe('hevc');
+    expect(writableFormat('prores-hq', true)).toBe('prores-hq');
   });
 
   it('map onto the job engine\'s formats, extensions, alpha, tags, and audio', () => {

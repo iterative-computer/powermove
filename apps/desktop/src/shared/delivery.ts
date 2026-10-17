@@ -92,6 +92,16 @@ export function legacyFormatId(format: SheetFormat): 'prores' | 'mp4' | 'webm' |
   }
 }
 
+/** The format the current exporter writes in place of one only the engine
+ *  writes, for a launch without the engine (the export sheet and Settings ›
+ *  Project show it; the stored default is kept). */
+export function writableFormat(format: unknown, engine: boolean): SheetFormat {
+  const f = migrateFormat(format);
+  if (engine || !formatInfo(f).engine) return f;
+  if (isProRes(f)) return 'prores-4444';
+  return f === 'webm-vp8' ? 'webm-vp9' : 'h264';
+}
+
 export function isRenderFormat(format: SheetFormat): format is DeliveryFormat {
   return format !== 'web' && format !== 'json';
 }
