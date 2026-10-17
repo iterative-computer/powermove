@@ -234,6 +234,7 @@ fn settings() -> ExportSettings {
         precision: Precision::Float32,
         dither: true,
         draft_from_proxies: false,
+        delivery: Default::default(),
     }
 }
 
@@ -430,6 +431,7 @@ fn host_calls_relay_by_token_and_the_outbox_drains() {
                     progress: 0.5,
                     path: None,
                     error: None,
+                    preview: None,
                 }),
             }),
         ));

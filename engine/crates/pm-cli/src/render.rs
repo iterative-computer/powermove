@@ -1,7 +1,8 @@
 //! `pm-cli render` (plan section 22, "The CLI"): renders a project file (PMV4,
-//! PMV3, or JSON) to a video through the same pipeline as the job engine:
-//! capability check, pm-render frames, pm-audio's offline mix, VideoToolbox,
-//! AVAssetWriter, verification, and an atomic move to the path the user
+//! PMV3, or JSON) to any format at cutover through the same pipeline as the
+//! job engine: capability check, pm-render frames, pm-audio's offline mix,
+//! the encoder and muxer (VideoToolbox and AVAssetWriter, libvpx and FFmpeg's
+//! WebM muxer, or PNG), verification, and an atomic move to the path the user
 //! chose. Embedded media is unpacked to a private temporary folder; linked
 //! media is read from its `sourcePath`; `--media <asset>=<file>` overrides
 //! either.
@@ -18,7 +19,8 @@ use pm_model::{Document, Value};
 use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
 use pm_protocol::common::{FrameRate, Size, TickRange, Ticks};
 use pm_protocol::priority::{
-    AlphaOutput, ExportFormat, ExportSettings, ProResProfile, QualityTier,
+    AlphaOutput, AudioCoding, Container, DeliveryOptions, ExportFormat, ExportSettings,
+    ExportTimecode, ProResProfile, QualityTier, WebmCodec,
 };
 use pm_render::Renderer;
 
@@ -38,13 +40,18 @@ impl From<String> for Failure {
     }
 }
 
-/// Presets (section 17, "Presets and the render queue"), the formats the job
-/// engine encodes at Phase 2.
+/// Presets (section 17, "Presets and the render queue"); the app's export
+/// sheet offers the same five (`shared/export-presets.ts`).
 pub const PRESETS: &[(&str, &str)] = &[
     ("master", "Master · ProRes 422 HQ"),
     ("master-alpha", "Master with alpha · ProRes 4444"),
     ("web", "Web · H.264"),
+    ("web-hevc", "Web · HEVC"),
+    ("png", "Image sequence · PNG"),
 ];
+
+/// Formats by name (`--format`).
+pub const FORMATS: &str = "prores-proxy, prores-lt, prores, prores-hq, prores-4444, prores-4444xq, h264, hevc, hevc10, vp9, vp8, png, png16, still, still16";
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -65,14 +72,27 @@ pub struct Options {
     pub composition: Option<String>,
     pub force: bool,
     pub media: Vec<(String, PathBuf)>,
+    /// `pcm16`, `pcm24`, `float`, or `aac`.
+    pub audio: Option<String>,
+    /// Start timecode `HH:MM:SS:FF` (`;` before the frames for drop-frame).
+    pub timecode: Option<String>,
+    pub reel: Option<String>,
+    /// Leave captions layers out of the picture.
+    pub no_captions: bool,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
     Failure::Usage(m.into())
 }
 
-fn format_of(name: &str) -> Result<ExportFormat, Failure> {
+/// A format by name; HEVC goes in MOV when the output ends in `.mov`.
+fn format_of(name: &str, ext: &str) -> Result<ExportFormat, Failure> {
     let prores = |profile| Ok(ExportFormat::ProRes { profile });
+    let container = if ext == "mov" {
+        Container::Mov
+    } else {
+        Container::Mp4
+    };
     match name {
         "prores-proxy" => prores(ProResProfile::Proxy),
         "prores-lt" => prores(ProResProfile::Lt),
@@ -81,9 +101,44 @@ fn format_of(name: &str) -> Result<ExportFormat, Failure> {
         "prores-4444" => prores(ProResProfile::P4444),
         "prores-4444xq" | "prores-4444-xq" => prores(ProResProfile::P4444Xq),
         "h264" => Ok(ExportFormat::H264),
-        other => Err(usage(format!(
-            "unknown format {other:?} (prores-proxy, prores-lt, prores, prores-hq, prores-4444, prores-4444xq, h264)"
-        ))),
+        "hevc" => Ok(ExportFormat::Hevc {
+            ten_bit: false,
+            container,
+        }),
+        "hevc10" => Ok(ExportFormat::Hevc {
+            ten_bit: true,
+            container,
+        }),
+        "vp9" => Ok(ExportFormat::Webm {
+            codec: WebmCodec::Vp9,
+        }),
+        "vp8" => Ok(ExportFormat::Webm {
+            codec: WebmCodec::Vp8,
+        }),
+        "png" => Ok(ExportFormat::PngSequence { sixteen_bit: false }),
+        "png16" => Ok(ExportFormat::PngSequence { sixteen_bit: true }),
+        "still" => Ok(ExportFormat::PngStill { sixteen_bit: false }),
+        "still16" => Ok(ExportFormat::PngStill { sixteen_bit: true }),
+        other => Err(usage(format!("unknown format {other:?} ({FORMATS})"))),
+    }
+}
+
+/// The extension a format is written with (`None`: a PNG sequence folder).
+pub fn extension_of(format: ExportFormat) -> Option<&'static str> {
+    match format {
+        ExportFormat::ProRes { .. }
+        | ExportFormat::Hevc {
+            container: Container::Mov,
+            ..
+        } => Some("mov"),
+        ExportFormat::H264
+        | ExportFormat::Hevc {
+            container: Container::Mp4,
+            ..
+        } => Some("mp4"),
+        ExportFormat::Webm { .. } => Some("webm"),
+        ExportFormat::PngStill { .. } => Some("png"),
+        ExportFormat::PngSequence { .. } => None,
     }
 }
 
@@ -271,6 +326,12 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
     let comp = pm_eval::Comp::resolve(doc, &loaded.composition)
         .map_err(|_| Failure::Failed(format!("composition {:?} not found", loaded.composition)))?;
     let (cw, ch) = composition_size(doc, &loaded.composition).map_err(|e| e.to_string())?;
+    let ext = options
+        .output
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let preset = options.preset.as_deref().unwrap_or("master");
     let (mut format, mut alpha) = match preset {
         "master" => (
@@ -286,11 +347,17 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             AlphaOutput::Straight,
         ),
         "web" => (ExportFormat::H264, AlphaOutput::None),
-        "web-hevc" | "png" | "image-sequence" => {
-            return Err(Failure::Unsupported(vec![format!(
-                "preset {preset:?} needs HEVC or PNG output (Phase 3b)"
-            )]));
-        }
+        "web-hevc" => (
+            ExportFormat::Hevc {
+                ten_bit: false,
+                container: Container::Mp4,
+            },
+            AlphaOutput::None,
+        ),
+        "png" | "image-sequence" => (
+            ExportFormat::PngSequence { sixteen_bit: false },
+            AlphaOutput::Straight,
+        ),
         other => {
             let known: Vec<String> = PRESETS
                 .iter()
@@ -303,7 +370,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
         }
     };
     if let Some(f) = &options.format {
-        format = format_of(f)?;
+        format = format_of(f, &ext)?;
         if !format.supports_alpha() {
             alpha = AlphaOutput::None;
         }
@@ -358,8 +425,8 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
     let even = |v: f64| ((v / 2.0).round() * 2.0).max(2.0) as u32;
     let size = match (options.size, options.scale) {
         (Some((w, h)), _) => {
-            if w % 2 != 0 || h % 2 != 0 {
-                return Err(usage("--size must be even on both sides"));
+            if !format.is_image() && (w % 2 != 0 || h % 2 != 0) {
+                return Err(usage("--size must be even on both sides for video"));
             }
             Size::new(w, h)
         }
@@ -369,13 +436,51 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
         (None, Some(s)) => return Err(usage(format!("scale {s} is outside 0.01 to 16"))),
         (None, None) => Size::new(even(f64::from(cw)), even(f64::from(ch))),
     };
-    let color = match options.color.as_deref().unwrap_or("quicktime") {
-        "quicktime" => OutputColor::Rec709QuickTime {
+    let color = match (options.color.as_deref(), format.is_image()) {
+        (None | Some("quicktime"), false) => OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
         },
-        "broadcast" => OutputColor::Rec709Broadcast,
-        other => return Err(usage(format!("color {other:?} (quicktime or broadcast)"))),
+        (Some("broadcast"), false) => OutputColor::Rec709Broadcast,
+        (None | Some("srgb"), true) => OutputColor::SrgbImage,
+        (Some("rec709"), true) => OutputColor::Rec709Image,
+        (Some(other), _) => {
+            return Err(usage(format!(
+                "color {other:?} (video: quicktime or broadcast; images: srgb or rec709)"
+            )));
+        }
     };
+    let audio_coding = match options.audio.as_deref() {
+        None => None,
+        Some("pcm16") => Some(AudioCoding::Pcm16),
+        Some("pcm24") => Some(AudioCoding::Pcm24),
+        Some("float") => Some(AudioCoding::PcmFloat),
+        Some("aac") => Some(AudioCoding::Aac),
+        Some(other) => {
+            return Err(usage(format!(
+                "audio {other:?} (pcm16, pcm24, float, or aac)"
+            )));
+        }
+    };
+    let timecode = match &options.timecode {
+        Some(start) => Some(ExportTimecode {
+            start: start.clone(),
+            drop_frame: start.contains([';', '.', ',']),
+            reel: options.reel.clone(),
+        }),
+        None if options.reel.is_some() => {
+            return Err(usage("--reel needs --timecode"));
+        }
+        None => None,
+    };
+    // 8-bit outputs dither by default (section 17); 10-bit and above do not.
+    let eight_bit = matches!(
+        format,
+        ExportFormat::H264
+            | ExportFormat::Hevc { ten_bit: false, .. }
+            | ExportFormat::Webm { .. }
+            | ExportFormat::PngSequence { sixteen_bit: false }
+            | ExportFormat::PngStill { sixteen_bit: false }
+    );
     let precision = match options.precision.unwrap_or(32) {
         16 => Precision::Float16,
         32 => Precision::Float32,
@@ -391,14 +496,27 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             start: seconds_to_ticks(start)?,
             end: seconds_to_ticks(end)?,
         },
-        audio: !options.no_audio,
+        audio: !options.no_audio && !format.is_image(),
         motion_blur: false,
         color,
         precision,
-        dither: options
-            .dither
-            .unwrap_or(matches!(format, ExportFormat::H264)),
+        dither: options.dither.unwrap_or(eight_bit),
         draft_from_proxies: false,
+        delivery: DeliveryOptions {
+            audio_coding,
+            timecode,
+            hide_captions: options.no_captions,
+            preview: false,
+            sequence_name: format
+                .is_image()
+                .then(|| {
+                    options
+                        .output
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .flatten(),
+        },
     })
 }
 
@@ -424,15 +542,19 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         .to_ascii_lowercase();
     let loaded = load(options)?;
     let settings = settings(options, &loaded)?;
-    let container_ext = match settings.format {
-        ExportFormat::ProRes { .. } => "mov",
-        _ => "mp4",
-    };
-    if ext != container_ext {
-        return Err(usage(format!(
-            "{:?} is written to .{container_ext}, not .{ext}",
-            settings.format
-        )));
+    match extension_of(settings.format) {
+        Some(want) if ext != want => {
+            return Err(usage(format!(
+                "{:?} is written to .{want}, not .{ext}",
+                settings.format
+            )));
+        }
+        None if !ext.is_empty() => {
+            return Err(usage(format!(
+                "a PNG sequence is written to a folder; name it without .{ext}"
+            )));
+        }
+        _ => {}
     }
     let output = absolute(&options.output)?;
     let job = ExportJob {
@@ -486,6 +608,13 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "size": [job.settings.size.width, job.settings.size.height],
         "frameRate": [job.settings.frame_rate.num, job.settings.frame_rate.den],
         "audioSamples": r.audio.as_ref().map(|a| a.samples),
+        "audioCodec": r.audio.as_ref().map(|a| a.codec.clone()),
+        "bytes": r.bytes,
+        "timecode": r.timecode.as_ref().map(|t| serde_json::json!({
+            "startFrame": t.start_frame,
+            "dropFrame": t.drop_frame,
+            "reel": t.reel,
+        })),
         "colr": [r.cicp.0, r.cicp.1, r.cicp.2],
         "maxBlockErrorCv": r.max_pixel_error_cv(),
         "hardwareEncoder": r.hardware_encoder,

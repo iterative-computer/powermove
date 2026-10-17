@@ -7,23 +7,15 @@ pub mod reader;
 mod vt;
 mod writer;
 
-use std::path::PathBuf;
-
+use crate::Delivered;
 use crate::Error;
 use crate::atomic::AtomicOutput;
 use crate::convert::EncoderInput;
 use crate::mp4box::Movie;
-use crate::pipeline::{Pipeline, Sink};
+use crate::pipeline::Sink;
 use crate::settings::{ExportSpec, Overwrite};
 use crate::timescale::VideoTiming;
-use crate::verify::{self, BlockSample, Expected, VerifyReport};
-
-/// A delivered, verified file.
-#[derive(Clone, Debug)]
-pub struct Delivered {
-    pub path: PathBuf,
-    pub report: VerifyReport,
-}
+use crate::verify::{self, BlockSample, Expected};
 
 /// The production sink: VideoToolbox → AVAssetWriter → verify → move into place.
 pub struct VideoToolboxSink {
@@ -44,6 +36,12 @@ pub struct VideoToolboxSink {
 impl VideoToolboxSink {
     pub fn new(spec: &ExportSpec) -> Result<Self, Error> {
         spec.validate()?;
+        if !spec.container.is_quicktime_family() {
+            return Err(Error::InvalidSpec(format!(
+                "{:?} is not written by AVAssetWriter",
+                spec.container
+            )));
+        }
         let timing = spec.timing()?;
         let output = match spec.overwrite {
             Overwrite::InPlace => {
@@ -62,14 +60,17 @@ impl VideoToolboxSink {
         Ok(Self {
             spec: spec.clone(),
             timing,
-            pool: pixbuf::Pool::new(spec.codec.input_format(), spec.width, spec.height)?,
+            pool: pixbuf::Pool::new(spec.input_format(), spec.width, spec.height)?,
             encoder: vt::Encoder::new(spec, timing)?,
             writer: Some(writer),
             output,
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
-            alpha: (spec.alpha != crate::settings::AlphaOutput::None)
-                .then(alpha::AlphaDescriptions::default),
+            // ProRes describes opaque frames without alpha (see `alpha`); HEVC
+            // with alpha is its own codec type and describes its alpha layer.
+            alpha: (spec.alpha != crate::settings::AlphaOutput::None
+                && matches!(spec.codec, crate::settings::Codec::ProRes(_)))
+            .then(alpha::AlphaDescriptions::default),
         })
     }
 
@@ -118,7 +119,7 @@ impl Sink for VideoToolboxSink {
         writer.finish()?;
         let temp = self.output.temp_path().to_path_buf();
         let movie = Movie::read(&temp)?;
-        let format = self.spec.codec.input_format();
+        let format = self.spec.input_format();
         let decoded = self
             .sampled
             .iter()
@@ -132,17 +133,8 @@ impl Sink for VideoToolboxSink {
         );
         let mut report = verify::check(&expected, &movie, &decoded)?;
         report.hardware_encoder = self.encoder.hardware;
+        report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
         Ok(Delivered { path, report })
     }
-}
-
-/// An export in progress on macOS.
-pub type Export = Pipeline<VideoToolboxSink>;
-
-/// Starts an export: validates, prepares the temporary file next to the destination,
-/// and opens the encoder and muxer.
-pub fn export(spec: ExportSpec) -> Result<Export, Error> {
-    let sink = VideoToolboxSink::new(&spec)?;
-    Pipeline::new(spec, sink)
 }

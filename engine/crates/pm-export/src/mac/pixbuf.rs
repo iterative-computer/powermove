@@ -259,6 +259,36 @@ impl PixelBuffer {
         })
     }
 
+    /// The bytes of a packed (single-plane) buffer, rows tightly packed (for
+    /// example `BGRA` from a decoder, in tests and measurements).
+    pub fn bytes(&self) -> Result<Vec<u8>, Error> {
+        let (w, h) = (self.width(), self.height());
+        let bytes_per_pixel = match &self.format().to_be_bytes() {
+            b"BGRA" | b"RGBA" | b"ARGB" => 4,
+            b"l64r" | b"RGhA" => 8,
+            other => {
+                return Err(Error::Verify(format!(
+                    "'{}' is not a packed RGB format",
+                    String::from_utf8_lossy(other)
+                )));
+            }
+        };
+        self.with_lock(true, |pb| {
+            let (base, bpr, rows) = Self::geometry(pb, false, 0);
+            let row_bytes = bytes_per_pixel * w;
+            if base.is_null() || rows != h || bpr < row_bytes {
+                return Err(Error::Verify("the buffer has no packed plane".into()));
+            }
+            let mut out = Vec::with_capacity(row_bytes * h);
+            for y in 0..h {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(base.add(y * bpr), row_bytes)
+                });
+            }
+            Ok(out)
+        })
+    }
+
     fn attach(&self, key: &CFString, value: &CFType) {
         unsafe { CVBufferSetAttachment(&self.0, key, value, CVAttachmentMode::ShouldPropagate) };
     }
@@ -291,12 +321,12 @@ pub fn color_constants(
 ) -> (&'static CFString, &'static CFString, &'static CFString) {
     unsafe {
         match tags {
-            ColorTags::Rec709Broadcast => (
+            ColorTags::Rec709Broadcast | ColorTags::Rec709Image => (
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
                 kCVImageBufferTransferFunction_ITU_R_709_2,
                 kCVImageBufferYCbCrMatrix_ITU_R_709_2,
             ),
-            ColorTags::Rec709QuickTime => (
+            ColorTags::Rec709QuickTime | ColorTags::SrgbImage => (
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
                 kCVImageBufferTransferFunction_sRGB,
                 kCVImageBufferYCbCrMatrix_ITU_R_709_2,

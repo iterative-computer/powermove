@@ -5,7 +5,9 @@ input, dither, muxers, agent delivery, presets), section 20 (agents and MCP:
 `export_video`, snapshots, `render_frames`), section 22 (the CLI), section 25
 (infrastructure: `pm-cli parity` for renders; codec generation,
 transparency, time, and cadence bars), section 26's Phase 2 list and gate,
-contracts 12, 13, and 14. Branch `feat/ne-jobexport`. The plan stays the
+contracts 12, 13, and 14. Branch `feat/ne-jobexport`. The Phase 3b delivery
+lane (every format at cutover, presets, the Render Queue, offline media at
+export; branch `feat/ne-exports`) is [its own part below](#phase-3b-delivery). The plan stays the
 authority; this file records what was built, how it behaves, and what was
 measured. It builds on [delivery.md](delivery.md) (the VideoToolbox encoder,
 muxers, verification, atomic output), [pm-render.md](pm-render.md), and
@@ -59,9 +61,9 @@ JobDocument (frozen Arc<Document> at the session's revision)
   problems (undecodable sources) route the export.
 - **Timecode**: MOV exports carry a `tmcd` track naming their first frame in
   the rate's timecode (frame `start × rate`, rounded half up; drop-frame at
-  29.97 and 59.94; wrapped to a day). Start timecode and reel settings
-  arrive with Phase 3b presets (contract 12, open question 4). MP4 cannot
-  carry one (AVAssetWriter refuses it).
+  29.97 and 59.94; wrapped to a day). Phase 3b adds the start timecode,
+  drop or non-drop, and the reel (below). MP4 cannot carry one
+  (AVAssetWriter refuses it).
 - **Alpha** (ProRes 4444): VideoToolbox describes an all-opaque frame as
   depth 24 and AVAssetWriter takes the track's description from the first
   sample, so an alpha export that opened on an opaque frame lost its alpha.
@@ -264,8 +266,9 @@ the progress sheet (`engine:export-status`); its Cancel cancels the job;
 a done export feeds caption sidecars and the sidecar memory. A routed job
 comes back with `routed`, main records the chosen file for the window
 (`render-encoder.ts` `routeToCurrentExporter`), and the current exporter
-writes it without a second save panel. The render queue panel, presets,
-and user jobs that survive relaunch are Phase 3b.
+writes it without a second save panel (WebM and PNG sequences too since
+Phase 3b, through `save.ts`). Phase 3b's sheet, presets, and Render Queue
+are below.
 
 ## Fixed along the way
 
@@ -353,7 +356,7 @@ It also changed, minimally:
 - The frame bridge measurement harness (`measure-main.ts`,
   `frame-bridge-measure.mjs`): agent snapshot runs.
 
-## Not done here
+## Not done in Phase 2
 
 - **Cadence bar.** It is a presentation bar (23.976 and 25 fps content on
   60 and 120 Hz displays); the frame bridge harness measures 60 fps content
@@ -373,12 +376,196 @@ It also changed, minimally:
   engine playback; the editor relay is unit-tested only.
 - **Codec generation, ProRes 4444 alpha**, within 8 px of α = 0: measured,
   not met (above).
-- **29.97 non-drop timecode** in exports: the job engine labels 29.97 and
-  59.94 drop-frame (the timeline's default); a start timecode, reel, and
-  DF/NDF choice arrive with presets (contract 12, open question 4).
-- **Render queue, presets, persistence of user jobs across relaunch**:
-  Phase 3b. User exports run in the job engine but are not persisted.
+- **29.97 non-drop timecode**, the start timecode, the reel, the render
+  queue, presets, and user jobs that survive relaunch: done in Phase 3b
+  (below).
 - **The hidden MCP host** keeps the current exporter until Phase 3c; its
   `test-mcp.mjs` mode was not rerun here (only `--desktop` changed
   behavior).
 - **Base-machine numbers**: everything above is this Mac only.
+
+# Phase 3b: delivery
+
+The delivery lane (plan section 17, section 9's output tags and ProRes
+ranges, sections 14.6 and 14.8, section 25's 3b rows, amendments 6, 7, and
+8). Branch `feat/ne-exports`. Measured on this Mac (Apple M4 Max, macOS
+27, Electron 44) on 2026-10-15 and 2026-10-16, with other lanes' builds and
+Electron runs sharing the machine (load averages 7 to 17); numbers are as
+measured.
+
+## Formats at cutover
+
+| Sheet format | Container | Encoder input | Encoder | Alpha | Notes |
+|---|---|---|---|---|---|
+| ProRes 422 Proxy, LT, 422, HQ | MOV | `v216` (amendment 6) | VideoToolbox | no | PCM by default |
+| ProRes 4444, 4444 XQ | MOV | `y416` | VideoToolbox | straight or premultiplied | opaque exports code no alpha channel (`PreserveAlphaChannel` false; before, every frame carried a 16-bit all-ones alpha) |
+| H.264 High | MP4 or MOV | `420v` | VideoToolbox, VBR at the tier | no | AAC in MP4, PCM in MOV |
+| HEVC Main / Main10 | MP4 or MOV | `420v` / `x420` (10-bit, MSB-aligned) | VideoToolbox, VBR at the tier | 8-bit only | |
+| HEVC with alpha | MOV | `v0a8`, codec type `muxa` | VideoToolbox, average bit rate (its encoder accepts VBR and fails every frame, -12912) | straight or premultiplied (`almo` box's mode byte: 0 straight, 2 premultiplied) | depth 32 |
+| WebM VP9 / VP8 | WebM | `yuv420p` / `yuva420p` | libvpx through `pm_media`'s FFmpeg bindings (deadline good, cpu-used 2, row-mt and tile columns for VP9) | yes (`alpha_mode` tag) | Opus at 48 kHz; frame-exact (replaces "WebM realtime capture") |
+| PNG sequence / still | folder of `<name>_00000.png` (≥ 5 digits) / file | RGBA8 or RGBA16, straight alpha | `png` crate | yes | `sRGB` chunk plus `cICP` (1-13-0, or 1-1-0 with "Rec.709 image"), full range; verified lossless |
+
+`ExportSpec::input_format()` picks the input from codec and alpha.
+Conversion (`convert.rs`) stays the f64 reference: Rec.709 matrix, siting
+type 0, 4:2:0 vertical filter, the deterministic blue-noise dither (±0.5 LSB,
+8-bit outputs only), round half to even, clipping to the codable range.
+Verification (`verify.rs`) covers every format: for MOV and MP4 the movie's
+boxes (`hvcC` profile and depth, `almo` mode, PCM bits and float flag,
+`tmcd` and reel), for WebM a demux and libvpx decode of sampled frames, for
+PNG the decoded files against the encoder input exactly; per-codec pixel
+tolerances.
+
+## Settings and audio
+
+- Today's settings survive: tiers 4, 16, 40 Mbps; scale 0.01 to 16 and a
+  custom size; the frame-rate list; work area or whole composition; alpha.
+  PNG takes odd sizes; video is rounded to even pixels.
+- Audio: PCM 16, 24 (MOV default), 32-bit float, or AAC (AudioToolbox,
+  MP4 default, priming in `edts`) in QuickTime family files; Opus in WebM
+  (mixed at 48 kHz). Integer PCM is converted with `pm_audio::offline::encode`
+  and TPDF dither seeded by the export sample index, so two exports of a
+  project are identical.
+- Timecode: `DeliveryOptions.timecode {start, dropFrame, reel}`; MOV only,
+  drop-frame only at 29.97 and 59.94, `01:00:00;00` DF names frame 107,892.
+- Color: "Rec.709 (QuickTime and Safari)" (1-13-1) or broadcast (1-1-1) for
+  video; sRGB or Rec.709 image tags for PNG.
+- Captions: burned in as today, or left out when a sidecar is delivered
+  (`hideCaptions`: captions layers render as nothing, equal frame for frame
+  to the project without them); SRT and VTT sidecars are written beside the
+  output by main.
+- Comfort (section 17): the system stays awake while an export or the queue
+  runs (`powerSaveBlocker`), a notification when one finishes while the
+  window is not focused, a size estimate in the sheet (Apple's ProRes rates:
+  45, 102, 147, 220, 330, 500 Mbps at 1080p29.97, scaled by pixels and rate;
+  bit rate times duration otherwise), overwrite policy per export (keep
+  both, replace, stop), file name tokens (`{project}`, `{composition}`,
+  `{preset}`, `{format}`, `{size}`, `{width}`, `{height}`, `{fps}`,
+  `{date}`, `{time}`), start timecode and reel name.
+
+## Presets and migration
+
+`shared/delivery.ts` holds the format catalog, delivery options, the five
+built-in presets ("Master · ProRes 422 HQ", "Master with alpha · ProRes
+4444", "Web · H.264", "Web · HEVC", "Image sequence · PNG"), and
+migration: stored format ids `prores` become ProRes 4444, `mp4` H.264, and
+`webm` and the realtime capture `rec` WebM VP9; saved presets and project
+export defaults migrate through the same function. With Use New Engine off
+the sheet offers today's formats only (a project's stored new-format
+default falls back to its legacy equivalent).
+
+## The export sheet and the Render Queue
+
+- The sheet is a Settings sheet: Output, Rendering, Delivery, File,
+  Captions, and Presets cards; rows appear only for settings the format
+  reads (`fieldSupport`). Actions: Cancel, Add to Queue, Export.
+- The progress sheet keeps a live preview: job statuses carry a JPEG of the
+  latest encoded frame (`JobStatus.preview`, at most 640 px, every 250 ms
+  and the last frame).
+- The Render Queue panel (`render-queue-panel.ts`, main `render-queue.ts`):
+  jobs from the sheet (Add to Queue) and agent exports while they render,
+  each with its destination; Start Queue and Pause Queue; jobs run
+  unattended in the job engine from snapshots taken when they were added; a
+  failed job shows why and the next one runs; a job menu (Cancel, Render
+  Again, Show in Finder, Move Up/Down, Remove). User jobs persist in
+  `<userData>/Render Queue/queue.json` with one snapshot file per job and
+  survive relaunch (a job running at quit is pending again).
+- Offline media at export (section 14.8): before the save panel main lists
+  offline clips and asks with a native message: Locate Media…, Export with
+  Proxies (only when proxies exist), Cancel. Agent exports fail with
+  `mediaOffline` (routed); a queued user job waits (`waitingForMedia`,
+  rechecked every 2 s) instead of failing.
+- Routed jobs (the engine cannot render the project): the sheet's export
+  falls back to today's exporter at the chosen destination (ProRes 4444,
+  H.264, WebM VP9, PNG); an engine-only format says so; a queued job fails
+  with the reason.
+
+## Agents
+
+`export_video` takes `preset` (`master`, `master-alpha`, `web-h264`,
+`web-hevc`, `png`) or any format id of the catalog (today's `mp4` and
+`prores` still accepted); `docs/MCP.md` and the tool schema document them.
+An explicit format overrides the preset's, alpha included: alpha defaults to
+the preset's only where the written format keeps it (`master-alpha` with
+`h264` writes opaque H.264; with `prores-4444xq` it keeps alpha). When the
+current exporter takes the export (Use New Engine off, offline media, or a
+project the engine routes), the formats and presets it writes still work:
+`mp4`/`h264`/`web-h264` become its MP4 and `prores`/`prores-4444`/
+`master-alpha` its ProRes 4444; the preset's delivery options (for example
+`master-alpha`'s 24-bit PCM) are not carried over. Other formats and presets
+fail with the reason (`legacyExportArgs`, `bridge.test.ts`).
+Agent exports keep contract 12's reply rule; PNG sequences answer the
+folder's path.
+
+## Contracts
+
+- Contract 12: `ExportSettings.delivery` (`DeliveryOptions`: audio coding,
+  timecode, hide captions, preview, sequence name), `JobStatus.preview`;
+  both optional on the wire. This answers RFC 12's open question 4.
+- Contract 14: `OutputDestinationRequest.folder`: the host creates an
+  owner-only temporary folder, the engine writes frames into a work folder
+  beside it, and the commit moves the folder. Replace moves the frames into
+  an existing folder, then removes the frames of an earlier, longer export of
+  the same sequence (same `<name>_<digits>.<ext>` name, digit count and
+  extension), so the folder never mixes old and new frames; other files stay.
+  `pm-host`, main's `outputs.ts` and `pm_export::AtomicOutput` implement it.
+
+## Tests and measurements (Phase 3b)
+
+| What | Result |
+|---|---|
+| Conformance per format (`tests/delivery.rs`, `formats.rs`, `videotoolbox.rs`) | Every format at cutover from one project exports and verifies (320 × 180, 30 frames; worst block error against the encoder input: ProRes HQ 0.063 CV, HEVC 10-bit 3.453 CV at 10 bits, VP9 1.906 CV, PNG 0); HEVC 8/10-bit in MP4 and MOV, HEVC alpha straight and premultiplied, PCM 16/24/float and AAC, H.264 in MOV with timecode and reel, WebM VP9/VP8 with and without alpha and Opus (checked with FFmpeg too), PNG sequences and stills, nothing left behind on failure or drop; opaque ProRes 4444 and XQ code no alpha channel (frame header `alpha_info` 0; it was 2) |
+| Bit-depth bar (`bars_delivery.rs`) | ProRes 422 HQ ramp: 877 luma codes 64 to 940, monotonic, step 1, chroma neutral; 897 Cb codes 64 to 960. 16-bit PNG: every column on the ideal value, largest step 18 (≤ ⌈65535 / 3839⌉). Dithered 8-bit within 0.5 CV |
+| Alpha bar | ProRes 4444 alpha exact at 16 bits; color worst 1.34 CV straight, 2.09 CV premultiplied (12-bit, α ≥ 1/64). HEVC with alpha: PSNR engine 53.20 dB, AVFoundation's preset 53.08 dB (mean of three frames) |
+| SDR color bar (chart through each codec, ΔE2000 decoded by FFmpeg and AVFoundation) | H.264 patch centers 0.496 CV, ΔE max 0.628 mean 0.162 (AVFoundation decode 0.900 / 0.176); HEVC 10-bit 0.495 CV, ΔE 0.127 / 0.043; ProRes HQ 0.070 CV, ΔE 0.127 / 0.042 |
+| Audio bar | Clicks land on their samples at 60000/1001 (frame 37: sample 29630 for 29629, within ±1); totals equal round(duration × rate). It found a pm-audio bug: a clip's first source sample was dropped (fixed, below) |
+| Export safety (`delivery.rs`) | Encoder input of an export after preview renders at 160, 80, and 320 px in f16 equals a fresh renderer's, frame for frame; 16-bit PNG sequence files byte-identical between the two |
+| VMAF, H.264 (`measure_delivery.rs`, 1080p, 48 frames, libvmaf v2 on the engine's own `420v` input; x264 from a GPL FFmpeg, measurement only) | Landscape pan with grain: 4 Mbps VideoToolbox 95.57 (4.16 Mbps actual), x264 medium 95.11, slow 95.16; 16 Mbps 96.17 / 95.93 / 96.01; 40 Mbps 96.56 / 96.21 / 96.28. Color bars: 4 Mbps 95.03 / 94.93 / 95.07; 16 Mbps 97.95 / 96.87 / 96.96; 40 Mbps 98.32 / 97.96 / 98.03. Before VBR (`AverageBitRate`): VideoToolbox undershot to 0.72, 1.28, 17.2 Mbps on the grain clip (VMAF 93.39, 94.86, 96.17). No software encoder is needed for H.264 |
+| Throughput, job engine in-process (`measure_delivery.rs`, UHD ProRes source, 48 frames, end to end incl. verify) | UHD ProRes 422 HQ with 3 layers: 20.9 fps (12.3 fps in a run under heavier load; real time is 23.976). 1080p: ProRes Proxy 46.9, HQ 46.3, 4444 43.6, 4444 XQ 42.0, H.264 40.1, HEVC 40.6, HEVC 10-bit 42.1, HEVC alpha 43.2, VP9 10.3, VP8 23.7, PNG 8-bit 43.9, PNG 16-bit 34.5 fps. UHD render plus convert alone: 19.8 fps (render and f32 readback dominate; `v216` conversion is 6.5 ms per UHD frame; FFmpeg decodes the source at 78 fps) |
+| Throughput against today's exporter (`e2e/export-baseline.spec.ts`, one 1080p project of 6 moving solids, 144 frames, wall clock from Export to done) | Today's exporter / job engine: H.264 63.8 / 52.9 fps (0.83×), ProRes 4444 63.7 / 59.5 (0.93×), WebM VP9 227.8 / 11.1 (0.05×; today's is realtime-deadline WebCodecs at 4.4 Mbps), PNG 40.3 / 32.9 (0.82×). The engine's H.264 writes 16.4 Mbps where today's undershoots to 1.9 Mbps at the same tier |
+| e2e (`engine-delivery.spec.ts`, under the Electron lock, one worker) | The sheet's formats, presets, start timecode and reel, live previews, HEVC 10-bit MOV, 16-bit PNG sequence, VP8; the offline-media message (Cancel, Locate Media…); the Render Queue (three jobs including a routed failure, persistence across relaunch, the job menu's Remove). With `engine-export`, `export-dialog`, `export-video-frames`, `export-webm`, `export-mp4`, `export-destination`: 22 passed |
+| Unit tests | Rust: pm-export, pm-node, pm-host, pm-protocol, pm-cli: 178 passed, 7 ignored (measurements); one load-dependent failure in the first of three runs did not recur. Vitest: main and shared 1,514 passed; the two failures are `instructions.test.ts`'s golden and 10 KB checks, unchanged from `feat/native-engine`. Renderer core and legacy: 558 passed earlier in the lane (one pre-existing timeout) |
+| Lint | `cargo clippy -D warnings` and `cargo fmt --check` clean for the touched crates; `svelte-check` and `tsc -p tsconfig.node.json` clean |
+
+## Changes outside this lane's files (Phase 3b)
+
+- `pm-media` `ff/mod.rs`: `init()` public (FFmpeg log level and
+  registration before the WebM muxer).
+- `pm-audio` `mixer.rs`: `sample_at` takes amendment 1's tolerance
+  (`1e-9 × max(1, |n|)`), and a copy reader's voice window uses the reader's
+  own rounded lattice (`voice_bounds`), so a clip's first source sample is
+  no longer dropped (found by the audio bar).
+- `pm-host` `outputs.rs` and `lib.rs`: folder temporaries, `remove_path`,
+  `output_bytes`, folder placement.
+- `pm-protocol`: the contract 12 and 14 additions above; fixtures and
+  generated TypeScript regenerated.
+- Main `save.ts`: a routed WebM or PNG sequence export takes the user's
+  destination (the folder is made) instead of asking again.
+- Renderer `legacy/ui/project-settings.ts` (engine-aware format list),
+  `css/app.css` (Render Queue rows).
+
+## Gaps (Phase 3b)
+
+- **4K ProRes 422 HQ export at real time on base**: not met on this Mac
+  under shared load (20.9 fps with three layers, 23.976 needed), and no base
+  machine was measured. Rendering and the f32 readback dominate; the GPU
+  encoder-input pass (convert on the GPU, read back `v216`, a quarter of the
+  bytes) is designed but not built: exports convert on the CPU.
+- **At least today's baseline, every format**: not met for WebM VP9 (0.05×:
+  today's WebM is a realtime-deadline encode; the engine's is libvpx good
+  quality, cpu-used 2), and below 1× for H.264 (0.83×, writing 8.6× the
+  bits today's encoder does at the same tier), ProRes 4444 (0.93×), and PNG
+  (0.82×). One project, this Mac only.
+- **Proxies** do not exist until Phase 4a: "Export with Proxies" appears
+  only when main's `resolveProxy` finds one, which it never does yet; draft
+  exports without proxies fail.
+- **Blender layers** route to today's exporter; the Blender-required
+  message is not wired.
+- **Routed queue jobs** fail with the reason rather than running today's
+  exporter unattended; engine-only formats cannot fall back.
+- **16-bit PNG still sources** are routed by pm-render; the bars use 12-bit
+  ProRes 4444 XQ sources instead.
+- **Export safety** covers preview renders at reduced sizes and f16 only;
+  proxies, Blender previews, and the Phase 4b disk cache do not exist yet.
+- **Audio "no length limit"** is not tested here.
+- **8-bit PNG** dithers by default, which enlarges files.
+- **Base-machine numbers**: everything is this Mac only.

@@ -1,6 +1,8 @@
 //! AVAssetWriter muxing (section 17, "Muxers"): compressed video passed through from
-//! our VTCompressionSession, PCM audio encoded by AVAssetWriter (24-bit LPCM in MOV,
-//! AAC in MP4), and a `tmcd` track carrying the start timecode with the drop-frame
+//! our VTCompressionSession; audio as LPCM (16-bit with deterministic TPDF dither,
+//! 24-bit, or 32-bit float, converted by the engine and passed through) or AAC
+//! encoded by AudioToolbox from f32 (with an edit list for its priming); and a
+//! `tmcd` track carrying the start timecode with the drop-frame
 //! flag and the reel name, associated with the video track. Movie and media timescales
 //! are always set (section 17; amendment 7).
 //!
@@ -22,7 +24,7 @@ use objc2_av_foundation::*;
 use objc2_avf_audio::*;
 use objc2_core_audio_types::{
     AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
-    kAudioFormatLinearPCM, kAudioFormatMPEG4AAC,
+    kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM, kAudioFormatMPEG4AAC,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::*;
@@ -30,7 +32,7 @@ use objc2_foundation::{NSString, NSURL};
 
 use super::cf::{self, Dict};
 use crate::Error;
-use crate::settings::{AudioSpec, Container, TimecodeSpec};
+use crate::settings::{AudioCodec, AudioSpec, Container, TimecodeSpec};
 use crate::timescale::{VideoTiming, audio_timescale};
 
 /// How long the writer may make no progress before the export fails.
@@ -110,6 +112,11 @@ impl Writer {
             match container {
                 Container::Mov => AVFileTypeQuickTimeMovie,
                 Container::Mp4 => AVFileTypeMPEG4,
+                _ => {
+                    return Err(Error::InvalidSpec(format!(
+                        "{container:?} is not written by AVAssetWriter"
+                    )));
+                }
             }
         }
         .expect("AVFoundation file type");
@@ -145,24 +152,33 @@ impl Writer {
     }
 
     fn add_audio(&mut self, a: AudioSpec) -> Result<(), Error> {
-        let settings = unsafe {
-            match self.file_type {
-                // Today's ProRes export carries 24-bit PCM.
-                Container::Mov => Dict::new()
-                    .u32(key(AVFormatIDKey), kAudioFormatLinearPCM)
-                    .f64(key(AVSampleRateKey), a.sample_rate as f64)
-                    .u32(key(AVNumberOfChannelsKey), a.channels as u32)
-                    .u32(key(AVLinearPCMBitDepthKey), 24)
-                    .bool(key(AVLinearPCMIsFloatKey), false)
-                    .bool(key(AVLinearPCMIsBigEndianKey), false)
-                    .bool(key(AVLinearPCMIsNonInterleaved), false)
-                    .build(),
-                Container::Mp4 => Dict::new()
+        let pcm = |bits: u32, float: bool| unsafe {
+            Dict::new()
+                .u32(key(AVFormatIDKey), kAudioFormatLinearPCM)
+                .f64(key(AVSampleRateKey), a.sample_rate as f64)
+                .u32(key(AVNumberOfChannelsKey), a.channels as u32)
+                .u32(key(AVLinearPCMBitDepthKey), bits)
+                .bool(key(AVLinearPCMIsFloatKey), float)
+                .bool(key(AVLinearPCMIsBigEndianKey), false)
+                .bool(key(AVLinearPCMIsNonInterleaved), false)
+                .build()
+        };
+        let settings = match a.codec {
+            AudioCodec::Pcm16 => pcm(16, false),
+            AudioCodec::Pcm24 => pcm(24, false),
+            AudioCodec::PcmF32 => pcm(32, true),
+            AudioCodec::Aac => unsafe {
+                Dict::new()
                     .u32(key(AVFormatIDKey), kAudioFormatMPEG4AAC)
                     .f64(key(AVSampleRateKey), a.sample_rate as f64)
                     .u32(key(AVNumberOfChannelsKey), a.channels as u32)
                     .u32(key(AVEncoderBitRateKey), 128_000 * a.channels as u32)
-                    .build(),
+                    .build()
+            },
+            AudioCodec::Opus => {
+                return Err(Error::InvalidSpec(
+                    "Opus is written to WebM, not by AVAssetWriter".into(),
+                ));
             }
         };
         let media = unsafe { AVMediaTypeAudio }.expect("AVMediaTypeAudio");
@@ -186,17 +202,30 @@ impl Writer {
         cf::objc_try("addInput (audio)", || unsafe {
             self.writer.addInput(&input)
         })?;
-        // The source: interleaved f32 PCM.
-        let bytes = 4 * a.channels as u32;
+        // The source the engine hands over: the output's own integer samples for
+        // 16 and 24-bit PCM (the engine rounds and dithers, so the bytes are its
+        // own and deterministic), interleaved f32 otherwise.
+        let (bits, flags) = match a.codec {
+            AudioCodec::Pcm16 => (
+                16,
+                kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            ),
+            AudioCodec::Pcm24 => (
+                24,
+                kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            ),
+            _ => (32, kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked),
+        };
+        let bytes = bits / 8 * a.channels as u32;
         let asbd = AudioStreamBasicDescription {
             mSampleRate: a.sample_rate as f64,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mFormatFlags: flags,
             mBytesPerPacket: bytes,
             mFramesPerPacket: 1,
             mBytesPerFrame: bytes,
             mChannelsPerFrame: a.channels as u32,
-            mBitsPerChannel: 32,
+            mBitsPerChannel: bits,
             mReserved: 0,
         };
         let mut fd: *const CMFormatDescription = std::ptr::null();
@@ -280,7 +309,7 @@ impl Writer {
                 "this container cannot carry a timecode track ({})",
                 match self.file_type {
                     Container::Mov => "MOV",
-                    Container::Mp4 => "MP4",
+                    _ => "MP4",
                 }
             )));
         }
@@ -425,7 +454,21 @@ impl Writer {
             ));
         }
         let frames = interleaved.len() / channels;
-        let bytes: Vec<u8> = interleaved.iter().flat_map(|s| s.to_ne_bytes()).collect();
+        let mut bytes = Vec::new();
+        let format = match spec.codec {
+            AudioCodec::Pcm16 => pm_audio::offline::PcmFormat::S16,
+            AudioCodec::Pcm24 => pm_audio::offline::PcmFormat::S24,
+            _ => pm_audio::offline::PcmFormat::F32,
+        };
+        // The dither of 16-bit PCM is keyed by the export's own sample index, so
+        // chunked and whole renders write the same bytes.
+        pm_audio::offline::encode(
+            format,
+            interleaved,
+            channels,
+            self.audio_written as i64,
+            &mut bytes,
+        );
         let block = block_buffer(&bytes)?;
         let pts =
             unsafe { CMTime::new(self.audio_written as i64, audio_timescale(spec.sample_rate)) };

@@ -81,6 +81,17 @@ pub struct Sps {
     pub colour_description: Option<(u8, u8, u8)>,
 }
 
+/// HEVC decoder configuration (`hvcC`) facts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Hevc {
+    /// 1 Main, 2 Main10, 4 range extensions.
+    pub profile_idc: u8,
+    pub level_idc: u8,
+    pub chroma_format_idc: u8,
+    pub bit_depth_luma: u8,
+    pub bit_depth_chroma: u8,
+}
+
 /// A video sample entry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Visual {
@@ -92,6 +103,14 @@ pub struct Visual {
     /// `gama` box value.
     pub gamma: Option<f64>,
     pub sps: Option<Sps>,
+    pub hevc: Option<Hevc>,
+    /// An `lhvC` box: a layered HEVC configuration, which HEVC with alpha carries
+    /// for its alpha layer.
+    pub layered_hevc: bool,
+    /// The `almo` box's payload (HEVC with alpha: the alpha mode).
+    pub alpha_mode: Option<Vec<u8>>,
+    /// The sample entry's child boxes, in order (diagnostics).
+    pub boxes: Vec<[u8; 4]>,
 }
 
 /// An audio sample entry.
@@ -100,6 +119,8 @@ pub struct Audio {
     pub channels: u32,
     pub sample_rate: f64,
     pub bits_per_channel: u32,
+    /// LPCM samples are floating point (SoundDescriptionV2 format flags).
+    pub float: bool,
 }
 
 /// A `tmcd` sample entry and its first sample.
@@ -167,12 +188,60 @@ impl Movie {
         self.tracks.iter().find(|t| &t.handler == handler)
     }
 
+    /// Reads the container facts of a file: only its `ftyp` and `moov` boxes are
+    /// loaded (exports run to many gigabytes); the `tmcd` sample is read where its
+    /// chunk offset points.
     pub fn read(path: &Path) -> Result<Movie, Error> {
-        let d = std::fs::read(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-        Movie::parse(&d)
+        use std::io::{Read, Seek, SeekFrom};
+        let io = |e: std::io::Error| Error::Io(format!("{}: {e}", path.display()));
+        let mut file = std::fs::File::open(path).map_err(io)?;
+        let len = file.metadata().map_err(io)?.len();
+        let mut buf = vec![];
+        let mut at = 0u64;
+        while at + 8 <= len {
+            file.seek(SeekFrom::Start(at)).map_err(io)?;
+            let mut head = [0u8; 16];
+            let n = file.read(&mut head).map_err(io)?;
+            if n < 8 {
+                break;
+            }
+            let size32 = u32::from_be_bytes(head[0..4].try_into().unwrap()) as u64;
+            let size = match size32 {
+                1 if n >= 16 => u64::from_be_bytes(head[8..16].try_into().unwrap()),
+                1 => break,
+                0 => len - at,
+                s => s,
+            };
+            if size < 8 || at + size > len {
+                break;
+            }
+            if &head[4..8] == b"ftyp" || &head[4..8] == b"moov" {
+                if size > 1 << 30 {
+                    return Err(Error::Verify("container: moov is larger than 1 GiB".into()));
+                }
+                let mut b = vec![0u8; size as usize];
+                file.seek(SeekFrom::Start(at)).map_err(io)?;
+                file.read_exact(&mut b).map_err(io)?;
+                buf.extend(b);
+            }
+            at += size;
+        }
+        let read_at = |offset: u64| -> Option<u32> {
+            let mut f = std::fs::File::open(path).ok()?;
+            f.seek(SeekFrom::Start(offset)).ok()?;
+            let mut b = [0u8; 4];
+            f.read_exact(&mut b).ok()?;
+            Some(u32::from_be_bytes(b))
+        };
+        Movie::parse_with(&buf, &read_at)
     }
 
+    /// Parses a whole file held in memory.
     pub fn parse(d: &[u8]) -> Result<Movie, Error> {
+        Movie::parse_with(d, &|o| be32(d, o as usize))
+    }
+
+    fn parse_with(d: &[u8], read_at: &dyn Fn(u64) -> Option<u32>) -> Result<Movie, Error> {
         let bad = |m: &str| Error::Verify(format!("container: {m}"));
         let top = children(d, 0, d.len());
         let brand = find(&top, b"ftyp")
@@ -185,7 +254,7 @@ impl Movie {
             full_header_times(d, mvhd.start).ok_or_else(|| bad("short mvhd"))?;
         let mut tracks = vec![];
         for trak in mv.iter().filter(|b| &b.kind == b"trak") {
-            tracks.push(parse_track(d, *trak).ok_or_else(|| bad("malformed trak"))?);
+            tracks.push(parse_track(d, *trak, read_at).ok_or_else(|| bad("malformed trak"))?);
         }
         Ok(Movie {
             brand,
@@ -205,7 +274,7 @@ fn full_header_times(d: &[u8], s: usize) -> Option<(u32, u64)> {
     }
 }
 
-fn parse_track(d: &[u8], trak: BoxRef) -> Option<Track> {
+fn parse_track(d: &[u8], trak: BoxRef, read_at: &dyn Fn(u64) -> Option<u32>) -> Option<Track> {
     let t = children(d, trak.start, trak.end);
     let tkhd = find(&t, b"tkhd")?;
     let id = if *d.get(tkhd.start)? == 1 {
@@ -295,7 +364,7 @@ fn parse_track(d: &[u8], trak: BoxRef) -> Option<Track> {
             let first_chunk = find(&st, b"stco")
                 .and_then(|b| be32(d, b.start + 8).map(|v| v as u64))
                 .or_else(|| find(&st, b"co64").and_then(|b| be64(d, b.start + 8)));
-            tc.start_frame = first_chunk.and_then(|o| be32(d, o as usize));
+            tc.start_frame = first_chunk.and_then(read_at);
             track.tmcd = Some(tc);
         }
         _ => {}
@@ -314,6 +383,7 @@ fn parse_visual(d: &[u8], e: BoxRef) -> Option<Visual> {
         ..Visual::default()
     };
     for k in children(d, s + 78, e.end) {
+        v.boxes.push(k.kind);
         match &k.kind {
             b"colr" => {
                 let kind: [u8; 4] = d.get(k.start..k.start + 4)?.try_into().ok()?;
@@ -332,6 +402,18 @@ fn parse_visual(d: &[u8], e: BoxRef) -> Option<Visual> {
                 }
             }
             b"gama" => v.gamma = be32(d, k.start).map(|g| g as f64 / 65536.0),
+            b"hvcC" => {
+                let b = |o: usize| d.get(k.start + o).copied();
+                v.hevc = Some(Hevc {
+                    profile_idc: b(1)? & 0x1f,
+                    level_idc: b(12)?,
+                    chroma_format_idc: b(16)? & 0x03,
+                    bit_depth_luma: (b(17)? & 0x07) + 8,
+                    bit_depth_chroma: (b(18)? & 0x07) + 8,
+                });
+            }
+            b"lhvC" => v.layered_hevc = true,
+            b"almo" => v.alpha_mode = d.get(k.start..k.end).map(<[u8]>::to_vec),
             b"avcC" => {
                 let nsps = (*d.get(k.start + 5)? & 0x1f) as usize;
                 if nsps > 0 {
@@ -355,12 +437,15 @@ fn parse_audio(d: &[u8], e: BoxRef) -> Option<Audio> {
             channels: be32(d, s + 40)?,
             sample_rate: rate,
             bits_per_channel: be32(d, s + 48)?,
+            // kAudioFormatFlagIsFloat.
+            float: be32(d, s + 52)? & 1 != 0,
         })
     } else {
         Some(Audio {
             channels: be16(d, s + 16)? as u32,
             sample_rate: be32(d, s + 24)? as f64 / 65536.0,
             bits_per_channel: be16(d, s + 18)? as u32,
+            float: false,
         })
     }
 }

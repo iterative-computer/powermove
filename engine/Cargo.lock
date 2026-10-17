@@ -2089,6 +2089,7 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-time",
+ "png",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",

@@ -1,6 +1,6 @@
 // Host services in main: capability handles, output destinations, leases,
 // hardware sessions, crash attribution, and the definition relay.
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -139,6 +139,65 @@ describe('output destinations', () => {
     expect(await readFile(target, 'utf8')).toBe('three');
     expect((await write('uniqueName', target, 'four')).path).toBe(path.join(dir, 'Exports', 'Final (2).mp4'));
     expect((await readdir(path.join(dir, 'Exports'))).sort()).toEqual(['Final (2).mp4', 'Final.mp4']);
+  });
+
+  it('binds a chosen policy to a user destination handle', async () => {
+    const target = path.join(dir, 'Queue', 'Job.mov');
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, 'earlier');
+    // The engine asks to replace (its default for chosen files); the queue job keeps both.
+    const destination = outputs.chooseDestination(target, 'job-q', 6, 6, 'uniqueName');
+    const out = await outputs.destination({ job: 'job-q', choice: { kind: 'userChosen', destination }, overwrite: 'replace' }, 6, 6);
+    await writeFile(handles.resolve(out.temporary, 6, 6).path, 'queued');
+    const done = await outputs.commit({ job: 'job-q', temporary: out.temporary, commit: true, verification: verified(6) }, 6, 6);
+    expect(done.path).toBe(path.join(dir, 'Queue', 'Job (2).mov'));
+    expect(await readFile(target, 'utf8')).toBe('earlier');
+  });
+
+  it('writes PNG sequences as folders: owner-only, whole, never replacing a folder, merged on replace', async () => {
+    const auto = path.join(dir, 'Powermove');
+    const folder = { ...agent('Frames', 'png'), folder: true };
+    const first = await outputs.destination(folder, 1, 1);
+    const temp = handles.resolve(first.temporary, 1, 1).path;
+    expect((await stat(temp)).isDirectory()).toBe(true);
+    expect((await stat(temp)).mode & 0o777).toBe(0o700);
+    // An empty folder, or one with an empty frame, is not an output.
+    await expect(outputs.commit({ job: 'job-1', temporary: first.temporary, commit: true, verification: verified(0) }, 1, 1)).rejects.toThrow(/empty/);
+    await expect(stat(temp)).rejects.toThrow();
+    const second = await outputs.destination(folder, 1, 1);
+    const temp2 = handles.resolve(second.temporary, 1, 1).path;
+    await writeFile(path.join(temp2, 'Frames_00000.png'), 'png0');
+    await writeFile(path.join(temp2, 'Frames_00001.png'), 'png1');
+    const done = await outputs.commit({ job: 'job-1', temporary: second.temporary, commit: true, verification: verified(8) }, 1, 1);
+    expect(done.path).toBe(path.join(auto, 'Frames'));
+    expect((await readdir(done.path!)).sort()).toEqual(['Frames_00000.png', 'Frames_00001.png']);
+    // The same name again is a new folder, never a merge.
+    const third = await outputs.destination(folder, 1, 1);
+    await writeFile(path.join(handles.resolve(third.temporary, 1, 1).path, 'Frames_00000.png'), 'x');
+    expect((await outputs.commit({ job: 'job-1', temporary: third.temporary, commit: true, verification: verified(1) }, 1, 1)).path).toBe(path.join(auto, 'Frames (2)'));
+    // A chosen folder with replace: same-named frames are replaced, the earlier
+    // longer export's extra frames go, other files stay.
+    const chosen = path.join(dir, 'Seq');
+    await mkdir(chosen);
+    await writeFile(path.join(chosen, 'notes.txt'), 'mine');
+    await writeFile(path.join(chosen, 'Seq_00000.png'), 'old');
+    await writeFile(path.join(chosen, 'Seq_00001.png'), 'old');
+    await writeFile(path.join(chosen, 'Other_00001.png'), 'other');
+    await writeFile(path.join(chosen, 'Seq_001.png'), 'digits');
+    await writeFile(path.join(chosen, 'Seq_00001.tif'), 'tif');
+    await mkdir(path.join(chosen, 'Seq_00009.png'));
+    const handle = outputs.chooseDestination(chosen, 'job-s', 2, 2);
+    const out = await outputs.destination({ job: 'job-s', choice: { kind: 'userChosen', destination: handle }, overwrite: 'replace', folder: true }, 2, 2);
+    await writeFile(path.join(handles.resolve(out.temporary, 2, 2).path, 'Seq_00000.png'), 'new');
+    expect((await outputs.commit({ job: 'job-s', temporary: out.temporary, commit: true, verification: verified(3) }, 2, 2)).path).toBe(chosen);
+    expect(await readFile(path.join(chosen, 'Seq_00000.png'), 'utf8')).toBe('new');
+    expect(await readFile(path.join(chosen, 'notes.txt'), 'utf8')).toBe('mine');
+    expect((await readdir(chosen)).sort()).toEqual(['Other_00001.png', 'Seq_00000.png', 'Seq_00001.tif', 'Seq_00009.png', 'Seq_001.png', 'notes.txt']);
+    // An abandoned folder output is removed with its frames.
+    const crashed = await outputs.destination(folder, 1, 7);
+    await writeFile(path.join(handles.resolve(crashed.temporary, 1, 7).path, 'f.png'), 'x');
+    expect(await outputs.abandonPort(7)).toBe(1);
+    expect((await readdir(auto)).filter((n) => n.startsWith('.'))).toEqual([]);
   });
 
   it('sweeps only its own leftover temporary files', async () => {

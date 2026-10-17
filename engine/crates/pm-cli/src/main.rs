@@ -53,15 +53,21 @@ wasm identical; 1 a mismatch or an identity difference; 2 only tolerance
 questions; 64 usage; 70 the run failed.";
 
 const USAGE: &str = "usage:
-  pm-cli render <project.pmv|.json> -o <out.mov|.mp4> [options]
-      --preset master|master-alpha|web     (default master: ProRes 422 HQ)
-      --format prores-proxy|prores-lt|prores|prores-hq|prores-4444|prores-4444xq|h264
-      --quality draft|high|max             H.264 at 4, 16, or 40 Mbps
-      --alpha none|straight|premultiplied  ProRes 4444 only
+  pm-cli render <project.pmv|.json> -o <out.mov|.mp4|.webm|.png|folder> [options]
+      --preset master|master-alpha|web|web-hevc|png   (default master: ProRes 422 HQ)
+      --format prores-proxy|prores-lt|prores|prores-hq|prores-4444|prores-4444xq|
+               h264|hevc|hevc10|vp9|vp8|png|png16|still|still16
+               (HEVC goes in MOV when the output ends in .mov; PNG sequences
+               are written to a new folder)
+      --quality draft|high|max             H.264, HEVC, and WebM at 4, 16, or 40 Mbps
+      --alpha none|straight|premultiplied  ProRes 4444, HEVC 8-bit, WebM, PNG
       --range all|work|START:END           seconds (default all)
       --fps N | N/D | 23.976 | 29.97 | ...  (default the composition's rate)
       --scale S | --size WxH               (default the composition's size)
-      --no-audio  --color quicktime|broadcast  --dither on|off  --precision 16|32
+      --audio pcm16|pcm24|float|aac        (default 24-bit PCM in MOV, AAC in MP4)
+      --timecode HH:MM:SS:FF  --reel NAME  start timecode (`;` for drop-frame), MOV
+      --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
+      --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
       compares engine renders with the legacy captures of the parity corpus
@@ -193,6 +199,10 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
                 o.media.push((asset.into(), PathBuf::from(file)));
             }
             "--force" => o.force = true,
+            "--audio" => o.audio = Some(value(args, &mut i, a)?.into()),
+            "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
+            "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
+            "--no-captions" => o.no_captions = true,
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {
@@ -392,6 +402,26 @@ mod tests {
         assert!(parse_render(&s(&["-o", "x.mov"])).is_err(), "no input");
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--bogus"])).is_err());
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--size", "12"])).is_err());
+        let o = parse_render(&s(&[
+            "p.pmv",
+            "-o",
+            "x.mov",
+            "--format",
+            "hevc10",
+            "--audio",
+            "float",
+            "--timecode",
+            "01:00:00;00",
+            "--reel",
+            "A001",
+            "--no-captions",
+        ]))
+        .unwrap();
+        assert_eq!(o.format.as_deref(), Some("hevc10"));
+        assert_eq!(o.audio.as_deref(), Some("float"));
+        assert_eq!(o.timecode.as_deref(), Some("01:00:00;00"));
+        assert_eq!(o.reel.as_deref(), Some("A001"));
+        assert!(o.no_captions);
     }
 
     #[test]

@@ -80,7 +80,8 @@ describe('export settings', () => {
     expect(mp4).toEqual({
       format: { kind: 'h264' }, alpha: 'none', quality: 'high', size: { width: 1280, height: 720 },
       frameRate: { num: 30000, den: 1001 }, range: { start: 705_600_000, end: 3 * 705_600_000 },
-      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, precision: 'float32', dither: true, draftFromProxies: false
+      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, precision: 'float32', dither: true, draftFromProxies: false,
+      delivery: { audioCoding: null, timecode: null, hideCaptions: false, preview: false, sequenceName: null }
     });
     const prores = exportSettingsFor(project({ work: null }), { format: 'prores', range: 'work', audio: false, motionBlur: true, alpha: true });
     expect(prores.format).toEqual({ kind: 'proRes', profile: 'p4444' });
@@ -290,5 +291,85 @@ describe('export sheet jobs through the job engine', () => {
     expect(engine.of('cancelJobs')[0]!.body).toEqual({ type: 'cancelJobs', kind: 'job', job: second.jobId });
     engine.status(second.jobId, 'failed', { class: 'userJob', error: error('unsupported', 'text layers') });
     expect(statuses.at(-1)).toEqual([5, { jobId: second.jobId, state: 'failed', progress: 0.5, error: 'text layers', routed: true }]);
+  });
+});
+
+describe('Phase 3b delivery through the job engine', () => {
+  const sheet = (extra: Record<string, unknown> = {}) => ({
+    format: 'hevc', alpha: false, fps: 29.97, scale: 1, start: 0, end: 2, audio: true, motionBlur: false, quality: 'max' as const,
+    delivery: { container: 'mov' as const, highDepth: true, audioCoding: 'float' as const, timecode: '01:00:00;00', reel: 'A001' },
+    ...extra
+  });
+
+  it('builds every delivery option into the settings', () => {
+    const s = userExportSettings(project(), sheet());
+    expect(s).toMatchObject({
+      format: { kind: 'hevc', tenBit: true, container: 'mov' },
+      quality: 'max', size: { width: 1280, height: 720 }, frameRate: { num: 30000, den: 1001 },
+      color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, dither: false,
+      delivery: { audioCoding: 'pcmFloat', timecode: { start: '01:00:00;00', dropFrame: true, reel: 'A001' }, hideCaptions: false, preview: false, sequenceName: null }
+    });
+    // PNG sequences: odd sizes, image tags, 16-bit undithered, no audio, frames named after the folder.
+    const png = userExportSettings(project(), sheet({ format: 'png', width: 641, height: 361, alpha: true, delivery: { highDepth: true, imageColor: 'rec709' } }), { sequenceName: 'Frames' });
+    expect(png).toMatchObject({
+      format: { kind: 'pngSequence', sixteenBit: true }, alpha: 'straight', size: { width: 641, height: 361 },
+      color: { kind: 'rec709Image' }, audio: false, dither: false, delivery: { sequenceName: 'Frames', audioCoding: null, timecode: null }
+    });
+    // Today's ids still work; timecode is MOV only.
+    const mp4 = userExportSettings(project(), sheet({ format: 'mp4', delivery: { timecode: '01:00:00:00', audioCoding: 'pcm24' } }));
+    expect(mp4).toMatchObject({ format: { kind: 'h264' }, dither: true, delivery: { timecode: null, audioCoding: null } });
+    expect(() => userExportSettings(project(), sheet({ format: 'hevc', alpha: true }))).toThrow('transparency');
+    expect(() => userExportSettings(project(), sheet({ format: 'json' }))).toThrow(AgentJobError);
+  });
+
+  it('streams previews and offline waits to the window, marks draft sessions, and closes them', async () => {
+    const engine = new FakeEngine();
+    const drafts: Array<[number, boolean]> = [];
+    (engine as any).setDraftSession = (session: number, draft: boolean) => drafts.push([session, draft]);
+    const statuses: Array<[number, UserExportStatus]> = [];
+    const jobs = new AgentJobs({ engine, onUserStatus: (owner, s) => statuses.push([owner, s]) });
+    const { jobId } = await jobs.exportUser(5, project(), sheet({ format: 'prores-hq' }), '/Users/x/Cut.mov', { draft: true });
+    const body = engine.of('submitJob')[0]!.body as Extract<Request, { type: 'submitJob' }>;
+    expect((body.spec as any).settings).toMatchObject({ draftFromProxies: true, delivery: { preview: true } });
+    expect(drafts).toEqual([[10, true]]);
+    engine.status(jobId, 'waitingForMedia', { class: 'userJob', progress: 0, error: error('mediaOffline', '1 clip is offline: a.mov.') });
+    engine.status(jobId, 'running', { class: 'userJob', progress: 0.5, preview: { frame: 12, width: 640, height: 360, jpeg: new Uint8Array([0xff, 0xd8]) } });
+    expect(statuses[0]![1]).toMatchObject({ state: 'waitingForMedia', waiting: '1 clip is offline: a.mov.' });
+    expect(statuses[1]![1]).toMatchObject({ state: 'running', preview: { frame: 12, width: 640, height: 360 } });
+    expect([...statuses[1]![1].preview!.jpeg]).toEqual([0xff, 0xd8]);
+    engine.status(jobId, 'done', { class: 'userJob', path: '/Users/x/Cut.mov' });
+    expect(drafts).toEqual([[10, true], [10, false]]);
+  });
+
+  it('runs queue jobs without a window and reports to the queue', async () => {
+    const engine = new FakeEngine();
+    const queued: Array<[string, UserExportStatus]> = [];
+    const windows = vi.fn();
+    const jobs = new AgentJobs({ engine, onQueueStatus: (id, s) => queued.push([id, s]), onUserStatus: windows });
+    const { jobId } = await jobs.exportQueued(project(), sheet({ format: 'webm-vp9' }), '/Users/x/Web.webm', 'uniqueName');
+    expect(jobId.startsWith('queue-export-')).toBe(true);
+    expect(engine.chosen).toEqual([['/Users/x/Web.webm', jobId, 10]]);
+    const body = engine.of('submitJob')[0]!.body as Extract<Request, { type: 'submitJob' }>;
+    expect((body.spec as any).settings).toMatchObject({ format: { kind: 'webm', codec: 'vp9' }, delivery: { preview: false } });
+    engine.status(jobId, 'done', { class: 'userJob', path: '/Users/x/Web (2).webm' });
+    expect(queued).toEqual([[jobId, { jobId, state: 'done', progress: 1, path: '/Users/x/Web (2).webm' }]]);
+    expect(windows).not.toHaveBeenCalled();
+    await jobs.cancelQueued(jobId);
+  });
+
+  it('exports agent presets and formats, PNG sequences as folders, and lists them for the queue', async () => {
+    const engine = new FakeEngine();
+    const listed: string[] = [];
+    const jobs = new AgentJobs({ engine, onAgentJob: (job) => listed.push(`${job.name}: ${job.summary} ${job.status.state}`) });
+    void jobs.exportVideo(7, 'run-1', project(), { name: 'Frames', format: '', preset: 'png', range: 'all', audio: true, motionBlur: false, alpha: true, mode: 'async' });
+    void jobs.exportVideo(7, 'run-1', project(), { format: 'prores-hq', preset: 'master-alpha', range: 'all', audio: true, motionBlur: false, alpha: false, mode: 'async' });
+    await tick(); await tick(); await tick();
+    const [png, hq] = engine.of('submitJob').map((s) => s.body as Extract<Request, { type: 'submitJob' }>);
+    expect(png!.output).toEqual({ kind: 'agentAutomatic', suggestedName: 'Frames', extension: 'png' });
+    expect((png!.spec as any).settings).toMatchObject({ format: { kind: 'pngSequence', sixteenBit: false }, alpha: 'straight', audio: false, color: { kind: 'srgbImage' }, delivery: { sequenceName: 'Frames' } });
+    expect(hq!.output).toMatchObject({ extension: 'mov' });
+    expect((hq!.spec as any).settings).toMatchObject({ format: { kind: 'proRes', profile: 'hq' }, alpha: 'none', delivery: { audioCoding: 'pcm24' } });
+    expect(listed).toEqual(['Frames: PNG sequence · 1280×720 queued', 'Launch: QuickTime · ProRes 422 HQ · 1280×720 queued']);
+    await expect(jobs.exportVideo(7, 'run-1', project(), { format: 'h264', preset: 'bogus', range: 'all', audio: true, motionBlur: false, alpha: false })).rejects.toThrow('preset');
   });
 });

@@ -36,6 +36,9 @@ export type HostServicesOptions = {
   /** Overrides the global memory budget derived from physical memory (tests). */
   globalMemory?: number;
   resolveAsset?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  /** A generated proxy of an asset whose original is offline (draft
+   *  renders, section 14.8; Phase 4a generates proxies). */
+  resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
 };
 
@@ -48,6 +51,9 @@ function outputFailure(error: unknown): Error {
 
 export class HostServicesCore {
   readonly handles = new HandleTable();
+  /** Job sessions of draft renders ("Render using: Proxies (draft)"): their
+   *  offline media resolves to proxies. */
+  private readonly draftSessions = new Set<number>();
   readonly outputs: OutputDestinations;
   readonly memory: MemoryArbiter;
   readonly hardware = new HardwareArbiter();
@@ -55,6 +61,12 @@ export class HostServicesCore {
   constructor(private readonly options: HostServicesOptions) {
     this.outputs = new OutputDestinations({ handles: this.handles, automaticDirectory: options.automaticOutputDirectory });
     this.memory = new MemoryArbiter(options.globalMemory ?? globalBudget(options.physicalMemory), options.now);
+  }
+
+  /** Marks a job session as a draft render (or not). */
+  setDraftSession(session: number, draft: boolean): void {
+    if (draft) this.draftSessions.add(session);
+    else this.draftSessions.delete(session);
   }
 
   cacheDirectory(kind: CacheKind): string {
@@ -66,7 +78,7 @@ export class HostServicesCore {
     switch (body.type) {
       case 'mintHandle': {
         if (!isSafeUint(body.session)) throw new ProtocolError('invalidMessage', 'a handle is minted for a session');
-        const { path: file, contentHash } = await this.pathFor(body.kind);
+        const { path: file, contentHash } = await this.pathFor(body.kind, body.session);
         const handle = this.handles.mint({ kind: body.kind, session: body.session, port: hostPort, path: file });
         return { type: 'handle', handle, kind: body.kind, contentHash };
       }
@@ -117,7 +129,7 @@ export class HostServicesCore {
     }
   }
 
-  private async pathFor(kind: CapabilityKind): Promise<{ path: string; contentHash: ContentHash | null }> {
+  private async pathFor(kind: CapabilityKind, session: number): Promise<{ path: string; contentHash: ContentHash | null }> {
     switch (kind.kind) {
       case 'cache': {
         if (!CACHE_KINDS.includes(kind.cache)) throw new ProtocolError('invalidMessage', 'unknown cache kind');
@@ -127,7 +139,8 @@ export class HostServicesCore {
       }
       case 'mediaRead': {
         if (!isId(kind.asset)) throw new ProtocolError('invalidMessage', 'invalid asset id');
-        const resolved = await this.options.resolveAsset?.(kind.asset);
+        const resolved = await this.options.resolveAsset?.(kind.asset)
+          ?? (this.draftSessions.has(session) ? await this.options.resolveProxy?.(kind.asset) : null);
         if (!resolved) throw new ProtocolError('mediaOffline', 'The asset\'s file is not available.');
         return resolved;
       }

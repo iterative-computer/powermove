@@ -423,7 +423,7 @@ impl HostServices for Bound<'_> {
             let bytes = (self.host.random)()
                 .map_err(|e| error(ErrorCode::Internal, format!("no random source ({e})")))?;
             let hex: String = bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
-            match create_temporary(&placement.directory, &hex) {
+            match create_temporary(&placement.directory, &hex, request.folder) {
                 Ok(path) => {
                     temporary = Some(path);
                     break;
@@ -500,7 +500,7 @@ impl HostServices for Bound<'_> {
                 path: None,
             });
         }
-        let size = std::fs::metadata(&pending.temporary).map_or(0, |m| m.len());
+        let size = outputs::output_bytes(&pending.temporary);
         if size == 0 {
             discard(&pending.temporary);
             return Err(error(
