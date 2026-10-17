@@ -485,9 +485,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["comps"]["inner"]["layers"]
             .as_array_mut()
             .unwrap()
-            .push(layer("s", "shape", json!({}), 0.0, 0.0, 2.0))
+            .push(layer("t", "text", json!({}), 0.0, 0.0, 2.0))
     });
-    assert!(f.contains(&Feature::LayerType("shape".into())), "{f:?}");
+    assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
 }
 
 #[test]

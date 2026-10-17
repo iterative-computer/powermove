@@ -106,6 +106,7 @@ pub struct Renderer {
     scene3d: Scene3dRenderer,
     /// The 3D pass's planning options (view override, mesh definitions).
     options3d: crate::scene3d::Options3d,
+    vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
     /// Prepares and runs layer effects (`composite::EffectHost`).
@@ -126,6 +127,7 @@ impl Renderer {
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
             options3d: crate::scene3d::Options3d::default(),
+            vector: crate::vector::cache::VectorCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -201,9 +203,40 @@ impl Renderer {
             .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
     }
 
-    /// Frees idle intermediate targets down to `bytes` (lease pressure).
+    /// Frees idle intermediate targets and cached vector textures so that
+    /// together they hold at most `bytes` (lease pressure): the pool trims
+    /// first, and the vector cache gets what the pool leaves.
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
+        self.vector.trim(bytes.saturating_sub(self.pool.bytes()));
+    }
+
+    /// The vector cache's standing bound, enforced while frames render
+    /// (default: today's raster cache, 192 MiB and 4096 entries).
+    pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
+        self.vector.set_budget(max_bytes, max_entries);
+    }
+
+    /// Cached vector textures.
+    pub fn vector_cache_len(&self) -> usize {
+        self.vector.len()
+    }
+
+    /// Bytes of cached vector textures (shape rasters and level 2 scenes):
+    /// the render cache category of the lease.
+    pub fn vector_cache_bytes(&self) -> u64 {
+        self.vector.bytes()
+    }
+
+    /// Selects the level 2 coverage backend (Vello on the GPU with the
+    /// `vello_cpu` fallback, or `vello_cpu` always).
+    pub fn set_vector_backend(&mut self, backend: crate::vector::cache::CoverageBackend) {
+        self.vector.set_backend(backend);
+    }
+
+    /// The backend that rendered the last level 2 scene.
+    pub fn last_vector_backend(&self) -> Option<&'static str> {
+        self.vector.last_backend
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
@@ -341,6 +374,9 @@ impl Renderer {
             width: r.width,
             height: r.height,
         });
+        // The previous frame's vector textures become evictable, and the
+        // cache returns within its bound.
+        self.vector.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -357,6 +393,7 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                vector: &mut self.vector,
                 precision,
                 working: color.working,
                 blend_domain: color.blend_domain,
