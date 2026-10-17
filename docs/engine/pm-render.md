@@ -27,6 +27,7 @@ the authority.
 | 3D layers: the full scene pass (depth sets, shadows, every light, maps, transparency, editor looks, legacy `scene3d` and OBJ mesh layers) | Supported | docs/engine/scene3d.md (Phase 3a 3D lane) |
 | Region of interest, output scale, 16- and 32-bit precision | Supported | Regions equal the full frame bit for bit |
 | Depth and object-id surface (contract 2) | Supported for top-level layers | `tests/headless.rs` |
+| Effects and transitions (renderer given definitions, contract 10): the 16 built-in effects, 4 transitions, and any registered GLSL through `pm-glsl` | Supported, see `docs/engine/effects.md` | `tests/effects_webgl.rs` (shader level against WebGL2), `tests/corpus.rs` (`effects-*` capture), `tests/effects.rs` |
 | Everything else | Routed by `unsupported` | `tests/headless.rs` capability test |
 
 ## API

@@ -35,6 +35,7 @@ import { install as installCapabilities } from './core/capabilities';
 import { install as installMedia } from './core/media';
 import { installHostMediaStore } from '../media/host-media-store';
 import { bridge as hostBridge } from '../kernel/bridge';
+import { installEngineDefinitions } from '../kernel/engine-definitions';
 import { install as installAudio } from './core/audio';
 import { install as installShaders } from './gl/shaders';
 import { install as installTransitions } from './gl/transitions';
@@ -117,6 +118,9 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['gl/transitions', installTransitions],
   ['gl/raster', installRaster],
   ['gl/compositor', installCompositor],
+  /* Definition snapshots for the engines (contract 10; with "Use New Engine"
+     on only). Follows the GLSL preambles and GL.compileError. */
+  ['kernel/engine-definitions', (PM) => void installEngineDefinitions(PM, hostBridge() as never)],
   ['core/engine', installEngine],
   /* The kernel's engine connection (behind "Use New Engine"): the viewer's
      engine frames, the patch stream, and the transport (section 18). */

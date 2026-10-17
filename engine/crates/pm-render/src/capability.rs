@@ -76,6 +76,12 @@ pub enum Feature {
     Media(String),
     /// A request option (view override, editor looks).
     Request(String),
+    /// An effect or transition whose definition the renderer was not given
+    /// and that is not marked missing (contract 10: `pm-cli` fails on it).
+    Definition(String),
+    /// A definition WebGL draws but the native pipeline cannot translate:
+    /// it needs the decision 19 fallback runner.
+    ShaderFallback(String),
 }
 
 impl Unsupported {
@@ -119,6 +125,8 @@ impl fmt::Display for Feature {
             Feature::ImageSequence => write!(f, "animated images and image sequences"),
             Feature::Media(m) => write!(f, "media: {m}"),
             Feature::Request(r) => write!(f, "request: {r}"),
+            Feature::Definition(d) => write!(f, "no definition for {d}"),
+            Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
         }
     }
 }
@@ -183,7 +191,21 @@ fn is_property(v: Option<&Node>) -> bool {
 
 /// Static check of `composition` and everything it nests.
 pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
-    check(document, composition, None)
+    check(document, composition, None, None)
+}
+
+/// [`unsupported`] (with media facts when `assets` is given) for a renderer
+/// holding these definitions: effects and transitions are drawn, except
+/// those with no definition that is not marked missing
+/// ([`Feature::Definition`]) and definitions that need the fallback runner
+/// ([`Feature::ShaderFallback`]), on layers and adjustment layers alike.
+pub fn unsupported_with_definitions(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+    effects: &crate::effects::Effects,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, Some(effects))
 }
 
 /// [`unsupported`] plus facts read from media headers through `assets`
@@ -194,13 +216,14 @@ pub fn unsupported_with_media(
     composition: &str,
     assets: &dyn AssetResolver,
 ) -> Vec<Unsupported> {
-    check(document, composition, Some(assets))
+    check(document, composition, Some(assets), None)
 }
 
 fn check(
     document: &Document,
     composition: &str,
     assets: Option<&dyn AssetResolver>,
+    effects: Option<&crate::effects::Effects>,
 ) -> Vec<Unsupported> {
     let mut out = BTreeSet::new();
     let Some(root) = document.root() else {
@@ -232,7 +255,7 @@ fn check(
         let Some(comp) = composition_node(root, &id) else {
             continue;
         };
-        check_composition(root, &id, comp, assets, &mut out, &mut stack);
+        check_composition(root, &id, comp, assets, effects, &mut out, &mut stack);
     }
     out.into_iter().collect()
 }
@@ -242,6 +265,7 @@ fn check_composition(
     comp_id: &str,
     comp: &Node,
     assets: Option<&dyn AssetResolver>,
+    effects: Option<&crate::effects::Effects>,
     out: &mut BTreeSet<Unsupported>,
     stack: &mut Vec<String>,
 ) {
@@ -279,14 +303,28 @@ fn check_composition(
                 }
                 "adjustment" => {
                     if has_effects(layer) {
-                        add(layer, Feature::Adjustment);
+                        match effects {
+                            None => add(layer, Feature::Adjustment),
+                            Some(e) => {
+                                for f in crate::effects::layer_features(e, layer) {
+                                    add(layer, f);
+                                }
+                            }
+                        }
                     }
                 }
                 other => add(layer, Feature::LayerType(other.to_owned())),
             }
         }
         if has_effects(layer) && ty != "adjustment" {
-            add(layer, Feature::Effects);
+            match effects {
+                None => add(layer, Feature::Effects),
+                Some(e) => {
+                    for f in crate::effects::layer_features(e, layer) {
+                        add(layer, f);
+                    }
+                }
+            }
         }
         // Parametric masks, track mattes, and blend modes are drawn
         // (`crate::composite`); bezier path masks and masks that are not an
@@ -309,7 +347,14 @@ fn check_composition(
             add(layer, Feature::PathMasks);
         }
         if js::flag(layer, "transitionIn") || js::flag(layer, "transitionOut") {
-            add(layer, Feature::Transition);
+            match effects {
+                None => add(layer, Feature::Transition),
+                Some(e) => {
+                    for f in crate::effects::transition_features(e, layer) {
+                        add(layer, f);
+                    }
+                }
+            }
         }
         let mblur = node::member(Some(layer), "mblur");
         if is_property(mblur) || node::truthy(mblur) {
@@ -383,9 +428,15 @@ fn has_effects(layer: &Node) -> bool {
 /// The lowercase `format` of a layer's asset record, if it has one.
 fn asset_format(root: &Node, layer: &Node) -> Option<String> {
     let asset = node::member(node::member(Some(layer), "d"), "asset")?;
-    let asset_id = node::js_value_opt(Some(asset)).to_js_string().to_string_lossy();
+    let asset_id = node::js_value_opt(Some(asset))
+        .to_js_string()
+        .to_string_lossy();
     let record = node::member(node::member(Some(root), "assets"), &asset_id)?;
-    Some(js::member_string(record, "format").unwrap_or_default().to_ascii_lowercase())
+    Some(
+        js::member_string(record, "format")
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+    )
 }
 
 fn check_media(

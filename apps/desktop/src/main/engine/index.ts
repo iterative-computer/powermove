@@ -24,6 +24,7 @@ import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { EngineFontClient, installEngineFontService } from '../engine-fonts';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
+import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
 import { askAboutOfflineMedia, offlineClips } from './offline-media';
 import { RenderQueue } from './render-queue';
@@ -213,6 +214,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     : null;
 
   const engineNowUs = engineClock(bridgeAddon);
+  const cacheDirectory = path.join(options.userData, 'Engine Cache');
   engine = new NativeEngine({
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
@@ -227,7 +229,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           ...env,
           ...(launch?.env ?? {}),
           POWERMOVE_ENGINE_PROCESS: process,
-          POWERMOVE_ENGINE_ADDON: addon
+          POWERMOVE_ENGINE_ADDON: addon,
+          // Translated shader programs, kept across launches (plan section 11).
+          POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }
       });
       if (launch) {
@@ -242,7 +246,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       return child as unknown as ChildLike;
     },
     channel: () => new MessageChannelMain() as unknown as { port1: PortLike; port2: PortLike },
-    cacheDirectory: path.join(options.userData, 'Engine Cache'),
+    cacheDirectory,
     automaticOutputDirectory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
     hostNow: engineNowUs,

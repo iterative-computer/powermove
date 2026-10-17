@@ -14,6 +14,7 @@ use pm_protocol::common::Ticks;
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
 use crate::composite::{ColorSettings, EffectHost};
+use crate::effects::Effects;
 use crate::error::{LayerFailure, RenderError};
 use crate::exec::{Exec, Region};
 use crate::expr::PmExprEngine;
@@ -110,8 +111,11 @@ pub struct Renderer {
     vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
-    /// Prepares and runs layer effects (`composite::EffectHost`).
-    effects: Option<Arc<dyn EffectHost>>,
+    /// Effect, transition, and layer definitions and their programs
+    /// (`crate::effects`, contract 10): the renderer's own effect host.
+    effects: Effects,
+    /// Another effect host in place of the renderer's own (tests).
+    effect_host: Option<Arc<dyn EffectHost>>,
 }
 
 impl Renderer {
@@ -133,14 +137,174 @@ impl Renderer {
             device,
             queue,
             bracket: None,
-            effects: None,
+            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
+            effect_host: None,
         }
     }
 
-    /// Runs layer effects and adjustment layers through `host` (the effects
-    /// lane's runner); `None` routes compositions with effects.
+    /// Runs layer effects and adjustment layers through `host` instead of
+    /// the renderer's definitions; `None` goes back to them.
     pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
-        self.effects = host;
+        self.effect_host = host;
+    }
+
+    /// Replaces the effect, transition, and layer definitions with an
+    /// embedded set (an export job's, a collected project's, `pm-cli`'s;
+    /// contract 10) and translates what changed. Returns per-definition
+    /// failures. Without definitions, layers with effects or transitions
+    /// are routed.
+    pub fn set_definitions(
+        &mut self,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.set_snapshot(set)
+    }
+
+    /// Applies a kernel update (`pushDefinitions`); the failures are
+    /// `DefinitionsApplied.failures`. In force for every later frame.
+    pub fn apply_definitions(
+        &mut self,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.apply(update)
+    }
+
+    /// Forgets every definition: effects and transitions are routed again.
+    pub fn clear_definitions(&mut self) {
+        self.effects.clear();
+    }
+
+    /// The definitions in force (what an export job embeds).
+    pub fn definitions(&self) -> pm_protocol::definitions::DefinitionSetSnapshot {
+        self.effects.snapshot()
+    }
+
+    pub fn effects(&self) -> &Effects {
+        &self.effects
+    }
+
+    pub fn effects_mut(&mut self) -> &mut Effects {
+        &mut self.effects
+    }
+
+    /// Swaps in another definition set (one per view of a shared renderer:
+    /// each keeps its programs and watchdog state); returns the previous.
+    pub fn swap_effects(&mut self, effects: &mut Effects) {
+        std::mem::swap(&mut self.effects, effects);
+    }
+
+    /// Runs `f` with an effect context over the renderer's own definitions,
+    /// then submits and gives the intermediates back.
+    fn with_gpu<T>(
+        &mut self,
+        label: &str,
+        precision: Precision,
+        full: (u32, u32),
+        f: impl FnOnce(&mut crate::effects::exec::Gpu<'_>) -> T,
+    ) -> (T, Vec<Unsupported>) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let mut taken = Vec::new();
+        let mut unsupported = Vec::new();
+        let out = {
+            let mut cx = crate::composite::effects::EffectContext {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                pool: &mut self.pool,
+                precision,
+                working: pm_protocol::color::WorkingEncoding::Standard,
+                full,
+                taken: &mut taken,
+                native: Some(crate::effects::exec::Native {
+                    effects: &mut self.effects,
+                    timer: None,
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut unsupported,
+                }),
+            };
+            let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
+            f(&mut gpu)
+        };
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        (out, unsupported)
+    }
+
+    /// Runs effect pass nodes on `input` as the compositor's `runEffects`
+    /// does (harnesses and the shader parity tests): every buffer the size
+    /// of `input`, in GL row order, E-encoded. `region` places the buffer in
+    /// a level of `full` pixels (`effectViewportCoordinates`); `backdrop` is
+    /// `u_backdrop` (an empty unit without one). Returns a new working
+    /// target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_effects(
+        &mut self,
+        input: &Target,
+        backdrop: Option<&Target>,
+        steps: &[crate::effects::plan::EffectStep],
+        time: f64,
+        region: Option<(u32, u32)>,
+        full: (u32, u32),
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let (w, h) = (input.width(), input.height());
+        let region = region.map(|(x, y)| Region {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
+        let (out, unsupported) = self.with_gpu("pm effects", precision, full, |gpu| {
+            gpu.chain(
+                "",
+                steps,
+                time,
+                input,
+                backdrop,
+                coordinates,
+                pm_protocol::color::WorkingEncoding::Standard,
+            )
+            .unwrap_or_else(|| gpu.copy_of(input))
+        });
+        if !unsupported.is_empty() {
+            return Err(RenderError::Unsupported(unsupported));
+        }
+        Ok(out)
+    }
+
+    /// Runs a transition node from `from` to `to` (`runTransition`).
+    pub fn run_transition(
+        &mut self,
+        from: &Target,
+        to: &Target,
+        step: &crate::effects::plan::TransitionStep,
+        time: f64,
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let mut step = step.clone();
+        step.edge_in = true;
+        let full = (from.width(), from.height());
+        let (out, unsupported) = self.with_gpu("pm transition", precision, full, |gpu| {
+            gpu.run_transition("", &step, from, to, time)
+        });
+        match out {
+            Some(t) if unsupported.is_empty() => Ok(t),
+            _ => Err(RenderError::Unsupported(unsupported)),
+        }
+    }
+
+    /// Reads finished watchdog timestamps (`wait`: every submitted frame)
+    /// and returns the overruns reported since the last call.
+    pub fn watchdog_reports(&mut self, wait: bool) -> Vec<pm_protocol::error::EngineError> {
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, wait);
+        self.effects.watchdog.take_reports()
     }
 
     /// Records `bracket` around every following frame's commands (`None`:
@@ -168,10 +332,14 @@ impl Renderer {
         self.pool.bytes()
     }
 
-    /// Keeps translated 3D programs in `dir` across processes (amendment
-    /// 11's disk program cache); the engine host passes its cache
-    /// directory.
+    /// Keeps translated 3D programs (amendment 11's disk program cache) and
+    /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
+    /// processes; the engine host passes its shader cache folder.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        // Translated GLSL (`pm_glsl::Cache`: source hash and device) in its
+        // own folder; definition sets made before keep their cache.
+        self.effects
+            .set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
         self.scene3d.set_program_cache(dir);
     }
 
@@ -347,6 +515,10 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        // Overruns measured on earlier frames disable their effects now.
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
         let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
@@ -356,7 +528,7 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.as_deref(),
+            effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
         );
         if !request.background {
@@ -386,7 +558,13 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        let (legend, taken, unsupported, exec_failures) = {
+        // Only renderers drawing their own definitions time effects.
+        let timer = if self.effects.configured() && self.effect_host.is_none() {
+            self.effects.watchdog.frame_timer(&self.device)
+        } else {
+            None
+        };
+        let (legend, taken, unsupported, exec_failures, timer) = {
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -394,6 +572,8 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                effects: &mut self.effects,
+                timer,
                 vector: &mut self.vector,
                 precision,
                 working: color.working,
@@ -442,12 +622,17 @@ impl Renderer {
                 exec.taken.push(id_rows);
             }
             let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
-            (legend, exec.taken, exec.unsupported, exec.failures)
+            let timer = exec.timer.take();
+            (legend, exec.taken, exec.unsupported, exec.failures, timer)
         };
+        if let Some(timer) = timer {
+            self.effects.watchdog.finish(&mut encoder, timer);
+        }
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
         self.queue.submit([encoder.finish()]);
+        self.effects.watchdog.submitted();
         for t in taken {
             self.pool.give(t);
         }
@@ -589,13 +774,26 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.as_deref(),
+            effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         Ok((plan, build.failures))
+    }
+}
+
+/// The effect host plans are built with: another host when one is set,
+/// else the renderer's definitions once it has any (without either, layers
+/// with effects or transitions are routed).
+fn effect_host<'a>(
+    host: &'a Option<Arc<dyn EffectHost>>,
+    effects: &'a Effects,
+) -> Option<&'a dyn EffectHost> {
+    match host {
+        Some(h) => Some(h.as_ref()),
+        None => effects.configured().then_some(effects as &dyn EffectHost),
     }
 }
 

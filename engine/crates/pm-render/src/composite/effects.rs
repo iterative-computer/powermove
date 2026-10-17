@@ -17,9 +17,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use pm_eval::Scope;
+use pm_eval::{JsResult, Scope};
 use pm_gpu::{Target, TargetPool};
-use pm_model::Node;
+use pm_model::{JsString, Node};
 use pm_protocol::color::{Precision, WorkingEncoding};
 
 use crate::capability::Feature;
@@ -107,6 +107,9 @@ pub struct EffectContext<'a> {
     /// Targets to return to the pool after the frame is submitted: every
     /// target a chain takes from `pool`, the one it returns included.
     pub taken: &'a mut Vec<Target>,
+    /// The renderer's own effect state (`crate::effects`: programs, the
+    /// watchdog's timestamps), for the chains it prepares itself.
+    pub(crate) native: Option<crate::effects::exec::Native<'a>>,
 }
 
 /// A target covering a rectangle of the frame. Targets are in GL row order
@@ -137,17 +140,79 @@ pub trait EffectPasses: Send + Sync {
     ) -> Result<Option<Target>, String>;
 }
 
+/// A layer's active transition, prepared at plan time (section 8, the
+/// transition node). It runs after the layer's composite, from the stack
+/// beneath the layer to the stack with it (`runTransition`), over the whole
+/// frame.
+#[derive(Clone)]
+pub struct PreparedTransition {
+    pub passes: Arc<dyn TransitionPasses>,
+}
+
+impl fmt::Debug for PreparedTransition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedTransition")
+            .field("key", &self.passes.key())
+            .finish()
+    }
+}
+
+impl PartialEq for PreparedTransition {
+    fn eq(&self, other: &Self) -> bool {
+        self.passes.key() == other.passes.key()
+    }
+}
+
+/// A prepared transition.
+pub trait TransitionPasses: Send + Sync {
+    /// As [`EffectPasses::key`].
+    fn key(&self) -> Vec<u8>;
+
+    /// Records the transition from `before` (the stack beneath the layer)
+    /// and `with_layer` (the stack with the layer composited), both
+    /// covering the frame. `Ok(None)` when the program cannot run (today's
+    /// `acc = withLayer`); `Err` fails the layer.
+    fn record(
+        &self,
+        cx: &mut EffectContext<'_>,
+        before: Covered<'_>,
+        with_layer: Covered<'_>,
+    ) -> Result<Option<Target>, String>;
+}
+
 /// Prepares a layer's effects.
 pub trait EffectHost: Send + Sync {
     /// The renderable effects of `layer` at `frame.time`, or `Ok(None)`
-    /// when none renders (every effect off or missing). `Err` names what
-    /// this host cannot draw, which routes the composition.
+    /// when none renders (every effect off or missing). The inner `Err`
+    /// names what this host cannot draw, which routes the composition; the
+    /// outer one is a script error evaluating the layer (a layer failure).
     fn prepare<'d>(
         &self,
         scope: &mut Scope<'_, 'd>,
         layer: &'d Node,
         frame: EffectFrame,
-    ) -> Result<Option<PreparedEffects>, Feature>;
+    ) -> JsResult<Result<Option<PreparedEffects>, Feature>>;
+
+    /// Whether a transition type is registered (`PM.transitionDef`), for
+    /// `activeTransition` and the group boundary rule.
+    fn transition_known(&self, _ty: &JsString) -> bool {
+        true
+    }
+
+    /// The active transition of `layer` at `frame.time`, or `Ok(None)` when
+    /// none is active. A host that draws no transitions routes them.
+    fn prepare_transition<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        frame: EffectFrame,
+    ) -> JsResult<Result<Option<PreparedTransition>, Feature>> {
+        let active = scope.active_transition(layer, frame.time, &|ty| self.transition_known(ty))?;
+        Ok(match active {
+            Some(_) => Err(Feature::Transition),
+            None => Ok(None),
+        })
+    }
 }
 
 #[cfg(test)]

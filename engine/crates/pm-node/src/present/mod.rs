@@ -90,6 +90,11 @@ pub enum FrameSource {
 /// without an output, and runs that must not open one).
 pub const HOST_CLOCK_ENV: &str = "POWERMOVE_ENGINE_HOST_CLOCK";
 
+/// The folder translated GLSL programs are kept in across launches (plan
+/// section 11, "cache by source hash"); main passes its engine cache's
+/// `Shader Cache` folder. Unset: programs are kept in memory only.
+pub const SHADER_CACHE_ENV: &str = "POWERMOVE_ENGINE_SHADER_CACHE";
+
 #[derive(Debug, Clone)]
 pub struct PresenterConfig {
     pub thread: ThreadConfig,
@@ -133,6 +138,9 @@ impl PresenterConfig {
                 remote_rate: env(REMOTE_RATE_ENV).as_deref() == Some("1"),
                 document: env(SOURCE_ENV).as_deref() == Some("document"),
                 host_clock: env(HOST_CLOCK_ENV).as_deref() == Some("1"),
+                shader_cache: env(SHADER_CACHE_ENV)
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::PathBuf::from),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),
@@ -406,6 +414,24 @@ impl FramePresenter for BridgePresenter {
         self.send(Command::Document {
             key: (port, session),
             update,
+        });
+    }
+
+    fn definitions(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+        registered: &[(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )],
+    ) {
+        self.send(Command::Definitions {
+            key: (port, session),
+            set: std::sync::Arc::new(set.clone()),
+            registered: registered.to_vec(),
         });
     }
 
