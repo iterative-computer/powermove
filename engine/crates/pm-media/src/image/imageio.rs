@@ -98,6 +98,7 @@ unsafe extern "C" {
         intent: i32,
     ) -> CGImageRef;
     fn CGImageRelease(img: CGImageRef);
+    fn CGImageGetRenderingIntent(img: CGImageRef) -> i32;
     fn CGContextSetRenderingIntent(ctx: CGContextRef, intent: i32);
     fn CGContextSetInterpolationQuality(ctx: CGContextRef, quality: i32);
 }
@@ -325,6 +326,8 @@ const ORDER_MASK: u32 = 0x7000;
 const ORDER_16_LITTLE: u32 = 1 << 12;
 const ORDER_32_LITTLE: u32 = 2 << 12;
 const PREMULTIPLIED_LAST: u32 = 1;
+const ALPHA_LAST: u32 = 3;
+const ALPHA_FIRST: u32 = 4;
 /// `kCGImageAlphaNoneSkipLast`.
 const NONE_SKIP_LAST: u32 = 5;
 
@@ -489,44 +492,47 @@ pub fn read_frame(
             icc_bytes,
         )
     } else {
-        // Other color models: draw into 16-bit premultiplied sRGB.
-        let stride = w * 8;
-        let mut buf = vec![0u16; w * h * 4];
-        unsafe {
-            let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            let ctx = CGBitmapContextCreate(
-                buf.as_mut_ptr() as *mut c_void,
-                w,
-                h,
-                16,
-                stride,
-                srgb,
-                PREMULTIPLIED_LAST | ORDER_16_LITTLE,
-            );
-            CGColorSpaceRelease(srgb);
-            if ctx.is_null() {
-                return Err(MediaError::Image(
-                    "could not create a bitmap context".into(),
-                ));
+        // Other color models (CMYK, Lab, indexed) and packings: ColorSync
+        // draws them through the file's profile into 16-bit sRGB, so the
+        // samples are sRGB from here on and the profile is kept for the
+        // facts only (`IccClass::ConvertedToSrgb`).
+        //
+        // A bitmap context only holds premultiplied alpha, and ColorSync
+        // converts a straight-alpha image premultiplied, so the color under
+        // partial alpha would not be the file's color converted. Straight
+        // alpha is therefore split off: the color converts as an opaque
+        // image and the file's alpha is attached unchanged, keeping the
+        // file's (straight) reading for alpha overrides.
+        let straight = matches!(alpha_info, ALPHA_LAST | ALPHA_FIRST);
+        let split = if straight {
+            unsafe { split_straight_alpha(p, space, w, h, bpc, comps, row, info) }
+        } else {
+            None
+        };
+        let (buf, straight) = match split {
+            Some((opaque, alpha)) => {
+                let mut buf = unsafe { draw_srgb16(opaque.as_mut_ptr(), w, h)? };
+                for (px, a) in buf.chunks_exact_mut(4).zip(alpha) {
+                    px[3] = a;
+                }
+                (buf, true)
             }
-            CGContextDrawImage(
-                ctx,
-                CGRect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: w as f64,
-                    h: h as f64,
-                },
-                p,
-            );
-            CGContextRelease(ctx);
-        }
+            None => {
+                let mut buf = unsafe { draw_srgb16(p, w, h)? };
+                // A packing the split does not read: divide the drawn color
+                // back out (approximate under partial alpha).
+                if straight {
+                    unpremultiply_u16(&mut buf);
+                }
+                (buf, straight)
+            }
+        };
         (
             Unpacked::U16(buf),
             16,
             false,
-            true,
-            Some(icc::IccClass::Other),
+            !straight,
+            Some(icc::IccClass::ConvertedToSrgb),
             icc_bytes,
         )
     };
@@ -577,6 +583,155 @@ pub fn read_frame(
         },
         orientation,
     })
+}
+
+/// Draws `img` into 16-bit premultiplied sRGB (little-endian RGBA)
+/// through ColorSync.
+unsafe fn draw_srgb16(img: CGImageRef, w: usize, h: usize) -> Result<Vec<u16>> {
+    let mut buf = vec![0u16; w * h * 4];
+    unsafe {
+        let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            16,
+            w * 8,
+            srgb,
+            PREMULTIPLIED_LAST | ORDER_16_LITTLE,
+        );
+        CGColorSpaceRelease(srgb);
+        if ctx.is_null() {
+            return Err(MediaError::Image(
+                "could not create a bitmap context".into(),
+            ));
+        }
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+    }
+    Ok(buf)
+}
+
+/// An owned `CGImage`, released on drop.
+struct OwnedImage(CGImageRef);
+
+impl OwnedImage {
+    fn as_mut_ptr(&self) -> CGImageRef {
+        self.0
+    }
+}
+
+impl Drop for OwnedImage {
+    fn drop(&mut self) {
+        unsafe { CGImageRelease(self.0) }
+    }
+}
+
+/// Splits an integer image with straight alpha (8 or 16 bits, alpha first
+/// or last, big-endian or 16-bit little-endian components) into an opaque
+/// image of its color in the same color space and its alpha as 16-bit
+/// codes. None for packings it does not read.
+#[allow(clippy::too_many_arguments)]
+unsafe fn split_straight_alpha(
+    img: CGImageRef,
+    space: CGColorSpaceRef,
+    w: usize,
+    h: usize,
+    bpc: usize,
+    comps: usize,
+    row: usize,
+    info: u32,
+) -> Option<(OwnedImage, Vec<u16>)> {
+    const ORDER_16_BIG: u32 = 3 << 12;
+    const ORDER_32_BIG: u32 = 4 << 12;
+    if space.is_null() || info & FLOAT != 0 {
+        return None;
+    }
+    let n = unsafe { CGColorSpaceGetNumberOfComponents(space) };
+    let order = info & ORDER_MASK;
+    let little = match (bpc, order) {
+        (8, 0) | (8, ORDER_32_BIG) | (16, 0) | (16, ORDER_16_BIG) => false,
+        (16, ORDER_16_LITTLE) => true,
+        _ => return None,
+    };
+    if comps != n + 1 {
+        return None;
+    }
+    let first = info & ALPHA_MASK == ALPHA_FIRST;
+    let bytes_per = bpc / 8;
+    let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(img))) }?;
+    let bytes = unsafe { cf_data_bytes(data.as_ptr()) }?;
+    if bytes.len() < row * (h - 1) + w * comps * bytes_per {
+        return None;
+    }
+    let mut color = Vec::with_capacity(w * h * n * bytes_per);
+    let mut alpha = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for px in bytes[y * row..y * row + w * comps * bytes_per].chunks_exact(comps * bytes_per) {
+            let (a, c) = if first {
+                px.split_at(bytes_per)
+            } else {
+                let (c, a) = px.split_at(n * bytes_per);
+                (a, c)
+            };
+            color.extend_from_slice(c);
+            alpha.push(match (bytes_per, little) {
+                (1, _) => u16::from(a[0]) * 257,
+                (_, false) => u16::from_be_bytes([a[0], a[1]]),
+                (_, true) => u16::from_le_bytes([a[0], a[1]]),
+            });
+        }
+    }
+    let cf = unsafe {
+        Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            color.as_ptr(),
+            color.len() as isize,
+        ))
+    }?;
+    unsafe {
+        let provider = CGDataProviderCreateWithCFData(cf.as_ptr());
+        let opaque = CGImageCreate(
+            w,
+            h,
+            bpc,
+            bpc * n,
+            w * n * bytes_per,
+            space,
+            order,
+            provider,
+            std::ptr::null(),
+            false,
+            // The file's intent, as drawing the image itself would use.
+            CGImageGetRenderingIntent(img),
+        );
+        CGDataProviderRelease(provider);
+        (!opaque.is_null()).then(|| (OwnedImage(opaque), alpha))
+    }
+}
+
+/// Premultiplied 16-bit RGBA to straight, rounded; fully transparent
+/// pixels keep color 0.
+fn unpremultiply_u16(px: &mut [u16]) {
+    for p in px.chunks_exact_mut(4) {
+        let a = u32::from(p[3]);
+        if a == 0 || a == 65535 {
+            continue;
+        }
+        for c in &mut p[..3] {
+            *c = ((u32::from(*c) * 65535 + a / 2) / a).min(65535) as u16;
+        }
+    }
 }
 
 enum Unpacked {

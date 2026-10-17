@@ -167,6 +167,12 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
             imageio::read_frame(path, 0, pool, format)
         }
+        // The `image` crate reads RGB and gray TIFFs only: it fails on
+        // palette, YCbCr, and Lab, and turns CMYK into RGB without its
+        // profile. ImageIO converts those through their profile.
+        ImageFormat::Tiff if !matches!(raster::tiff_photometric(path)?, Some(0..=2)) => {
+            imageio::read_frame(path, 0, pool, format)
+        }
         _ => raster::read(path, pool, format),
     }
 }

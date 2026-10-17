@@ -22,6 +22,67 @@ fn exif_number(o: Orientation) -> u8 {
     }
 }
 
+/// The first image's `PhotometricInterpretation` (tag 262) of a classic or
+/// Big TIFF, None when the file has no such tag or is not a TIFF.
+pub(crate) fn tiff_photometric(path: &Path) -> Result<Option<u16>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 16];
+    if f.read(&mut head)? < 8 {
+        return Ok(None);
+    }
+    let le = match &head[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Ok(None),
+    };
+    let u16_at = |b: &[u8]| {
+        let b = [b[0], b[1]];
+        if le {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        }
+    };
+    let u32_at = |b: &[u8]| {
+        let b = [b[0], b[1], b[2], b[3]];
+        if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
+    };
+    let u64_at = |b: &[u8]| {
+        let b: [u8; 8] = b[..8].try_into().unwrap();
+        if le {
+            u64::from_le_bytes(b)
+        } else {
+            u64::from_be_bytes(b)
+        }
+    };
+    // (IFD offset, entry-count size, entry size)
+    let (ifd, count_size, entry_size) = match u16_at(&head[2..]) {
+        42 => (u64::from(u32_at(&head[4..])), 2, 12),
+        43 => (u64_at(&head[8..]), 8, 20),
+        _ => return Ok(None),
+    };
+    f.seek(SeekFrom::Start(ifd))?;
+    let mut count = [0u8; 8];
+    f.read_exact(&mut count[..count_size])?;
+    let n = if count_size == 2 {
+        u64::from(u16_at(&count))
+    } else {
+        u64_at(&count)
+    };
+    // Tags are sorted, and 262 comes early; a bounded read covers it.
+    let mut entries = vec![0u8; n.min(64) as usize * entry_size];
+    f.read_exact(&mut entries)?;
+    Ok(entries
+        .chunks_exact(entry_size)
+        .find(|e| u16_at(e) == 262)
+        .map(|e| u16_at(&e[if entry_size == 12 { 8 } else { 12 }..])))
+}
+
 pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillImage> {
     let err = |e: image::ImageError| MediaError::Image(e.to_string());
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
