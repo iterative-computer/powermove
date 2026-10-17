@@ -693,11 +693,11 @@ impl EffectHost for Host {
         scope: &mut pm_eval::Scope<'_, 'd>,
         layer: &'d pm_model::Node,
         _frame: EffectFrame,
-    ) -> Result<Option<PreparedEffects>, Feature> {
+    ) -> pm_eval::JsResult<Result<Option<PreparedEffects>, Feature>> {
         let _ = scope;
         let fx = pm_eval::node::array(pm_eval::node::member(Some(layer), "fx")).unwrap_or(&[]);
         let Some(first) = fx.first() else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         let ty = pm_eval::node::string(pm_eval::node::member(Some(first), "type"))
             .unwrap()
@@ -708,13 +708,13 @@ impl EffectHost for Host {
             "shift-full" => (TestEffect::ShiftRight(6), Padding::Full),
             "fail" => (TestEffect::Fail, Padding::NONE),
             "nothing" => (TestEffect::Nothing, Padding::NONE),
-            _ => return Err(Feature::Effects),
+            _ => return Ok(Err(Feature::Effects)),
         };
-        Ok(Some(PreparedEffects {
+        Ok(Ok(Some(PreparedEffects {
             padding,
             backdrop: false,
             passes: Arc::new(Passes(effect)),
-        }))
+        })))
     }
 }
 

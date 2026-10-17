@@ -41,7 +41,9 @@ use pm_protocol::color::BlendMode;
 use crate::plan::{CompPlan, Draw};
 
 pub use color::{ColorSettings, project_color};
-pub use effects::{EffectHost, EffectPasses, Padding, PreparedEffects};
+pub use effects::{
+    EffectHost, EffectPasses, Padding, PreparedEffects, PreparedTransition, TransitionPasses,
+};
 
 /// Today's `MASK_MAX`: the parametric route evaluates at most 8 masks.
 pub const MASK_MAX: usize = pm_vector::mask::MAX_PARAMETRIC_MASKS;
@@ -82,6 +84,8 @@ pub struct LayerNode {
     /// Opacity applied at the composite (`compositeAlpha`: the group's
     /// opacity for a group, 1 otherwise).
     pub alpha: f64,
+    /// The active transition, run after the composite (`runTransition`).
+    pub transition: Option<PreparedTransition>,
 }
 
 /// An adjustment layer: its effects over the accumulator beneath it.

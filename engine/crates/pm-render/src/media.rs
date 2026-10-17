@@ -576,15 +576,28 @@ impl MediaCache {
         path: &Path,
         instance: u64,
         seconds: f64,
+        rate: Option<pm_time::Rate>,
         export: bool,
         working: WorkingEncoding,
         precision: Precision,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
-        let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
-        let Some(n) = src.select(ticks) else {
+        let n = match rate {
+            // Interpret Footage frame rate: frame n at n / rate, clamped to
+            // the file's last frame (`crate::retime`).
+            Some(rate) => crate::retime::override_frame(seconds, rate)
+                .map(|n| n.min(src.pts.len().saturating_sub(1))),
+            None => {
+                let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
+                src.select(ticks)
+            }
+        };
+        let Some(n) = n else {
             return Ok(None);
         };
+        if src.pts.is_empty() {
+            return Ok(None);
+        }
         let key_of = |frame: usize| FrameKey {
             path: path.to_path_buf(),
             frame,

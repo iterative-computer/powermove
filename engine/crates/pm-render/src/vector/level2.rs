@@ -6,9 +6,9 @@
 //! transform; coverage comes from Vello (or `vello_cpu`), and the engine's
 //! float paint pass composites each item ([`super::cache`]).
 
-use pm_vector::kurbo::{Affine, Rect, RoundedRect, Shape};
 use pm_eval::transform::Mat2d;
 use pm_vector::canvas2d::shape::{PathColors, ShapeColors};
+use pm_vector::kurbo::{Affine, Rect, RoundedRect, Shape};
 use pm_vector::path::PathLayer;
 use pm_vector::render::scene::{CoverageItem, CoverageScene, FillRule, ItemStyle};
 use pm_vector::shape::{ShapeContent, shape_geometry};
@@ -25,7 +25,12 @@ pub fn shape_scene(d: &ShapeContent, colors: &ShapeColors, world: &Mat2d) -> Opt
     let g = shape_geometry(d).ok()?;
     let to_layer = Affine::translate((-d.w / 2.0, -d.h / 2.0));
     let mut scene = CoverageScene::default();
-    scene.push_shape(&g, affine(world) * to_layer, &colors.color, &colors.stroke_color);
+    scene.push_shape(
+        &g,
+        affine(world) * to_layer,
+        &colors.color,
+        &colors.stroke_color,
+    );
     Some(scene)
 }
 

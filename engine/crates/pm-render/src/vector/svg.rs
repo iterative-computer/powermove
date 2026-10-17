@@ -61,7 +61,11 @@ pub fn document(path: &Path) -> Result<(Arc<SvgDocument>, Stamp), String> {
     if docs.len() >= MAX_DOCUMENTS {
         docs.remove(0);
     }
-    docs.push(Cached { path: path.to_path_buf(), stamp, doc: doc.clone() });
+    docs.push(Cached {
+        path: path.to_path_buf(),
+        stamp,
+        doc: doc.clone(),
+    });
     Ok((doc, stamp))
 }
 
@@ -112,10 +116,16 @@ pub fn plan_svg(
     let Some(bounds) = doc.user_bounds() else {
         return Ok(SvgPlan::Drawn(None));
     };
-    let inside = bounds.x0 >= clip.x0 && bounds.y0 >= clip.y0 && bounds.x1 <= clip.x1 && bounds.y1 <= clip.y1;
+    let inside = bounds.x0 >= clip.x0
+        && bounds.y0 >= clip.y0
+        && bounds.x1 <= clip.x1
+        && bounds.y1 <= clip.y1;
     if inside && let Some(scene) = doc.scene(m) {
         return Ok(SvgPlan::Drawn(scene.pixel_bounds(target).map(|rect| {
-            Box::new(VectorQuad::Device { source: VectorSource::Scene { scene, rect }, rect })
+            Box::new(VectorQuad::Device {
+                source: VectorSource::Scene { scene, rect },
+                rect,
+            })
         })));
     }
     let visible = bounds.intersect(clip);
@@ -164,11 +174,14 @@ mod tests {
         // A 200 × 100 box at (100, 50) in a 400 × 200 target.
         let world = [1.0, 0.0, 0.0, 1.0, 200.0, 100.0];
         let target = PixelRect::new(0, 0, 400, 200);
-        let SvgPlan::Drawn(Some(quad)) = plan_svg(&p, 200.0, 100.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap()
+        let SvgPlan::Drawn(Some(quad)) =
+            plan_svg(&p, 200.0, 100.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap()
         else {
             panic!("drawn");
         };
-        let VectorQuad::Device { source, rect } = *quad else { panic!("device") };
+        let VectorQuad::Device { source, rect } = *quad else {
+            panic!("device")
+        };
         assert!(matches!(source, VectorSource::Scene { .. }));
         // The rect spans user (10..90, 10..40) × 2 from (100, 50).
         assert_eq!(rect, PixelRect::new(120, 70, 160, 60));
@@ -181,15 +194,26 @@ mod tests {
         let target = PixelRect::new(0, 0, 400, 200);
         // `cover` in a square box crops the sides: resvg with a clip.
         let uv = crate::plan::fit_uv("cover", 100.0, 50.0, 100.0, 100.0);
-        let SvgPlan::Drawn(Some(quad)) = plan_svg(&p, 100.0, 100.0, uv, &world, target).unwrap() else {
+        let SvgPlan::Drawn(Some(quad)) = plan_svg(&p, 100.0, 100.0, uv, &world, target).unwrap()
+        else {
             panic!("drawn");
         };
-        let VectorQuad::Device { source, .. } = *quad else { panic!("device") };
-        let VectorSource::SvgRaster { clip, .. } = source else { panic!("raster") };
+        let VectorQuad::Device { source, .. } = *quad else {
+            panic!("device")
+        };
+        let VectorSource::SvgRaster { clip, .. } = source else {
+            panic!("raster")
+        };
         // The clip is the box: 100 × 100 centered at (200, 100).
         assert_eq!(clip[0], [150.0, 50.0]);
         assert_eq!(clip[2], [250.0, 150.0]);
-        let t = write("text.svg", r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="1" y="8">a</text></svg>"##);
-        assert!(matches!(plan_svg(&t, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap(), SvgPlan::Text));
+        let t = write(
+            "text.svg",
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="1" y="8">a</text></svg>"##,
+        );
+        assert!(matches!(
+            plan_svg(&t, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap(),
+            SvgPlan::Text
+        ));
     }
 }

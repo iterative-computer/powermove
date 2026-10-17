@@ -304,21 +304,50 @@ impl VectorCache {
             return Ok(e.view.clone());
         }
         let (texture, bytes) = match source {
-            VectorSource::Shape { content, colors, scale } => {
+            VectorSource::Shape {
+                content,
+                colors,
+                scale,
+            } => {
                 let b = raster_shape(content, colors, *scale).map_err(|e| e.to_string())?;
-                (upload_rgba8(device, queue, b.width, b.height, &b.rgba), u64::from(b.width) * u64::from(b.height) * 4)
+                (
+                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+                    u64::from(b.width) * u64::from(b.height) * 4,
+                )
             }
-            VectorSource::Paths { nodes, colors, scale } => {
+            VectorSource::Paths {
+                nodes,
+                colors,
+                scale,
+            } => {
                 let layer = PathLayer::new(nodes);
                 let (b, _) = raster_paths(&layer, colors, *scale).map_err(|e| e.to_string())?;
-                (upload_rgba8(device, queue, b.width, b.height, &b.rgba), u64::from(b.width) * u64::from(b.height) * 4)
+                (
+                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+                    u64::from(b.width) * u64::from(b.height) * 4,
+                )
             }
-            VectorSource::Scene { scene, rect } => self.render_scene(device, queue, scene, *rect, precision)?,
-            VectorSource::SvgRaster { path, transform, rect, clip, .. } => {
+            VectorSource::Scene { scene, rect } => {
+                self.render_scene(device, queue, scene, *rect, precision)?
+            }
+            VectorSource::SvgRaster {
+                path,
+                transform,
+                rect,
+                clip,
+                ..
+            } => {
                 let (doc, _) = super::svg::document(path)?;
                 let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
-                let b = doc.raster_device(pm_vector::kurbo::Affine::new(*transform), *rect, Some(&clip));
-                (upload_rgba8(device, queue, b.width, b.height, &b.rgba), u64::from(b.width) * u64::from(b.height) * 4)
+                let b = doc.raster_device(
+                    pm_vector::kurbo::Affine::new(*transform),
+                    *rect,
+                    Some(&clip),
+                );
+                (
+                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+                    u64::from(b.width) * u64::from(b.height) * 4,
+                )
             }
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -331,7 +360,16 @@ impl VectorCache {
             false,
         );
         self.bytes += bytes;
-        self.entries.insert(key, Entry { _texture: texture, view: view.clone(), bytes, used: self.tick, frame: self.frame });
+        self.entries.insert(
+            key,
+            Entry {
+                _texture: texture,
+                view: view.clone(),
+                bytes,
+                used: self.tick,
+                frame: self.frame,
+            },
+        );
         Ok(view)
     }
 
@@ -339,7 +377,9 @@ impl VectorCache {
         if self.backend == CoverageBackend::Cpu {
             return None;
         }
-        self.gpu.get_or_insert_with(|| GpuCoverage::new(device).ok()).as_mut()
+        self.gpu
+            .get_or_insert_with(|| GpuCoverage::new(device).ok())
+            .as_mut()
     }
 
     /// Renders a level 2 scene: coverage pages, then the float paint pass
@@ -361,7 +401,8 @@ impl VectorCache {
             for (i, &(w, h)) in layout.pages.iter().enumerate() {
                 let tex = device.create_texture(&GpuCoverage::page_descriptor(w, h));
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                gpu.render_page(device, queue, scene, &layout, i, &view).map_err(|e| e.to_string())?;
+                gpu.render_page(device, queue, scene, &layout, i, &view)
+                    .map_err(|e| e.to_string())?;
                 pages.push(tex);
             }
         } else {
@@ -377,12 +418,18 @@ impl VectorCache {
         };
         let out = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pm vector level 2"),
-            size: wgpu::Extent3d { width: rect.width.max(1), height: rect.height.max(1), depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: rect.width.max(1),
+                height: rect.height.max(1),
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
@@ -395,7 +442,9 @@ impl VectorCache {
             mapped_at_creation: false,
         });
         queue.write_buffer(&gbuf, 0, &f32_bytes(&globals));
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pm vector paint") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pm vector paint"),
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm vector paint"),
@@ -403,14 +452,21 @@ impl VectorCache {
                     view: &out_view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if format == wgpu::TextureFormat::Rgba32Float { &paint.pipeline_f32 } else { &paint.pipeline_f16 });
+            pass.set_pipeline(if format == wgpu::TextureFormat::Rgba32Float {
+                &paint.pipeline_f32
+            } else {
+                &paint.pipeline_f16
+            });
             // Items draw in scene order; consecutive items on one page share
             // a draw.
             let mut i = 0;
@@ -448,8 +504,14 @@ impl VectorCache {
                         label: Some("pm vector paint"),
                         layout: &paint.layout,
                         entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: gbuf.as_entire_binding() },
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: gbuf.as_entire_binding(),
+                            },
                         ],
                     })
                 });
@@ -460,8 +522,15 @@ impl VectorCache {
             }
         }
         queue.submit([encoder.finish()]);
-        let bpp = if format == wgpu::TextureFormat::Rgba32Float { 16 } else { 8 };
-        Ok((out, u64::from(rect.width.max(1)) * u64::from(rect.height.max(1)) * bpp))
+        let bpp = if format == wgpu::TextureFormat::Rgba32Float {
+            16
+        } else {
+            8
+        };
+        Ok((
+            out,
+            u64::from(rect.width.max(1)) * u64::from(rect.height.max(1)) * bpp,
+        ))
     }
 }
 
@@ -470,22 +539,47 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 /// A premultiplied RGBA8 texture, top-down.
-fn upload_rgba8(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) -> wgpu::Texture {
+fn upload_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::Texture {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pm vector raster"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
         rgba,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     tex
 }

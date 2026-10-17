@@ -406,6 +406,41 @@ fn engine_retiming_uses_the_owning_composition_rate() {
     );
 }
 
+#[test]
+fn engine_retiming_matches_today_at_the_root() {
+    // Amendment 16: at the root the engine's step is the legacy step, so an
+    // eased speed (which the midpoint rule does not integrate exactly)
+    // answers bit for bit what `retiming.ts` answers, at every rate.
+    let eased = r#"{"v":1,"kf":[{"t":0,"v":0.5,"i":"a","eo":[0.8,0],"ei":[0.2,1]},{"t":4,"v":4,"i":"b","eo":[0.8,0],"ei":[0.2,1]}],"expr":null}"#;
+    for fps in ["30", "24", "29.97", "60", "120", "23.976", "59.94"] {
+        let text = format!(
+            r#"{{"id":"P","compId":"C","w":640,"h":360,"fps":{fps},"dur":10,"layers":[{}],"comps":{{}},"params":{{}}}}"#,
+            video(eased)
+        );
+        let d = doc(&text);
+        let comp = Comp::resolve(&d, "C").unwrap();
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let l = &comp.layers()[0];
+        let mut cache = RetimeCache::new();
+        for i in 0..400 {
+            // Off-frame and on-frame times, before and after the layer start.
+            let t = -0.1 + i as f64 * 0.013_7;
+            let engine = scope
+                .source_time_with(l, t, Retiming::Engine, Some(&mut cache))
+                .unwrap();
+            let legacy = scope
+                .source_time_with(l, t, Retiming::Legacy, None)
+                .unwrap();
+            assert_eq!(
+                engine.to_bits(),
+                legacy.to_bits(),
+                "{fps} fps at {t}: engine {engine} legacy {legacy}"
+            );
+        }
+    }
+}
+
 fn bounds_of<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node) -> Option<pm_eval::bounds::Bounds> {
     scope.bounds(layer, 0.0, &mut NoText, &mut NoHost).unwrap()
 }

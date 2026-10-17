@@ -164,6 +164,16 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
     },
+    /// The session's definitions (contract 10), and those a delta
+    /// registered again.
+    Definitions {
+        key: Key,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    },
     /// An asset's file, or `None` when it is offline or gone.
     Media {
         key: Key,
@@ -211,6 +221,18 @@ pub struct ThreadConfig {
     /// Play without the audio device: the line runs on the host clock
     /// (tests on machines without an output, and the S1 harness).
     pub host_clock: bool,
+    /// The program cache folder (`SHADER_CACHE_ENV`).
+    pub shader_cache: Option<PathBuf>,
+}
+
+/// The device's composer, keeping translated programs in the configured
+/// cache folder.
+fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -> Composer {
+    let mut composer = Composer::new(device, queue);
+    composer
+        .renderer()
+        .set_program_cache_dir(config.shader_cache.clone());
+    composer
 }
 
 /// One frame's record for the S1 harness.
@@ -698,6 +720,41 @@ impl Thread {
                 }
             }
             Command::Document { key, update } => self.document(key, update),
+            Command::Definitions {
+                key,
+                set,
+                registered,
+            } => {
+                let doc = self.docs.entry(key).or_default();
+                doc.set_definitions(set, registered);
+                let definitions = doc.definitions().cloned();
+                let registered = doc.take_registered();
+                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // Translate now (not at the next frame) and report each
+                // definition that fails (contract 10; the kernel fills the
+                // shader UI from these).
+                let mut failures = Vec::new();
+                if self.config.document
+                    && let Some(gpu) = self.gpu.as_mut()
+                {
+                    let composer = gpu
+                        .composer
+                        .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+                    failures = composer
+                        .use_definitions(key, definitions.as_ref(), &registered)
+                        .unwrap_or_default();
+                } else if let Some(doc) = self.docs.get_mut(&key) {
+                    // Applied with the view's next frame.
+                    doc.keep_registered(registered);
+                }
+                for error in failures {
+                    let report = pm_protocol::error::FailureReport { revision, error };
+                    self.event(key, Event::Failure(report), None);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
             Command::Media { key, asset, path } => {
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -723,6 +780,9 @@ impl Thread {
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            composer.forget_definitions(key);
+        }
         let mut stats = self.stats();
         stats.routes.remove(&view_name(key));
         stats.audio.remove(&view_name(key));
@@ -1973,8 +2033,13 @@ impl Thread {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu
                 .composer
-                .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
+                .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
             let composition = view.state.composition.as_str().to_owned();
+            // The renderer draws with this view's definitions (one renderer
+            // serves every view on the device).
+            let registered = doc.take_registered();
+            let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            composer.set_playing(timing.is_some());
             // Stand-ins only for paused frames after a scrub seek; read the
             // counter first so a frame landing during the render is not
             // missed.
@@ -2005,6 +2070,22 @@ impl Thread {
                     stats.layer_failures += composed.failures.len() as u64;
                     stats.stand_in_frames += u64::from(stand_in);
                     stats.scrub = Some(scrub_stats);
+                    drop(stats);
+                    // Effects the GPU watchdog turned off (measured on an
+                    // earlier frame): reported at this frame's revision.
+                    for error in composer.renderer().watchdog_reports(false) {
+                        let report = pm_protocol::error::FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
