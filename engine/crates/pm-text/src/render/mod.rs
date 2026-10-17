@@ -7,7 +7,7 @@
 //!   italic, the profile's expansion) and color bitmap glyphs placed as
 //!   Canvas2D places them, both cached across frames.
 //! - [`scene`]: a text raster as ordered canvas draws (coverage items and
-//!   image items) in device pixels; [`raster`] builds the scene of a text
+//!   image items) in device pixels; [`text_raster`] builds the scene of a text
 //!   layer's `rasterText` canvas.
 //! - [`atlas`]: coverage cells 1:1 with device pixels.
 //! - [`cpu`], [`paint`]: the `vello_cpu` coverage fallback and the float
