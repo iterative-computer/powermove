@@ -647,7 +647,12 @@ fn still_document(
             1.0,
         )],
     );
-    asset(&mut doc, "img", "image", "png", w, h, 0.0);
+    let format = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    asset(&mut doc, "img", "image", &format, w, h, 0.0);
     if let Some(i) = interpret {
         doc["assets"]["img"]["interpret"] = i;
         doc["requiresEngine"] = json!("native");
@@ -930,6 +935,191 @@ fn interpreted_icc_stills_read_alpha_and_profile_overrides() {
         assert!(compared >= 64, "{name}: {compared} pixels compared");
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// A still's stored samples as 0..1 RGBA (8- or 16-bit RGBA planes).
+fn stored_rgba(path: &Path) -> (Vec<[f64; 4]>, pm_media::image::StillImage) {
+    let pool = pm_media::pool::FramePool::new(0);
+    let s = pm_media::image::read(path, &pool).unwrap();
+    let f = &s.frame;
+    let (w, h) = (f.format.width, f.format.height);
+    let px = f
+        .with_planes(|p| {
+            let sixteen = p[0].desc.format == pm_media::frame::PlaneFormat::Rgba16;
+            let mut out = Vec::with_capacity(w * h);
+            for y in 0..h {
+                for x in 0..w {
+                    out.push([0, 1, 2, 3].map(|c| unsafe {
+                        let row = p[0].ptr.add(y * p[0].stride);
+                        if sixteen {
+                            let b = row.add(x * 8 + c * 2);
+                            f64::from(u16::from_le_bytes([*b, *b.add(1)])) / 65535.0
+                        } else {
+                            f64::from(*row.add(x * 4 + c)) / 255.0
+                        }
+                    }));
+                }
+            }
+            out
+        })
+        .unwrap();
+    (px, s)
+}
+
+/// CMYK stills (section 9): ImageIO converts them to sRGB through their
+/// profile once, so with Interpret Footage overrides the renderer draws
+/// those samples and never applies the profile again (pm-media's
+/// `converted_stills_are_srgb_once` compares the samples with ColorSync's
+/// conversion); without overrides they route to the legacy renderer, which
+/// converts CMYK itself. A straight-alpha CMYK TIFF keeps its alpha reading.
+#[test]
+fn interpreted_cmyk_stills_draw_their_converted_samples() {
+    let (Some(jpg), Some(tiffa)) = (formats("image/cmyk.jpg"), formats("image/cmyka.tiff")) else {
+        return;
+    };
+    let mut r = Renderer::headless().unwrap();
+    let request = |w, h| RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
+    let e = |v: f64| f64::from(pm_color::transfer::display_encode_f32(v as f32));
+    let d = |v: f64| f64::from(pm_color::transfer::display_decode_f32(v as f32));
+    let p3 = pm_color::primaries::conversion(
+        pm_protocol::color::Primaries::DisplayP3,
+        pm_protocol::color::Primaries::Bt709,
+    )
+    .unwrap();
+    type Want = Box<dyn Fn([f64; 4]) -> [f64; 4]>;
+    for (path, (w, h), straight) in [(&jpg, (320u32, 180u32), false), (&tiffa, (96, 64), true)] {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let (doc, res) = still_document(path, (w, h), None);
+        assert!(
+            r.render(&load(&doc), "Ptest-root", ticks(0.0), &request(w, h), &res)
+                .is_err(),
+            "{name}: CMYK stills are routed without an interpretation"
+        );
+        let (stored, still) = stored_rgba(path);
+        assert_eq!(
+            still.color.icc_class,
+            Some(pm_media::image::icc::IccClass::ConvertedToSrgb)
+        );
+        let cases: Vec<(Value, Want)> = vec![
+            // As the file says: straight color times alpha (opaque: as is).
+            (
+                json!({ "pixelAspect": [1, 1] }),
+                Box::new(|c| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]),
+            ),
+            (
+                json!({ "alpha": "ignore" }),
+                Box::new(|c| [c[0], c[1], c[2], 1.0]),
+            ),
+            (
+                json!({ "primaries": "displayP3" }),
+                Box::new(move |c| {
+                    let l = pm_color::primaries::apply(&p3, [d(c[0]), d(c[1]), d(c[2])]);
+                    [e(l[0]) * c[3], e(l[1]) * c[3], e(l[2]) * c[3], c[3]]
+                }),
+            ),
+        ];
+        for (interp, want) in cases {
+            let i = Interpretation::from_json(&interp).0;
+            assert_eq!(
+                pm_render::media::probe_interpreted_image(path, &i),
+                Ok(()),
+                "{name} {interp}"
+            );
+            let (doc, res) = still_document(path, (w, h), Some(interp.clone()));
+            let ours = render(&mut r, &doc, (w, h), 0.0, &res);
+            let mut max = 0f64;
+            for (k, c) in stored.iter().enumerate() {
+                let want = want(*c);
+                for ch in 0..4 {
+                    max = max.max((f64::from(ours[k * 4 + ch]) - want[ch]).abs() * 255.0);
+                }
+            }
+            eprintln!("{name} {interp}: max |Δ| {max:.4} CV against its converted samples");
+            assert!(max <= 0.05, "{name} {interp}: {max} CV");
+        }
+        assert_eq!(
+            straight,
+            still.color.alpha == pm_protocol::color::AlphaMode::Straight
+        );
+    }
+}
+
+/// The interpreted probes decode a still, or open and index a video, once
+/// per file size and modification time; each interpretation is resolved
+/// from those facts (capability routing asks at every document revision).
+/// Shown by replacing a file's bytes while keeping its size and time: the
+/// answers stay; a new time reads the file again.
+#[test]
+fn interpreted_probes_are_kept_per_file_stamp() {
+    use pm_render::media::{ProbeIssue, probe_interpreted_image, probe_interpreted_video};
+    let dir = std::env::temp_dir().join(format!("pm-render-probe-stamp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let interps = [
+        json!({ "alpha": "ignore" }),
+        json!({ "primaries": "displayP3" }),
+        json!({ "transfer": "gamma22", "alphaMatte": "#102030" }),
+    ]
+    .map(|j| Interpretation::from_json(&j).0);
+    let rewrite = |path: &Path| {
+        let m = std::fs::metadata(path).unwrap();
+        let modified = m.modified().unwrap();
+        std::fs::write(path, vec![0u8; m.len() as usize]).unwrap();
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(modified).unwrap();
+        modified
+    };
+    let touch = |path: &Path, t: std::time::SystemTime| {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(t + std::time::Duration::from_secs(2))
+            .unwrap();
+    };
+
+    let still = dir.join("still.png");
+    let mut info = png::Info::with_size(16, 8);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Sixteen;
+    let file = std::fs::File::create(&still).unwrap();
+    let mut writer = png::Encoder::with_info(std::io::BufWriter::new(file), info)
+        .unwrap()
+        .write_header()
+        .unwrap();
+    writer.write_image_data(&[0x40u8; 16 * 8 * 8]).unwrap();
+    writer.finish().unwrap();
+    for i in &interps {
+        assert_eq!(probe_interpreted_image(&still, i), Ok(()));
+    }
+    let t = rewrite(&still);
+    for i in &interps {
+        assert_eq!(
+            probe_interpreted_image(&still, i),
+            Ok(()),
+            "kept for the stamp"
+        );
+    }
+    touch(&still, t);
+    assert!(matches!(
+        probe_interpreted_image(&still, &interps[0]),
+        Err(ProbeIssue::Unreadable(_))
+    ));
+
+    if let Some(video) = formats("video/geom-base.mov") {
+        let copy = dir.join("video.mov");
+        std::fs::copy(&video, &copy).unwrap();
+        for i in &interps {
+            assert_eq!(probe_interpreted_video(&copy, i), Ok(()));
+        }
+        let t = rewrite(&copy);
+        for i in &interps {
+            assert_eq!(
+                probe_interpreted_video(&copy, i),
+                Ok(()),
+                "kept for the stamp"
+            );
+        }
+        touch(&copy, t);
+        assert!(probe_interpreted_video(&copy, &interps[0]).is_err());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Routing (section 25: a feature leaves `pm_render::unsupported` only with

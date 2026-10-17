@@ -12,6 +12,11 @@ Run with `python3 -I`. Subcommands:
   dvcc PROFILE LEVEL COMPAT print a Dolby Vision configuration payload
   clap W H HOFF VOFF        print a clean aperture payload (integers)
   tiff-float OUT W H        write an uncompressed RGB float32 TIFF ramp
+  tiff-cmyka OUT W H ICC [opaque]
+                            write an uncompressed 8-bit CMYK TIFF with
+                            unassociated (straight) alpha and the ICC profile
+                            at path ICC embedded; `opaque` writes the same
+                            CMYK samples without alpha
   svg OUT                   write a small SVG with gradients and text-free shapes
   ramp-ppm OUT W H MAXVAL   write an RGB ramp as a binary PPM (P6), samples
                             0..MAXVAL across (red), down (green), constant blue
@@ -167,6 +172,50 @@ def tiff_float(out, w, h):
     open(out, "wb").write(body + pixels)
 
 
+def tiff_cmyka(out, w, h, icc_path, opaque=None):
+    w, h = int(w), int(h)
+    spp = 4 if opaque == "opaque" else 5
+    icc = open(icc_path, "rb").read()
+    pixels = bytearray()
+    for y in range(h):
+        for x in range(w):
+            # Cyan ramps across, magenta down, constant yellow and black;
+            # alpha is a diagonal ramp that reaches 0 and 255.
+            pixels += bytes((
+                round(255 * x / (w - 1)),
+                round(255 * y / (h - 1)),
+                64,
+                32,
+                round(255 * (x + y) / (w + h - 2)),
+            )[:spp])
+    entries = [
+        (256, 4, 1, w), (257, 4, 1, h), (258, 3, spp, "bps"), (259, 3, 1, 1), (262, 3, 1, 5),
+        (273, 4, 1, "data"), (277, 3, 1, spp), (278, 4, 1, h), (279, 4, 1, len(pixels)),
+        (284, 3, 1, 1), (332, 3, 1, 1), (338, 3, 1, 2), (34675, 7, len(icc), "icc"),
+    ]
+    if spp == 4:
+        entries = [e for e in entries if e[0] != 338]
+    ifd_off = 8
+    extra_off = ifd_off + 2 + len(entries) * 12 + 4
+    bps_off = extra_off
+    icc_off = bps_off + 10
+    data_off = icc_off + len(icc) + (len(icc) & 1)
+    where = {"bps": bps_off, "icc": icc_off, "data": data_off}
+    ifd = struct.pack("<H", len(entries))
+    for tag, typ, count, value in entries:
+        if isinstance(value, str):
+            ifd += struct.pack("<HHII", tag, typ, count, where[value])
+        elif typ == 3:
+            ifd += struct.pack("<HHIHH", tag, typ, count, value, 0)
+        else:
+            ifd += struct.pack("<HHII", tag, typ, count, value)
+    ifd += struct.pack("<I", 0)
+    body = b"II*\x00" + struct.pack("<I", ifd_off) + ifd
+    body += struct.pack("<HHHHH", 8, 8, 8, 8, 8) + icc + b"\x00" * (len(icc) & 1)
+    assert len(body) == data_off
+    open(out, "wb").write(body + pixels)
+
+
 def svg(out):
     open(out, "w").write("""<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
   <defs>
@@ -208,6 +257,8 @@ def main():
         print(clap(*args))
     elif cmd == "tiff-float":
         tiff_float(*args)
+    elif cmd == "tiff-cmyka":
+        tiff_cmyka(*args)
     elif cmd == "svg":
         svg(*args)
     elif cmd == "ramp-ppm":

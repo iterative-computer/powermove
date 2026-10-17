@@ -16,7 +16,7 @@
 #     from the parent corpus.
 #   - MP3: libmp3lame (Homebrew FFmpeg) — FFmpeg has no native MP3 encoder.
 #   - WebP and animated WebP: cwebp and img2webp (libwebp, Homebrew).
-#   - HEIF/HEIC: sips (ImageIO).
+#   - HEIF/HEIC and CMYK stills: sips (ImageIO).
 #   - 12-bit and lossless JPEG: cjpeg (libjpeg-turbo, Homebrew) — FFmpeg's
 #     MJPEG encoder writes 8-bit baseline only.
 #   - Float TIFF, SVG, and MOV boxes FFmpeg does not write (mdcv, clli, dvcC,
@@ -229,6 +229,9 @@ ff -f lavfi -i "$IMG,format=rgb24" -frames:v 1 tiff8-rgb.tiff
 ff -f lavfi -i "$(asrc 1 $S rgba)" -frames:v 1 -compression_algo lzw tiff8-rgba-lzw.tiff
 ff -f lavfi -i "nullsrc=s=1024x8,format=rgb48le,geq=r=X*64:g=X*64:b=X*64" -frames:v 1 -compression_algo deflate tiff16-rgb.tiff
 "${TOOLS[@]}" tiff-float tiff32f-rgb.tiff 256 16
+# A palette TIFF (the image crate reads RGB and gray TIFFs only): ImageIO.
+ff -f lavfi -i "$IMG,format=pal8" -frames:v 1 tiff8-palette.tiff
+ff -i tiff8-palette.tiff -pix_fmt rgb24 ref-tiff8-palette.png
 ff -f lavfi -i "nullsrc=s=256x16,format=gbrpf32le,geq=r=X/128:g=Y/15:b=0.25" -frames:v 1 -compression none exr-float.exr
 ff -f lavfi -i "nullsrc=s=256x16,format=gbrapf32le,geq=r=X/128:g=Y/15:b=0.25:a=X/255" -frames:v 1 -compression zip16 -format half exr-half-alpha.exr
 ff -f lavfi -i "nullsrc=s=1024x8,format=gbrp10le,geq=r=X:g=X:b=1023-X" -frames:v 1 dpx10.dpx
@@ -261,6 +264,16 @@ sips -m "$P/Generic Gray Gamma 2.2 Profile.icc" png8-gray.png --out icc-gray22.p
 sips -m "$P/Generic Gray Profile.icc" png8-gray.png --out icc-gray18.png >/dev/null
 for f in icc-adobergb icc-p3 icc-prophoto16 icc-gray22 icc-gray18; do
   sips -m "$P/sRGB Profile.icc" "$f.png" --out "ref-srgb-$f.png" >/dev/null
+done
+# CMYK stills with the Generic CMYK profile, which ImageIO converts to sRGB
+# (sips cannot write CMYK with alpha; formats_tools.py writes that TIFF);
+# and each converted to sRGB by sips as ColorSync's reference.
+sips -m "$P/Generic CMYK Profile.icc" png8-rgb.png -s format jpeg --out cmyk.jpg >/dev/null
+sips -m "$P/Generic CMYK Profile.icc" png8-rgb.png -s format tiff --out cmyk.tiff >/dev/null
+"${TOOLS[@]}" tiff-cmyka cmyka.tiff 96 64 "$P/Generic CMYK Profile.icc"
+"${TOOLS[@]}" tiff-cmyka cmyka-opaque.tiff 96 64 "$P/Generic CMYK Profile.icc" opaque
+for f in cmyk.jpg cmyk.tiff cmyka.tiff cmyka-opaque.tiff; do
+  sips -m "$P/sRGB Profile.icc" "$f" -s format png --out "ref-srgb-${f%.*}-${f##*.}.png" >/dev/null
 done
 "${TOOLS[@]}" svg vector.svg
 cd ..

@@ -1504,6 +1504,125 @@ fn icc_stills() {
     }
 }
 
+/// Stills in a color model other than RGB or gray (CMYK JPEG and TIFF,
+/// CMYK TIFF with straight alpha, palette TIFF) are drawn by ImageIO into
+/// 16-bit sRGB through their profile, once: their class says the samples
+/// are sRGB already, so no reading applies the profile again (with or
+/// without Interpret Footage overrides). Each matches ColorSync's own 8-bit
+/// conversion to sRGB (sips) or, for the palette, FFmpeg's palette lookup.
+/// A straight-alpha file keeps straight samples whose color is exactly the
+/// conversion of the same CMYK samples without alpha.
+#[test]
+#[ignore]
+fn converted_stills_are_srgb_once() {
+    use pm_media::image::icc::IccClass;
+    use pm_media::interpret::interpret_still;
+    use pm_protocol::color::AlphaMode;
+    let dir = formats().join("image");
+    let pool = FramePool::new(0);
+    // (file, reference, alpha reading, tolerance max and mean in CV). The
+    // CMYK JPEG's limit covers the JPEG decode: sips and our ImageIO read
+    // decode it 1 to 2.2 CV apart on 37 of 172800 channels (the CMYK TIFFs,
+    // without a lossy decode, are within 0.5 CV). The straight-alpha TIFF
+    // is compared premultiplied, since sips stores 8-bit straight color
+    // (coarse under low alpha); sips's 8-bit path still differs by up to
+    // 1.39 CV there, as ColorSync's 8-bit path does on RGB profiles
+    // (`icc_stills`), and the exact check is the opaque twin below. The
+    // palette's colors go through ColorSync from the palette's device RGB
+    // to sRGB: within 1 CV of the palette lookup.
+    let cases = [
+        (
+            "cmyk.jpg",
+            "ref-srgb-cmyk-jpg.png",
+            AlphaMode::Opaque,
+            (2.5, 0.3),
+        ),
+        (
+            "cmyk.tiff",
+            "ref-srgb-cmyk-tiff.png",
+            AlphaMode::Opaque,
+            (0.5, 0.3),
+        ),
+        (
+            "cmyka-opaque.tiff",
+            "ref-srgb-cmyka-opaque-tiff.png",
+            AlphaMode::Opaque,
+            (0.5, 0.3),
+        ),
+        (
+            "cmyka.tiff",
+            "ref-srgb-cmyka-tiff.png",
+            AlphaMode::Straight,
+            (1.5, 0.3),
+        ),
+        (
+            "tiff8-palette.tiff",
+            "ref-tiff8-palette.png",
+            AlphaMode::Opaque,
+            (1.0, 0.5),
+        ),
+    ];
+    for (file, reference, alpha, (tol_max, tol_mean)) in cases {
+        let s = image::read(&dir.join(file), &pool).unwrap();
+        assert_eq!(s.backend, image::ImageBackend::ImageIo, "{file}");
+        assert_eq!(s.color.icc_class, Some(IccClass::ConvertedToSrgb), "{file}");
+        assert_eq!(s.color.alpha, alpha, "{file}");
+        // No interpretation runs the profile again; overrides read the
+        // converted samples.
+        for json in [
+            "{}",
+            r#"{"alpha":"ignore"}"#,
+            r#"{"primaries":"displayP3"}"#,
+        ] {
+            let (i, _) = Interpretation::from_json(&serde_json::from_str(json).unwrap());
+            let si = interpret_still(&s.color, s.float, &i);
+            assert!(!si.colorsync, "{file} {json}");
+        }
+        let r = image::read(&dir.join(reference), &pool).unwrap();
+        let (ours, want) = (still_rgba(&s), still_rgba(&r));
+        assert_eq!(ours.len(), want.len(), "{file}");
+        let (mut max, mut sum, mut over_one) = (0f64, 0f64, 0usize);
+        for (o, w) in ours.iter().zip(&want) {
+            assert!(
+                (o[3] - w[3]).abs() * 255.0 <= 0.5,
+                "{file}: alpha {o:?} vs {w:?}"
+            );
+            for c in 0..3 {
+                // Premultiplied (straight times alpha; opaque files have 1).
+                let d = (o[c] * o[3] - w[c] * w[3]).abs() * 255.0;
+                max = max.max(d);
+                sum += d;
+                over_one += usize::from(d > 1.0);
+            }
+        }
+        let mean = sum / (3 * ours.len()) as f64;
+        eprintln!(
+            "{file}: {alpha:?}, |Δ| max {max:.3} mean {mean:.3} CV ({over_one} of {} channels over 1 CV) against {reference}",
+            3 * ours.len()
+        );
+        assert!(
+            max <= tol_max && mean <= tol_mean,
+            "{file} vs {reference}: max {max:.3} mean {mean:.3} CV"
+        );
+    }
+    // Straight alpha is split off before ColorSync converts the color: each
+    // color equals the conversion of the same CMYK samples stored opaque.
+    let with_alpha = still_rgba(&image::read(&dir.join("cmyka.tiff"), &pool).unwrap());
+    let opaque = still_rgba(&image::read(&dir.join("cmyka-opaque.tiff"), &pool).unwrap());
+    let (w, h) = (96usize, 64usize);
+    let mut max = 0f64;
+    for (i, (a, o)) in with_alpha.iter().zip(&opaque).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let stored = (255.0 * (x + y) as f64 / (w + h - 2) as f64).round();
+        assert_eq!((a[3] * 255.0).round(), stored, "alpha at {x},{y}");
+        for c in 0..3 {
+            max = max.max((a[c] - o[c]).abs() * 65535.0);
+        }
+    }
+    eprintln!("cmyka.tiff color vs the same CMYK without alpha: max |Δ| {max} (16-bit codes)");
+    assert_eq!(max, 0.0);
+}
+
 /// A matrix/TRC or gray TRC ICC profile, read for an f64 oracle: its
 /// colorants (`rXYZ`, `gXYZ`, `bXYZ`, D50 PCS) as linear RGB → XYZ (None
 /// for a gray profile), and its red or gray tone curve (`curv` or `para`;
@@ -1758,6 +1877,31 @@ fn interpret_footage_facts() {
         matches!(get(&facts, "primaries").origin, FactOrigin::Default { ref rule } if rule.contains("set aside")),
         "{:?}",
         get(&facts, "primaries")
+    );
+    // A CMYK JPEG is already sRGB once ImageIO has drawn it: the origins
+    // say so, with or without overrides (the profile is never applied
+    // again).
+    for interp in [None, Some(r#"{"alpha":"ignore"}"#)] {
+        let facts = media_facts(&dir.join("image/cmyk.jpg"), interp).unwrap();
+        for m in ["primaries", "transfer"] {
+            let f = get(&facts, m);
+            assert!(
+                matches!(f.origin, FactOrigin::File { ref source } if source.contains("Converted to sRGB by ImageIO")),
+                "{m}: {f:?}"
+            );
+        }
+        assert_eq!(get(&facts, "transfer").value, "displayE", "{interp:?}");
+    }
+    let facts = media_facts(&dir.join("image/png8-rgb.png"), None).unwrap();
+    assert!(matches!(
+        get(&facts, "transfer").origin,
+        FactOrigin::Default { .. }
+    ));
+    let facts = media_facts(&dir.join("image/icc-p3.png"), None).unwrap();
+    assert!(
+        matches!(get(&facts, "transfer").origin, FactOrigin::File { ref source } if source.contains("sRGB curve")),
+        "{:?}",
+        get(&facts, "transfer")
     );
     let facts = media_facts(&dir.join("sequence/seq_png_0001.png"), None).unwrap();
     assert!(
