@@ -306,7 +306,9 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
       return { applyMs, toDrawMs, before, after };
     });
     const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
-    const dropped = (s: any) => Object.values(s?.dropped ?? {}).reduce((a: number, b: any) => a + Number(b), 0);
+    // A frame replaced by a newer revision of itself (an edit re-rendered the
+    // frames ahead, docs/engine/perf.md) is not a drop: the frame is shown.
+    const dropped = (s: any) => Object.entries(s?.dropped ?? {}).filter(([reason]) => reason !== 'replaced').reduce((a: number, [, b]: [string, any]) => a + Number(b), 0);
     await record('edit-during-playback-1000-page', {
       applyAndSendMs: dist(result.applyMs, 3),
       editToDrawMs: dist(result.toDrawMs),
@@ -315,6 +317,7 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
       presenterDroppedDuring: dropped(result.after) - dropped(result.before),
       presenterDroppedByReason: result.after?.dropped ?? null,
       engineLateSkipped: report?.presenter?.lateSkipped ?? null,
+      engineRerendered: report?.presenter?.rerendered ?? null,
       composeUsMax: report?.presenter?.composeUsMax ?? null,
       composeUsMean: report?.presenter?.documentFrames ? Math.round(report.presenter.composeUsTotal / report.presenter.documentFrames) : null
     });

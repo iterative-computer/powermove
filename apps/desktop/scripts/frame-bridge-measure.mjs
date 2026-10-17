@@ -541,6 +541,8 @@ function analyzePlayback(raw) {
  * includes it (viz timing for the worker's canvas).
  */
 function analyzeEdits(page, ctx, sink, offMain) {
+  // Use New Engine off: no engine frames, only the page's cost of each edit.
+  if (!page.engineTrace) return { n: page.edits.length, applyMs: dist(page.edits.map(([, t0, t1]) => t1 - t0), 3) };
   const draws = page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[2], submitMs: d[5] })).sort((a, b) => a.rafMs - b.rafMs);
   const applyMs = [];
   const toPresentMs = [];
