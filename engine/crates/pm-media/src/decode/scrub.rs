@@ -20,7 +20,8 @@
 //! samples left. A stopped decode keeps its place, so a later target
 //! further along the run continues from there. After a target lands it
 //! decodes ahead in the direction of motion into the frame cache (the GOP
-//! neighbourhood, within the cache's lease share).
+//! neighbourhood, within the cache's lease share), a stride at a time;
+//! nothing after a jump.
 
 use super::service::{DecodeService, InstanceId, MediaSource};
 use super::session::{DEFAULT_WINDOW, Progress};
@@ -85,6 +86,9 @@ const AHEAD: usize = 8;
 /// frame cache: one seek from the GOP start then serves that many reverse
 /// steps.
 const KEEP_BEFORE: usize = 32;
+/// Moves of more frames than this are jumps (a click on the ruler, a
+/// random seek), not drags: nothing is decoded ahead of them.
+const MAX_STRIDE: i64 = 16;
 /// An idle worker exits after this long; the next request starts another.
 const IDLE_EXIT: Duration = Duration::from_secs(30);
 
@@ -130,10 +134,12 @@ struct State {
     busy: Option<usize>,
     /// Errors of targets since asked.
     failed: HashMap<usize, String>,
-    /// The last frame requested and the direction of motion (+1, −1, 0).
+    /// The last frame requested, and the step of the last move when it was
+    /// a drag (at most [`MAX_STRIDE`] frames; 0 after a jump or before any
+    /// move): its sign is the direction of motion.
     last: Option<usize>,
-    direction: i64,
-    /// Decode ahead of this frame in `direction`.
+    stride: i64,
+    /// Decode ahead of this frame by `stride`.
     ahead_from: Option<usize>,
     /// The newest frame the worker decoded: the stand-in of last resort.
     latest: Option<(usize, DecodedFrame)>,
@@ -371,7 +377,8 @@ impl State {
         if let Some(last) = self.last
             && last != n
         {
-            self.direction = if n > last { 1 } else { -1 };
+            let d = n as i64 - last as i64;
+            self.stride = if d.abs() <= MAX_STRIDE { d } else { 0 };
         }
         self.last = Some(n);
     }
@@ -416,7 +423,7 @@ impl Shared {
                         .session(&self.source, self.instance, DecodePurpose::Display)?;
                 let keep = {
                     let st = self.state.lock().unwrap();
-                    if st.direction < 0 {
+                    if st.stride < 0 {
                         KEEP_BEFORE.min(self.cache_frames(&st))
                     } else {
                         0
@@ -511,23 +518,29 @@ impl Shared {
         }
     }
 
-    /// The next frame to decode ahead of the last target in the direction
-    /// of motion, within [`AHEAD`] frames forward or [`KEEP_BEFORE`] in
-    /// reverse, and half the frame cache.
+    /// The next frame to decode ahead of the last target, a stride at a
+    /// time in the direction of motion: [`AHEAD`] steps forward, or one
+    /// reverse neighbourhood ([`KEEP_BEFORE`] frames), within half the frame
+    /// cache. Nothing after a jump.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
-        if st.direction == 0 {
+        let stride = st.stride;
+        if stride == 0 {
             st.ahead_from = None;
             return None;
         }
         // Reverse steps need a seek from the GOP start for every
         // neighbourhood, so they look as far ahead as one neighbourhood.
-        let reach = if st.direction < 0 { KEEP_BEFORE } else { AHEAD };
-        let count = reach.min(self.cache_frames(st));
+        let steps = if stride < 0 {
+            (KEEP_BEFORE as i64 / -stride).max(1) as usize
+        } else {
+            AHEAD
+        };
+        let count = steps.min(self.cache_frames(st));
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
         for i in 1..=count as i64 {
-            let m = from as i64 + i * st.direction;
+            let m = from as i64 + i * stride;
             if m < 0 || m >= frames {
                 break;
             }
@@ -547,11 +560,13 @@ impl Shared {
         budget / 2 / st.frame_bytes.max(1)
     }
 
-    /// Whether a newer request should stop the job in flight (a scrub target
-    /// or a look-ahead frame): it does when the newer request lies earlier
-    /// on the same run, or when its own seek costs fewer samples than
-    /// finishing this one. Otherwise finishing first costs the newer request
-    /// nothing or less than starting over, and shows a frame meanwhile.
+    /// Whether a newer request should stop the job in flight. A request
+    /// earlier on the same run stops it (continuing reaches the request
+    /// sooner); a request further along the same run does not (finishing
+    /// first costs it nothing). A request elsewhere stops look-ahead, and
+    /// stops a scrub target when its own seek costs fewer samples than
+    /// finishing the target; otherwise finishing first costs the newer
+    /// request less than starting over, and shows a frame meanwhile.
     fn supersedes(&self, job: Job, target: usize, p: Progress) -> bool {
         let st = self.state.lock().unwrap();
         if st.shutdown {
@@ -560,7 +575,6 @@ impl Shared {
         let newer = st.exact.front().copied().or(st.scrub);
         drop(st);
         let Some(r) = newer else { return false };
-        let _ = job;
         let index = &self.source.index;
         let rs = index.frames[r].sample;
         if rs == target {
@@ -570,6 +584,10 @@ impl Shared {
         let on_path = sync >= p.run_start && sync < p.next.max(p.run_start + 1) && rs >= p.next;
         if on_path {
             return rs < target;
+        }
+        if matches!(job, Job::Ahead(_)) {
+            // Look-ahead is a guess; a request elsewhere is not.
+            return true;
         }
         let remaining = (target + 1).saturating_sub(p.next);
         let fresh = rs + 1 - sync;
@@ -582,15 +600,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direction_follows_requests() {
+    fn the_stride_follows_drags_and_resets_on_jumps() {
         let mut st = State::default();
         st.moved_to(10);
-        assert_eq!(st.direction, 0);
+        assert_eq!(st.stride, 0);
         st.moved_to(12);
-        assert_eq!(st.direction, 1);
+        assert_eq!(st.stride, 2);
         st.moved_to(12);
-        assert_eq!(st.direction, 1);
+        assert_eq!(st.stride, 2);
         st.moved_to(3);
-        assert_eq!(st.direction, -1);
+        assert_eq!(st.stride, -9);
+        st.moved_to(300);
+        assert_eq!(st.stride, 0, "a jump is not a drag");
     }
 }
