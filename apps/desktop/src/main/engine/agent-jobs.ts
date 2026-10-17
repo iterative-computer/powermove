@@ -33,6 +33,7 @@ import {
   formatInfo,
   type DeliveryFormat,
   type DeliveryOptions,
+  type ExportPreset,
   isDropFrameTimecode,
   isMov,
   isRenderFormat,
@@ -159,14 +160,20 @@ export const AGENT_PRESETS: Readonly<Record<string, string>> = {
   png: 'builtin:png'
 };
 
+/** An agent preset's built-in preset, or undefined for an unknown name. */
+export function agentPreset(name: string): ExportPreset | undefined {
+  const id = Object.prototype.hasOwnProperty.call(AGENT_PRESETS, name) ? AGENT_PRESETS[name] : undefined;
+  return id ? BUILT_IN_PRESETS.find((p) => p.id === id) : undefined;
+}
+
 /** The format an agent export writes: the preset's, unless a format is given. */
-function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; delivery: DeliveryOptions; presetAlpha: boolean | undefined } {
-  const preset = input.preset ? BUILT_IN_PRESETS.find((p) => p.id === AGENT_PRESETS[input.preset!]) : undefined;
+function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; delivery: DeliveryOptions } {
+  const preset = input.preset ? agentPreset(input.preset) : undefined;
   if (input.preset && !preset) throw new AgentJobError(`Unknown export preset ${input.preset}.`);
   const delivery = normalizeDelivery(preset?.options.delivery ?? {});
   const format = input.format ? migrateFormat(input.format, 'h264') : preset?.options.format ?? 'h264';
   if (!isRenderFormat(format)) throw new AgentJobError('export_video writes video or image files; use save_project for a project file.');
-  return { format, delivery, presetAlpha: input.format ? undefined : preset?.options.alpha };
+  return { format, delivery };
 }
 
 /** The job engine's settings for a format and the sheet's delivery options:
@@ -235,9 +242,10 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
   const [start, end] = input.range === 'work' && Array.isArray(work) && Number(work[1]) > Number(work[0])
     ? [Number(work[0]), Number(work[1])]
     : [0, dur];
-  const { format, delivery, presetAlpha } = agentFormat(input);
-  const alpha = presetAlpha ?? input.alpha;
-  if (input.alpha && !supportsAlpha(format, delivery)) {
+  // `input.alpha` already holds the preset's default (exportVideoInput).
+  const { format, delivery } = agentFormat(input);
+  const alpha = input.alpha;
+  if (alpha && !supportsAlpha(format, delivery)) {
     throw new AgentJobError('Transparent video requires ProRes 4444, HEVC (8-bit), WebM, or PNG.');
   }
   return wireSettings({

@@ -33,7 +33,7 @@ import { userInput, type UserInput } from '../user-input';
 import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
 import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
 import type { TranscriptionService } from '../transcription/service';
-import { AGENT_PRESETS, type AgentFramesResult, type ExportVideoInput, type ExportVideoResult, type FramesPlan, type RenderStatus } from '../engine/agent-jobs';
+import { AGENT_PRESETS, agentPreset, type AgentFramesResult, type ExportVideoInput, type ExportVideoResult, type FramesPlan, type RenderStatus } from '../engine/agent-jobs';
 import { isRenderFormat, migrateFormat, supportsAlpha } from '../../shared/delivery';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
@@ -71,11 +71,17 @@ export function exportVideoInput(args: Record<string, unknown>): ExportVideoInpu
   for (const key of Object.keys(args)) if (!EXPORT_KEYS.has(key)) throw new Error(`export_video does not take ${key}.`);
   const { name, preset, range = 'all', audio = true, motionBlur = true, mode = 'wait' } = args;
   if (preset !== undefined && !EXPORT_PRESETS.has(preset as string)) throw new Error(`export_video preset is one of ${[...EXPORT_PRESETS].join(', ')}.`);
-  // Without a preset, today's default: MP4 (H.264).
+  // Without a preset, today's default: MP4 (H.264). With one, '' stands for
+  // the preset's format.
   const format = args['format'] ?? (preset === undefined ? 'mp4' : '');
-  const alpha = args['alpha'] ?? (preset === 'master-alpha' || preset === 'png');
   if (name !== undefined && (typeof name !== 'string' || !name.length || name.length > 120)) throw new Error('export_video name is 1 to 120 characters.');
   if (format !== '' && !EXPORT_FORMATS.has(format as string)) throw new Error(`export_video format is one of ${[...EXPORT_FORMATS].join(', ')}.`);
+  // Alpha defaults to the preset's, and only where the written format keeps
+  // it: an explicit format overrides the preset's, alpha included.
+  const presetOptions = preset === undefined ? undefined : agentPreset(preset as string)?.options;
+  const written = format === '' ? presetOptions?.format : migrateFormat(format);
+  const alpha = args['alpha'] ?? (presetOptions?.alpha === true && written !== undefined && isRenderFormat(written)
+    && supportsAlpha(written, { highDepth: presetOptions.delivery?.highDepth === true }));
   if (!EXPORT_RANGES.has(range as string)) throw new Error('export_video range is all or work.');
   if (!EXPORT_MODES.has(mode as string)) throw new Error('export_video mode is wait or async.');
   if (typeof audio !== 'boolean' || typeof motionBlur !== 'boolean' || typeof alpha !== 'boolean') throw new Error('export_video audio, motionBlur, and alpha are booleans.');
@@ -92,11 +98,15 @@ export function exportVideoInput(args: Record<string, unknown>): ExportVideoInpu
 }
 
 /** The current exporter's `export_video` arguments for an export the new
- *  engine routed to it; it writes MP4 (H.264) and ProRes 4444 only. */
+ *  engine routed to it; it writes MP4 (H.264) and ProRes 4444 only, so of the
+ *  presets it takes web-h264 and master-alpha. */
 export function legacyExportArgs(input: ExportVideoInput): Record<string, unknown> {
-  const format = LEGACY_EXPORT_FORMATS[input.format || (input.preset === 'master-alpha' ? 'prores' : input.preset ? '' : 'mp4')];
+  const preset = input.preset === undefined ? undefined : agentPreset(input.preset);
+  const requested = input.format || preset?.options.format || 'mp4';
+  const format = LEGACY_EXPORT_FORMATS[requested];
   if (!format) {
-    throw new Error('This project needs the current exporter, which writes MP4 (H.264) and ProRes 4444; export it as format mp4 or prores.');
+    const what = input.format ? `format ${input.format}` : `preset ${input.preset}`;
+    throw new Error(`This project needs the current exporter, which writes MP4 (H.264) and ProRes 4444, not ${what}; export it as format mp4 or prores, or preset web-h264 or master-alpha.`);
   }
   return {
     ...(input.name !== undefined ? { name: input.name } : {}),

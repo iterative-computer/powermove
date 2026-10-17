@@ -484,6 +484,15 @@ default falls back to its legacy equivalent).
 `export_video` takes `preset` (`master`, `master-alpha`, `web-h264`,
 `web-hevc`, `png`) or any format id of the catalog (today's `mp4` and
 `prores` still accepted); `docs/MCP.md` and the tool schema document them.
+An explicit format overrides the preset's, alpha included: alpha defaults to
+the preset's only where the written format keeps it (`master-alpha` with
+`h264` writes opaque H.264; with `prores-4444xq` it keeps alpha). When the
+current exporter takes the export (Use New Engine off, offline media, or a
+project the engine routes), the formats and presets it writes still work:
+`mp4`/`h264`/`web-h264` become its MP4 and `prores`/`prores-4444`/
+`master-alpha` its ProRes 4444; the preset's delivery options (for example
+`master-alpha`'s 24-bit PCM) are not carried over. Other formats and presets
+fail with the reason (`legacyExportArgs`, `bridge.test.ts`).
 Agent exports keep contract 12's reply rule; PNG sequences answer the
 folder's path.
 
