@@ -195,7 +195,9 @@ impl BlenderStage {
                         &settings,
                         d,
                     ));
-                    self.cache.get(&key)
+                    // Keys cover the size; a file changed on disk since
+                    // is not drawn.
+                    self.cache.get(&key).filter(|s| check_size(s, w, h).is_ok())
                 });
                 match found {
                     Some(s) => {
@@ -251,12 +253,12 @@ impl BlenderStage {
                     &settings,
                     &rendered.device,
                 ));
+                // The size is checked before the surface is stored.
                 let decoded = match &found.png {
-                    SurfacePng::File(p) => self.cache.insert_file(&key, p),
-                    SurfacePng::Bytes(b) => self.cache.insert_bytes(&key, b),
+                    SurfacePng::File(p) => self.cache.insert_file(&key, p, (w, h)),
+                    SurfacePng::Bytes(b) => self.cache.insert_bytes(&key, b, (w, h)),
                 }
                 .map_err(|e| BlenderError::Failed(e.to_string()))?;
-                check_size(&decoded, w, h).map_err(|e| BlenderError::Failed(e.to_string()))?;
                 self.stats.rendered += 1;
                 entry.insert(layer.clone(), decoded);
                 done += 1;
@@ -412,6 +414,8 @@ mod tests {
     struct Fake {
         calls: Vec<Vec<String>>,
         drop_layer: Option<String>,
+        /// Renders surfaces one pixel too wide.
+        wrong_size: bool,
     }
 
     impl BlenderBackend for Fake {
@@ -425,6 +429,7 @@ mod tests {
         ) -> Result<RenderedFrame, BlenderError> {
             self.calls.push(job.layers.clone());
             let (w, h) = job.snapshot.size();
+            let w = w + u32::from(self.wrong_size);
             Ok(RenderedFrame {
                 surfaces: job
                     .layers
@@ -471,6 +476,7 @@ mod tests {
         let mut fake = Fake {
             calls: vec![],
             drop_layer: None,
+            wrong_size: false,
         };
         let cancel = AtomicBool::new(false);
         let mut seen = vec![];
@@ -498,6 +504,7 @@ mod tests {
         let mut fake = Fake {
             calls: vec![],
             drop_layer: Some("b".into()),
+            wrong_size: false,
         };
         let e = stage
             .prepare(
@@ -520,5 +527,31 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(cancelled, BlenderError::Cancelled);
+    }
+
+    #[test]
+    fn a_surface_of_the_wrong_size_fails_and_is_not_cached() {
+        let mut stage = BlenderStage::new(SurfaceCache::new(1 << 20, None));
+        let mut fake = Fake {
+            calls: vec![],
+            drop_layer: None,
+            wrong_size: true,
+        };
+        let cancel = AtomicBool::new(false);
+        let e = stage
+            .prepare(&mut fake, &[snapshot(0.0)], &cancel, &mut |_, _| {})
+            .unwrap_err();
+        assert!(
+            matches!(&e, BlenderError::Failed(m) if m.contains("5×2")),
+            "{e:?}"
+        );
+        assert!(stage.cache.is_empty());
+        // The next attempt asks Blender again (nothing wrong was kept).
+        fake.wrong_size = false;
+        stage
+            .prepare(&mut fake, &[snapshot(0.0)], &cancel, &mut |_, _| {})
+            .unwrap();
+        assert_eq!(fake.calls.len(), 2);
+        assert_eq!(stage.stats.cached, 0);
     }
 }

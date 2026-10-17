@@ -20,7 +20,7 @@ use pm_protocol::blender::{BlenderSettings, ResolvedDevice};
 use pm_protocol::common::ContentHash;
 
 use crate::key::hex;
-use crate::surface::{DecodedSurface, SurfaceError, decode_surface};
+use crate::surface::{DecodedSurface, SurfaceError, check_size, decode_surface};
 
 /// Default disk bound.
 pub const DEFAULT_DISK_BYTES: u64 = 8 << 30;
@@ -169,14 +169,24 @@ impl SurfaceCache {
     }
 
     /// Adds a surface rendered into `png` (moved into the disk area when the
-    /// cache has one), decoded once.
+    /// cache has one), decoded once. A surface that is not `size` (width,
+    /// height) is refused before anything is stored, and its file removed:
+    /// a key never names a surface of the wrong size.
     pub fn insert_file(
         &mut self,
         key: &ContentHash,
         png: &Path,
+        size: (u32, u32),
     ) -> Result<Arc<DecodedSurface>, SurfaceError> {
         let bytes = std::fs::read(png).map_err(|e| SurfaceError::Decode(e.to_string()))?;
-        let surface = Arc::new(decode_surface(&bytes)?);
+        let surface =
+            match decode_surface(&bytes).and_then(|s| check_size(&s, size.0, size.1).map(|()| s)) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    let _ = std::fs::remove_file(png);
+                    return Err(e);
+                }
+            };
         if let Some(target) = self.disk_path(key) {
             if std::fs::rename(png, &target).is_err() {
                 let _ = std::fs::write(&target, &bytes);
@@ -188,13 +198,17 @@ impl SurfaceCache {
         Ok(surface)
     }
 
-    /// Adds a decoded surface with its PNG bytes.
+    /// Adds a decoded surface with its PNG bytes; one that is not `size` is
+    /// refused before anything is stored.
     pub fn insert_bytes(
         &mut self,
         key: &ContentHash,
         png: &[u8],
+        size: (u32, u32),
     ) -> Result<Arc<DecodedSurface>, SurfaceError> {
-        let surface = Arc::new(decode_surface(png)?);
+        let surface = decode_surface(png)?;
+        check_size(&surface, size.0, size.1)?;
+        let surface = Arc::new(surface);
         if let Some(target) = self.disk_path(key) {
             let tmp = target.with_extension(format!("{}.part", std::process::id()));
             if std::fs::write(&tmp, png).is_ok() {
@@ -292,7 +306,8 @@ mod tests {
         let mut c = SurfaceCache::new(512, Some(dir.clone()));
         let keys: Vec<ContentHash> = (1..=3u8).map(|n| ContentHash([n; 32])).collect();
         for (i, k) in keys.iter().enumerate() {
-            c.insert_bytes(k, &png(1000 * (i as u16 + 1))).unwrap();
+            c.insert_bytes(k, &png(1000 * (i as u16 + 1)), (4, 4))
+                .unwrap();
         }
         assert_eq!(c.len(), 2);
         assert!(c.usage() <= 512);
@@ -306,13 +321,47 @@ mod tests {
         assert!(c.len() <= 1);
         // Disk bound.
         c.set_disk_budget(0);
-        c.insert_bytes(&ContentHash([4; 32]), &png(5)).unwrap();
+        c.insert_bytes(&ContentHash([4; 32]), &png(5), (4, 4))
+            .unwrap();
         let pngs = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
             .count();
         assert_eq!(pngs, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_surface_of_the_wrong_size_is_never_stored() {
+        let dir = std::env::temp_dir().join(format!(
+            "pm-blender-cache-size-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = SurfaceCache::new(1 << 20, Some(dir.join("surfaces")));
+        std::fs::create_dir_all(dir.join("surfaces")).unwrap();
+        let key = ContentHash([7; 32]);
+        // Bytes: refused, nothing in memory or on disk.
+        assert!(matches!(
+            c.insert_bytes(&key, &png(9), (8, 4)),
+            Err(SurfaceError::Size { .. })
+        ));
+        assert!(!c.contains(&key));
+        assert!(c.get(&key).is_none());
+        // A file host services wrote: refused and removed.
+        let written = dir.join("written.png");
+        std::fs::write(&written, png(9)).unwrap();
+        assert!(c.insert_file(&key, &written, (4, 8)).is_err());
+        assert!(!written.exists());
+        assert!(!c.contains(&key));
+        assert_eq!(c.stats.inserted, 0);
+        // The right size is stored.
+        std::fs::write(&written, png(9)).unwrap();
+        c.insert_file(&key, &written, (4, 4)).unwrap();
+        assert!(c.contains(&key));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
