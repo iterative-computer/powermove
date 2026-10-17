@@ -54,12 +54,20 @@ pub(crate) fn upload(
     let (format, bytes, texel): (wgpu::TextureFormat, Vec<u8>, u32) = match precision {
         Precision::Float32 => (
             wgpu::TextureFormat::Rgba32Float,
-            surface.pixels.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            surface
+                .pixels
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
             16,
         ),
         _ => (
             wgpu::TextureFormat::Rgba16Float,
-            surface.pixels.iter().flat_map(|v| f16_bits(*v).to_le_bytes()).collect(),
+            surface
+                .pixels
+                .iter()
+                .flat_map(|v| f16_bits(*v).to_le_bytes())
+                .collect(),
             8,
         ),
     };
@@ -124,7 +132,10 @@ mod tests {
             let back = half_to_f32(h);
             let next = half_to_f32(h + 1);
             let prev = if h > 0 { half_to_f32(h - 1) } else { back };
-            assert!((back - v).abs() <= (next - v).abs() && (back - v).abs() <= (prev - v).abs(), "{code}");
+            assert!(
+                (back - v).abs() <= (next - v).abs() && (back - v).abs() <= (prev - v).abs(),
+                "{code}"
+            );
         }
     }
 

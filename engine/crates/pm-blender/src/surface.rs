@@ -184,7 +184,12 @@ pub fn check_size(surface: &DecodedSurface, width: u32, height: u32) -> Result<(
 
 /// Writes straight RGBA16 samples as a PNG with the given ancillary chunks
 /// before `IDAT` (tests and tools).
-pub fn encode_rgba16(width: u32, height: u32, rgba: &[u16], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+pub fn encode_rgba16(
+    width: u32,
+    height: u32,
+    rgba: &[u16],
+    chunks: &[(&[u8; 4], &[u8])],
+) -> Vec<u8> {
     let mut out = Vec::new();
     {
         let mut e = png::Encoder::new(&mut out, width, height);

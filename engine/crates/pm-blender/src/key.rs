@@ -111,30 +111,89 @@ mod tests {
             name: "Apple M4 Max".into(),
         };
         let base = snapshot(45.0, vec![asset("x", b"1"), asset("y", b"2")], None);
-        let k = |s: &Snapshot, layer: &str, w: ContentHash, v: &str, st: &BlenderSettings, d: &ResolvedDevice| {
-            key_hash(&surface_key(s, layer, w, v, st, d))
-        };
+        let k =
+            |s: &Snapshot,
+             layer: &str,
+             w: ContentHash,
+             v: &str,
+             st: &BlenderSettings,
+             d: &ResolvedDevice| { key_hash(&surface_key(s, layer, w, v, st, d)) };
         let reference = k(&base, "a", worker, "4.5.14", &settings(), &device);
         let reordered = snapshot(45.0, vec![asset("y", b"2"), asset("x", b"1")], None);
         // The snapshot's own bytes do not list assets, so reordering them
         // changes nothing.
-        assert_eq!(reference, k(&reordered, "a", worker, "4.5.14", &settings(), &device));
+        assert_eq!(
+            reference,
+            k(&reordered, "a", worker, "4.5.14", &settings(), &device)
+        );
         let changed = [
-            k(&snapshot(46.0, vec![asset("x", b"1"), asset("y", b"2")], None), "a", worker, "4.5.14", &settings(), &device),
-            k(&snapshot(45.0, vec![asset("x", b"1"), asset("y", b"3")], None), "a", worker, "4.5.14", &settings(), &device),
-            k(&snapshot(45.0, vec![asset("x", b"1"), asset("y", b"2")], Some((1, 16))), "a", worker, "4.5.14", &settings(), &device),
+            k(
+                &snapshot(46.0, vec![asset("x", b"1"), asset("y", b"2")], None),
+                "a",
+                worker,
+                "4.5.14",
+                &settings(),
+                &device,
+            ),
+            k(
+                &snapshot(45.0, vec![asset("x", b"1"), asset("y", b"3")], None),
+                "a",
+                worker,
+                "4.5.14",
+                &settings(),
+                &device,
+            ),
+            k(
+                &snapshot(
+                    45.0,
+                    vec![asset("x", b"1"), asset("y", b"2")],
+                    Some((1, 16)),
+                ),
+                "a",
+                worker,
+                "4.5.14",
+                &settings(),
+                &device,
+            ),
             k(&base, "b", worker, "4.5.14", &settings(), &device),
-            k(&base, "a", ContentHash([8; 32]), "4.5.14", &settings(), &device),
+            k(
+                &base,
+                "a",
+                ContentHash([8; 32]),
+                "4.5.14",
+                &settings(),
+                &device,
+            ),
             k(&base, "a", worker, "4.5.15", &settings(), &device),
-            k(&base, "a", worker, "4.5.14", &BlenderSettings { samples: 17, ..settings() }, &device),
-            k(&base, "a", worker, "4.5.14", &settings(), &ResolvedDevice::Cpu),
+            k(
+                &base,
+                "a",
+                worker,
+                "4.5.14",
+                &BlenderSettings {
+                    samples: 17,
+                    ..settings()
+                },
+                &device,
+            ),
+            k(
+                &base,
+                "a",
+                worker,
+                "4.5.14",
+                &settings(),
+                &ResolvedDevice::Cpu,
+            ),
         ];
         for (i, c) in changed.iter().enumerate() {
             assert_ne!(reference, *c, "input {i}");
         }
         let mut preview = base.clone();
         preview.frame.preview = true;
-        assert_ne!(reference, k(&preview, "a", worker, "4.5.14", &settings(), &device));
+        assert_ne!(
+            reference,
+            k(&preview, "a", worker, "4.5.14", &settings(), &device)
+        );
     }
 
     #[test]

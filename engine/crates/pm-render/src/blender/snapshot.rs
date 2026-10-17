@@ -53,8 +53,8 @@ use pm_eval::node;
 use pm_eval::parenting::Role3d;
 use pm_eval::{JsResult, Scope};
 use pm_geom3d::layering;
-use pm_model::json::{JsString, Map, Value};
 use pm_model::Node;
+use pm_model::json::{JsString, Map, Value};
 
 use crate::assets::AssetResolver;
 use crate::js;
@@ -161,13 +161,7 @@ fn object_meshes(scene_node: &Value, object: &crate::scene3d::Object3d) -> Vec<V
         let g = &mesh.geometry.geometry;
         let vertices = g.vertex_count();
         let index_count = if g.indexed { g.indices.len() } else { vertices };
-        let index = |i: usize| -> usize {
-            if g.indexed {
-                g.indices[i] as usize
-            } else {
-                i
-            }
-        };
+        let index = |i: usize| -> usize { if g.indexed { g.indices[i] as usize } else { i } };
         let groups: Vec<(usize, usize, u32)> = if g.groups.is_empty() {
             vec![(0, index_count, 0)]
         } else {
@@ -200,7 +194,13 @@ fn object_meshes(scene_node: &Value, object: &crate::scene3d::Object3d) -> Vec<V
             }
             let slot = slots.get(material_index as usize).filter(|s| !s.is_null());
             let material = if use_source && slot.is_none() {
-                source_material(object.missing && matches!(mesh.materials.iter().next().map(|m| m.kind), Some(MaterialKind::Basic)))
+                source_material(
+                    object.missing
+                        && matches!(
+                            mesh.materials.iter().next().map(|m| m.kind),
+                            Some(MaterialKind::Basic)
+                        ),
+                )
             } else {
                 slot.and_then(|s| s.get("material"))
                     .filter(|m| m.is_truthy())
@@ -249,9 +249,7 @@ fn depth_sets<'d>(
         // `!solo || l.solo` (group ancestors are looked up in a list
         // without groups, so none are found) and opacity above 0.001.
         joins.push(
-            a && object
-                && (!solo || js::flag(l, "solo"))
-                && scope.world_opacity(l, time)? > 0.001,
+            a && object && (!solo || js::flag(l, "solo")) && scope.world_opacity(l, time)? > 0.001,
         );
     }
     // `compositionOrderedLayers` over the same list: runs of 3D layers
@@ -273,12 +271,19 @@ fn depth_sets<'d>(
                         .find(|o| o.id == id)
                         .map(|o| o.origin)
                         .or_else(|| {
-                            scene.lights.iter().find(|l| l.id == id).map(|l| l.position())
+                            scene
+                                .lights
+                                .iter()
+                                .find(|l| l.id == id)
+                                .map(|l| l.position())
                         });
                     origin.map_or(0.0, |p| layering::view_z(&view, p))
                 })
                 .collect();
-            layering::sort_run(&depths).into_iter().map(|k| block[k]).collect()
+            layering::sort_run(&depths)
+                .into_iter()
+                .map(|k| block[k])
+                .collect()
         } else {
             block
         };
@@ -354,7 +359,11 @@ fn camera_json(camera: &Camera3d) -> Value {
 }
 
 fn light_json(node: &Value, scene: &Scene3d, environment_shadows: Option<&Value>) -> Value {
-    let id = node.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+    let id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let p = obj(node, "p");
     let v = |k: &str| p.and_then(|p| p.get(k)).and_then(|c| c.get("v")).cloned();
     let light = scene.lights.iter().find(|l| l.id == id);
@@ -415,7 +424,8 @@ fn image_extension(path: &Path) -> Option<&'static str> {
 fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
     use pm_media::frame::{Layout, PlaneFormat};
     let pool = pm_media::pool::FramePool::new(0);
-    let still = pm_media::image::read(path, &pool).map_err(|e| format!("{}: {e}", path.display()))?;
+    let still =
+        pm_media::image::read(path, &pool).map_err(|e| format!("{}: {e}", path.display()))?;
     let f = &still.frame.format;
     if f.layout != Layout::Rgba {
         return Err("a texture image layout this engine cannot convert".into());
@@ -438,7 +448,10 @@ fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
                             match p.desc.format {
                                 PlaneFormat::Rgba8 => f64::from(*at.add(c)) / 255.0,
                                 PlaneFormat::Rgba16 => {
-                                    f64::from(u16::from_le_bytes([*at.add(c * 2), *at.add(c * 2 + 1)])) / 65535.0
+                                    f64::from(u16::from_le_bytes([
+                                        *at.add(c * 2),
+                                        *at.add(c * 2 + 1),
+                                    ])) / 65535.0
                                 }
                                 PlaneFormat::Rgba32Float => f64::from(f32::from_le_bytes([
                                     *at.add(c * 4),
@@ -480,7 +493,11 @@ fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// The assets the scene's materials name (`assetBytes` of each id).
-fn scene_assets(root: &Node, scene: &Value, assets: &dyn AssetResolver) -> Result<Vec<SnapshotAsset>, String> {
+fn scene_assets(
+    root: &Node,
+    scene: &Value,
+    assets: &dyn AssetResolver,
+) -> Result<Vec<SnapshotAsset>, String> {
     let mut ids: Vec<String> = Vec::new();
     let mut add = |id: Option<&str>| {
         if let Some(id) = id.filter(|s| !s.is_empty())
@@ -489,7 +506,12 @@ fn scene_assets(root: &Node, scene: &Value, assets: &dyn AssetResolver) -> Resul
             ids.push(id.to_owned());
         }
     };
-    for node in scene.get("objects").and_then(Value::as_array).into_iter().flatten() {
+    for node in scene
+        .get("objects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let slots = node.get("slots").and_then(Value::as_array);
         let materials: Vec<&Value> = match slots {
             Some(s) if !s.is_empty() => s.iter().filter_map(|s| s.get("material")).collect(),
@@ -502,7 +524,10 @@ fn scene_assets(root: &Node, scene: &Value, assets: &dyn AssetResolver) -> Resul
                 }
             }
             if let Some(shader) = m.get("shader") {
-                add(shader.get("source").and_then(|s| s.get("assetId")).and_then(Value::as_str));
+                add(shader
+                    .get("source")
+                    .and_then(|s| s.get("assetId"))
+                    .and_then(Value::as_str));
                 for n in shader
                     .get("graph")
                     .and_then(|g| g.get("nodes"))
@@ -527,10 +552,21 @@ fn scene_assets(root: &Node, scene: &Value, assets: &dyn AssetResolver) -> Resul
         let io = |e: std::io::Error| format!("{}: {e}", path.display());
         let asset = if node::is_str(node::member(Some(record), "kind"), "image") {
             match image_extension(&path) {
-                Some(ext) => SnapshotAsset::new(id.clone(), format!("{id}.{ext}"), AssetBytes::File(path.clone())).map_err(io)?,
+                Some(ext) => SnapshotAsset::new(
+                    id.clone(),
+                    format!("{id}.{ext}"),
+                    AssetBytes::File(path.clone()),
+                )
+                .map_err(io)?,
                 None => {
-                    let png = convert_to_png(&path).map_err(|e| format!("Could not convert texture {name}: {e}"))?;
-                    SnapshotAsset::new(id.clone(), format!("{id}.png"), AssetBytes::Bytes(Arc::new(png))).map_err(io)?
+                    let png = convert_to_png(&path)
+                        .map_err(|e| format!("Could not convert texture {name}: {e}"))?;
+                    SnapshotAsset::new(
+                        id.clone(),
+                        format!("{id}.png"),
+                        AssetBytes::Bytes(Arc::new(png)),
+                    )
+                    .map_err(io)?
                 }
             }
         } else {
@@ -585,8 +621,17 @@ pub fn build<'d>(
         .collect();
     let mut objects = Vec::new();
     let mut ids = Vec::new();
-    for node in scene_json.get("objects").and_then(Value::as_array).into_iter().flatten() {
-        let id = node.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+    for node in scene_json
+        .get("objects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let id = node
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         let Some(object) = scene.objects.iter().find(|o| o.id == id) else {
             continue;
         };
@@ -616,7 +661,11 @@ pub fn build<'d>(
         .map(|l| light_json(l, &scene, environment_shadows))
         .collect();
     let (blocks, background_for) = depth_sets(scope, time, &scene, &ids)?;
-    let scale = if frame.preview { settings.preview_scale } else { 1.0 };
+    let scale = if frame.preview {
+        settings.preview_scale
+    } else {
+        1.0
+    };
     let size = |v: u32| js::max(2.0, round(f64::from(v) * scale));
     let mut s = settings.to_json();
     if let Value::Object(m) = &mut s {

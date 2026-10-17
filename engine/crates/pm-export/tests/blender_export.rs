@@ -124,10 +124,21 @@ fn camera(dur: f64) -> Value {
 /// Two models, one turning, Blender (EEVEE) on.
 fn scene(dur: f64, engine: &str, samples: u32) -> Value {
     let mut cube = object3d("cube", "box", "#FF8040", -0.7, dur);
-    set(&mut cube, "rotation.y", keys(json!(10), &[(0.0, json!(10)), (dur, json!(70))]));
+    set(
+        &mut cube,
+        "rotation.y",
+        keys(json!(10), &[(0.0, json!(10)), (dur, json!(70))]),
+    );
     let ball = object3d("ball", "sphere", "#4080FF", 0.7, dur);
-    let mut doc = project(W, H, dur, solid_fill("#182028"), vec![camera(dur), sun(dur), cube, ball]);
-    doc["render3d"] = json!({ "enabled": true, "engine": engine, "samples": samples, "device": "cpu" });
+    let mut doc = project(
+        W,
+        H,
+        dur,
+        solid_fill("#182028"),
+        vec![camera(dur), sun(dur), cube, ball],
+    );
+    doc["render3d"] =
+        json!({ "enabled": true, "engine": engine, "samples": samples, "device": "cpu" });
     doc
 }
 
@@ -175,11 +186,24 @@ fn local(scratch: &Path) -> Option<LocalBackend> {
     }
 }
 
-fn export(renderer: &mut Renderer, blender: &mut ExportBlender, job: &ExportJob) -> Result<(), JobError> {
+fn export(
+    renderer: &mut Renderer,
+    blender: &mut ExportBlender,
+    job: &ExportJob,
+) -> Result<(), JobError> {
     let plan = plan_export_with(job, true)?;
     let sink = sink_for(&plan)?;
-    run_export_with_blender(renderer, job, plan, sink, &Unrestricted, &AtomicBool::new(false), &mut |_| {}, Some(blender))
-        .map(|_| ())
+    run_export_with_blender(
+        renderer,
+        job,
+        plan,
+        sink,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+        Some(blender),
+    )
+    .map(|_| ())
 }
 
 /// 16-bit RGBA PNG samples, top-down.
@@ -194,7 +218,11 @@ fn read16(path: &Path) -> (u32, u32, Vec<u16>) {
     let mut out = Vec::new();
     for px in buf[..info.buffer_size()].chunks_exact(2 * ch) {
         for c in 0..4 {
-            out.push(if c < ch { u16::from_be_bytes([px[2 * c], px[2 * c + 1]]) } else { 65535 });
+            out.push(if c < ch {
+                u16::from_be_bytes([px[2 * c], px[2 * c + 1]])
+            } else {
+                65535
+            });
         }
     }
     (info.width, info.height, out)
@@ -227,18 +255,32 @@ fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
     export(&mut renderer, &mut blender, &job(&doc, out.join("seq"), 2)).unwrap();
     let first = started.elapsed();
     let stats = blender.stage.stats;
-    eprintln!("first export: {first:?}, {stats:?}, devices {:?}", blender.stage.devices);
-    assert_eq!(stats.jobs, 2, "one Blender request per frame (layers batched)");
+    eprintln!(
+        "first export: {first:?}, {stats:?}, devices {:?}",
+        blender.stage.devices
+    );
+    assert_eq!(
+        stats.jobs, 2,
+        "one Blender request per frame (layers batched)"
+    );
     assert_eq!(stats.rendered, 4);
-    assert!(blender
-        .stage
-        .devices
-        .iter()
-        .all(|d| matches!(d, ResolvedDevice::Metal { .. })), "{:?}", blender.stage.devices);
+    assert!(
+        blender
+            .stage
+            .devices
+            .iter()
+            .all(|d| matches!(d, ResolvedDevice::Metal { .. })),
+        "{:?}",
+        blender.stage.devices
+    );
     // The same export again: every surface from the cache, Blender not run.
     let again = Instant::now();
     export(&mut renderer, &mut blender, &job(&doc, out.join("seq"), 2)).unwrap();
-    eprintln!("second export: {:?}, {:?}", again.elapsed(), blender.stage.stats);
+    eprintln!(
+        "second export: {:?}, {:?}",
+        again.elapsed(),
+        blender.stage.stats
+    );
     assert_eq!(blender.stage.stats.jobs, 2);
     assert_eq!(blender.stage.stats.cached, 4);
     // Exactness: each frame equals the f64 composite of its stored surfaces.
@@ -253,17 +295,36 @@ fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
     for (n, file) in files.iter().enumerate() {
         let t = seconds(n as f64 / 30.0);
         let surfaces = blender
-            .prepare(&mut renderer, &document, "Ptest-root", t, &request, &MediaPaths::default(), &AtomicBool::new(false), &mut |_, _| {})
+            .prepare(
+                &mut renderer,
+                &document,
+                "Ptest-root",
+                t,
+                &request,
+                &MediaPaths::default(),
+                &AtomicBool::new(false),
+                &mut |_, _| {},
+            )
             .unwrap()
             .unwrap();
         let mut req = request.clone();
         req.blender = BlenderRender::Final(surfaces.clone());
-        let (plan, _) = renderer.plan(&document, "Ptest-root", t, &req, &MediaPaths::default()).unwrap();
+        let (plan, _) = renderer
+            .plan(&document, "Ptest-root", t, &req, &MediaPaths::default())
+            .unwrap();
         let frame = surfaces.values().next().unwrap();
         let order: Vec<String> = plan
             .draws
             .iter()
-            .filter(|d| matches!(&d.content, Content::Texture { source: Source::Blender(_), .. }))
+            .filter(|d| {
+                matches!(
+                    &d.content,
+                    Content::Texture {
+                        source: Source::Blender(_),
+                        ..
+                    }
+                )
+            })
             .map(|d| d.layer.clone())
             .collect();
         assert_eq!(order.len(), 2);
@@ -291,7 +352,9 @@ fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
                 }
             }
         }
-        eprintln!("frame {n}: max |export − composite of stored surfaces| = {max} of 65535; {covered} covered samples");
+        eprintln!(
+            "frame {n}: max |export − composite of stored surfaces| = {max} of 65535; {covered} covered samples"
+        );
         assert!(covered > 500, "Blender drew the models");
         assert!(max <= 1, "{max}");
     }
@@ -301,12 +364,22 @@ fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
 #[test]
 fn batched_and_per_layer_surfaces_are_equal_and_byte_stable() {
     let dir = scratch("batch");
-    let Some(mut backend) = local(&dir) else { return };
+    let Some(mut backend) = local(&dir) else {
+        return;
+    };
     let mut renderer = Renderer::headless().unwrap();
     let doc = load(&scene(1.0, "eevee", 4));
     let request = RenderRequest::sized(Size::new(W, H), Precision::Float32);
     let snaps = renderer
-        .blender_snapshots(&doc, "Ptest-root", Ticks::ZERO, &request, &MediaPaths::default(), false, SnapshotOptions::default())
+        .blender_snapshots(
+            &doc,
+            "Ptest-root",
+            Ticks::ZERO,
+            &request,
+            &MediaPaths::default(),
+            false,
+            SnapshotOptions::default(),
+        )
         .unwrap();
     let snapshot = &snaps.snapshots[0];
     let settings = pm_blender::job::snapshot_settings(snapshot).unwrap();
@@ -325,7 +398,13 @@ fn batched_and_per_layer_surfaces_are_equal_and_byte_stable() {
             )
             .unwrap()
     };
-    let bytes = |f: &RenderedFrame, layer: &str| match &f.surfaces.iter().find(|s| s.layer == layer).unwrap().png {
+    let bytes = |f: &RenderedFrame, layer: &str| match &f
+        .surfaces
+        .iter()
+        .find(|s| s.layer == layer)
+        .unwrap()
+        .png
+    {
         pm_blender::job::SurfacePng::Bytes(b) => b.clone(),
         pm_blender::job::SurfacePng::File(p) => std::fs::read(p).unwrap(),
     };
@@ -337,9 +416,18 @@ fn batched_and_per_layer_surfaces_are_equal_and_byte_stable() {
         let b = decode_surface(&bytes(&single, &layer)).unwrap();
         assert_eq!(a.bit_depth, 16);
         assert_eq!(a, b, "{layer}: batched and per-layer surfaces differ");
-        assert_eq!(bytes(&batched, &layer), bytes(&again, &layer), "{layer}: not byte-stable");
+        assert_eq!(
+            bytes(&batched, &layer),
+            bytes(&again, &layer),
+            "{layer}: not byte-stable"
+        );
         let chunks: Vec<String> = pm_blender_chunks(&bytes(&batched, &layer));
-        assert!(!chunks.iter().any(|c| c == "tEXt" || c == "iTXt" || c == "zTXt"), "{layer}: {chunks:?}");
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| c == "tEXt" || c == "iTXt" || c == "zTXt"),
+            "{layer}: {chunks:?}"
+        );
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -360,7 +448,10 @@ fn cancel_stops_blender() {
     let dir = scratch("cancel");
     let Some(backend) = local(&dir) else { return };
     let mut renderer = Renderer::headless().unwrap();
-    let mut blender = ExportBlender::new(BlenderStage::new(SurfaceCache::new(64 << 20, None)), Box::new(backend));
+    let mut blender = ExportBlender::new(
+        BlenderStage::new(SurfaceCache::new(64 << 20, None)),
+        Box::new(backend),
+    );
     // A slow render: Cycles on the CPU with many samples at a larger size.
     let doc = scene(1.0, "cycles", 4096);
     let document = load(&doc);
@@ -372,13 +463,25 @@ fn cancel_stops_blender() {
         flag.store(true, Ordering::Relaxed);
     });
     let started = Instant::now();
-    let r = blender.prepare(&mut renderer, &document, "Ptest-root", Ticks::ZERO, &request, &MediaPaths::default(), &cancel, &mut |_, _| {});
+    let r = blender.prepare(
+        &mut renderer,
+        &document,
+        "Ptest-root",
+        Ticks::ZERO,
+        &request,
+        &MediaPaths::default(),
+        &cancel,
+        &mut |_, _| {},
+    );
     canceller.join().unwrap();
     let took = started.elapsed();
     assert!(matches!(r, Err(JobError::Cancelled)), "{:?}", r.err());
     assert!(took < Duration::from_secs(10), "cancel took {took:?}");
     // The worker's process group is gone.
-    let pids = std::process::Command::new("/bin/ps").args(["-axo", "pid,command"]).output().unwrap();
+    let pids = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid,command"])
+        .output()
+        .unwrap();
     let running = String::from_utf8_lossy(&pids.stdout)
         .lines()
         .filter(|l| l.contains(&dir.to_string_lossy().to_string()) && l.contains("worker.py"))
@@ -391,7 +494,9 @@ struct NoBlender;
 
 impl BlenderBackend for NoBlender {
     fn version(&mut self) -> Result<String, BlenderError> {
-        Err(BlenderError::Missing(pm_blender::BLENDER_MISSING_MESSAGE.into()))
+        Err(BlenderError::Missing(
+            pm_blender::BLENDER_MISSING_MESSAGE.into(),
+        ))
     }
     fn render(&mut self, _: &RenderJob<'_>, _: &AtomicBool) -> Result<RenderedFrame, BlenderError> {
         unreachable!()
@@ -405,7 +510,11 @@ impl BlenderBackend for Dropping {
     fn version(&mut self) -> Result<String, BlenderError> {
         Ok("4.5.14".into())
     }
-    fn render(&mut self, job: &RenderJob<'_>, _: &AtomicBool) -> Result<RenderedFrame, BlenderError> {
+    fn render(
+        &mut self,
+        job: &RenderJob<'_>,
+        _: &AtomicBool,
+    ) -> Result<RenderedFrame, BlenderError> {
         self.0.lock().unwrap().extend(job.layers.iter().cloned());
         let (w, h) = job.snapshot.size();
         Ok(RenderedFrame {
@@ -413,7 +522,12 @@ impl BlenderBackend for Dropping {
                 .iter()
                 .map(|l| pm_blender::job::RenderedSurface {
                     layer: l.clone(),
-                    png: pm_blender::job::SurfacePng::Bytes(pm_blender::surface::encode_rgba16(w, h, &vec![30000; (w * h * 4) as usize], &[])),
+                    png: pm_blender::job::SurfacePng::Bytes(pm_blender::surface::encode_rgba16(
+                        w,
+                        h,
+                        &vec![30000; (w * h * 4) as usize],
+                        &[],
+                    )),
                 })
                 .collect(),
             device: ResolvedDevice::Cpu,
@@ -426,15 +540,34 @@ fn a_missing_blender_or_surface_fails_the_export_and_nothing_is_routed() {
     let dir = scratch("missing");
     let mut renderer = Renderer::headless().unwrap();
     let doc = scene(1.0, "eevee", 4);
-    let mut none = ExportBlender::new(BlenderStage::new(SurfaceCache::new(1 << 20, None)), Box::new(NoBlender));
+    let mut none = ExportBlender::new(
+        BlenderStage::new(SurfaceCache::new(1 << 20, None)),
+        Box::new(NoBlender),
+    );
     let e = export(&mut renderer, &mut none, &job(&doc, dir.join("a"), 1)).unwrap_err();
-    assert!(matches!(&e, JobError::Blender(BlenderError::Missing(m)) if m == pm_blender::BLENDER_MISSING_MESSAGE), "{e:?}");
-    let mut dropping = ExportBlender::new(BlenderStage::new(SurfaceCache::new(1 << 20, None)), Box::new(Dropping(Mutex::new(vec![]))));
+    assert!(
+        matches!(&e, JobError::Blender(BlenderError::Missing(m)) if m == pm_blender::BLENDER_MISSING_MESSAGE),
+        "{e:?}"
+    );
+    let mut dropping = ExportBlender::new(
+        BlenderStage::new(SurfaceCache::new(1 << 20, None)),
+        Box::new(Dropping(Mutex::new(vec![]))),
+    );
     let e = export(&mut renderer, &mut dropping, &job(&doc, dir.join("b"), 1)).unwrap_err();
-    assert!(matches!(&e, JobError::Blender(BlenderError::Failed(m)) if m.contains("did not render the surface")), "{e:?}");
-    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    assert!(
+        matches!(&e, JobError::Blender(BlenderError::Failed(m)) if m.contains("did not render the surface")),
+        "{e:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
     assert!(left.is_empty(), "a failed export leaves nothing: {left:?}");
     // Without a Blender stage the job is routed, as before.
-    assert!(matches!(plan_export(&job(&doc, dir.join("c.png"), 1)), Err(JobError::Unsupported(_))));
+    assert!(matches!(
+        plan_export(&job(&doc, dir.join("c.png"), 1)),
+        Err(JobError::Unsupported(_))
+    ));
     std::fs::remove_dir_all(dir).unwrap();
 }

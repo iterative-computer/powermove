@@ -122,7 +122,9 @@ impl SurfaceCache {
     }
 
     fn disk_path(&self, key: &ContentHash) -> Option<PathBuf> {
-        self.disk.as_ref().map(|d| d.join(format!("{}.png", hex(key))))
+        self.disk
+            .as_ref()
+            .map(|d| d.join(format!("{}.png", hex(key))))
     }
 
     fn remember(&mut self, key: &ContentHash, surface: Arc<DecodedSurface>) {
@@ -168,7 +170,11 @@ impl SurfaceCache {
 
     /// Adds a surface rendered into `png` (moved into the disk area when the
     /// cache has one), decoded once.
-    pub fn insert_file(&mut self, key: &ContentHash, png: &Path) -> Result<Arc<DecodedSurface>, SurfaceError> {
+    pub fn insert_file(
+        &mut self,
+        key: &ContentHash,
+        png: &Path,
+    ) -> Result<Arc<DecodedSurface>, SurfaceError> {
         let bytes = std::fs::read(png).map_err(|e| SurfaceError::Decode(e.to_string()))?;
         let surface = Arc::new(decode_surface(&bytes)?);
         if let Some(target) = self.disk_path(key) {
@@ -183,7 +189,11 @@ impl SurfaceCache {
     }
 
     /// Adds a decoded surface with its PNG bytes.
-    pub fn insert_bytes(&mut self, key: &ContentHash, png: &[u8]) -> Result<Arc<DecodedSurface>, SurfaceError> {
+    pub fn insert_bytes(
+        &mut self,
+        key: &ContentHash,
+        png: &[u8],
+    ) -> Result<Arc<DecodedSurface>, SurfaceError> {
         let surface = Arc::new(decode_surface(png)?);
         if let Some(target) = self.disk_path(key) {
             let tmp = target.with_extension(format!("{}.part", std::process::id()));
@@ -228,13 +238,22 @@ impl SurfaceCache {
 
     /// The device Blender resolved for these settings on this machine, if
     /// a job has recorded it.
-    pub fn resolved_device(&self, version: &str, settings: &BlenderSettings) -> Option<ResolvedDevice> {
+    pub fn resolved_device(
+        &self,
+        version: &str,
+        settings: &BlenderSettings,
+    ) -> Option<ResolvedDevice> {
         crate::key::predicted_device(settings)
             .or_else(|| self.devices.get(&device_slot(version, settings)).cloned())
     }
 
     /// Records the device a job resolved (kept on disk with the surfaces).
-    pub fn record_device(&mut self, version: &str, settings: &BlenderSettings, device: &ResolvedDevice) {
+    pub fn record_device(
+        &mut self,
+        version: &str,
+        settings: &BlenderSettings,
+        device: &ResolvedDevice,
+    ) {
         let slot = device_slot(version, settings);
         if self.devices.get(&slot) == Some(device) {
             return;

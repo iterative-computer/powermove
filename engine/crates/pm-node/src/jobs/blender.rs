@@ -28,7 +28,9 @@ use pm_protocol::blender::{
 use pm_protocol::common::{ByteSize, ContentHash, JobId, SessionId, Size, Ticks};
 use pm_protocol::envelope::{Request, Response};
 use pm_protocol::error::{EngineError, ErrorCode};
-use pm_protocol::host::{CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, MintHandle, ResolveHandle};
+use pm_protocol::host::{
+    CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, MintHandle, ResolveHandle,
+};
 use pm_protocol::priority::{CancelJobs, PriorityClass};
 
 use super::Shared;
@@ -89,7 +91,11 @@ impl HostBackend {
             Some(session),
         ) {
             Ok(Response::Handle(g)) => g,
-            Ok(_) => return Err(BlenderError::Failed("Blender cache: unexpected answer".into())),
+            Ok(_) => {
+                return Err(BlenderError::Failed(
+                    "Blender cache: unexpected answer".into(),
+                ));
+            }
             Err(e) => return Err(failed(e)),
         };
         let resolved = match self.shared.call(
@@ -108,6 +114,7 @@ impl HostBackend {
             pm_blender::supervisor::create_private_dir(&path.join(sub))
                 .map_err(|e| BlenderError::Failed(format!("Blender cache: {e}")))?;
         }
+        prune(&path);
         self.area = Some((path.clone(), grant.handle.clone(), session));
         Ok((path, grant.handle))
     }
@@ -130,6 +137,35 @@ impl HostBackend {
     }
 }
 
+/// Snapshots and converted textures are inputs of running jobs only:
+/// those older than the longest a job may run are removed (surfaces stay,
+/// under the surface cache's own bound).
+fn prune(area: &std::path::Path) {
+    let horizon = FRAME_TIMEOUT * 2;
+    for sub in ["snapshots", "assets", ""] {
+        let Ok(entries) = std::fs::read_dir(area.join(sub)) else {
+            continue;
+        };
+        // In the area itself, only surfaces host services wrote and no job
+        // took (a failed or cancelled one).
+        let only_png = sub.is_empty();
+        for e in entries.flatten() {
+            if only_png && e.path().extension().is_none_or(|x| x != "png") {
+                continue;
+            }
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > horizon);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 fn of_engine(e: EngineError) -> BlenderError {
     match e.code {
         ErrorCode::BlenderMissing => BlenderError::Missing(e.message),
@@ -142,20 +178,24 @@ impl BlenderBackend for HostBackend {
     fn version(&mut self) -> Result<String, BlenderError> {
         let session = self.params().session;
         match self.shared.call(Request::BlenderStatus, Some(session)) {
-            Ok(Response::BlenderStatus(s)) if s.supported() => {
-                Ok(s.version.unwrap_or_default())
-            }
+            Ok(Response::BlenderStatus(s)) if s.supported() => Ok(s.version.unwrap_or_default()),
             Ok(Response::BlenderStatus(s)) => Err(BlenderError::Missing(
                 s.error
                     .filter(|e| !e.is_empty())
                     .unwrap_or_else(|| pm_blender::BLENDER_MISSING_MESSAGE.to_owned()),
             )),
-            Ok(_) => Err(BlenderError::Failed("unexpected Blender status answer".into())),
+            Ok(_) => Err(BlenderError::Failed(
+                "unexpected Blender status answer".into(),
+            )),
             Err(e) => Err(of_engine(e)),
         }
     }
 
-    fn render(&mut self, job: &RenderJob<'_>, cancel: &AtomicBool) -> Result<RenderedFrame, BlenderError> {
+    fn render(
+        &mut self,
+        job: &RenderJob<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<RenderedFrame, BlenderError> {
         let (area, handle) = self.area()?;
         let params = self.params();
         let io = |e: std::io::Error| BlenderError::Failed(format!("Blender cache: {e}"));
@@ -163,11 +203,11 @@ impl BlenderBackend for HostBackend {
         let bytes = job.snapshot.encode();
         let hash = job.snapshot.hash();
         let file = area.join("snapshots").join(format!("{}.json", hex(&hash)));
-        if !file.exists() {
-            let tmp = file.with_extension(format!("{}.part", std::process::id()));
-            pm_blender::supervisor::write_private(&tmp, &bytes).map_err(io)?;
-            std::fs::rename(&tmp, &file).map_err(io)?;
-        }
+        // Written again even when present: a fresh modification time keeps
+        // it out of `prune` while the job runs.
+        let tmp = file.with_extension(format!("{}.{}.part", std::process::id(), self.next));
+        pm_blender::supervisor::write_private(&tmp, &bytes).map_err(io)?;
+        std::fs::rename(&tmp, &file).map_err(io)?;
         // Assets: media handles, or converted bytes in the area.
         let mut assets = Vec::new();
         for a in &job.snapshot.assets {
@@ -178,10 +218,10 @@ impl BlenderBackend for HostBackend {
                         .extension()
                         .map(|e| e.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "png".into());
-                    let path = area.join("assets").join(format!("{}.{ext}", hex(&a.hash())));
-                    if !path.exists() {
-                        pm_blender::supervisor::write_private(&path, b).map_err(io)?;
-                    }
+                    let path = area
+                        .join("assets")
+                        .join(format!("{}.{ext}", hex(&a.hash())));
+                    pm_blender::supervisor::write_private(&path, b).map_err(io)?;
                     handle.clone()
                 }
             };
@@ -198,13 +238,25 @@ impl BlenderBackend for HostBackend {
         let surfaces: Vec<SurfaceRequest> = job
             .layers
             .iter()
-            .zip(job.keys.iter().chain(std::iter::repeat(&ContentHash([0; 32]))))
+            .zip(
+                job.keys
+                    .iter()
+                    .chain(std::iter::repeat(&ContentHash([0; 32]))),
+            )
             .map(|(layer, key)| SurfaceRequest {
                 layer: layer.as_str().into(),
-                composition_path: frame.composition_path.iter().map(|c| c.as_str().into()).collect(),
-                time: Ticks::new((frame.time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64)
-                    .unwrap_or(Ticks::ZERO),
-                shutter: frame.shutter.map(|(index, count)| ShutterSample { index, count }),
+                composition_path: frame
+                    .composition_path
+                    .iter()
+                    .map(|c| c.as_str().into())
+                    .collect(),
+                time: Ticks::new(
+                    (frame.time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
+                )
+                .unwrap_or(Ticks::ZERO),
+                shutter: frame
+                    .shutter
+                    .map(|(index, count)| ShutterSample { index, count }),
                 size: Size::new(w, h),
                 key: *key,
             })
@@ -216,7 +268,8 @@ impl BlenderBackend for HostBackend {
                 hash,
                 encoding: SnapshotEncoding::RenderSnapshotJsonV1,
                 handle: handle.clone(),
-                bytes: ByteSize::new(bytes.len() as u64).map_err(|_| BlenderError::Failed("snapshot size".into()))?,
+                bytes: ByteSize::new(bytes.len() as u64)
+                    .map_err(|_| BlenderError::Failed("snapshot size".into()))?,
             },
             worker_script_hash: pm_blender::worker::worker_script_hash(),
             assets,
@@ -253,16 +306,22 @@ impl BlenderBackend for HostBackend {
             .ok_or_else(|| BlenderError::Failed("Blender delivered no surfaces".into()))?;
         let mut out = Vec::new();
         for s in delivered {
-            pm_protocol::validate::Validate::validate(&s).map_err(|v| BlenderError::Failed(v.to_string()))?;
+            pm_protocol::validate::Validate::validate(&s)
+                .map_err(|v| BlenderError::Failed(v.to_string()))?;
             let Some(layer) = job.layers.get(s.request_index as usize) else {
-                return Err(BlenderError::Failed("a Blender surface for no request".into()));
+                return Err(BlenderError::Failed(
+                    "a Blender surface for no request".into(),
+                ));
             };
             out.push(RenderedSurface {
                 layer: layer.clone(),
                 png: SurfacePng::File(area.join(format!("{}.png", hex(&s.key)))),
             });
         }
-        Ok(RenderedFrame { surfaces: out, device })
+        Ok(RenderedFrame {
+            surfaces: out,
+            device,
+        })
     }
 }
 

@@ -77,7 +77,11 @@ pub trait BlenderBackend {
     /// The Blender version (`major.minor.patch`), or why Blender is missing.
     fn version(&mut self) -> Result<String, BlenderError>;
     /// Renders `job`; setting `cancel` stops Blender.
-    fn render(&mut self, job: &RenderJob<'_>, cancel: &AtomicBool) -> Result<RenderedFrame, BlenderError>;
+    fn render(
+        &mut self,
+        job: &RenderJob<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<RenderedFrame, BlenderError>;
 }
 
 /// The settings of a snapshot (its `settings` object and frame).
@@ -91,10 +95,15 @@ pub fn snapshot_settings(snapshot: &Snapshot) -> Result<BlenderSettings, Blender
             Some("eevee") => BlenderEngine::Eevee,
             _ => return Err(bad()),
         },
-        samples: num("samples").filter(|n| (1.0..=4096.0).contains(n)).ok_or_else(bad)? as u16,
+        samples: num("samples")
+            .filter(|n| (1.0..=4096.0).contains(n))
+            .ok_or_else(bad)? as u16,
         preview: snapshot.frame.preview,
         preview_scale: num("previewScale").unwrap_or(0.5),
-        denoise: s.get("denoise").and_then(pm_model::Value::as_bool).unwrap_or(true),
+        denoise: s
+            .get("denoise")
+            .and_then(pm_model::Value::as_bool)
+            .unwrap_or(true),
         device: match s.get("device").and_then(pm_model::Value::as_str) {
             Some("cpu") => RequestedDevice::Cpu,
             Some("gpu") => RequestedDevice::Gpu,
@@ -178,7 +187,14 @@ impl BlenderStage {
             let mut missing = Vec::new();
             for layer in &layers {
                 let found = device.as_ref().and_then(|d| {
-                    let key = key_hash(&surface_key(snapshot, layer, self.worker_hash, &version, &settings, d));
+                    let key = key_hash(&surface_key(
+                        snapshot,
+                        layer,
+                        self.worker_hash,
+                        &version,
+                        &settings,
+                        d,
+                    ));
                     self.cache.get(&key)
                 });
                 match found {
@@ -219,7 +235,8 @@ impl BlenderStage {
             let rendered = backend.render(&job, cancel)?;
             self.stats.jobs += 1;
             self.devices.push(rendered.device.clone());
-            self.cache.record_device(&version, &settings, &rendered.device);
+            self.cache
+                .record_device(&version, &settings, &rendered.device);
             for layer in &missing {
                 let Some(found) = rendered.surfaces.iter().find(|s| &s.layer == layer) else {
                     return Err(BlenderError::Failed(format!(
@@ -280,7 +297,10 @@ impl LocalBackend {
 }
 
 /// Writes converted asset bytes beside the worker's inputs.
-fn asset_files(job: &RenderJob<'_>, scratch: &std::path::Path) -> Result<Vec<(String, PathBuf)>, BlenderError> {
+fn asset_files(
+    job: &RenderJob<'_>,
+    scratch: &std::path::Path,
+) -> Result<Vec<(String, PathBuf)>, BlenderError> {
     let mut out = Vec::new();
     for a in &job.snapshot.assets {
         let path = match &a.bytes {
@@ -290,7 +310,10 @@ fn asset_files(job: &RenderJob<'_>, scratch: &std::path::Path) -> Result<Vec<(St
                     .extension()
                     .map(|e| e.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                if p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) == Some(ext.to_ascii_lowercase()) {
+                if p.extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    == Some(ext.to_ascii_lowercase())
+                {
                     p.clone()
                 } else {
                     let target = scratch.join(&a.name);
@@ -300,7 +323,8 @@ fn asset_files(job: &RenderJob<'_>, scratch: &std::path::Path) -> Result<Vec<(St
             }
             crate::snapshot::AssetBytes::Bytes(b) => {
                 let target = scratch.join(&a.name);
-                crate::supervisor::write_private(&target, b).map_err(|e| BlenderError::Failed(e.to_string()))?;
+                crate::supervisor::write_private(&target, b)
+                    .map_err(|e| BlenderError::Failed(e.to_string()))?;
                 target
             }
         };
@@ -314,10 +338,19 @@ impl BlenderBackend for LocalBackend {
         Ok(self.worker.install().version.clone())
     }
 
-    fn render(&mut self, job: &RenderJob<'_>, cancel: &AtomicBool) -> Result<RenderedFrame, BlenderError> {
+    fn render(
+        &mut self,
+        job: &RenderJob<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<RenderedFrame, BlenderError> {
         let bytes = job.snapshot.encode();
-        let scratch = std::env::temp_dir().join(format!("pm-blender-assets-{}-{}", std::process::id(), job.id));
-        crate::supervisor::create_private_dir(&scratch).map_err(|e| BlenderError::Failed(e.to_string()))?;
+        let scratch = std::env::temp_dir().join(format!(
+            "pm-blender-assets-{}-{}",
+            std::process::id(),
+            job.id
+        ));
+        crate::supervisor::create_private_dir(&scratch)
+            .map_err(|e| BlenderError::Failed(e.to_string()))?;
         let result = (|| {
             let assets = asset_files(job, &scratch)?;
             let groups: Vec<Vec<String>> = if job.batch {
@@ -342,13 +375,18 @@ impl BlenderBackend for LocalBackend {
                 for (layer, path) in out.files {
                     surfaces.push(RenderedSurface {
                         layer,
-                        png: SurfacePng::Bytes(std::fs::read(&path).map_err(|e| BlenderError::Failed(e.to_string()))?),
+                        png: SurfacePng::Bytes(
+                            std::fs::read(&path)
+                                .map_err(|e| BlenderError::Failed(e.to_string()))?,
+                        ),
                     });
                 }
             }
             Ok(RenderedFrame {
                 surfaces,
-                device: device.ok_or_else(|| BlenderError::Failed("Blender did not report its device".into()))?,
+                device: device.ok_or_else(|| {
+                    BlenderError::Failed("Blender did not report its device".into())
+                })?,
             })
         })();
         let _ = std::fs::remove_dir_all(&scratch);
@@ -380,7 +418,11 @@ mod tests {
         fn version(&mut self) -> Result<String, BlenderError> {
             Ok("4.5.14".into())
         }
-        fn render(&mut self, job: &RenderJob<'_>, _: &AtomicBool) -> Result<RenderedFrame, BlenderError> {
+        fn render(
+            &mut self,
+            job: &RenderJob<'_>,
+            _: &AtomicBool,
+        ) -> Result<RenderedFrame, BlenderError> {
             self.calls.push(job.layers.clone());
             let (w, h) = job.snapshot.size();
             Ok(RenderedFrame {
@@ -390,10 +432,17 @@ mod tests {
                     .filter(|l| Some(*l) != self.drop_layer.as_ref())
                     .map(|l| RenderedSurface {
                         layer: l.clone(),
-                        png: SurfacePng::Bytes(encode_rgba16(w, h, &vec![65535; (w * h * 4) as usize], &[])),
+                        png: SurfacePng::Bytes(encode_rgba16(
+                            w,
+                            h,
+                            &vec![65535; (w * h * 4) as usize],
+                            &[],
+                        )),
                     })
                     .collect(),
-                device: ResolvedDevice::Metal { name: "test".into() },
+                device: ResolvedDevice::Metal {
+                    name: "test".into(),
+                },
             })
         }
     }
@@ -435,7 +484,9 @@ mod tests {
         assert_eq!(seen.last(), Some(&(4, 4)));
         // Again: everything from the cache, the device learned from the
         // first job.
-        let again = stage.prepare(&mut fake, &frames, &cancel, &mut |_, _| {}).unwrap();
+        let again = stage
+            .prepare(&mut fake, &frames, &cancel, &mut |_, _| {})
+            .unwrap();
         assert_eq!(fake.calls.len(), 2);
         assert_eq!(stage.stats.cached, 4);
         assert_eq!(again.len(), 2);
@@ -449,11 +500,24 @@ mod tests {
             drop_layer: Some("b".into()),
         };
         let e = stage
-            .prepare(&mut fake, &[snapshot(0.0)], &AtomicBool::new(false), &mut |_, _| {})
+            .prepare(
+                &mut fake,
+                &[snapshot(0.0)],
+                &AtomicBool::new(false),
+                &mut |_, _| {},
+            )
             .unwrap_err();
-        assert_eq!(e, BlenderError::Failed("Blender did not render the surface of layer b".into()));
+        assert_eq!(
+            e,
+            BlenderError::Failed("Blender did not render the surface of layer b".into())
+        );
         let cancelled = stage
-            .prepare(&mut fake, &[snapshot(2.0)], &AtomicBool::new(true), &mut |_, _| {})
+            .prepare(
+                &mut fake,
+                &[snapshot(2.0)],
+                &AtomicBool::new(true),
+                &mut |_, _| {},
+            )
             .unwrap_err();
         assert_eq!(cancelled, BlenderError::Cancelled);
     }

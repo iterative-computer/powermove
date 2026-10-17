@@ -43,7 +43,11 @@ pub fn worker_args(script: &std::path::Path) -> Vec<std::ffi::OsString> {
 pub fn resolved_device(manifest: &serde_json::Value) -> Option<ResolvedDevice> {
     let d = manifest.get("resolvedDevice")?;
     let kind = d.get("kind")?.as_str()?;
-    let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("").to_owned();
+    let name = d
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_owned();
     Some(match kind {
         "cpu" => ResolvedDevice::Cpu,
         "metal" => ResolvedDevice::Metal { name },
@@ -81,7 +85,10 @@ mod tests {
         );
         // No shell, no subprocess, no network from the worker: it imports
         // only Blender's modules and the standard library's basics.
-        for line in s.lines().filter(|l| l.trim_start().starts_with("import ") || l.contains(" import ")) {
+        for line in s
+            .lines()
+            .filter(|l| l.trim_start().starts_with("import ") || l.contains(" import "))
+        {
             for banned in ["subprocess", "urllib", "socket", "http", "ctypes"] {
                 assert!(!line.contains(banned), "{line}");
             }
@@ -93,7 +100,10 @@ mod tests {
     #[test]
     fn flags_are_contract_11s() {
         let args = worker_args(std::path::Path::new("/tmp/w.py"));
-        let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
             args,
             [

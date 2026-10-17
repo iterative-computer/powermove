@@ -54,8 +54,14 @@ fn n(v: Option<&Value>) -> Option<f64> {
 fn with_blender(loaded: &Value, compositions: &[String], settings: &Value) -> Value {
     let mut root = loaded.clone();
     let open = s(get(&root, "compId")).to_owned();
-    let open = if open.is_empty() { s(get(&root, "id")) } else { open };
-    let Value::Object(map) = &mut root else { panic!("root") };
+    let open = if open.is_empty() {
+        s(get(&root, "id"))
+    } else {
+        open
+    };
+    let Value::Object(map) = &mut root else {
+        panic!("root")
+    };
     for c in compositions {
         if *c == open && map.get("layers").is_some() {
             map.insert("render3d", settings.clone());
@@ -117,28 +123,43 @@ fn snapshots_equal_todays_render_snapshot() {
                 .map(|a| a.iter().map(|c| s(Some(c))).collect())
                 .unwrap_or_default();
             let settings = get(&record, "settings").cloned().unwrap();
-            let doc = pm_model::Document::new(Some(with_blender(&loaded, &compositions, &settings)), 1);
+            let doc =
+                pm_model::Document::new(Some(with_blender(&loaded, &compositions, &settings)), 1);
             let time = n(get(&record, "time")).unwrap();
             let mut ev = Evaluator::new().with_expressions(Arc::new(PmExprEngine));
             let root = Comp::resolve(&doc, &p.composition).unwrap();
             for pass in PASSES {
-                let Some(entry) = get(&record, pass) else { continue };
+                let Some(entry) = get(&record, pass) else {
+                    continue;
+                };
                 if let Some(e) = get(entry, "error") {
-                    t.failed.push(format!("{}/{pass}: the capture recorded an error: {}", p.name, s(Some(e))));
+                    t.failed.push(format!(
+                        "{}/{pass}: the capture recorded an error: {}",
+                        p.name,
+                        s(Some(e))
+                    ));
                     continue;
                 }
-                let snapshots = get(entry, "snapshots").and_then(Value::as_array).cloned().unwrap_or_default();
+                let snapshots = get(entry, "snapshots")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 // Frames: the engine's walk lists the same frames.
                 if pass != "preview" {
                     let opts = get(entry, "options");
                     let options = FrameOptions {
                         width: n(opts.and_then(|o| get(o, "width"))).map(|v| v as u32),
                         height: n(opts.and_then(|o| get(o, "height"))).map(|v| v as u32),
-                        motion_blur: !matches!(opts.and_then(|o| get(o, "mblur")), Some(Value::Bool(false))),
+                        motion_blur: !matches!(
+                            opts.and_then(|o| get(o, "mblur")),
+                            Some(Value::Bool(false))
+                        ),
                         samples: n(opts.and_then(|o| get(o, "mbSamples"))).map_or(10, |v| v as u32),
                         shutter: n(opts.and_then(|o| get(o, "shutter"))),
                     };
-                    let frames = frame_requests(&mut ev, &root, &root, time, options).unwrap().unwrap();
+                    let frames = frame_requests(&mut ev, &root, &root, time, options)
+                        .unwrap()
+                        .unwrap();
                     let want: Vec<(String, u64, u32, u32)> = snapshots
                         .iter()
                         .map(|x| {
@@ -153,12 +174,22 @@ fn snapshots_equal_todays_render_snapshot() {
                         .collect();
                     let got: Vec<(String, u64, u32, u32)> = frames
                         .iter()
-                        .map(|f| (f.composition().to_owned(), f.time.to_bits(), f.width, f.height))
+                        .map(|f| {
+                            (
+                                f.composition().to_owned(),
+                                f.time.to_bits(),
+                                f.width,
+                                f.height,
+                            )
+                        })
                         .collect();
                     if got == want {
                         t.frame_lists += 1;
                     } else {
-                        t.failed.push(format!("{}/{pass} t={time}: frames differ: today {want:?}, engine {got:?}", p.name));
+                        t.failed.push(format!(
+                            "{}/{pass} t={time}: frames differ: today {want:?}, engine {got:?}",
+                            p.name
+                        ));
                     }
                 }
                 for x in &snapshots {
@@ -166,8 +197,10 @@ fn snapshots_equal_todays_render_snapshot() {
                     let comp_id = s(get(r, "comp"));
                     let comp = Comp::resolve(&doc, &comp_id).unwrap();
                     let preview = matches!(get(r, "preview"), Some(Value::Bool(true)));
-                    let w = n(get(r, "width")).unwrap_or_else(|| pm_eval::node::to_number(comp.member("w")));
-                    let h = n(get(r, "height")).unwrap_or_else(|| pm_eval::node::to_number(comp.member("h")));
+                    let w = n(get(r, "width"))
+                        .unwrap_or_else(|| pm_eval::node::to_number(comp.member("w")));
+                    let h = n(get(r, "height"))
+                        .unwrap_or_else(|| pm_eval::node::to_number(comp.member("h")));
                     let frame = BlenderFrame {
                         composition_path: vec![comp_id.clone()],
                         time: n(get(r, "time")).unwrap(),
@@ -179,7 +212,8 @@ fn snapshots_equal_todays_render_snapshot() {
                     let label = format!("{}/{pass} {comp_id} t={}", p.name, frame.time);
                     t.snapshots += 1;
                     let mut scope = pm_eval::Scope::new(&mut ev, &comp, &root);
-                    let built = build(&mut scope, &frame, &p.resolver, &SnapshotOptions::default()).unwrap();
+                    let built = build(&mut scope, &frame, &p.resolver, &SnapshotOptions::default())
+                        .unwrap();
                     let snapshot = match built {
                         Ok(s) => s,
                         Err(why) if why == "imported models" => {
@@ -205,7 +239,13 @@ fn snapshots_equal_todays_render_snapshot() {
                     let got: Vec<(String, String, String)> = snapshot
                         .assets
                         .iter()
-                        .map(|a| (a.id.clone(), a.name.clone(), a.sha256.iter().map(|b| format!("{b:02x}")).collect()))
+                        .map(|a| {
+                            (
+                                a.id.clone(),
+                                a.name.clone(),
+                                a.sha256.iter().map(|b| format!("{b:02x}")).collect(),
+                            )
+                        })
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();
@@ -217,7 +257,10 @@ fn snapshots_equal_todays_render_snapshot() {
                     } else {
                         let mut lines = vec![format!("{label}:")];
                         for d in c.differences.iter().take(12) {
-                            lines.push(format!("  {}: today {} engine {}", d.path, d.today, d.engine));
+                            lines.push(format!(
+                                "  {}: today {} engine {}",
+                                d.path, d.today, d.engine
+                            ));
                         }
                         if want != got {
                             lines.push(format!("  assets: today {want:?} engine {got:?}"));
@@ -235,7 +278,12 @@ fn snapshots_equal_todays_render_snapshot() {
     for (name, why) in &t.routed {
         eprintln!("not built (allowed until the glTF lane lands): {name}: {why}");
     }
-    assert!(t.failed.is_empty(), "{} failures:\n{}", t.failed.len(), t.failed.join("\n"));
+    assert!(
+        t.failed.is_empty(),
+        "{} failures:\n{}",
+        t.failed.len(),
+        t.failed.join("\n")
+    );
     if only.is_none() {
         assert!(t.equal > 0, "nothing compared");
     }

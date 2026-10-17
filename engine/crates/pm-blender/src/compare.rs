@@ -147,13 +147,19 @@ mod tests {
 
     #[test]
     fn geometry_has_a_bound_and_the_rest_is_exact() {
-        let today = v(r#"{"objects":[{"meshes":[{"positions":[0,1,2],"matrix":[1,0],"material":{"p":{"roughness":{"v":0.4}}}}]}],"camera":{"fov":45}}"#);
-        let near = v(r#"{"objects":[{"meshes":[{"positions":[0,1.0000005,2],"matrix":[1,0.0000001],"material":{"p":{"roughness":{"v":0.4}}}}]}],"camera":{"fov":45}}"#);
+        let today = v(
+            r#"{"objects":[{"meshes":[{"positions":[0,1,2],"matrix":[1,0],"material":{"p":{"roughness":{"v":0.4}}}}]}],"camera":{"fov":45}}"#,
+        );
+        let near = v(
+            r#"{"objects":[{"meshes":[{"positions":[0,1.0000005,2],"matrix":[1,0.0000001],"material":{"p":{"roughness":{"v":0.4}}}}]}],"camera":{"fov":45}}"#,
+        );
         let c = compare(&today, &near);
         assert!(c.equal(), "{:?}", c.differences);
         assert_eq!(c.geometry_values, 5);
         assert!(c.geometry_max > 4e-7);
-        let far = v(r#"{"objects":[{"meshes":[{"positions":[0,1.00001,2],"matrix":[1,0],"material":{"p":{"roughness":{"v":0.4000000001}}}}]}],"camera":{"fov":45}}"#);
+        let far = v(
+            r#"{"objects":[{"meshes":[{"positions":[0,1.00001,2],"matrix":[1,0],"material":{"p":{"roughness":{"v":0.4000000001}}}}]}],"camera":{"fov":45}}"#,
+        );
         let c = compare(&today, &far);
         let paths: Vec<&str> = c.differences.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(

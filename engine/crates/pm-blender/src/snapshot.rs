@@ -245,11 +245,14 @@ impl Render3dSettings {
             let int = |lo: f64, hi: f64| -> Result<u16, String> {
                 match v {
                     Value::Number(n) if n.fract() == 0.0 && *n >= lo && *n <= hi => Ok(*n as u16),
-                    _ => Err(format!("render3d.{key} must be an integer from {lo} to {hi}")),
+                    _ => Err(format!(
+                        "render3d.{key} must be an integer from {lo} to {hi}"
+                    )),
                 }
             };
             let boolean = || -> Result<bool, String> {
-                v.as_bool().ok_or_else(|| format!("render3d.{key} must be a boolean"))
+                v.as_bool()
+                    .ok_or_else(|| format!("render3d.{key} must be a boolean"))
             };
             match key.as_str() {
                 "enabled" => s.enabled = boolean()?,
@@ -314,7 +317,11 @@ impl Render3dSettings {
 
     /// The contract 11 settings of a frame (`preview` picks the preview
     /// samples and scale; Material Preview forces EEVEE).
-    pub fn for_frame(&self, preview: bool, force_eevee: bool) -> pm_protocol::blender::BlenderSettings {
+    pub fn for_frame(
+        &self,
+        preview: bool,
+        force_eevee: bool,
+    ) -> pm_protocol::blender::BlenderSettings {
         use pm_protocol::blender::{BlenderEngine, BlenderSettings};
         BlenderSettings {
             engine: if self.cycles && !force_eevee {

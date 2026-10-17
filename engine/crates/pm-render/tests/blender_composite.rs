@@ -40,7 +40,12 @@ fn scene(render3d: bool) -> Value {
         H,
         2.0,
         solid_fill("#102030"),
-        vec![camera("cam", [0.0, 0.0, 4.0], false, 2.0), sun("sun", [-3.0, 5.0, 4.0], false, 2.0), a, b],
+        vec![
+            camera("cam", [0.0, 0.0, 4.0], false, 2.0),
+            sun("sun", [-3.0, 5.0, 4.0], false, 2.0),
+            a,
+            b,
+        ],
     );
     if render3d {
         doc["render3d"] = json!({ "enabled": true, "engine": "eevee", "samples": 16 });
@@ -59,11 +64,20 @@ fn surface(w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32, seed: u32) -> Vec
             rgba[i] = ((k * 977) % 65536) as u16;
             rgba[i + 1] = ((k * 3011 + 17) % 65536) as u16;
             rgba[i + 2] = ((k * 5003 + 400) % 65536) as u16;
-            rgba[i + 3] = if (x + y) % 5 == 0 { 65535 } else { ((k * 1499) % 65536) as u16 };
+            rgba[i + 3] = if (x + y) % 5 == 0 {
+                65535
+            } else {
+                ((k * 1499) % 65536) as u16
+            };
         }
     }
     // Color chunks the engine must ignore.
-    encode_rgba16(w, h, &rgba, &[(b"gAMA", &45455u32.to_be_bytes()), (b"sRGB", &[0])])
+    encode_rgba16(
+        w,
+        h,
+        &rgba,
+        &[(b"gAMA", &45455u32.to_be_bytes()), (b"sRGB", &[0])],
+    )
 }
 
 fn request(precision: Precision) -> RenderRequest {
@@ -74,14 +88,26 @@ fn request(precision: Precision) -> RenderRequest {
 fn draw_order(plan: &CompPlan) -> Vec<String> {
     plan.draws
         .iter()
-        .filter(|d| matches!(&d.content, Content::Texture { source: Source::Blender(_), .. }))
+        .filter(|d| {
+            matches!(
+                &d.content,
+                Content::Texture {
+                    source: Source::Blender(_),
+                    ..
+                }
+            )
+        })
         .map(|d| d.layer.clone())
         .collect()
 }
 
 /// f64 reference: the background, then each surface (premultiplied E,
 /// times the layer's opacity) source-over.
-fn reference(order: &[String], surfaces: &HashMap<String, Arc<DecodedSurface>>, opacity: &HashMap<&str, f64>) -> Vec<f64> {
+fn reference(
+    order: &[String],
+    surfaces: &HashMap<String, Arc<DecodedSurface>>,
+    opacity: &HashMap<&str, f64>,
+) -> Vec<f64> {
     let bg = [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 1.0];
     let mut out = Vec::with_capacity((W * H * 4) as usize);
     for y in 0..H {
@@ -90,7 +116,12 @@ fn reference(order: &[String], surfaces: &HashMap<String, Arc<DecodedSurface>>, 
             for id in order {
                 let p = surfaces[id].pixel(x, y);
                 let o = opacity[id.as_str()];
-                let s = [f64::from(p[0]) * o, f64::from(p[1]) * o, f64::from(p[2]) * o, f64::from(p[3]) * o];
+                let s = [
+                    f64::from(p[0]) * o,
+                    f64::from(p[1]) * o,
+                    f64::from(p[2]) * o,
+                    f64::from(p[3]) * o,
+                ];
                 for k in 0..4 {
                     c[k] = s[k] + c[k] * (1.0 - s[3]);
                 }
@@ -102,7 +133,10 @@ fn reference(order: &[String], surfaces: &HashMap<String, Arc<DecodedSurface>>, 
 }
 
 fn max_diff(a: &[f32], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| (f64::from(*x) - y).abs()).fold(0.0, f64::max)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (f64::from(*x) - y).abs())
+        .fold(0.0, f64::max)
 }
 
 #[test]
@@ -112,7 +146,15 @@ fn surfaces_composite_exactly_per_layer() {
     let assets = MapResolver::default();
     // The frame's Blender snapshots: one frame, both layers.
     let snaps = r
-        .blender_snapshots(&doc, "Ptest-root", ticks(0.0), &request(Precision::Float32), &assets, false, SnapshotOptions::default())
+        .blender_snapshots(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request(Precision::Float32),
+            &assets,
+            false,
+            SnapshotOptions::default(),
+        )
         .unwrap();
     assert!(snaps.errors.is_empty(), "{:?}", snaps.errors);
     assert_eq!(snaps.snapshots.len(), 1);
@@ -134,11 +176,15 @@ fn surfaces_composite_exactly_per_layer() {
     for precision in [Precision::Float32, Precision::Float16] {
         let mut req = request(precision);
         req.blender = BlenderRender::Final(Arc::new(surfaces.clone()));
-        let (plan, failures) = r.plan(&doc, "Ptest-root", ticks(0.0), &req, &assets).unwrap();
+        let (plan, failures) = r
+            .plan(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .unwrap();
         assert!(failures.is_empty(), "{failures:?}");
         let order = draw_order(&plan);
         assert_eq!(order.len(), 2, "both layers draw their surfaces");
-        let frame = r.render(&doc, "Ptest-root", ticks(0.0), &req, &assets).unwrap();
+        let frame = r
+            .render(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
         let got = r.read_rgba(&frame).unwrap();
         let want = reference(&order, &decoded, &opacity);
@@ -160,19 +206,38 @@ fn a_missing_surface_fails_the_layer_and_native_shading_needs_no_blender() {
     let assets = MapResolver::default();
     let mut req = request(Precision::Float16);
     req.blender = BlenderRender::Final(Arc::new(Default::default()));
-    let frame = r.render(&doc, "Ptest-root", ticks(0.0), &req, &assets).unwrap();
-    let mut messages: Vec<(String, String)> = frame.failures.iter().map(|f| (f.layer.clone(), f.message.clone())).collect();
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+        .unwrap();
+    let mut messages: Vec<(String, String)> = frame
+        .failures
+        .iter()
+        .map(|f| (f.layer.clone(), f.message.clone()))
+        .collect();
     messages.sort();
     assert_eq!(
         messages,
-        [("a".to_string(), NOT_PREPARED.to_string()), ("b".to_string(), NOT_PREPARED.to_string())]
+        [
+            ("a".to_string(), NOT_PREPARED.to_string()),
+            ("b".to_string(), NOT_PREPARED.to_string())
+        ]
     );
     // Without `render3d.enabled` the native pass draws and nothing fails.
     let native = load(&scene(false));
-    let frame = r.render(&native, "Ptest-root", ticks(0.0), &req, &assets).unwrap();
+    let frame = r
+        .render(&native, "Ptest-root", ticks(0.0), &req, &assets)
+        .unwrap();
     assert!(frame.failures.is_empty());
     let snaps = r
-        .blender_snapshots(&native, "Ptest-root", ticks(0.0), &req, &assets, false, SnapshotOptions::default())
+        .blender_snapshots(
+            &native,
+            "Ptest-root",
+            ticks(0.0),
+            &req,
+            &assets,
+            false,
+            SnapshotOptions::default(),
+        )
         .unwrap();
     assert!(snaps.snapshots.is_empty());
 }
@@ -184,10 +249,15 @@ struct Preview {
 
 impl PreviewSurfaces for Preview {
     fn options(&self) -> SnapshotOptions {
-        SnapshotOptions { force_eevee: true, ..Default::default() }
+        SnapshotOptions {
+            force_eevee: true,
+            ..Default::default()
+        }
     }
     fn lookup(&self, snapshot: &Snapshot, layer: &str) -> Option<Arc<DecodedSurface>> {
-        self.have.get(&(snapshot.hash().0.to_vec(), layer.to_owned())).cloned()
+        self.have
+            .get(&(snapshot.hash().0.to_vec(), layer.to_owned()))
+            .cloned()
     }
     fn wanted(&self, snapshot: Snapshot) {
         self.wanted.lock().unwrap().push(snapshot);
@@ -203,7 +273,18 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
     // Preview snapshots are made at the preview scale with EEVEE, even
     // without `render3d.enabled` (today's rendered preview).
     let snaps = r
-        .blender_snapshots(&doc, "Ptest-root", ticks(0.0), &req, &assets, true, SnapshotOptions { force_eevee: true, ..Default::default() })
+        .blender_snapshots(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &req,
+            &assets,
+            true,
+            SnapshotOptions {
+                force_eevee: true,
+                ..Default::default()
+            },
+        )
         .unwrap();
     let snap = snaps.snapshots[0].clone();
     assert_eq!(snap.size(), (W / 2, H / 2));
@@ -217,14 +298,24 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
     });
     let mut req = request(Precision::Float16);
     req.blender = BlenderRender::Preview(preview.clone());
-    let (plan, failures) = r.plan(&doc, "Ptest-root", ticks(0.0), &req, &assets).unwrap();
+    let (plan, failures) = r
+        .plan(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+        .unwrap();
     assert!(failures.is_empty());
     // `a` draws its half-size surface stretched over the frame; `b` draws
     // natively while its surface is asked for.
     let blender: Vec<(&str, [f64; 6])> = plan
         .draws
         .iter()
-        .filter(|d| matches!(&d.content, Content::Texture { source: Source::Blender(_), .. }))
+        .filter(|d| {
+            matches!(
+                &d.content,
+                Content::Texture {
+                    source: Source::Blender(_),
+                    ..
+                }
+            )
+        })
         .map(|d| (d.layer.as_str(), d.matrix))
         .collect();
     assert_eq!(blender.len(), 1);
@@ -232,9 +323,23 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
     let rect = half.rect();
     assert_eq!(
         blender[0].1,
-        [rect[2] * f64::from(W), 0.0, 0.0, rect[3] * f64::from(H), rect[0] * f64::from(W), rect[1] * f64::from(H)]
+        [
+            rect[2] * f64::from(W),
+            0.0,
+            0.0,
+            rect[3] * f64::from(H),
+            rect[0] * f64::from(W),
+            rect[1] * f64::from(H)
+        ]
     );
-    assert!(plan.draws.iter().any(|d| d.layer == "b" && matches!(&d.content, Content::Texture { source: Source::Object3d(_), .. })));
+    assert!(plan.draws.iter().any(|d| d.layer == "b"
+        && matches!(
+            &d.content,
+            Content::Texture {
+                source: Source::Object3d(_),
+                ..
+            }
+        )));
     let wanted = preview.wanted.lock().unwrap();
     assert_eq!(wanted.len(), 1);
     assert_eq!(wanted[0].hash(), snap.hash());
@@ -247,7 +352,14 @@ fn nested_compositions_are_their_own_frames() {
     let layers = inner["layers"].take().as_array().unwrap().clone();
     composition(&mut doc, "inner", 48, 32, 2.0, layers);
     doc["comps"]["inner"]["render3d"] = json!({ "enabled": true });
-    let mut pre = layer("pre", "precomp", json!({ "comp": "inner", "w": 48, "h": 32 }), 48.0, 32.0, 2.0);
+    let mut pre = layer(
+        "pre",
+        "precomp",
+        json!({ "comp": "inner", "w": 48, "h": 32 }),
+        48.0,
+        32.0,
+        2.0,
+    );
     set(&mut pre, "scale.x", json!(200));
     set(&mut pre, "scale.y", json!(200));
     doc["layers"] = json!([pre]);
@@ -256,7 +368,15 @@ fn nested_compositions_are_their_own_frames() {
     let assets = MapResolver::default();
     let req = request(Precision::Float32);
     let snaps = r
-        .blender_snapshots(&doc, "Ptest-root", ticks(0.5), &req, &assets, false, SnapshotOptions::default())
+        .blender_snapshots(
+            &doc,
+            "Ptest-root",
+            ticks(0.5),
+            &req,
+            &assets,
+            false,
+            SnapshotOptions::default(),
+        )
         .unwrap();
     assert!(snaps.errors.is_empty(), "{:?}", snaps.errors);
     assert_eq!(snaps.snapshots.len(), 1);
@@ -266,12 +386,17 @@ fn nested_compositions_are_their_own_frames() {
     assert_eq!((snap.frame.width, snap.frame.height), (48, 32));
     let mut frame = HashMap::new();
     for l in snap.layers() {
-        frame.insert(l, Arc::new(decode_surface(&surface(48, 32, 0, 0, 48, 32, 4)).unwrap()));
+        frame.insert(
+            l,
+            Arc::new(decode_surface(&surface(48, 32, 0, 0, 48, 32, 4)).unwrap()),
+        );
     }
     let mut surfaces = pm_blender::job::Surfaces::new();
     surfaces.insert(snap.frame.lookup(), frame);
     let mut req = request(Precision::Float32);
     req.blender = BlenderRender::Final(Arc::new(surfaces));
-    let frame = r.render(&doc, "Ptest-root", ticks(0.5), &req, &assets).unwrap();
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.5), &req, &assets)
+        .unwrap();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
 }

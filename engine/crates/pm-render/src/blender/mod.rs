@@ -52,7 +52,8 @@ pub use snapshot::SnapshotOptions;
 
 /// Today's sentence for a final render whose Blender frame is missing
 /// (`compositor.ts`).
-pub const NOT_PREPARED: &str = "The Blender frame is not prepared. Render this frame before capturing it.";
+pub const NOT_PREPARED: &str =
+    "The Blender frame is not prepared. Render this frame before capturing it.";
 
 /// The surfaces a paused viewer has, and where it reports the ones it
 /// lacks (the interactive engine's preview cache).
@@ -171,12 +172,17 @@ pub(crate) enum Planned {
 
 /// Whether the composition renders with Blender (`render3d.enabled`).
 pub fn blender_enabled(comp: &pm_eval::Comp<'_>) -> bool {
-    pm_eval::node::truthy(
-        pm_eval::node::member(comp.member("render3d"), "enabled"),
-    )
+    pm_eval::node::truthy(pm_eval::node::member(comp.member("render3d"), "enabled"))
 }
 
-fn frame_of(state: &PlanState, comp_id: &str, time: f64, width: u32, height: u32, preview: bool) -> BlenderFrame {
+fn frame_of(
+    state: &PlanState,
+    comp_id: &str,
+    time: f64,
+    width: u32,
+    height: u32,
+    preview: bool,
+) -> BlenderFrame {
     let mut path = state.path.clone();
     if path.last().map(String::as_str) != Some(comp_id) {
         path.push(comp_id.to_owned());
@@ -241,12 +247,10 @@ pub(crate) fn plan_object<'d>(
                 return Ok(None);
             }
             let key = frame_of(state, &comp_id, time, width, height, false).lookup();
-            Ok(Some(
-                match surfaces.get(&key).and_then(|f| f.get(&id)) {
-                    Some(s) => draw(&id, s.clone(), width, height),
-                    None => Planned::Fail(NOT_PREPARED.to_owned()),
-                },
-            ))
+            Ok(Some(match surfaces.get(&key).and_then(|f| f.get(&id)) {
+                Some(s) => draw(&id, s.clone(), width, height),
+                None => Planned::Fail(NOT_PREPARED.to_owned()),
+            }))
         }
         BlenderRender::Preview(host) => {
             let frame = frame_of(state, &comp_id, time, width, height, true);

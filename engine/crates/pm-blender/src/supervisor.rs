@@ -194,7 +194,8 @@ pub fn safe_id(s: &str) -> bool {
     !b.is_empty()
         && b.len() <= 160
         && b[0].is_ascii_alphabetic()
-        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
 }
 
 /// One render request to the worker.
@@ -240,7 +241,11 @@ pub struct Worker {
 
 impl Worker {
     /// A worker whose scratch directory is created under `scratch_parent`.
-    pub fn new(install: Install, scratch_parent: &Path, timeout: Duration) -> Result<Worker, BlenderError> {
+    pub fn new(
+        install: Install,
+        scratch_parent: &Path,
+        timeout: Duration,
+    ) -> Result<Worker, BlenderError> {
         let root = scratch_parent.join(format!(
             "powermove-blender-{}-{}",
             std::process::id(),
@@ -266,7 +271,10 @@ impl Worker {
     fn environment(&self) -> Vec<(String, PathBuf)> {
         let r = &self.root;
         vec![
-            ("PATH".into(), PathBuf::from("/usr/bin:/bin:/usr/sbin:/sbin")),
+            (
+                "PATH".into(),
+                PathBuf::from("/usr/bin:/bin:/usr/sbin:/sbin"),
+            ),
             ("HOME".into(), r.join("home")),
             ("TMPDIR".into(), r.join("tmp")),
             ("BLENDER_USER_RESOURCES".into(), r.join("user")),
@@ -284,8 +292,15 @@ impl Worker {
         if self.running.is_some() {
             return Ok(());
         }
-        let fail = |e: std::io::Error| BlenderError::Failed(format!("Blender could not start: {e}"));
-        for d in ["home", "tmp", "user/config", "user/scripts", "user/datafiles"] {
+        let fail =
+            |e: std::io::Error| BlenderError::Failed(format!("Blender could not start: {e}"));
+        for d in [
+            "home",
+            "tmp",
+            "user/config",
+            "user/scripts",
+            "user/datafiles",
+        ] {
             create_private_dir(&self.root.join(d)).map_err(fail)?;
         }
         let script = self.root.join("worker.py");
@@ -376,7 +391,11 @@ impl Worker {
 
     /// Renders one request. `cancel` is polled while Blender works; setting
     /// it kills Blender and answers [`BlenderError::Cancelled`].
-    pub fn render(&mut self, req: &WorkerRequest<'_>, cancel: &AtomicBool) -> Result<WorkerOutput, BlenderError> {
+    pub fn render(
+        &mut self,
+        req: &WorkerRequest<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<WorkerOutput, BlenderError> {
         if !safe_id(req.id) || req.outputs.iter().any(|o| !safe_id(o)) {
             return Err(BlenderError::Failed("Invalid Blender request".into()));
         }
@@ -407,7 +426,9 @@ impl Worker {
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
             if !safe_id(id) || !ASSET_EXTENSIONS.contains(&ext.as_str()) {
-                return Err(BlenderError::Failed("Unsupported Blender asset format".into()));
+                return Err(BlenderError::Failed(
+                    "Unsupported Blender asset format".into(),
+                ));
             }
             let target = dir.join(format!("{id}.{ext}"));
             bytes += std::fs::copy(path, &target).map_err(io)?;
@@ -439,10 +460,16 @@ impl Worker {
         {
             let running = self.running.as_mut().expect("started");
             let line = format!("{envelope}\n");
-            if let Err(e) = running.stdin.write_all(line.as_bytes()).and_then(|_| running.stdin.flush()) {
+            if let Err(e) = running
+                .stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| running.stdin.flush())
+            {
                 let tail = self.stderr_tail();
                 self.kill();
-                return Err(BlenderError::Failed(format!("Blender stopped: {e}. {tail}")));
+                return Err(BlenderError::Failed(format!(
+                    "Blender stopped: {e}. {tail}"
+                )));
             }
         }
         let deadline = Instant::now() + self.timeout;
@@ -501,7 +528,14 @@ impl Worker {
         {
             let id = f.get("id").and_then(|i| i.as_str()).unwrap_or("");
             let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if !safe_id(id) || name.is_empty() || name.len() > 240 || Path::new(name).file_name().map(|n| n != name).unwrap_or(true) {
+            if !safe_id(id)
+                || name.is_empty()
+                || name.len() > 240
+                || Path::new(name)
+                    .file_name()
+                    .map(|n| n != name)
+                    .unwrap_or(true)
+            {
                 return Err(BlenderError::Failed("Invalid Blender output".into()));
             }
             let path = dir.join(name);
@@ -565,12 +599,21 @@ mod tests {
 
     #[test]
     fn versions_and_bundles_parse_like_today() {
-        assert_eq!(parse_version("Blender 4.5.14 LTS"), Some(("4.5.14".into(), true)));
+        assert_eq!(
+            parse_version("Blender 4.5.14 LTS"),
+            Some(("4.5.14".into(), true))
+        );
         assert_eq!(parse_version("Blender 5.0"), Some(("5.0.0".into(), true)));
-        assert_eq!(parse_version("Blender 4.4.3"), Some(("4.4.3".into(), false)));
+        assert_eq!(
+            parse_version("Blender 4.4.3"),
+            Some(("4.4.3".into(), false))
+        );
         assert_eq!(parse_version("Python 3.11"), None);
         assert_eq!(bundle_version("Blender.app"), Some(None));
-        assert_eq!(bundle_version("Blender-4.5.14.app"), Some(Some(vec![4, 5, 14])));
+        assert_eq!(
+            bundle_version("Blender-4.5.14.app"),
+            Some(Some(vec![4, 5, 14]))
+        );
         assert_eq!(bundle_version("Blender 4.5.app"), Some(Some(vec![4, 5])));
         assert_eq!(bundle_version("Blender_5.0.app"), Some(Some(vec![5, 0])));
         assert_eq!(bundle_version("BlenderKit.app"), None);
@@ -581,20 +624,40 @@ mod tests {
     #[test]
     fn bundles_sort_unversioned_then_newest() {
         let dir = std::env::temp_dir().join(format!("pm-blender-bundles-{}", unique()));
-        for n in ["Blender-4.5.2.app", "Blender.app", "Blender 5.0.app", "Other.app"] {
+        for n in [
+            "Blender-4.5.2.app",
+            "Blender.app",
+            "Blender 5.0.app",
+            "Other.app",
+        ] {
             std::fs::create_dir_all(dir.join(n)).unwrap();
         }
         let found: Vec<String> = bundles_in(&dir)
             .iter()
-            .map(|p| p.strip_prefix(&dir).unwrap().components().next().unwrap().as_os_str().to_string_lossy().into_owned())
+            .map(|p| {
+                p.strip_prefix(&dir)
+                    .unwrap()
+                    .components()
+                    .next()
+                    .unwrap()
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
-        assert_eq!(found, ["Blender.app", "Blender 5.0.app", "Blender-4.5.2.app"]);
+        assert_eq!(
+            found,
+            ["Blender.app", "Blender 5.0.app", "Blender-4.5.2.app"]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_missing_blender_names_the_requirement() {
         let e = discover(Some(Path::new("/nonexistent/Blender"))).unwrap_err();
-        assert_eq!(e, BlenderError::Missing(crate::BLENDER_MISSING_MESSAGE.into()));
+        assert_eq!(
+            e,
+            BlenderError::Missing(crate::BLENDER_MISSING_MESSAGE.into())
+        );
     }
 }

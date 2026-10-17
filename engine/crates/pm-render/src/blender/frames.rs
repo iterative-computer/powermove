@@ -56,7 +56,8 @@ impl Default for FrameOptions {
 
 /// Why the walk stopped (today's throws).
 pub const TOO_DEEP: &str = "Composition nesting is too deep";
-pub const TOO_MANY: &str = "Motion blur requires too many nested frames. Reduce shutter samples or composition nesting.";
+pub const TOO_MANY: &str =
+    "Motion blur requires too many nested frames. Reduce shutter samples or composition nesting.";
 
 fn number(n: Option<&Node>) -> f64 {
     node::to_number(n)
@@ -91,7 +92,10 @@ fn visit<'d>(
         return Ok(Err(TOO_DEEP.into()));
     }
     let id = comp.id().to_string_lossy();
-    if !walk.visited.insert((id.clone(), t.to_bits(), width, height)) {
+    if !walk
+        .visited
+        .insert((id.clone(), t.to_bits(), width, height))
+    {
         return Ok(Ok(()));
     }
     if walk.visited.len() > 4096 {
@@ -139,7 +143,12 @@ fn visit<'d>(
     let cw = number(comp.member("w"));
     let ch = number(comp.member("h"));
     for (i, &sample) in times.iter().enumerate() {
-        if enabled && has_object && walk.keys.insert((id.clone(), sample.to_bits(), width, height)) {
+        if enabled
+            && has_object
+            && walk
+                .keys
+                .insert((id.clone(), sample.to_bits(), width, height))
+        {
             walk.frames.push(BlenderFrame {
                 composition_path: path.clone(),
                 time: sample,
@@ -162,11 +171,19 @@ fn visit<'d>(
                 let d = node::member(Some(l), "d");
                 let w = js::max(
                     2.0,
-                    js::round(or(or(number(node::member(d, "w")), cw), f64::from(width)) * f64::from(width) / or(cw, f64::from(width))),
+                    js::round(
+                        or(or(number(node::member(d, "w")), cw), f64::from(width))
+                            * f64::from(width)
+                            / or(cw, f64::from(width)),
+                    ),
                 );
                 let h = js::max(
                     2.0,
-                    js::round(or(or(number(node::member(d, "h")), ch), f64::from(height)) * f64::from(height) / or(ch, f64::from(height))),
+                    js::round(
+                        or(or(number(node::member(d, "h")), ch), f64::from(height))
+                            * f64::from(height)
+                            / or(ch, f64::from(height)),
+                    ),
                 );
                 let st = scope.source_time(l, sample, None)?;
                 children.push((sub, st, w as u32, h as u32));
@@ -209,5 +226,16 @@ pub fn frame_requests(
         options,
         shutter,
     };
-    Ok(visit(&mut walk, ev, root_comp, project, &[], time, width, height, 0)?.map(|()| walk.frames))
+    Ok(visit(
+        &mut walk,
+        ev,
+        root_comp,
+        project,
+        &[],
+        time,
+        width,
+        height,
+        0,
+    )?
+    .map(|()| walk.frames))
 }
