@@ -102,9 +102,11 @@ fn compare_float(ours: &[f32], reference: &[f32], w: u32, video: bool) -> (f64, 
 ///   and the f16 accumulator (today's `RGBA16F`) rounds every partial sum,
 ///   so the two paths diverge by up to [`F16_ACCUMULATION_CV`] after 20
 ///   samples (Chromium's own sum is 0.87 CV from the exact mean in alpha).
-/// - **Blurred video in today's captures draws nothing**
-///   (`motion/blur-video`): the capture path reads a per-layer preview
-///   element nothing seeks. The engine draws the center frame; only the
+/// - **Blurred video in today's captures draws a stale, unseeked frame**
+///   (`motion/blur-video`, frame 0 in the capture): `renderToPixels` sets
+///   `useVideoPreviews = false`, so every sample reads the shared asset
+///   element `a.el`, and no prepared frame exists under `L.id + '@' + (T +
+///   dt)`. The engine draws the center frame; only the
 ///   unblurred clip is compared with the capture, and the blurred static
 ///   clip is compared with the engine's own sharp frame.
 const FRAME_IDENTITY_CV: u8 = 12;

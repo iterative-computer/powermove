@@ -54,10 +54,21 @@ on; the viewer's `Composer` (pm-node) passes `PreviewPlaying` for timed frames a
 ### Video in blurred samples (a legacy defect)
 
 Today's capture path (`renderToPixels`, which `renderOpaqueFrame` and the alpha
-exporter also use) draws a motion-blurred video layer from a per-layer preview
-element that nothing seeks during the capture: in the corpus capture both blurred
-clips of `motion/blur-video` draw nothing, while the unblurred clip draws. In an
-interactive session the same element holds whatever frame the viewer last showed.
+exporter also use) draws a motion-blurred video layer from a stale, unseeked frame:
+frame 0 in the corpus capture. `renderToPixels` sets `useVideoPreviews = false`
+(`compositor.ts:1862`), so `contentQuad` reads the shared asset element `a.el`
+(`compositor.ts:958`). Frame preparation stores its frames under `L.id + '@' + T`
+for the center time only, so no prepared frame exists for a sample time `T + dt`,
+and each sample draws whatever frame is uploaded for `a.el`. In the capture
+`motion-20261016-085932-b52905bb`, `motion/blur-video` at t = 0.5 and t = 1.2 draws
+both blurred clips (the moving one on `corpus-frames-30.mp4` and the static one on
+`corpus-frames-24.mp4`) showing frame 0 (timecode 00:00:00.000, counter 0), while
+the unblurred clip shows the correct frames (00:00:00.500 / 12 and 00:00:01.167 /
+28). `PM.prepareFrame(t)` does seek `a.el` to the center time before the render;
+the texture for that element is versioned by its presented-frame count
+(`videoTextureVersion`), not by its time, which is the likely reason the seek is not
+picked up (inferred, not traced further). Outside the capture the frame shown is
+whatever was last uploaded for that element, so it depends on history.
 The engine draws the frame selected at the center time (what the viewer shows at
 the playhead) with the transform sampled across the shutter. Recorded as a
 deviation in `tests/motion.rs`; it is an appendix A candidate (owner: plan).
@@ -221,7 +232,8 @@ Recorded deviations:
    accumulator's rounding plus the still class, not this lane's accumulation.
 2. **Video decode** (above): differences at saturated chroma edges, frame identity
    shown.
-3. **Blurred video** draws nothing in today's captures (above).
+3. **Blurred video** draws a stale, unseeked frame in today's captures (frame 0
+   in the capture; above).
 
 The existing corpus test (`tests/corpus.rs`, v1 and render captures) and `pm-cli
 parity render` now request the captures' 16 and 20 samples; 70 frames, 0 failures.
