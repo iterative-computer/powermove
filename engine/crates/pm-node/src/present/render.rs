@@ -1978,6 +1978,7 @@ impl Thread {
             // serves every view on the device).
             let registered = doc.take_registered();
             let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            composer.set_playing(timing.is_some());
             match composer.compose(
                 doc.document(),
                 &composition,

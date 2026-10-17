@@ -7,6 +7,8 @@ use pm_protocol::frame::{FrameRequest, MAX_OUTPUT_DIMENSION, MAX_SCALE, MIN_SCAL
 use pm_protocol::validate::Validate;
 
 use crate::error::RenderError;
+use crate::motion::MotionBlur;
+use crate::sampling::Sampling;
 
 /// A render of one composition at one time.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +44,11 @@ pub struct RenderRequest {
     /// native shading, an export's prepared surfaces, or the paused
     /// viewer's preview surfaces.
     pub blender: crate::blender::BlenderRender,
+    /// Motion blur of layers with their switch on (`crate::motion`).
+    pub motion_blur: MotionBlur,
+    /// The resampler of `compat` level 2 raster content
+    /// (`crate::sampling`).
+    pub sampling: Sampling,
 }
 
 impl RenderRequest {
@@ -59,6 +66,8 @@ impl RenderRequest {
             export: false,
             view: None,
             blender: crate::blender::BlenderRender::Native,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
         }
     }
 
@@ -75,6 +84,8 @@ impl RenderRequest {
             export: false,
             view: None,
             blender: crate::blender::BlenderRender::Native,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
         }
     }
 
@@ -85,6 +96,16 @@ impl RenderRequest {
         request
             .validate()
             .map_err(|v| RenderError::Request(v.to_string()))?;
+        use pm_protocol::frame::{FramePurpose, MotionBlurKind};
+        // Frames while playing and scrub frames take the playback
+        // resampler; paused frames, exports, and captures the final one.
+        let sampling = if request.purpose == FramePurpose::Scrub
+            || request.motion_blur == MotionBlurKind::PreviewPlaying
+        {
+            Sampling::Playback
+        } else {
+            Sampling::Final
+        };
         Ok(RenderRequest {
             output_size: request.output_size,
             scale: Some((request.scale, request.scale)),
@@ -92,9 +113,14 @@ impl RenderRequest {
             precision: request.precision,
             depth_id: request.depth_id,
             background: true,
-            export: request.purpose == pm_protocol::frame::FramePurpose::Export,
+            export: request.purpose == FramePurpose::Export,
             view: request.view.clone().filter(|_| !request.purpose.is_final()),
             blender: crate::blender::BlenderRender::Native,
+            motion_blur: match request.motion_blur {
+                MotionBlurKind::Off => MotionBlur::Off,
+                kind => MotionBlur::Kind(kind),
+            },
+            sampling,
         })
     }
 

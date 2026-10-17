@@ -85,17 +85,44 @@ impl LayerQuad {
     /// Plan matrices map the unit quad in the frame's own (top-down)
     /// composition space scaled to output pixels.
     pub fn of_plan(plan: &CompPlan) -> Vec<LayerQuad> {
-        plan.draws
-            .iter()
-            .map(|draw| {
-                let m = draw.matrix;
-                let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
-                LayerQuad {
-                    layer: draw.layer.clone(),
-                    corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        for draw in &plan.draws {
+            quads_of(draw, &mut out);
+        }
+        out
+    }
+}
+
+fn quads_of(draw: &plan::Draw, out: &mut Vec<LayerQuad>) {
+    match &draw.content {
+        // A 2.5D layer: its projected quad.
+        plan::Content::Placed(p) if p.plane.is_some() => {
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: crate::space25d::corners(p.plane.as_ref().expect("checked")),
+            });
+        }
+        // A motion-blurred layer: where its samples were drawn.
+        plan::Content::Texture {
+            source: plan::Source::Accumulate(acc),
+            ..
+        } => {
+            let start = out.len();
+            for d in &acc.draws {
+                quads_of(d, out);
+            }
+            for q in &mut out[start..] {
+                q.layer.clone_from(&draw.layer);
+            }
+        }
+        _ => {
+            let m = draw.matrix;
+            let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+            });
+        }
     }
 }
 
@@ -107,6 +134,14 @@ pub trait CommandBracket: Send + Sync {
     fn begin(&self, encoder: &mut wgpu::CommandEncoder);
     /// Recorded last; `output` is the frame's target, written by then.
     fn end(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView);
+}
+
+/// The motion blur and resampler a request asks of its root composition.
+fn build_options(comp: &Comp<'_>, request: &RenderRequest) -> plan::BuildOptions {
+    plan::BuildOptions {
+        blur: crate::motion::resolve(comp, request.motion_blur),
+        sampling: request.sampling,
+    }
 }
 
 /// The renderer.
@@ -121,6 +156,7 @@ pub struct Renderer {
     /// comes with each request).
     options3d: crate::scene3d::Options3d,
     vector: crate::vector::cache::VectorCache,
+    pyramids: crate::sampling::gpu::PyramidCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
     /// Effect, transition, and layer definitions and their programs
@@ -150,6 +186,7 @@ impl Renderer {
             scene3d: Scene3dRenderer::default(),
             options3d: crate::scene3d::Options3d::default(),
             vector: crate::vector::cache::VectorCache::new(),
+            pyramids: crate::sampling::gpu::PyramidCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -383,9 +420,10 @@ impl Renderer {
         &self.queue
     }
 
-    /// Bytes of intermediate targets held by the pool.
+    /// Bytes of intermediate targets held by the pool and of the kept mip
+    /// pyramids of level 2 stills.
     pub fn pooled_bytes(&self) -> u64 {
-        self.pool.bytes()
+        self.pool.bytes() + self.pyramids.bytes()
     }
 
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
@@ -433,7 +471,11 @@ impl Renderer {
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
-        self.vector.trim(bytes.saturating_sub(self.pool.bytes()));
+        if self.pool.bytes() + self.pyramids.bytes() > bytes {
+            self.pyramids.clear();
+        }
+        self.vector
+            .trim(bytes.saturating_sub(self.pool.bytes() + self.pyramids.bytes()));
         self.text_gpu.trim(bytes);
     }
 
@@ -590,6 +632,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
+            build_options(&comp, request),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -642,6 +685,7 @@ impl Renderer {
                 export: request.export,
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
+                pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
             };
@@ -959,7 +1003,10 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        // Text and effects draw nothing here: only the 3D passes matter.
+        // Planned exactly as `render` plans it (effects, transitions, text,
+        // motion blur), so every 3D pass the render reaches is collected:
+        // without the effect host a layer with effects would be refused
+        // before its content is planned.
         let (_, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -969,9 +1016,10 @@ impl Renderer {
             h,
             scale,
             assets,
-            None,
+            effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
-            None,
+            Some(&mut self.text),
+            build_options(&comp, request),
             crate::blender::PlanState::collecting(preview, options),
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -1011,6 +1059,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
+            build_options(&comp, request),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
