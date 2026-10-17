@@ -181,11 +181,13 @@ export class NativeApi {
    * pm-wasm those were a third of the page's time in a drag
    * (docs/engine/perf.md).
    */
-  private shapes = new WeakMap<object, Map<string, { shape: number; cur: unknown; live: unknown; value: unknown }>>();
+  private shapes = new WeakMap<object, Map<string, { shape: number; cur: unknown; live: unknown; index: number; value: unknown }>>();
   private rootsAnswer: { key: string; shape: number; cur: unknown; live: unknown; value: any[] } | null = null;
   /** Set by `layerQuery` and `answer` for `shaped`: the last answer came from
    *  pm-wasm for a layer of the current composition. */
   private indexedQuery = false;
+  /** The layer's index in its composition for that answer. */
+  private queriedIndex = -1;
   private nativeAnswer = false;
   /** Nesting of `answer` (a legacy fallback may ask further queries). */
   private depth = 0;
@@ -316,7 +318,10 @@ export class NativeApi {
   private layerQuery<T>(op: string, L: any, extra: Record<string, unknown>, map?: (v: any, ctx: Context) => T): Native<T> {
     const ctx = this.context(L);
     if (!ctx) return { fallback: 'context' };
-    if (this.depth === 1) this.indexedQuery = typeof ctx.layer === 'number';
+    if (this.depth === 1) {
+      this.indexedQuery = typeof ctx.layer === 'number';
+      this.queriedIndex = typeof ctx.layer === 'number' ? ctx.layer : -1;
+    }
     return this.query(op, { comp: ctx.comp, open: ctx.open, layer: ctx.layer, ...extra }, map ? (v) => map(v, ctx) : undefined);
   }
 
@@ -398,24 +403,23 @@ export class NativeApi {
    * at the same index (what `context` checks before every query; a miss lets
    * the query repair a write the barrier did not see).
    */
-  private mirrored(raw: any): boolean {
-    const c = this.comps();
-    if (!c || !Array.isArray(c.cur.layers)) return false;
-    const i = this.index(c.cur.layers).index.get(raw);
-    if (i === undefined || c.cur.layers[i] !== raw) return false;
-    const mirrored = lookup(this.barrier()!.shadow, ['comps', c.comp, 'layers', i, 'id']);
+  private mirrored(raw: any, i: number, comp: string): boolean {
+    const layers = (this.unwrap(this.PM.curComp?.() ?? this.PM.proj) as any)?.layers;
+    if (!Array.isArray(layers) || layers[i] !== raw) return false;
+    const mirrored = lookup(this.barrier()!.shadow, ['comps', comp, 'layers', i, 'id']);
     return mirrored.exists && mirrored.value === raw.id;
   }
 
   /** The composition structural answers are valid for, flushed first; null when there is none. */
-  private shapeStamp(): { shape: number; cur: unknown; live: unknown } | null {
+  private shapeStamp(): { shape: number; cur: unknown; live: unknown; comp: string } | null {
     if (this.dual) return null;
     const barrier = this.barrier();
     const wasm = this.wasm();
     if (!barrier || !wasm || wasm.dead) return null;
     try { barrier.flush(); } catch { return null; }
-    const live = this.PM.curComp?.() ?? this.PM.proj;
-    return { shape: barrier.shapeRevision, cur: this.unwrap(live), live };
+    const c = this.comps();
+    if (!c) return null;
+    return { shape: barrier.shapeRevision, cur: c.cur, live: c.liveCur, comp: c.comp };
   }
 
   /**
@@ -431,19 +435,21 @@ export class NativeApi {
     if (!stamp) return compute();
     const memo = this.shapes.get(raw);
     const hit = memo?.get(key);
-    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw)) {
+    // At an unchanged shape the layer is where it was: one look at that index.
+    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw, hit.index, stamp.comp)) {
       this.count(op);
       this.stats.shapeHits += 1;
       return copy(hit.value as T);
     }
     this.indexedQuery = false;
+    this.queriedIndex = -1;
     this.nativeAnswer = false;
     const value = compute();
     const shape = this.barrier()?.shapeRevision;
-    if (this.indexedQuery && this.nativeAnswer && shape !== undefined) {
+    if (this.indexedQuery && this.nativeAnswer && shape !== undefined && this.queriedIndex >= 0) {
       const entries = memo ?? new Map();
       if (!memo) this.shapes.set(raw, entries);
-      entries.set(key, { shape, cur: stamp.cur, live: stamp.live, value: copy(value) });
+      entries.set(key, { shape, cur: stamp.cur, live: stamp.live, index: this.queriedIndex, value: copy(value) });
     }
     return value;
   }
