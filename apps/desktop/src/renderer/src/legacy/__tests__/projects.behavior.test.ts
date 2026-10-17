@@ -140,6 +140,19 @@ it('the journal keeps one copy of what each edit rewrites whole and replays to t
   assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] }]);
 });
 
+it('hands the journal to an asynchronous store as a snapshot of each version', () => {
+  const { PM, mem } = projectsModel();
+  const writes = [];
+  PM.store.setAsync = (key, value) => { writes.push([key, value]); mem.set(key, value); return Promise.resolve(); };
+  PM.proj = { id: 'A1', name: 'Async', revision: 0, layers: [{ id: 'L1', p: { o: { v: 1 } } }] };
+  PM.Projects.put(PM.proj);
+  for (let revision = 1; revision <= 3; revision++) {
+    PM.bus.emit('history:project-patch', { projectId: 'A1', revision, patches: [{ path: ['layers', 0, 'p', 'o', 'v'], exists: true, value: revision }] });
+  }
+  assert.deepEqual(writes.map(([key, value]) => [key, value.length]), [['projectJournal.A1', 1], ['projectJournal.A1', 2], ['projectJournal.A1', 3]]);
+  assert.equal(PM.Projects.get('A1').layers[0].p.o.v, 3);
+});
+
 it('checkpoints the project when the journal would pass its bound, to the byte', () => {
   const MAX = 4 * 1024 * 1024;
   const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;

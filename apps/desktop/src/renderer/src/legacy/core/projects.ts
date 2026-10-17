@@ -66,7 +66,8 @@ function applyPatches(root: any, patches: any[]) {
 }
 
 /** The journal as this window last wrote it (see the patch listener). */
-let written: { id: string; entries: any[]; sizes: number[] } | null = null;
+type JournalState = { id: string; entries: any[]; sizes: number[] };
+let written: JournalState | null = null;
 
 function journal(id: any) {
   const value = id ? PM.store.get(R.JOURNAL + id, []) : [];
@@ -297,7 +298,8 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
   /* The journal this window wrote last, with each entry's size: an append
      neither reads the journal back from the store (a structured clone of all
      of it) nor serializes all of it again to measure it. */
-  const state = written?.id === entry.projectId ? written : (() => {
+  const cached = written;
+  const state: JournalState = cached && cached.id === entry.projectId ? cached : (() => {
     const entries = journal(entry.projectId);
     return { id: entry.projectId, entries, sizes: entries.map(item => journalBytes(item)) };
   })();
@@ -313,7 +315,12 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
     if (PM.proj?.id === entry.projectId) R.put(PM.proj);
     return;
   }
-  PM.store.set(R.JOURNAL + entry.projectId, state.entries);
+  /* Serialized off the edit's task when the store can (the journal is a
+     snapshot; a newer write supersedes a pending one, and a checkpoint's
+     delete supersedes both). Cloning and posting it in the edit's task cost
+     6 ms per edit at 1,000 layers (docs/engine/perf.md). */
+  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + entry.projectId, state.entries.slice());
+  else PM.store.set(R.JOURNAL + entry.projectId, state.entries);
   written = state;
 });
 }
