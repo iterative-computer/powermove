@@ -1082,3 +1082,63 @@ fn content_keys_follow_the_pose() {
         );
     }
 }
+
+/// Frame time of glTF layers at 1920 × 1080 (release; ignored): the
+/// scene build (mixer, poses, bone textures) and the render of every
+/// output (CPU and GPU, waiting for the device).
+#[test]
+#[ignore]
+fn frame_time_gltf_at_1080p() {
+    let Some((dir, _)) = selected() else {
+        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        return;
+    };
+    let gpu = pm_gpu::Gpu::new("pm-render glTF frame time").expect("a Metal device");
+    let mut renderer = Scene3dRenderer::default();
+    let mut pool = pm_gpu::TargetPool::new();
+    for id in ["khr-BrainStem-0.8", "khr-Fox-0.7", "khr-ToyCar", "pbr-ext", "transmission"] {
+        let Some(raw) = fixture().into_iter().find(|c| text(obj(c).get("id")).as_deref() == Some(id)) else {
+            continue;
+        };
+        let mut raw = raw;
+        if let Value::Object(m) = &mut raw {
+            m.insert("width", Value::Number(1920.0));
+            m.insert("height", Value::Number(1080.0));
+        }
+        let mut builds = Vec::new();
+        let mut renders = Vec::new();
+        for k in 0..12 {
+            // A new time per frame (the mixer, bones, and morphs change).
+            if let Value::Object(m) = &mut raw {
+                m.insert("time", Value::Number(0.25 + 0.04 * f64::from(k)));
+            }
+            let t0 = std::time::Instant::now();
+            let c = case(&raw, &dir).unwrap();
+            builds.push(t0.elapsed().as_secs_f64() * 1e3);
+            let t0 = std::time::Instant::now();
+            renderer.begin_frame();
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let mut outs = Vec::new();
+            for (plan, _) in &c.outputs {
+                outs.push(renderer.render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, plan, false).unwrap());
+            }
+            gpu.queue.submit([encoder.finish()]);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            renders.push(t0.elapsed().as_secs_f64() * 1e3);
+            for o in outs {
+                pool.give(o.color);
+            }
+        }
+        // The first frame translates programs and uploads.
+        let first = renders.remove(0);
+        builds.remove(0);
+        renders.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        builds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "{id:<20} build median {:.2} ms; render median {:.2} ms p95 {:.2} ms (first {first:.0} ms)",
+            builds[builds.len() / 2],
+            renders[renders.len() / 2],
+            renders[renders.len() * 95 / 100]
+        );
+    }
+}
