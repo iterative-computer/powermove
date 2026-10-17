@@ -145,8 +145,9 @@ repository.
   three.js runtime: `pm_geom3d::gltf::pick` matches three.js on every
   tested ray, but wiring it (and primitive picks) into `pm-eval` and the
   hosts is not done here. The S7 lazy skinned pick (joint-bounded BVH
-  nodes) is not ported; the full re-pose meets the targets natively. The
-  glTF code has not been built or measured for wasm32.
+  nodes) is not ported; the full re-pose meets the targets natively.
+  `pm-geom3d` with the glTF code builds for wasm32-unknown-unknown; picks
+  in wasm are not measured.
 - Skinned meshes are not culled and sort transparent items by the
   geometry's sphere (see Fidelity notes); three.js's history-dependent
   programs are generated fresh.
