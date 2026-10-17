@@ -253,7 +253,7 @@ fn motion_corpus_parity() {
                 }
                 let line = format!(
                     "{:<34} t={:<5} blurred static clip vs its sharp frame: max {worst}; \
-                     DEVIATION today's capture draws no blurred video",
+                     DEVIATION today's capture draws a stale, unseeked frame for blurred video",
                     p.name, s.time
                 );
                 eprintln!("{line}");

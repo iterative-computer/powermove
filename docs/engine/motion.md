@@ -67,8 +67,18 @@ the unblurred clip shows the correct frames (00:00:00.500 / 12 and 00:00:01.167 
 28). `PM.prepareFrame(t)` does seek `a.el` to the center time before the render;
 the texture for that element is versioned by its presented-frame count
 (`videoTextureVersion`), not by its time, which is the likely reason the seek is not
-picked up (inferred, not traced further). Outside the capture the frame shown is
+picked up (inferred, not traced further). Each sample also calls
+`seekPreviewVideo(a.el, vt, .0005)` with its own sample time when not playing
+(`compositor.ts:979`); that seek is asynchronous, and the version does not pick up
+its result while the render runs. Outside the capture the frame shown is
 whatever was last uploaded for that element, so it depends on history.
+The same path runs for a video layer inside a blurred precomp (or a precomp inside
+a blurred group): `prepareFrame` visits nested precomps and stores their video
+frames at the child center time only (`frame-preparation.ts`), while the child
+renders at each sample's child time with the same `L.id + '@' + T` lookup, so this
+deviation applies there too. Video and image are
+compared types, so such layers are not routed by `pm_render::unsupported`; no
+corpus case covers them yet (`motion/blur-precomps` holds only solids).
 The engine draws the frame selected at the center time (what the viewer shows at
 the playhead) with the transform sampled across the shutter. Recorded as a
 deviation in `tests/motion.rs`; it is an appendix A candidate (owner: plan).
@@ -243,7 +253,8 @@ Recorded deviations:
 2. **Video decode** (above): differences at saturated chroma edges, frame identity
    shown.
 3. **Blurred video** draws a stale, unseeked frame in today's captures (frame 0
-   in the capture; above).
+   in the capture; above). It applies to video inside blurred precomps as well;
+   no corpus case covers that yet.
 
 The existing corpus test (`tests/corpus.rs`, v1 and render captures) and `pm-cli
 parity render` now request the captures' 16 and 20 samples; 70 frames, 0 failures.
