@@ -222,16 +222,19 @@ fn check(
             feature: Feature::RequiresEngine,
         });
     }
+    // Each composition is checked once per context: `sampled` is true when
+    // it is reached through a blurred precomp or a precomp inside a blurred
+    // group, so its layers are drawn at every shutter sample time.
     let mut seen = BTreeSet::new();
-    let mut stack = vec![composition.to_owned()];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) {
+    let mut stack = vec![(composition.to_owned(), false)];
+    while let Some((id, sampled)) = stack.pop() {
+        if !seen.insert((id.clone(), sampled)) {
             continue;
         }
         let Some(comp) = composition_node(root, &id) else {
             continue;
         };
-        check_composition(root, &id, comp, assets, &mut out, &mut stack);
+        check_composition(root, &id, comp, sampled, assets, &mut out, &mut stack);
     }
     out.into_iter().collect()
 }
@@ -260,9 +263,10 @@ fn check_composition(
     root: &Node,
     comp_id: &str,
     comp: &Node,
+    sampled: bool,
     assets: Option<&dyn AssetResolver>,
     out: &mut BTreeSet<Unsupported>,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<(String, bool)>,
 ) {
     let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
     let mut add = |layer: &Node, feature: Feature| {
@@ -327,9 +331,8 @@ fn check_composition(
         // docs/engine/motion.md); other types keep routing until their own
         // renderers are compared with them.
         let mblur = node::member(Some(layer), "mblur");
-        if (is_property(mblur) || node::truthy(mblur))
-            && !crate::motion::DRAWN_TYPES.contains(&ty.as_str())
-        {
+        let own_blur = is_property(mblur) || node::truthy(mblur);
+        if own_blur && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
             add(layer, Feature::MotionBlur);
         }
         // 3D object, light, and camera layers draw in screen space; their
@@ -343,17 +346,20 @@ fn check_composition(
         {
             add(layer, Feature::TwoAndAHalfD);
         }
-        // Members of a 3D group are planes of its space, and members of a
-        // blurred group are sampled with it: other types keep routing.
+        // Members of a 3D group are placed in its space, members of a
+        // blurred group are sampled with it, and the layers of a composition
+        // reached through a blurred precomp are drawn at every sample time:
+        // other types keep routing. That includes 3D object, light, and
+        // camera layers, whose scene pass is built at the center time and
+        // whose placement inside a 3D group has no parity case.
+        let (three_d, blurred) = enclosing_groups(layers, layer);
         if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
             && !NOT_VISUAL.contains(&ty.as_str())
-            && pm_eval::parenting::Role3d::of(layer).is_none()
         {
-            let (three_d, blurred) = enclosing_groups(layers, layer);
             if three_d {
                 add(layer, Feature::TwoAndAHalfD);
             }
-            if blurred {
+            if blurred || sampled {
                 add(layer, Feature::MotionBlur);
             }
         }
@@ -372,7 +378,7 @@ fn check_composition(
             "image" | "video" => check_media(root, layer, &ty, assets, &mut add),
             "precomp" => {
                 if let Some((id, _)) = precomp_target(root, layer) {
-                    stack.push(id);
+                    stack.push((id, sampled || own_blur || blurred));
                 }
             }
             _ => {}

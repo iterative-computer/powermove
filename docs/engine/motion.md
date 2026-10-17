@@ -90,7 +90,17 @@ non-model blocks and supersedes this call when the lanes merge.
 
 Drawn (and no longer routed) for solid, image, video, precomp, and group layers;
 shapes, text, and other layer types with the 3D switch, or inside a 3D group, stay
-routed until their renderers are compared in 2.5D (`capability.rs`).
+routed until their renderers are compared in 2.5D (`capability.rs`). 3D object,
+light, and camera layers draw in screen space, so their own 3D switch does not
+route them, but inside a 3D group they are routed (their placement in a 3D group
+has no parity case).
+
+Motion blur routes the same way: a layer of another type is routed when it has
+motion blur itself, when an enclosing group has it, or when its composition is
+reached through a blurred precomp or a precomp inside a blurred group (the
+capability check carries that context down nested precomps, so the layers drawn at
+every sample time are the compared types only). 3D object, light, and camera
+layers in any of those positions are routed too.
 
 ## Retiming
 
@@ -268,8 +278,9 @@ unchanged, continuous precomp rasterization, level 2 routing.
 
 ## Gaps
 
-- Motion blur on 3D object layers, shapes, text, and other layer types stays routed
-  until their renderers are compared with blur (the 3D scene lane's pass context is
+- Motion blur on 3D object layers, shapes, text, and other layer types (on the layer,
+  an enclosing group, or a blurred precomp above it) stays routed until their
+  renderers are compared with blur (the 3D scene lane's pass context is
   built per pass at the center time; a blurred object needs one per sample).
   Blender surface requests per shutter sample are the Blender lane's (routed).
 - 2.5D shapes, text, and other types stay routed (their rasters use `affinePlane`
