@@ -9,6 +9,7 @@
  * the engines' host requests (native-engine.ts).
  */
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,7 @@ import { BrowserWindow, dialog, MessageChannelMain, Notification, powerSaveBlock
 import { extensionOf, isRenderFormat, migrateFormat, normalizeDelivery } from '../../shared/delivery';
 import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
+import { discoverBlender } from '../blender-service';
 import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
@@ -248,6 +250,24 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     hostNow: engineNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
+    // Blender jobs of the job engine (contract 11): the Blender the user
+    // chose in Settings (`blender-path.json`, as the current engine's
+    // Blender service reads it), else the first one discovered.
+    blender: {
+      tempRoot: os.tmpdir(),
+      locate: async () => {
+        const configured = await readFile(path.join(options.userData, 'blender-path.json'), 'utf8')
+          .then((raw) => {
+            const p = JSON.parse(raw)?.path;
+            return typeof p === 'string' && path.isAbsolute(p) ? p : undefined;
+          })
+          .catch(() => undefined);
+        const status = await discoverBlender(configured);
+        return status.available && status.path
+          ? { available: true, path: status.path, ...(status.version ? { version: status.version } : {}) }
+          : { available: false, error: status.error ?? 'This composition renders with Blender. Install Blender 4.5 or later, or set its renderer to Native.' };
+      }
+    },
     log
   });
 

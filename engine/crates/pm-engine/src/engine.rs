@@ -1408,6 +1408,13 @@ impl Engine {
                     self.viewer_transport(port, sid, command, now, out);
                 }
             }
+            (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
+                if self.jobs.is_some() =>
+            {
+                // Contract 11: surfaces and progress of the job engine's
+                // Blender requests.
+                self.jobs.as_mut().expect("checked").host_event(&event);
+            }
             (
                 Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_) | Event::Audio(_),
                 PeerKind::Renderer,

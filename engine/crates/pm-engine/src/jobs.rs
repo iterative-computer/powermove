@@ -109,6 +109,10 @@ pub trait JobService: Send {
     /// The answer to a [`HostRequest`].
     fn host_answer(&mut self, token: u64, answer: Result<Response, EngineError>);
 
+    /// A host event for the service's own requests: Blender surfaces and
+    /// progress (contract 11), delivered before the request's answer.
+    fn host_event(&mut self, _event: &pm_protocol::envelope::Event) {}
+
     /// Takes everything waiting to be sent.
     fn drain(&mut self) -> Drained;
 
