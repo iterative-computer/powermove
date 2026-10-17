@@ -7,7 +7,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { PROTOCOL_BUILD, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
-import { NativeEngine } from './native-engine';
+import { NativeEngine, PROBE_SUPERSEDED } from './native-engine';
 import type { ChildLike, ClientPortInfo, EngineControl, PortLike } from './ports';
 import { decodeEnvelope, encodeEnvelope, envelope, eventMessage, localRanges, requestMessage, responseMessage } from './protocol';
 
@@ -530,6 +530,26 @@ describe('NativeEngine with fake engines', () => {
       const again = await job.ask({ type: 'resolveHandle', handle: body!.handle, session: 0 });
       expect(again.message.kind).toBe('error');
       await expect(probing.probeMedia('missing', null)).rejects.toThrow('not available');
+      // One probe per asset in flight: a request waiting behind it is
+      // superseded by a newer one and never reaches the engine.
+      const sent = () => job.received.filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia').length;
+      const before = sent();
+      const first = probing.probeMedia('clip', '{"range":"limited"}');
+      const second = probing.probeMedia('clip', '{"range":"full"}');
+      const third = probing.probeMedia('clip', null);
+      await expect(second).rejects.toThrow(PROBE_SUPERSEDED);
+      await expect(first).resolves.toMatchObject({ displaySize: [320, 180] });
+      await expect(third).resolves.toMatchObject({ displaySize: [320, 180] });
+      const bodies = job.received
+        .slice()
+        .filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia')
+        .slice(before)
+        .map((m) => (m.message.kind === 'request' && m.message.body.type === 'probeMedia' ? m.message.body.interpret : undefined));
+      expect(sent() - before).toBe(2);
+      expect(bodies).toEqual(['{"range":"limited"}', null]);
+      // The slot is free again: the next probe goes straight out.
+      await expect(probing.probeMedia('clip', '{"range":"full"}')).resolves.toMatchObject({ duration: 2 });
+      expect(sent() - before).toBe(3);
     } finally {
       await probing.stop();
     }
