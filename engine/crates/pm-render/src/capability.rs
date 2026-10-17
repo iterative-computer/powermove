@@ -33,8 +33,7 @@ pub struct Unsupported {
 /// What is unsupported.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Feature {
-    /// A layer type this renderer does not draw (shape, text, captions,
-    /// shader, extension fragment or mesh, legacy `scene3d`, ...).
+    /// A layer type this renderer does not draw (text, captions, ...).
     LayerType(String),
     /// An extension layer whose definition is not the 3D primitive path.
     ExtensionDefinition(String),
@@ -79,8 +78,10 @@ pub enum Feature {
     /// An effect or transition whose definition the renderer was not given
     /// and that is not marked missing (contract 10: `pm-cli` fails on it).
     Definition(String),
-    /// A definition WebGL draws but the native pipeline cannot translate:
-    /// it needs the decision 19 fallback runner.
+    /// A program WebGL draws but the native pipeline cannot translate (a
+    /// shader layer's code or a definition): it needs the decision 19
+    /// fallback runner (`crate::shader_layers::fallback`), so it is not
+    /// headless-renderable.
     ShaderFallback(String),
 }
 
@@ -298,7 +299,26 @@ fn check_composition(
                         }
                         // The built-in OBJ model layer, with its fixed shading.
                         crate::scene3d::legacy::OBJ_MODEL_DEFINITION => {}
-                        _ => add(layer, Feature::ExtensionDefinition(def)),
+                        // Fragment layers, mesh layers, and missing
+                        // definitions need the definition set
+                        // (`crate::shader_layers`).
+                        _ => match effects {
+                            Some(e) => {
+                                if let Some(f) =
+                                    crate::shader_layers::plan::extension_feature(e, &def)
+                                {
+                                    add(layer, f);
+                                }
+                            }
+                            None => add(layer, Feature::ExtensionDefinition(def)),
+                        },
+                    }
+                }
+                // Drawn through the GLSL pipeline; code only the fallback
+                // runner can draw is listed (`Feature::ShaderFallback`).
+                "shader" => {
+                    if let Some(f) = crate::shader_layers::plan::shader_layer_feature(layer) {
+                        add(layer, f);
                     }
                 }
                 "adjustment" => {

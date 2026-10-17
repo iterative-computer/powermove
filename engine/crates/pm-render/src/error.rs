@@ -23,6 +23,12 @@ pub enum RenderError {
     Gpu(String),
     #[error("media: {0}")]
     Media(String),
+    /// Layers drawn by the decision 19 fallback runner
+    /// (`crate::shader_layers::fallback`) whose pixels have not arrived:
+    /// the caller asks the runner for them and renders the frame again.
+    /// The targets are left untouched.
+    #[error("waiting for the shader fallback runner ({} layer draws)", .0.len())]
+    ShaderFallbackPending(Vec<crate::shader_layers::FallbackRequest>),
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,

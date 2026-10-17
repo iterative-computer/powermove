@@ -45,6 +45,10 @@ pub(crate) struct Exec<'a> {
     /// This frame's watchdog timestamps (devices with `TIMESTAMP_QUERY`).
     pub timer: Option<FrameTimer>,
     pub vector: &'a mut crate::vector::cache::VectorCache,
+    /// Shader-layer programs and the fallback runner's pixels.
+    pub shaders: &'a mut crate::shader_layers::exec::ShaderState,
+    /// Fallback runner requests whose pixels have not arrived.
+    pub fallback_pending: Vec<std::sync::Arc<crate::shader_layers::FallbackRequest>>,
     pub precision: Precision,
     pub working: WorkingEncoding,
     /// Where screen, overlay, and soft light run with linear blending on.
@@ -252,6 +256,34 @@ impl Exec<'_> {
                                 }
                             }
                         }
+                        Source::Shader(shader) => match self.shader_source(encoder, shader) {
+                            Ok((target, pooled)) => {
+                                // Legacy GLSL targets are in GL row order
+                                // and hold E-encoded values.
+                                r.view = Some(target.view.clone());
+                                r.from_fbo = true;
+                                r.encoded = true;
+                                // Uploaded fallback pixels are not the
+                                // pool's; wgpu keeps them alive until the
+                                // frame's commands are done.
+                                if pooled {
+                                    self.taken.push(target);
+                                }
+                            }
+                            Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self
+                                .fail(
+                                    plan,
+                                    draw,
+                                    MediaFailure::Unsupported(
+                                        crate::capability::Feature::ShaderFallback(what),
+                                    ),
+                                ),
+                            Err(crate::shader_layers::exec::Missed::Pending(request)) => {
+                                if !self.fallback_pending.iter().any(|p| p.key == request.key) {
+                                    self.fallback_pending.push(request);
+                                }
+                            }
+                        },
                         Source::Object3d(object) => {
                             match self.scene3d.render(
                                 self.device,

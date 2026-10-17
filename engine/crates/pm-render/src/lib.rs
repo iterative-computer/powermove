@@ -18,6 +18,8 @@
 //! - [`RenderRequest`]: contract 2's request as the graph sees it.
 //! - [`effects`]: effects and transitions through the GLSL pipeline, with
 //!   definition snapshots (contract 10) and the GPU watchdog.
+//! - [`shader_layers`]: shader layers, extension fragment layers (Studio
+//!   Cube included), and the decision 19 fallback runner.
 
 pub mod assets;
 pub mod capability;
@@ -34,6 +36,7 @@ pub mod plan;
 mod renderer;
 mod request;
 pub mod scene3d;
+pub mod shader_layers;
 pub mod stills;
 pub mod three;
 pub mod vector;
@@ -46,3 +49,4 @@ pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{CommandBracket, Frame, LayerQuad, PassThrough, Rendered, Renderer};
 pub use request::RenderRequest;
+pub use shader_layers::all_builtin_definitions;

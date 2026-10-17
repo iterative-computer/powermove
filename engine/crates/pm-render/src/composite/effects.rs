@@ -213,6 +213,12 @@ pub trait EffectHost: Send + Sync {
             None => Ok(None),
         })
     }
+
+    /// The extension layer definitions this host draws fragment layers
+    /// with (`crate::shader_layers`); `None` routes them as before.
+    fn layer_definitions(&self) -> Option<&crate::effects::Effects> {
+        None
+    }
 }
 
 #[cfg(test)]

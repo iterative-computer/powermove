@@ -621,6 +621,10 @@ impl crate::composite::EffectHost for Effects {
         plan::transition_known(self, ty)
     }
 
+    fn layer_definitions(&self) -> Option<&Effects> {
+        Some(self)
+    }
+
     fn prepare_transition<'d>(
         &self,
         scope: &mut pm_eval::Scope<'_, 'd>,

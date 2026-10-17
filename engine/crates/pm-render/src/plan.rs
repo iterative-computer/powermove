@@ -111,6 +111,9 @@ pub enum Source {
     Object3d(Box<Object3dPlan>),
     /// Shape content (`crate::vector`).
     Vector(Box<crate::vector::VectorSource>),
+    /// A shader layer or an extension fragment layer
+    /// (`crate::shader_layers`).
+    Shader(Box<crate::shader_layers::ShaderSource>),
 }
 
 /// Inputs and outputs of a build.
@@ -132,6 +135,9 @@ pub struct Build<'r> {
     /// The matte source a matte pass renders, which draws even when it is
     /// switched off (`{ ...source, on: true }`).
     forced_on: Option<*const Node>,
+    /// A decision 19 fallback runner draws programs the native pipeline
+    /// cannot (`crate::shader_layers::fallback`); without one they route.
+    shader_fallback: bool,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -198,6 +204,27 @@ pub fn build_with<'r>(
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
 ) -> (CompPlan, Build<'r>) {
+    build_full(
+        ev, root_comp, project, time, width, height, scale, assets, effects, options3d, false,
+    )
+}
+
+/// [`build_with`], with programs the native pipeline cannot translate
+/// planned for the decision 19 fallback runner when `shader_fallback`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_full<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    effects: Option<&'r dyn EffectHost>,
+    options3d: crate::scene3d::Options3d,
+    shader_fallback: bool,
+) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
         failures: Vec::new(),
@@ -209,6 +236,7 @@ pub fn build_with<'r>(
         effects,
         matte_depth: 0,
         forced_on: None,
+        shader_fallback,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -1008,8 +1036,35 @@ fn native_content_quad<'d>(
                 uv: [0.0, 0.0, 1.0, 1.0],
             }))
         }
+        "shader" => {
+            let planned = crate::shader_layers::plan::shader_layer(
+                scope,
+                layer,
+                &d,
+                time,
+                (width, height),
+                scale,
+                b.shader_fallback,
+            )?;
+            Ok(shader_quad(b, &comp_id, layer, planned))
+        }
         "extension" => {
             let def = js::string(js::get(&d, "definition"));
+            if pm_eval::parenting::Role3d::of(layer).is_none()
+                && let Some(planned) = crate::shader_layers::plan::extension_layer(
+                    scope,
+                    layer,
+                    &d,
+                    &def,
+                    time,
+                    (width, height),
+                    scale,
+                    b.effects.and_then(|e| e.layer_definitions()),
+                    b.shader_fallback,
+                )?
+            {
+                return Ok(shader_quad(b, &comp_id, layer, planned));
+            }
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
                     match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
@@ -1073,6 +1128,40 @@ fn native_content_quad<'d>(
                 Feature::LayerType(other.to_owned()),
             ));
             Ok(None)
+        }
+    }
+}
+
+/// The quad of a planned shader or extension fragment layer: `{tex, w, h,
+/// ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true}`.
+fn shader_quad(
+    b: &mut Build<'_>,
+    comp_id: &str,
+    layer: &Node,
+    planned: crate::shader_layers::plan::Planned,
+) -> Option<Quad> {
+    use crate::shader_layers::plan::Planned;
+    match planned {
+        Planned::Draw { source, w, h } => Some(Quad::Texture {
+            source: Source::Shader(source),
+            w,
+            h,
+            ax: 0.0,
+            ay: 0.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }),
+        Planned::Refused(message) => {
+            b.failures.push(LayerFailure {
+                composition: comp_id.to_owned(),
+                layer: js::layer_id(layer),
+                message,
+            });
+            None
+        }
+        Planned::Unsupported(feature) => {
+            b.unsupported
+                .push(Unsupported::layer(comp_id, layer, feature));
+            None
         }
     }
 }
