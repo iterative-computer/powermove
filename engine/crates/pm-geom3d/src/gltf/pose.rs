@@ -217,11 +217,15 @@ fn expand_box(b: &mut (Vec3, Vec3), lo: Vec3, hi: Vec3, m: &Mat4) {
             if k & 2 == 0 { lo[1] } else { hi[1] },
             if k & 1 == 0 { lo[2] } else { hi[2] },
         ];
-        let q = math::apply(m, p);
-        for c in 0..3 {
-            b.0[c] = b.0[c].min(q[c]);
-            b.1[c] = b.1[c].max(q[c]);
-        }
+        grow(b, math::apply(m, p));
+    }
+}
+
+/// `Box3.expandByPoint`.
+fn grow(b: &mut (Vec3, Vec3), p: Vec3) {
+    for ((lo, hi), v) in b.0.iter_mut().zip(b.1.iter_mut()).zip(p) {
+        *lo = lo.min(v);
+        *hi = hi.max(v);
     }
 }
 
@@ -241,11 +245,7 @@ pub fn local_box(
         let mut b = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         let poser = Poser::new(model, object, d, &pose.influences[object], world);
         for i in 0..g.vertex_count() {
-            let v = poser.vertex(i);
-            for c in 0..3 {
-                b.0[c] = b.0[c].min(v[c]);
-                b.1[c] = b.1[c].max(v[c]);
-            }
+            grow(&mut b, poser.vertex(i));
         }
         return Some(b);
     }

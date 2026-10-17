@@ -31,9 +31,12 @@ pub(crate) struct VertexBuffer {
     pub buffer: wgpu::Buffer,
 }
 
+type ImageEntry = (Arc<wgpu::Texture>, wgpu::TextureView, u64);
+
 #[derive(Default)]
 pub(crate) struct GltfGpu {
-    images: HashMap<(u64, bool, bool), (Arc<wgpu::Texture>, wgpu::TextureView, u64)>,
+    /// By image key, color space, and mipmapping: texture, view, last use.
+    images: HashMap<(u64, bool, bool), ImageEntry>,
     samplers: HashMap<Sampler, wgpu::Sampler>,
     data: HashMap<u64, (wgpu::TextureView, u64)>,
     /// Per geometry key and attribute name.

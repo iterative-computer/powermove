@@ -360,9 +360,7 @@ impl Bvh {
         ];
         let mut best = f64::INFINITY;
         let mut hit = None;
-        if self.slab(0, r, inv).is_none() {
-            return None;
-        }
+        self.slab(0, r, inv)?;
         let mut stack = vec![0usize];
         while let Some(ni) = stack.pop() {
             let (_, _, first, count) = self.nodes[ni];
@@ -415,11 +413,21 @@ pub struct Hit {
     pub instance: Option<u32>,
 }
 
+/// A posed drawable: positions, refit BVH, and (skinned) its bounding
+/// sphere and box for the current pose.
+struct Deformed {
+    positions: Vec<Vec3>,
+    bvh: Bvh,
+    bounds: (Vec3, f64, Option<(Vec3, Vec3)>),
+}
+
 /// Rest-pose triangles and BVHs of a model's geometries, shared by every
 /// layer using it.
 pub struct Picker {
     pub model: Arc<Model>,
     tris: Vec<Option<(Vec<[u32; 3]>, Bvh)>>,
+    /// `geometry.boundingSphere` per geometry.
+    spheres: Vec<(Vec3, f64)>,
 }
 
 /// A model posed under a layer at a time (re-posed vertices for skinned
@@ -429,7 +437,7 @@ pub struct Posed {
     pub pose: Pose,
     reachable: Vec<bool>,
     /// Per object: posed positions and their refit BVH.
-    deformed: Vec<Option<(Vec<Vec3>, Bvh)>>,
+    deformed: Vec<Option<Deformed>>,
 }
 
 impl Picker {
@@ -456,7 +464,16 @@ impl Picker {
                 Some((t, bvh))
             })
             .collect();
-        Picker { model, tris }
+        let spheres = model
+            .geometries
+            .iter()
+            .map(|g| g.bounding_sphere())
+            .collect();
+        Picker {
+            model,
+            tris,
+            spheres,
+        }
     }
 
     /// Poses the model under the layer matrix `layer` at mixer time `time`.
@@ -465,7 +482,7 @@ impl Picker {
         let (parent, pose) = pose::placed(model, Pose::at(model, time), layer);
         let world = pose::world(model, &pose, Some(&parent));
         let reachable = pose::reachable(model);
-        let mut deformed = vec![None; model.objects.len()];
+        let mut deformed: Vec<Option<Deformed>> = (0..model.objects.len()).map(|_| None).collect();
         for (i, o) in model.objects.iter().enumerate() {
             let ObjectKind::Drawable(d) = &o.kind else {
                 continue;
@@ -486,7 +503,31 @@ impl Picker {
             let p: Vec<Vec3> = (0..n).map(|v| poser.vertex(v)).collect();
             let mut b = bvh.clone();
             b.refit(&p, tris);
-            deformed[i] = Some((p, b));
+            let bounds = if d.skin.is_some() {
+                let mut lo = [f64::INFINITY; 3];
+                let mut hi = [f64::NEG_INFINITY; 3];
+                for v in &p {
+                    for ((l, h), x) in lo.iter_mut().zip(hi.iter_mut()).zip(v) {
+                        *l = l.min(*x);
+                        *h = h.max(*x);
+                    }
+                }
+                let c = scale(add(lo, hi), 0.5);
+                let r = p
+                    .iter()
+                    .map(|v| distance_sq(*v, c))
+                    .fold(0.0, f64::max)
+                    .sqrt();
+                (c, r, Some((lo, hi)))
+            } else {
+                let (c, r) = self.spheres[d.geometry];
+                (c, r, model.geometries[d.geometry].bounding_box)
+            };
+            deformed[i] = Some(Deformed {
+                positions: p,
+                bvh: b,
+                bounds,
+            });
         }
         Posed {
             world,
@@ -534,10 +575,14 @@ impl Picker {
                     let Some((tris, rest_bvh)) = &self.tris[d.geometry] else {
                         continue;
                     };
-                    let (positions, bvh): (Option<&[Vec3]>, &Bvh) = match &posed.deformed[i] {
-                        Some((p, b)) => (Some(p), b),
-                        None => (None, rest_bvh),
-                    };
+                    let (positions, bvh, (center, radius, bbox)): (Option<&[Vec3]>, &Bvh, _) =
+                        match &posed.deformed[i] {
+                            Some(x) => (Some(&x.positions), &x.bvh, x.bounds),
+                            None => {
+                                let (c, r) = self.spheres[d.geometry];
+                                (None, rest_bvh, (c, r, g.bounding_box))
+                            }
+                        };
                     let vertex = |k: u32| -> Vec3 {
                         match positions {
                             Some(p) => p[k as usize],
@@ -545,31 +590,6 @@ impl Picker {
                                 let v = &g.position.data[k as usize * 3..k as usize * 3 + 3];
                                 [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]
                             }
-                        }
-                    };
-                    // Bounding volumes: the posed vertices' for skinned
-                    // meshes, the geometry's otherwise.
-                    let (center, radius, bbox) = match positions {
-                        Some(p) if d.skin.is_some() => {
-                            let mut lo = [f64::INFINITY; 3];
-                            let mut hi = [f64::NEG_INFINITY; 3];
-                            for v in p {
-                                for c in 0..3 {
-                                    lo[c] = lo[c].min(v[c]);
-                                    hi[c] = hi[c].max(v[c]);
-                                }
-                            }
-                            let c = scale(add(lo, hi), 0.5);
-                            let r = p
-                                .iter()
-                                .map(|v| distance_sq(*v, c))
-                                .fold(0.0, f64::max)
-                                .sqrt();
-                            (c, r, Some((lo, hi)))
-                        }
-                        _ => {
-                            let (c, r) = g.bounding_sphere();
-                            (c, r, g.bounding_box)
                         }
                     };
                     let instances: Vec<(Option<u32>, Mat4)> = match &d.instances {
@@ -620,7 +640,7 @@ impl Picker {
                 mode => {
                     let s = model.objects[i].scale;
                     let threshold = 1.0 / ((s[0] + s[1] + s[2]) / 3.0);
-                    let (center, radius) = g.bounding_sphere();
+                    let (center, radius) = self.spheres[d.geometry];
                     let wc = math::apply(world, center);
                     let wr = radius * math::max_scale_on_axis(world) + 1.0;
                     if !ray.hits_sphere(wc, wr) {

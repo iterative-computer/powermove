@@ -62,8 +62,10 @@ fn hash(parts: &[&[u8]]) -> u64 {
 
 type Version = (PathBuf, u64, Option<std::time::SystemTime>);
 
-fn cache() -> &'static Mutex<HashMap<Version, Result<Arc<GltfAsset>, String>>> {
-    static C: OnceLock<Mutex<HashMap<Version, Result<Arc<GltfAsset>, String>>>> = OnceLock::new();
+type Loaded = Mutex<HashMap<Version, Result<Arc<GltfAsset>, String>>>;
+
+fn cache() -> &'static Loaded {
+    static C: OnceLock<Loaded> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
