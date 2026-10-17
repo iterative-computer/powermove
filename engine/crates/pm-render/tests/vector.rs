@@ -33,10 +33,14 @@ fn placed(id: &str, ty: &str, d: Value, compat: u32, rotation: f64, scale: f64) 
 }
 
 fn render_alpha(renderer: &mut Renderer, layers: Vec<Value>) -> Vec<f32> {
-    render_rgba(renderer, project(W, H, 2.0, no_fill(), layers), &MapResolver::default())
-        .chunks(4)
-        .map(|p| p[3])
-        .collect()
+    render_rgba(
+        renderer,
+        project(W, H, 2.0, no_fill(), layers),
+        &MapResolver::default(),
+    )
+    .chunks(4)
+    .map(|p| p[3])
+    .collect()
 }
 
 fn render_rgba(renderer: &mut Renderer, doc: Value, resolver: &MapResolver) -> Vec<f32> {
@@ -112,7 +116,12 @@ fn edge_error(ours: &[f32], reference: &[f32]) -> EdgeError {
         }
     }
     let rms = (sum / n.max(1) as f64).sqrt();
-    EdgeError { edge_pixels: n, rms, psnr_db: -20.0 * rms.log10(), max_any }
+    EdgeError {
+        edge_pixels: n,
+        rms,
+        psnr_db: -20.0 * rms.log10(),
+        max_any,
+    }
 }
 
 fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
@@ -121,7 +130,8 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
     let n = points * 2;
     (0..n)
         .map(|i| {
-            let a = -core::f64::consts::FRAC_PI_2 + f64::from(i) * core::f64::consts::TAU / f64::from(n);
+            let a = -core::f64::consts::FRAC_PI_2
+                + f64::from(i) * core::f64::consts::TAU / f64::from(n);
             let r = if i % 2 == 1 { inner } else { outer };
             (a.cos() * r, a.sin() * r)
         })
@@ -168,8 +178,14 @@ fn level2_edges_are_analytic() {
     ];
     for (name, d, inside) in cases {
         let reference = coverage(inside);
-        let level2 = render_alpha(&mut renderer, vec![placed(name, "shape", d.clone(), 2, rotation, scale)]);
-        let level1 = render_alpha(&mut renderer, vec![placed(name, "shape", d, 1, rotation, scale)]);
+        let level2 = render_alpha(
+            &mut renderer,
+            vec![placed(name, "shape", d.clone(), 2, rotation, scale)],
+        );
+        let level1 = render_alpha(
+            &mut renderer,
+            vec![placed(name, "shape", d, 1, rotation, scale)],
+        );
         let e2 = edge_error(&level2, &reference);
         let e1 = edge_error(&level1, &reference);
         eprintln!(
@@ -177,8 +193,16 @@ fn level2_edges_are_analytic() {
             e2.edge_pixels, e2.rms, e2.psnr_db, e2.max_any, e1.rms, e1.psnr_db, e1.max_any
         );
         assert!(e2.edge_pixels > 300, "{name}: the shape has edges");
-        assert!(e2.psnr_db >= 40.0, "{name}: level 2 edges are analytic ({:.1} dB)", e2.psnr_db);
-        assert!(e2.max_any <= 0.03, "{name}: level 2 largest error {}", e2.max_any);
+        assert!(
+            e2.psnr_db >= 40.0,
+            "{name}: level 2 edges are analytic ({:.1} dB)",
+            e2.psnr_db
+        );
+        assert!(
+            e2.max_any <= 0.03,
+            "{name}: level 2 largest error {}",
+            e2.max_any
+        );
         assert!(
             e2.rms * 2.0 < e1.rms,
             "{name}: level 2 is sharper than the level 1 raster ({:.5} vs {:.5})",
@@ -213,7 +237,11 @@ fn gpu_and_cpu_coverage_agree() {
     };
     renderer.set_vector_backend(CoverageBackend::Auto);
     let gpu = render_alpha(&mut renderer, layers());
-    assert_eq!(renderer.last_vector_backend(), Some("vello"), "Vello draws on the GPU");
+    assert_eq!(
+        renderer.last_vector_backend(),
+        Some("vello"),
+        "Vello draws on the GPU"
+    );
     renderer.set_vector_backend(CoverageBackend::Cpu);
     let cpu = render_alpha(&mut renderer, layers());
     assert_eq!(renderer.last_vector_backend(), Some("vello_cpu"));
@@ -226,7 +254,10 @@ fn gpu_and_cpu_coverage_agree() {
     }
     let mean = sum / gpu.len() as f64;
     eprintln!("Vello GPU vs vello_cpu: {differing} pixels differ, max {max:.4}, mean {mean:.6}");
-    assert!(max <= 3.0 / 255.0 + 1e-6, "coverage agrees within 3/255 (max {max})");
+    assert!(
+        max <= 3.0 / 255.0 + 1e-6,
+        "coverage agrees within 3/255 (max {max})"
+    );
     assert!(mean <= 1e-3, "mean difference {mean}");
 }
 
@@ -243,13 +274,23 @@ fn solid_radius_is_honored_on_level2_only() {
         .flat_map(|y| (0..W).map(move |x| (x, y)))
         .filter(|(x, y)| level1[(y * W + x) as usize] > 0.5)
         .collect();
-    let (x0, y0) = (opaque.iter().map(|p| p.0).min().unwrap(), opaque.iter().map(|p| p.1).min().unwrap());
-    let (x1, y1) = (opaque.iter().map(|p| p.0).max().unwrap() + 1, opaque.iter().map(|p| p.1).max().unwrap() + 1);
+    let (x0, y0) = (
+        opaque.iter().map(|p| p.0).min().unwrap(),
+        opaque.iter().map(|p| p.1).min().unwrap(),
+    );
+    let (x1, y1) = (
+        opaque.iter().map(|p| p.0).max().unwrap() + 1,
+        opaque.iter().map(|p| p.1).max().unwrap() + 1,
+    );
     assert_eq!((x1 - x0, y1 - y0), (120, 80), "level 1 draws the full box");
     let at = |a: &[f32], x: u32, y: u32| a[(y * W + x) as usize];
     assert_eq!(at(&level1, x0, y0), 1.0, "level 1 ignores the radius");
     assert_eq!(at(&level2, x0, y0), 0.0, "level 2 rounds the corner");
-    assert_eq!(at(&level2, x0 + 60, y0), 1.0, "level 2 keeps the straight edges");
+    assert_eq!(
+        at(&level2, x0 + 60, y0),
+        1.0,
+        "level 2 keeps the straight edges"
+    );
     // Level 2 against the exact rounded rectangle.
     let (fx0, fy0) = (f64::from(x0), f64::from(y0));
     let reference = coverage(|x, y| {
@@ -293,12 +334,18 @@ fn level2_solids_without_radius_have_analytic_edges() {
         json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": -5 }),
     ] {
         // Where the box sits relative to the layer origin, unrotated.
-        let upright = render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 2, 0.0, 100.0)]);
+        let upright = render_alpha(
+            &mut renderer,
+            vec![placed("solid", "solid", d.clone(), 2, 0.0, 100.0)],
+        );
         let (x0, y0, x1, y1) = opaque_bounds(&upright);
         assert_eq!((x1 - x0, y1 - y0), (120, 80), "{d}: the full box");
         let (bx, by) = (f64::from(x0) - 128.0, f64::from(y0) - 128.0);
         let (rotation, scale) = (23.0, 115.0);
-        let ours = render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 2, rotation, scale)]);
+        let ours = render_alpha(
+            &mut renderer,
+            vec![placed("solid", "solid", d.clone(), 2, rotation, scale)],
+        );
         let reference = coverage(|x, y| {
             let (u, v) = to_layer(x, y, rotation, scale);
             (bx..=bx + 120.0).contains(&u) && (by..=by + 80.0).contains(&v)
@@ -309,22 +356,48 @@ fn level2_solids_without_radius_have_analytic_edges() {
             "level 2 solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
             e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
-        assert!(partial * 2 >= e.edge_pixels, "{d}: edges are antialiased, not hard ({partial} of {})", e.edge_pixels);
-        assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03, "{d}: {:.1} dB, max {:.4}", e.psnr_db, e.max_any);
+        assert!(
+            partial * 2 >= e.edge_pixels,
+            "{d}: edges are antialiased, not hard ({partial} of {})",
+            e.edge_pixels
+        );
+        assert!(
+            e.psnr_db >= 40.0 && e.max_any <= 0.03,
+            "{d}: {:.1} dB, max {:.4}",
+            e.psnr_db,
+            e.max_any
+        );
     }
     // For contrast: level 1 keeps today's single-sample quad.
     let level1 = render_alpha(
         &mut renderer,
-        vec![placed("solid", "solid", json!({ "color": "#FFFFFF", "w": 120, "h": 80 }), 1, 23.0, 115.0)],
+        vec![placed(
+            "solid",
+            "solid",
+            json!({ "color": "#FFFFFF", "w": 120, "h": 80 }),
+            1,
+            23.0,
+            115.0,
+        )],
     );
-    assert!(level1.iter().all(|a| *a == 0.0 || *a == 1.0), "level 1 solids are aliased as today");
+    assert!(
+        level1.iter().all(|a| *a == 0.0 || *a == 1.0),
+        "level 1 solids are aliased as today"
+    );
 }
 
 #[test]
 fn vector_cache_stays_bounded_while_content_animates() {
     let mut renderer = Renderer::headless().unwrap();
     let frame = |rotation: f64| {
-        vec![placed("s", "shape", json!({ "shape": "star", "w": 200, "h": 200, "points": 5, "color": "#FFFFFF" }), 2, rotation, 100.0)]
+        vec![placed(
+            "s",
+            "shape",
+            json!({ "shape": "star", "w": 200, "h": 200, "points": 5, "color": "#FFFFFF" }),
+            2,
+            rotation,
+            100.0,
+        )]
     };
     // One frame's working set.
     render_alpha(&mut renderer, frame(0.0));
@@ -344,7 +417,10 @@ fn vector_cache_stays_bounded_while_content_animates() {
         "rotating level 2 shape: {one} bytes per frame, budget {budget}, peak {peak} after 40 frames, {} entries",
         renderer.vector_cache_len()
     );
-    assert!(peak <= budget + one, "peak {peak} exceeds budget {budget} + one frame {one}");
+    assert!(
+        peak <= budget + one,
+        "peak {peak} exceeds budget {budget} + one frame {one}"
+    );
     assert!(renderer.vector_cache_len() <= 4);
     // The entry bound holds as well.
     renderer.set_vector_cache_budget(u64::MAX, 2);
@@ -358,7 +434,14 @@ fn vector_cache_stays_bounded_while_content_animates() {
     renderer.set_vector_cache_budget(1, 4096);
     let many: Vec<Value> = (0..6)
         .map(|i| {
-            let mut l = placed(&format!("s{i}"), "shape", json!({ "shape": "ellipse", "w": 30, "h": 30, "color": "#FFFFFF" }), 2, 0.0, 100.0);
+            let mut l = placed(
+                &format!("s{i}"),
+                "shape",
+                json!({ "shape": "ellipse", "w": 30, "h": 30, "color": "#FFFFFF" }),
+                2,
+                0.0,
+                100.0,
+            );
             set(&mut l, "position.x", json!(30.0 + 38.0 * f64::from(i)));
             l
         })
@@ -369,13 +452,24 @@ fn vector_cache_stays_bounded_while_content_animates() {
         assert_eq!(drawn[(128 * W + x) as usize], 1.0, "layer {i} is drawn");
     }
     render_alpha(&mut renderer, frame(300.0));
-    assert!(renderer.vector_cache_len() <= 1, "{} entries", renderer.vector_cache_len());
+    assert!(
+        renderer.vector_cache_len() <= 1,
+        "{} entries",
+        renderer.vector_cache_len()
+    );
 }
 
 #[test]
 fn trim_splits_its_budget_with_the_target_pool() {
     let mut renderer = Renderer::headless().unwrap();
-    let layers = vec![placed("b", "shape", json!({ "shape": "polygon", "w": 200, "h": 200, "points": 6, "color": "#FFFFFF" }), 2, 10.0, 100.0)];
+    let layers = vec![placed(
+        "b",
+        "shape",
+        json!({ "shape": "polygon", "w": 200, "h": 200, "points": 6, "color": "#FFFFFF" }),
+        2,
+        10.0,
+        100.0,
+    )];
     render_alpha(&mut renderer, layers);
     let vector = renderer.vector_cache_bytes();
     let pool = renderer.pooled_bytes();
@@ -395,8 +489,22 @@ fn vector_textures_are_accounted_and_trimmed() {
     let mut renderer = Renderer::headless().unwrap();
     assert_eq!(renderer.vector_cache_bytes(), 0);
     let layers = vec![
-        placed("a", "shape", json!({ "shape": "ellipse", "w": 100, "h": 60, "color": "#FFFFFF" }), 1, 0.0, 100.0),
-        placed("b", "shape", json!({ "shape": "polygon", "w": 100, "h": 100, "points": 6, "color": "#FFFFFF" }), 2, 10.0, 100.0),
+        placed(
+            "a",
+            "shape",
+            json!({ "shape": "ellipse", "w": 100, "h": 60, "color": "#FFFFFF" }),
+            1,
+            0.0,
+            100.0,
+        ),
+        placed(
+            "b",
+            "shape",
+            json!({ "shape": "polygon", "w": 100, "h": 100, "points": 6, "color": "#FFFFFF" }),
+            2,
+            10.0,
+            100.0,
+        ),
     ];
     let first = render_alpha(&mut renderer, layers.clone());
     let bytes = renderer.vector_cache_bytes();
@@ -416,12 +524,26 @@ fn vector_textures_are_accounted_and_trimmed() {
 }
 
 /// An SVG image layer (`d.asset` → `path`), `compat` level `compat`.
-fn svg_project(svg: &str, name: &str, w: u32, h: u32, d: Value, compat: u32, rotation: f64) -> (Value, MapResolver) {
+fn svg_project(
+    svg: &str,
+    name: &str,
+    w: u32,
+    h: u32,
+    d: Value,
+    compat: u32,
+    rotation: f64,
+) -> (Value, MapResolver) {
     let dir = std::env::temp_dir().join(format!("pm-render-vector-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, svg).unwrap();
-    let mut doc = project(W, H, 2.0, no_fill(), vec![placed("svg", "image", d, compat, rotation, 100.0)]);
+    let mut doc = project(
+        W,
+        H,
+        2.0,
+        no_fill(),
+        vec![placed("svg", "image", d, compat, rotation, 100.0)],
+    );
     asset(&mut doc, "art", "image", "svg", w, h, 0.0);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("art".into(), path);
@@ -435,7 +557,10 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
     let mut renderer = Renderer::headless().unwrap();
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
     let (doc, resolver) = svg_project(SOLID_SVG, "solid.svg", 100, 50, d.clone(), 2, 23.0);
-    assert_eq!(unsupported_with_media(&load(&doc), "Ptest-root", &resolver), vec![]);
+    assert_eq!(
+        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+        vec![]
+    );
     let rgba = render_rgba(&mut renderer, doc, &resolver);
     let alpha: Vec<f32> = rgba.chunks(4).map(|p| p[3]).collect();
     // The 200 × 100 box centered at (128, 128) rotated 23°: user units ×2.
@@ -445,15 +570,25 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         (10.0..=90.0).contains(&sx) && (10.0..=40.0).contains(&sy)
     });
     let e = edge_error(&alpha, &reference);
-    eprintln!("SVG rect: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}", e.edge_pixels, e.rms, e.psnr_db, e.max_any);
+    eprintln!(
+        "SVG rect: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
+        e.edge_pixels, e.rms, e.psnr_db, e.max_any
+    );
     assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
     // The circle is black and opaque over the white rect.
     let center = (128 * W + 128) as usize * 4;
-    assert!(rgba[center] < 1e-3 && (rgba[center + 3] - 1.0).abs() < 1e-3, "{:?}", &rgba[center..center + 4]);
+    assert!(
+        rgba[center] < 1e-3 && (rgba[center + 3] - 1.0).abs() < 1e-3,
+        "{:?}",
+        &rgba[center..center + 4]
+    );
     // Level 1 SVG images stay routed.
     let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
     let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
-    assert_eq!(u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(), vec![Feature::SvgImage]);
+    assert_eq!(
+        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
+        vec![Feature::SvgImage]
+    );
 }
 
 #[test]
@@ -464,7 +599,10 @@ fn level2_svg_fallbacks_and_text() {
     let gradient = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><defs><linearGradient id="g"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.5"/></linearGradient></defs><rect width="100" height="50" fill="url(#g)"/></svg>"##;
     let d = json!({ "asset": "art", "fit": "cover", "w": 100, "h": 100 });
     let (doc, resolver) = svg_project(gradient, "gradient.svg", 100, 50, d, 2, 0.0);
-    assert_eq!(unsupported_with_media(&load(&doc), "Ptest-root", &resolver), vec![]);
+    assert_eq!(
+        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+        vec![]
+    );
     let rgba = render_rgba(&mut renderer, doc, &resolver);
     let a = |x: u32, y: u32| rgba[((y * W + x) * 4 + 3) as usize];
     // Covered exactly over the 100 × 100 box at (78..178, 78..178).
@@ -479,7 +617,18 @@ fn level2_svg_fallbacks_and_text() {
     assert!((a(176, 128) - 0.63).abs() < 0.02, "{}", a(176, 128));
     // SVG text is routed.
     let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30">Powermove</text></svg>"##;
-    let (doc, resolver) = svg_project(text, "text.svg", 100, 50, json!({ "asset": "art", "w": 100, "h": 50 }), 2, 0.0);
+    let (doc, resolver) = svg_project(
+        text,
+        "text.svg",
+        100,
+        50,
+        json!({ "asset": "art", "w": 100, "h": 50 }),
+        2,
+        0.0,
+    );
     let u = unsupported_with_media(&load(&doc), "Ptest-root", &resolver);
-    assert_eq!(u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(), vec![Feature::SvgImage]);
+    assert_eq!(
+        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
+        vec![Feature::SvgImage]
+    );
 }

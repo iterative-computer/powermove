@@ -2127,6 +2127,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-glsl"
+version = "0.1.0"
+dependencies = [
+ "glslang",
+ "glslang-sys",
+ "libc",
+ "naga",
+ "proptest",
+ "rspirv",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pm-gpu"
 version = "0.1.0"
 dependencies = [
@@ -2237,6 +2253,8 @@ version = "0.1.0"
 name = "pm-render"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "kurbo",
  "libm",
  "pm-blender",
  "pm-color",
@@ -2244,17 +2262,23 @@ dependencies = [
  "pm-export",
  "pm-expr",
  "pm-geom3d",
+ "pm-glsl",
  "pm-gpu",
  "pm-media",
  "pm-model",
  "pm-protocol",
+ "pm-text",
  "pm-time",
  "pm-vector",
  "png",
+ "pollster",
+ "read-fonts 0.45.0",
  "regex",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "vello",
  "wgpu",
 ]
 
@@ -2273,6 +2297,7 @@ dependencies = [
  "harfrust 0.14.0",
  "icu_properties",
  "icu_segmenter",
+ "kurbo",
  "memmap2",
  "objc2",
  "objc2-app-kit",
@@ -2282,12 +2307,15 @@ dependencies = [
  "objc2-foundation",
  "parlance",
  "parley",
+ "png",
  "read-fonts 0.45.0",
  "serde",
  "serde_json",
  "sha2",
+ "skrifa",
  "thiserror 2.0.21",
  "unicode-bidi",
+ "vello_cpu",
 ]
 
 [[package]]

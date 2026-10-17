@@ -14,6 +14,7 @@ use pm_protocol::common::Ticks;
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
 use crate::composite::{ColorSettings, EffectHost};
+use crate::effects::Effects;
 use crate::error::{LayerFailure, RenderError};
 use crate::exec::{Exec, Region};
 use crate::expr::PmExprEngine;
@@ -36,6 +37,18 @@ pub struct Frame {
     pub failures: Vec<LayerFailure>,
     /// The composition time rendered, in seconds.
     pub seconds: f64,
+}
+
+/// One layer's text raster ([`Renderer::text_raster`]).
+pub struct TextRaster {
+    /// Premultiplied working values of the plan's crop, top-down.
+    pub pixels: Vec<f32>,
+    /// The whole canvas in device pixels (`plan.crop` is a part of it).
+    pub canvas: (u32, u32),
+    /// The crop's quad in layer pixels and its anchor.
+    pub box_size: (f64, f64),
+    pub anchor: (f64, f64),
+    pub plan: crate::text::TextPlan,
 }
 
 /// A pass-through candidate ([`Renderer::pass_through`]).
@@ -110,8 +123,13 @@ pub struct Renderer {
     vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
-    /// Prepares and runs layer effects (`composite::EffectHost`).
-    effects: Option<Arc<dyn EffectHost>>,
+    /// Effect, transition, and layer definitions and their programs
+    /// (`crate::effects`, contract 10): the renderer's own effect host.
+    effects: Effects,
+    /// Another effect host in place of the renderer's own (tests).
+    effect_host: Option<Arc<dyn EffectHost>>,
+    text: crate::text::TextContext,
+    text_gpu: crate::text::gpu::TextGpu,
 }
 
 impl Renderer {
@@ -122,7 +140,10 @@ impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Renderer {
         let pipelines = Pipelines::new(&device);
         let media = MediaCache::new(&device);
+        let text_gpu = crate::text::gpu::TextGpu::new(&device);
         Renderer {
+            text: crate::text::TextContext::default(),
+            text_gpu,
             pipelines,
             media,
             pool: TargetPool::new(),
@@ -133,20 +154,219 @@ impl Renderer {
             device,
             queue,
             bracket: None,
-            effects: None,
+            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
+            effect_host: None,
         }
     }
 
-    /// Runs layer effects and adjustment layers through `host` (the effects
-    /// lane's runner); `None` routes compositions with effects.
+    /// Runs layer effects and adjustment layers through `host` instead of
+    /// the renderer's definitions; `None` goes back to them.
     pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
-        self.effects = host;
+        self.effect_host = host;
+    }
+
+    /// Replaces the effect, transition, and layer definitions with an
+    /// embedded set (an export job's, a collected project's, `pm-cli`'s;
+    /// contract 10) and translates what changed. Returns per-definition
+    /// failures. Without definitions, layers with effects or transitions
+    /// are routed.
+    pub fn set_definitions(
+        &mut self,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.set_snapshot(set)
+    }
+
+    /// Applies a kernel update (`pushDefinitions`); the failures are
+    /// `DefinitionsApplied.failures`. In force for every later frame.
+    pub fn apply_definitions(
+        &mut self,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        self.effects.apply(update)
+    }
+
+    /// Forgets every definition: effects and transitions are routed again.
+    pub fn clear_definitions(&mut self) {
+        self.effects.clear();
+    }
+
+    /// The definitions in force (what an export job embeds).
+    pub fn definitions(&self) -> pm_protocol::definitions::DefinitionSetSnapshot {
+        self.effects.snapshot()
+    }
+
+    pub fn effects(&self) -> &Effects {
+        &self.effects
+    }
+
+    pub fn effects_mut(&mut self) -> &mut Effects {
+        &mut self.effects
+    }
+
+    /// Swaps in another definition set (one per view of a shared renderer:
+    /// each keeps its programs and watchdog state); returns the previous.
+    pub fn swap_effects(&mut self, effects: &mut Effects) {
+        std::mem::swap(&mut self.effects, effects);
+    }
+
+    /// Runs `f` with an effect context over the renderer's own definitions,
+    /// then submits and gives the intermediates back.
+    fn with_gpu<T>(
+        &mut self,
+        label: &str,
+        precision: Precision,
+        full: (u32, u32),
+        f: impl FnOnce(&mut crate::effects::exec::Gpu<'_>) -> T,
+    ) -> (T, Vec<Unsupported>) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let mut taken = Vec::new();
+        let mut unsupported = Vec::new();
+        let out = {
+            let mut cx = crate::composite::effects::EffectContext {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                pool: &mut self.pool,
+                precision,
+                working: pm_protocol::color::WorkingEncoding::Standard,
+                full,
+                taken: &mut taken,
+                native: Some(crate::effects::exec::Native {
+                    effects: &mut self.effects,
+                    timer: None,
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut unsupported,
+                }),
+            };
+            let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
+            f(&mut gpu)
+        };
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        (out, unsupported)
+    }
+
+    /// Runs effect pass nodes on `input` as the compositor's `runEffects`
+    /// does (harnesses and the shader parity tests): every buffer the size
+    /// of `input`, in GL row order, E-encoded. `region` places the buffer in
+    /// a level of `full` pixels (`effectViewportCoordinates`); `backdrop` is
+    /// `u_backdrop` (an empty unit without one). Returns a new working
+    /// target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_effects(
+        &mut self,
+        input: &Target,
+        backdrop: Option<&Target>,
+        steps: &[crate::effects::plan::EffectStep],
+        time: f64,
+        region: Option<(u32, u32)>,
+        full: (u32, u32),
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let (w, h) = (input.width(), input.height());
+        let region = region.map(|(x, y)| Region {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
+        let (out, unsupported) = self.with_gpu("pm effects", precision, full, |gpu| {
+            gpu.chain(
+                "",
+                steps,
+                time,
+                input,
+                backdrop,
+                coordinates,
+                pm_protocol::color::WorkingEncoding::Standard,
+            )
+            .unwrap_or_else(|| gpu.copy_of(input))
+        });
+        if !unsupported.is_empty() {
+            return Err(RenderError::Unsupported(unsupported));
+        }
+        Ok(out)
+    }
+
+    /// Runs a transition node from `from` to `to` (`runTransition`).
+    pub fn run_transition(
+        &mut self,
+        from: &Target,
+        to: &Target,
+        step: &crate::effects::plan::TransitionStep,
+        time: f64,
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let mut step = step.clone();
+        step.edge_in = true;
+        let full = (from.width(), from.height());
+        let (out, unsupported) = self.with_gpu("pm transition", precision, full, |gpu| {
+            gpu.run_transition("", &step, from, to, time)
+        });
+        match out {
+            Some(t) if unsupported.is_empty() => Ok(t),
+            _ => Err(RenderError::Unsupported(unsupported)),
+        }
+    }
+
+    /// Reads finished watchdog timestamps (`wait`: every submitted frame)
+    /// and returns the overruns reported since the last call.
+    pub fn watchdog_reports(&mut self, wait: bool) -> Vec<pm_protocol::error::EngineError> {
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, wait);
+        self.effects.watchdog.take_reports()
     }
 
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
         self.bracket = bracket;
+    }
+
+    /// The capability check for this renderer: `unsupported_with_media`,
+    /// with text and captions drawn when fonts are configured.
+    pub fn unsupported_with_media(
+        &self,
+        document: &Document,
+        composition: &str,
+        assets: &dyn AssetResolver,
+    ) -> Vec<Unsupported> {
+        if self.text.has_fonts() {
+            capability::unsupported_with_fonts(document, composition, Some(assets))
+        } else {
+            capability::unsupported_with_media(document, composition, assets)
+        }
+    }
+
+    /// The fonts text and captions layers lay out with (`None`: those
+    /// layers are unsupported and route to the legacy renderer). Dropping
+    /// or replacing them clears the glyph and raster caches.
+    pub fn set_text_fonts(&mut self, fonts: Option<Box<dyn crate::text::TextFonts>>) {
+        self.text.set_fonts(fonts);
+        self.text_gpu.clear();
+    }
+
+    /// Text layout and rendering state (profiles, the captions switch).
+    pub fn text(&mut self) -> &mut crate::text::TextContext {
+        &mut self.text
+    }
+
+    /// The GPU side of text rendering (coverage source, cache, counters).
+    pub fn text_gpu(&mut self) -> &mut crate::text::gpu::TextGpu {
+        &mut self.text_gpu
+    }
+
+    /// `PM.captionsHidden` for the following frames: an export without
+    /// burned-in captions (`captionsBurn: false`) draws no captions layer.
+    pub fn set_captions_hidden(&mut self, hidden: bool) {
+        self.text.set_captions_hidden(hidden);
     }
 
     /// A renderer on its own device (`pm_gpu::Gpu::new`).
@@ -168,10 +388,14 @@ impl Renderer {
         self.pool.bytes()
     }
 
-    /// Keeps translated 3D programs in `dir` across processes (amendment
-    /// 11's disk program cache); the engine host passes its cache
-    /// directory.
+    /// Keeps translated 3D programs (amendment 11's disk program cache) and
+    /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
+    /// processes; the engine host passes its shader cache folder.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        // Translated GLSL (`pm_glsl::Cache`: source hash and device) in its
+        // own folder; definition sets made before keep their cache.
+        self.effects
+            .set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
         self.scene3d.set_program_cache(dir);
     }
 
@@ -204,10 +428,13 @@ impl Renderer {
 
     /// Frees idle intermediate targets and cached vector textures so that
     /// together they hold at most `bytes` (lease pressure): the pool trims
-    /// first, and the vector cache gets what the pool leaves.
+    /// first, and the vector cache gets what the pool leaves. The text
+    /// raster cache is kept apart from the pool and trims to `bytes` on its
+    /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);
         self.vector.trim(bytes.saturating_sub(self.pool.bytes()));
+        self.text_gpu.trim(bytes);
     }
 
     /// The vector cache's standing bound, enforced while frames render
@@ -347,6 +574,10 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        // Overruns measured on earlier frames disable their effects now.
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
         let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
@@ -356,8 +587,9 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.as_deref(),
+            effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
+            Some(&mut self.text),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -386,7 +618,13 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        let (legend, taken, unsupported, exec_failures) = {
+        // Only renderers drawing their own definitions time effects.
+        let timer = if self.effects.configured() && self.effect_host.is_none() {
+            self.effects.watchdog.frame_timer(&self.device)
+        } else {
+            None
+        };
+        let (legend, taken, unsupported, exec_failures, timer) = {
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -394,7 +632,10 @@ impl Renderer {
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
+                effects: &mut self.effects,
+                timer,
                 vector: &mut self.vector,
+                text: &mut self.text_gpu,
                 precision,
                 working: color.working,
                 blend_domain: color.blend_domain,
@@ -442,12 +683,17 @@ impl Renderer {
                 exec.taken.push(id_rows);
             }
             let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
-            (legend, exec.taken, exec.unsupported, exec.failures)
+            let timer = exec.timer.take();
+            (legend, exec.taken, exec.unsupported, exec.failures, timer)
         };
+        if let Some(timer) = timer {
+            self.effects.watchdog.finish(&mut encoder, timer);
+        }
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
         self.queue.submit([encoder.finish()]);
+        self.effects.watchdog.submitted();
         for t in taken {
             self.pool.give(t);
         }
@@ -558,6 +804,128 @@ impl Renderer {
         }))
     }
 
+    /// The canvas raster of one text or captions layer at composition time
+    /// `seconds`, drawn at raster scale `scale` (what today's `PM.raster(L,
+    /// scale, T)` paints), read back. `None` when the layer draws nothing
+    /// (no cue showing, no ink). For parity tests, `pm-cli`, and debugging.
+    pub fn text_raster(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        seconds: f64,
+        scale: f64,
+        precision: Precision,
+    ) -> Result<Option<TextRaster>, RenderError> {
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let root = document.root().unwrap();
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        if !self.text.has_fonts() {
+            return Err(RenderError::Unsupported(vec![Unsupported::request(
+                "text without configured fonts",
+            )]));
+        }
+        let comp_id = comp.id().to_string_lossy();
+        let mut scope = pm_eval::Scope::new(&mut self.evaluator, &comp, &project);
+        let node = scope
+            .layers()
+            .iter()
+            .find(|l| crate::js::layer_id(l) == layer)
+            .ok_or_else(|| RenderError::Request(format!("no layer {layer}")))?;
+        let ty = crate::js::layer_type(node);
+        let quad = match ty.as_str() {
+            "text" => self.text.text_layer(&mut scope, node, seconds, scale),
+            "captions" => self.text.captions_layer(&mut scope, node, seconds, scale),
+            other => return Err(RenderError::Request(format!("layer {layer} is {other}"))),
+        };
+        // What the layer could not draw is refused here, as `render` refuses
+        // it, and never left for a later layer to report.
+        let refused: Vec<Unsupported> = self
+            .text
+            .take_unsupported()
+            .into_iter()
+            .map(|what| Unsupported::layer(&comp_id, node, Feature::Text(what)))
+            .collect();
+        let quad = quad.map_err(|e| RenderError::Request(e.to_string()))?;
+        if !refused.is_empty() {
+            return Err(RenderError::Unsupported(refused));
+        }
+        let Some(quad) = quad else { return Ok(None) };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text raster"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &quad.plan,
+                precision,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+        Ok(Some(TextRaster {
+            pixels,
+            canvas: (quad.plan.scene.width, quad.plan.scene.height),
+            box_size: (quad.w, quad.h),
+            anchor: (quad.ax, quad.ay),
+            plan: quad.plan,
+        }))
+    }
+
+    /// Paints a text scene (the whole scene) through the GPU text path and
+    /// reads it back: premultiplied working values, top-down. For the level
+    /// 2 gate, review sheets, and tools that build scenes themselves.
+    pub fn paint_text_scene(
+        &mut self,
+        scene: pm_text::render::scene::TextScene,
+        precision: Precision,
+    ) -> Result<Vec<f32>, RenderError> {
+        let plan = crate::text::TextPlan::whole(scene);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text scene"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &plan,
+                precision,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        for t in taken {
+            self.pool.give(t);
+        }
+        Ok(pm_gpu::readback::read_f32(
+            &self.device,
+            &self.queue,
+            view.texture(),
+        )?)
+    }
+
     /// The Blender snapshots a frame needs (section 17's Blender stage):
     /// the frame is planned without drawing, and every composition pass
     /// with `render3d.enabled` (every one with 3D objects for `preview`)
@@ -591,6 +959,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        // Text and effects draw nothing here: only the 3D passes matter.
         let (_, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -600,8 +969,9 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.as_deref(),
+            None,
             self.options3d.for_request(request),
+            None,
             crate::blender::PlanState::collecting(preview, options),
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -638,13 +1008,27 @@ impl Renderer {
             h,
             scale,
             assets,
-            self.effects.as_deref(),
+            effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
+            Some(&mut self.text),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         Ok((plan, build.failures))
+    }
+}
+
+/// The effect host plans are built with: another host when one is set,
+/// else the renderer's definitions once it has any (without either, layers
+/// with effects or transitions are routed).
+fn effect_host<'a>(
+    host: &'a Option<Arc<dyn EffectHost>>,
+    effects: &'a Effects,
+) -> Option<&'a dyn EffectHost> {
+    match host {
+        Some(h) => Some(h.as_ref()),
+        None => effects.configured().then_some(effects as &dyn EffectHost),
     }
 }
 

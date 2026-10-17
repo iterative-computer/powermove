@@ -5,6 +5,8 @@ use pm_gpu::{Target, TargetPool};
 use pm_protocol::color::{BlendDomain, Precision, WorkingEncoding};
 
 use crate::capability::Unsupported;
+use crate::effects::Effects;
+use crate::effects::watchdog::FrameTimer;
 use crate::error::LayerFailure;
 use crate::media::{MediaCache, MediaFailure};
 use crate::pipelines::{FillUniform, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
@@ -38,7 +40,12 @@ pub(crate) struct Exec<'a> {
     pub media: &'a mut MediaCache,
     pub pool: &'a mut TargetPool,
     pub scene3d: &'a mut Scene3dRenderer,
+    /// Effect and transition definitions and programs.
+    pub effects: &'a mut Effects,
+    /// This frame's watchdog timestamps (devices with `TIMESTAMP_QUERY`).
+    pub timer: Option<FrameTimer>,
     pub vector: &'a mut crate::vector::cache::VectorCache,
+    pub text: &'a mut crate::text::gpu::TextGpu,
     pub precision: Precision,
     pub working: WorkingEncoding,
     /// Where screen, overlay, and soft light run with linear blending on.
@@ -236,9 +243,30 @@ impl Exec<'_> {
                             }
                         }
                         Source::Vector(v) => {
-                            match self.vector.resolve(self.device, self.queue, v, self.precision) {
+                            match self
+                                .vector
+                                .resolve(self.device, self.queue, v, self.precision)
+                            {
                                 Ok(view) => r.view = Some(view),
-                                Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
+                            }
+                        }
+                        Source::Text(text) => {
+                            match self.text.render(
+                                self.device,
+                                self.queue,
+                                encoder,
+                                self.pool,
+                                &mut self.taken,
+                                text,
+                                self.precision,
+                            ) {
+                                Ok(view) => r.view = Some(view),
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
                             }
                         }
                         Source::Blender(blender) => {

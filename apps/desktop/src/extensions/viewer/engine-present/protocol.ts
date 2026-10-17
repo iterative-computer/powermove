@@ -121,7 +121,7 @@ export type EngineFrameMessage =
  * routing, plan section 21), so its frames leave the screen until the
  * engine draws again.
  */
-export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string };
+export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
 
 /** Whether a clock sample's line is moving. */
 export function running(sample: ClockSample | null): boolean {

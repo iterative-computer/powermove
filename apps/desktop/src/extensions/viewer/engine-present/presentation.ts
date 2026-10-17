@@ -153,6 +153,8 @@ export class ViewerPresentation {
   private host: Window | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
+  /** The revision the engine routed the composition away at (`routed`). */
+  private routedRevision: number | null = null;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
   private readonly hiddenListeners = new Set<() => void>();
   private readonly offReady: () => void;
@@ -462,6 +464,11 @@ export class ViewerPresentation {
     this.presenter = presenter;
     presenter.onPresented((frame) => {
       if (this.presenter !== presenter) return;
+      // A frame drawn before the engine routed the composition to the
+      // current engine, presented late: it must not cover the current
+      // engine's canvas.
+      if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
+      this.routedRevision = null;
       this.latestFrame = frame;
       if (this.canvasElement.style.visibility !== 'visible') this.canvasElement.style.visibility = 'visible';
       for (const listener of this.listeners) listener(frame);
@@ -488,6 +495,7 @@ export class ViewerPresentation {
         if (message.type === 'routed') {
           // The current engine draws this composition now: its canvas
           // shows until the engine presents again.
+          this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
           this.latestFrame = null;
           this.hide(this.canvasElement);
           return;

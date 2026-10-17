@@ -113,6 +113,8 @@ pub enum Source {
     Blender(Box<crate::blender::BlenderSource>),
     /// Shape content (`crate::vector`).
     Vector(Box<crate::vector::VectorSource>),
+    /// A text or captions raster (`crate::text`).
+    Text(Box<crate::text::TextPlan>),
 }
 
 /// Inputs and outputs of a build.
@@ -134,6 +136,8 @@ pub struct Build<'r> {
     /// The matte source a matte pass renders, which draws even when it is
     /// switched off (`{ ...source, on: true }`).
     forced_on: Option<*const Node>,
+    /// Text layout and glyph caches (`None`: text layers are unsupported).
+    text: Option<&'r mut crate::text::TextContext>,
     /// Blender surfaces of 3D object layers (`crate::blender`).
     pub(crate) blender: crate::blender::PlanState,
 }
@@ -184,11 +188,14 @@ pub fn build_with_effects<'r>(
         assets,
         effects,
         crate::scene3d::Options3d::default(),
+        None,
     )
 }
 
 /// [`build_with_effects`] with the 3D pass's options (view override, mesh
-/// layer definitions).
+/// layer definitions) and text layout: text and captions layers draw
+/// through `text` (its fonts and glyph caches; `None`: they are
+/// unsupported).
 #[allow(clippy::too_many_arguments)]
 pub fn build_with<'r>(
     ev: &mut Evaluator,
@@ -201,10 +208,12 @@ pub fn build_with<'r>(
     assets: &'r dyn AssetResolver,
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
+    text: Option<&'r mut crate::text::TextContext>,
 ) -> (CompPlan, Build<'r>) {
     let blender = crate::blender::PlanState::new(options3d.blender.clone());
     build_blender(
-        ev, root_comp, project, time, width, height, scale, assets, effects, options3d, blender,
+        ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
+        blender,
     )
 }
 
@@ -222,6 +231,7 @@ pub(crate) fn build_blender<'r>(
     assets: &'r dyn AssetResolver,
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
+    text: Option<&'r mut crate::text::TextContext>,
     blender: crate::blender::PlanState,
 ) -> (CompPlan, Build<'r>) {
     let mut b = Build {
@@ -235,6 +245,7 @@ pub(crate) fn build_blender<'r>(
         effects,
         matte_depth: 0,
         forced_on: None,
+        text,
         blender,
     };
     let mut scope = Scope::new(ev, root_comp, project);
@@ -290,7 +301,9 @@ fn comp_pass<'d>(
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
-        let known = |_: &JsString| true;
+        // `PM.transitionDef`: a host knows its registered transitions.
+        let host = b.effects;
+        let known = |ty: &JsString| host.is_none_or(|h| h.transition_known(ty));
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
             s.group_creates_compositing_boundary(l, time, true, &known)
         };
@@ -450,7 +463,7 @@ fn draw_layer<'d>(
                 );
                 return Ok(None);
             }
-            Some(host) => match host.prepare(scope, layer, frame) {
+            Some(host) => match host.prepare(scope, layer, frame)? {
                 Ok(e) => e,
                 Err(f) => {
                     refuse(b, f);
@@ -460,6 +473,35 @@ fn draw_layer<'d>(
         }
     } else {
         None
+    };
+    // The transition node (`activeTransition`, `runTransition`): prepared by
+    // the host; without one, a layer in a transition is routed.
+    let transition = match b.effects {
+        None => {
+            let active: Option<ActiveTransition<'d>> =
+                scope.active_transition(layer, time, &|_| true)?;
+            if active.is_some() && ty != "adjustment" {
+                refuse(b, Feature::Transition);
+                return Ok(None);
+            }
+            None
+        }
+        Some(_) if ty == "adjustment" => None,
+        Some(host) => {
+            let frame = composite::effects::EffectFrame {
+                width,
+                height,
+                scale,
+                time,
+            };
+            match host.prepare_transition(scope, layer, frame)? {
+                Ok(t) => t,
+                Err(f) => {
+                    refuse(b, f);
+                    return Ok(None);
+                }
+            }
+        }
     };
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
@@ -491,16 +533,10 @@ fn draw_layer<'d>(
         refuse(b, Feature::MotionBlur);
         return Ok(None);
     }
-    let transition: Option<ActiveTransition<'d>> =
-        scope.active_transition(layer, time, &|_| true)?;
-    if transition.is_some() {
-        refuse(b, Feature::Transition);
-        return Ok(None);
-    }
     let matted = js::flag(layer, "matteSource");
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
-    let slow = has_masks || has_fx || blend != BlendMode::Normal || matted;
+    let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
     // The layer's own target: masks, effects, matte, then the composite.
     let wrap = |scope: &mut Scope<'_, 'd>,
                 b: &mut Build<'_>,
@@ -524,6 +560,7 @@ fn draw_layer<'d>(
                 matte,
                 blend,
                 alpha: composite_alpha,
+                transition: transition.clone(),
             },
         ))]))
     };
@@ -773,7 +810,8 @@ enum Quad {
     },
     /// Screen-space content covering the whole target (3D layers).
     Screen { source: Source },
-    /// Target-space content covering exactly `rect` (level 2 vectors).
+    /// Target-space content covering exactly `rect` (x, y, width, height):
+    /// level 2 vectors, and level 2 text drawn at output resolution.
     Device { source: Source, rect: [f64; 4] },
 }
 
@@ -828,7 +866,12 @@ fn native_content_quad<'d>(
             // plain rectangle.
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
-            let rgba = [c.rgb[0] as f32, c.rgb[1] as f32, c.rgb[2] as f32, c.alpha as f32];
+            let rgba = [
+                c.rgb[0] as f32,
+                c.rgb[1] as f32,
+                c.rgb[2] as f32,
+                c.alpha as f32,
+            ];
             let world = vector_world(scope, layer, time, scale)?;
             let scene = crate::vector::level2::solid_scene(
                 js::or_number(js::get(&d, "w"), wf),
@@ -838,10 +881,12 @@ fn native_content_quad<'d>(
                 &world,
             );
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-            Ok(scene.pixel_bounds(target).map(|rect| device_quad(crate::vector::VectorQuad::Device {
-                source: crate::vector::VectorSource::Scene { scene, rect },
-                rect,
-            })))
+            Ok(scene.pixel_bounds(target).map(|rect| {
+                device_quad(crate::vector::VectorQuad::Device {
+                    source: crate::vector::VectorSource::Scene { scene, rect },
+                    rect,
+                })
+            }))
         }
         "shape" => {
             let world = vector_world(scope, layer, time, scale)?;
@@ -893,7 +938,9 @@ fn native_content_quad<'d>(
                 let world = vector_world(scope, layer, time, scale)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
-                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => Ok(quad.map(|q| device_quad(*q))),
+                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => {
+                        Ok(quad.map(|q| device_quad(*q)))
+                    }
                     Ok(crate::vector::svg::SvgPlan::Text) => {
                         b.unsupported
                             .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
@@ -1084,6 +1131,7 @@ fn native_content_quad<'d>(
                 },
             }
         }
+        "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -1112,7 +1160,13 @@ fn vector_world<'d>(
 /// A planned vector quad as the render graph's quad.
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
-        crate::vector::VectorQuad::Layer { source, w, h, ax, ay } => Quad::Texture {
+        crate::vector::VectorQuad::Layer {
+            source,
+            w,
+            h,
+            ax,
+            ay,
+        } => Quad::Texture {
             source: Source::Vector(Box::new(source)),
             w,
             h,
@@ -1122,9 +1176,82 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
         },
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
             source: Source::Vector(Box::new(source)),
-            rect: [f64::from(rect.x), f64::from(rect.y), f64::from(rect.width), f64::from(rect.height)],
+            rect: [
+                f64::from(rect.x),
+                f64::from(rect.y),
+                f64::from(rect.width),
+                f64::from(rect.height),
+            ],
         },
     }
+}
+
+/// A text or captions layer's raster quad (`crate::text`), at the density
+/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+#[allow(clippy::too_many_arguments)]
+fn text_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    target: (u32, u32),
+    scale: (f64, f64),
+) -> JsResult<Option<Quad>> {
+    let comp_id = scope.comp.id().to_string_lossy();
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        b.unsupported.push(Unsupported::layer(
+            &comp_id,
+            layer,
+            Feature::Text(format!("{ty} layers without configured fonts")),
+        ));
+        return Ok(None);
+    };
+    if ty == "captions" && text.captions_hidden() {
+        return Ok(None);
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    // `compat` level 2: drawn at output resolution, no raster.
+    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 {
+        let offset = scope.size_anchor_offset(layer, time)?;
+        let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
+        let m = kurbo::Affine::new(m);
+        let plan = if ty == "text" {
+            text.text_layer_level2(scope, layer, time, m, target)?
+        } else {
+            text.captions_layer_level2(scope, layer, time, m, target)?
+        };
+        for what in text.take_unsupported() {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        return Ok(plan.map(|p| {
+            let [x0, y0, x1, y1] = p.crop.map(f64::from);
+            let rect = [x0, y0, x1 - x0, y1 - y0];
+            Quad::Device {
+                source: Source::Text(Box::new(p)),
+                rect,
+            }
+        }));
+    }
+    let raster_scale = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, raster_scale)?
+    } else {
+        text.captions_layer(scope, layer, time, raster_scale)?
+    };
+    for what in text.take_unsupported() {
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+    }
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
+    }))
 }
 
 /// `Math.max(1, Number(d.w || comp.w || W))` before the `max`.
