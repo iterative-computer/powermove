@@ -1,10 +1,19 @@
-//! CSS colors as a canvas `fillStyle` or `strokeStyle` setter parses them
-//! (the subset Powermove documents produce, plus every CSS named color).
+//! CSS colors as a canvas `fillStyle` or `strokeStyle` setter parses them.
+//!
+//! Parsed: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, every CSS
+//! named color and `transparent` (the sRGB colors a canvas stores as 8-bit
+//! channels). A string the setter rejects keeps the context's previous
+//! style; callers pass that fallback ([`Rejected::Invalid`]). Valid CSS
+//! colors this module does not reproduce (`lab()`, `lch()`, `oklab()`,
+//! `oklch()`, `color()`, `color-mix()`, relative colors, `calc()`,
+//! `currentcolor`, system colors) are [`Rejected::Unsupported`]: the
+//! renderer refuses such a layer rather than drawing the fallback. Any
+//! functional notation that fails to parse counts as unsupported, so a
+//! string is only ever drawn as the fallback when it is certainly not a
+//! color.
 //!
 //! Values are E-encoded straight RGBA in 0..1 (the working encoding:
-//! a hex code's value is the working value, section 9). A string the
-//! setter rejects keeps the context's previous style; callers pass that
-//! fallback.
+//! a hex code's value is the working value, section 9).
 
 /// Straight (unpremultiplied) RGBA, E-encoded, 0..1.
 pub type Rgba = [f64; 4];
@@ -73,24 +82,9 @@ fn alpha(s: &str) -> Option<f64> {
     Some(v.clamp(0.0, 1.0))
 }
 
-fn functional(name: &str, args: &str) -> Option<Rgba> {
-    // Legacy comma syntax and the space syntax with an optional `/ alpha`.
-    let (main, slash_alpha) = match args.split_once('/') {
-        Some((m, a)) => (m, Some(a)),
-        None => (args, None),
-    };
-    let parts: Vec<&str> = if main.contains(',') {
-        main.split(',').collect()
-    } else {
-        main.split_whitespace().collect()
-    };
-    let (r, g, b, a) = match (parts.len(), slash_alpha) {
-        (3, None) => (parts[0], parts[1], parts[2], None),
-        (3, Some(a)) => (parts[0], parts[1], parts[2], Some(a)),
-        (4, None) => (parts[0], parts[1], parts[2], Some(parts[3])),
-        _ => return None,
-    };
-    let _ = name;
+/// `rgb()`/`rgba()` arguments.
+fn functional(args: &str) -> Option<Rgba> {
+    let ([r, g, b], a) = components(args)?;
     Some([
         channel(r)?,
         channel(g)?,
@@ -102,33 +96,232 @@ fn functional(name: &str, args: &str) -> Option<Rgba> {
     ])
 }
 
-/// Parses a CSS color as the canvas setter does, or `None` (the setter
-/// keeps its previous value).
-pub fn parse(value: &str) -> Option<Rgba> {
-    let s = value.trim();
-    if let Some(h) = s.strip_prefix('#') {
-        return hex(h);
+/// The arguments of a functional notation: three components and an
+/// optional alpha, in the legacy comma syntax or the space syntax with
+/// `/ alpha`.
+fn components(args: &str) -> Option<([&str; 3], Option<&str>)> {
+    let (main, slash_alpha) = match args.split_once('/') {
+        Some((m, a)) => (m, Some(a)),
+        None => (args, None),
+    };
+    let comma = main.contains(',');
+    let parts: Vec<&str> = if comma {
+        main.split(',').map(str::trim).collect()
+    } else {
+        main.split_whitespace().collect()
+    };
+    if comma && slash_alpha.is_some() {
+        return None;
+    }
+    match (parts.len(), slash_alpha) {
+        (3, a) => Some(([parts[0], parts[1], parts[2]], a.map(str::trim))),
+        (4, None) if comma => Some(([parts[0], parts[1], parts[2]], Some(parts[3]))),
+        _ => None,
+    }
+}
+
+/// A hue in degrees: a number, or an angle in `deg`, `rad`, `grad`, `turn`.
+fn hue(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("none") {
+        return Some(0.0);
     }
     let lower = s.to_ascii_lowercase();
-    for f in ["rgba", "rgb"] {
-        if let Some(rest) = lower.strip_prefix(f)
-            && let Some(inner) = rest.trim_start().strip_prefix('(')
-            && let Some(inner) = inner.trim_end().strip_suffix(')')
-        {
-            return functional(f, inner);
-        }
+    let (num, factor) = if let Some(v) = lower.strip_suffix("grad") {
+        (v, 360.0 / 400.0)
+    } else if let Some(v) = lower.strip_suffix("deg") {
+        (v, 1.0)
+    } else if let Some(v) = lower.strip_suffix("rad") {
+        (v, 180.0 / std::f64::consts::PI)
+    } else if let Some(v) = lower.strip_suffix("turn") {
+        (v, 360.0)
+    } else {
+        (lower.as_str(), 1.0)
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some((v * factor).rem_euclid(360.0))
+}
+
+/// An `hsl()`/`hwb()` percentage component as 0..1: a percentage, or in
+/// the space syntax a number on the 0..100 scale (CSS Color 4).
+fn percent(s: &str, number_ok: bool) -> Option<f64> {
+    let s = s.trim();
+    if number_ok && s.eq_ignore_ascii_case("none") {
+        return Some(0.0);
+    }
+    let (num, ok) = match s.strip_suffix('%') {
+        Some(p) => (p.trim(), true),
+        None => (s, number_ok),
+    };
+    if !ok {
+        return None;
+    }
+    let v: f64 = num.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some((v / 100.0).clamp(0.0, 1.0))
+}
+
+/// HSL to sRGB (CSS Color 4 `hslToRgb`), unrounded.
+fn hsl_rgb(h: f64, s: f64, l: f64) -> [f64; 3] {
+    let f = |n: f64| {
+        let k = (n + h / 30.0).rem_euclid(12.0);
+        let a = s * l.min(1.0 - l);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    };
+    [f(0.0), f(8.0), f(4.0)]
+}
+
+/// A channel in 0..1 rounded to the 8-bit value the canvas stores.
+fn byte_channel(v: f64) -> f64 {
+    (v.clamp(0.0, 1.0) * 255.0).round() / 255.0
+}
+
+fn hsl(args: &str) -> Option<Rgba> {
+    let ([h, s, l], a) = components(args)?;
+    let numbers = !args.contains(',');
+    let rgb = hsl_rgb(hue(h)?, percent(s, numbers)?, percent(l, numbers)?);
+    let a = match a {
+        Some(a) => alpha(a)?,
+        None => 1.0,
+    };
+    Some([
+        byte_channel(rgb[0]),
+        byte_channel(rgb[1]),
+        byte_channel(rgb[2]),
+        a,
+    ])
+}
+
+fn hwb(args: &str) -> Option<Rgba> {
+    // `hwb()` has only the space syntax.
+    if args.contains(',') {
+        return None;
+    }
+    let ([h, w, b], a) = components(args)?;
+    let (h, mut w, mut b) = (hue(h)?, percent(w, true)?, percent(b, true)?);
+    if w + b >= 1.0 {
+        let sum = w + b;
+        w /= sum;
+        b /= sum;
+    }
+    let base = hsl_rgb(h, 1.0, 0.5);
+    let ch = |c: f64| byte_channel(c * (1.0 - w - b) + w);
+    let a = match a {
+        Some(a) => alpha(a)?,
+        None => 1.0,
+    };
+    Some([ch(base[0]), ch(base[1]), ch(base[2]), a])
+}
+
+/// Why a canvas style setter does not take a string as a color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejected {
+    /// Not a CSS color: the setter keeps its previous style.
+    Invalid,
+    /// A CSS color (or possibly one) this parser does not reproduce: the
+    /// layer must be refused, not drawn with the previous style.
+    Unsupported,
+}
+
+/// CSS system colors and `currentcolor`: valid, but resolved by the
+/// document, not by this parser.
+const DOCUMENT_COLORS: &[&str] = &[
+    "accentcolor",
+    "accentcolortext",
+    "activeborder",
+    "activecaption",
+    "activetext",
+    "appworkspace",
+    "background",
+    "buttonborder",
+    "buttonface",
+    "buttonhighlight",
+    "buttonshadow",
+    "buttontext",
+    "canvas",
+    "canvastext",
+    "captiontext",
+    "currentcolor",
+    "field",
+    "fieldtext",
+    "graytext",
+    "highlight",
+    "highlighttext",
+    "inactiveborder",
+    "inactivecaption",
+    "inactivecaptiontext",
+    "infobackground",
+    "infotext",
+    "linktext",
+    "mark",
+    "marktext",
+    "menu",
+    "menutext",
+    "scrollbar",
+    "selecteditem",
+    "selecteditemtext",
+    "threeddarkshadow",
+    "threedface",
+    "threedhighlight",
+    "threedlightshadow",
+    "threedshadow",
+    "visitedtext",
+    "window",
+    "windowframe",
+    "windowtext",
+];
+
+/// Classifies a string as the canvas setter would see it: the color, or
+/// why it is not drawn as one.
+pub fn classify(value: &str) -> Result<Rgba, Rejected> {
+    let s = value.trim();
+    if let Some(h) = s.strip_prefix('#') {
+        return hex(h).ok_or(Rejected::Invalid);
+    }
+    let lower = s.to_ascii_lowercase();
+    if let Some((name, rest)) = lower.split_once('(') {
+        let name = name.trim_end();
+        let parsed = rest.trim_end().strip_suffix(')').and_then(|inner| {
+            // Nested functions (`calc()`, relative colors) are not parsed.
+            if inner.contains('(') || inner.contains(" from ") || inner.starts_with("from ") {
+                return None;
+            }
+            match name {
+                "rgb" | "rgba" => functional(inner),
+                "hsl" | "hsla" => hsl(inner),
+                "hwb" => hwb(inner),
+                _ => None,
+            }
+        });
+        return parsed.ok_or(Rejected::Unsupported);
     }
     if lower == "transparent" {
-        return Some([0.0, 0.0, 0.0, 0.0]);
+        return Ok([0.0, 0.0, 0.0, 0.0]);
     }
-    named(&lower).map(|[r, g, b]| {
-        [
+    if let Some([r, g, b]) = named(&lower) {
+        return Ok([
             f64::from(r) / 255.0,
             f64::from(g) / 255.0,
             f64::from(b) / 255.0,
             1.0,
-        ]
-    })
+        ]);
+    }
+    if DOCUMENT_COLORS.contains(&lower.as_str()) {
+        return Err(Rejected::Unsupported);
+    }
+    Err(Rejected::Invalid)
+}
+
+/// Parses a CSS color as the canvas setter does, or `None` (the setter
+/// keeps its previous value, or the color is not reproduced; see
+/// [`classify`]).
+pub fn parse(value: &str) -> Option<Rgba> {
+    classify(value).ok()
 }
 
 /// Parses `value`, keeping `previous` when the setter would reject it.
@@ -312,6 +505,66 @@ mod tests {
         assert_eq!(parse("#12"), None);
         assert_eq!(parse("nonsense"), None);
         assert_eq!(parse_or("nonsense", BLACK), BLACK);
+    }
+
+    fn rgb8(r: u8, g: u8, b: u8, a: f64) -> Rgba {
+        [
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+            a,
+        ]
+    }
+
+    #[test]
+    fn parses_hsl_and_hwb_as_chromium_stores_them() {
+        // Chromium (Electron, 2026-10-16) serializes these fillStyle values
+        // as the codes below.
+        assert_eq!(parse("hsl(0, 100%, 50%)"), Some(rgb8(255, 0, 0, 1.0)));
+        assert_eq!(parse("hsl(120deg 100% 25%)"), Some(rgb8(0, 128, 0, 1.0)));
+        assert_eq!(parse("hsl(210 50% 40%)"), Some(rgb8(51, 102, 153, 1.0)));
+        assert_eq!(parse("hsl(0.5turn 100 50)"), Some(rgb8(0, 255, 255, 1.0)));
+        assert_eq!(
+            parse("hsla(240, 100%, 50%, 0.5)"),
+            Some(rgb8(0, 0, 255, 0.5))
+        );
+        assert_eq!(
+            parse("HSL(300 100% 50% / 25%)"),
+            Some(rgb8(255, 0, 255, 0.25))
+        );
+        assert_eq!(parse("hsl(-120, 100%, 50%)"), Some(rgb8(0, 0, 255, 1.0)));
+        assert_eq!(parse("hwb(0 0% 0%)"), Some(rgb8(255, 0, 0, 1.0)));
+        assert_eq!(parse("hwb(120 20% 30%)"), Some(rgb8(51, 179, 51, 1.0)));
+        assert_eq!(parse("hwb(0 60% 60%)"), Some(rgb8(128, 128, 128, 1.0)));
+        assert_eq!(parse("hsl(37 61% 47%)"), Some(rgb8(0xc1, 0x89, 0x2f, 1.0)));
+        assert_eq!(parse("hwb(200 13% 41%)"), Some(rgb8(0x21, 0x6f, 0x96, 1.0)));
+        assert_eq!(parse("hsl(none 100% 50%)"), Some(rgb8(255, 0, 0, 1.0)));
+        // The legacy comma syntax needs percentages (Chromium rejects it);
+        // a functional notation that does not parse is refused, not guessed.
+        assert_eq!(classify("hsl(0, 100, 50)"), Err(Rejected::Unsupported));
+    }
+
+    #[test]
+    fn refuses_colors_it_does_not_reproduce() {
+        for s in [
+            "oklch(70% 0.1 200)",
+            "oklab(0.5 0.1 0.1)",
+            "lab(50% 40 59.5)",
+            "lch(52% 72 50)",
+            "color(display-p3 1 0 0)",
+            "color-mix(in srgb, red, blue)",
+            "rgb(from red r g b)",
+            "rgb(calc(255) 0 0)",
+            "rgb(255 none 0)",
+            "light-dark(red, blue)",
+            "currentcolor",
+            "CanvasText",
+        ] {
+            assert_eq!(classify(s), Err(Rejected::Unsupported), "{s}");
+        }
+        for s in ["", "nonsense", "undefined", "null", "#12", "#ggg", "5"] {
+            assert_eq!(classify(s), Err(Rejected::Invalid), "{s:?}");
+        }
     }
 
     #[test]

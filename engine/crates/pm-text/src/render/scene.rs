@@ -558,4 +558,118 @@ mod tests {
         s.items[0].blur = 2.0;
         assert_eq!(s.ink(), Some([3, 3, 38, 28]));
     }
+
+    /// `font` with a `COLR` (version 0) and `CPAL` table that make `glyph`
+    /// a color vector glyph of one red layer (itself).
+    fn with_colr(font: &[u8], glyph: u16) -> Vec<u8> {
+        let be16 = |v: u16| v.to_be_bytes();
+        let be32 = |v: u32| v.to_be_bytes();
+        let mut colr = Vec::new();
+        colr.extend(be16(0)); // version
+        colr.extend(be16(1)); // numBaseGlyphRecords
+        colr.extend(be32(14)); // baseGlyphRecordsOffset
+        colr.extend(be32(20)); // layerRecordsOffset
+        colr.extend(be16(1)); // numLayerRecords
+        colr.extend(be16(glyph));
+        colr.extend(be16(0)); // firstLayerIndex
+        colr.extend(be16(1)); // numLayers
+        colr.extend(be16(glyph));
+        colr.extend(be16(0)); // paletteIndex
+        let mut cpal = Vec::new();
+        cpal.extend(be16(0)); // version
+        cpal.extend(be16(1)); // numPaletteEntries
+        cpal.extend(be16(1)); // numPalettes
+        cpal.extend(be16(1)); // numColorRecords
+        cpal.extend(be32(14)); // colorRecordsArrayOffset
+        cpal.extend(be16(0)); // colorRecordIndices[0]
+        cpal.extend([0, 0, 255, 255]); // BGRA red
+        let n = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..n)
+            .map(|i| {
+                let r = &font[12 + 16 * i..28 + 16 * i];
+                let off = u32::from_be_bytes([r[8], r[9], r[10], r[11]]) as usize;
+                let len = u32::from_be_bytes([r[12], r[13], r[14], r[15]]) as usize;
+                ([r[0], r[1], r[2], r[3]], font[off..off + len].to_vec())
+            })
+            .collect();
+        tables.push((*b"COLR", colr));
+        tables.push((*b"CPAL", cpal));
+        tables.sort_by_key(|t| t.0);
+        let mut out = font[..4].to_vec();
+        out.extend(be16(tables.len() as u16));
+        out.extend([0; 6]); // searchRange etc. (unused by the reader)
+        let mut offset = 12 + 16 * tables.len();
+        let mut body = Vec::new();
+        for (tag, data) in &tables {
+            out.extend(tag);
+            out.extend(be32(0)); // checksum (not verified)
+            out.extend(be32(offset as u32));
+            out.extend(be32(data.len() as u32));
+            let mut padded = data.clone();
+            padded.resize(data.len().div_ceil(4) * 4, 0);
+            offset += padded.len();
+            body.extend(padded);
+        }
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn color_vector_glyphs_are_refused_not_drawn() {
+        use skrifa::MetadataProvider;
+        let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
+            eprintln!("Arial is not installed; skipped");
+            return;
+        };
+        let font = skrifa::FontRef::new(&arial).unwrap();
+        let a = font.charmap().map('A').unwrap().to_u32();
+        let b = font.charmap().map('B').unwrap().to_u32();
+        let colr = with_colr(&arial, a as u16);
+        let face = FaceRef {
+            data: &colr,
+            index: 0,
+            id: colr.as_ptr() as usize,
+        };
+        assert!(super::super::bitmap::has_colr(face));
+        assert!(super::super::bitmap::is_colr_glyph(face, a));
+        assert!(!super::super::bitmap::is_colr_glyph(face, b));
+        let draw = |glyphs: &[PlacedGlyph]| {
+            let mut outlines = Outlines::new();
+            let mut bitmaps = Bitmaps::new();
+            let mut painter = Painter {
+                outlines: &mut outlines,
+                bitmaps: &mut bitmaps,
+                profile: Profile::CANVAS2D,
+                unsupported: Vec::new(),
+            };
+            let run = Run {
+                face,
+                size: 40.0,
+                coords: Coords::User(&[]),
+                synthetic_bold: false,
+                synthetic_italic: false,
+                oblique: 0.0,
+                glyphs,
+                bitmap_size: None,
+            };
+            let mut items = Vec::new();
+            painter.fill_text(
+                &mut items,
+                &[run],
+                (0.0, 40.0),
+                Affine::IDENTITY,
+                [0.0, 0.0, 0.0, 1.0],
+                1.0,
+                0.0,
+            );
+            (items.len(), painter.unsupported)
+        };
+        let glyph = |id| PlacedGlyph { id, x: 0.0, y: 0.0 };
+        // A plain glyph of the face draws.
+        let (n, unsupported) = draw(&[glyph(b)]);
+        assert!(n > 0 && unsupported.is_empty(), "{unsupported:?}");
+        // The color vector glyph is refused, not drawn as a monochrome outline.
+        let (_, unsupported) = draw(&[glyph(b), glyph(a)]);
+        assert_eq!(unsupported, vec!["color vector glyphs (COLR)".to_owned()]);
+    }
 }
