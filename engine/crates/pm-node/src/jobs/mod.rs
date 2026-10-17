@@ -1135,7 +1135,6 @@ fn destination(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn run_job(
     shared: &Arc<Shared>,
     renderer: &mut Renderer,

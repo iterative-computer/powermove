@@ -147,3 +147,46 @@ host would reject what a newer engine sends.
    and EEVEE settings stays in the worker script; whether the snapshot or
    `BlenderSettings` carries engine-specific extras (EEVEE shadows,
    Cycles light paths) is decided when Phase 3b ports the worker.
+
+## Decisions made while connecting it (Blender lane, 2026-10-17)
+
+Version 0 is unchanged on the wire (no type changed); these settle how the
+types are used. Design notes: `docs/engine/blender.md`.
+
+1. **One request per Blender frame.** A `BlenderJobRequest` carries the
+   snapshot of one composition at one time and size; its `surfaces` are
+   that frame's layers (all with the same composition path, time, shutter
+   sample, and size). Shutter samples and nested compositions are separate
+   requests.
+2. **Where the bytes are.** `SnapshotRef.handle` and `output` are the
+   requesting session's `cache {blenderSurfaces}` handle. The snapshot is
+   `snapshots/<hex BLAKE3>.json` in that area (canonical JSON, sorted keys,
+   `JSON.stringify` numbers); a converted image is
+   `assets/<hex SHA-256>.<ext>` with the same cache handle; every other
+   `BlenderAsset` has a `mediaRead` handle for its asset. A finished
+   surface is `<hex key>.png` in the area.
+3. **Hashes.** `worker_script_hash` is SHA-256 of
+   `engine/crates/pm-blender/worker/worker.py`; host services refuse any
+   other. Asset hashes are SHA-256 of the bytes. Surface keys are BLAKE3 of
+   `SurfaceKey::key_bytes`.
+4. **The answer marks the end.** `blenderRender` is answered `ack` after
+   the job's last `blenderSurface` event, or with the error that ended it
+   (`blenderMissing`, `blenderFailed`, `cancelled`). Events precede the
+   answer on the same port.
+5. **Cancel.** The job engine sends `cancelJobs {kind: job, job}` with the
+   Blender job's id to host services, which stop Blender (kill the worker's
+   process group) and answer `jobsCancelled`. An engine launch ending
+   cancels its Blender jobs.
+6. **Crop.** Host services send the full surface as `crop`; the engine finds
+   the occupied rectangle when it decodes (today's `cropSurface` rule), so
+   main never inflates PNGs.
+7. **Pinned output additions.** Compression 15 (S7's fast compression),
+   metadata stamps off (byte-stable files, S7 defect 7), and the resolved
+   device in the manifest. `PINNED_OUTPUT.compression_percent` stays `None`
+   in `pm_protocol` (not on the wire); pm-blender's worker script is the
+   authority.
+8. **Batching.** `batch_layers` is set: S7 measured equal surfaces, and the
+   lane's test reproduces it with the pinned worker.
+9. **Devices.** The surface key uses the device Blender resolved; before a
+   job has run on a machine, Cycles on the CPU is known and everything else
+   is learned from the first job's manifest and recorded with the cache.

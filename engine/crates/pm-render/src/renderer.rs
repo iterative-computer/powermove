@@ -564,6 +564,7 @@ impl Renderer {
     /// gives the snapshot of its frame, at the plan's own times and sizes.
     /// A frame whose snapshot cannot be built answers why
     /// ([`crate::blender::BlenderSnapshots::errors`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn blender_snapshots(
         &mut self,
         document: &Document,

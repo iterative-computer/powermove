@@ -172,7 +172,7 @@ fn visit<'d>(
                 children.push((sub, st, w as u32, h as u32));
             }
         }
-        for (sub, st, w, h) in children.drain(..).collect::<Vec<_>>() {
+        for (sub, st, w, h) in std::mem::take(&mut children) {
             let Ok(sub) = Comp::in_root(root, &sub, comp.revision()) else {
                 continue;
             };
