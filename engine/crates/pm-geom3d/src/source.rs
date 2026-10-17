@@ -38,6 +38,81 @@ impl Source {
         Primitive::from_parameters(name, p).map(Source::Primitive)
     }
 
+    /// Writes an identity of the source into `out`: equal bytes for
+    /// equal sources (floats by their bits), so a hash of them keys the
+    /// geometry. Mesh, lathe, and extrude point lists are written as raw
+    /// bits, not formatted.
+    pub fn write_key(&self, out: &mut Vec<u8>) {
+        fn floats(out: &mut Vec<u8>, v: &[f64]) {
+            out.extend((v.len() as u64).to_le_bytes());
+            for x in v {
+                out.extend(x.to_bits().to_le_bytes());
+            }
+        }
+        fn points(out: &mut Vec<u8>, v: &[[f64; 2]]) {
+            out.extend((v.len() as u64).to_le_bytes());
+            for [x, y] in v {
+                out.extend(x.to_bits().to_le_bytes());
+                out.extend(y.to_bits().to_le_bytes());
+            }
+        }
+        fn optional(out: &mut Vec<u8>, v: Option<&[f64]>) {
+            match v {
+                Some(v) => {
+                    out.push(1);
+                    floats(out, v);
+                }
+                None => out.push(0),
+            }
+        }
+        match self {
+            Source::Primitive(p) => {
+                out.push(0);
+                out.extend(format!("{p:?}").as_bytes());
+            }
+            Source::Lathe {
+                points: p,
+                segments,
+            } => {
+                out.push(1);
+                points(out, p);
+                out.extend(segments.to_bits().to_le_bytes());
+            }
+            Source::Extrude {
+                points: p,
+                depth,
+                bevel,
+            } => {
+                out.push(2);
+                points(out, p);
+                out.extend(depth.to_bits().to_le_bytes());
+                out.extend(bevel.to_bits().to_le_bytes());
+            }
+            Source::Mesh(m) => {
+                out.push(3);
+                floats(out, &m.positions);
+                match &m.indices {
+                    Some(i) => {
+                        out.push(1);
+                        out.extend((i.len() as u64).to_le_bytes());
+                        for v in i {
+                            out.extend(v.to_le_bytes());
+                        }
+                    }
+                    None => out.push(0),
+                }
+                optional(out, m.normals.as_deref());
+                optional(out, m.uvs.as_deref());
+                out.extend((m.groups.len() as u64).to_le_bytes());
+                for g in &m.groups {
+                    for v in [g.start, g.count, g.material_index] {
+                        out.extend(v.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     /// The geometry three.js builds for the source.
     pub fn geometry(&self) -> Geometry {
         match self {
