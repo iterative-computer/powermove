@@ -113,6 +113,20 @@ pub struct TextRaster {
     pub selection: Selection,
 }
 
+/// What `rasterAnimatedText` paints: posed glyphs (range-font advances
+/// applied) with their baselines, and the canvas box `[x0, x1] × [y0, y1]`
+/// in layer pixels (the canvas spans `max(1, x1 − x0)` × `max(1, y1 − y0)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimatedRaster {
+    pub glyphs: Vec<crate::text_anim::PosedGlyph>,
+    /// `unit.y + d.size × 0.82` per glyph.
+    pub baselines: Vec<f64>,
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
 /// The `TextContent` the layout reads from resolved content.
 pub fn text_content(d: &Content) -> TextContent {
     let mut map = serde_json::Map::new();
@@ -376,9 +390,7 @@ impl<'d> Scope<'_, 'd> {
         state: &TextAnimation,
         measure: &mut dyn TextMeasure,
     ) -> TextRaster {
-        let mut glyphs = self.animated_glyphs(d, layout, state);
-        // A settled animation renders exactly like plain text.
-        if state.styles.is_empty() && glyphs.iter().all(|g| g.is_identity()) {
+        let Some(raster) = self.animated_raster_glyphs(d, layout, state, measure) else {
             let g = text_geometry(d, measure);
             return TextRaster {
                 w: g.w,
@@ -387,6 +399,47 @@ impl<'d> Scope<'_, 'd> {
                 anchor_y: g.anchor_y,
                 selection: g.selection,
             };
+        };
+        let AnimatedRaster { x0, y0, x1, y1, .. } = raster;
+        let w = js_max(1.0, x1 - x0);
+        let h = js_max(1.0, y1 - y0);
+        let selection = if !state.styles.is_empty() {
+            Selection {
+                x0,
+                y0,
+                x1,
+                y1,
+                w,
+                h,
+            }
+        } else {
+            text_geometry(d, measure).selection
+        };
+        TextRaster {
+            w,
+            h,
+            anchor_x: -x0,
+            anchor_y: -y0,
+            selection,
+        }
+    }
+
+    /// The glyphs `rasterAnimatedText` paints and the box they span, or
+    /// `None` when the animation is settled (no range styles and every
+    /// glyph at rest): that text renders exactly like plain text. Each
+    /// glyph's `unit.x` includes the range-font advance shift; it is drawn
+    /// at `(unit.x, baseline)` through its matrix.
+    pub fn animated_raster_glyphs(
+        &mut self,
+        d: &Content,
+        layout: &GlyphLayout,
+        state: &TextAnimation,
+        measure: &mut dyn TextMeasure,
+    ) -> Option<AnimatedRaster> {
+        let mut glyphs = self.animated_glyphs(d, layout, state);
+        // A settled animation renders exactly like plain text.
+        if state.styles.is_empty() && glyphs.iter().all(|g| g.is_identity()) {
+            return None;
         }
         let base_font = text_content(d);
         let align = if is_align(d, "center") {
@@ -417,7 +470,14 @@ impl<'d> Scope<'_, 'd> {
         }
         let d_size = get(d, "size").to_number();
         let (mut x0, mut y0, mut x1, mut y1) = (0.0f64, 0.0f64, 1.0f64, js_max(1.0, d_size));
-        for g in glyphs.iter().filter(|g| g.opacity > 0.0) {
+        let mut baselines = Vec::with_capacity(glyphs.len());
+        for g in &glyphs {
+            let baseline = g.unit.y + d_size * 0.82;
+            baselines.push(baseline);
+            // NaN opacity draws nothing, as `g.opacity > 0` filters it.
+            if g.opacity.is_nan() || g.opacity <= 0.0 {
+                continue;
+            }
             let w = measure.plain_width(&text_content(&g.style), &g.unit.text);
             let style_size = get(&g.style, "size").to_number();
             let h = if style_size == 0.0 || style_size.is_nan() {
@@ -425,7 +485,6 @@ impl<'d> Scope<'_, 'd> {
             } else {
                 style_size
             };
-            let baseline = g.unit.y + d_size * 0.82;
             let m = g.matrix;
             let pad = 4.0 + g.blur * 2.0;
             for (x, y) in [(0.0, -h), (w, -h), (0.0, h * 0.3), (w, h * 0.3)] {
@@ -437,27 +496,14 @@ impl<'d> Scope<'_, 'd> {
                 y1 = js_max(y1, yy + pad);
             }
         }
-        let w = js_max(1.0, x1 - x0);
-        let h = js_max(1.0, y1 - y0);
-        let selection = if !state.styles.is_empty() {
-            Selection {
-                x0,
-                y0,
-                x1,
-                y1,
-                w,
-                h,
-            }
-        } else {
-            text_geometry(d, measure).selection
-        };
-        TextRaster {
-            w,
-            h,
-            anchor_x: -x0,
-            anchor_y: -y0,
-            selection,
-        }
+        Some(AnimatedRaster {
+            glyphs,
+            baselines,
+            x0,
+            y0,
+            x1,
+            y1,
+        })
     }
 
     /// `PM.textRasterGeometry(layer, scale, time)` without the canvas sizes:

@@ -310,6 +310,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::Request(r) => format!("request: {r}"),
         Feature::Definition(d) => format!("no definition for {d}"),
         Feature::ShaderFallback(d) => format!("{d} needs the GLSL fallback runner"),
+        Feature::Text(t) => format!("text: {t}"),
     };
     match (&u.composition, &u.layer) {
         (Some(c), Some(l)) => format!("{what} (layer {l} in {c})"),

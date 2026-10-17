@@ -160,6 +160,11 @@ fn corpus_render_parity() {
             ));
             continue;
         }
+        // Text and captions are judged by the text class (tests/text_corpus.rs).
+        if support::text::has_text(&p.document) {
+            skipped.push((p.name.clone(), "text class: tests/text_corpus.rs".into()));
+            continue;
+        }
         // The capture app had only the built-in definitions: any other
         // extension layer definition was missing there (the checkerboard).
         let mut set = all_builtin_definitions();
@@ -246,7 +251,10 @@ fn corpus_render_parity() {
             continue;
         }
         for s in &p.samples {
-            let request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            // The capture's motion blur: 16 samples opaque, 20 transparent.
+            let mut request =
+                RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,
                 &p.composition,
@@ -337,6 +345,7 @@ fn corpus_render_parity() {
             if let Some(float) = &s.float {
                 let mut request = request;
                 request.background = false;
+                request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
                 let frame = renderer
                     .render(
                         &p.document,
