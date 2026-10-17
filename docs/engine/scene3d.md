@@ -84,10 +84,39 @@ pass") into the full pass. The plan stays the authority.
 - **Textures** decode through `pm-media` in the still classes the 2D
   renderer draws, upload top row first (WebGL ignores `UNPACK_FLIP_Y` for
   an `ImageBitmap`), sRGB maps as `Rgba8UnormSrgb`, and generate mipmaps
-  as box filters (in linear light for sRGB). Maps with transparency are
-  routed: the premultiplication Chromium applies to an `ImageBitmap` in
-  WebGL has not been measured.
-- **Missing textures** draw without the map and add a warning, as today.
+  as box filters (in linear light for sRGB). Maps with transparency (any
+  alpha below 255) are routed: the premultiplication Chromium applies to an
+  `ImageBitmap` in WebGL has not been measured. `Textures::probe` decides
+  this statically (decoded once per file version: path, size, modification
+  time), so the capability check lists `3D texture maps with transparency`
+  before a frame renders. A map that changes after the check is met when
+  the scene's maps load at render time (`Scene3dRenderer::resolve_maps`,
+  before any draw); it returns `Error3d::Unsupported`, which `exec` turns
+  into `MediaFailure::Unsupported`, so the frame is routed
+  (`RenderError::Unsupported`) and never draws with the model missing.
+- **Missing textures** draw without the map and add `Missing texture: <id>`
+  to `Scene3d::warnings`, as today's texture getter returns nothing for an
+  image without a bitmap. That covers an image asset that is offline (the
+  resolver may still name a path), does not decode, or vanishes between
+  the plan and the render (the render drops it from its copy of the scene).
+  `Error3d::Failed` is left for GPU or program failures, which fail the
+  layer. The warnings have no channel to the host yet (today the compositor
+  shows them through `setShaderMeta`).
+- **GPU resources** follow the scenes being drawn, as today's runtime
+  disposes textures its scene no longer references. Each frame
+  (`Renderer::render_into` calls `Scene3dRenderer::begin_frame`), the first
+  3D render releases the meshes, maps, and legacy mesh-layer buffers that
+  neither it nor the previous 3D frame drew (`KEEP_FRAMES` = 2, so a viewer
+  alternating two frames does not re-upload). `Renderer::scene3d_resident`
+  reports the counts and bytes.
+- **Geometry keys.** Scene sources are keyed by a hash of their parameters
+  and point lists written as raw bits (`Source::write_key`, not formatted
+  text). OBJ model geometry is keyed by its file version (path, size,
+  modification time; `legacy::obj_mesh_versioned`), never by an address, so
+  a re-saved or newly parsed file cannot reuse another file's GPU buffers.
+  Built geometry (OBJ triangles included) is shared across scenes and
+  frames. `Geometry3d`'s debug form names the key, not the vertices, so
+  content keys stay cheap.
 - **`doubleSided`** is read as `compositionScene` passes it (absent means
   front side), not with the schema default.
 - **Depth and id surface.** Coverage is the layer's own alpha (≥ 0.5/255);
@@ -127,13 +156,15 @@ pass") into the full pass. The plan stays the authority.
 
 ## Integration notes
 
-- `Renderer::set_view(Some(&view))` applies contract 2's view override to
-  the following viewer renders; an export request (`RenderRequest::export`)
-  never draws it, whatever was set. `RenderRequest::from_frame_request_with_view`
-  returns the request and its view (dropped for exports and agent
-  captures, `FramePurpose::is_final`); the plain `from_frame_request` still
-  refuses a request carrying a view, so a caller that does not apply it
-  routes instead of drawing the editor view without its override.
+- The view override travels with each render: `RenderRequest::view`
+  (contract 2's `FrameRequest.view`). `RenderRequest::from_frame_request`
+  carries it for viewer frames and drops it for exports and agent captures
+  (`FramePurpose::is_final`; contract 2 already refuses a final request
+  that carries one), and an export request (`RenderRequest::export`) never
+  draws one. Nothing in the renderer remembers a view, so an agent capture
+  or thumbnail rendered after a viewer frame draws the document's own
+  scene. (`Renderer::set_view` and `from_frame_request_with_view` were
+  removed; `RenderRequest` is `Clone`, no longer `Copy`.)
 - `Renderer::set_mesh_definitions` registers mesh-layer definition
   snapshots (`assetField`, parameter defaults). The built-in OBJ model
   layer is known without one. The static capability check cannot see
@@ -162,10 +193,11 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 | `tests/scene3d.rs` | Programs and uniforms against the recorded draws | 265 draws matched, in three.js's order; 23,831 uniform values compared, all equal as f32 (the test requires bit equality; samplers and the shadow materials' stale `mapTransform` are left to the pixel sweep); every recorded draw that writes color or depth matched |
 | `tests/scene3d_layering.rs` | 80 seeded compositions (objects, 2D solids, 3D nulls, lights, cameras, plain groups, inactive and invisible layers, solo) through today's compositing pass, `compositionOrderedLayers`, and `compositionDepthIds` under bun (`tools/layering/generate.ts`) | 208 object draws: depth sets and set bottoms (103) equal; draw order equal (180 adjacent pairs) |
 | `tests/scene3d_mesh.rs` | Legacy mesh layers (3 OBJ meshes, the checkerboard) against the compositor's shader in WebGL | Max 1 CV |
-| `tests/scene3d_document.rs` | Ordering, depth sets, depth and id surface (upright, also off center in precomps), view overrides (exports ignore them), OBJ models, mesh layers, linear blending end to end, the static check inside legacy scenes | Pass |
-| `tests/corpus.rs` | Every 3D corpus project the renderer supports (`v1-20261012-230504`, `render-20261014-131536`) | every supported `3d/*` project and the render corpus's 3D projects, 0 failures; `layers/obj-model` 3 frames exact; the full corpus 112 frames, 0 failures (2026-10-16, after merging the compositing lane) |
-| Program cache | Cold and warm first frame of `five-casting-lights` (debug build) | 343 ms translating, 18 ms from the disk cache |
-| `frame_time_3d_shadows_at_1080p` (ignored, release) | 7 layers, 3 casting lights (sun, spot, point atlas), 1920 × 1080 | Median 9.7 ms, p95 13.9 ms (CPU plan and GPU); 26 to 36 ms median when re-measured at a load average of about 30 from other workers |
+| `tests/scene3d_document.rs` | Ordering, depth sets, depth and id surface (upright, also off center in precomps), view overrides per request (exports ignore them, the next render without one is unchanged, final purposes never carry one), OBJ models, mesh layers, linear blending end to end, the static check inside legacy scenes | Pass |
+| `tests/scene3d_resources.rs` | Maps with transparency routed by the static check and by a render; offline and undecodable maps draw as no map with the warning; a map gaining transparency after the plan routes (`Error3d::Unsupported`), one vanishing draws as no map; a re-saved OBJ draws its new geometry, as a fresh renderer does; meshes and maps of 12 frames of edited geometry and new map files stay at most 2 each, and drop to what is drawn | Pass |
+| `tests/corpus.rs` | Every 3D corpus project the renderer supports (`v1-20261012-230504`, `render-20261014-131536`) | `PM_RENDER_ONLY=3d/`: 23 frames, 0 failures (`3d/depth-sets` now compares, its shape layers drawn since the vector lane merged); `layers/obj-model` 3 frames exact; the full corpus 138 frames, 0 failures (2026-10-16, after merging the vector lane) |
+| Program cache | Cold and warm first frame of `five-casting-lights` (debug build) | 196 ms translating, 6 ms from the disk cache (2026-10-16; earlier 343 ms and 18 ms on a busier machine) |
+| `frame_time_3d_shadows_at_1080p` (ignored, release) | 7 layers, 3 casting lights (sun, spot, point atlas), 1920 × 1080 | 2026-10-16 after the review fixes (geometry keyed by raw bits instead of formatted text, maps resolved once per scene, eviction): median 4.34 ms, p95 5.70 ms (CPU plan and GPU) at a load average of about 9. Earlier: median 9.7 ms, p95 13.9 ms; 26 to 36 ms median at a load average of about 30. Not gated here; idle and base machines not measured |
 
 ## Gaps
 
@@ -178,11 +210,14 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
   `object_bounds`, `scene_bounds`, `pick_extension_scene`) still come from
   the host's three.js runtime (section 26, Phase 1: until 3c). Rectangle
   picking of mesh layers is `pm-eval`'s `GL.pick` port and needs no 3D.
-- Corpus projects `3d/depth-sets` (shape layers), `3d/transparency` (a
-  mask), and `3d/motion-blur` are routed by 2D features other lanes own;
-  their 3D behavior is covered by the sweep and the document tests.
+- Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` are
+  routed by 2D features other lanes own; their 3D behavior is covered by
+  the sweep and the document tests.
 - Texture maps with transparency, and maps outside the drawn still classes,
-  are routed.
+  are routed (statically, and at render time if a file changes after the
+  check).
+- Scene warnings (`Missing texture`, `Missing model`) are kept in
+  `Scene3d::warnings` but have no channel to the host yet.
 - 3D output stays 8-bit as today's canvas, renders at the full output size
   for a region of interest, and has no render cache yet (the content key
   is ready for one).
@@ -204,12 +239,20 @@ tests and tools named above are its own files. Everything else it touched:
   options; `build_with` (3D options next to the compositing lane's effect
   host, merged with `build_with_effects`); `comp_pass` orders the pass; the
   extension branch plans legacy kinds.
-- `pm-render/src/renderer.rs`: `set_view` (ignored by export requests),
-  `set_mesh_definitions`, the 3D options passed to the plan.
-- `pm-render/src/request.rs`: `from_frame_request_with_view`.
+- `pm-render/src/renderer.rs`: `set_mesh_definitions`, the 3D options of
+  each request passed to the plan, `scene3d_resident`, and
+  `scene3d.begin_frame()` next to the vector cache's.
+- `pm-render/src/request.rs`: `RenderRequest::view` (no longer `Copy`);
+  `from_frame_request` carries the view of non-final requests.
 - `pm-render/src/exec.rs`: nested depth for precompositions in the depth
-  and id surface. (The scene pass's own linear conversion was removed when
-  the compositing lane's decode of 3D output merged.)
+  and id surface; `Error3d::Unsupported` becomes
+  `MediaFailure::Unsupported`. (The scene pass's own linear conversion was
+  removed when the compositing lane's decode of 3D output merged.)
+- `RenderRequest` lost `Copy`, and literals gained `view: None`:
+  `pm-export/src/render.rs` (`request.clone()`, `view: None`),
+  `pm-export/tests/job_export.rs`, `pm-node/src/present/compose.rs`,
+  `pm-cli/src/render_parity.rs`, `pm-render/tests/corpus.rs`, and
+  `pm-render/tests/headless.rs` (one line each).
 - `pm-render/src/capability.rs`: legacy scene layers checked inside
   (`check_legacy_scene`), the built-in OBJ model layer accepted; the 3D
   check takes the asset resolver.
