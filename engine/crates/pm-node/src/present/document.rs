@@ -250,14 +250,17 @@ impl ViewDocument {
             })
             .collect();
         for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
-            // With definitions, effects and transitions are drawn; one the
-            // renderer cannot draw (no definition, a program that needs the
-            // fallback runner) fails the render as unsupported and routes
-            // the composition then (`force_legacy`).
+            // With definitions, effects, transitions, and adjustment layers
+            // with effects are drawn; one the renderer cannot draw (no
+            // definition, a program that needs the fallback runner) fails
+            // the render as unsupported and routes the composition then
+            // (`force_legacy`).
             if self.definitions.is_some()
                 && matches!(
                     u.feature,
-                    pm_render::Feature::Effects | pm_render::Feature::Transition
+                    pm_render::Feature::Effects
+                        | pm_render::Feature::Transition
+                        | pm_render::Feature::Adjustment
                 )
             {
                 continue;

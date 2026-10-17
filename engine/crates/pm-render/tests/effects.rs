@@ -591,6 +591,183 @@ fn effects_on_groups_and_inside_precomps() {
     );
 }
 
+/// Adjustment layers with the built-in definitions (`compositeAdjustment`):
+/// the stack beneath through the real GLSL chain (`runEffects(acc, acc)`),
+/// masked, composited over the stack with the layer's opacity and blend;
+/// layers above untouched; routed without definitions.
+#[test]
+fn adjustment_layers_run_real_definitions_on_the_stack_beneath() {
+    let _gpu = gpu();
+    let mut r = builtins();
+    let dur = 2.0;
+    let back = layer(
+        "back",
+        "solid",
+        json!({ "color": "#336699", "w": W, "h": H }),
+        0.0,
+        0.0,
+        dur,
+    );
+    let chip = layer(
+        "chip",
+        "solid",
+        json!({ "color": "#F0C020", "w": 60, "h": 40 }),
+        40.0,
+        30.0,
+        dur,
+    );
+    let above = layer(
+        "above",
+        "solid",
+        json!({ "color": "#20E080", "w": 30, "h": 30 }),
+        250.0,
+        120.0,
+        dur,
+    );
+    let doc = |adj: Option<Value>| {
+        let mut layers = vec![above.clone()];
+        layers.extend(adj);
+        layers.extend([chip.clone(), back.clone()]);
+        load(&project(W, H, dur, solid_fill("#000000"), layers))
+    };
+    let res = MapResolver::default();
+    let px = |v: &[f32], x: usize, y: usize| -> [f32; 4] {
+        let i = (y * W as usize + x) * 4;
+        [v[i], v[i + 1], v[i + 2], v[i + 3]]
+    };
+    let close =
+        |a: [f32; 4], b: [f32; 4]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1.5 / 255.0);
+    let stack = render(&mut r, &doc(None), &res, 0.5, &request()).unwrap();
+    // Invert at 100%, opacity 100%: every pixel beneath is inverted, the
+    // layer above is not.
+    let mut adj = layer("adj", "adjustment", json!({}), 0.0, 0.0, dur);
+    adj["fx"] = json!([fx("f1", "invert", json!({ "amount": ch(json!(100)) }))]);
+    let inverted = render(&mut r, &doc(Some(adj.clone())), &res, 0.5, &request()).unwrap();
+    for (x, y) in [(10, 10), (60, 50), (200, 100), (300, 170)] {
+        let s = px(&stack, x, y);
+        assert!(
+            close(
+                px(&inverted, x, y),
+                [1.0 - s[0], 1.0 - s[1], 1.0 - s[2], 1.0]
+            ),
+            "({x}, {y}): {:?} from {s:?}",
+            px(&inverted, x, y)
+        );
+    }
+    assert!(
+        close(px(&inverted, 260, 130), px(&stack, 260, 130)),
+        "above"
+    );
+    // At 40% opacity, with a rect mask over the left half (a parametric
+    // mask is placed by its center) and a screen blend: inside,
+    // screen(inverted, stack) mixed at 40%; outside, the stack.
+    adj["blend"] = json!("screen");
+    set(&mut adj, "opacity", json!(40));
+    adj["masks"] = json!([{ "id": "k", "shape": "rect", "mode": "add", "on": true,
+        "p": { "x": ch(json!(W / 4)), "y": ch(json!(H / 2)), "w": ch(json!(W / 2)), "h": ch(json!(H)), "rotation": ch(json!(0)), "feather": ch(json!(0)) } }]);
+    let masked = render(&mut r, &doc(Some(adj.clone())), &res, 0.5, &request()).unwrap();
+    for (x, y) in [(10, 10), (60, 50), (100, 150)] {
+        let s = px(&stack, x, y);
+        let want: Vec<f32> = (0..3)
+            .map(|c| {
+                let (a, b) = (1.0 - s[c], s[c]);
+                let screen = a + b - a * b;
+                b + (screen - b) * 0.4
+            })
+            .collect();
+        assert!(
+            close(px(&masked, x, y), [want[0], want[1], want[2], 1.0]),
+            "({x}, {y}): {:?}, want {want:?}",
+            px(&masked, x, y)
+        );
+    }
+    for (x, y) in [(200, 100), (300, 20)] {
+        assert!(
+            close(px(&masked, x, y), px(&stack, x, y)),
+            "outside the mask ({x}, {y})"
+        );
+    }
+    // A blur on an adjustment reads the stack beneath: the chip's edge is
+    // soft, far from it the stack is unchanged.
+    let mut soft = layer("adj", "adjustment", json!({}), 0.0, 0.0, dur);
+    soft["fx"] = json!([fx("f1", "blur", json!({ "amount": ch(json!(10)) }))]);
+    let blurred = render(&mut r, &doc(Some(soft)), &res, 0.5, &request()).unwrap();
+    assert!(max_diff(&blurred, &stack) > 0.1);
+    assert!(close(px(&blurred, 200, 100), px(&stack, 200, 100)));
+    let edge = px(&blurred, 40, 50);
+    let (inside, outside) = (px(&stack, 45, 50), px(&stack, 35, 50));
+    assert!(
+        (0..3).all(|c| edge[c] > inside[c].min(outside[c]) + 0.02
+            && edge[c] < inside[c].max(outside[c]) - 0.02),
+        "{edge:?} between {inside:?} and {outside:?}"
+    );
+    // An adjustment whose effect is missing is a no-op, its data kept; one
+    // with no definitions at all is routed.
+    let mut missing = layer("adj", "adjustment", json!({}), 0.0, 0.0, dur);
+    missing["fx"] = json!([fx("f1", "com.example.gone", json!({}))]);
+    let mut set_missing = builtin_definitions();
+    set_missing.missing.push("com.example.gone".into());
+    r.set_definitions(&set_missing).unwrap();
+    let unchanged = render(&mut r, &doc(Some(missing)), &res, 0.5, &request()).unwrap();
+    assert!(max_diff(&unchanged, &stack) <= 1.0 / 1024.0);
+    let mut bare = Renderer::headless().unwrap();
+    let adjusted = doc(Some(adj));
+    assert!(
+        unsupported(&adjusted, "Ptest-root")
+            .iter()
+            .any(|u| u.feature == Feature::Adjustment),
+        "routed without definitions"
+    );
+    assert!(
+        unsupported_with_definitions(&adjusted, "Ptest-root", None, r.effects()).is_empty(),
+        "drawn with them"
+    );
+    assert!(matches!(
+        render(&mut bare, &adjusted, &res, 0.5, &request()),
+        Err(RenderError::Unsupported(_))
+    ));
+}
+
+/// `Renderer::set_program_cache_dir` keeps translated GLSL on disk
+/// (`dir/glsl`): a second renderer (the next engine launch) loads the
+/// built-ins from it instead of translating them again.
+#[test]
+fn translated_programs_are_kept_in_the_program_cache_folder() {
+    let _gpu = gpu();
+    let dir = std::env::temp_dir().join(format!("pm-render-program-cache-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    let mut first = Renderer::headless().unwrap();
+    first.set_program_cache_dir(Some(dir.clone()));
+    let started = std::time::Instant::now();
+    assert!(
+        first
+            .set_definitions(&builtin_definitions())
+            .unwrap()
+            .is_empty()
+    );
+    let cold = started.elapsed();
+    let entries = std::fs::read_dir(dir.join("glsl")).unwrap().count();
+    assert_eq!(entries, 20, "one entry per built-in program");
+    let mut second = Renderer::headless().unwrap();
+    second.set_program_cache_dir(Some(dir.clone()));
+    let started = std::time::Instant::now();
+    assert!(
+        second
+            .set_definitions(&builtin_definitions())
+            .unwrap()
+            .is_empty()
+    );
+    let warm = started.elapsed();
+    eprintln!("20 built-ins: cold {cold:?}, from the folder {warm:?}");
+    assert!(warm < cold, "loaded from disk: {warm:?} vs {cold:?}");
+    // The cached programs draw what fresh ones draw.
+    let (doc, res) = document(vec![fx("f1", "glow", json!({}))], None);
+    let a = render(&mut first, &doc, &res, 0.5, &request()).unwrap();
+    let b = render(&mut second, &doc, &res, 0.5, &request()).unwrap();
+    assert_eq!(a, b);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     let _gpu = gpu();
@@ -647,7 +824,38 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     let kept = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert!(max_diff(&kept, &base) <= 1.0 / 1024.0, "still disabled");
     assert!(r.watchdog_reports(true).is_empty(), "not reported again");
-    // A changed source (a hot reload, a new registration) re-enables it.
+    // Registered again with the same source (a kernel delta: a register or
+    // a hot reload of that id) re-enables it.
+    let same = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "blur")
+        .unwrap()
+        .clone();
+    let generation = r.effects().generation().unwrap().get() + 1;
+    assert!(
+        r.apply_definitions(&update(generation, false, vec![same], vec![]))
+            .unwrap()
+            .is_empty()
+    );
+    let reloaded = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert_eq!(reloaded, first, "a delta re-registration re-enables it");
+    // Over budget again: off again from the next frame.
+    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
+    let mut off = false;
+    for _ in 0..20 {
+        render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+        if !r.watchdog_reports(true).is_empty() {
+            off = true;
+            break;
+        }
+    }
+    assert!(off, "overran again");
+    r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    let off_again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert!(max_diff(&off_again, &base) <= 1.0 / 1024.0);
+    // A changed source in a full set (a hot reload, a new registration)
+    // re-enables it too.
     let blur = set
         .definitions
         .iter_mut()
