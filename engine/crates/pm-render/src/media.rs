@@ -16,6 +16,7 @@ use pm_color::chroma::{Factors, Filter, filters, sample_origin};
 use pm_color::ycbcr::Matrix;
 use pm_gpu::decode_in::{DecodeImporter, Normalized};
 use pm_gpu::{Target, working_format};
+use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::image::icc::IccClass;
 use pm_media::pool::FramePool;
@@ -401,7 +402,15 @@ struct FrameKey {
 /// sources and sessions, and the last converted frame of each source.
 pub struct MediaCache {
     pool: FramePool,
-    service: DecodeService,
+    service: Arc<DecodeService>,
+    /// Display frames decode on workers (docs/engine/scrub.md); export
+    /// frames decode here, on the caller's thread.
+    viewer: ViewerDecode,
+    /// Scrub frames: a video whose exact frame is not decoded yet shows
+    /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
+    pub scrub: bool,
+    /// Video layers drawn with a stand-in frame since the counter was reset.
+    pub stand_ins: usize,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
     /// Open video sources with the file's size and modification time when
@@ -424,12 +433,18 @@ pub enum MediaFailure {
 
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
+        // The frame cache holds the GOP neighbourhoods scrubbing decodes
+        // (docs/engine/scrub.md): about 40 UHD 4:2:0 frames.
+        let service = Arc::new(DecodeService::new(ServiceConfig {
+            cache_bytes: 512 << 20,
+            ..ServiceConfig::default()
+        }));
         MediaCache {
             pool: FramePool::new(64 << 20),
-            service: DecodeService::new(ServiceConfig {
-                cache_bytes: 64 << 20,
-                ..ServiceConfig::default()
-            }),
+            viewer: ViewerDecode::new(service.clone()),
+            service,
+            scrub: false,
+            stand_ins: 0,
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
             sources: BTreeMap::new(),
@@ -518,7 +533,10 @@ impl MediaCache {
             Some((s, src)) if *s == stamp => return Ok(src.clone()),
             Some(_) => {
                 // Replaced on disk: drop the stale index and frames.
-                self.sources.remove(path);
+                if let Some((_, old)) = self.sources.remove(path) {
+                    self.viewer.release(Some(old.id));
+                    self.service.release(None, Some(old.id));
+                }
                 self.frames.retain(|k, _| k.path != path);
                 self.recount();
             }
@@ -553,30 +571,42 @@ impl MediaCache {
         let Some(n) = src.select(ticks) else {
             return Ok(None);
         };
-        let key = FrameKey {
+        let key_of = |frame: usize| FrameKey {
             path: path.to_path_buf(),
-            frame: n,
+            frame,
             precision: precision as u8,
             export,
             linear: working == WorkingEncoding::LinearLight,
         };
+        // The newest converted frame of the source (a paused redraw).
+        if let Some(t) = self.frames.get(&key_of(n)) {
+            return Ok(Some(t.clone()));
+        }
+        let (n, frame) = if export {
+            let mut session = self
+                .service
+                .session(&src, instance, DecodePurpose::Export)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            let frame = session
+                .frame(n)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            (n, frame)
+        } else {
+            let want = if self.scrub { Want::Scrub } else { Want::Exact };
+            let fetched = self
+                .viewer
+                .fetch(&src, instance, n, want)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            if !fetched.exact {
+                self.stand_ins += 1;
+            }
+            (fetched.shown, fetched.frame)
+        };
+        // A stand-in may be the frame converted last.
+        let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
         }
-        let purpose = if export {
-            DecodePurpose::Export
-        } else {
-            DecodePurpose::Display
-        };
-        let frame = {
-            let mut session = self
-                .service
-                .session(&src, instance, purpose)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-            session
-                .frame(n)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?
-        };
         let importer = self.importer()?;
         let imported = importer
             .import(&frame)
@@ -670,6 +700,16 @@ impl MediaCache {
             .chain(self.frames.values())
             .map(Target::bytes)
             .sum();
+    }
+
+    /// Changes whenever a display frame a scrub asked for has decoded.
+    pub fn landed(&self) -> u64 {
+        self.viewer.landed()
+    }
+
+    /// The display decode workers' counters.
+    pub fn scrub_stats(&self) -> ScrubStats {
+        self.viewer.stats()
     }
 
     /// Releases CoreVideo texture cache entries no longer in use.
