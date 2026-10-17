@@ -1095,6 +1095,44 @@ pub fn events() -> Vec<Envelope> {
         event(Event::Audio(AudioMessage::Monitor {
             solo: vec!["layer-1".into()],
         })),
+        event(Event::ShaderFallback(
+            crate::shader_fallback::ShaderFallbackMessage::Requests {
+                requests: vec![crate::shader_fallback::ShaderFallbackRequest {
+                    key: "5e".repeat(32),
+                    layer: "layer-3".into(),
+                    vertex: "#version 300 es\nvoid main(){}".into(),
+                    fragment: "#version 300 es\nprecision highp float;\nuniform samplerCube u;\nout vec4 fragColor;\nvoid main(){ fragColor = texture(u, vec3(1.0)); }".into(),
+                    width: 2,
+                    height: 1,
+                    calls: vec![crate::shader_fallback::ShaderFallbackCall {
+                        function: "2f".into(),
+                        name: "iResolution".into(),
+                        v: vec![2.0, 1.0],
+                    }],
+                    stage: "bind".into(),
+                    message: "sampler `u` (Cube)".into(),
+                }],
+            },
+        )),
+        event(Event::ShaderFallback(
+            crate::shader_fallback::ShaderFallbackMessage::Pixels(
+                crate::shader_fallback::ShaderFallbackPixels {
+                    key: "5e".repeat(32),
+                    width: 2,
+                    height: 1,
+                    row: 0,
+                    rows: 1,
+                    rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0, 0, 0, 0, 0, 0, 0x3c]),
+                },
+            ),
+        )),
+        event(Event::ShaderFallback(
+            crate::shader_fallback::ShaderFallbackMessage::Failed {
+                key: "5e".repeat(32),
+                reason: "compile".into(),
+                message: "the program does not link".into(),
+            },
+        )),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
         })),
@@ -1313,6 +1351,11 @@ pub fn all() -> Vec<(String, Envelope)> {
                 } => serde_json::to_value(message)
                     .ok()
                     .and_then(|v| v["audio"].as_str().map(str::to_owned)),
+                Message::Event {
+                    body: Event::ShaderFallback(message),
+                } => serde_json::to_value(message)
+                    .ok()
+                    .and_then(|v| v["fallback"].as_str().map(str::to_owned)),
                 _ => None,
             };
             if let Some(inner) = inner {
@@ -1416,9 +1459,10 @@ pub const fn event_index(event: &Event) -> usize {
         Event::Fact(_) => 16,
         Event::InFlight(_) => 17,
         Event::Audio(_) => 18,
+        Event::ShaderFallback(_) => 19,
     }
 }
-pub const EVENT_VARIANTS: usize = 19;
+pub const EVENT_VARIANTS: usize = 20;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

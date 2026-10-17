@@ -350,6 +350,7 @@ fn event_name(event: &Event) -> &'static str {
         Event::BlenderSurface(_) => "blenderSurface",
         Event::Fact(_) => "fact",
         Event::Audio(_) => "audio",
+        Event::ShaderFallback(_) => "shaderFallback",
     }
 }
 
@@ -1393,7 +1394,8 @@ impl Engine {
                 event @ (Event::ReleaseFrame(_)
                 | Event::Viewer(_)
                 | Event::Transport(_)
-                | Event::Audio(_)),
+                | Event::Audio(_)
+                | Event::ShaderFallback(_)),
                 PeerKind::Renderer,
             ) if self.presenter.is_some() => {
                 let Some(sid) =
@@ -1414,6 +1416,7 @@ impl Engine {
                     Event::ReleaseFrame(release) => p.release(port, sid, release),
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
                     Event::Audio(message) => p.audio(ctx, port, sid, message),
+                    Event::ShaderFallback(message) => p.shader_fallback(ctx, port, sid, message),
                     _ => {}
                 });
                 if let Some(command) = transport {
@@ -1421,7 +1424,11 @@ impl Engine {
                 }
             }
             (
-                Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_) | Event::Audio(_),
+                Event::ReleaseFrame(_)
+                | Event::Viewer(_)
+                | Event::Transport(_)
+                | Event::Audio(_)
+                | Event::ShaderFallback(_),
                 PeerKind::Renderer,
             )
             | (Event::BlenderProgress(_) | Event::BlenderSurface(_), PeerKind::Host) => self

@@ -36,7 +36,7 @@ use std::sync::OnceLock;
 
 use pm_protocol::definitions::DefinitionSnapshot;
 
-pub use fallback::{FallbackPixels, FallbackRequest, FallbackStore};
+pub use fallback::{Bands, FallbackBand, FallbackPixels, FallbackRequest, FallbackStore};
 pub use plan::{ProgramRef, ShaderSource};
 pub use uniforms::{Control, UniformDef, UniformType, parse_float, parse_uniforms};
 

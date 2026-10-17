@@ -18,6 +18,15 @@
  */
 import type { AudioMessage, ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
+import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
+
+/** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
+export interface FallbackRunner {
+  render(request: ShaderFallbackRequest): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
+}
+
+/** Largest pixel band in one message (pm_protocol shader_fallback::MAX_BAND_BYTES). */
+export const MAX_FALLBACK_BAND_BYTES = 8 * 1024 * 1024;
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
 export interface DocumentStream {
@@ -88,6 +97,8 @@ export type SessionOptions = {
   definitions?: () => DefinitionsSource | null;
   /** The first backoff after a second refused definitions push (ms; doubles per refusal). */
   definitionsRetryMs?: number;
+  /** The decision 19 shader fallback runner (created on the first request when absent). */
+  fallbackRunner?: () => FallbackRunner;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -137,6 +148,7 @@ export class DocumentSession {
   /** Batches that wait for a resync in flight (a staged file resyncs asynchronously). */
   private queued: StreamBatch[] = [];
   private resyncing: Promise<void> | null = null;
+  private fallbackRunner: FallbackRunner | null = null;
   private resyncAgain = false;
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
@@ -348,6 +360,11 @@ export class DocumentSession {
       case 'patchesApplied':
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
+      case 'shaderFallback': {
+        if (event['fallback'] !== 'requests') return;
+        for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) void this.runFallback(request);
+        return;
+      }
       case 'failure': {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
@@ -370,6 +387,36 @@ export class DocumentSession {
       }
       default:
         return;
+    }
+  }
+
+  /**
+   * Draws one program the engine's pipeline cannot translate with the
+   * fallback runner and uploads its pixels in row bands that fit a message
+   * (plan section 11, decision 19), or tells the engine why it could not.
+   */
+  private async runFallback(request: ShaderFallbackRequest): Promise<void> {
+    const session = this.id;
+    if (session === null || this.closed) return;
+    const send = (body: Record<string, unknown>) => {
+      if (this.id === session && !this.closed) this.options.connection.event({ type: 'shaderFallback', ...body } as never, session);
+    };
+    try {
+      this.fallbackRunner ??= this.options.fallbackRunner?.() ?? null;
+      if (!this.fallbackRunner) throw new ShaderFallbackError(request.key, 'unavailable', 'no shader fallback runner');
+      const pixels = await this.fallbackRunner.render(request);
+      const rowBytes = pixels.width * 8;
+      const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
+      const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
+      for (let row = 0; row < pixels.height; row += rowsPerBand) {
+        const rows = Math.min(rowsPerBand, pixels.height - row);
+        send({ fallback: 'pixels', key: request.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) });
+      }
+    } catch (error) {
+      const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log('warn', `engine: the shader fallback runner could not draw layer ${request.layer} (${reason}: ${message})`);
+      send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
     }
   }
 

@@ -32,7 +32,8 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, type DocumentStream } from './session';
+import { DocumentSession, type DocumentStream, type FallbackRunner } from './session';
+import { ShaderFallbackRunner } from './shader-fallback';
 import { EngineTransport } from './transport';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -106,6 +107,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const ready = new Set<() => void>();
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
+  let fallbackRunner: FallbackRunner | null = null;
   const transport = new EngineTransport(() => current, hostClock);
   PM.setTransportDriver?.(transport);
 
@@ -229,6 +231,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         documentId: () => String(PM.proj?.id ?? ''),
         stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
         definitions: () => ((PM as any).EngineDefinitions ?? null),
+        // One WebGL2 context for the window's sessions (decision 19).
+        fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
         handlers: {
           message: (message, arrivedMs) => {
             if (message.type === 'frame' && !firstFrame) {

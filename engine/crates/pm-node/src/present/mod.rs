@@ -361,6 +361,19 @@ impl FramePresenter for BridgePresenter {
         });
     }
 
+    fn shader_fallback(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    ) {
+        self.send(Command::ShaderFallback {
+            key: (port, session),
+            message,
+        });
+    }
+
     fn render(
         &mut self,
         _ctx: &mut PresentContext<'_>,

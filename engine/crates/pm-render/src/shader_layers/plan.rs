@@ -236,7 +236,7 @@ fn program_plan(
             if !fallback_runner {
                 return Planned::Unsupported(Feature::ShaderFallback(what.to_owned()));
             }
-            ProgramRef::Fallback(Arc::new(FallbackRequest::new(
+            ProgramRef::Fallback(Arc::new(super::fallback::request(
                 js::layer_id(layer),
                 source,
                 tw,
@@ -393,7 +393,7 @@ pub(crate) fn extension_layer<'d>(
                 .as_ref()
                 .map(|g| g.source.clone())
                 .unwrap_or_default();
-            ProgramRef::Fallback(Arc::new(FallbackRequest::new(
+            ProgramRef::Fallback(Arc::new(super::fallback::request(
                 js::layer_id(layer),
                 source,
                 sized.2,

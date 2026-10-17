@@ -28,95 +28,127 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
 use crate::effects::program::Call;
 
-/// One `glUniform*` call as the runner replays it (the shader corpus's
-/// format, `tools/effects/webgl.ts`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FallbackCall {
-    /// `1f`, `2f`, `3f`, `4f`, `1i`, or `m3` (column-major).
-    #[serde(rename = "fn")]
-    pub function: String,
-    pub name: String,
-    pub v: Vec<f64>,
-}
+pub use pm_protocol::shader_fallback::{
+    ShaderFallbackCall as FallbackCall, ShaderFallbackPixels as FallbackBand,
+    ShaderFallbackRequest as FallbackRequest,
+};
 
-impl FallbackCall {
-    pub fn of(name: &str, call: &Call) -> FallbackCall {
-        let (function, v): (&str, Vec<f64>) = match call {
-            Call::F(v) => (
-                ["1f", "2f", "3f", "4f"][v.len().clamp(1, 4) - 1],
-                v.iter().map(|x| f64::from(*x)).collect(),
-            ),
-            Call::I(i) => ("1i", vec![f64::from(*i)]),
-            Call::M3(m) => ("m3", m.iter().map(|x| f64::from(*x)).collect()),
-        };
-        FallbackCall {
-            function: function.into(),
-            name: name.into(),
-            v,
-        }
+/// The runner's form of one uniform call (the shader corpus's format,
+/// `tools/effects/webgl.ts`).
+pub fn call(name: &str, call: &Call) -> FallbackCall {
+    let (function, v): (&str, Vec<f64>) = match call {
+        Call::F(v) => (
+            ["1f", "2f", "3f", "4f"][v.len().clamp(1, 4) - 1],
+            v.iter().map(|x| f64::from(*x)).collect(),
+        ),
+        Call::I(i) => ("1i", vec![f64::from(*i)]),
+        Call::M3(m) => ("m3", m.iter().map(|x| f64::from(*x)).collect()),
+    };
+    FallbackCall {
+        function: function.into(),
+        name: name.into(),
+        v,
     }
 }
 
-/// What the runner draws for one layer at one frame.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FallbackRequest {
-    /// SHA-256 of everything below that decides the pixels (hex).
-    pub key: String,
-    pub layer: String,
-    /// `PM.VERT`.
-    pub vertex: String,
-    /// The wrapped fragment program (shader-layer header and code, or the
-    /// kernel's extension-layer program).
-    pub fragment: String,
-    pub width: u32,
-    pub height: u32,
-    pub calls: Vec<FallbackCall>,
-    /// The native pipeline's failure (reported with the layer).
-    pub stage: String,
-    pub message: String,
+/// The request for a program, its target, and its calls.
+pub fn request(
+    layer: String,
+    fragment: String,
+    width: u32,
+    height: u32,
+    calls: &[(String, Call)],
+    failure: &pm_glsl::Failure,
+) -> FallbackRequest {
+    use sha2::{Digest, Sha256};
+    let vertex = pm_glsl::VERTEX.to_owned();
+    let mut h = Sha256::new();
+    h.update(b"pm-render shader fallback 1\0");
+    h.update(vertex.as_bytes());
+    h.update([0]);
+    h.update(fragment.as_bytes());
+    h.update([0]);
+    h.update(width.to_le_bytes());
+    h.update(height.to_le_bytes());
+    h.update(super::plan::calls_bytes(calls));
+    let key = h
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    FallbackRequest {
+        key,
+        layer,
+        vertex,
+        fragment,
+        width,
+        height,
+        calls: calls.iter().map(|(n, c)| self::call(n, c)).collect(),
+        stage: failure.stage.name().into(),
+        message: failure.message.lines().next().unwrap_or_default().into(),
+    }
 }
 
-impl FallbackRequest {
-    pub fn new(
-        layer: String,
-        fragment: String,
-        width: u32,
-        height: u32,
-        calls: &[(String, Call)],
-        failure: &pm_glsl::Failure,
-    ) -> FallbackRequest {
-        use sha2::{Digest, Sha256};
-        let vertex = pm_glsl::VERTEX.to_owned();
-        let mut h = Sha256::new();
-        h.update(b"pm-render shader fallback 1\0");
-        h.update(vertex.as_bytes());
-        h.update([0]);
-        h.update(fragment.as_bytes());
-        h.update([0]);
-        h.update(width.to_le_bytes());
-        h.update(height.to_le_bytes());
-        h.update(super::plan::calls_bytes(calls));
-        let key = h
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        FallbackRequest {
-            key,
-            layer,
-            vertex,
-            fragment,
-            width,
-            height,
-            calls: calls.iter().map(|(n, c)| FallbackCall::of(n, c)).collect(),
-            stage: failure.stage.name().into(),
-            message: failure.message.lines().next().unwrap_or_default().into(),
+/// Collects a request's row bands (`ShaderFallbackMessage::Pixels`) into
+/// its pixels.
+#[derive(Debug, Default)]
+pub struct Bands {
+    partial: HashMap<String, (FallbackPixels, Vec<bool>)>,
+}
+
+impl Bands {
+    /// Adds a band; returns the request's pixels once every row arrived.
+    /// A band whose size disagrees with earlier ones restarts the request.
+    pub fn add(&mut self, band: &FallbackBand) -> Option<(String, FallbackPixels)> {
+        let (w, h) = (band.width, band.height);
+        let entry = self.partial.entry(band.key.clone()).or_insert_with(|| {
+            (
+                FallbackPixels {
+                    width: w,
+                    height: h,
+                    rgba16f: vec![0; w as usize * h as usize * 4],
+                },
+                vec![false; h as usize],
+            )
+        });
+        if entry.0.width != w || entry.0.height != h {
+            *entry = (
+                FallbackPixels {
+                    width: w,
+                    height: h,
+                    rgba16f: vec![0; w as usize * h as usize * 4],
+                },
+                vec![false; h as usize],
+            );
         }
+        let row_values = w as usize * 4;
+        let start = band.row as usize * row_values;
+        let values = band.rgba16f.0.len() / 2;
+        let end = start + values;
+        if band.row + band.rows > h
+            || values != band.rows as usize * row_values
+            || end > entry.0.rgba16f.len()
+        {
+            return None;
+        }
+        for (i, pair) in band.rgba16f.0.chunks_exact(2).enumerate() {
+            entry.0.rgba16f[start + i] = u16::from_le_bytes([pair[0], pair[1]]);
+        }
+        for r in band.row..band.row + band.rows {
+            entry.1[r as usize] = true;
+        }
+        if entry.1.iter().all(|r| *r) {
+            let (pixels, _) = self.partial.remove(&band.key).expect("present");
+            return Some((band.key.clone(), pixels));
+        }
+        None
+    }
+
+    /// Forgets a request (the runner failed it).
+    pub fn forget(&mut self, key: &str) {
+        self.partial.remove(key);
     }
 }
 
@@ -245,11 +277,31 @@ mod tests {
 
     #[test]
     fn calls_serialize_in_the_corpus_format() {
-        let c = FallbackCall::of("iResolution", &Call::F(vec![320.0, 180.0]));
+        let c = call("iResolution", &Call::F(vec![320.0, 180.0]));
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"fn": "2f", "name": "iResolution", "v": [320.0, 180.0]})
         );
-        assert_eq!(FallbackCall::of("iFrame", &Call::I(7)).function, "1i");
+        assert_eq!(call("iFrame", &Call::I(7)).function, "1i");
+    }
+
+    #[test]
+    fn bands_assemble_in_any_order() {
+        let band = |row: u32, rows: u32, v: u8| FallbackBand {
+            key: "k".into(),
+            width: 2,
+            height: 3,
+            row,
+            rows,
+            rgba16f: pm_protocol::common::Bytes(vec![v; 2 * rows as usize * 8]),
+        };
+        let mut bands = Bands::default();
+        assert!(bands.add(&band(2, 1, 3)).is_none());
+        assert!(bands.add(&band(4, 1, 9)).is_none(), "past the last row");
+        let (key, px) = bands.add(&band(0, 2, 1)).unwrap();
+        assert_eq!(key, "k");
+        assert_eq!(px.rgba16f.len(), 24);
+        assert_eq!(px.rgba16f[0], 0x0101);
+        assert_eq!(px.rgba16f[16], 0x0303);
     }
 }

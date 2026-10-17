@@ -17,7 +17,7 @@
 //! | 7 | Errors and isolation | [`error`] |
 //! | 8 | Budget leases | [`lease`] |
 //! | 9 | Protocol codec and code generation | [`envelope`], [`codec`], [`version`], [`common`] |
-//! | 10 | Definition snapshots | [`definitions`] |
+//! | 10 | Definition snapshots (and the shader fallback runner's messages) | [`definitions`], [`shader_fallback`] |
 //! | 11 | Blender jobs | [`blender`] |
 //! | 12 | Priority classes and agent frames | [`priority`] |
 //! | 13 | GPU time slicing | [`slicing`] |
@@ -40,6 +40,7 @@ pub mod lease;
 pub mod patch;
 pub mod priority;
 pub mod scene;
+pub mod shader_fallback;
 pub mod slicing;
 pub mod validate;
 pub mod version;

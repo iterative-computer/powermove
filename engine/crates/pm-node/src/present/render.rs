@@ -185,6 +185,11 @@ pub enum Command {
         key: Key,
         message: AudioMessage,
     },
+    /// The renderer's shader fallback runner answered (decision 19).
+    ShaderFallback {
+        key: Key,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     Shutdown,
@@ -232,6 +237,9 @@ fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -
     composer
         .renderer()
         .set_program_cache_dir(config.shader_cache.clone());
+    // Viewer sessions come from a renderer with the decision 19 fallback
+    // runner (`engine-connection/shader-fallback.ts`).
+    composer.renderer().set_shader_fallback_runner(true);
     composer
 }
 
@@ -394,6 +402,16 @@ struct Thread {
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
     generations: Generations,
+    /// Shader fallback requests sent to each view's renderer and not yet
+    /// answered (by request key), and the bands received so far.
+    fallback: Fallback,
+}
+
+/// The decision 19 fallback runner's state on this thread.
+#[derive(Default)]
+struct Fallback {
+    asked: BTreeMap<String, Key>,
+    bands: pm_render::shader_layers::Bands,
 }
 
 fn now() -> i64 {
@@ -434,6 +452,7 @@ pub fn run(
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
+        fallback: Fallback::default(),
     };
     thread.check_in();
     loop {
@@ -743,6 +762,7 @@ impl Thread {
                     view.dirty = true;
                 }
             }
+            Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
@@ -753,7 +773,65 @@ impl Thread {
         true
     }
 
+    /// The runner's answer: a band of pixels (the frame renders again once
+    /// every band of a request arrived), or a failure (the composition is
+    /// routed to the legacy viewer, as a program the engine cannot draw).
+    fn shader_fallback(
+        &mut self,
+        key: Key,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    ) {
+        use pm_protocol::shader_fallback::ShaderFallbackMessage as M;
+        match message {
+            M::Pixels(band) => {
+                if self.fallback.asked.get(&band.key) != Some(&key) {
+                    return;
+                }
+                let Some((request, pixels)) = self.fallback.bands.add(&band) else {
+                    return;
+                };
+                self.fallback.asked.remove(&request);
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.renderer().put_fallback_pixels(request, pixels);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
+            M::Failed {
+                key: request,
+                reason,
+                message,
+            } => {
+                if self.fallback.asked.remove(&request) != Some(key) {
+                    return;
+                }
+                self.fallback.bands.forget(&request);
+                (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!(
+                        "viewer: the shader fallback runner could not draw a layer ({reason}: {message})"
+                    ),
+                }]);
+                if let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key))
+                {
+                    let composition = view.state.composition.as_str().to_owned();
+                    doc.force_legacy(
+                        &composition,
+                        vec![format!(
+                            "the shader fallback runner could not draw a layer ({reason})"
+                        )],
+                    );
+                    view.dirty = true;
+                }
+            }
+            // Requests travel the other way.
+            M::Requests { .. } => {}
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
+        self.fallback.asked.retain(|_, k| *k != key);
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -2010,6 +2088,32 @@ impl Thread {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }
                     }
+                }
+                Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
+                    // Layers only the fallback runner draws (decision 19):
+                    // ask the view's renderer, and render the frame again
+                    // when the pixels arrive.
+                    let fresh: Vec<_> = requests
+                        .into_iter()
+                        .filter(|r| !self.fallback.asked.contains_key(&r.key))
+                        .collect();
+                    for chunk in fresh.chunks(pm_protocol::shader_fallback::MAX_REQUESTS) {
+                        for r in chunk {
+                            self.fallback.asked.insert(r.key.clone(), key);
+                        }
+                        let body = Event::ShaderFallback(
+                            pm_protocol::shader_fallback::ShaderFallbackMessage::Requests {
+                                requests: chunk.to_vec(),
+                            },
+                        );
+                        let mut envelope =
+                            Envelope::new(Message::Event { body }).with_session(key.1);
+                        envelope.revision = Revision::new(doc.revision()).ok();
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
+                    return None;
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
