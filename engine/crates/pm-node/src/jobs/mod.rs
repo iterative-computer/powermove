@@ -1293,11 +1293,9 @@ fn run_probes(shared: &Shared) {
                 if let Some(p) = st.probes.pop_front() {
                     break p;
                 }
-                st = shared
-                    .work
-                    .wait_timeout(st, Duration::from_millis(500))
-                    .map(|(g, _)| g)
-                    .unwrap_or_else(|e| e.into_inner().0);
+                // Every push and the shutdown flag notify `work` under this
+                // lock, so the lane sleeps until there is something to do.
+                st = shared.work.wait(st).unwrap_or_else(|e| e.into_inner());
             }
         };
         let (port, id, probe) = next;
