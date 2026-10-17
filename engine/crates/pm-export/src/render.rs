@@ -65,6 +65,10 @@ pub enum JobError {
     Render(String),
     #[error("audio failed: {0}")]
     Audio(String),
+    /// Blender is missing, failed, or did not deliver a surface (contract
+    /// 11: `blenderMissing`, `blenderFailed`).
+    #[error("{0}")]
+    Blender(pm_blender::BlenderError),
     #[error(transparent)]
     Export(#[from] Error),
 }
@@ -752,6 +756,13 @@ pub fn offline_media(
 /// spec, and the audio graph. Offline media is not checked here; the job
 /// engine asks [`offline_media`] first (queued jobs wait for it, section 14.8).
 pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
+    plan_export_with(job, false)
+}
+
+/// [`plan_export`] for a job engine with a Blender stage: compositions
+/// rendered with Blender are not routed for that reason
+/// (`crate::blender`).
+pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, JobError> {
     let s = &job.settings;
     pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
     let document = if s.delivery.hide_captions {
@@ -765,6 +776,7 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
     let mut problems: Vec<String> =
         pm_render::unsupported_with_media(doc, &job.composition, &*job.media)
             .iter()
+            .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
             .map(ToString::to_string)
             .collect();
     let rate = rate_of(s)?;
@@ -951,6 +963,25 @@ pub fn run_export_into<S: Sink + Send>(
 where
     S::Output: Send,
 {
+    run_export_with_blender(renderer, job, plan, sink, gate, cancel, progress, None)
+}
+
+/// [`run_export_into`] with the job lane's Blender stage: each frame's
+/// Blender surfaces are prepared before it renders (`crate::blender`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_export_with_blender<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+    mut blender: Option<&mut crate::blender::ExportBlender>,
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
     let ExportPlan {
         spec,
         timeline,
@@ -1040,20 +1071,49 @@ where
                 render_error = Some(JobError::Cancelled);
                 break;
             }
-            let rendered = render_frame(
-                renderer,
-                &document,
-                &job.composition,
-                timeline.tick(n),
-                &request,
-                &job.media,
-                gate,
-                pass,
-                cancel,
-            )
+            let frame_request = match blender.as_deref_mut() {
+                None => Ok(request.clone()),
+                Some(stage) => stage
+                    .prepare(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        timeline.tick(n),
+                        &request,
+                        &*job.media,
+                        cancel,
+                        &mut |_, _| {},
+                    )
+                    .map(|surfaces| crate::blender::with_surfaces(&request, surfaces)),
+            };
+            let rendered = frame_request
+                .and_then(|frame_request| {
+                    render_frame(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        timeline.tick(n),
+                        &frame_request,
+                        &job.media,
+                        gate,
+                        pass,
+                        cancel,
+                    )
+                })
             .and_then(|f| {
                 if f.failures.is_empty() {
                     Ok(f)
+                } else if let Some(l) = f
+                    .failures
+                    .iter()
+                    .find(|l| l.message == pm_render::blender::NOT_PREPARED)
+                {
+                    // A Blender surface is missing: the export fails
+                    // (contract 11 invariant 7), it is never routed.
+                    Err(JobError::Blender(pm_blender::BlenderError::Failed(format!(
+                        "layer {} in {}: {}",
+                        l.layer, l.composition, l.message
+                    ))))
                 } else {
                     Err(JobError::Unsupported(
                         f.failures

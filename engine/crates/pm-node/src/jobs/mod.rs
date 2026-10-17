@@ -319,6 +319,9 @@ fn engine_error(job: &JobId, e: &JobError) -> EngineError {
         JobError::Invalid(_) => ErrorCode::InvalidMessage,
         JobError::Render(_) | JobError::Audio(_) => ErrorCode::ExportFailed,
         JobError::Export(_) => ErrorCode::ExportFailed,
+        JobError::Blender(pm_blender::BlenderError::Missing(_)) => ErrorCode::BlenderMissing,
+        JobError::Blender(pm_blender::BlenderError::Cancelled) => ErrorCode::Cancelled,
+        JobError::Blender(pm_blender::BlenderError::Failed(_)) => ErrorCode::BlenderFailed,
     };
     job_error(job, code, e.to_string())
 }

@@ -21,11 +21,16 @@ def pin_output(scene):
         if hasattr(scene.render,flag):setattr(scene.render,flag,False)
 
 def gpu_device():
+    # EEVEE renders on the system GPU; name it as Cycles lists it, which
+    # needs no GPU context (stable from the first render on).
+    kind='metal' if sys.platform=='darwin' else 'gpu'
     try:
-        import gpu
-        return {'kind':'metal' if sys.platform=='darwin' else 'gpu','name':gpu.platform.renderer_get()}
+        prefs=bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type='METAL' if sys.platform=='darwin' else 'CUDA';prefs.get_devices()
+        names=sorted(d.name for d in prefs.devices if d.type!='CPU')
+        return {'kind':kind,'name':', '.join(names) or 'unknown'}
     except Exception:
-        return {'kind':'metal' if sys.platform=='darwin' else 'gpu','name':'unknown'}
+        return {'kind':kind,'name':'unknown'}
 
 def emit(data):
     print('PM_BLENDER:'+json.dumps(data), flush=True)
