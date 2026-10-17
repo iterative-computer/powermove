@@ -224,7 +224,7 @@ fn corpus_render_parity() {
             }
             // 3D class: the 3D pixels and MSAA edges, measured on our renders.
             let three_d = if support::has_3d_objects(&p.document) {
-                let mut with_ids = request;
+                let mut with_ids = request.clone();
                 with_ids.depth_id = true;
                 let ids = renderer
                     .render(

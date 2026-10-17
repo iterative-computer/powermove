@@ -340,7 +340,7 @@ fn render_bands(
         };
         let band = (admitted * BAND_ROWS).min(h - y);
         let whole = y == 0 && band == h;
-        let mut req = *request;
+        let mut req = request.clone();
         if !whole {
             req.region = Some(PixelRect {
                 x: 0,
@@ -639,6 +639,7 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         // Today's alpha exports render without the composition background.
         background: alpha == AlphaOutput::None,
         export: true,
+        view: None,
     };
     Ok(ExportPlan {
         spec,

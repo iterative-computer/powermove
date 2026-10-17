@@ -249,7 +249,6 @@ fn check_composition(
     let mut add = |layer: &Node, feature: Feature| {
         out.insert(Unsupported::layer(comp_id, layer, feature));
     };
-    let mut objects = 0usize;
     let mut has_3d = false;
     for layer in layers {
         let ty = js::layer_type(layer);
@@ -261,12 +260,20 @@ fn check_composition(
                         .unwrap_or_default();
                     match def.as_str() {
                         pm_eval::parenting::Role3d::OBJECT => {
-                            objects += 1;
                             has_3d = true;
                         }
                         pm_eval::parenting::Role3d::LIGHT | pm_eval::parenting::Role3d::CAMERA => {
                             has_3d = true;
                         }
+                        // Legacy scene layers: the 3D pass renders them whole,
+                        // so their embedded scene meets the 3D checks.
+                        crate::scene3d::legacy::SCENE3D_DEFINITION => {
+                            for why in crate::scene3d::check_legacy_scene(root, layer, assets) {
+                                add(layer, Feature::Scene3d(why));
+                            }
+                        }
+                        // The built-in OBJ model layer, with its fixed shading.
+                        crate::scene3d::legacy::OBJ_MODEL_DEFINITION => {}
                         _ => add(layer, Feature::ExtensionDefinition(def)),
                     }
                 }
@@ -340,7 +347,7 @@ fn check_composition(
         }
     }
     if has_3d {
-        for issue in crate::scene3d::check(root, comp, layers, objects) {
+        for issue in crate::scene3d::check(root, comp, layers, assets) {
             out.insert(Unsupported {
                 composition: Some(comp_id.to_owned()),
                 layer: issue.0,

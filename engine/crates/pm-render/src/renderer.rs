@@ -104,6 +104,9 @@ pub struct Renderer {
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
+    /// The 3D pass's planning options (mesh definitions; the view override
+    /// comes with each request).
+    options3d: crate::scene3d::Options3d,
     vector: crate::vector::cache::VectorCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
@@ -124,6 +127,7 @@ impl Renderer {
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
+            options3d: crate::scene3d::Options3d::default(),
             vector: crate::vector::cache::VectorCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
@@ -169,6 +173,25 @@ impl Renderer {
     /// directory.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
         self.scene3d.set_program_cache(dir);
+    }
+
+    /// GPU meshes and material maps the 3D pass keeps between frames
+    /// (released once no 3D frame draws them).
+    pub fn scene3d_resident(&self) -> crate::scene3d::Resident3d {
+        self.scene3d.resident()
+    }
+
+    /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`) by
+    /// definition id, so legacy OBJ mesh layers render natively. The
+    /// built-in OBJ model layer is always known; a snapshot for its id
+    /// replaces it.
+    pub fn set_mesh_definitions(
+        &mut self,
+        definitions: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
+    ) {
+        let mut all = crate::scene3d::legacy::builtin_mesh_definitions();
+        all.extend(definitions);
+        self.options3d.mesh_definitions = Arc::new(all);
     }
 
     /// 3D layers render without MSAA when `false` (only for the parity
@@ -324,7 +347,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (mut plan, build) = plan::build_with_effects(
+        let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -334,6 +357,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
+            self.options3d.for_request(request),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -350,8 +374,10 @@ impl Renderer {
             height: r.height,
         });
         // The previous frame's vector textures become evictable, and the
-        // cache returns within its bound.
+        // cache returns within its bound; 3D meshes and maps no recent 3D
+        // frame drew are released.
         self.vector.begin_frame();
+        self.scene3d.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -554,7 +580,7 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build_with_effects(
+        let (plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
             &project,
@@ -564,6 +590,7 @@ impl Renderer {
             scale,
             assets,
             self.effects.as_deref(),
+            self.options3d.for_request(request),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
