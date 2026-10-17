@@ -603,6 +603,38 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(api.stats.repairs).toBe(0);
   });
 
+  it('sends an edit before its listeners run while an engine session wants it', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid', { name: 'A' })));
+    doc.barrier!.flush();
+    const layer = PM.proj.layers[0];
+    const order: string[] = [];
+    const offBatch = doc.subscribe(batch => order.push(`batch ${batch.origin}`));
+    PM.bus.on('layers', () => order.push('layers'));
+    PM.bus.on('history', () => order.push('history'));
+    // Without an engine session: the batch waits for a query or the end of the task.
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 40 }).ok).toBe(true);
+    expect(order).toEqual(['layers', 'history']);
+    doc.barrier!.flush();
+    expect(order).toEqual(['layers', 'history', 'batch edit']);
+    order.length = 0;
+    let wanted = true;
+    const off = doc.flushBeforeListeners(() => wanted);
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 50 }).ok).toBe(true);
+    expect(order[0]).toBe('batch edit');
+    expect(order.slice(1)).toEqual(['layers', 'history']);
+    // The batch carried the edit: nothing is left for the end of the task.
+    doc.barrier!.flush();
+    expect(order.filter(o => o.startsWith('batch'))).toHaveLength(1);
+    expect(JSON.parse(doc.wasm!.toJson()).comps[PM.proj.compId].layers[0].p.opacity.v).toBe(50);
+    order.length = 0;
+    wanted = false;
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 60 }).ok).toBe(true);
+    expect(order).toEqual(['layers', 'history']);
+    off();
+    offBatch();
+  });
+
   it('names the patch paths that can change a composition shape', async () => {
     const { changesShape } = await import('./barrier');
     expect(changesShape([])).toBe(true);

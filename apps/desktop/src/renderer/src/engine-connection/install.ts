@@ -131,6 +131,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     });
   };
   const offPending = PM.EngineDoc?.onPending?.(flushSoon) ?? (() => {});
+  // And before the listeners of a document announcement (an edit's panels
+  // and overlays), not after them.
+  const offEager = PM.EngineDoc?.flushBeforeListeners?.(() => sessions.size > 0 && !flushing) ?? (() => {});
 
   const stream = (): DocumentStream => {
     const doc = PM.EngineDoc;
@@ -288,6 +291,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }),
     dispose: () => {
       offPending();
+      offEager();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
       registration.dispose();
