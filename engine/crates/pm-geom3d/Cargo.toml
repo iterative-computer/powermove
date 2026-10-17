@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 libm.workspace = true
+serde_json.workspace = true
+# The container and document schema; extensions come from the raw JSON.
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "names", "extensions", "extras"] }
 
 [dev-dependencies]
 pm-model = { path = "../pm-model" }
