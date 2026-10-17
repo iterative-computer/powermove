@@ -2251,6 +2251,7 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-protocol",
+ "pm-text",
  "pm-time",
  "pm-vector",
  "png",
