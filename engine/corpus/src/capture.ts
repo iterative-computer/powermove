@@ -37,6 +37,8 @@ interface Options {
 interface SampleRecord {
   time: number; width: number; height: number;
   png?: FileRecord; alphaPng?: FileRecord; float?: { data: FileRecord; header: FileRecord }; eval?: FileRecord;
+  /** Transparent float renders at other motion-blur sample counts (`blurSamples`). */
+  blur?: Array<{ samples: number; float: { data: FileRecord; header: FileRecord } }>;
   blender?: FileRecord; blenderSnapshots?: { final: number; preview: number; export?: number; exportAlpha?: number }; blenderError?: string;
   glErrors: string[]; warnings: string[]; prepareError?: string; error?: string; ms: number;
 }
@@ -125,12 +127,12 @@ class Session {
   }
 }
 
-async function captureSamples(session: Session, out: string, dir: string, samples: number[], size: [number, number], alpha: boolean, evaluate: boolean, record: ProjectRecord, label: string): Promise<void> {
+async function captureSamples(session: Session, out: string, dir: string, samples: number[], size: [number, number], alpha: boolean, evaluate: boolean, record: ProjectRecord, label: string, blurSamples: number[] = []): Promise<void> {
   for (const time of samples) {
     const started = performance.now();
     const sample: SampleRecord = { time, width: size[0], height: size[1], glErrors: [], warnings: [], ms: 0 };
     try {
-      const result = await session.legacy.evaluate(args => (window as any).__corpus.capture(args), { time, width: size[0], height: size[1], alpha, evaluate });
+      const result = await session.legacy.evaluate(args => (window as any).__corpus.capture(args), { time, width: size[0], height: size[1], alpha, evaluate, blurSamples });
       const name = timeLabel(time);
       const text = { Software: 'Powermove engine corpus (legacy capture)', Source: `${label} @ ${time}s`, Alpha: 'opaque export path (topDownOpaque, over black)' };
       sample.png = writePng(out, `${dir}/frames/${name}.png`, size[0], size[1], decode(result.opaque.base64), text);
@@ -141,6 +143,16 @@ async function captureSamples(session: Session, out: string, dir: string, sample
           encoding: 'Legacy compositor working values: display encoding E, Rec.709 primaries, premultiplied, unclamped; the accumulator is an RGBA16F texture, so every value is exactly representable in binary16',
           source: `PM.GL.renderToPixels(t, w, h, ${JSON.stringify(result.alpha.options)}) via gl.readPixels(RGBA, FLOAT)`,
         }, decode(result.alpha.floatBase64));
+      }
+      for (const blur of result.blur ?? []) {
+        (sample.blur ??= []).push({
+          samples: blur.samples,
+          float: writeFloat(out, `${dir}/frames/${name}.mb${blur.samples}.rgba32f`, {
+            width: size[0], height: size[1], rowOrder: 'top-down', alpha: 'premultiplied', time, sourcePrecision: 'binary16',
+            encoding: 'Legacy compositor working values: display encoding E, Rec.709 primaries, premultiplied, unclamped; the accumulator is an RGBA16F texture, so every value is exactly representable in binary16',
+            source: `PM.GL.renderToPixels(t, w, h, ${JSON.stringify(blur.options)}) via gl.readPixels(RGBA, FLOAT)`,
+          }, decode(blur.floatBase64)),
+        });
       }
       if (result.evaluated) sample.eval = writeFile(out, `${dir}/eval/${name}.json`, JSON.stringify(result.evaluated) + '\n');
       sample.glErrors = result.glErrors; sample.warnings = result.warnings;
@@ -265,7 +277,7 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
     const loaded = await session.legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
     record.loaded = writeFile(out, `${dir}/loaded.json`, loaded + '\n');
     record.settle = await session.legacy.evaluate(t => (window as any).__corpus.settle(t), project.samples[0]!);
-    await captureSamples(session, out, dir, project.samples, described.size, described.alpha, evaluate, record, project.id);
+    await captureSamples(session, out, dir, project.samples, described.size, described.alpha, evaluate, record, project.id, project.blurSamples);
     const stray = await takeBlenderJobs(session.legacy);
     if (stray.length) record.hydrateIssues.push({ path: 'blender', message: `${stray.length} Blender jobs while capturing frames` });
     if (hasObjects(described)) await captureBlender(session, out, dir, project, record, described.alpha);
@@ -413,7 +425,7 @@ export async function capture(options: Options): Promise<string> {
     }
     const all = [...records, ...(real ? [real] : [])];
     const files = all.flatMap(record => [
-      ...record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, sample.eval, sample.blender].filter(Boolean) as FileRecord[]),
+      ...record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, ...(sample.blur ?? []).flatMap(b => [b.float.data, b.float.header]), sample.eval, sample.blender].filter(Boolean) as FileRecord[]),
       ...(record.blender?.assets ?? []),
     ]);
     const manifest = {
@@ -432,7 +444,7 @@ export async function capture(options: Options): Promise<string> {
       totals: {
         projects: all.length, synthetic: records.length, real: real ? 1 : 0,
         frames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.png).length, 0),
-        floatFrames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.float).length, 0),
+        floatFrames: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.float ? 1 : 0) + (sample.blur?.length ?? 0), 0), 0),
         evalDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.eval).length, 0),
         blenderDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.blender).length, 0),
         blenderSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots ? sample.blenderSnapshots.final + sample.blenderSnapshots.preview : 0), 0), 0),
@@ -453,7 +465,7 @@ export async function capture(options: Options): Promise<string> {
         document: record.document, loaded: record.loaded, media: record.media, error: record.error,
         extensions: record.extensions, extensionChecks: record.extensionChecks, hydrateIssues: record.hydrateIssues, keyIdRewrites: record.keyIdRewrites.length, missingDefinitions: record.missingDefinitions, mediaPending: record.mediaPending, settle: record.settle,
         blender: record.blender,
-        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, eval: sample.eval, blender: sample.blender, blenderSnapshots: sample.blenderSnapshots, blenderError: sample.blenderError, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
+        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, blur: sample.blur, eval: sample.eval, blender: sample.blender, blenderSnapshots: sample.blenderSnapshots, blenderError: sample.blenderError, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
         pageErrors: record.pageErrors.length,
       })),
       scenarios,

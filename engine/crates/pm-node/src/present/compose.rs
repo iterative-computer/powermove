@@ -162,6 +162,9 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
+    /// The viewer is playing: today's playing motion-blur count and the
+    /// playback resampler (`set_playing`).
+    playing: bool,
     /// The view (hashed) whose definition set is in the renderer, and the
     /// identity and version of the set it was loaded from.
     definitions: Option<(u64, Option<(usize, u64)>)>,
@@ -269,6 +272,7 @@ impl Composer {
             scratch: None,
             definitions: None,
             parked: HashMap::new(),
+            playing: false,
         }
     }
 
@@ -336,6 +340,11 @@ impl Composer {
         }
     }
 
+    /// Whether the next frames are playback frames (timed) or paused ones.
+    pub fn set_playing(&mut self, playing: bool) {
+        self.playing = playing;
+    }
+
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
     /// On an error the working texture is left as it was.
     #[allow(clippy::too_many_arguments)]
@@ -371,6 +380,18 @@ impl Composer {
                 background: true,
                 export: false,
                 view: None,
+                // Today's viewer: 6 samples while playing, 12 when paused;
+                // the playback resampler while playing.
+                motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
+                    pm_protocol::frame::MotionBlurKind::PreviewPlaying
+                } else {
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused
+                }),
+                sampling: if self.playing {
+                    pm_render::sampling::Sampling::Playback
+                } else {
+                    pm_render::sampling::Sampling::Final
+                },
             };
             let reuse = self
                 .scratch
