@@ -184,7 +184,20 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 | same | No Blender; a backend that drops a surface | `blenderMissing` with appendix D's sentence; `blenderFailed`; nothing written; without a Blender stage the job still routes |
 | `pm-blender` unit tests | Settings parse, canonical hashing, key inputs (every input changes the key, asset order does not), surface decoding and crops, cache bounds and disk, device record, discovery, flags, the stage's per-key rendering and failures | Pass |
 | `apps/desktop` `src/main/engine/blender.test.ts` | Main's supervision with a stand-in executable: flags, scrubbed environment, surfaces before the answer, batching off, worker-script hash, foreign handles, missing Blender, cancel kills the process | Pass |
-| `apps/desktop` `e2e/engine-blender.spec.ts` | The app: today's Blender still (Use New Engine off) and the job engine's still and MP4 (on) | See the report of this lane for the measured run |
+| same | Cycles with `device: cpu` and `auto` | Recorded per job: `Cpu`, then `Metal {Apple M4 Max (GPU - 40 cores)}` |
+| `apps/desktop` `e2e/engine-blender.spec.ts` (under the Electron lock) | The app, 192 × 108, a turning box and a sphere, EEVEE 8 samples: today's still (Use New Engine off, today's surfaces recorded at main's IPC), then the job engine's still and a 6-frame H.264 MP4 (on) | The MP4 is the job engine's (AVAssetWriter, 6 frames); 12 surfaces in the cache (2 layers × 6 frames; the still reused frame 0's); the job engine's still is 100% within 2 CV of today's surfaces composited per layer (max 2 CV) |
+
+## Found along the way
+
+- **Today's still export draws Blender surfaces off by up to a pixel.**
+  Against today's own Blender surfaces of the same frame (recorded at
+  main's IPC) composited per layer, the current exporter's still is 97.7%
+  within 2 CV with a maximum of 207 CV: model edges move by a pixel and
+  read as aliased, while the job engine's still is 100% within 2 CV (the
+  8-bit dither of today's PNGs). Today's worker and the pinned worker
+  cover the same pixels (same bounding boxes; the 16-bit surfaces keep
+  faint edge pixels the 8-bit ones round to 0). Candidate for appendix A;
+  the engine does not reproduce it.
 
 ## Changes outside the lane's files
 
