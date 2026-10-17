@@ -842,7 +842,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
 V.engineFrame = () => {
   const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
-  return frame ? { seq: frame.seq, revision: frame.revision, viewSeq: frame.viewSeq, pts: frame.pts, overlay: enginePresentation!.overlayInCss(frame) } : null;
+  return frame ? { seq: frame.seq, revision: frame.revision, viewSeq: frame.viewSeq, pts: frame.pts, standIn: frame.standIn, overlay: enginePresentation!.overlayInCss(frame) } : null;
 };
 
 let viewport3d:ReturnType<PowermoveAPI['scene3d']['viewport']['attach']>|null=null;
