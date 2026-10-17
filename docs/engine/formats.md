@@ -18,7 +18,7 @@ Every corpus is synthetic and lives outside the repository.
 
 | Corpus | Command | Default location |
 |---|---|---|
-| Format matrix (197 files: 84 video, 5 HDR, 43 stills, 25 sequence frames, 4 animated, 36 audio) | `engine/crates/pm-media/tests/corpus/formats.sh [out]` | `~/Library/Caches/powermove-engine/media-corpus/formats` (`$PM_MEDIA_CORPUS/formats`) |
+| Format matrix (207 files: 84 video, 5 HDR, 53 stills, 25 sequence frames, 4 animated, 36 audio) | `engine/crates/pm-media/tests/corpus/formats.sh [out]` | `~/Library/Caches/powermove-engine/media-corpus/formats` (`$PM_MEDIA_CORPUS/formats`) |
 | Seek corpus (open GOP, B-pyramid, x264/x265 files) | `engine/crates/pm-media/tests/corpus/gen.sh` | `~/Library/Caches/powermove-engine/media-corpus` |
 | Model corpus (parity GLBs, glTF edge cases, OBJ bundles) and the three.js references | `bun engine/crates/pm-geom3d/tools/three-models.ts --corpus [dir]` | `~/Library/Caches/powermove-engine/model-corpus` (`$PM_MODEL_CORPUS`) |
 
@@ -26,9 +26,10 @@ Every corpus is synthetic and lives outside the repository.
 `~/Library/Caches/powermove-engine/ffmpeg/out`). Where our build has no
 encoder a named tool writes the file and the script says why next to it:
 Homebrew FFmpeg for the GPL x264/x265 and libmp3lame, `cwebp`/`img2webp`,
-`sips` for HEIF, `cjpeg` for 12-bit and lossless JPEG, and
-`formats_tools.py` for float TIFF, SVG, and the MOV boxes FFmpeg does not
-write (`mdcv`, `clli`, `dvcC`, `clap`). Video frames come from `testsrc2`
+`sips` for HEIF, the ICC-tagged and CMYK stills and their sRGB references,
+`cjpeg` for 12-bit and lossless JPEG, and `formats_tools.py` for float
+TIFF, CMYK TIFF with straight alpha (and its opaque twin), SVG, and the MOV
+boxes FFmpeg does not write (`mdcv`, `clli`, `dvcC`, `clap`). Video frames come from `testsrc2`
 (every frame differs, so a seek one frame off never matches); ramps and
 bars use exact codes so depth and color can be checked code by code.
 
@@ -83,7 +84,8 @@ source pass at the project's working precision.
 |---|---|---|
 | PNG 8/16-bit, gray, palette, RGBA | `image` crate | 8 or 16 bits |
 | JPEG 4:2:0/4:2:2/4:4:4, gray, progressive, 12-bit, lossless 16-bit | libjpeg-turbo 3.2.0 (TurboJPEG, pinned in `native/sources.lock`) | 8, 12, 16 bits; Y′CbCr JPEG drawn from its planes |
-| TIFF 8/16-bit, LZW, float 32 | `image` crate | 8, 16, 32 float |
+| TIFF 8/16-bit, LZW, float 32 (RGB and gray) | `image` crate | 8, 16, 32 float |
+| CMYK JPEG; CMYK TIFF, with straight alpha; palette, YCbCr, and Lab TIFF; any still ImageIO cannot hand over as RGB or gray samples | ImageIO, drawn through the file's profile into sRGB once (`IccClass::ConvertedToSrgb`) | 16 (sRGB) |
 | WebP lossy, lossless with alpha | `image` crate | 8 |
 | HEIF/HEIC, AVIF still (8 and 10-bit) | ImageIO | as decoded |
 | OpenEXR half and float, with alpha | OpenEXRCore | 16/32 float, linear |
@@ -100,6 +102,18 @@ profile (Adobe RGB, ProPhoto, "Generic Gray" gamma 1.8, camera and printer
 RGB) converts through ColorSync, relative colorimetric, from float samples
 into extended linear sRGB, unclipped. Floating-point stills are linear;
 integer stills without a profile read as sRGB (section 9).
+
+Stills in another color model (CMYK, Lab, indexed) are converted by ImageIO
+when they are read: ColorSync draws them through the file's profile into
+16-bit sRGB, and the reader marks them `IccClass::ConvertedToSrgb`, so no
+later reading applies the profile again (the profile bytes stay for the
+facts). A bitmap context only holds premultiplied alpha, so a file with
+straight alpha is split first: its color converts as an opaque image and
+its alpha is attached unchanged, keeping a straight reading whose color is
+exactly the conversion of the same samples without alpha. TIFFs go to
+ImageIO by their `PhotometricInterpretation`: the `image` crate reads RGB
+and gray only (it failed on palette and on CMYK with alpha, and turned
+plain CMYK into RGB without its profile).
 
 ### Audio
 
@@ -181,7 +195,14 @@ renderer use):
   the default of a still without a profile. The sheet shows that origin
   ("The ICC profile is set aside by the override; ...").
 - Without either, the sheet shows Rec.709 primaries and Linear transfer,
-  both from the file ("ICC profile, converted by ColorSync to ..."). The engine accepts no raw paths: the sheet asks main,
+  both from the file ("ICC profile, converted by ColorSync to ...").
+
+Stills ImageIO converted to sRGB (CMYK, Lab, indexed) read as sRGB, from
+the file ("Converted to sRGB by ImageIO from the file's color model and
+profile"); their overrides reinterpret those converted samples, and
+ColorSync never runs again. On integer stills with an sRGB-equivalent or
+Display P3 profile, the transfer's origin is the profile ("ICC profile
+... (sRGB curve)"), as the primaries' is. The engine accepts no raw paths: the sheet asks main,
 main resolves the asset to a `mediaRead` capability handle on the job
 engine (session 0), and the job engine answers `probeMedia` with
 `mediaFacts` off its thread. The sheet follows the Settings sheet anatomy
@@ -234,10 +255,19 @@ match and only what the renderer cannot draw at all is refused.
 | Quarter-turn rotation, non-square pixels, a cropping clean aperture | legacy (exact against FFmpeg, not compared with today's viewer) | drawn |
 | Wide-gamut SDR video (Display P3, BT.2020) | legacy (today's viewer clips at upload: the open decision of P3 stills) | drawn, converted in linear light |
 | Stills with other ICC profiles | legacy | drawn through ColorSync |
+| CMYK, Lab, and indexed stills (converted to sRGB by ImageIO) | legacy (Chromium converts CMYK itself; not compared) | drawn from the converted samples |
 | AVIF, BMP, ICO, GIF, EXR, DPX, 16-bit PNG, PNG with `gAMA`/`cHRM`, and other still classes `pm_render::stills` has not proven against the legacy look | legacy | drawn (decoded and tested against reference decoders in `pm-media`) |
 | Image sequences and animated images | legacy | legacy |
 | HDR stills (a PQ or HLG reading, from the file or an override); OpenEXR chromaticities other than Rec.709 (no primaries override) | legacy | legacy |
 | Other rotation angles, Dolby Vision profile 5, unknown primaries | legacy | legacy |
+
+Routing asks at every document revision, so its media probes keep their
+facts per path, size, and modification time: `probe_image` and
+`probe_video` their answers, `probe_interpreted_image` the still's color
+reading (one decode), and `probe_interpreted_video` the video probe (one
+open and index); each interpretation is resolved from those facts. On a
+6000 × 4000 16-bit PNG (debug build) the first interpreted probe takes
+3.6 s and the following ones, under other interpretations, 4–23 µs.
 
 A project stamped `requiresEngine` routes to the engine only when every
 native-only field it uses (the section 6 table, `pm_protocol::patch::
@@ -363,6 +393,17 @@ From `cargo test -p pm-media --test formats -- --ignored --nocapture`:
   ColorSync-converted stills are within Adobe RGB 0.318 / 0.064, ProPhoto
   0.258 / 0.023, Generic Gray 0.043 / 0.033 CV;
   out-of-sRGB pixels kept unclipped (18,956 of 38,644 for P3).
+- Stills converted to sRGB by ImageIO, against sips's conversion
+  (premultiplied): CMYK TIFF 0.498 / 0.279 CV; the CMYK TIFF with straight
+  alpha's opaque twin 0.498 / 0.241, and the straight-alpha TIFF itself
+  1.388 / 0.289 (sips's 8-bit path; its straight color equals the opaque
+  twin's conversion exactly: max difference 0 in 16-bit codes); CMYK JPEG 2.160 / 0.275 (37 of
+  172,800 channels over 1 CV, where sips's JPEG decode differs); palette
+  TIFF against FFmpeg's palette lookup 1.000 / 0.326 (ColorSync takes the
+  palette's device RGB to sRGB). Little CMS (`tificc`, relative
+  colorimetric, 16-bit; measured once, not in the corpus) differs from our
+  ColorSync conversion of the same CMYK TIFF by up to 15 CV (mean 0.98): CMYK conversions are CMM-specific, so ColorSync's
+  own output is the reference.
 - Audio: every format decodes sample-identical to FFmpeg (max |Δ| 0) with
   FFmpeg's priming; seeks equal sequential decode within 3.1e-5 (codec
   overlap windows).
@@ -385,3 +426,7 @@ float32 targets):
   (straight) 0.202 CV, alpha ignore 0.372, straight 0.202, premultiplied
   0.202, premultiplied with an #FF8000 matte 0.202; transfer gamma 2.2 and
   primaries Display P3 (profile set aside) 0.000.
+- Interpret Footage on CMYK stills (`cmyk.jpg`, and `cmyka.tiff` with
+  straight alpha) against their converted samples: as the file says, alpha
+  ignore, and primaries Display P3 within 1e-4 CV; without `interpret`
+  both route to the legacy renderer.
