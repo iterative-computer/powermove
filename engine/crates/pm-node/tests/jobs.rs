@@ -1075,4 +1075,46 @@ fn media_facts_resolve_their_handle_through_the_host() {
         host.answers.get(&id),
         Some(Message::Error { error, .. }) if error.code == ErrorCode::CapabilityRejected
     ));
+
+    // Probes sent back to back queue on the probe lane (one thread, in
+    // order) and every one is answered with its own reading.
+    let ids: Vec<_> = ["straight", "premultiplied", "ignore", "straight", "ignore"]
+        .iter()
+        .map(|alpha| {
+            let handle = host.mint(
+                CapabilityKind::MediaRead {
+                    asset: "clip".into(),
+                },
+                fixture("hevc-alpha.mov"),
+            );
+            let id = host.send_request(
+                Request::ProbeMedia(ProbeMedia {
+                    handle,
+                    interpret: Some(format!(r#"{{"alpha":"{alpha}"}}"#)),
+                }),
+                None,
+                None,
+            );
+            (id, *alpha)
+        })
+        .collect();
+    assert!(host.run_until(Duration::from_secs(60), |h| {
+        ids.iter().all(|(id, _)| h.answers.contains_key(id))
+    }));
+    for (id, alpha) in ids {
+        let Some(Message::Response {
+            body: Response::MediaFacts(facts),
+            ..
+        }) = host.answers.get(&id)
+        else {
+            panic!("{:?}", host.answers.get(&id));
+        };
+        let value = &facts
+            .settings
+            .iter()
+            .find(|s| s.member == "alpha")
+            .unwrap()
+            .value;
+        assert_eq!(value, alpha);
+    }
 }

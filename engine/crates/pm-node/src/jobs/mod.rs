@@ -123,6 +123,10 @@ struct State {
     media: HashMap<SessionId, HashMap<String, ([u8; 32], PathBuf)>>,
     /// The run of each queued or running frame batch, for run cancels.
     frame_runs: Vec<(AgentRunId, Arc<AtomicBool>)>,
+    /// `probeMedia` requests, answered in order by one probe lane (each
+    /// opens and indexes a file; main sends at most one per asset at a
+    /// time).
+    probes: VecDeque<(PortId, RequestId, pm_protocol::media::ProbeMedia)>,
     shutdown: bool,
     stats: ServiceStats,
 }
@@ -336,6 +340,13 @@ impl JobEngineService {
             .map_err(|e| format!("could not start the {name} lane: {e}"))?;
             threads.push(handle);
         }
+        let probes = shared.clone();
+        let handle =
+            pm_engine::qos::spawn_engine_thread(EngineProcess::Job, "pm-job-probes", move || {
+                run_probes(&probes)
+            })
+            .map_err(|e| format!("could not start the pm-job-probes lane: {e}"))?;
+        threads.push(handle);
         Ok(JobEngineService { shared, threads })
     }
 
@@ -562,19 +573,11 @@ impl JobService for JobEngineService {
         id: RequestId,
         probe: pm_protocol::media::ProbeMedia,
     ) -> Result<(), Box<EngineError>> {
-        // Probing opens and indexes the file: off the engine thread.
-        let shared = self.shared.clone();
-        std::thread::Builder::new()
-            .name("pm-probe-media".into())
-            .spawn(move || probe_media(&shared, port, id, probe))
-            .map(|_| ())
-            .map_err(|e| {
-                Box::new(EngineError::new(
-                    ErrorCode::Internal,
-                    ErrorScope::Request { id },
-                    format!("The probe could not start: {e}"),
-                ))
-            })
+        // Probing opens and indexes the file: off the engine thread, on the
+        // probe lane.
+        self.shared.lock().probes.push_back((port, id, probe));
+        self.shared.work.notify_all();
+        Ok(())
     }
 
     fn signal(&mut self, signal: &DeadlineSignal) {
@@ -1262,6 +1265,43 @@ fn run_job(
             discard(shared);
             finish(JobState::Failed, None, Some(engine_error(job, &e)))
         }
+    }
+}
+
+/// The probe lane: answers `probeMedia` requests in order until shutdown.
+/// Requests still queued at shutdown are answered as cancelled.
+fn run_probes(shared: &Shared) {
+    loop {
+        let next = {
+            let mut st = shared.lock();
+            loop {
+                if st.shutdown {
+                    let left: Vec<_> = st.probes.drain(..).collect();
+                    drop(st);
+                    for (port, id, _) in left {
+                        let error = EngineError::new(
+                            ErrorCode::Cancelled,
+                            ErrorScope::Request { id },
+                            "The job engine is shutting down.",
+                        );
+                        let mut envelope = Envelope::new(Message::Error { id, error });
+                        envelope.session = None;
+                        shared.send(port, envelope);
+                    }
+                    return;
+                }
+                if let Some(p) = st.probes.pop_front() {
+                    break p;
+                }
+                st = shared
+                    .work
+                    .wait_timeout(st, Duration::from_millis(500))
+                    .map(|(g, _)| g)
+                    .unwrap_or_else(|e| e.into_inner().0);
+            }
+        };
+        let (port, id, probe) = next;
+        probe_media(shared, port, id, probe);
     }
 }
 
