@@ -81,10 +81,10 @@ pub struct ScrubStats {
 
 /// Frames decoded ahead of a target in the direction of motion.
 const AHEAD: usize = 8;
-/// At most this many presented frames before a target are kept decoded
-/// while scrubbing backward (unreferenced ones included), within half the
-/// frame cache: one seek from the GOP start then serves that many reverse
-/// steps.
+/// While scrubbing backward, one seek from the GOP start serves the
+/// reverse steps of up to this many presented frames before its target:
+/// every reference picture on the way and the unreferenced ones at the
+/// drag's stride are kept (within three quarters of the frame cache).
 const KEEP_BEFORE: usize = 32;
 /// Moves of more frames than this are jumps (a click on the ruler, a
 /// random seek), not drags: nothing is decoded ahead of them.
@@ -421,16 +421,16 @@ impl Shared {
                 let mut guard =
                     self.service
                         .session(&self.source, self.instance, DecodePurpose::Display)?;
-                let keep = {
+                let (keep, stride) = {
                     let st = self.state.lock().unwrap();
                     if st.stride < 0 {
-                        KEEP_BEFORE.min(self.cache_frames(&st))
+                        (self.reverse_reach(&st), st.stride.unsigned_abs() as usize)
                     } else {
-                        0
+                        (0, 1)
                     }
                 };
                 guard.set_window(DEFAULT_WINDOW.max(keep + 1));
-                guard.set_keep_before(keep);
+                guard.set_keep_before(keep, stride);
                 match job {
                     Job::Exact(n) => guard.frame(n).map(Some),
                     Job::Scrub(n) | Job::Ahead(n) => {
@@ -519,9 +519,9 @@ impl Shared {
     }
 
     /// The next frame to decode ahead of the last target, a stride at a
-    /// time in the direction of motion: [`AHEAD`] steps forward, or one
-    /// reverse neighbourhood ([`KEEP_BEFORE`] frames), within half the frame
-    /// cache. Nothing after a jump.
+    /// time in the direction of motion: [`AHEAD`] steps forward within half
+    /// the frame cache, or one reverse neighbourhood
+    /// ([`ViewerDecode`]'s reverse reach). Nothing after a jump.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
         let stride = st.stride;
@@ -531,12 +531,11 @@ impl Shared {
         }
         // Reverse steps need a seek from the GOP start for every
         // neighbourhood, so they look as far ahead as one neighbourhood.
-        let steps = if stride < 0 {
-            (KEEP_BEFORE as i64 / -stride).max(1) as usize
+        let count = if stride < 0 {
+            (self.reverse_reach(st) as i64 / -stride).max(1) as usize
         } else {
-            AHEAD
+            AHEAD.min(self.cache_frames(st))
         };
-        let count = steps.min(self.cache_frames(st));
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
         for i in 1..=count as i64 {
@@ -558,6 +557,13 @@ impl Shared {
     fn cache_frames(&self, st: &State) -> usize {
         let budget = self.service.cache().stats().budget;
         budget / 2 / st.frame_bytes.max(1)
+    }
+
+    /// How far before a target a reverse scrub keeps frames: [`KEEP_BEFORE`]
+    /// within three quarters of the frame cache.
+    fn reverse_reach(&self, st: &State) -> usize {
+        let budget = self.service.cache().stats().budget;
+        KEEP_BEFORE.min(budget / 4 * 3 / st.frame_bytes.max(1))
     }
 
     /// Whether a newer request should stop the job in flight. A request

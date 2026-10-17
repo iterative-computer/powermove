@@ -64,8 +64,11 @@ pub struct Session {
     /// Classifies unreferenced pictures a seek may leave out.
     skip: Option<Disposable>,
     /// Presented frames just before a target that are decoded and kept even
-    /// when unreferenced (a reverse scrub steps into them next).
+    /// when unreferenced (a reverse scrub steps into them next): those
+    /// within `keep_before` frames whose distance to the target is a
+    /// multiple of `keep_stride`.
     keep_before: usize,
+    keep_stride: usize,
     pub stats: SessionStats,
 }
 
@@ -108,6 +111,7 @@ impl Session {
         Session {
             shown_at,
             keep_before: 0,
+            keep_stride: 1,
             skip: Disposable::for_index(&index),
             index,
             reader,
@@ -138,10 +142,12 @@ impl Session {
         };
     }
 
-    /// Keeps the `frames` presented frames before each target, unreferenced
-    /// ones included (at most the window).
-    pub fn set_keep_before(&mut self, frames: usize) {
+    /// Keeps the presented frames up to `frames` before each target whose
+    /// distance to it is a multiple of `stride` (every one for 1),
+    /// unreferenced ones included (at most the window).
+    pub fn set_keep_before(&mut self, frames: usize, stride: usize) {
         self.keep_before = frames;
+        self.keep_stride = stride.max(1);
     }
 
     pub fn decoder_info(&self) -> DecoderInfo {
@@ -314,9 +320,10 @@ impl Session {
             let t = std::time::Instant::now();
             for (p, &k) in pkts.iter().zip(chunk) {
                 let behind = k != target && self.index.samples[k].cts < target_cts;
+                let (shown, at) = (self.shown_at[k], self.shown_at[target]);
                 let kept = behind
-                    && self.shown_at[k].saturating_add(self.keep_before.min(self.window_limit))
-                        >= self.shown_at[target];
+                    && shown.saturating_add(self.keep_before.min(self.window_limit)) >= at
+                    && at.saturating_sub(shown) % self.keep_stride == 0;
                 if behind && !kept && self.skip.is_some_and(|d| d.disposable(&p.data)) {
                     self.stats.disposable_skipped += 1;
                     continue;

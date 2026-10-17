@@ -304,8 +304,11 @@ impl SessionGuard<'_> {
     }
 
     /// See [`Session::set_keep_before`].
-    pub fn set_keep_before(&mut self, frames: usize) {
-        self.session.as_mut().unwrap().set_keep_before(frames);
+    pub fn set_keep_before(&mut self, frames: usize, stride: usize) {
+        self.session
+            .as_mut()
+            .unwrap()
+            .set_keep_before(frames, stride);
     }
 
     /// Rule 7 selection then decode; `None` before the first frame.

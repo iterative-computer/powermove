@@ -144,6 +144,7 @@ fn drag(src: &std::sync::Arc<MediaSource>, frames: usize, step: i64, what: &str)
     let mut asked = 0;
     let mut exact = std::collections::BTreeSet::new();
     let mut stand_ins = 0;
+    let mut shown = std::collections::BTreeSet::new();
     let mut tick = 0u32;
     let mut lag = vec![];
     let mut requested = std::collections::HashMap::new();
@@ -153,6 +154,7 @@ fn drag(src: &std::sync::Arc<MediaSource>, frames: usize, step: i64, what: &str)
         asked += 1;
         requested.entry(k as usize).or_insert(t0.elapsed());
         let f = viewer.fetch(src, 1, k as usize, Want::Scrub).unwrap();
+        shown.insert(f.shown);
         if f.exact {
             if exact.insert(f.shown)
                 && let Some(at) = requested.get(&f.shown)
@@ -169,8 +171,9 @@ fn drag(src: &std::sync::Arc<MediaSource>, frames: usize, step: i64, what: &str)
         }
     }
     println!(
-        "{what}: asked {asked}, exact frames drawn {}, stand-ins {stand_ins}, request to exact {}; {:?}",
+        "{what}: asked {asked}, exact frames drawn {}, stand-ins {stand_ins}, distinct frames drawn {}, request to exact {}; {:?}",
         exact.len(),
+        shown.len(),
         dist(&mut lag),
         viewer.stats()
     );
