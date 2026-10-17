@@ -629,8 +629,13 @@ pub struct StillInterpretation {
 /// either override sets it aside as a whole: the samples are read as stored
 /// with the overrides, and the value not overridden takes the default of a
 /// still without a profile (Rec.709 primaries; the display encoding for
-/// integer stills, linear for float). Alpha overrides replace the file's
-/// alpha reading of the stored samples in every case.
+/// integer stills, linear for float). A still ImageIO already converted to
+/// sRGB (CMYK, Lab, indexed: [`IccClass::ConvertedToSrgb`]) reads as sRGB,
+/// and its overrides reinterpret those converted samples; its profile is
+/// never applied again. Alpha overrides replace the file's alpha reading of
+/// the stored samples in every case.
+///
+/// [`IccClass::ConvertedToSrgb`]: crate::image::icc::IccClass::ConvertedToSrgb
 pub fn interpret_still(
     color: &crate::image::ImageColor,
     float: bool,
@@ -664,12 +669,27 @@ pub fn interpret_still(
                 "The ICC profile is set aside by the override; stills without a profile read as sRGB",
             ),
         ),
+        Some(IccClass::ConvertedToSrgb) => (
+            Primaries::Bt709,
+            file("Converted to sRGB by ImageIO from the file's color model and profile"),
+        ),
     };
     let transfer = if colorsync {
         (
             Transfer::Linear,
             file("ICC profile, converted by ColorSync to linear light"),
         )
+    } else if let (false, Some(class)) = (float, color.icc_class.filter(|c| *c != IccClass::Other))
+    {
+        // Integer stills whose profile (or conversion) defines the sRGB curve.
+        let source = match class {
+            IccClass::ConvertedToSrgb => {
+                "Converted to sRGB by ImageIO from the file's color model and profile (sRGB curve)"
+            }
+            IccClass::DisplayP3 => "ICC profile (Display P3, sRGB curve)",
+            _ => "ICC profile equivalent to sRGB (sRGB curve)",
+        };
+        (color.transfer, file(source))
     } else {
         let rule = match (set_aside, float) {
             (false, true) => "Floating-point stills are linear",
@@ -878,5 +898,63 @@ mod tests {
         assert!(!si.colorsync);
         assert_eq!(si.reading.primaries.value, Primaries::DisplayP3);
         assert_eq!(si.reading.transfer.value, Transfer::Gamma22);
+    }
+
+    #[test]
+    fn converted_stills_read_as_srgb_and_never_reapply_their_profile() {
+        let mut cmyk = other_profile(AlphaMode::Opaque);
+        cmyk.icc_class = Some(crate::image::icc::IccClass::ConvertedToSrgb);
+        let source = |o: &Origin| match o {
+            Origin::File { source } => source.clone(),
+            o => panic!("{o:?}"),
+        };
+        for json in [
+            serde_json::json!({}),
+            serde_json::json!({ "alpha": "ignore" }),
+            serde_json::json!({ "range": "full" }),
+        ] {
+            let (i, _) = Interpretation::from_json(&json);
+            let si = interpret_still(&cmyk, false, &i);
+            assert!(!si.colorsync, "{json}");
+            assert_eq!(si.reading.primaries.value, Primaries::Bt709);
+            assert_eq!(si.reading.transfer.value, Transfer::DisplayE);
+            assert!(source(&si.reading.primaries.origin).contains("Converted to sRGB by ImageIO"));
+            assert!(source(&si.reading.transfer.origin).contains("sRGB curve"));
+        }
+        // Overrides reinterpret the converted samples.
+        let (i, _) = Interpretation::from_json(&serde_json::json!({ "primaries": "displayP3" }));
+        let si = interpret_still(&cmyk, false, &i);
+        assert!(!si.colorsync);
+        assert_eq!(si.reading.primaries.value, Primaries::DisplayP3);
+        assert_eq!(si.reading.primaries.automatic, Primaries::Bt709);
+        assert_eq!(si.reading.transfer.value, Transfer::DisplayE);
+        assert!(matches!(si.reading.transfer.origin, Origin::File { .. }));
+    }
+
+    #[test]
+    fn srgb_and_p3_profiles_define_the_transfer_of_integer_stills() {
+        use crate::image::icc::IccClass;
+        let none = |o: &Origin| matches!(o, Origin::Default { .. });
+        for (class, want) in [
+            (IccClass::Srgb, "equivalent to sRGB (sRGB curve)"),
+            (IccClass::GraySrgb, "equivalent to sRGB (sRGB curve)"),
+            (IccClass::DisplayP3, "Display P3, sRGB curve"),
+        ] {
+            let mut c = other_profile(AlphaMode::Opaque);
+            c.icc_class = Some(class);
+            let si = interpret_still(&c, false, &Interpretation::default());
+            let Origin::File { source } = &si.reading.transfer.origin else {
+                panic!("{class:?}: {:?}", si.reading.transfer.origin);
+            };
+            assert!(source.contains(want), "{class:?}: {source}");
+            // Float stills are linear by convention whatever the profile.
+            c.transfer = Transfer::Linear;
+            let si = interpret_still(&c, true, &Interpretation::default());
+            assert!(none(&si.reading.transfer.origin), "{class:?}");
+        }
+        let mut c = other_profile(AlphaMode::Opaque);
+        c.icc_class = None;
+        let si = interpret_still(&c, false, &Interpretation::default());
+        assert!(none(&si.reading.transfer.origin));
     }
 }
