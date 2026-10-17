@@ -328,10 +328,14 @@ impl Renderer {
         self.pool.bytes()
     }
 
-    /// Keeps translated 3D programs in `dir` across processes (amendment
-    /// 11's disk program cache); the engine host passes its cache
-    /// directory.
+    /// Keeps translated 3D programs (amendment 11's disk program cache) and
+    /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
+    /// processes; the engine host passes its shader cache folder.
     pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        // Translated GLSL (`pm_glsl::Cache`: source hash and device) in its
+        // own folder; definition sets made before keep their cache.
+        self.effects
+            .set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
         self.scene3d.set_program_cache(dir);
     }
 
