@@ -182,6 +182,12 @@ impl Renderer {
         self.options3d.view = view.map(crate::scene3d::View3d::from_override);
     }
 
+    /// GPU meshes and material maps the 3D pass keeps between frames
+    /// (released once no 3D frame draws them).
+    pub fn scene3d_resident(&self) -> crate::scene3d::Resident3d {
+        self.scene3d.resident()
+    }
+
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`) by
     /// definition id, so legacy OBJ mesh layers render natively. The
     /// built-in OBJ model layer is always known; a snapshot for its id
@@ -375,8 +381,10 @@ impl Renderer {
             height: r.height,
         });
         // The previous frame's vector textures become evictable, and the
-        // cache returns within its bound.
+        // cache returns within its bound; 3D meshes and maps no recent 3D
+        // frame drew are released.
         self.vector.begin_frame();
+        self.scene3d.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

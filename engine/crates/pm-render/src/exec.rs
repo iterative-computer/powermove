@@ -262,7 +262,14 @@ impl Exec<'_> {
                                         self.taken.push(d);
                                     }
                                 }
-                                Err(message) => {
+                                Err(crate::scene3d::Error3d::Unsupported(why)) => self.fail(
+                                    plan,
+                                    draw,
+                                    MediaFailure::Unsupported(crate::capability::Feature::Scene3d(
+                                        why,
+                                    )),
+                                ),
+                                Err(crate::scene3d::Error3d::Failed(message)) => {
                                     self.fail(plan, draw, MediaFailure::Failed(message))
                                 }
                             }

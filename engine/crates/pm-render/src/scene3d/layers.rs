@@ -101,7 +101,10 @@ fn role(layer: &Node) -> Option<Role> {
     }
 }
 
-/// Image assets as the runtime's texture getter sees them.
+/// Image assets as the runtime's texture getter sees them: an image that
+/// is offline or does not decode has no bitmap, so the material draws
+/// without the map and the scene warns (`Missing texture`). Images this
+/// pass does not draw keep their path; the capability check routes them.
 struct DocumentTextures<'a> {
     root: &'a Node,
     assets: &'a dyn AssetResolver,
@@ -113,7 +116,11 @@ impl TextureSource for DocumentTextures<'_> {
         if !node::is_str(node::member(Some(record), "kind"), "image") {
             return None;
         }
-        self.assets.path(asset, Some(record))
+        let path = self.assets.path(asset, Some(record))?;
+        match super::textures::Textures::probe(&path) {
+            Err(super::textures::MapError::Failed(_)) => None,
+            _ => Some(path),
+        }
     }
 }
 
@@ -145,11 +152,8 @@ impl super::model::ModelSource for DocumentModels<'_> {
         let Some(path) = self.assets.path(asset, Some(record)) else {
             return ModelLookup::Missing;
         };
-        match super::legacy::obj_mesh(&path) {
-            Ok(mesh) => ModelLookup::Obj {
-                key: Arc::as_ptr(&mesh) as u64,
-                mesh,
-            },
+        match super::legacy::obj_mesh_versioned(&path) {
+            Ok((key, mesh)) => ModelLookup::Obj { key, mesh },
             Err(_) => ModelLookup::Missing,
         }
     }

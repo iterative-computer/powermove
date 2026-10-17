@@ -30,7 +30,7 @@ pub mod textures;
 
 use std::sync::Arc;
 
-pub use gpu::{MathMode, Rendered3d, SAMPLES, Scene3dRenderer};
+pub use gpu::{Error3d, MathMode, Rendered3d, Resident3d, SAMPLES, Scene3dRenderer};
 pub use model::{
     Camera3d, Light3d, LightKind, Look, Material3d, MaterialKind, Materials, Mesh3d, Object3d,
     Projection, Scene3d, Texture3d,

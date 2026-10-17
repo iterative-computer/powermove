@@ -48,6 +48,66 @@ struct GpuMesh {
     wireframe: Option<(wgpu::Buffer, u32)>,
 }
 
+impl GpuMesh {
+    fn bytes(&self) -> u64 {
+        [&self.position, &self.normal, &self.uv, &self.index]
+            .into_iter()
+            .chain(self.wireframe.as_ref().map(|(b, _)| b))
+            .map(wgpu::Buffer::size)
+            .sum()
+    }
+}
+
+/// Why a 3D render drew nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error3d {
+    /// Something this pass does not draw, met at render time (the frame is
+    /// routed to the legacy engine, `MediaFailure::Unsupported`).
+    Unsupported(String),
+    /// The layer failed and drew nothing.
+    Failed(String),
+}
+
+impl From<String> for Error3d {
+    fn from(message: String) -> Error3d {
+        Error3d::Failed(message)
+    }
+}
+
+impl From<&str> for Error3d {
+    fn from(message: &str) -> Error3d {
+        Error3d::Failed(message.to_owned())
+    }
+}
+
+impl std::fmt::Display for Error3d {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error3d::Unsupported(m) => write!(f, "unsupported: {m}"),
+            Error3d::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// GPU resources the 3D pass keeps between frames
+/// ([`Scene3dRenderer::resident`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Resident3d {
+    /// Geometry buffers (one per distinct geometry, and per OBJ mesh of a
+    /// legacy mesh layer).
+    pub meshes: usize,
+    pub mesh_bytes: u64,
+    /// Material map textures (one per file version and color space).
+    pub maps: usize,
+    pub map_bytes: u64,
+}
+
+/// 3D frames a mesh or map stays resident without being drawn: the
+/// previous 3D frame's resources survive, so a viewer alternating two
+/// frames (a scrub across a cut, a thumbnail between viewer frames) does
+/// not re-upload them every frame.
+const KEEP_FRAMES: u64 = 2;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     program: u64,
@@ -127,7 +187,16 @@ pub struct Scene3dRenderer {
     /// so a draw does not regenerate its sources.
     by_parameters: HashMap<u64, (u64, Arc<Compiled>)>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
-    meshes: HashMap<u64, Arc<GpuMesh>>,
+    /// GPU meshes by geometry key, with the 3D frame generation of their
+    /// last use.
+    meshes: HashMap<u64, (Arc<GpuMesh>, u64)>,
+    /// The current 3D frame generation: advanced by the first 3D render
+    /// after [`Scene3dRenderer::begin_frame`].
+    generation: u64,
+    frame_started: bool,
+    /// The last scene whose maps were loaded, and that scene with the maps
+    /// that failed to load dropped (shared by the layers of one pass).
+    resolved: Option<(Arc<Scene3d>, Arc<Scene3d>)>,
     attachments: Option<Attachments>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
@@ -149,6 +218,9 @@ impl Default for Scene3dRenderer {
             by_parameters: HashMap::new(),
             pipelines: HashMap::new(),
             meshes: HashMap::new(),
+            generation: 0,
+            frame_started: false,
+            resolved: None,
             attachments: None,
             shadows: HashMap::new(),
             prepass: None,
@@ -244,10 +316,99 @@ fn compact_bindings(program: &mut glsl::Program) {
     }
 }
 
-/// The error of a draw that needs something this pass does not draw.
-pub const UNSUPPORTED: &str = "unsupported: ";
-
 impl Scene3dRenderer {
+    /// Starts a frame. Its first 3D render releases the meshes and maps no
+    /// 3D frame drew in the last [`KEEP_FRAMES`] 3D frames, so the
+    /// resident set follows the scenes being drawn.
+    pub fn begin_frame(&mut self) {
+        self.frame_started = true;
+    }
+
+    fn start_generation(&mut self) {
+        if !self.frame_started {
+            return;
+        }
+        self.frame_started = false;
+        self.generation += 1;
+        let keep_from = self.generation.saturating_sub(KEEP_FRAMES - 1);
+        self.meshes.retain(|_, (_, used)| *used >= keep_from);
+        self.textures.evict(self.generation, keep_from);
+        self.legacy.evict(self.generation, keep_from);
+    }
+
+    /// The meshes and maps resident on the GPU.
+    pub fn resident(&self) -> Resident3d {
+        let (maps, map_bytes) = self.textures.resident();
+        let (legacy, legacy_bytes) = self.legacy.resident();
+        Resident3d {
+            meshes: self.meshes.len() + legacy,
+            mesh_bytes: self.meshes.values().map(|(m, _)| m.bytes()).sum::<u64>() + legacy_bytes,
+            maps,
+            map_bytes,
+        }
+    }
+
+    /// Loads every map of `scene` before anything draws. A map that no
+    /// longer loads (deleted or unreadable since the plan) is dropped with
+    /// a `Missing texture` warning, as today's runtime draws a model whose
+    /// texture getter returns nothing; one outside the classes this pass
+    /// draws (changed since the capability check) makes the render
+    /// unsupported.
+    fn resolve_maps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Arc<Scene3d>,
+    ) -> Result<Arc<Scene3d>, Error3d> {
+        if let Some((from, to)) = &self.resolved
+            && Arc::ptr_eq(from, scene)
+        {
+            return Ok(to.clone());
+        }
+        let mut failed: Vec<(std::path::PathBuf, bool)> = Vec::new();
+        for o in &scene.objects {
+            for m in &o.meshes {
+                for mat in m.materials.iter() {
+                    for (_, t) in mat.maps.all() {
+                        let Some(t) = t else { continue };
+                        match self.textures.map(device, queue, encoder, &t.path, t.srgb) {
+                            Ok(_) => {}
+                            Err(MapError::Unsupported(why)) => {
+                                return Err(Error3d::Unsupported(why));
+                            }
+                            Err(MapError::Failed(_)) => failed.push((t.path.clone(), t.srgb)),
+                        }
+                    }
+                }
+            }
+        }
+        let out = if failed.is_empty() {
+            scene.clone()
+        } else {
+            let mut s = Scene3d::clone(scene);
+            let mut warnings = Vec::new();
+            for o in &mut s.objects {
+                for m in &mut o.meshes {
+                    for mat in m.materials.iter_mut() {
+                        for slot in mat.maps.all_mut() {
+                            if let Some(t) = slot
+                                && failed.contains(&(t.path.clone(), t.srgb))
+                            {
+                                warnings.push(format!("Missing texture: {}", t.asset));
+                                *slot = None;
+                            }
+                        }
+                    }
+                }
+            }
+            s.warnings.extend(warnings);
+            Arc::new(s)
+        };
+        self.resolved = Some((scene.clone(), out.clone()));
+        Ok(out)
+    }
+
     /// Keeps translated programs in `dir` across processes (the engine
     /// passes its cache directory; `None` translates in memory only).
     pub fn set_program_cache(&mut self, dir: Option<std::path::PathBuf>) {
@@ -540,9 +701,11 @@ impl Scene3dRenderer {
         g: &super::model::Geometry3d,
         wireframe: bool,
     ) -> Arc<GpuMesh> {
-        if let Some(m) = self.meshes.get(&g.key)
+        let generation = self.generation;
+        if let Some((m, used)) = self.meshes.get_mut(&g.key)
             && (!wireframe || m.wireframe.is_some())
         {
+            *used = generation;
             return m.clone();
         }
         let geometry = &g.geometry;
@@ -595,7 +758,7 @@ impl Scene3dRenderer {
             count: geometry.indices.len() as u32,
             wireframe: wire,
         });
-        self.meshes.insert(g.key, m.clone());
+        self.meshes.insert(g.key, (m.clone(), generation));
         m
     }
 
@@ -835,7 +998,7 @@ impl Scene3dRenderer {
         scene: &Scene3d,
         draw: &DrawDesc,
         samples: u32,
-    ) -> Result<Prepared, String> {
+    ) -> Result<Prepared, Error3d> {
         let (key, compiled) = self.program(device, &draw.params)?;
         let pipeline = self.pipeline(device, key, &compiled, samples, draw.state);
         let mut block = vec![0u8; compiled.block_size.max(16) as usize];
@@ -864,8 +1027,8 @@ impl Scene3dRenderer {
                         .textures
                         .map(device, queue, encoder, &map.path, map.srgb)
                         .map_err(|e| match e {
-                            MapError::Unsupported(m) => format!("{UNSUPPORTED}{m}"),
-                            MapError::Failed(m) => m,
+                            MapError::Unsupported(m) => Error3d::Unsupported(m),
+                            MapError::Failed(m) => Error3d::Failed(m),
                         })?;
                     (
                         tex.view.clone(),
@@ -884,7 +1047,7 @@ impl Scene3dRenderer {
                     let (a, b) = self
                         .textures
                         .ltc(device, queue)
-                        .map_err(|e| format!("{UNSUPPORTED}{e}"))?;
+                        .map_err(Error3d::Unsupported)?;
                     let v = if matches!(bound, Some(TextureRef::Ltc1)) {
                         a
                     } else {
@@ -967,7 +1130,7 @@ impl Scene3dRenderer {
         scene: &Scene3d,
         pass: &PassDesc,
         resolve: Option<&wgpu::TextureView>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error3d> {
         match pass {
             PassDesc::Shadow { light, size, views } => {
                 self.shadow_target(device, *light, *size);
@@ -1111,7 +1274,8 @@ impl Scene3dRenderer {
         pool: &mut TargetPool,
         plan: &super::Object3dPlan,
         depth_surface: bool,
-    ) -> Result<Rendered3d, String> {
+    ) -> Result<Rendered3d, Error3d> {
+        self.start_generation();
         match &plan.kind {
             super::Render3d::Layer {
                 object,
@@ -1134,7 +1298,8 @@ impl Scene3dRenderer {
             super::Render3d::ObjMesh(mesh) => {
                 let color = self
                     .legacy
-                    .render(device, queue, encoder, pool, mesh, self.samples)?;
+                    .render(device, queue, encoder, pool, mesh, self.samples)
+                    .map_err(Error3d::Failed)?;
                 Ok(Rendered3d { color, depth: None })
             }
         }
@@ -1174,7 +1339,8 @@ impl Scene3dRenderer {
         depth_set: &[usize],
         background: bool,
         depth_surface: bool,
-    ) -> Result<Rendered3d, String> {
+    ) -> Result<Rendered3d, Error3d> {
+        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         let layer = Layer3d {
@@ -1216,7 +1382,8 @@ impl Scene3dRenderer {
         pool: &mut TargetPool,
         scene: &Arc<Scene3d>,
         depth_surface: bool,
-    ) -> Result<Rendered3d, String> {
+    ) -> Result<Rendered3d, Error3d> {
+        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         self.prepass = None;

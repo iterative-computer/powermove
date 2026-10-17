@@ -101,24 +101,52 @@ pub fn target_size(d_size: f64, comp_size: f64, full: f64, scale: f64) -> (f64, 
 
 type ObjKey = (PathBuf, u64, Option<std::time::SystemTime>);
 
-fn obj_cache() -> &'static Mutex<HashMap<ObjKey, Arc<ObjMesh>>> {
-    static C: OnceLock<Mutex<HashMap<ObjKey, Arc<ObjMesh>>>> = OnceLock::new();
+/// Parsed OBJ files by version, with their geometry key.
+fn obj_cache() -> &'static Mutex<HashMap<ObjKey, (u64, Arc<ObjMesh>)>> {
+    type Cache = Mutex<HashMap<ObjKey, (u64, Arc<ObjMesh>)>>;
+    static C: OnceLock<Cache> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The geometry key of an OBJ file version: its path, size, and
+/// modification time, in a domain of its own (scene sources hash their
+/// parameters), so GPU geometry cached under it is the geometry of exactly
+/// that file version.
+fn obj_key(key: &ObjKey) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"pm-render obj geometry 1\0");
+    h.update(key.0.as_os_str().as_encoded_bytes());
+    h.update([0]);
+    h.update(key.1.to_le_bytes());
+    if let Some(d) = key
+        .2
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        h.update([1]);
+        h.update(d.as_nanos().to_le_bytes());
+    }
+    u64::from_le_bytes(h.finalize()[..8].try_into().unwrap())
 }
 
 /// The parsed OBJ mesh of a file (`asset.mesh`), cached per file version.
 pub fn obj_mesh(path: &std::path::Path) -> Result<Arc<ObjMesh>, String> {
+    obj_mesh_versioned(path).map(|(_, mesh)| mesh)
+}
+
+/// [`obj_mesh`] and the geometry key of the file version it parsed.
+pub fn obj_mesh_versioned(path: &std::path::Path) -> Result<(u64, Arc<ObjMesh>), String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
     if let Some(m) = obj_cache().lock().unwrap().get(&key) {
         return Ok(m.clone());
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mesh = Arc::new(parse_obj(&text)?);
+    let entry = (obj_key(&key), Arc::new(parse_obj(&text)?));
     let mut c = obj_cache().lock().unwrap();
     c.retain(|k, _| k.0 != key.0);
-    c.insert(key, mesh.clone());
-    Ok(mesh)
+    c.insert(key, entry.clone());
+    Ok(entry)
 }
 
 /// `meshExtensionQuad`'s parameters and mesh for a mesh layer at `time`.
@@ -331,10 +359,38 @@ struct Pipelines {
 #[derive(Default)]
 pub struct MeshRenderer {
     pipelines: Option<Pipelines>,
-    buffers: HashMap<usize, (Arc<ObjMesh>, wgpu::Buffer, wgpu::Buffer)>,
+    /// Vertex buffers by mesh (the entry holds the mesh, so its address is
+    /// not reused while cached), with the 3D frame generation of their
+    /// last use.
+    buffers: HashMap<usize, MeshBuffers>,
+    generation: u64,
+}
+
+struct MeshBuffers {
+    mesh: Arc<ObjMesh>,
+    positions: wgpu::Buffer,
+    normals: wgpu::Buffer,
+    used: u64,
 }
 
 impl MeshRenderer {
+    /// Starts 3D frame `generation`, releasing the buffers of meshes no
+    /// 3D frame drew since generation `keep_from`.
+    pub(crate) fn evict(&mut self, generation: u64, keep_from: u64) {
+        self.generation = generation;
+        self.buffers.retain(|_, b| b.used >= keep_from);
+    }
+
+    /// Meshes resident on the GPU and their bytes.
+    pub fn resident(&self) -> (usize, u64) {
+        let bytes = self
+            .buffers
+            .values()
+            .map(|b| b.positions.size() + b.normals.size())
+            .sum();
+        (self.buffers.len(), bytes)
+    }
+
     fn pipelines(&mut self, device: &wgpu::Device) -> &Pipelines {
         self.pipelines.get_or_insert_with(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -477,8 +533,7 @@ impl MeshRenderer {
         );
         let buffers = plan.mesh.as_ref().map(|m| {
             let key = Arc::as_ptr(m) as usize;
-            self.buffers
-                .retain(|_, (mesh, _, _)| Arc::strong_count(mesh) > 1);
+            let generation = self.generation;
             let entry = self.buffers.entry(key).or_insert_with(|| {
                 let make = |v: &[f32], label: &str| {
                     wgpu::util::DeviceExt::create_buffer_init(
@@ -490,13 +545,20 @@ impl MeshRenderer {
                         },
                     )
                 };
-                (
-                    m.clone(),
-                    make(&m.positions, "legacy mesh positions"),
-                    make(&m.normals, "legacy mesh normals"),
-                )
+                MeshBuffers {
+                    mesh: m.clone(),
+                    positions: make(&m.positions, "legacy mesh positions"),
+                    normals: make(&m.normals, "legacy mesh normals"),
+                    used: generation,
+                }
             });
-            (entry.1.clone(), entry.2.clone(), m.vertex_count as u32)
+            entry.used = generation;
+            debug_assert!(Arc::ptr_eq(&entry.mesh, m));
+            (
+                entry.positions.clone(),
+                entry.normals.clone(),
+                m.vertex_count as u32,
+            )
         });
         let p = self.pipelines(device);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {

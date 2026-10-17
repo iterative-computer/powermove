@@ -116,6 +116,18 @@ impl MaterialMaps {
         }
     }
 
+    /// Every map slot, in [`MaterialMaps::all`]'s order.
+    pub fn all_mut(&mut self) -> [&mut Option<Texture3d>; 6] {
+        [
+            &mut self.color,
+            &mut self.normal,
+            &mut self.roughness,
+            &mut self.metalness,
+            &mut self.emissive,
+            &mut self.ao,
+        ]
+    }
+
     pub fn all(&self) -> [(&'static str, Option<&Texture3d>); 6] {
         [
             ("map", self.color.as_ref()),
@@ -214,8 +226,25 @@ pub enum Materials {
     Slots(Vec<Material3d>),
 }
 
+impl Materials {
+    /// The materials in slot order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Material3d> {
+        match self {
+            Materials::Single(m) => std::slice::from_ref(m.as_ref()).iter(),
+            Materials::Slots(list) => list.iter(),
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Material3d> {
+        match self {
+            Materials::Single(m) => std::slice::from_mut(m.as_mut()).iter_mut(),
+            Materials::Slots(list) => list.iter_mut(),
+        }
+    }
+}
+
 /// Geometry shared by meshes with the same source (`signature`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Geometry3d {
     /// Hash of the source (the GPU mesh cache key).
     pub key: u64,
@@ -245,6 +274,18 @@ pub fn bounding_sphere(g: &Geometry) -> ([f64; 3], f64) {
         max = max.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     }
     (c, max.sqrt())
+}
+
+/// The key names the geometry (a source hash or an OBJ file version), so
+/// debug output and content keys carry it instead of every vertex.
+impl std::fmt::Debug for Geometry3d {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Geometry3d")
+            .field("key", &format_args!("{:016x}", self.key))
+            .field("vertices", &self.geometry.vertex_count())
+            .field("sphere", &self.sphere)
+            .finish()
+    }
 }
 
 impl PartialEq for Geometry3d {
@@ -703,7 +744,20 @@ pub struct LayerFacts {
 
 impl SceneBuilder {
     fn geometry(&mut self, source: &Source) -> Geometry3d {
-        let key = sha_key(&[format!("{source:?}").as_bytes()]);
+        let mut identity = Vec::new();
+        source.write_key(&mut identity);
+        let key = sha_key(&[b"source 1", &identity]);
+        self.cached(key, || source.geometry())
+    }
+
+    /// An OBJ model's geometry (`key` names the file version).
+    fn obj(&mut self, key: u64, mesh: &pm_geom3d::obj::ObjMesh) -> Geometry3d {
+        self.cached(key, || obj_triangles(mesh))
+    }
+
+    /// The geometry under `key`, built once and kept across scenes and
+    /// frames (bounded).
+    fn cached(&mut self, key: u64, build: impl FnOnce() -> Geometry) -> Geometry3d {
         if let Some((g, sphere)) = self.geometries.get(&key) {
             return Geometry3d {
                 key,
@@ -711,7 +765,6 @@ impl SceneBuilder {
                 sphere: *sphere,
             };
         }
-        // Built geometry is kept across scenes and frames (bounded).
         static SHARED: std::sync::OnceLock<std::sync::Mutex<GeometryCache>> =
             std::sync::OnceLock::new();
         let shared = SHARED.get_or_init(Default::default);
@@ -719,7 +772,7 @@ impl SceneBuilder {
         let (g, sphere) = match found {
             Some(f) => f,
             None => {
-                let g = source.geometry();
+                let g = build();
                 let sphere = bounding_sphere(&g);
                 let entry = (Arc::new(g), sphere);
                 let mut map = shared.lock().unwrap();
@@ -903,7 +956,7 @@ impl SceneBuilder {
                         missing = true;
                         None
                     }
-                    ModelLookup::Obj { key, mesh } => Some(obj_geometry(key, &mesh)),
+                    ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
                 }
             } else {
                 Some(self.geometry(&source_of(source)?))
@@ -1134,19 +1187,24 @@ impl SceneBuilder {
 /// An OBJ model asset's geometry (`new BufferGeometry()` with the parsed
 /// positions, normals, and texture coordinates; not indexed).
 pub fn obj_geometry(key: u64, mesh: &pm_geom3d::obj::ObjMesh) -> Geometry3d {
-    let g = Geometry {
+    let g = obj_triangles(mesh);
+    let sphere = bounding_sphere(&g);
+    Geometry3d {
+        key,
+        geometry: Arc::new(g),
+        sphere,
+    }
+}
+
+/// An OBJ mesh as non-indexed triangles.
+fn obj_triangles(mesh: &pm_geom3d::obj::ObjMesh) -> Geometry {
+    Geometry {
         positions: mesh.positions.clone(),
         normals: mesh.normals.clone(),
         uvs: mesh.texcoords.clone(),
         indices: (0..mesh.vertex_count as u32).collect(),
         indexed: false,
         groups: Vec::new(),
-    };
-    let sphere = bounding_sphere(&g);
-    Geometry3d {
-        key,
-        geometry: Arc::new(g),
-        sphere,
     }
 }
 

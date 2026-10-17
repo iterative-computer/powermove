@@ -8,19 +8,27 @@
 //! Map images decode through `pm-media` and only in the still classes the
 //! 2D renderer draws (`crate::media::probe_image`); images with
 //! transparency are refused, since the premultiplication Chromium applies
-//! to an `ImageBitmap` uploaded to WebGL has not been measured. A map's
+//! to an `ImageBitmap` uploaded to WebGL has not been measured. Both are
+//! decided statically ([`Textures::probe`], cached per file version), so
+//! the capability check routes such maps before a frame renders. A map's
 //! rows upload top row first, as WebGL uploads an `ImageBitmap` (which
 //! ignores `UNPACK_FLIP_Y_WEBGL`), so texture coordinate v = 0 samples the
 //! image's top row.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A material map on the GPU.
 pub struct MapTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+}
+
+struct MapEntry {
+    texture: Arc<MapTexture>,
+    /// The 3D frame generation of the last use ([`Textures::evict`]).
+    used: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -63,7 +71,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 /// Material maps, shadow-map samplers, and the LTC tables, kept across
 /// frames.
 pub struct Textures {
-    maps: HashMap<MapKey, Arc<MapTexture>>,
+    maps: HashMap<MapKey, MapEntry>,
+    /// The current 3D frame generation (`Scene3dRenderer::begin_frame`).
+    generation: u64,
     pool: pm_media::pool::FramePool,
     mip: Option<(
         wgpu::RenderPipeline,
@@ -81,6 +91,7 @@ impl Default for Textures {
     fn default() -> Self {
         Textures {
             maps: HashMap::new(),
+            generation: 0,
             pool: pm_media::pool::FramePool::new(16 << 20),
             mip: None,
             ltc: None,
@@ -278,8 +289,9 @@ impl Textures {
             modified,
             srgb,
         };
-        if let Some(t) = self.maps.get(&key) {
-            return Ok(t.clone());
+        if let Some(e) = self.maps.get_mut(&key) {
+            e.used = self.generation;
+            return Ok(e.texture.clone());
         }
         let (w, h, rgba) = decode(path, &self.pool)?;
         self.samplers(device);
@@ -377,20 +389,70 @@ impl Textures {
         let t = Arc::new(MapTexture { texture, view });
         self.maps
             .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
-        self.maps.insert(key, t.clone());
+        self.maps.insert(
+            key,
+            MapEntry {
+                texture: t.clone(),
+                used: self.generation,
+            },
+        );
         Ok(t)
     }
 
-    /// Whether `path` is a map image this pass draws (the static check;
-    /// decoding may still refuse transparency).
+    /// Starts 3D frame `generation`: maps no 3D frame used since
+    /// generation `keep_from` are released (today's runtime disposes the
+    /// textures its scene no longer references on every sync).
+    pub(crate) fn evict(&mut self, generation: u64, keep_from: u64) {
+        self.generation = generation;
+        self.maps.retain(|_, e| e.used >= keep_from);
+    }
+
+    /// Map textures on the GPU, and their bytes (mip chains included).
+    pub fn resident(&self) -> (usize, u64) {
+        let bytes = self
+            .maps
+            .values()
+            .map(|e| {
+                let t = &e.texture.texture;
+                (0..t.mip_level_count())
+                    .map(|l| {
+                        let (w, h) = ((t.width() >> l).max(1), (t.height() >> l).max(1));
+                        u64::from(w) * u64::from(h) * 4
+                    })
+                    .sum::<u64>()
+            })
+            .sum();
+        (self.maps.len(), bytes)
+    }
+
+    /// Whether `path` is a map image this pass draws: readable, in the
+    /// still classes the 2D renderer draws, and opaque (every alpha 255).
+    /// Decided once per file version (path, size, modification time), so
+    /// the capability check and the scene build can ask at every frame.
     pub fn probe(path: &Path) -> Result<(), MapError> {
-        match crate::media::probe_image(path) {
-            Ok(()) => Ok(()),
-            Err(crate::media::ProbeIssue::Unsupported(f)) => {
-                Err(MapError::Unsupported(format!("3D texture map image ({f})")))
-            }
-            Err(crate::media::ProbeIssue::Unreadable(m)) => Err(MapError::Failed(m)),
+        type Probes = Mutex<HashMap<MapKey, Result<(), MapError>>>;
+        static CACHE: OnceLock<Probes> = OnceLock::new();
+        let (len, modified) = stamp(path)
+            .ok_or_else(|| MapError::Failed(format!("{} is offline", path.display())))?;
+        let key = MapKey {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            srgb: false,
+        };
+        let cache = CACHE.get_or_init(Default::default);
+        if let Some(r) = cache.lock().unwrap().get(&key) {
+            return r.clone();
         }
+        let result = decode(path, &pm_media::pool::FramePool::new(0)).map(|_| ());
+        let mut c = cache.lock().unwrap();
+        // One answer per path: a new version replaces the old one.
+        c.retain(|k, _| k.path != key.path);
+        if c.len() >= 4096 {
+            c.clear();
+        }
+        c.insert(key, result.clone());
+        result
     }
 }
 
@@ -399,7 +461,13 @@ pub fn decode(
     path: &Path,
     pool: &pm_media::pool::FramePool,
 ) -> Result<(u32, u32, Vec<u8>), MapError> {
-    Textures::probe(path)?;
+    match crate::media::probe_image(path) {
+        Ok(()) => {}
+        Err(crate::media::ProbeIssue::Unsupported(f)) => {
+            return Err(MapError::Unsupported(format!("3D texture map image ({f})")));
+        }
+        Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
+    }
     let still = pm_media::image::read(path, pool)
         .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?;
     let f = &still.frame.format;
