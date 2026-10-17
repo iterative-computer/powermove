@@ -9,8 +9,11 @@ contract 10. Code:
   rewrites and bind check, naga; the translation cache; isolation under a deadline; the
   fuzz target `pm-glsl-fuzz`.
 - `engine/crates/pm-render/src/effects/`: definitions (contract 10) and their programs,
-  the effect pass and transition nodes, the staged-layer executor, GL's uniform
-  binding rules, the GPU watchdog; `builtins.json` embeds the built-in snapshots.
+  the renderer's effect host (`EffectHost for Effects`: the effect pass and transition
+  nodes the compositor runs), GL's uniform binding rules, the E encode and decode around
+  legacy programs, the GPU watchdog; `builtins.json` embeds the built-in snapshots.
+- `engine/crates/pm-render/src/composite/effects.rs` (the compositing lane's seam): where
+  the chains run; see "Where effects run".
 - `apps/desktop/src/renderer/src/kernel/definition-snapshots.ts`,
   `engine-definitions.ts`: the kernel side (snapshots, the publisher, the session
   streams, shader meta from engine reports), installed only with "Use New Engine" on.
@@ -59,64 +62,99 @@ engine-only: WebGL draws the program, so layers using it are routed
 (`Feature::ShaderFallback`, reported as `NotHeadlessRenderable`) until the decision 19
 fallback runner exists. Nothing is drawn wrong.
 
-## Staged layers
+## Where effects run
 
-`renderProject` takes a layer off the fast path when it has a renderable effect
-(`hasRenderableEffects`) or an active transition: the layer is drawn into its own
-buffer (`lf`, the size of the level), masks (not here), effects, the track matte (not
-here), then composited, through `runTransition` when one is active. The engine plans the
-same thing as a `Content::Staged` draw (`effects/plan.rs`):
+The compositor (`crate::composite`, `docs/engine/composite.md`) owns the graph: a layer
+that leaves today's fast path is a `composite::Node`, and its steps run in today's
+order: content, masks, effects, track matte, composite. The effects lane plugs in at
+`composite::EffectHost`, which `Effects` (the renderer's definition set) implements;
+`Renderer::set_effect_host` replaces it in tests only. At plan time:
 
-- **Content**: the layer's own draws as a transparent `CompPlan` of the level's size
-  (a group: its members' plan); the stage's `alpha` is the group's opacity
-  (`compositeAlpha`), 1 for other layers.
-- **Effect pass nodes** (`EffectStep`), in `L.fx` order: enabled (`<fx>.$enabled`,
-  animatable), not `missing`, definition registered. Parameters as
-  `effectParamValue` reads them (no property or a nullish value: the default) and as
-  `setParam` converts them: colors by `hex2rgb(String(v))` (first `#` removed, 3 or 4
-  digits doubled, `parseInt(…, 16) || 0` per channel, a sign accepted), toggles 0 or 1,
-  numbers `Number(v) || 0`.
-- **Transition node** (`TransitionStep`): `activeTransition`'s edge and progress, with
-  `prop ? evP : pd.def` parameters.
+- `EffectHost::prepare(scope, layer, frame)` returns the layer's `PreparedEffects`
+  (`effects/plan.rs`): the **effect pass nodes** (`EffectStep`), in `L.fx` order:
+  enabled (`<fx>.$enabled`, animatable), not `missing`, definition registered.
+  Parameters as `effectParamValue` reads them (no property or a nullish value: the
+  default) and as `setParam` converts them: colors by `hex2rgb(String(v))` (first `#`
+  removed, 3 or 4 digits doubled, `parseInt(…, 16) || 0` per channel, a sign accepted),
+  toggles 0 or 1, numbers `Number(v) || 0`. With them the chain's total `padding` and
+  whether a step reads `u_backdrop`. `Ok(None)` when no effect renders (all off or
+  missing): the layer stays on the fast path; `Err(feature)` routes the composition
+  (`Feature::Definition` for an unknown id).
+- `EffectHost::prepare_transition` returns the **transition node** (`TransitionStep`):
+  `activeTransition`'s edge and progress, with `prop ? evP : pd.def` parameters.
+  `transition_known` answers `PM.transitionDef` for the group boundary rule.
+
+At record time the compositor calls `EffectPasses::record(input, backdrop)` for a layer
+(input = the masked layer target; backdrop = the accumulator beneath it, given only when
+a step reads it) and for an adjustment layer (input and backdrop = the accumulator:
+`runEffects(acc, acc)`; the result is then masked and composited over the accumulator
+with the layer's opacity and blend through `FRAG_COMPOSITE`). A transition runs after
+the layer's composite: `withLayer` is the accumulator with the layer composited (normal:
+a copy plus the draw; other modes: `FRAG_COMPOSITE`), then
+`TransitionPasses::record(before = acc, with_layer)` over the whole frame; `Ok(None)` (a
+program that cannot run) leaves `withLayer`, as `runTransition` returning null.
 
 Execution (`effects/exec.rs`) is in GL row order like every pm-render target:
 
-- A level holding staged draws is drawn in runs: the draws before a staged layer in one
-  render pass (the first clears and draws the background; later runs load), so the
-  stack a staged layer reads as `u_backdrop` is exactly today's `acc`.
-- Each effect pass: a new buffer cleared to transparent, blending off, the quad through
-  `PM.VERT`, the compositor's calls in order: `u_tex` = 0, `u_orig` = 1 (with
-  `keepOrig`), `u_backdrop` = 2 (with `backdrop`), `u_m`, `u_res`, `u_uv`,
-  `u_coordRes`, `u_pxOrigin`, `u_texel`, `u_time`, `u_pass`, then the parameters. GL's
-  rules (`effects/program.rs`): a call of the wrong type changes nothing (a single float
-  never sets a `vec2`; `uniform1f` never sets an `int`), uniforms are program-wide
-  (both stages' blocks), named parameters bind when the linked program has them active,
-  else the positional alias `u_p<i>` or `u_c<i>`; a sampler reads unit 0 unless a
-  `uniform1i` call moved it; an empty unit samples (0, 0, 0, 1). Every texture is
-  sampled linear with clamp-to-edge, today's state for every effect and transition
-  buffer (`grab`).
+- Each effect pass: a new buffer the size of the pass rectangle, cleared to
+  transparent, blending off, the quad through `PM.VERT`, the compositor's calls in
+  order: `u_tex` = 0, `u_orig` = 1 (with `keepOrig`), `u_backdrop` = 2 (with
+  `backdrop`), `u_m`, `u_res`, `u_uv`, `u_coordRes`, `u_pxOrigin`, `u_texel`, `u_time`,
+  `u_pass`, then the parameters. GL's rules (`effects/program.rs`): a call of the wrong
+  type changes nothing (a single float never sets a `vec2`; `uniform1f` never sets an
+  `int`), uniforms are program-wide (both stages' blocks), named parameters bind when
+  the linked program has them active, else the positional alias `u_p<i>` or `u_c<i>`; a
+  sampler reads unit 0 unless a `uniform1i` call moved it; an empty unit samples (0, 0,
+  0, 1). Every texture is sampled linear with clamp-to-edge, today's state for every
+  effect and transition buffer (`grab`).
 - `clamp: true` (a definition flag the kernel passes through) clamps the effect's output
   to 0..1 in an extra pass; otherwise values above 1.0 pass (rgba16float or rgba32float).
-- The composite is `drawFbo(res, W, H, alpha)`: premultiplied source-over, 1:1. With a
-  transition: `withLayer` = an exact copy of the stack with the layer composited,
-  `from`/`to` by edge, the output copied back; a transition program that cannot run
-  leaves `withLayer` (as `runTransition` returning null).
+- A step whose program the engine cannot build at record time (WebGL draws it) adds
+  `Feature::ShaderFallback` and the frame routes.
 
-**Regions of interest.** A level whose staged layers are all viewport-safe and have no
-transition draws a padded crop of the region (today's 128 px viewer overscan plus the
-sum of the chain's `viewportPadding` values, clamped to the frame) with the crop's
-effect coordinates (`effectViewportCoordinates`: `u_uv`, `u_pxOrigin`, `u_coordRes`),
-then copies the region out. Any other staged level is drawn in full and cropped. Tests:
-a blur, chroma, and vignette chain's padded crop of a 1280 × 720 frame equals the full
-frame (measured 0 CV); a level with a transition, drawn in full, is checked within 1 CV.
-Note: Mosaic computes its grid
-from `v_px - u_pxOrigin` (crop-local), so its grid follows the crop in today's zoomed
-viewer and here alike.
+**Color domain** (section 11: "legacy GLSL receives E-encoded values independent of the
+display"). In Standard the working encoding is E and the chain runs on the targets as
+they are. With linear blending on, `Gpu::chain` encodes the chain's input and its
+backdrop with E before the first program and decodes the result after the last
+(`SimpleOp::EncodeE`, `DecodeE`), and a transition's two inputs are encoded and its
+output decoded the same way, so every legacy program reads and writes E values; the
+compositing around it (the layer's composite, the adjustment's `FRAG_COMPOSITE`,
+`withLayer`) blends in linear light. Both passes divide by alpha only within
+(`PM_UNPREMULTIPLY_FLOOR`, 1]: legacy programs write alpha above 1 (Glow adds its light
+over `u_orig`, so alpha reaches 1 + intensity) and color with zero alpha (chromatic
+aberration's fringes); such color is light and is converted per channel. The frame's
+output encode (`composite/ops.wgsl` `fs_encode_flip`) does the same, so a pixel no
+linear-light blend touches displays the E value it displays in Standard. (In Standard,
+an alpha above 1 also darkens the stack beneath by the excess, as WebGL does; with
+linear blending on that composite is in linear light, like every other.) Today's
+compositor has no linear blending, so there is no WebGL reference for this mode;
+`tests/effects_linear.rs` holds it to Standard wherever no linear-light blend is
+involved (see Parity).
+
+**Regions of interest** (`composite::region`). A pass holding an effect renders over the
+region grown by the node's padding, clamped to the frame (`Padding::Full` for an effect
+that is not viewport-safe and for a transition, which reads the whole frame), with the
+crop's effect coordinates (`effectViewportCoordinates`: `u_uv`, `u_pxOrigin`,
+`u_coordRes`), and the region is cut from it. A step's padding is the sum of its
+`viewportPadding` parameter values; a chain's paddings add up (each step reads the
+previous step's output). Today's viewer (`extensions/viewer/viewer.ts`
+`effectViewportPadding`) instead pads its crop by 128 px plus the largest single
+`viewportPadding` value of any enabled effect in the open composition. The engine's
+rule reads at least as far for every chain (the sum of one step's keys is at least
+their maximum, and chained steps add), so a region equals the full frame where
+today's crop may not; it renders more pixels for long chains. Tests: a blur, chroma,
+and vignette chain's padded crop of a 1280 × 720 frame equals the full frame (measured
+0 CV), a viewport-safe blur and an invert under a transition over two regions within
+1 CV (`tests/effects.rs`), and the compositor's regions with masks, mattes, blends,
+adjustments, and padded effects bit for bit (`tests/composite.rs`). Note: Mosaic computes
+its grid from `v_px - u_pxOrigin` (crop-local), so its grid follows the crop in today's
+zoomed viewer and here alike.
 
 **Definitions in the plan.** `Renderer::set_definitions` (an embedded
 `DefinitionSetSnapshot`) or `apply_definitions` (a kernel `DefinitionsUpdate`) configure
-the renderer. Without definitions, effects and transitions are routed as before
-(`Feature::Effects`, `Feature::Transition`). With them:
+the renderer. Without definitions, effects, transitions, and adjustment layers with
+effects are routed as before (`Feature::Effects`, `Feature::Transition`,
+`Feature::Adjustment`). With them:
 
 | Case | Today | Engine |
 |---|---|---|
@@ -129,11 +167,14 @@ the renderer. Without definitions, effects and transitions are routed as before
 | Watchdog overrun | n/a | skipped from the next frame, `WatchdogTimeout` reported |
 | Transition registered | drawn | drawn |
 | Transition unknown / missing / program refused | — / no transition / `withLayer` | routed / no transition / no transition |
-| Effects on adjustment layers | `compositeAdjustment` | routed (`Feature::Adjustment`; the composite lane ports `FRAG_COMPOSITE`) |
+| Effects on adjustment layers | `compositeAdjustment` | drawn (the compositor's adjustment node with the real chain); the same per-effect rules |
 
 `capability::unsupported_with_definitions` gives the same answer statically for routing
-consumers; `unsupported` and `unsupported_with_media` are unchanged (they list effects
-and transitions). Built-ins: `pm_render::builtin_definitions()` (the 16 effects and 4
+consumers; `unsupported` and `unsupported_with_media` are unchanged (they list effects,
+transitions, and adjustment layers with effects). The interactive engine's presenter
+(pm-node `present/document.rs`) routes with `unsupported_with_media` and, once the
+session has definitions, ignores those three features; a definition it cannot draw
+fails the frame as unsupported and routes then. Built-ins: `pm_render::builtin_definitions()` (the 16 effects and 4
 transitions as the kernel snapshots them; a vitest fails when `builtins.json` drifts
 from the kernel; `bun engine/crates/pm-render/tools/effects/builtins.ts` rewrites it).
 
@@ -146,7 +187,13 @@ query set and readback per renderer; a frame encoded while the previous timed fr
 unread is not timed. Readback is never waited for during rendering: the next frame
 collects it (`Watchdog::collect`). A definition over the budget (default 250 ms per
 instance per frame) is disabled from the next frame, skipped with its data kept, and
-reported (`WatchdogTimeout`, effect scope) until it is registered again.
+reported (`WatchdogTimeout`, effect scope) until it is registered again: a kernel delta
+that upserts it (a register or hot reload of that id, even with the same source), a
+changed source in a full set, or its removal. A full update or an embedded set that
+repeats an unchanged definition (session start, after a refused push, another view's
+set) keeps it off. `Effects::apply` forgets the records of a delta's upserts; the
+interactive engine loads full sets per view, so pm-engine passes a delta's upserted ids
+to `FramePresenter::definitions` and pm-node's `Composer::use_definitions` forgets them.
 
 Measured: with eleven test renderers busy in one process, Metal left pass-boundary
 samples of render passes unwritten (zeros) in 4 of 10 spans, and end-of-pass samples of
@@ -181,15 +228,29 @@ Kernel (`kernel/definition-snapshots.ts`):
   winner per id (last registered wins, disposing restores the previous one), one change
   per task (registry batches make a reload one change).
 - `SessionDefinitions`: one receiver's stream, a full update at generation 1, then
-  deltas numbered by one; a refused update makes the next one full.
+  deltas numbered by one; a refused update makes the next one full. A viewer session
+  (`engine-connection/session.ts`) resends the full set at once after the first
+  refusal (a generation gap after an engine restart), then backs off from 250 ms,
+  doubling; after 6 refusals in a row it stops and the next registry change sends the
+  full set (`SessionDefinitions.stale`). A closed session's stream leaves the list
+  `createEngineDefinitions` keeps.
 - `engine-definitions.ts` installs it with "Use New Engine" on: main's relay gets the
   stream (`nativeEngine.pushDefinitions`), `PM.EngineDefinitions.session(send)` gives an
   engine session its own stream, and `GL.compileError` answers for engine reports too.
 
 Engine (`pm_render::effects::Effects`): applies updates in generation order
 (`pm_protocol::definitions::DefinitionSet`), translates what changed (a same-source
-re-push reuses the program; a changed one gets a fresh watchdog record), and returns the
-per-definition failures (`DefinitionsApplied.failures`).
+re-push reuses the program; a changed one gets a fresh watchdog record, as does every
+upsert of a delta), and returns the per-definition failures
+(`DefinitionsApplied.failures`).
+
+**Program cache on disk.** `Renderer::set_program_cache_dir(dir)` keeps translated GLSL
+in `dir/glsl` (`pm_glsl::Cache`; 3D programs in `dir`). Main passes
+`<userData>/Engine Cache/Shader Cache` to the engine processes
+(`POWERMOVE_ENGINE_SHADER_CACHE`) and the interactive engine's composer uses it, so only
+the first launch translates the built-ins on the render thread. Measured
+(`tests/effects.rs`, release, M4 Max): the 20 built-ins in 120 ms cold, 1.4 ms from the
+folder.
 
 **Shader meta.** `EngineShaderMeta` fills `uiState.getShaderMeta` and the compile errors
 from engine reports at their revision: definition failures go to every extension layer
@@ -234,11 +295,28 @@ pipeline creation.
 sets on a photo, an alpha image at 85% opacity, and a rotated solid; every transition in
 and out on a photo and a solid; a stack with Glow, an animated enable, Drop Shadow, a
 disabled effect, and a missing one; effects on a group, inside a precomp, on a precomp
-layer, and a transition on a group. Capture `effects-20261016-041938-4837194b` (79
-samples, each opaque and as a transparent float frame). With the newest v1 and render
-captures, 149 samples are compared: 146 within the Standard class (their transparent
-float frames within 1 CV), the 3 Posterize samples (opaque and float) in the
-WebGL-unstable class (below), 0 failures.
+layer, and a transition on a group; effects with the compositor's other steps
+(`render/fx-compositing`: a masked blur, Glow with screen, Drop Shadow before a track
+matte, a transition after a multiply composite, an adjustment with animated opacity, a
+masked adjustment with multiply); adjustment layers (`render/fx-adjustment`: a blur over
+a time range, Glow and Duotone feathered with screen at 80%, Drop Shadow at 60%, alpha
+content over transparency, an adjustment inside a precomp). Capture
+`effects-20261017-060101-ca4d364f` (87 samples, each opaque and as a transparent float
+frame), measured 2026-10-17: 84 samples within 1 CV everywhere (max 1 CV; their float
+frames within 0.63 CV), the 3 Posterize samples in the WebGL-unstable class (below), 0
+failures. With the newest v1, render, and composite captures, `corpus.rs` compares 202
+frames: 0 failed, 6 (the 3 Posterize samples, opaque and float) listed apart.
+
+**Linear blending** (`tests/effects_linear.rs`, no WebGL reference exists): each of the
+16 built-in effects (the corpus's non-trivial parameters for Color, Levels, and
+Gradient), on an opaque picture larger than the frame over black and on a solid over
+transparency; the 4 transitions at progress 0.2, 0.5, and 0.8 over a full-frame
+picture; a raw effect mixing the layer with `u_backdrop`; adjustment layers with
+Invert, Blur, and Duotone at 100%. Each, with linear blending on, against the same
+project in Standard: every case within 1 CV for 100% of channel values (max 1 CV).
+Also: a blur across a hard black and white edge averages E values (midpoint 0.5, not
+0.735) and a 50% white-over-black composite in the same renderer is 188 with linear
+blending on and 128 off (the control that linear light is in force).
 
 **The WebGL-unstable class** (amendment 9). `webgl.ts --perturb-input` moves every
 input texel one binary16 step away from zero; WebGL's own output then moves past the
@@ -276,6 +354,7 @@ bun engine/crates/pm-render/tools/effects/collect.ts             # shader corpus
   bun engine/crates/pm-render/tools/effects/webgl.ts [--perturb-input]
 bun engine/crates/pm-render/tools/effects/expectations.ts        # probe verdict fixture
 cargo test -p pm-render --test effects_webgl -- --nocapture      # shader parity
+cargo test -p pm-render --release --test effects_linear -- --nocapture  # linear blending
 bun engine/corpus/src/capture.ts --only render/fx-,render/tr- --label effects --skip-real --skip-scenarios
 cargo test -p pm-render --release --test corpus -- --nocapture   # app-level parity
 cargo run --release -p pm-glsl --bin pm-glsl-fuzz -- --seeds <seeds.json> --iterations 3000
@@ -302,9 +381,12 @@ cargo test -p pm-render --release --test effects builtin_costs -- --ignored --no
 - **The engine process** (`pm-engine`) applies `pushDefinitions` to the session's
   `DefinitionSet` without translating, so `definitionsApplied` carries no failures; the
   interactive engine's presenter translates the set when it arrives and sends each
-  failure as a `failure` event instead (definition scope). Translating a cold set of
-  the 20 built-ins takes about 150 ms on the presenter's render thread.
-- **Adjustment layers** with effects stay routed (they need `FRAG_COMPOSITE`).
+  failure as a `failure` event instead (definition scope). On the first launch (an
+  empty shader cache folder) translating the 20 built-ins takes about 120 to 150 ms on
+  the presenter's render thread; later launches load them from the folder.
+- **Linear blending with an alpha above 1:** in Standard such a pixel darkens the stack
+  beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
+  composite is in linear light and there is no reference for it.
 - **WebGL-unstable class** pending review (above).
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); Store has 3 public extensions, not in this
