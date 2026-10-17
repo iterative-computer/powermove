@@ -135,7 +135,8 @@ mod review {
         std::fs::create_dir_all(&out).unwrap();
         let mut html = String::from(
             "<!doctype html><meta charset=utf-8><title>Text review</title><style>body{font:13px system-ui;background:#111;color:#ddd}figure{margin:16px 0}img{image-rendering:pixelated;display:block}figcaption{margin:4px 0 12px}</style>\
-             <h1>Text review</h1><p>Rows, top to bottom: today's Canvas2D, engine level 1 (Canvas2D profile), CoreText with font smoothing, engine level 2 (CoreText profile). Scores are ink SSIM.</p>",
+             <h1>Text review</h1><p>Rows, top to bottom: today's Canvas2D, engine level 1 (Canvas2D profile), CoreText with font smoothing, engine level 2 (CoreText profile). Scores are ink SSIM.</p>\
+             <p>Cases marked <em>emoji</em> hold color bitmap glyphs (Apple Color Emoji). At both levels the engine places and sizes them as Canvas2D does (amendment 10), not as CoreText does, so their level 2 vs CoreText score is low by design and is not a failure: compare their level 2 row with the Canvas2D row instead.</p>",
         );
         let mut n = 0;
         for (case, shot) in cases["cases"]
@@ -304,11 +305,20 @@ mod review {
                     }
                 }
             }
+            let emoji = faces
+                .iter()
+                .flatten()
+                .any(|f| pm_text::render::bitmap::has_bitmaps(FaceRef::of(f)));
+            let note = if emoji {
+                " (emoji: Canvas2D placement at level 2 by design; compare row 4 with row 1)"
+            } else {
+                ""
+            };
             let name = format!("{id}.png");
             png(&out.join(&name), zw, zh * 4, &sheet);
             let _ = write!(
                 html,
-                "<figure><img src=\"{name}\" width=\"{zw}\"><figcaption>{id} — {} {} px, weight {}, density {density}: level 1 vs Canvas2D {s1:.4}, level 2 vs CoreText {s2:.4}</figcaption></figure>",
+                "<figure><img src=\"{name}\" width=\"{zw}\"><figcaption>{id} — {} {} px, weight {}, density {density}: level 1 vs Canvas2D {s1:.4}, level 2 vs CoreText {s2:.4}{note}</figcaption></figure>",
                 d["font"].as_str().unwrap_or(""),
                 d["size"],
                 d["weight"]

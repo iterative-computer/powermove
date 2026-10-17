@@ -18,7 +18,9 @@ anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
 | Apple Color Emoji (`sbix`), placed as Canvas2D places it | Drawn | `fit-emoji` (6 to 64 px), `emoji` group |
 | RTL and complex scripts the level 1 layout shapes (Arabic, Hebrew, Devanagari, Thai, CJK) | Drawn | `scripts` group |
 | `compat` level 2 text and captions, at output resolution | Drawn when the host gives level 2 fonts; still routed by the static check (below) | `tests/text_level2.rs` |
-| Color vector glyphs (`COLR`) | Refused (`Feature::Text`), not drawn wrong | `Painter::unsupported` |
+| Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
+| Valid CSS colors the engine does not reproduce (`lab()`, `lch()`, `oklab()`, `oklch()`, `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`, system colors, any functional notation that does not parse) | Refused (`Feature::Text`), not drawn with a fallback | `tests/text_colors.rs` |
+| Color vector glyphs (`COLR`) | Refused (`Feature::Text`), not drawn wrong | `scene::tests::color_vector_glyphs_are_refused_not_drawn` |
 | Text and captions without configured fonts | Refused (`Feature::Text`) | `tests/text_gpu.rs` |
 
 Text and captions have no shadow property today (drop shadow is an effect).
@@ -41,13 +43,27 @@ is a `TextScene` of ordered draws in device pixels:
 - `rasterAnimatedText`: one `fillText(g.text, 0, 0)` per posed glyph
   (opacity above 0) through `density · translate(−x0, −y0) · translate(x,
   baseline) · glyph matrix`, with `globalAlpha`, `filter: blur(blur × density
-  px)`, the range-styled font, and the fill style carried from glyph to glyph
-  as the canvas carries it. `pm_eval`'s `animated_raster_glyphs` gives the
+  px)`, the range-styled font, and `fillStyle = g.color ?? g.style.color`.
+  Each glyph draws between `save()` and `restore()`, so a color the setter
+  rejects leaves the canvas default, black (never the previous glyph's
+  color). `pm_eval`'s `animated_raster_glyphs` gives the
   glyphs with the range-font advance shift and the canvas box.
 - Captions `draw`: the box (`roundedRect`, `hexToRgba(boxColor,
   boxOpacity)`), then per word `strokeText` (2 × stroke × size / style size,
   round joins, miter limit 2) and `fillText` (fill or highlight color), each
-  word with its state's alpha and scale about the word's center.
+  word with its state's alpha and scale about the word's center. Each word
+  draws between `save()` and `restore()`: a rejected fill or highlight color
+  draws in the box fill (black without a box), and a `hexToRgba` string
+  holding `NaN` (a short or non-hex code) is rejected the same way, so a box
+  fills and a stroke strokes black.
+
+A color string a layer's draws need is classified by
+`pm_text::render::color::classify`: parsed to the 8-bit sRGB value the
+canvas stores, rejected (the setter keeps the restored style), or
+unsupported (a valid CSS color the parser does not reproduce). Unsupported
+colors refuse the layer (`Feature::Text`) in `render` and in
+`Renderer::text_raster`, which drains the refusal so it never lands on a
+later layer.
 
 Only the part of the canvas that holds ink is allocated (`TextScene::ink`,
 whole canvas pixels); the quad shrinks to that crop, which samples
@@ -210,10 +226,21 @@ over the same coverage, max |Δ| ≤ 1e-6 (blurred animator, emoji, stroked
 caption with box); Vello against `vello_cpu` coverage, ink SSIM ≥ 0.9994;
 deterministic; served from the cache.
 
+**Colors** (`tests/text_colors.rs`, rerun 2026-10-16 after the fill-style
+fix): `hsl()`, `hsla()`, `hwb()` scenes equal their hex scenes; rejected
+colors draw the restored style in plain text, range styles, caption fill,
+highlight, box and stroke; six unsupported colors refuse in `text_raster` and
+`render` and leave nothing for the next layer. The color parser's values are
+those Chromium's `fillStyle` reports (Electron 44, checked 2026-10-16). The
+rerun of `text_raster`, `text_corpus`, `text_level2` and `text_gpu` after the
+fix gave the numbers above unchanged.
+
 **Typing** (`examples/text_typing.rs`, the engine's share: layout, scene,
 coverage, paint, composite at 1920 × 1080, GPU finished; 71 keystrokes): a
 96 px title p50 1.39 ms, p95 2.18 ms; a 48 px paragraph in a 1400 px box p50
-1.85 ms, p95 3.16 ms; 36 px p50 1.26 ms, p95 1.75 ms. The viewer bridge and
+1.85 ms, p95 3.16 ms; 36 px p50 1.26 ms, p95 1.75 ms. Rerun 2026-10-16 23:30
+(load 9.6 to 11.6): p95 1.65, 3.49 and 1.79 ms; an independent rerun under
+load measured p95 2.7, 4.2 and 2.2 ms, so expect ±1 ms with machine load. The viewer bridge and
 the editor's own handling are not included; the section 25 row is end to
 end (Phase 3a gate).
 
@@ -221,9 +248,12 @@ end (Phase 3a gate).
 
 `cargo run --release -p pm-render --example text_review` writes one sheet per
 text case (rows: today's Canvas2D, engine level 1, CoreText with smoothing,
-engine level 2) and an `index.html` with the scores. Sheets for Jude's text
-review (420 cases): `~/Library/Application Support/Powermove Engine
-Corpus/review/text-1792139695/index.html`.
+engine level 2) and an `index.html` with the scores. Emoji cases are marked:
+the engine places emoji as Canvas2D does at both levels (amendment 10), so
+their level 2 vs CoreText score is low by design (row 4 compares with row 1,
+not row 3). Sheets for Jude's text review (420 cases): `~/Library/Application Support/Powermove Engine
+Corpus/review/text-1792218705/index.html` (regenerated 2026-10-16 with the
+emoji notes; supersedes `text-1792139695`).
 
 ## Tools and reproduction
 
@@ -238,6 +268,7 @@ cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_D
 cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_gpu
+cargo test --release -p pm-render --test text_colors
 cargo run --release -p pm-render --example text_fit -- <capture> sizes|dark|stroke|bold|emoji|probe|large|mid|score [profile.json]
 cargo run --release -p pm-render --example text_review
 cargo run --release -p pm-render --example text_typing
@@ -287,3 +318,7 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
   projects left to the text class.
 - `engine/crates/pm-node/src/present/document.rs`: the `Feature::Text` arm
   of `describe`.
+- `engine/crates/pm-text/capture/build.ts`: one entry for the rendering
+  capture page.
+- `engine/Cargo.lock`: Vello, `vello_cpu` and their dependencies.
+- `docs/engine/pm-render.md`: one table row.
