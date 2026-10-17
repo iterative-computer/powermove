@@ -18,7 +18,7 @@ Every corpus is synthetic and lives outside the repository.
 
 | Corpus | Command | Default location |
 |---|---|---|
-| Format matrix (195 files: 84 video, 5 HDR, 41 stills, 25 sequence frames, 4 animated, 36 audio) | `engine/crates/pm-media/tests/corpus/formats.sh [out]` | `~/Library/Caches/powermove-engine/media-corpus/formats` (`$PM_MEDIA_CORPUS/formats`) |
+| Format matrix (197 files: 84 video, 5 HDR, 43 stills, 25 sequence frames, 4 animated, 36 audio) | `engine/crates/pm-media/tests/corpus/formats.sh [out]` | `~/Library/Caches/powermove-engine/media-corpus/formats` (`$PM_MEDIA_CORPUS/formats`) |
 | Seek corpus (open GOP, B-pyramid, x264/x265 files) | `engine/crates/pm-media/tests/corpus/gen.sh` | `~/Library/Caches/powermove-engine/media-corpus` |
 | Model corpus (parity GLBs, glTF edge cases, OBJ bundles) and the three.js references | `bun engine/crates/pm-geom3d/tools/three-models.ts --corpus [dir]` | `~/Library/Caches/powermove-engine/model-corpus` (`$PM_MODEL_CORPUS`) |
 
@@ -93,11 +93,13 @@ source pass at the project's working precision.
 | Image sequences (PNG, TIFF, DPX, EXR) | per frame, gaps reported | as the frames |
 | Animated GIF, APNG, WebP, AVIF | composited frames with their delays | 8 (AVIF as decoded) |
 
-Stills that carry an ICC profile other than sRGB (Display P3, Adobe RGB,
-ProPhoto, gray gamma 2.2) convert through ColorSync into extended linear
-sRGB, unclipped; sRGB and untagged stills bypass ColorSync; floating-point
-stills are linear; integer stills without a profile read as sRGB
-(section 9).
+Stills with an ICC profile equivalent to sRGB (including Apple's "Generic
+Gray Gamma 2.2", within 1/1024 of the sRGB curve) and untagged stills
+bypass ColorSync; Display P3 converts in float by matrix; every other
+profile (Adobe RGB, ProPhoto, "Generic Gray" gamma 1.8, camera and printer
+RGB) converts through ColorSync, relative colorimetric, from float samples
+into extended linear sRGB, unclipped. Floating-point stills are linear;
+integer stills without a profile read as sRGB (section 9).
 
 ### Audio
 
@@ -162,7 +164,24 @@ default". Shape (all members optional; `"auto"` and `null` mean absent):
 ```
 
 Members that cannot be used are reported (`interpret.<member>: <message>`)
-and read as absent. The engine accepts no raw paths: the sheet asks main,
+and read as absent.
+
+Stills whose ICC profile is neither sRGB-equivalent nor Display P3
+(`pm_media::interpret::interpret_still`, which both the sheet and the
+renderer use):
+
+- Alpha overrides change how ColorSync's input is read, never its output:
+  the stored samples are taken out of their alpha reading (a matte removed,
+  unpremultiplied above `UNPREMULTIPLY_ALPHA_FLOOR`) in the stored encoding,
+  converted as opaque color, and premultiplied again in linear light
+  (`convert_to_linear_srgb(still, pool, alpha)`).
+- A primaries or transfer override sets the profile aside as a whole (it
+  describes primaries and curve together and cannot be split): the stored
+  samples are read with the override, and the value not overridden takes
+  the default of a still without a profile. The sheet shows that origin
+  ("The ICC profile is set aside by the override; ...").
+- Without either, the sheet shows Rec.709 primaries and Linear transfer,
+  both from the file ("ICC profile, converted by ColorSync to ..."). The engine accepts no raw paths: the sheet asks main,
 main resolves the asset to a `mediaRead` capability handle on the job
 engine (session 0), and the job engine answers `probeMedia` with
 `mediaFacts` off its thread. The sheet follows the Settings sheet anatomy
@@ -171,6 +190,10 @@ its origin; Apply writes the `interpret` member, and the display size and
 duration it implies, as one Undo step.
 
 ## How sources are drawn
+
+What the renderer does with each kind of source. Several are drawn only for
+assets with `interpret` until they are compared with today's viewer (see
+Routing below).
 
 - **HDR in Standard projects.** PQ and HLG sources tone map with BT.2446
   Method A (`pm_color::tonemap`, the WGSL `pm_hdr_to_sdr` in the source
@@ -182,8 +205,12 @@ duration it implies, as one Undo step.
   chroma upsampling, from the neighboring fields: at field rate when the
   composition rate is at least twice the source frame rate (each frame's
   fields in display order), else at frame rate showing each frame's first
-  field. Field-rate output equals FFmpeg's `bwdif=mode=send_field`
-  converted with the same matrix and chroma filter.
+  field. Field-rate output equals FFmpeg's `bwdif=mode=send_field` run on
+  the same decode and converted with the same matrix and chroma filter, for
+  4:2:2 8- and 10-bit, DV PAL 4:2:0, and DVCPRO 4:1:1, both field orders:
+  bwdif runs on each plane, so interlaced 4:2:0 and 4:1:1 chroma is
+  deinterlaced at its own resolution from its own fields, then upsampled
+  with the source's siting as a progressive frame.
 - **Frame selection** follows section 5 rule 7 on presentation timestamps
   (VFR by timestamp, never by index) with amendment 2's tie-break; a
   conformed rate shows presented frame n from n / rate.
@@ -194,18 +221,48 @@ duration it implies, as one Undo step.
 ### Routing (`pm_render::unsupported`)
 
 The capability check stays conservative: a feature leaves it only when the
-renderer draws it and a parity test proves it.
+renderer draws it and a parity test against today's viewer proves it. An
+asset with `interpret` is different: the legacy renderer ignores the member
+(the project is stamped `requiresEngine`), so there is no legacy look to
+match and only what the renderer cannot draw at all is refused.
 
 | Source | Without `interpret` | With `interpret` |
 |---|---|---|
-| Quarter-turn rotation, clean aperture, interlaced, HDR (PQ, HLG, Dolby Vision with a base layer) | drawn | drawn |
+| Progressive, unrotated, square-pixel Rec.709 or BT.601 video (VFR included) | drawn | drawn |
+| HDR video (PQ, HLG, Dolby Vision with a base layer) | legacy: today's Chromium handling is not measured (`corpus.md`, "Not covered yet"), so Method A's difference has no appendix A item or corpus case (DECISION) | drawn, tone mapped with Method A |
+| Interlaced video | legacy (today's viewer shows the woven frame; bwdif is a look change) | drawn, bwdif at field or frame rate |
+| Quarter-turn rotation, non-square pixels, a cropping clean aperture | legacy (exact against FFmpeg, not compared with today's viewer) | drawn |
 | Wide-gamut SDR video (Display P3, BT.2020) | legacy (today's viewer clips at upload: the open decision of P3 stills) | drawn, converted in linear light |
 | Stills with other ICC profiles | legacy | drawn through ColorSync |
-| AVIF, BMP, ICO, GIF, EXR, DPX stills; image sequences | legacy (decoded and tested here, not yet proven against the legacy look) | legacy |
+| AVIF, BMP, ICO, GIF, EXR, DPX, 16-bit PNG, PNG with `gAMA`/`cHRM`, and other still classes `pm_render::stills` has not proven against the legacy look | legacy | drawn (decoded and tested against reference decoders in `pm-media`) |
+| Image sequences and animated images | legacy | legacy |
+| HDR stills (a PQ or HLG reading, from the file or an override); OpenEXR chromaticities other than Rec.709 (no primaries override) | legacy | legacy |
 | Other rotation angles, Dolby Vision profile 5, unknown primaries | legacy | legacy |
 
-A project stamped `requiresEngine` routes to the engine only when the stamp
-names native features this renderer draws (linked media, `interpret`).
+A project stamped `requiresEngine` routes to the engine only when every
+native-only field it uses (the section 6 table, `pm_protocol::patch::
+FIELD_TABLE`) is one this engine draws or judges elsewhere and at least one
+it draws is present: linked media and `interpret` are drawn; project
+`color` (its own `ProjectColor` check) and clip `pitch` (audio) are judged
+elsewhere; precomp `keepFrameRate` is not drawn, so a stamp that may carry
+it routes the project away. A test keeps that classification equal to the
+field table, so a new native-only field must be classified first.
+
+### Open decisions
+
+- **HDR in Standard projects.** Method A is implemented and equals the f64
+  oracle through the renderer (HDR10 6.78e-4, HLG 1.34e-5), but section 9
+  makes the change of look conditional on a measurement of today's Chromium
+  handling, an appendix A item, and a corpus case, and none exists yet
+  (`corpus.md`, "Not covered yet"). Until then iPhone HLG and HDR10 clips
+  in existing projects keep today's look through the legacy renderer.
+- **Interlaced, rotated, non-square-pixel, cropping-clean-aperture
+  video.** Exact against FFmpeg (bwdif within 2.5e-7, rotations and crops
+  bit-exact), not compared with today's viewer, which shows interlaced
+  frames woven. They need legacy captures and parity cases before they are
+  drawn without `interpret`.
+- **Wide-gamut SDR video and ICC stills** shown unclipped versus today's
+  clipping at upload: drawn only with `interpret`.
 
 ## 3D model import against three.js r180
 
@@ -296,8 +353,15 @@ From `cargo test -p pm-media --test formats -- --ignored --nocapture`:
 - Stills against reference decoders (`djpeg`, `dwebp`, FFmpeg): max |Δ|
   0.000 CV for PNG 8/16, TIFF 8/16, BMP, GIF, ICO, JPEG (all subsamplings,
   progressive, 12-bit, lossless 16-bit), and WebP lossy and lossless.
-- ICC stills against ColorSync: Display P3 max 1.107 / mean 0.159 CV,
-  Adobe RGB 0.529 / 0.091, ProPhoto 16-bit 0.525 / 0.256, gray 2.2 exact;
+- ICC stills against ColorSync's 8-bit conversion to sRGB (sips): Display
+  P3 (matrix) max 1.107 / mean 0.159 CV; through ColorSync from float
+  samples, Adobe RGB 1.422 / 0.165, ProPhoto 16-bit 1.511 / 0.279, Generic
+  Gray (gamma 1.8) 0.559 / 0.155; Generic Gray Gamma 2.2 is
+  sRGB-equivalent, passes through, and is exact. ColorSync's 8-bit path
+  differs from its float path near black at the gamut edge; against the
+  profiles' own matrix/TRC (or gray TRC) evaluated in f64 the
+  ColorSync-converted stills are within Adobe RGB 0.318 / 0.064, ProPhoto
+  0.258 / 0.023, Generic Gray 0.043 / 0.033 CV;
   out-of-sRGB pixels kept unclipped (18,956 of 38,644 for P3).
 - Audio: every format decodes sample-identical to FFmpeg (max |Δ| 0) with
   FFmpeg's priming; seeks equal sequential decode within 3.1e-5 (codec
@@ -306,3 +370,18 @@ From `cargo test -p pm-media --test formats -- --ignored --nocapture`:
   compared value (radius and center within 1e-9 relative); both OBJ bundles
   pack to imports identical to `prepareModelImport`'s; 19 `parseObj`
   inputs (3 files, 16 malformed or edge sources) match exactly.
+
+From `cargo test -p pm-render --test footage -- --nocapture` (renderer,
+float32 targets):
+
+- HDR through Method A against the f64 oracle: HDR10 6.78e-4, HLG 1.34e-5.
+- bwdif at field rate against FFmpeg's bwdif on the same decode (8 fields
+  each, first, middle, and last): `interlaced-bff.mxf` 4:2:2 2.48e-7,
+  `interlaced-tff.mov` ProRes 4:2:2 10-bit 2.47e-7, `dv-pal.dv` 4:2:0
+  2.50e-7, `dvcpro25-pal.mov` 4:1:1 2.48e-7; frame-rate output equals the
+  first field exactly.
+- Interpret Footage on an RGBA8 PNG with macOS's Adobe RGB (1998) profile,
+  against Adobe RGB → linear Rec.709 evaluated in f64: as the file says
+  (straight) 0.202 CV, alpha ignore 0.372, straight 0.202, premultiplied
+  0.202, premultiplied with an #FF8000 matte 0.202; transfer gamma 2.2 and
+  primaries Display P3 (profile set aside) 0.000.
