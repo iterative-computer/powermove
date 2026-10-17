@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { BlenderJobRequest, Event } from '../../shared/engine-protocol';
-import { blenderVersion, EngineBlender, pngSize, resolvedDevice, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
+import { blenderVersion, EngineBlender, pngSize, resolvedDevice, sweepScratch, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
 import { HandleTable } from './handles';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -105,6 +105,16 @@ describe('the pinned worker', () => {
     expect(blenderVersion('Blender 5.0')).toBe('5.0.0');
     expect(resolvedDevice({ resolvedDevice: { kind: 'oneapi', name: 'Arc' } })).toEqual({ kind: 'oneApi', name: 'Arc' });
     expect(resolvedDevice({})).toBeNull();
+  });
+});
+
+describe('scratch', () => {
+  it('of processes that no longer run is swept', async () => {
+    const parent = path.join(root, 'powermove-engine-blender');
+    for (const name of ['999999', String(process.pid), 'not-a-pid']) await mkdir(path.join(parent, name), { recursive: true });
+    await sweepScratch(parent);
+    const left = (await import('node:fs/promises')).readdir(parent);
+    expect((await left).sort()).toEqual(['not-a-pid', String(process.pid)].sort());
   });
 });
 

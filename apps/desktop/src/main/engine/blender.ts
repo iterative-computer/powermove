@@ -107,6 +107,21 @@ export async function pngSize(file: string): Promise<{ width: number; height: nu
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
+/** Removes the scratch of processes that no longer run. */
+export async function sweepScratch(parent: string): Promise<void> {
+  for (const name of await readdir(parent).catch(() => [] as string[])) {
+    const pid = Number(name);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      alive = (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+    if (!alive) await rm(path.join(parent, name), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 type Pending = { id: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> | null; left: number; since: number };
 
 /** One serialized Blender process running the pinned worker. */
@@ -269,7 +284,16 @@ export class EngineBlender {
   private current: Queued | null = null;
   private paused = false;
 
-  constructor(private readonly options: EngineBlenderOptions) {}
+  /** This process's scratch parent: `<tmp>/powermove-engine-blender/<pid>`.
+   *  Scratch of processes that no longer run is removed at start (an app
+   *  that was killed never disposed its worker). */
+  private readonly scratch: string;
+
+  constructor(private readonly options: EngineBlenderOptions) {
+    const parent = path.join(options.tempRoot, 'powermove-engine-blender');
+    this.scratch = path.join(parent, String(process.pid));
+    void sweepScratch(parent);
+  }
 
   async status(): Promise<{ type: 'blenderStatus'; available: boolean; version: string | null; error: string | null }> {
     const found = await this.options.locate();
@@ -329,6 +353,7 @@ export class EngineBlender {
     for (const q of this.queued) q.cancelled = true;
     await this.worker?.dispose();
     this.worker = null;
+    await rm(this.scratch, { recursive: true, force: true }).catch(() => {});
   }
 
   private area(handle: string, session: number, port: number): string {
@@ -378,7 +403,8 @@ export class EngineBlender {
     if (!found.available || !found.path) throw new ProtocolError('blenderMissing', found.error || 'This composition renders with Blender. Install Blender 4.5 or later, or set its renderer to Native.');
     if (!this.worker || this.worker.executable !== found.path) {
       await this.worker?.dispose();
-      this.worker = new PinnedWorker(found.path, this.options.tempRoot, this.options.timeoutMs);
+      await mkdir(this.scratch, { recursive: true, mode: 0o700 });
+      this.worker = new PinnedWorker(found.path, this.scratch, this.options.timeoutMs);
     }
     this.worker.setPaused(this.paused);
     const worker = this.worker;
