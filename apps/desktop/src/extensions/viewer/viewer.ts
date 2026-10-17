@@ -1108,7 +1108,18 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
   const disposable = api.events.on(event, handler);
   eventOffs.push(() => disposable.dispose());
 };
-listen('project:changed', () => { viewportPlan = null; V.layout(); });
+/* An edit announces several project changes in one task (history, layers,
+   project), and each layout measures the stage, which forces the editor's
+   layout when anything wrote to it: three forced layouts per edit, 9 ms at
+   1,000 layers (docs/engine/perf.md). They lay out once, at the end of the
+   task, before the next frame. */
+let layoutQueued = false;
+const layoutAtEndOfTask = () => {
+  if (layoutQueued) return;
+  layoutQueued = true;
+  queueMicrotask(() => { layoutQueued = false; V.layout(); });
+};
+listen('project:changed', () => { viewportPlan = null; layoutAtEndOfTask(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
 // The engine connection registered or disposed `engine.viewer`: attach or
 // detach now, without a full layout.
