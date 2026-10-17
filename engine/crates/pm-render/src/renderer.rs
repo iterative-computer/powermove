@@ -103,6 +103,7 @@ pub struct Renderer {
     pipelines: Pipelines,
     media: MediaCache,
     pool: TargetPool,
+    uniforms: crate::exec::UniformPool,
     scene3d: Scene3dRenderer,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
@@ -122,6 +123,7 @@ impl Renderer {
             pipelines,
             media,
             pool: TargetPool::new(),
+            uniforms: crate::exec::UniformPool::default(),
             scene3d: Scene3dRenderer::default(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
@@ -325,10 +327,12 @@ impl Renderer {
             bracket.begin(&mut encoder);
         }
         let (legend, taken, unsupported, exec_failures) = {
+            self.uniforms.reset();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
                 pipelines: &self.pipelines,
+                uniforms: &mut self.uniforms,
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,

@@ -31,10 +31,50 @@ pub(crate) struct Resolved {
     pub layer: String,
 }
 
+/// The quad uniform buffers of a renderer's passes, reused frame after frame
+/// (the n-th pass of a frame takes the n-th buffer): creating one per pass
+/// per frame was 8% of a viewer frame at 500 layers (docs/engine/perf.md).
+/// `queue.write_buffer` lands before the next submission's commands, after
+/// the earlier submissions that read the buffer.
+#[derive(Default)]
+pub(crate) struct UniformPool {
+    buffers: Vec<wgpu::Buffer>,
+    next: usize,
+}
+
+impl UniformPool {
+    /// A frame starts: hand the buffers out from the first again.
+    pub fn reset(&mut self) {
+        self.next = 0;
+    }
+
+    /// A buffer of at least `size` bytes for this frame's next pass.
+    fn take(&mut self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        let i = self.next;
+        self.next += 1;
+        if let Some(b) = self.buffers.get(i).filter(|b| b.size() >= size) {
+            return b.clone();
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pm quads"),
+            size: size.next_power_of_two().max(4096),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if i < self.buffers.len() {
+            self.buffers[i] = buffer.clone();
+        } else {
+            self.buffers.push(buffer.clone());
+        }
+        buffer
+    }
+}
+
 pub(crate) struct Exec<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     pub pipelines: &'a Pipelines,
+    pub uniforms: &'a mut UniformPool,
     pub media: &'a mut MediaCache,
     pub pool: &'a mut TargetPool,
     pub scene3d: &'a mut Scene3dRenderer,
@@ -306,12 +346,7 @@ impl Exec<'_> {
             let at = (i + 1) * UNIFORM_STRIDE as usize;
             data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
         }
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm quads"),
-            size: data.len() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let buffer = self.uniforms.take(self.device, data.len() as u64);
         self.queue.write_buffer(&buffer, 0, &data);
         let quad_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm quads"),
