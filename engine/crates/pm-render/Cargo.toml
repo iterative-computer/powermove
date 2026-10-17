@@ -29,5 +29,6 @@ sha2 = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 
 [dev-dependencies]
+pm-text = { path = "../pm-text", default-features = false }
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 png = "0.18"
