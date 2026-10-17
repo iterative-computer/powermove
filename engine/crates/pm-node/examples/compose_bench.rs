@@ -5,6 +5,12 @@
 //! (evaluation, planning, encoding) and the wall time including the GPU.
 //!
 //!   cargo run --release -p pm-node --example compose_bench -- <document.json> <composition> [frames] [width] [height]
+//!
+//! `PM_BENCH_EDIT=drag` makes every frame a new revision that moves one
+//! layer (a layer drag: one leaf edit per frame at a fixed time);
+//! `PM_BENCH_EDIT=playback` edits one layer's opacity per frame while the
+//! time advances (inspector edits during playback, at the worst rate).
+//! docs/engine/perf.md records the runs.
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -27,15 +33,28 @@ fn main() {
     let width: u32 = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(1496);
     let height: u32 = args.get(5).and_then(|v| v.parse().ok()).unwrap_or(904);
     let parse = Instant::now();
-    let doc = pm_model::Document::new(
+    let mut doc = pm_model::Document::new(
         Some(pm_model::json::parse(&text).expect("parse the document")),
         1,
     );
     eprintln!("parsed in {:.1} ms", parse.elapsed().as_secs_f64() * 1e3);
-    let comp = pm_eval::Comp::resolve(&doc, &composition).expect("the composition");
-    let number = |key: &str| pm_eval::node::to_number(comp.member(key));
-    let (cw, ch) = (number("w"), number("h"));
-    let fps = number("fps");
+    let edit = std::env::var("PM_BENCH_EDIT").ok();
+    let (cw, ch, fps, solids) = {
+        let comp = pm_eval::Comp::resolve(&doc, &composition).expect("the composition");
+        let number = |key: &str| pm_eval::node::to_number(comp.member(key));
+        // Indexes of the solid layers (the layers an edit touches).
+        let solids: Vec<usize> = comp
+            .layers()
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                pm_eval::node::string(pm_eval::node::member(Some(l), "type"))
+                    .is_some_and(|t| t.to_string_lossy() == "solid")
+            })
+            .map(|(i, _)| i)
+            .collect();
+        (number("w"), number("h"), number("fps"), solids)
+    };
     let fps = if fps.is_finite() && fps > 0.0 {
         fps
     } else {
@@ -64,9 +83,36 @@ fn main() {
     let media = MediaMap::default();
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
+    let mut apply_ms = Vec::new();
     for k in 0..frames {
+        let at = match edit.as_deref() {
+            Some("drag") => 0,
+            _ => k,
+        };
         let time =
-            Ticks::new((f64::from(k) / fps * TICKS_PER_SECOND as f64).round() as i64).unwrap();
+            Ticks::new((f64::from(at) / fps * TICKS_PER_SECOND as f64).round() as i64).unwrap();
+        if let (Some(mode), false) = (edit.as_deref(), solids.is_empty()) {
+            use pm_model::json::Value;
+            use pm_model::patch::{Patch, PathPart};
+            let layer = solids[(k as usize * 37) % solids.len()];
+            let (key, value) = match mode {
+                "drag" => ("position.x", 100.0 + f64::from(k)),
+                _ => ("opacity", 30.0 + f64::from(k % 60)),
+            };
+            let path = vec![
+                PathPart::Key("comps".into()),
+                PathPart::Key(composition.as_str().into()),
+                PathPart::Key("layers".into()),
+                PathPart::Index(layer as f64),
+                PathPart::Key("p".into()),
+                PathPart::Key(key.into()),
+                PathPart::Key("v".into()),
+            ];
+            let start = Instant::now();
+            doc.apply(&[Patch::set(path, Value::Number(value))])
+                .expect("apply the edit");
+            apply_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        }
         let start = Instant::now();
         let composed = composer
             .compose(&doc, &composition, &media, time, &state, &working)
@@ -101,6 +147,10 @@ fn main() {
     // the document (the audio thread mixes from its own).
     let mut route_ms = Vec::new();
     let mut clone_ms = Vec::new();
+    let mut apply_summary = String::new();
+    if !apply_ms.is_empty() {
+        apply_summary = format!("edit apply: {}", summary(&mut apply_ms));
+    }
     for _ in 0..20 {
         let start = Instant::now();
         let reasons = pm_render::unsupported_with_media(&doc, &composition, &media);
@@ -116,6 +166,9 @@ fn main() {
     println!("document copy: {}", summary(&mut clone_ms));
     println!("compose CPU: {}", summary(&mut cpu));
     println!("compose + GPU: {}", summary(&mut wall));
+    if let Some(mode) = &edit {
+        println!("edits ({mode}, one per frame): {apply_summary}");
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
