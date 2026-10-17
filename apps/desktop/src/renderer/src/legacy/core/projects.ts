@@ -4,6 +4,30 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { needsNewerReader } from '../../../../shared/reader-version';
 import { writeDocument } from '../../engine-doc/write';
 
+/**
+ * The journal without what `patches` overwrites. A patch at a member of the
+ * project itself (`['edits']`, `['revision']`) replaces everything earlier
+ * patches wrote under that member, and the project is an object, so no write
+ * between them can move that member elsewhere: replaying the journal gives
+ * the same document without them. Every edit writes the whole provenance log
+ * (`['edits']`), so without this each entry kept a copy of the log and every
+ * edit rewrote all of them (docs/engine/perf.md). Entries stay, possibly with
+ * no patches.
+ */
+export function supersede(entries: any[], patches: any[]): any[] {
+  const members = new Set<string>();
+  for (const patch of patches) {
+    if (Array.isArray(patch?.path) && patch.path.length === 1 && typeof patch.path[0] === 'string') members.add(patch.path[0]);
+  }
+  if (!members.size) return entries;
+  for (const item of entries) {
+    if (!Array.isArray(item?.patches)) continue;
+    const kept = item.patches.filter((patch: any) => !(Array.isArray(patch?.path) && patch.path.length >= 1 && members.has(patch.path[0])));
+    if (kept.length !== item.patches.length) item.patches = kept;
+  }
+  return entries;
+}
+
 export function install(PM: PMRegistry): void {
 const R: any = {
   KEY: 'projects',          // [{id, name, at, thumb}]
@@ -265,7 +289,7 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
   if (!entry?.projectId || !Array.isArray(entry.patches) || !entry.patches.length) return;
   // Read-only (newer) projects keep no recovery journal; see R.put.
   if (PM.proj?.id === entry.projectId && needsNewerReader(PM.proj)) return;
-  const entries = journal(entry.projectId);
+  const entries = supersede(journal(entry.projectId), entry.patches);
   entries.push({ revision: Number(entry.revision) || 0, patches: entry.patches });
   /* Keep the journal bounded even before the next debounced checkpoint. */
   if (journalBytes(entries) > MAX_JOURNAL_BYTES) {

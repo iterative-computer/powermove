@@ -109,6 +109,32 @@ it('replays compact recovery patches over the last full checkpoint', () => {
 });
 
 
+it('the journal keeps one copy of what each edit rewrites whole and replays to the same document', () => {
+  const { PM, mem } = projectsModel();
+  PM.proj = { id: 'J1', name: 'Journal', revision: 0, edits: [], layers: [{ id: 'L1', p: { o: { v: 100 } } }, { id: 'L2', p: { o: { v: 100 } } }] };
+  PM.Projects.put(PM.proj);
+  const log = [];
+  for (let revision = 1; revision <= 5; revision++) {
+    log.push({ id: `e${revision}`, revision });
+    PM.bus.emit('history:project-patch', {
+      projectId: 'J1', revision,
+      patches: [
+        { path: ['revision'], exists: true, value: revision },
+        { path: ['edits'], exists: true, value: structuredClone(log) },
+        { path: ['layers', revision % 2, 'p', 'o', 'v'], exists: true, value: 10 * revision },
+      ],
+    });
+  }
+  const recovered = PM.Projects.get('J1');
+  assert.equal(recovered.revision, 5);
+  assert.deepEqual(recovered.edits.map(e => e.id), ['e1', 'e2', 'e3', 'e4', 'e5']);
+  assert.deepEqual(recovered.layers.map(l => l.p.o.v), [40, 50]);
+  const entries = mem.get('projectJournal.J1');
+  assert.equal(entries.length, 5, 'every edit keeps its entry');
+  assert.deepEqual(entries.map(e => e.patches.filter(p => p.path[0] === 'edits').length), [0, 0, 0, 0, 1], 'one provenance log');
+  assert.deepEqual(entries.map(e => e.patches.length), [1, 1, 1, 1, 3]);
+});
+
 it('stores a project written for a newer reader once and never autosaves it afterwards', () => {
   const { PM, mem } = projectsModel();
   PM.proj = { id: 'N1', name: 'Newer', layers: [{ id: 'L1' }], minReaderVersion: 2 };
