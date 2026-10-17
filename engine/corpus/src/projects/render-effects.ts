@@ -6,7 +6,8 @@
  * layer buffer, the effect passes with today's uniforms, `u_orig`, the
  * composite, transitions in and out, effect stacks, animated enables,
  * missing definitions, effects on groups and inside precomps, partial
- * opacity, and transparent output.
+ * opacity, transparent output, and effects with masks, mattes, blend modes,
+ * and adjustment layers.
  */
 import { effects, transitions } from '../catalog';
 import { newProject, type Builder, type Channel, type Value } from '../doc';
@@ -108,7 +109,48 @@ function combinations(): CorpusProject[] {
   fading.transitionIn = grouped.transition('wipe', .9, { angle: 45, softness: 30 });
   grouped.add(fading);
 
+  // Effects with the compositor's other steps: masks before effects, the
+  // matte after, blend modes at the composite, adjustment layers over the
+  // stack beneath, and a transition after a blended composite.
+  const mixed = newProject('render/fx-compositing', { name: 'Effects with masks, mattes, blends, and adjustments', backgroundFill: GRADIENT, w: 480, h: 270, dur: 2 });
+  mixed.add(mixed.layer('solid', { name: 'Back', d: { color: '#202634', w: 420, h: 220 }, p: { 'position.x': 30, 'position.y': 25, opacity: 90 } }));
+  const masked = mixed.add(mixed.layer('image', { name: 'Masked blur', d: { asset: ref(PHOTO), fit: 'stretch', w: 200, h: 120 }, p: { 'position.x': 20, 'position.y': 20 } }));
+  masked.masks.push(mixed.mask('ellipse', { x: 10, y: 5, w: 180, h: 110, feather: 20 }));
+  masked.fx.push(mixed.effect('blur', { amount: mixed.ch(4, [[0, 4], [2, 20]]) }));
+  const screened = mixed.add(mixed.layer('solid', { name: 'Screen glow', blend: 'screen', d: { color: '#FF6B1A', w: 110, h: 70 }, p: { 'position.x': 150, 'position.y': 90, opacity: 85 } }));
+  screened.fx.push(mixed.effect('glow', { threshold: 20, radius: 40, intensity: 180 }));
+  const matte = mixed.add(mixed.layer('solid', { name: 'Matte source', on: false, d: { color: '#FFFFFF', w: 120, h: 80 }, p: { 'position.x': 300, 'position.y': 20, rotation: 10 } }));
+  const matted = mixed.add(mixed.layer('image', { name: 'Shadow through a matte', d: { asset: ref('still-alpha.png'), fit: 'stretch', w: 150, h: 100 }, p: { 'position.x': 290, 'position.y': 10 } }));
+  matted.fx.push(mixed.effect('shadow', { distance: 14, softness: 20, opacity: 90 }));
+  matted.matteSource = matte.id; matted.matteMode = mixed.ch('alpha');
+  const crossing = mixed.add(mixed.layer('solid', { name: 'Multiply with a transition', blend: 'multiply', from: .2, dur: 1.8, d: { color: '#4C8DFF', w: 140, h: 90 }, p: { 'position.x': 60, 'position.y': 150 } }));
+  crossing.fx.push(mixed.effect('pixelate', { size: 6 }));
+  crossing.transitionIn = mixed.transition('wipe', .8, { angle: 30, softness: 20 });
+  mixed.add(mixed.layer('adjustment', { name: 'Desaturate', fx: [mixed.effect('color', { saturation: -70, contrast: 15 })], p: { opacity: mixed.ch(100, [[0, 100], [2, 50]]) } }));
+  const tint = mixed.add(mixed.layer('adjustment', { name: 'Masked invert, multiply', blend: 'multiply', fx: [mixed.effect('invert', { amount: 60 })], p: { opacity: 70 } }));
+  tint.masks.push(mixed.mask('rect', { x: 260, y: 140, w: 180, h: 100, feather: 10 }));
+
+  // Adjustment layers (`compositeAdjustment`): spatial and keepOrig effects
+  // on the stack beneath, a stack of effects, a time range, a feathered
+  // mask with a blend, partial opacity over transparency, and one inside a
+  // precomp.
+  const adjusted = newProject('render/fx-adjustment', { name: 'Adjustment layers', backgroundFill: GRADIENT, w: 480, h: 270, dur: 2 });
+  adjusted.add(adjusted.layer('adjustment', { name: 'Late blur', from: 1, dur: 1, fx: [adjusted.effect('blur', { amount: adjusted.ch(4, [[1, 4], [2, 30]]) })] }));
+  const glowing = adjusted.add(adjusted.layer('adjustment', { name: 'Glow and duotone, feathered, screen', blend: 'screen', fx: [adjusted.effect('glow', { threshold: 35, radius: 50, intensity: 140 }), adjusted.effect('duotone', { shadow: '#1B2A4A', highlight: '#FFD66B', amount: 70 })], p: { opacity: 80 } }));
+  glowing.masks.push(adjusted.mask('ellipse', { x: 120, y: 0, w: 260, h: 200, feather: 40 }));
+  adjusted.add(adjusted.layer('adjustment', { name: 'Shadowed stack', fx: [adjusted.effect('shadow', { distance: 16, angle: 120, softness: 24, opacity: 70 })], p: { opacity: 60 } }));
+  adjusted.add(adjusted.layer('image', { name: 'Photo', d: { asset: ref(PHOTO), fit: 'stretch', w: 220, h: 130 }, p: { 'position.x': 40, 'position.y': 30, rotation: -4 } }));
+  adjusted.add(adjusted.layer('image', { name: 'Alpha image', d: { asset: ref('still-alpha.png'), fit: 'contain', w: 160, h: 90 }, p: { 'position.x': 290, 'position.y': 150, opacity: 85 } }));
+  const nested = adjusted.composition({ name: 'Inner with an adjustment', w: 200, h: 120, dur: 2, bg: '#000000' });
+  adjusted.within(nested, () => {
+    adjusted.add(adjusted.layer('adjustment', { name: 'Inner pixelate', fx: [adjusted.effect('pixelate', { size: adjusted.ch(4, [[0, 4], [2, 16]]) }), adjusted.effect('invert', { amount: 40 })] }));
+    adjusted.add(adjusted.layer('image', { name: 'Inner photo', d: { asset: ref(PHOTO), fit: 'stretch', w: 200, h: 120 } }));
+  });
+  adjusted.add(adjusted.layer('precomp', { name: 'Precomp with an adjustment', d: { comp: nested.id, w: 200, h: 120 }, p: { 'position.x': 270, 'position.y': 20, rotation: 6 } }));
+
   return [
+    project(adjusted, { group: 'Render', title: 'Adjustment layers', covers: ['adjustment layer with a spatial effect', 'adjustment layer with a keepOrig effect', 'adjustment effect stack', 'adjustment layer time range', 'feathered mask on an adjustment with a blend mode', 'adjustment at partial opacity over transparency', 'adjustment layer inside a precomp'], samples: [0, .7, 1.4, 2], alpha: true }),
+    project(mixed, { group: 'Render', title: 'Effects with masks, mattes, blends, and adjustments', covers: ['masked layer with an effect', 'effect with a blend mode', 'effect before a track matte', 'transition after a blended composite', 'adjustment layer with effects', 'masked adjustment with a blend mode'], samples: [0, .5, 1, 1.5], alpha: true }),
     project(stack, { group: 'Render', title: 'Effect stack', covers: ['effect stacking', 'animatable effect enable', 'disabled effect', 'missing effect skipped with its data kept', 'keepOrig effects in a stack'], samples: [0, .5, 1.5], alpha: true }),
     project(grouped, { group: 'Render', title: 'Effects on groups and in precomps', covers: ['effect on a group (compositing boundary)', 'effects inside a precomp', 'effect on a precomp layer', 'transition on a group'], samples: [0, .4, 1, 2], alpha: true }),
   ];
