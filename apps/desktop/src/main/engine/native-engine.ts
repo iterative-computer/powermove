@@ -574,6 +574,7 @@ export class NativeEngine {
     this.supervisors.job.event({ type: 'deadline', ...signal });
     this.lastPlaybackStarted = signal;
     if (was) return;
+    if (DEFAULT_SLICING_POLICY.blender.kind === 'pause') this.blender?.setPaused(true);
     this.sendGrants(this.memory.playbackStarted());
     for (const l of this.listeners) l.playback?.(true);
   }
@@ -582,6 +583,7 @@ export class NativeEngine {
     if (this.lastPlaybackStarted === null) return;
     this.supervisors.job.event({ type: 'deadline', ...(signal ?? { signal: 'playbackStopped', at: this.options.hostNow() }) });
     this.lastPlaybackStarted = null;
+    this.blender?.setPaused(false);
     if (grants) this.sendGrants(this.memory.playbackStopped());
     for (const l of this.listeners) l.playback?.(false);
   }

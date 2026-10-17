@@ -35,9 +35,14 @@ use pm_protocol::priority::{CancelJobs, PriorityClass};
 
 use super::Shared;
 
-/// How long one Blender frame may take (today's 10-minute job timeout,
-/// plus the host's own bookkeeping).
-const FRAME_TIMEOUT: Duration = Duration::from_millis(limits::JOB_TIMEOUT_MS as u64 + 30_000);
+/// How long the job engine waits for one Blender frame. Host services own
+/// the 10-minute run timeout, which does not count the time Blender is
+/// paused during playback (contract 13), and answer every request; this
+/// bound only covers a host that never answers.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
+/// Inputs older than the longest a job may wait and run are no job's
+/// (`prune`).
+const INPUT_HORIZON: Duration = FRAME_TIMEOUT;
 
 /// The Blender backend of one job lane.
 pub(super) struct HostBackend {
@@ -141,7 +146,7 @@ impl HostBackend {
 /// those older than the longest a job may run are removed (surfaces stay,
 /// under the surface cache's own bound).
 fn prune(area: &std::path::Path) {
-    let horizon = FRAME_TIMEOUT * 2;
+    let horizon = INPUT_HORIZON;
     for sub in ["snapshots", "assets", ""] {
         let Ok(entries) = std::fs::read_dir(area.join(sub)) else {
             continue;

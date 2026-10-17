@@ -150,6 +150,12 @@ per frame: plan without drawing → snapshots (per nested composition)
   --offline-mode --python-exit-code 1`, an environment of its own (fixed
   `PATH`; `HOME`, `TMPDIR`, and `BLENDER_USER_*` in its scratch directory;
   nothing of main's), and its own process group.
+- Playback (contract 13, `SlicingPolicy.blender` is `pause`): while
+  anything plays, main stops the worker's process group (`SIGSTOP`) and
+  continues it (`SIGCONT`) when playback ends; a job that starts during
+  playback starts stopped; the 10-minute timeout does not count paused
+  time. The job engine therefore waits for an answer (bounded at 6 hours,
+  for a host that never answers) rather than timing Blender itself.
 - Discovery: the Blender chosen in Settings (`blender-path.json`, as the
   current engine reads it), else the first Blender 4.5 or newer found
   (`discoverBlender`).
@@ -183,7 +189,7 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 | same | Cancel 1.5 s into a Cycles CPU render (1920 × 1080, 4,096 samples) | `Cancelled`, the worker's process group is gone |
 | same | No Blender; a backend that drops a surface | `blenderMissing` with appendix D's sentence; `blenderFailed`; nothing written; without a Blender stage the job still routes |
 | `pm-blender` unit tests | Settings parse, canonical hashing, key inputs (every input changes the key, asset order does not), surface decoding and crops, cache bounds and disk, device record, discovery, flags, the stage's per-key rendering and failures | Pass |
-| `apps/desktop` `src/main/engine/blender.test.ts` | Main's supervision with a stand-in executable: flags, scrubbed environment, surfaces before the answer, batching off, worker-script hash, foreign handles, missing Blender, cancel kills the process | Pass |
+| `apps/desktop` `src/main/engine/blender.test.ts` | Main's supervision with a stand-in executable: flags, scrubbed environment, surfaces before the answer, batching off, worker-script hash, foreign handles, missing Blender, cancel kills the process, playback stops and continues the process (`ps` state `T`) and holds new jobs | Pass |
 | same | Cycles with `device: cpu` and `auto` | Recorded per job: `Cpu`, then `Metal {Apple M4 Max (GPU - 40 cores)}` |
 | `apps/desktop` `e2e/engine-blender.spec.ts` (under the Electron lock) | The app, 192 × 108, a turning box and a sphere, EEVEE 8 samples: today's still (Use New Engine off, today's surfaces recorded at main's IPC), then the job engine's still and a 6-frame H.264 MP4 (on) | The MP4 is the job engine's (AVAssetWriter, 6 frames); 12 surfaces in the cache (2 layers × 6 frames; the still reused frame 0's); the job engine's still is 100% within 2 CV of today's surfaces composited per layer (max 2 CV) |
 
@@ -245,8 +251,5 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 - **Native-pass limits on Blender compositions**: the static check still
   routes Blender compositions for limits only the native pass has (texture
   maps with transparency, image formats the native pass cannot draw).
-- **Throttling during playback** (contract 13's `BlenderThrottle::Pause`)
-  is not applied to host services' worker; exports do not pause Blender
-  while the user plays.
 - **Surfaces stay 16-bit PNG** (decision 15); RFC 11 open question 1 (raw
   or EXR) is unchanged.

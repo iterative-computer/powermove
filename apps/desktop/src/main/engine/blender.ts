@@ -107,7 +107,7 @@ export async function pngSize(file: string): Promise<{ width: number; height: nu
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
-type Pending = { id: string; resolve: () => void; reject: (error: Error) => void };
+type Pending = { id: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> | null; left: number; since: number };
 
 /** One serialized Blender process running the pinned worker. */
 export class PinnedWorker {
@@ -116,6 +116,7 @@ export class PinnedWorker {
   private pending: Pending | null = null;
   private stderr = '';
   private counter = 0;
+  private paused = false;
 
   constructor(readonly executable: string, readonly tempRoot: string, readonly timeoutMs = 10 * 60 * 1000) {}
 
@@ -140,6 +141,9 @@ export class PinnedWorker {
       detached: true
     });
     this.proc = proc;
+    if (this.paused && proc.pid) {
+      try { process.kill(-proc.pid, 'SIGSTOP'); } catch {}
+    }
     proc.stdin?.on('error', () => {});
     proc.stderr?.on('data', (b: Buffer) => {
       this.stderr = (this.stderr + b.toString()).slice(-8000);
@@ -179,17 +183,51 @@ export class PinnedWorker {
     if (!this.proc) return Promise.reject(new ProtocolError('blenderFailed', 'Blender is not running.'));
     if (this.pending) return Promise.reject(new ProtocolError('internal', 'Blender is busy.'));
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.kill();
-        reject(new ProtocolError('blenderFailed', 'Blender operation timed out'));
-      }, this.timeoutMs);
-      this.pending = {
+      const pending: Pending = {
         id,
-        resolve: () => { clearTimeout(timer); resolve(); },
-        reject: (e) => { clearTimeout(timer); reject(e); }
+        resolve: () => { if (pending.timer) clearTimeout(pending.timer); resolve(); },
+        reject: (e) => { if (pending.timer) clearTimeout(pending.timer); reject(e); },
+        timer: null,
+        left: this.timeoutMs,
+        since: Date.now()
       };
+      this.pending = pending;
+      if (!this.paused) this.arm(pending);
       this.proc!.stdin!.write(JSON.stringify({ id, path: requestPath }) + '\n');
     });
+  }
+
+  /** The timeout counts only while Blender runs (not while paused). */
+  private arm(p: Pending): void {
+    p.since = Date.now();
+    p.timer = setTimeout(() => {
+      this.kill();
+      p.reject(new ProtocolError('blenderFailed', 'Blender operation timed out'));
+    }, Math.max(0, p.left));
+  }
+
+  /** Pauses or resumes Blender (SIGSTOP and SIGCONT of its process group):
+   *  contract 13's `BlenderThrottle::Pause` while anything plays. */
+  setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    const pid = this.proc?.pid;
+    if (pid) {
+      try { process.kill(-pid, paused ? 'SIGSTOP' : 'SIGCONT'); } catch {}
+    }
+    const p = this.pending;
+    if (!p) return;
+    if (paused) {
+      if (p.timer) clearTimeout(p.timer);
+      p.timer = null;
+      p.left -= Date.now() - p.since;
+    } else {
+      this.arm(p);
+    }
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   /** Kills the worker's process group (cancel stops Blender). */
@@ -229,6 +267,7 @@ export class EngineBlender {
   private tail: Promise<unknown> = Promise.resolve();
   private queued: Queued[] = [];
   private current: Queued | null = null;
+  private paused = false;
 
   constructor(private readonly options: EngineBlenderOptions) {}
 
@@ -271,6 +310,13 @@ export class EngineBlender {
       return true;
     }
     return false;
+  }
+
+  /** Playback started or stopped anywhere: Blender pauses while anything
+   *  plays (`SlicingPolicy.blender` is `pause`, S8). */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.worker?.setPaused(paused);
   }
 
   /** An engine launch ended: its Blender jobs stop. */
@@ -334,6 +380,7 @@ export class EngineBlender {
       await this.worker?.dispose();
       this.worker = new PinnedWorker(found.path, this.options.tempRoot, this.options.timeoutMs);
     }
+    this.worker.setPaused(this.paused);
     const worker = this.worker;
     const layers = req.surfaces.map((s) => s.layer);
     const groups = req.batchLayers ? [layers] : layers.map((l) => [l]);

@@ -171,4 +171,36 @@ describe('Blender jobs from the job engine', () => {
     expect(b.cancel('nothing')).toBe(false);
     await b.dispose();
   });
+
+  it('pause Blender while anything plays and resume it after', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const state = (pid: number) => execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    const b = blender();
+    b.setPaused(true);
+    // A job started during playback waits: its Blender starts stopped.
+    let done = false;
+    const running = b.render(await job(['a'], 'j7'), session, port, () => {}).then(() => { done = true; });
+    for (let i = 0; i < 100; i++) {
+      if (await stat(record).catch(() => null)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(done).toBe(false);
+    b.setPaused(false);
+    await running;
+    expect(done).toBe(true);
+    // A running job stops and continues with playback.
+    const slow = b.render(await job(['slow'], 'j8'), session, port, () => {});
+    await new Promise((r) => setTimeout(r, 300));
+    const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    b.setPaused(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(state(pid)).toMatch(/^T/);
+    b.setPaused(false);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(state(pid)).not.toMatch(/^T/);
+    b.cancel('j8');
+    await expect(slow).rejects.toMatchObject({ code: 'cancelled' });
+    await b.dispose();
+  });
 });
