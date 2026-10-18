@@ -1,33 +1,25 @@
 //! The still-image classes this renderer draws (docs/engine/pm-render.md,
 //! "Image classes").
 //!
-//! Capability routing must be conservative (plan section 21): a still is
-//! drawn only when its container, encoding, depth, and color tagging fall in
-//! a class that matched the legacy renderer on the parity corpus
-//! (`render/still-*`, generated with detailed content, and the fixture
-//! stills). Everything else is routed to the legacy engine. The comparison
-//! (2026-10-14, Chromium 152) found these classes outside section 25's
-//! Standard or alpha class, so they are unsupported until the cause is
-//! fixed or decided:
+//! Level 1 consumes Blink's 8-bit compatibility bitmap (pm-media/image/
+//! compat.rs): PNG16 quantization, skcms ICC conversion/clipping, and WebP
+//! premultiplication occur before filtering. SDR AVIF uses Chromium 152's
+//! pinned CrabbyAvif/dav1d/libyuv conversion. Native-depth source readers
+//! remain available to level 2 and Interpret Footage.
 //!
-//! - Y'CbCr JPEG was routed while pm-media decoded JPEG with zune-jpeg; it
-//!   now decodes with libjpeg-turbo as Chromium does (islow IDCT, fancy
-//!   upsampling, bit-exact with `djpeg`), and baseline and progressive
-//!   8-bit Y'CbCr JPEG is drawn (corpus `render/still-photo-*-jpg`).
-//! - Display P3 (PNG, JPEG, HEIF): converted values match within 1 CV on
-//!   texel centers, but section 9 keeps out-of-gamut values until output,
-//!   while Chromium clips at decode; filtered edges of out-of-gamut colors
-//!   differ by up to 83 CV.
-//! - 16-bit PNG: Chromium reduces to 8 bits before premultiplying; up to
-//!   2 CV, 99.66% within 1, transparent frames 1.99 CV.
-//! - WebP with alpha: libwebp's premultiplication rounding; transparent
-//!   frames 1.12 CV (alpha class 1 CV).
-//! - AVIF: ImageIO's and Chromium's decodes differ by up to 94 CV.
+//! All 21 detailed still corpus cases pass the 2D/alpha classes. Container
+//! checks keep other structures explicit (HDR/gamma-only PNG, progressive
+//! gray JPEG, TIFF tiles/float/other models, and AVIF outside the tested
+//! 8-bit 4:2:0 SDR class).
 //!
-//! The class is decided from the decoded [`StillImage`] facts plus a header
-//! parse of the container for what the decoder does not report (JPEG frame
-//! type and components, PNG color chunks, WebP chunk layout, TIFF image
-//! structure and ICC profile tag, EXIF and HEIF transforms).
+//! Container transforms are drawn only as Chromium shows them, each
+//! compared in the app (`e2e/native-still-orientation-parity.spec.ts`):
+//! EXIF orientation the decoder applied from PNG `eXIf` before the image
+//! data, JPEG APP1 and TIFF tag 274; HEIF `irot`/`imir`/`clap` (ImageIO, as
+//! the `sips` rendition Chromium shows); AVIF `irot`/`imir`/`clap` as Blink
+//! interprets them (`avif_compat`); WebP EXIF, which Blink ignores (so does
+//! pm-media). Anything else (late PNG `eXIf` the decoder did not apply, a
+//! decoder disagreeing with the header) stays explicit.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -57,6 +49,8 @@ struct Header {
     /// A geometric transform the container asks for: EXIF orientation
     /// other than 1, HEIF `irot`/`imir`/`clap`.
     transform: Option<String>,
+    /// The first EXIF orientation other than 1.
+    exif: Option<u16>,
 }
 
 impl Header {
@@ -64,27 +58,49 @@ impl Header {
         if let Some(o) = orientation.filter(|&o| o != 1) {
             self.transform
                 .get_or_insert(format!("EXIF orientation {o}"));
+            self.exif.get_or_insert(o);
         }
     }
 }
 
-/// Whether a decoded still is in a tested class.
+/// Whether the drawn still shows the container's transform as Chromium
+/// shows it (module notes).
+fn transform_matches(still: &StillImage, header: &Header, compat: bool) -> bool {
+    compat
+        && match still.format {
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Tiff => {
+                header.exif == Some(u16::from(still.orientation))
+            }
+            ImageFormat::WebP => still.orientation == 1,
+            ImageFormat::Heif => true,
+            _ => false,
+        }
+}
+
+/// Whether a decoded still is in a tested class. An AVIF Chromium's
+/// decoder cannot parse is not a class: [`crate::media::probe_image`]
+/// reports it as an unreadable source before calling this.
 pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     if still.float {
         return unsupported("floating-point stills");
     }
-    // No oriented still of any drawn class has been compared with the
-    // legacy renderer (which reaches HEIF and TIFF through a transcode), so
-    // any orientation other than 1, reported by the decoder or found in the
-    // container, is unsupported.
-    if still.orientation != 1 {
+    if pm_media::image::compat::unmatched_icc_alpha(still) {
+        return unsupported(
+            "wide-gamut ICC stills with alpha (Chromium ImageBitmap conversion differs)",
+        );
+    }
+    // Compatibility classes consume the decoder-applied orientation (the
+    // container check below decides whether it is Chromium's).
+    let compat =
+        pm_media::image::compat::applies(still) || pm_media::image::avif_compat::applies(still);
+    if still.orientation != 1 && !compat {
         return unsupported(orientation_message(&format!(
             "EXIF orientation {}",
             still.orientation
         )));
     }
     let icc = still.color.icc_class;
-    if icc == Some(IccClass::DisplayP3) {
+    if icc == Some(IccClass::DisplayP3) && !compat {
         return unsupported(
             "Display P3 stills (out-of-gamut handling differs from the legacy renderer)",
         );
@@ -100,21 +116,32 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
             }
         }
         ImageFormat::Tiff => {
-            if still.bit_depth != 8 {
+            if still.bit_depth != 8 && !compat {
                 return unsupported("TIFF stills deeper than 8 bits");
             }
-            if still.color.alpha != AlphaMode::Opaque {
+            if still.color.alpha != AlphaMode::Opaque && !compat {
                 return unsupported("TIFF stills with alpha");
             }
-            // pm-media's TIFF decoder reports no profile today; the header
-            // parse routes tag 34675 whatever the decoder reports.
-            if icc.is_some() {
+            // ICC is preserved by the native reader and converted by skcms
+            // in the level-1 bitmap, as in the shipped PNG rendition.
+            if icc.is_some() && !compat {
                 return unsupported(
                     "TIFF stills with an ICC profile (not compared with the legacy renderer)",
                 );
             }
         }
-        ImageFormat::Avif => return unsupported("AVIF stills"),
+        ImageFormat::Avif if pm_media::image::avif_compat::applies(still) => {
+            // Container transforms follow Blink in `avif_compat`.
+            return match pm_media::image::avif_compat::unmeasured(path) {
+                Ok(None) => Ok(()),
+                Ok(Some(what)) => {
+                    unsupported(format!("{what} (not compared with the legacy renderer)"))
+                }
+                // Reported unreadable by `probe_image`.
+                Err(_) => Ok(()),
+            };
+        }
+        ImageFormat::Avif => return unsupported("AVIF stills outside the tested 8-bit sRGB class"),
         ImageFormat::Bmp => return unsupported("BMP stills"),
         ImageFormat::Ico => return unsupported("ICO stills"),
         ImageFormat::Gif => return unsupported("GIF stills"),
@@ -124,13 +151,28 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    let header = parse(&mut BufReader::new(file), still.format)?;
-    if let Some(t) = header.transform {
-        return unsupported(orientation_message(&t));
+    let header = if still.format == ImageFormat::Tiff && compat {
+        tiff(&mut BufReader::new(file), true)
+            .map_err(|e| feature(format!("malformed TIFF headers ({e})")))??
+    } else if still.format == ImageFormat::Png && compat {
+        let cicp = match still.color.icc_class {
+            Some(IccClass::DisplayP3) => Some([12, 13, 0, 1]),
+            Some(IccClass::Srgb) => Some([1, 13, 0, 1]),
+            _ => None,
+        };
+        png(&mut BufReader::new(file), cicp)
+            .map_err(|e| feature(format!("malformed PNG headers ({e})")))??
+    } else {
+        parse(&mut BufReader::new(file), still.format)?
+    };
+    if let Some(t) = &header.transform
+        && !transform_matches(still, &header, compat)
+    {
+        return unsupported(orientation_message(t));
     }
     match still.format {
-        ImageFormat::Png if still.bit_depth != 8 => unsupported("16-bit PNG stills"),
-        ImageFormat::WebP if still.color.alpha != AlphaMode::Opaque => {
+        ImageFormat::Png if still.bit_depth != 8 && !compat => unsupported("16-bit PNG stills"),
+        ImageFormat::WebP if still.color.alpha != AlphaMode::Opaque && !compat => {
             unsupported("WebP stills with alpha")
         }
         _ => Ok(()),
@@ -194,10 +236,10 @@ fn parse<R: Read + Seek>(r: &mut R, format: ImageFormat) -> Result<Header, Featu
         _ => "HEIF",
     };
     let parsed = match format {
-        ImageFormat::Png => png(r),
+        ImageFormat::Png => png(r, None),
         ImageFormat::Jpeg => jpeg(r),
         ImageFormat::WebP => webp(r),
-        ImageFormat::Tiff => tiff(r),
+        ImageFormat::Tiff => tiff(r, false),
         _ => heif(r),
     };
     match parsed {
@@ -356,7 +398,10 @@ fn exif_orientation(payload: &[u8]) -> io::Result<Option<u16>> {
 /// chromaticity chunks only where an sRGB chunk or ICC profile overrides
 /// them (as in Chromium and libpng); the orientation of an `eXIf` chunk
 /// (anywhere in the file).
-fn png<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
+fn png<R: Read + Seek>(
+    r: &mut R,
+    equivalent_cicp: Option<[u8; 4]>,
+) -> io::Result<Result<Header, Feature>> {
     if &array::<8, _>(r)? != b"\x89PNG\r\n\x1a\n" {
         return Err(malformed("no PNG signature"));
     }
@@ -376,6 +421,13 @@ fn png<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             b"iCCP" => iccp |= before_idat,
             b"gAMA" => gama |= before_idat,
             b"cHRM" => chrm |= before_idat,
+            b"cICP" if len == 4 && equivalent_cicp.is_some() => {
+                let tag = array::<4, _>(r)?;
+                body_read = 4;
+                if Some(tag) != equivalent_cicp {
+                    return Ok(unsupported("PNG CICP differs from its ICC profile").map(|_| header));
+                }
+            }
             b"cICP" | b"mDCv" | b"cLLi" | b"mDCV" | b"cLLI" => {
                 return Ok(unsupported("PNG stills with CICP or HDR metadata").map(|_| header));
             }
@@ -525,7 +577,7 @@ fn webp<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
 /// colorimetry tags (TransferFunction, WhitePoint, PrimaryChromaticities):
 /// tagged TIFF was not compared. Depth and alpha are also decided from the
 /// decoded still; the orientation tag (274) other than 1 is a transform.
-fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
+fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header, Feature>> {
     let entries = ifd0(r)?;
     let mut header = Header::default();
     header.exif(ifd0_orientation(&entries)?);
@@ -533,7 +585,7 @@ fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     // TIFF default); several values (or another type) is outside the class.
     let scalar = |tag: u16, default: u32| ifd_scalar(&entries, tag, default);
     let class = (|| -> Result<(), String> {
-        if ifd_entry(&entries, 34675).is_some() {
+        if ifd_entry(&entries, 34675).is_some() && !allow_icc {
             return Err(
                 "TIFF stills with an ICC profile (not compared with the legacy renderer)".into(),
             );
@@ -564,10 +616,12 @@ fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                 }
             ));
         }
-        if scalar(277, 1) != Ok(3) {
+        if !(scalar(277, 1) == Ok(3) || (allow_icc && scalar(277, 1) == Ok(4))) {
             return Err("TIFF stills with other than three samples per pixel".into());
         }
-        if ifd_per_sample(&entries, 258, 1) != Ok(8) {
+        if !(ifd_per_sample(&entries, 258, 1) == Ok(8)
+            || (allow_icc && ifd_per_sample(&entries, 258, 1) == Ok(16)))
+        {
             return Err("TIFF stills with other than 8 bits in every sample".into());
         }
         if ifd_per_sample(&entries, 339, 1) != Ok(1) {
@@ -591,8 +645,10 @@ fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
         }
         Ok(())
     })();
-    // An orientation is reported first: it is the reason the legacy
-    // comparison does not apply, whatever the structure.
+    if allow_icc {
+        return Ok(class.map(|()| header).map_err(feature));
+    }
+    // Preserve the old header-only orientation diagnostic.
     Ok(match class {
         Err(what) if header.transform.is_none() => Err(feature(what)),
         _ => Ok(header),

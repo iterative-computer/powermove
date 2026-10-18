@@ -1099,6 +1099,8 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
     PM.bus.emit('assets');
     if (relinkedLayers) PM.bus.emit('layers');
   }
+  await PM.HostMedia?.flushBindings?.(targetProject);
+  assertCurrentProject();
   return result;
 }
 async function recoverSourceAsset(meta: any, file: File, current: () => boolean) {

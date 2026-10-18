@@ -303,7 +303,10 @@ impl Exec<'_> {
                         self.taken.push(target);
                     }
                     Source::Image {
-                        path, interpret, ..
+                        path,
+                        interpret,
+                        level2,
+                        ..
                     } => {
                         match self.media.image(
                             self.device,
@@ -314,6 +317,7 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                             interpret.as_ref(),
+                            !*level2,
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
@@ -323,6 +327,8 @@ impl Exec<'_> {
                         }
                     }
                     Source::Video {
+                        level2,
+                        sequence,
                         path,
                         time,
                         interpret,
@@ -342,6 +348,8 @@ impl Exec<'_> {
                             self.precision,
                             interpret.as_ref(),
                             *composition_rate,
+                            *sequence,
+                            !*level2,
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());

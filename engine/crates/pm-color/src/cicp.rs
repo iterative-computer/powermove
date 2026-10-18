@@ -98,6 +98,7 @@ pub fn matrix(code: u8) -> Option<MatrixCoefficients> {
         1 => Some(MatrixCoefficients::Bt709),
         5 | 6 => Some(MatrixCoefficients::Bt601),
         9 => Some(MatrixCoefficients::Bt2020Ncl),
+        10 => Some(MatrixCoefficients::Bt2020Cl),
         _ => None,
     }
 }
@@ -122,6 +123,7 @@ pub fn matrix_code(matrix: MatrixCoefficients) -> u8 {
         MatrixCoefficients::Bt709 => 1,
         MatrixCoefficients::Bt601 => 6,
         MatrixCoefficients::Bt2020Ncl => 9,
+        MatrixCoefficients::Bt2020Cl => 10,
     }
 }
 
@@ -191,6 +193,8 @@ mod tests {
         assert_eq!(transfer(16), Some(Transfer::Pq));
         assert_eq!(transfer(2), None);
         assert_eq!(matrix(6), Some(MatrixCoefficients::Bt601));
+        assert_eq!(matrix(10), Some(MatrixCoefficients::Bt2020Cl));
+        assert_eq!(matrix_code(MatrixCoefficients::Bt2020Cl), 10);
         assert_eq!(matrix(2), None);
         let d = ColorDescription::SRGB_RGBA8;
         assert_eq!(tuple(of_description(&d)), (1, 13, 0, true));

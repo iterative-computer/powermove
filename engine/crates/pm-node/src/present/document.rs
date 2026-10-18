@@ -9,21 +9,20 @@
 //! * [`Route::Engine`]: the renderer draws everything in the composition
 //!   and the media of every asset it uses is answered;
 //! * [`Route::Legacy`]: something the renderer cannot draw yet
-//!   (`pm_render::unsupported_with_media`) or media the host could not
-//!   resolve: the viewer keeps the legacy engine's frames;
+//!   (`pm_render::unsupported_with_media`): the viewer keeps the legacy
+//!   engine's frames. Offline media instead draws a named layer failure;
 //! * [`Route::Pending`]: not decided yet (no document, the composition is
 //!   not in it, media answers outstanding, a batch that did not apply).
 //!
 //! The decision is static per (revision, composition, media answers), as
 //! `pm_render::capability` promises, so it is cached on that key.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use pm_engine::document::{DocumentUpdate, asset_records};
-use pm_eval::node;
-use pm_model::{Document, Node, NodeKind};
+use pm_model::{Document, Node};
 
 /// Where a composition's frames come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,18 +236,9 @@ impl ViewDocument {
         {
             return Route::Pending("media is being resolved");
         }
-        let used = used_assets(root);
-        let mut reasons: Vec<String> = records
-            .iter()
-            .filter(|(id, _)| used.contains(id.as_str()))
-            .filter(|(id, _)| self.media.0.get(id.as_str()).is_some_and(|p| p.is_none()))
-            .map(|(id, record)| {
-                let name = node::string(node::member(Some(*record), "name"))
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| id.clone());
-                format!("media offline: {name}")
-            })
-            .collect();
+        // The host has answered: an offline file is now a named layer
+        // failure from the renderer, not a different rendering engine.
+        let mut reasons = Vec::new();
         for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
             // With definitions, effects, transitions, adjustment layers
             // with effects, and extension layers are drawn; one the renderer cannot draw (no
@@ -324,30 +314,6 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
     }
 }
 
-/// The asset ids layers use anywhere in the document (`d.asset` of the
-/// open composition's layers and of every composition's).
-fn used_assets(root: &Node) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut add_layers = |layers: Option<&Node>| {
-        if let Some(NodeKind::Array(items)) = layers.map(|l| l.kind()) {
-            for layer in items {
-                if let Some(asset) =
-                    node::string(node::member(node::member(Some(layer), "d"), "asset"))
-                {
-                    out.insert(asset.to_string_lossy());
-                }
-            }
-        }
-    };
-    add_layers(node::member(Some(root), "layers"));
-    if let Some(NodeKind::Object(comps)) = node::member(Some(root), "comps").map(|c| c.kind()) {
-        for comp in comps.values() {
-            add_layers(node::member(Some(comp), "layers"));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,7 +358,7 @@ mod tests {
             "{reasons:?}"
         );
 
-        // An image layer waits for its media, and an offline file routes.
+        // An image waits for the host, then draws a named offline failure.
         let image = doc
             .replace(
                 r#""assets":{}"#,
@@ -406,10 +372,7 @@ mod tests {
         view.update(&replace(&image, 3)).unwrap();
         assert_eq!(view.route("c"), Route::Pending("media is being resolved"));
         view.set_media("img", None);
-        assert_eq!(
-            view.route("c"),
-            Route::Legacy(vec!["media offline: photo.png".into()])
-        );
+        assert_eq!(view.route("c"), Route::Engine);
     }
 
     #[test]

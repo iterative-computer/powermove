@@ -17,3 +17,8 @@ openexr    3.5.2   e5750af57bbed556b462cbf0c39550d9063b2028c0184ec65fe42fdae458c
 # library pm-media links, does not use it):
 imath      3.2.3   e10c12b3f21f45bf08e09d4215d9c7691368d747beebd840de0b6fefed2df9f8  Imath-3.2.3       BSD-3-Clause        https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.2.3.tar.gz
 meson      1.12.1  ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743  meson-1.12.1      Apache-2.0          https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz
+
+# Chromium 152 DEPS: AVIF compatibility decoder and its YUV conversion.
+crabbyavif 61f5abadda7b179f90e557fed6ae7a3d78bd8231 fabbef2c6c3a60dc3335f56a106b1d5d51d614764f9f9941ace813eb01bbf867 CrabbyAvif-61f5abadda7b179f90e557fed6ae7a3d78bd8231 Apache-2.0 https://codeload.github.com/webmproject/CrabbyAvif/tar.gz/61f5abadda7b179f90e557fed6ae7a3d78bd8231
+libyuv b56492e2dfc064f65ef27fed9c45d9bbfc2e2ad2 4e13b31588ed77fd9282c722ac369f5ad902d7b1989e5ced25c9d92b1852d89c libyuv-b56492e2dfc064f65ef27fed9c45d9bbfc2e2ad2 BSD-3-Clause https://codeload.github.com/lemenkov/libyuv/tar.gz/b56492e2dfc064f65ef27fed9c45d9bbfc2e2ad2
+skcms b6d106297ff9ef2ff8094033695d045e87775581 84bd973fa9393e769300e52050c48ec350b3ccf4dd2effdd0ec01f86d4b143b6 skia-b6d106297ff9ef2ff8094033695d045e87775581 BSD-3-Clause https://codeload.github.com/google/skia/tar.gz/b6d106297ff9ef2ff8094033695d045e87775581

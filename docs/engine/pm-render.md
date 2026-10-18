@@ -15,8 +15,8 @@ the authority.
 | Feature | Status | Parity evidence |
 |---|---|---|
 | Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
-| Image layers in the tested still classes (below): 8-bit PNG, baseline gray JPEG, opaque WebP, 8-bit opaque sRGB HEIF, 8-bit opaque untagged stripped RGB TIFF | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames ≤ 0.62 CV; `media/still-*` fixtures: exact |
-| Other stills (Y′CbCr or progressive gray JPEG, Display P3, 16-bit PNG, WebP with alpha, AVIF, GIF, BMP, ICO, OpenEXR, DPX, ICC-tagged, tiled, float, or deep TIFF) | Routed | Measured differences below; `tests/stills.rs` |
+| Image layers in the tested still classes below, including PNG16, Display P3, alpha WebP, SDR AVIF, ICC-tagged RGB TIFF, and container transforms as Chromium shows them (EXIF in PNG/JPEG/TIFF, HEIF and AVIF `irot`/`imir`/`clap`, WebP EXIF ignored) | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames below 1 CV; `media/still-*` fixtures: exact; 59 oriented, transformed and AVIF color-description app cases (`e2e/native-still-orientation-parity.spec.ts`): max ≤ 1 CV |
+| Other still structures (translucent wide-gamut ICC, progressive gray JPEG, GIF, BMP, ICO, OpenEXR, DPX, tiled or float TIFF) | Routed | Measured differences below; `tests/stills.rs` |
 | Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
 | Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
 | Normal blending (premultiplied source-over) | Supported | All of the above |
@@ -92,113 +92,59 @@ premultiplied source-over.
 
 ## Image classes
 
-`pm_render::stills` decides whether a still is drawn, from the decoded facts
-and a header parse (JPEG frame type and components, PNG color chunks, WebP
-chunks, TIFF image structure, EXIF orientation, HEIF transform properties).
-The parse reads only headers and metadata (seeking past image data; EXIF
-payloads over 1 MiB are unsupported rather than read). A class is drawn only if it matched the legacy renderer on the
-`render/still-*` corpus cases: generated stills with smooth ramps, saturated
-5 × 3 checkers (chroma edges at every subsampling phase), one-pixel lines,
-and ring patterns, drawn 1:1 on texel centers and again minified and
-rotated (`engine/corpus/src/stills.ts`; WebP, AVIF, and HEIC are encoded
-with `cwebp` and `sips` from generated PNGs). Measured 2026-10-14 against
-Chromium 152 (captures `render-20261014-084744-e5791e0a` and, for the TIFF
-and opaque lossless WebP rows, `render-20261014-131536-ea28ddc1`):
+Level 1 reads a compatibility bitmap before filtering; level 2 reads native
+precision. `pm-media/image/compat.rs` reproduces Blink's PNG16 reduction,
+skcms ICC conversion and clipping, rounded PNG/JPEG premultiplication and
+libwebp's fixed-point premultiplication. `image/avif_compat.rs` uses Chromium
+152's CrabbyAvif/dav1d/libyuv 8-bit conversion. See `media.md` for the source
+revisions and call surfaces.
 
-| Class | Frame (≤ 1 CV / max) | Transparent | Routing |
-|---|---|---|---|
-| PNG 8-bit gray and alpha (Adam7) | 100% / 1 | 0.62 CV | Drawn |
-| PNG 8-bit indexed with `tRNS` | 100% / 1 | 0.50 CV | Drawn |
-| Gray JPEG, baseline | 100% / 1 | | Drawn |
-| HEIC 8-bit sRGB | 100% / 1 | | Drawn |
-| WebP lossy, opaque | 100% / 1 | | Drawn |
-| WebP lossless, opaque | 100% / 1 | | Drawn |
-| TIFF 8-bit chunky RGB in strips, no profile (uncompressed; LZW, both Deflate tags, PackBits decode identically) | 100% / 1 | | Drawn |
-| Fixture PNG, WebP, HEIC, TIFF (flat colors) | exact | 0 CV | Drawn |
-| Y′CbCr JPEG 4:4:4 / 4:2:0 / 4:2:2 (baseline, progressive, FFmpeg layouts, EXIF orientation 6) | 99.67% / 3; 90.5% / 4; 96.4% / 26; orientation 90.4% / 24 | | Routed |
-| Display P3 PNG, JPEG, HEIC | 99.87% / 83 | | Routed |
-| PNG 16-bit RGBA | 99.66% / 2 | 1.99 CV | Routed |
-| WebP lossless or lossy with alpha | 99.998–100% / 1–2 | 1.12 CV | Routed |
-| Any oriented still: EXIF orientation ≠ 1 (PNG `eXIf`, JPEG APP1, WebP `EXIF`, TIFF tag 274), HEIF `irot`/`imir`/`clap` | not compared | | Routed |
-| AVIF (ImageIO) | 68.6% / 94 | | Routed |
-| TIFF with an ICC profile (tag 34675, any profile, including sRGB), colorimetry tags, tiles, fill order 2, or other sample formats | not compared | | Routed |
-| Progressive gray JPEG | not compared | | Routed |
+All 21 detailed `render/still-*` cases are drawn and compared in
+`tests/corpus.rs` and `tests/still_compat.rs`: 100% of opaque pixels within
+1 CV; all transparent-float comparisons below 1 CV. These include gray and
+indexed PNG, PNG16 RGBA, P3 PNG/JPEG/HEIC, baseline and progressive Y′CbCr
+JPEG with 4:2:0/4:2:2/4:4:4 MCU layouts, orientation-6 JPEG, gray JPEG,
+opaque and alpha lossy/lossless WebP, SDR AVIF, sRGB HEIC and RGB TIFF.
+No Interpret Footage override is needed to bypass a class gate.
 
-Causes, measured:
+RGB TIFF's UNDEFINED ICC tag is read explicitly when the TIFF library omits
+it. Tests cover Adobe RGB, P3 and sRGB profiles with LZW and uncompressed
+storage: their compatibility bitmaps are byte-identical to the shipped
+FFmpeg PNG conversion, which forwards ICC. Native readers retain the ICC
+for the correct high-precision path. A render at levels 1 → 2 → 1 verifies
+that the texture cache never reuses an 8-bit bitmap for level 2. Unsigned
+RGB/RGBA 8/16-bit TIFF bitmaps also equal their shipped PNG conversion.
+An extra opaque P3/Adobe RGB PNG/TIFF app capture checks this color boundary.
+Translucent wide-gamut ICC images fail the extra capture's unchanged 2D bar;
+that combination retains its gate, with external side-by-side evidence.
+Opaque RGBA containers stay in the supported class. Matching SDR PNG cICP
+and ICC declarations are accepted; conflicting/HDR declarations stay gated.
 
-- **Y′CbCr JPEG.** pm-media decodes JPEG with zune-jpeg (the `image`
-  crate); Chromium uses libjpeg-turbo (islow IDCT, fancy upsampling).
-  `djpeg` from libjpeg-turbo 3.2 reproduces the legacy 1:1 regions of the
-  4:4:4, 4:2:0, and 4:2:2 cases exactly (0 CV, every pixel), and the
-  orientation-6 case after a 90° clockwise rotation, so EXIF orientation is
-  read the same way and the difference is the decoder. Gray JPEG is within
-  1 CV. Drawing Y′CbCr JPEG needs pm-media to decode JPEG with
-  libjpeg-turbo (pm-media lane).
-- **Display P3.** On texel centers the converted values are within 1 CV of
-  Chromium's (PNG, HEIC; JPEG adds the decoder difference). Section 9
-  converts "in float, relative colorimetric, no clip until output", while
-  Chromium clips to sRGB at decode, so bilinear filtering across
-  out-of-gamut colors differs by up to 83 CV on the minified copy. Matching
-  today's look needs a clip at the source pass in Standard, which section 9
-  rules out, or an appendix A entry accepting the difference: a decision for
-  the plan owner. Until then P3 stills are routed.
-- **16-bit PNG.** Chromium reduces to 8 bits and premultiplies in 8 bits;
-  the engine keeps 16 bits.
-- **WebP with alpha.** libwebp's premultiplication rounding: 1.12 CV against
-  the alpha class's 1 CV; opaque frames are within 1 CV.
-- **AVIF.** pm-media reads AVIF through ImageIO; Chromium through libavif and
-  dav1d; up to 94 CV on the chroma checker.
+The header parser still restricts unmeasured structures. PNG gamma-only,
+conflicting CICP/HDR and sub-8-bit encodings; progressive gray and
+non-Y′CbCr RGB/CMYK,
+12-bit/arithmetic/lossless JPEG; tiled, other-model, float and other
+unmeasured TIFF structures; and AVIF outside the tested 8-bit 4:2:0 sRGB
+class (4:4:4, 4:2:2, monochrome) remain explicit gates. Container
+transforms are drawn only where an app comparison shows Chromium's result
+(`media.md`, "Container transforms"): the decoder's applied orientation must
+equal the container's, WebP EXIF is ignored as Blink ignores it, and AVIF
+`irot`/`imir`/`clap` follow Blink's `AVIFImageDecoder`. Late PNG EXIF stays
+gated when the decoder did not apply it. BMP, ICO, static GIF, OpenEXR and DPX still need composition parity
+or an Interpret Footage reading. Decoder breadth beyond these measured
+classes remains an open deliverable.
 
-**Orientation.** No oriented still of a drawn class has been compared with
-the legacy renderer, and the legacy paths differ by container (Chromium
-applies EXIF orientation to PNG, JPEG, and WebP; TIFF reaches it through an
-FFmpeg conversion to PNG, HEIF through `sips`). So an orientation other than
-1, whether pm-media's decoder reports it (`StillImage::orientation`) or only
-the container carries it (an `eXIf` chunk after the image data, a JPEG
-APP1 the decoder skips), routes the still, as does any HEIF transform
-property of any item. `tests/stills.rs` (`oriented_stills_are_unsupported`)
-covers PNG, gray JPEG, WebP, TIFF, and HEIC written by ImageIO and by hand,
-and checks both paths: the routing (where pm-media's decoder reports the
-orientation first for ImageIO's TIFF and HEIC and PNG `eXIf` before the
-image data, and only the header parse catches a late `eXIf` or a JPEG APP1
-the decoder skips), and, separately, that the header parse
-(`stills::container_transform`) finds the transform in every one of the
-files on its own (ImageIO's HEIC `irot` of 90, 180, and 270 degrees
-included; `imir` and `clap` only in the synthetic `stills::tests`).
-
-**TIFF.** Drawn only as the compared structure, decided from the first
-IFD: photometric RGB, three samples of 8-bit unsigned integers
-(BitsPerSample and SampleFormat read per sample), chunky, in strips (no
-tile tags 322 to 325), fill order 1, opaque, no ICC profile tag (34675)
-and no colorimetry tags (TransferFunction, WhitePoint,
-PrimaryChromaticities), compression none, LZW, Deflate (8 or 32946), or
-PackBits, predictor none or horizontal. The ICC check is on the header tag
-because pm-media's TIFF decoder (`image` 0.25 with `tiff` 0.11) reports no
-profile: a Display P3 or Adobe RGB TIFF would otherwise be drawn as
-untagged sRGB. Every ICC-tagged TIFF is routed, sRGB included, since none
-was compared (ImageIO embeds a profile in every TIFF of a tagged image;
-`tagged_tiff_is_unsupported` covers Adobe RGB, Display P3, and sRGB, LZW
-and uncompressed). The corpus case (`render/still-photo-tiff`, detailed
-content) is uncompressed, as FFmpeg writes it; `tiff_compressions_decode_alike`
-shows FFmpeg's LZW, Deflate (32946), and PackBits files, the Deflate file
-retagged as Adobe Deflate (8, same zlib stream), and ImageIO's untagged LZW
-file with predictor 2 decode in pm-media to exactly the uncompressed file's
-pixels, and that ImageIO's tiled file is routed. Gray, palette, CMYK,
-Y′CbCr, planar, extra-sample, fill order 2, floating-point or signed
-samples, colorimetry tags, and other compressions are routed
-(`stills::tests::tiff_classes`).
-
-**Gray JPEG.** Drawn only as baseline Huffman (SOF0), the structure of the
-compared corpus file (`corpus-photo-gray.jpg`); progressive gray (SOF2) is
-routed (`progressive_gray_jpeg_is_unsupported`, ImageIO's progressive
-encoder).
-
-Also routed, not compared: BMP, ICO, static GIF, OpenEXR, DPX, float and
-deeper-than-8-bit or alpha or ICC-tagged TIFF, deeper-than-8-bit or alpha
-HEIF, sub-8-bit PNG, PNG `gAMA` or `cHRM` without an `sRGB` chunk or ICC
-profile (Chromium honors them, pm-media does not), PNG `cICP`, `mDCv`,
-`cLLi`, WebP with an ICC profile, RGB, CMYK, arithmetic, lossless, and
-12-bit JPEG, ICC profiles other than sRGB, and animated images.
+Existing animated-image and numbered-sequence WebM renditions now use the
+video path, with the shipped slot timing and converter matrix. The three
+animated corpus sources pass hidden-app Chromium comparisons within the
+video class, including the saved 2× corpus compositions (interiors and
+alpha exact). Level 1 uses Chromium's libyuv nearest-chroma RGBA8 upload;
+level 2 keeps native conversion and passes same-filter FFmpeg + zimg.
+The level-1 bitmap's ≤1 CV independent zimg line remains open (up to 2 CV
+on saturated blue); see `media.md` and the external report. Original containers
+remain available through the source-preview APIs; import persistence is
+unchanged. `ImageSequence` only remains for readable originals that are not
+stored WebM renditions, or for the static check without source facts.
 
 ## Color
 
@@ -366,7 +312,7 @@ classes re-measured 2026-10-14 against Chromium 152.
 | `tests/color.rs` | Invariant (1), 4:2:0: H.264 → `420v` | 259,200 samples: luma and chroma exact |
 | `tests/headless.rs` | Determinism: every supported feature in one composition, 3 times, 16- and 32-bit, two renderers | Byte-identical |
 | `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2, exec-time unsupported media leaves the target untouched, a replaced video is reopened | Pass |
-| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, 16-bit, alpha, gray, tiled, and ICC-tagged TIFF, 1-bit PNG, `gAMA`, `cICP`, Y′CbCr JPEG from FFmpeg, progressive gray JPEG from ImageIO) are unsupported; oriented PNG, gray JPEG, WebP, TIFF, and HEIC are unsupported, and the header parse alone finds each transform; lossless TIFF compressions decode like the uncompressed file; header classes | Pass |
+| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, float, gray and tiled TIFF, translucent wide-gamut ICC, 1-bit PNG, unhandled `gAMA`/`cICP`, progressive gray JPEG from ImageIO) are unsupported; Y′CbCr JPEG is drawn; decoder-applied orientation is drawn, unapplied late PNG EXIF remains gated, ICC RGB TIFF matches the shipped PNG conversion, and the header parse alone finds each transform; lossless TIFF compressions decode like the uncompressed file; header classes | Pass |
 | `pm-gpu/tests/msl_math.rs` | Safe math is in effect | Pass |
 | `frame_time_at_1080p` (ignored) | The everything composition at 1920 × 1080, release | 3.06 ms (16-bit, p95 4.69), 2.48 ms (32-bit, p95 2.76) median per frame, plan and GPU |
 
@@ -402,8 +348,8 @@ output share the matrix.
 
 - 3D layers render at the full output size even for a region of interest.
 - 3D output stays 8-bit (as today's canvas) at 32-bit precision.
-- The video class's FFmpeg plus zimg reference (section 25) is not compared
-  here; video parity is against Chromium only.
+- The persisted-animation tests compare the video class against both
+  Chromium and FFmpeg plus zimg; the broader video gate is in `phase3a-gate.md`.
 - No render cache: content keys for layer and precomp outputs (section 8) are
   not computed yet beyond `pm_color::key`.
 - The GPU encoder-input pass of the export lane must adopt `VERTICAL_420`
@@ -419,17 +365,11 @@ output share the matrix.
   through `AVPlayerItemVideoOutput` matches the viewer within ΔE2000 1.0) is
   not tested here; only spike S2 measured it. `pm-color` writes the 1-13-1
   tags (amendment 7); the end-to-end test belongs with the export lane.
-- Stills routed by the image classes above: Y′CbCr JPEG (needs a
-  libjpeg-turbo decode in pm-media), Display P3 (needs the section 9 versus
-  legacy clipping decision), 16-bit PNG, WebP with alpha, AVIF, every
-  oriented still (no oriented case compared yet), ICC-tagged, tiled, and
-  other uncompared TIFF structures (an sRGB-tagged TIFF corpus case would
-  lift the most common one, which ImageIO and Photoshop write), and
-  progressive gray JPEG (needs a corpus case).
-- No consumer of the capability check exists on the integration branch yet
-  (no crate depends on `pm-render`): the tracer and export lanes must call
-  `unsupported_with_media` or route on `RenderError::Unsupported` when they
-  adopt it.
+- Still structures outside the measured compatibility classes above remain
+  gated. SVG's Chromium paint-record emulation is incomplete; see `vector.md`.
+- Capability gates remain development scaffolding. This media lane removes
+  only reasons with measured parity; the derouter lane owns retiring the
+  remaining routing machinery.
 
 ## Changes outside the lane
 

@@ -975,6 +975,7 @@ impl Renderer {
         // An interpreted source is read differently from its file (color,
         // geometry, or frame timing), so its planes are never copied.
         let plan::Source::Video {
+            sequence: false,
             path,
             time,
             interpret: None,

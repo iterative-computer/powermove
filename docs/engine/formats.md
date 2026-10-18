@@ -439,3 +439,72 @@ float32 targets):
   straight alpha) against their converted samples: as the file says, alpha
   ignore, and primaries Display P3 within 1e-4 CV; without `interpret`
   both route to the legacy renderer.
+
+## Phase 3c media closure status
+
+The native source-preview API and original animation timing reader are in
+`pm-media::preview` and `image::animation`; see `media.md` for the caller
+contract and the distinction between source frames and encoded thumbnails.
+Fixture regressions cover original GIF/APNG/WebP timing, alpha, non-monotonic
+reads, mixed-padding selected sequences with gaps, replacement/offline media,
+filmstrip cancellation, retained frame accounting, and shared decode leases.
+The opt-in format test also compares original AVIF animation frames.
+
+H.273 matrix code 10 now remains `Bt2020Cl` throughout probing,
+interpretation, color cache keys, and CICP conversion. It is distinct from
+code 9 (`Bt2020Ncl`). The source shader performs the nonlinear
+constant-luminance decode: sign-dependent chroma scales, green recovered in
+linear light, and R′G′B′ returned to the selected source interpretation. A
+12-bit FFV1 fixture verifies the probe and GPU against the f64 table-4
+reference, including neutral and both chroma signs. The scalar NCL gate
+oracle refuses CL rather than silently applying another matrix. The
+normative equations and smooth transfer constants are in
+[BT.2020-2, table 4](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2020-2-201510-I!!PDF-E.pdf).
+This fix does not establish legacy parity for un-interpreted wide-gamut
+video or remove that gate.
+
+The 15-project still gate classes are now drawn through a level-1
+compatibility bitmap: early PNG16 reduction, pinned skcms ICC conversion and
+clipping, libwebp's fixed-point premultiplication, and pinned Chromium
+CrabbyAvif/dav1d/libyuv AVIF conversion. All 21 detailed still corpus projects
+are within 1 CV at every opaque pixel and below 1 CV in transparent output.
+P3 PNG/JPEG/HEIC, alpha WebP, AVIF and orientation-6 JPEG no longer route.
+RGB TIFF ICC extraction handles the UNDEFINED tag type; Adobe RGB, P3 and
+sRGB TIFF compatibility bitmaps match their shipped PNG conversion exactly.
+Unsigned RGB/RGBA TIFF at 8/16 bits also matches its shipped PNG bitmap.
+Native-depth readers and level 2 retain source precision and ICC interpretation.
+An additional opaque P3/Adobe RGB PNG/TIFF app comparison covers ICC clipping.
+Translucent wide-gamut ICC stills fail that extra capture's unchanged 2D bar
+and retain their gate; their side-by-sides are in the external lane report.
+The remaining structural gates (for example float/tiled or other-model
+TIFF, progressive gray JPEG and HDR/gamma-only PNG) are listed in `stills.rs`;
+decoder breadth beyond these proven classes is still an open deliverable.
+
+Review round 3 (2026-10-18): WebP EXIF orientation is no longer applied
+(Blink ignores it). Orientation and container transforms of PNG, JPEG,
+TIFF, HEIF and AVIF are drawn as Chromium shows them, each class compared in
+the app (52 cases, max ≤ 1 CV); AVIF `clap` and `irot`/`imir` follow Blink's
+decoder, and only 8-bit 4:2:0 AVIF (full or limited range, opaque or
+translucent) is in the drawn class. SVG bytes are decoded from their
+declared encoding before usvg. See `media.md`.
+
+Review round 4 (2026-10-18): AVIF color descriptions follow Blink. BT.709
+or unspecified primaries with the sRGB, BT.709, SMPTE 170M or BT.2020
+transfer draw as sRGB (Blink's profile is sRGB itself); every other
+description or an embedded ICC profile is a named unsupported class instead
+of an invalid-media failure. AVIF items without `pixi` draw, as in Blink,
+and an AVIF Chromium cannot parse is a named failure, not a route. The app
+spec has 59 cases. See `media.md`.
+
+Existing animated and numbered imports render their persisted WebM through
+the video path. The three animated corpus sources pass Chromium's video
+class in hidden app exports and all nine frames of their saved 2× corpus
+compositions (interiors and alpha exact). Level 1 uses Chromium's libyuv
+RGBA8 upload; level 2 passes the native same-filter FFmpeg + zimg reference.
+The level-1 bitmap is up to 2 CV from nearest-filter zimg on saturated blue;
+that independent ≤1 CV gate remains open, with side-by-sides in the report. Original-decoding timing APIs remain
+available; this round does not change the import persistence policy.
+
+The lane report retains the diagnostic comparisons and their side-by-side
+artifacts outside the public repository. No corpus image, app trace, or
+machine-local operational report is checked in.

@@ -112,12 +112,16 @@ pub struct Placed {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     Image {
+        level2: bool,
         asset: String,
         path: PathBuf,
         /// The asset's Interpret Footage overrides (section 9).
         interpret: Option<pm_media::interpret::Interpretation>,
     },
     Video {
+        level2: bool,
+        /// Persisted image-sequence/animation WebM (converter BT.601 default).
+        sequence: bool,
         asset: String,
         path: PathBuf,
         /// Source time in seconds after retiming and today's end clamp.
@@ -1139,9 +1143,27 @@ fn native_content_quad<'d>(
             if ty == "image" && format == "svg" {
                 // Level 2 SVG images draw at output resolution
                 // (crate::vector::svg); level 1 and SVG text stay routed.
+                // A level 1 SVG is not parsed: Chromium's `<img>` accepts
+                // it, so a usvg error would not mean the file is corrupt.
                 if !crate::vector::level2(layer) {
-                    b.unsupported
-                        .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    if let Err(e) = std::fs::metadata(&path) {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message: format!("{}: {e}", path.display()),
+                        });
+                    } else {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    }
+                    return Ok(None);
+                }
+                if let Err(message) = crate::vector::svg::document(&path) {
+                    b.failures.push(LayerFailure {
+                        composition: comp_id,
+                        layer: js::layer_id(layer),
+                        message,
+                    });
                     return Ok(None);
                 }
                 let sw = js::or_number(&rec("w"), 1.0);
@@ -1170,13 +1192,29 @@ fn native_content_quad<'d>(
                     }
                 };
             }
-            if ty == "video"
+            let sequence = ty == "video"
                 && (rec("imageSequence").truthy()
-                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"))
-            {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::ImageSequence));
-                return Ok(None);
+                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"));
+            if sequence {
+                match crate::media::sequence_rendition(&path) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::ImageSequence,
+                        ));
+                        return Ok(None);
+                    }
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        return Ok(None);
+                    }
+                }
             }
             let sw = js::or_number(&rec("w"), 1.0);
             let sh = js::or_number(&rec("h"), 1.0);
@@ -1191,13 +1229,21 @@ fn native_content_quad<'d>(
                 let at = b.video_center.unwrap_or(time);
                 let st = scope.source_time(layer, at, Some(&mut b.retime))?;
                 let rate = interpret.as_ref().and_then(|i| i.frame_rate);
-                let time = match rate {
+                let time = match (
+                    (sequence && rate.is_none())
+                        .then(|| crate::media::sequence_playback_time(record, st))
+                        .flatten(),
+                    rate,
+                ) {
+                    (Some(t), _) => t,
                     // The file's frames on the overridden grid; the last
                     // frame clamps when the media is opened.
-                    Some(_) => js::max(0.0, st),
-                    None => playback_time(st, rec("dur").to_number(), b.video_padding),
+                    (None, Some(_)) => js::max(0.0, st),
+                    (None, None) => playback_time(st, rec("dur").to_number(), b.video_padding),
                 };
                 Source::Video {
+                    level2: crate::sampling::is_level2(layer),
+                    sequence,
                     asset: asset_id,
                     path,
                     time,
@@ -1206,6 +1252,7 @@ fn native_content_quad<'d>(
                 }
             } else {
                 Source::Image {
+                    level2: crate::sampling::is_level2(layer),
                     asset: asset_id,
                     path,
                     interpret,

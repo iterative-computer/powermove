@@ -1151,6 +1151,21 @@ fn animated_images() {
             .unwrap_or_else(|e| panic!("{file}: {e}"))
             .unwrap_or_else(|| panic!("{file}: not animated"));
         assert_eq!(a.frames, 10, "{file}");
+        let timing = a.compatibility_timing().unwrap();
+        assert_eq!((timing.fps, timing.frames), (10.0, 10), "{file}");
+        let mut previews = pm_media::preview::PreviewReader::open(&path).unwrap();
+        previews
+            .filmstrip(&[0.9, 0.0, 0.5], |_, seconds, preview| {
+                let index = timing.frame_at(seconds).unwrap();
+                let direct = image::read_animation_frame(&path, index, &pool)?;
+                assert_eq!(
+                    preview.decoded().md5_hex().unwrap(),
+                    direct.frame.md5_hex().unwrap(),
+                    "{file}: {seconds}"
+                );
+                Ok(())
+            })
+            .unwrap();
         for d in &a.delays {
             assert!((d - 0.1).abs() < 0.011, "{file}: delay {d}");
         }
