@@ -539,11 +539,21 @@ mod child {
         let content = Bytes(anchored.to_string().into_bytes());
         let shifted = rendered(c.snapshot(
             13,
-            SnapshotTarget::Layer { layer: "title".into(), scale: 1.0, crop: None, content: Some(content) },
+            SnapshotTarget::Layer {
+                layer: "title".into(),
+                scale: 1.0,
+                crop: None,
+                content: Some(content),
+            },
             Size::new(6000, 6000),
             SnapshotPixels::Premultiplied,
         ));
-        let offset = shifted.raster.clone().unwrap().font_offset.expect("a font offset");
+        let offset = shifted
+            .raster
+            .clone()
+            .unwrap()
+            .font_offset
+            .expect("a font offset");
         assert!(offset[0] != 0.0 || offset[1] != 0.0, "{offset:?}");
         assert!((raster.origin[0] - offset[0] - shifted.origin[0]).abs() < 1e-9);
         assert!((raster.origin[1] - offset[1] - shifted.origin[1]).abs() < 1e-9);
