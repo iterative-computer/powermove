@@ -2047,7 +2047,9 @@ fn cubic_in_line(cubic: &[Point; 4]) -> bool {
 }
 
 #[rustfmt::skip]
+// Upstream's tests, kept as written.
 #[cfg(test)]
+#[allow(clippy::bool_assert_comparison, clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 

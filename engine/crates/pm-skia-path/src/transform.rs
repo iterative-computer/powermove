@@ -398,7 +398,9 @@ fn mul_add_mul(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (f64::from(a) * f64::from(b) + f64::from(c) * f64::from(d)) as f32
 }
 
+// Upstream's tests, kept as written.
 #[cfg(test)]
+#[allow(clippy::bool_assert_comparison, clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
