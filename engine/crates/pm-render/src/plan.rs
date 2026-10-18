@@ -689,13 +689,11 @@ fn draw_layer<'d>(
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
     let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
-    // Motion blur samples draw straight into their accumulation; a blurred
+    // Motion blur samples draw straight into their accumulation. A blurred
     // layer that also needs its own target (masks, effects, matte, blend
-    // mode, transition) has no parity case and keeps routing.
-    if blur.is_some() && slow {
-        refuse(b, Feature::MotionBlur);
-        return Ok(None);
-    }
+    // mode, transition) takes the accumulation as its layer target, as
+    // today's slow path does (`lf` holds the samples; masks, effects, and
+    // the matte read it at the center time).
     // The layer's own target: masks, effects, matte, then the composite.
     let wrap = |scope: &mut Scope<'_, 'd>,
                 b: &mut Build<'_>,
@@ -735,11 +733,19 @@ fn draw_layer<'d>(
             });
         }
         if let Some(blur) = blur {
-            // The group's members at every sample time, accumulated.
+            // The group's members at every sample time, accumulated; the
+            // sum is drawn at the group's opacity, or is the layer target
+            // of the slow path (composited at the group's opacity).
+            if !slow {
+                let draw = crate::motion::plan::blur_group(
+                    scope, b, layer, time, width, height, scale, alpha, blur,
+                );
+                return Ok(Some(vec![draw]));
+            }
             let draw = crate::motion::plan::blur_group(
-                scope, b, layer, time, width, height, scale, alpha, blur,
+                scope, b, layer, time, width, height, scale, 1.0, blur,
             );
-            return Ok(Some(vec![draw]));
+            return wrap(scope, b, vec![draw], alpha);
         }
         // A boundary group: its members composite into their own target,
         // drawn with the group's opacity.
@@ -762,7 +768,11 @@ fn draw_layer<'d>(
         let draw = crate::motion::plan::blur_layer(
             scope, b, layer, time, width, height, scale, alpha, blur,
         )?;
-        return Ok(draw.map(|d| vec![d]));
+        return match draw {
+            Some(d) if slow => wrap(scope, b, vec![d], 1.0),
+            Some(d) => Ok(Some(vec![d])),
+            None => Ok(None),
+        };
     }
     let Some(draw) = layer_draw(scope, b, layer, time, width, height, scale, alpha)? else {
         return Ok(None);
@@ -854,6 +864,34 @@ pub(crate) fn layer_draw<'d>(
         },
     };
     Ok(Some(draw))
+}
+
+/// A motion-blur sample of a 3D object layer at `time`: pushes the
+/// enclosing pass's 3D state rebuilt at that time (today's
+/// `compositionRuntime(PM, T + dt)`); [`pop_sample_3d`] removes it. Returns
+/// whether a state was pushed (other layer types, or no enclosing pass).
+pub(crate) fn push_sample_3d<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+) -> JsResult<bool> {
+    if pm_eval::parenting::Role3d::of(layer) != Some(pm_eval::parenting::Role3d::Object) {
+        return Ok(false);
+    }
+    let Some(center) = b.pass3d.last() else {
+        return Ok(false);
+    };
+    let ctx = center.at_time(scope, time, width, height, b.assets, b.options3d.view.as_ref())?;
+    b.pass3d.push(ctx);
+    Ok(true)
+}
+
+/// Removes the state [`push_sample_3d`] pushed.
+pub(crate) fn pop_sample_3d(b: &mut Build<'_>) {
+    b.pass3d.pop();
 }
 
 /// `content` as it is, or wrapped with its plane and resampler.

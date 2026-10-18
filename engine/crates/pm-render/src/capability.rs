@@ -429,17 +429,13 @@ fn check_composition(
         // Members of a 3D group are placed in its space, members of a
         // blurred group are sampled with it, and the layers of a composition
         // reached through a blurred precomp are drawn at every sample time:
-        // other types keep routing. That includes 3D object, light, and
-        // camera layers, whose scene pass is built at the center time and
-        // whose placement inside a 3D group has no parity case.
+        // types outside the compared lists keep routing.
         let (three_d, blurred) = enclosing_groups(layers, layer);
-        if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
-            && !NOT_VISUAL.contains(&ty.as_str())
-        {
-            if three_d {
+        if !NOT_VISUAL.contains(&ty.as_str()) {
+            if three_d && !crate::space25d::DRAWN_TYPES.contains(&ty.as_str()) {
                 add(layer, Feature::TwoAndAHalfD);
             }
-            if blurred || sampled {
+            if (blurred || sampled) && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
                 add(layer, Feature::MotionBlur);
             }
         }

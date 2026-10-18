@@ -96,8 +96,10 @@ fn main() {
             }
             let hidden = text::without_text(&p.document);
             for s in &p.samples {
-                let request =
+                // The capture's motion blur: 16 samples (opaque export).
+                let mut request =
                     RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+                request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
                 let render = |r: &mut Renderer, doc: &pm_model::Document| {
                     r.render(doc, &p.composition, ticks(s.time), &request, &p.resolver)
                         .map(|f| opaque8(&r.read_rgba(&f).unwrap()))
