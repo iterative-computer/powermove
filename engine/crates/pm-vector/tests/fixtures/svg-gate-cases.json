@@ -1,0 +1,2685 @@
+{
+ "cases": [
+  {
+   "id": "gate-size-vb-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-vb-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-vb-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-equal-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-equal-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-equal-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-double-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-double-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-double-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-fraction-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"99.5\" height=\"60.25\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-fraction-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"99.5\" height=\"60.25\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-fraction-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"99.5\" height=\"60.25\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-px-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150px\" height=\"90px\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-px-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150px\" height=\"90px\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-px-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150px\" height=\"90px\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-percent-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-percent-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-percent-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-auto-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"auto\" height=\"auto\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-auto-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"auto\" height=\"auto\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-auto-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"auto\" height=\"auto\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-w-only-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-w-only-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-w-only-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-h-only-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"90\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-h-only-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"90\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-h-only-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"90\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-no-vb-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-no-vb-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-no-vb-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-w-only-no-vb-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-w-only-no-vb-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-w-only-no-vb-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-no-size-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-no-size-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-no-size-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-vb-origin-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-vb-origin-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-vb-origin-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-vb-negative-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-20 -10 100 60\"><rect x=\"-20\" y=\"-10\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"-12\" y=\"-4\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"5\" cy=\"33.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"50\" cy=\"20\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-vb-negative-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-20 -10 100 60\"><rect x=\"-20\" y=\"-10\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"-12\" y=\"-4\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"5\" cy=\"33.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"50\" cy=\"20\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-vb-negative-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-20 -10 100 60\"><rect x=\"-20\" y=\"-10\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"-12\" y=\"-4\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"5\" cy=\"33.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"50\" cy=\"20\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-vb-commas-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0,0,100,60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-vb-commas-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0,0,100,60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-vb-commas-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0,0,100,60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-wh-vb-origin-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-wh-vb-origin-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-wh-vb-origin-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-root-xy-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" x=\"10\" y=\"7\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-root-xy-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" x=\"10\" y=\"7\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-root-xy-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" x=\"10\" y=\"7\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-size-icon-96x96",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\"><path d=\"M12 2 L22 20 L2 20 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 96,
+   "height": 96
+  },
+  {
+   "id": "gate-size-icon-48x48",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\"><path d=\"M12 2 L22 20 L2 20 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 48,
+   "height": 48
+  },
+  {
+   "id": "gate-size-icon-131x131",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\"><path d=\"M12 2 L22 20 L2 20 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 131,
+   "height": 131
+  },
+  {
+   "id": "gate-size-icon-tess-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-size-icon-tess-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-size-icon-tess-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-par-wide-none-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-none-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-none-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-none-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMin-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMin-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMin-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMin-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMid-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMid-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMid-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMid-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMinYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMinYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMinYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMinYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMax-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMax-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMaxYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMaxYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMaxYMax-slice-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMaxYMax-slice-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-meet-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-wide-xMidYMid-meet-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-meet-100x100",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 100,
+   "height": 100
+  },
+  {
+   "id": "gate-par-tall-xMidYMid-meet-160x160",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+   "width": 160,
+   "height": 160
+  },
+  {
+   "id": "gate-par-vb-only-slice-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-par-vb-only-slice-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-par-vb-only-slice-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-par-vb-only-none-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-par-vb-only-none-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-par-vb-only-none-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-translate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(13.5 7.25)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-translate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(13.5 7.25)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-translate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(13.5 7.25)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-translate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-translate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-translate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(13.5 7.25)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-translate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(13.5 7.25)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-translate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(13.5 7.25)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-translate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(13.5 7.25)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-translate1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(9)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(9)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-translate1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(9)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(9)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-translate1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(9)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(9)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-translate1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(9)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-translate1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(9)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-translate1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(9)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-translate1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(9)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-translate1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(9)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-translate1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(9)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-rotate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(-30 50 30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-rotate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(-30 50 30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-rotate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(-30 50 30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-rotate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-rotate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-rotate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(-30 50 30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-rotate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(-30 50 30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-rotate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(-30 50 30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-rotate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(-30 50 30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-rotate-commas-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(25,50,30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-rotate-commas-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(25,50,30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-rotate-commas-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(25,50,30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-rotate-commas-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-rotate-commas-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-rotate-commas-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(25,50,30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-rotate-commas-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(25,50,30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-rotate-commas-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(25,50,30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-rotate-commas-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(25,50,30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-scale-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(1.3 0.8)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-scale-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(1.3 0.8)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-scale-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(1.3 0.8)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-scale-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-scale-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-scale-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(1.3 0.8)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-scale-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(1.3 0.8)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-scale-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(1.3 0.8)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-scale-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(1.3 0.8)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-scale1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(0.75)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(0.75)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-scale1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(0.75)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(0.75)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-scale1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(0.75)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(0.75)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-scale1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(0.75)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-scale1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(0.75)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-scale1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(0.75)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-scale1-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(0.75)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-scale1-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(0.75)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-scale1-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(0.75)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-skewx-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewX(20)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewX(20)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-skewx-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewX(20)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewX(20)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-skewx-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewX(20)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewX(20)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-skewx-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewX(20)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-skewx-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewX(20)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-skewx-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewX(20)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-skewx-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewX(20)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-skewx-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewX(20)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-skewx-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewX(20)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-skewy-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewY(-15)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewY(-15)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-skewy-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewY(-15)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewY(-15)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-skewy-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewY(-15)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewY(-15)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-skewy-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewY(-15)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-skewy-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewY(-15)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-skewy-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewY(-15)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-skewy-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewY(-15)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-skewy-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewY(-15)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-skewy-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewY(-15)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-matrix-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-matrix-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-matrix-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-matrix-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-matrix-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-matrix-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-matrix-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-matrix-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-matrix-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-analytic-list-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-analytic-list-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-analytic-list-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-tess-list-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-tess-list-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-tess-list-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-list-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-list-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-list-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-shape-opacity-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"10\" y=\"10\" width=\"50\" height=\"30\" rx=\"5\" fill=\"#F2C14E\" opacity=\"0.6\" transform=\"rotate(-12 35 25)\"/><circle cx=\"60\" cy=\"35\" r=\"18\" fill=\"#4C8DFF\" opacity=\"0.5\" transform=\"scale(1.1 0.9)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-shape-opacity-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"10\" y=\"10\" width=\"50\" height=\"30\" rx=\"5\" fill=\"#F2C14E\" opacity=\"0.6\" transform=\"rotate(-12 35 25)\"/><circle cx=\"60\" cy=\"35\" r=\"18\" fill=\"#4C8DFF\" opacity=\"0.5\" transform=\"scale(1.1 0.9)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-shape-opacity-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"10\" y=\"10\" width=\"50\" height=\"30\" rx=\"5\" fill=\"#F2C14E\" opacity=\"0.6\" transform=\"rotate(-12 35 25)\"/><circle cx=\"60\" cy=\"35\" r=\"18\" fill=\"#4C8DFF\" opacity=\"0.5\" transform=\"scale(1.1 0.9)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-shape-clip-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"40\" height=\"30\" rx=\"8\"/></clipPath></defs><rect x=\"0\" y=\"0\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" clip-path=\"url(#c)\" transform=\"translate(20 10) rotate(10)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-shape-clip-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"40\" height=\"30\" rx=\"8\"/></clipPath></defs><rect x=\"0\" y=\"0\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" clip-path=\"url(#c)\" transform=\"translate(20 10) rotate(10)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-shape-clip-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"40\" height=\"30\" rx=\"8\"/></clipPath></defs><rect x=\"0\" y=\"0\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" clip-path=\"url(#c)\" transform=\"translate(20 10) rotate(10)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-shape-gradient-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"10\" y=\"10\" width=\"60\" height=\"30\" rx=\"6\" fill=\"url(#g)\" transform=\"rotate(15 40 25) translate(5 3)\"/><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"url(#g)\" transform=\"skewX(-10)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-shape-gradient-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"10\" y=\"10\" width=\"60\" height=\"30\" rx=\"6\" fill=\"url(#g)\" transform=\"rotate(15 40 25) translate(5 3)\"/><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"url(#g)\" transform=\"skewX(-10)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-shape-gradient-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"10\" y=\"10\" width=\"60\" height=\"30\" rx=\"6\" fill=\"url(#g)\" transform=\"rotate(15 40 25) translate(5 3)\"/><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"url(#g)\" transform=\"skewX(-10)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-shape-gradient-tess-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"0.7\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\"/></radialGradient></defs><path d=\"M10 50 L40 5 L70 50 Z\" fill=\"url(#r)\" transform=\"translate(10 2) scale(1.1)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-shape-gradient-tess-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"0.7\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\"/></radialGradient></defs><path d=\"M10 50 L40 5 L70 50 Z\" fill=\"url(#r)\" transform=\"translate(10 2) scale(1.1)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-shape-gradient-tess-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"0.7\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\"/></radialGradient></defs><path d=\"M10 50 L40 5 L70 50 Z\" fill=\"url(#r)\" transform=\"translate(10 2) scale(1.1)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-nested-shape-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(10 5)\"><g transform=\"scale(0.9)\"><rect x=\"10\" y=\"10\" width=\"40\" height=\"25\" fill=\"#3FCF8E\" transform=\"rotate(20 30 22)\"/><circle cx=\"70\" cy=\"30\" r=\"12\" fill=\"#FF6B1A\" transform=\"translate(-5 4)\"/></g></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-nested-shape-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(10 5)\"><g transform=\"scale(0.9)\"><rect x=\"10\" y=\"10\" width=\"40\" height=\"25\" fill=\"#3FCF8E\" transform=\"rotate(20 30 22)\"/><circle cx=\"70\" cy=\"30\" r=\"12\" fill=\"#FF6B1A\" transform=\"translate(-5 4)\"/></g></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-nested-shape-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(10 5)\"><g transform=\"scale(0.9)\"><rect x=\"10\" y=\"10\" width=\"40\" height=\"25\" fill=\"#3FCF8E\" transform=\"rotate(20 30 22)\"/><circle cx=\"70\" cy=\"30\" r=\"12\" fill=\"#FF6B1A\" transform=\"translate(-5 4)\"/></g></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-group-clip-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"30\" r=\"22\"/></clipPath></defs><g transform=\"translate(10 0)\" clip-path=\"url(#c)\"><rect width=\"100\" height=\"30\" fill=\"#3FCF8E\"/><rect y=\"30\" width=\"100\" height=\"30\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-group-clip-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"30\" r=\"22\"/></clipPath></defs><g transform=\"translate(10 0)\" clip-path=\"url(#c)\"><rect width=\"100\" height=\"30\" fill=\"#3FCF8E\"/><rect y=\"30\" width=\"100\" height=\"30\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-group-clip-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"30\" r=\"22\"/></clipPath></defs><g transform=\"translate(10 0)\" clip-path=\"url(#c)\"><rect width=\"100\" height=\"30\" fill=\"#3FCF8E\"/><rect y=\"30\" width=\"100\" height=\"30\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-clip-rotated-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" transform=\"rotate(20 50 30)\"><rect x=\"20\" y=\"15\" width=\"60\" height=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#F2C14E\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#A73366\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-clip-rotated-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" transform=\"rotate(20 50 30)\"><rect x=\"20\" y=\"15\" width=\"60\" height=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#F2C14E\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#A73366\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-clip-rotated-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" transform=\"rotate(20 50 30)\"><rect x=\"20\" y=\"15\" width=\"60\" height=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#F2C14E\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#A73366\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-single-top-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"rotate(10 40 25)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-single-top-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"rotate(10 40 25)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-single-top-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"rotate(10 40 25)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-single-top-sized-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M20 10 L60 15 L40 50 Z\" fill=\"#4C8DFF\" transform=\"translate(15 5)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-single-top-sized-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M20 10 L60 15 L40 50 Z\" fill=\"#4C8DFF\" transform=\"translate(15 5)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-single-top-sized-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M20 10 L60 15 L40 50 Z\" fill=\"#4C8DFF\" transform=\"translate(15 5)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-identity-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"translate(0 0)\"/><circle cx=\"70\" cy=\"30\" r=\"15\" fill=\"#FF6B1A\" transform=\"rotate(360 70 30)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-identity-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"translate(0 0)\"/><circle cx=\"70\" cy=\"30\" r=\"15\" fill=\"#FF6B1A\" transform=\"rotate(360 70 30)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-identity-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"translate(0 0)\"/><circle cx=\"70\" cy=\"30\" r=\"15\" fill=\"#FF6B1A\" transform=\"rotate(360 70 30)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-xform-root-sized-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" height=\"90\" viewBox=\"5 5 100 60\"><g transform=\"rotate(-8 50 30)\"><rect x=\"15\" y=\"15\" width=\"40\" height=\"30\" fill=\"#3FCF8E\"/></g><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"#FF6B1A\" transform=\"translate(-4 2)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-xform-root-sized-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" height=\"90\" viewBox=\"5 5 100 60\"><g transform=\"rotate(-8 50 30)\"><rect x=\"15\" y=\"15\" width=\"40\" height=\"30\" fill=\"#3FCF8E\"/></g><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"#FF6B1A\" transform=\"translate(-4 2)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-xform-root-sized-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" height=\"90\" viewBox=\"5 5 100 60\"><g transform=\"rotate(-8 50 30)\"><rect x=\"15\" y=\"15\" width=\"40\" height=\"30\" fill=\"#3FCF8E\"/></g><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"#FF6B1A\" transform=\"translate(-4 2)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-percent-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"10%\" y1=\"0%\" x2=\"90%\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"8\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-percent-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"10%\" y1=\"0%\" x2=\"90%\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"8\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-percent-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"10%\" y1=\"0%\" x2=\"90%\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"8\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-user-percent-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"20\" y=\"5\" width=\"60\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-user-percent-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"20\" y=\"5\" width=\"60\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-user-percent-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"20\" y=\"5\" width=\"60\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-href-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"base\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><linearGradient id=\"g\" href=\"#base\" x2=\"0\" y2=\"1\"/><linearGradient id=\"g2\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xlink:href=\"#g\" y1=\"0.2\"/></defs><rect x=\"5\" y=\"5\" width=\"40\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"72\" cy=\"30\" r=\"22\" fill=\"url(#g2)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-href-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"base\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><linearGradient id=\"g\" href=\"#base\" x2=\"0\" y2=\"1\"/><linearGradient id=\"g2\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xlink:href=\"#g\" y1=\"0.2\"/></defs><rect x=\"5\" y=\"5\" width=\"40\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"72\" cy=\"30\" r=\"22\" fill=\"url(#g2)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-href-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"base\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><linearGradient id=\"g\" href=\"#base\" x2=\"0\" y2=\"1\"/><linearGradient id=\"g2\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xlink:href=\"#g\" y1=\"0.2\"/></defs><rect x=\"5\" y=\"5\" width=\"40\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"72\" cy=\"30\" r=\"22\" fill=\"url(#g2)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-stops-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"20%\" style=\"stop-color:#1B2A4A\"/><stop offset=\"0.1\" stop-color=\"#3FCF8E\"/><stop offset=\"80%\" stop-color=\"#F2C14E\" stop-opacity=\"0.5\"/><stop offset=\"1.5\" stop-color=\"#A73366\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-stops-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"20%\" style=\"stop-color:#1B2A4A\"/><stop offset=\"0.1\" stop-color=\"#3FCF8E\"/><stop offset=\"80%\" stop-color=\"#F2C14E\" stop-opacity=\"0.5\"/><stop offset=\"1.5\" stop-color=\"#A73366\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-stops-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"20%\" style=\"stop-color:#1B2A4A\"/><stop offset=\"0.1\" stop-color=\"#3FCF8E\"/><stop offset=\"80%\" stop-color=\"#F2C14E\" stop-opacity=\"0.5\"/><stop offset=\"1.5\" stop-color=\"#A73366\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-pad-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" spreadMethod=\"pad\" x1=\"0.3\" x2=\"0.7\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-pad-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" spreadMethod=\"pad\" x1=\"0.3\" x2=\"0.7\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-pad-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" spreadMethod=\"pad\" x1=\"0.3\" x2=\"0.7\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-radial-transform-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientTransform=\"translate(0.5 0.5) scale(1 0.5) rotate(30) translate(-0.5 -0.5)\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"10\" fill=\"url(#r)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-radial-transform-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientTransform=\"translate(0.5 0.5) scale(1 0.5) rotate(30) translate(-0.5 -0.5)\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"10\" fill=\"url(#r)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-radial-transform-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientTransform=\"translate(0.5 0.5) scale(1 0.5) rotate(30) translate(-0.5 -0.5)\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"10\" fill=\"url(#r)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-radial-percent-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" cx=\"40%\" cy=\"60%\" r=\"70%\" fx=\"40%\" fy=\"60%\"><stop offset=\"0\" stop-color=\"#F2C14E\"/><stop offset=\"1\" stop-color=\"#A73366\"/></radialGradient></defs><ellipse cx=\"50\" cy=\"30\" rx=\"45\" ry=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-radial-percent-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" cx=\"40%\" cy=\"60%\" r=\"70%\" fx=\"40%\" fy=\"60%\"><stop offset=\"0\" stop-color=\"#F2C14E\"/><stop offset=\"1\" stop-color=\"#A73366\"/></radialGradient></defs><ellipse cx=\"50\" cy=\"30\" rx=\"45\" ry=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-radial-percent-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" cx=\"40%\" cy=\"60%\" r=\"70%\" fx=\"40%\" fy=\"60%\"><stop offset=\"0\" stop-color=\"#F2C14E\"/><stop offset=\"1\" stop-color=\"#A73366\"/></radialGradient></defs><ellipse cx=\"50\" cy=\"30\" rx=\"45\" ry=\"25\" fill=\"url(#r)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-radial-user-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientUnits=\"userSpaceOnUse\" cx=\"50\" cy=\"30\" r=\"40\"><stop offset=\"0\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\" stop-opacity=\"0.2\"/></radialGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#r)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-radial-user-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientUnits=\"userSpaceOnUse\" cx=\"50\" cy=\"30\" r=\"40\"><stop offset=\"0\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\" stop-opacity=\"0.2\"/></radialGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#r)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-radial-user-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientUnits=\"userSpaceOnUse\" cx=\"50\" cy=\"30\" r=\"40\"><stop offset=\"0\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\" stop-opacity=\"0.2\"/></radialGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#r)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-opacity-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"#E8E2CF\"/><g opacity=\"0.7\"><rect x=\"5\" y=\"5\" width=\"60\" height=\"40\" fill=\"url(#g)\" fill-opacity=\"0.6\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-opacity-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"#E8E2CF\"/><g opacity=\"0.7\"><rect x=\"5\" y=\"5\" width=\"60\" height=\"40\" fill=\"url(#g)\" fill-opacity=\"0.6\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-opacity-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"#E8E2CF\"/><g opacity=\"0.7\"><rect x=\"5\" y=\"5\" width=\"60\" height=\"40\" fill=\"url(#g)\" fill-opacity=\"0.6\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-tess-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><path d=\"M5 55 C 20 0, 60 0, 95 55 Z\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-tess-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><path d=\"M5 55 C 20 0, 60 0, 95 55 Z\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-tess-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><path d=\"M5 55 C 20 0, 60 0, 95 55 Z\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-sized-root-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"10%\" y1=\"0\" x2=\"90%\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#g)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-sized-root-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"10%\" y1=\"0\" x2=\"90%\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#g)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-sized-root-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"10%\" y1=\"0\" x2=\"90%\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#g)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-ellipse-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><ellipse cx=\"50\" cy=\"30\" rx=\"40\" ry=\"20\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-ellipse-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><ellipse cx=\"50\" cy=\"30\" rx=\"40\" ry=\"20\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-ellipse-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><ellipse cx=\"50\" cy=\"30\" rx=\"40\" ry=\"20\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-rrect-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-rrect-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-rrect-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-rect-fraction-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10.3\" y=\"8.6\" width=\"70.2\" height=\"40.7\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-rect-fraction-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10.3\" y=\"8.6\" width=\"70.2\" height=\"40.7\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-rect-fraction-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10.3\" y=\"8.6\" width=\"70.2\" height=\"40.7\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-polygon-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><polygon points=\"50,2 98,58 2,58\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-polygon-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><polygon points=\"50,2 98,58 2,58\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-polygon-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><polygon points=\"50,2 98,58 2,58\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-rule-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><path clip-rule=\"evenodd\" d=\"M5 5 H95 V55 H5 Z M30 15 H70 V45 H30 Z\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-rule-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><path clip-rule=\"evenodd\" d=\"M5 5 H95 V55 H5 Z M30 15 H70 V45 H30 Z\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-rule-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><path clip-rule=\"evenodd\" d=\"M5 5 H95 V55 H5 Z M30 15 H70 V45 H30 Z\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-shape-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"50\" cy=\"30\" r=\"25\"/></clipPath></defs><rect width=\"100\" height=\"60\" fill=\"#F2C14E\" clip-path=\"url(#c)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-shape-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"50\" cy=\"30\" r=\"25\"/></clipPath></defs><rect width=\"100\" height=\"60\" fill=\"#F2C14E\" clip-path=\"url(#c)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-shape-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"50\" cy=\"30\" r=\"25\"/></clipPath></defs><rect width=\"100\" height=\"60\" fill=\"#F2C14E\" clip-path=\"url(#c)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-nested-groups-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"80\" height=\"50\" rx=\"10\"/></clipPath></defs><g clip-path=\"url(#c)\"><g opacity=\"0.8\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-nested-groups-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"80\" height=\"50\" rx=\"10\"/></clipPath></defs><g clip-path=\"url(#c)\"><g opacity=\"0.8\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-nested-groups-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"80\" height=\"50\" rx=\"10\"/></clipPath></defs><g clip-path=\"url(#c)\"><g opacity=\"0.8\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-colors-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"14\" height=\"25\" fill=\"tomato\"/><rect x=\"18\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(20, 120, 220)\"/><rect x=\"34\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgba(20,120,220,0.5)\"/><rect x=\"50\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(10%, 60%, 30%)\"/><rect x=\"66\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8\"/><rect x=\"82\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8DFF80\"/><rect x=\"2\" y=\"32\" width=\"14\" height=\"25\" fill=\"#4C88\"/><rect x=\"18\" y=\"32\" width=\"14\" height=\"25\" fill=\"hsl(200, 60%, 50%)\"/><rect x=\"34\" y=\"32\" width=\"14\" height=\"25\" fill=\"transparent\"/><rect x=\"50\" y=\"32\" width=\"14\" height=\"25\" fill=\"RED\"/><rect x=\"66\" y=\"32\" width=\"14\" height=\"25\" fill=\"  #A73366  \"/><rect x=\"82\" y=\"32\" width=\"14\" height=\"25\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-colors-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"14\" height=\"25\" fill=\"tomato\"/><rect x=\"18\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(20, 120, 220)\"/><rect x=\"34\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgba(20,120,220,0.5)\"/><rect x=\"50\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(10%, 60%, 30%)\"/><rect x=\"66\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8\"/><rect x=\"82\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8DFF80\"/><rect x=\"2\" y=\"32\" width=\"14\" height=\"25\" fill=\"#4C88\"/><rect x=\"18\" y=\"32\" width=\"14\" height=\"25\" fill=\"hsl(200, 60%, 50%)\"/><rect x=\"34\" y=\"32\" width=\"14\" height=\"25\" fill=\"transparent\"/><rect x=\"50\" y=\"32\" width=\"14\" height=\"25\" fill=\"RED\"/><rect x=\"66\" y=\"32\" width=\"14\" height=\"25\" fill=\"  #A73366  \"/><rect x=\"82\" y=\"32\" width=\"14\" height=\"25\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-colors-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"14\" height=\"25\" fill=\"tomato\"/><rect x=\"18\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(20, 120, 220)\"/><rect x=\"34\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgba(20,120,220,0.5)\"/><rect x=\"50\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(10%, 60%, 30%)\"/><rect x=\"66\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8\"/><rect x=\"82\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8DFF80\"/><rect x=\"2\" y=\"32\" width=\"14\" height=\"25\" fill=\"#4C88\"/><rect x=\"18\" y=\"32\" width=\"14\" height=\"25\" fill=\"hsl(200, 60%, 50%)\"/><rect x=\"34\" y=\"32\" width=\"14\" height=\"25\" fill=\"transparent\"/><rect x=\"50\" y=\"32\" width=\"14\" height=\"25\" fill=\"RED\"/><rect x=\"66\" y=\"32\" width=\"14\" height=\"25\" fill=\"  #A73366  \"/><rect x=\"82\" y=\"32\" width=\"14\" height=\"25\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-invalid-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"notacolor\"/><rect x=\"55\" y=\"5\" width=\"40\" height=\"40\" fill=\"#12345\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-invalid-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"notacolor\"/><rect x=\"55\" y=\"5\" width=\"40\" height=\"40\" fill=\"#12345\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-invalid-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"notacolor\"/><rect x=\"55\" y=\"5\" width=\"40\" height=\"40\" fill=\"#12345\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-current-color-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><g color=\"#3FCF8E\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"currentColor\"/></g><circle cx=\"72\" cy=\"30\" r=\"20\" fill=\"currentColor\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-current-color-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><g color=\"#3FCF8E\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"currentColor\"/></g><circle cx=\"72\" cy=\"30\" r=\"20\" fill=\"currentColor\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-current-color-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><g color=\"#3FCF8E\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"currentColor\"/></g><circle cx=\"72\" cy=\"30\" r=\"20\" fill=\"currentColor\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-none-and-opacity-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"none\"/><rect x=\"10\" y=\"10\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" fill-opacity=\"0\"/><circle cx=\"60\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" opacity=\"0\"/><ellipse cx=\"70\" cy=\"30\" rx=\"25\" ry=\"12\" fill=\"#F2C14E\" fill-opacity=\"0.35\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-none-and-opacity-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"none\"/><rect x=\"10\" y=\"10\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" fill-opacity=\"0\"/><circle cx=\"60\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" opacity=\"0\"/><ellipse cx=\"70\" cy=\"30\" rx=\"25\" ry=\"12\" fill=\"#F2C14E\" fill-opacity=\"0.35\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-none-and-opacity-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"none\"/><rect x=\"10\" y=\"10\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" fill-opacity=\"0\"/><circle cx=\"60\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" opacity=\"0\"/><ellipse cx=\"70\" cy=\"30\" rx=\"25\" ry=\"12\" fill=\"#F2C14E\" fill-opacity=\"0.35\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-style-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" style=\"fill: #1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" style=\" fill:#FF6B1A ; fill-opacity: 0.7 ;\"/><circle cx=\"65\" cy=\"30\" r=\"20\" style=\"fill:#3FCF8E;opacity:0.5\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-style-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" style=\"fill: #1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" style=\" fill:#FF6B1A ; fill-opacity: 0.7 ;\"/><circle cx=\"65\" cy=\"30\" r=\"20\" style=\"fill:#3FCF8E;opacity:0.5\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-style-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" style=\"fill: #1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" style=\" fill:#FF6B1A ; fill-opacity: 0.7 ;\"/><circle cx=\"65\" cy=\"30\" r=\"20\" style=\"fill:#3FCF8E;opacity:0.5\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-display-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><g display=\"none\"><rect width=\"50\" height=\"50\" fill=\"red\"/></g><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" style=\"display:none\"/><rect x=\"60\" y=\"10\" width=\"30\" height=\"30\" fill=\"#F2C14E\" display=\"inline\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-display-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><g display=\"none\"><rect width=\"50\" height=\"50\" fill=\"red\"/></g><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" style=\"display:none\"/><rect x=\"60\" y=\"10\" width=\"30\" height=\"30\" fill=\"#F2C14E\" display=\"inline\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-display-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><g display=\"none\"><rect width=\"50\" height=\"50\" fill=\"red\"/></g><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" style=\"display:none\"/><rect x=\"60\" y=\"10\" width=\"30\" height=\"30\" fill=\"#F2C14E\" display=\"inline\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-shape-rendering-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" shape-rendering=\"geometricPrecision\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" shape-rendering=\"auto\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-shape-rendering-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" shape-rendering=\"geometricPrecision\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" shape-rendering=\"auto\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-shape-rendering-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" shape-rendering=\"geometricPrecision\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" shape-rendering=\"auto\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-shape-rect-radii-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"30\" height=\"25\" rx=\"6\" fill=\"#3FCF8E\"/><rect x=\"35\" y=\"2\" width=\"30\" height=\"25\" ry=\"8\" fill=\"#FF6B1A\"/><rect x=\"68\" y=\"2\" width=\"30\" height=\"25\" rx=\"40\" fill=\"#4C8DFF\"/><rect x=\"2\" y=\"32\" width=\"30\" height=\"25\" rx=\"4\" ry=\"10\" fill=\"#F2C14E\"/><rect x=\"35\" y=\"32\" width=\"30\" height=\"25\" rx=\"auto\" ry=\"5\" fill=\"#A73366\"/><rect x=\"68\" y=\"32\" width=\"30\" height=\"25\" rx=\"-3\" ry=\"6\" fill=\"#E8E2CF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-shape-rect-radii-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"30\" height=\"25\" rx=\"6\" fill=\"#3FCF8E\"/><rect x=\"35\" y=\"2\" width=\"30\" height=\"25\" ry=\"8\" fill=\"#FF6B1A\"/><rect x=\"68\" y=\"2\" width=\"30\" height=\"25\" rx=\"40\" fill=\"#4C8DFF\"/><rect x=\"2\" y=\"32\" width=\"30\" height=\"25\" rx=\"4\" ry=\"10\" fill=\"#F2C14E\"/><rect x=\"35\" y=\"32\" width=\"30\" height=\"25\" rx=\"auto\" ry=\"5\" fill=\"#A73366\"/><rect x=\"68\" y=\"32\" width=\"30\" height=\"25\" rx=\"-3\" ry=\"6\" fill=\"#E8E2CF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-shape-rect-radii-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"30\" height=\"25\" rx=\"6\" fill=\"#3FCF8E\"/><rect x=\"35\" y=\"2\" width=\"30\" height=\"25\" ry=\"8\" fill=\"#FF6B1A\"/><rect x=\"68\" y=\"2\" width=\"30\" height=\"25\" rx=\"40\" fill=\"#4C8DFF\"/><rect x=\"2\" y=\"32\" width=\"30\" height=\"25\" rx=\"4\" ry=\"10\" fill=\"#F2C14E\"/><rect x=\"35\" y=\"32\" width=\"30\" height=\"25\" rx=\"auto\" ry=\"5\" fill=\"#A73366\"/><rect x=\"68\" y=\"32\" width=\"30\" height=\"25\" rx=\"-3\" ry=\"6\" fill=\"#E8E2CF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-shape-degenerate-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"0\" height=\"40\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"-10\" height=\"40\" fill=\"red\"/><circle cx=\"50\" cy=\"30\" r=\"0\" fill=\"red\"/><ellipse cx=\"50\" cy=\"30\" rx=\"10\" ry=\"0\" fill=\"red\"/><line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\" fill=\"red\"/><path d=\"M10 10\" fill=\"red\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-shape-degenerate-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"0\" height=\"40\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"-10\" height=\"40\" fill=\"red\"/><circle cx=\"50\" cy=\"30\" r=\"0\" fill=\"red\"/><ellipse cx=\"50\" cy=\"30\" rx=\"10\" ry=\"0\" fill=\"red\"/><line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\" fill=\"red\"/><path d=\"M10 10\" fill=\"red\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-shape-degenerate-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"0\" height=\"40\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"-10\" height=\"40\" fill=\"red\"/><circle cx=\"50\" cy=\"30\" r=\"0\" fill=\"red\"/><ellipse cx=\"50\" cy=\"30\" rx=\"10\" ry=\"0\" fill=\"red\"/><line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\" fill=\"red\"/><path d=\"M10 10\" fill=\"red\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-shape-ellipse-one-radius-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><ellipse cx=\"30\" cy=\"30\" rx=\"20\" fill=\"#3FCF8E\"/><ellipse cx=\"70\" cy=\"30\" ry=\"15\" fill=\"#FF6B1A\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-shape-ellipse-one-radius-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><ellipse cx=\"30\" cy=\"30\" rx=\"20\" fill=\"#3FCF8E\"/><ellipse cx=\"70\" cy=\"30\" ry=\"15\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-shape-ellipse-one-radius-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><ellipse cx=\"30\" cy=\"30\" rx=\"20\" fill=\"#3FCF8E\"/><ellipse cx=\"70\" cy=\"30\" ry=\"15\" fill=\"#FF6B1A\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-path-commands-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"m5 5 h30 v20 h-30 z M45 5 l20 0 l0 20 l-20 0 Z M75 5 H95 V25 H75 Z\" fill=\"#3FCF8E\"/><path d=\"M5 35 C 15 30 25 60 35 50 S 45 35 50 45 Q 60 60 70 45 T 95 45 L95 58 L5 58 Z\" fill=\"#FF6B1A\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-path-commands-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"m5 5 h30 v20 h-30 z M45 5 l20 0 l0 20 l-20 0 Z M75 5 H95 V25 H75 Z\" fill=\"#3FCF8E\"/><path d=\"M5 35 C 15 30 25 60 35 50 S 45 35 50 45 Q 60 60 70 45 T 95 45 L95 58 L5 58 Z\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-path-commands-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"m5 5 h30 v20 h-30 z M45 5 l20 0 l0 20 l-20 0 Z M75 5 H95 V25 H75 Z\" fill=\"#3FCF8E\"/><path d=\"M5 35 C 15 30 25 60 35 50 S 45 35 50 45 Q 60 60 70 45 T 95 45 L95 58 L5 58 Z\" fill=\"#FF6B1A\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-path-numbers-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5,5L45,5,45,25,5,25z M50 5 l.5.5 40 0 0 20-40 0z M5 30 L1e1 55 L4.5e1 55 L45 30 Z\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-path-numbers-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5,5L45,5,45,25,5,25z M50 5 l.5.5 40 0 0 20-40 0z M5 30 L1e1 55 L4.5e1 55 L45 30 Z\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-path-numbers-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5,5L45,5,45,25,5,25z M50 5 l.5.5 40 0 0 20-40 0z M5 30 L1e1 55 L4.5e1 55 L45 30 Z\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-path-unclosed-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 L45 10 L25 50\" fill=\"#3FCF8E\"/><polyline points=\"55,5 95,10 75,50 60,30\" fill=\"#FF6B1A\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-path-unclosed-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 L45 10 L25 50\" fill=\"#3FCF8E\"/><polyline points=\"55,5 95,10 75,50 60,30\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-path-unclosed-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 L45 10 L25 50\" fill=\"#3FCF8E\"/><polyline points=\"55,5 95,10 75,50 60,30\" fill=\"#FF6B1A\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-path-nonzero-overlap-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 H60 V50 H5 Z M30 10 H95 V55 H30 Z\" fill=\"#A73366\"/><path d=\"M5 30 H95 V40 H5 Z M50 2 V58 H55 V2 Z\" fill=\"#F2C14E\" fill-rule=\"nonzero\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-path-nonzero-overlap-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 H60 V50 H5 Z M30 10 H95 V55 H30 Z\" fill=\"#A73366\"/><path d=\"M5 30 H95 V40 H5 Z M50 2 V58 H55 V2 Z\" fill=\"#F2C14E\" fill-rule=\"nonzero\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-path-nonzero-overlap-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 H60 V50 H5 Z M30 10 H95 V55 H30 Z\" fill=\"#A73366\"/><path d=\"M5 30 H95 V40 H5 Z M50 2 V58 H55 V2 Z\" fill=\"#F2C14E\" fill-rule=\"nonzero\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-path-evenodd-style-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path style=\"fill-rule:evenodd\" d=\"M5 5 H95 V55 H5 Z M25 15 H75 V45 H25 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-path-evenodd-style-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path style=\"fill-rule:evenodd\" d=\"M5 5 H95 V55 H5 Z M25 15 H75 V45 H25 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-path-evenodd-style-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path style=\"fill-rule:evenodd\" d=\"M5 5 H95 V55 H5 Z M25 15 H75 V45 H25 Z\" fill=\"#3FCF8E\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-points-separators-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><polygon points=\"5,5 45,5 45,55 5,55,\" fill=\"#3FCF8E\"/><polygon points=\" 55 5,95 5 95 55   55,55 70\" fill=\"#FF6B1A\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-points-separators-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><polygon points=\"5,5 45,5 45,55 5,55,\" fill=\"#3FCF8E\"/><polygon points=\" 55 5,95 5 95 55   55,55 70\" fill=\"#FF6B1A\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-points-separators-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><polygon points=\"5,5 45,5 45,55 5,55,\" fill=\"#3FCF8E\"/><polygon points=\" 55 5,95 5 95 55   55,55 70\" fill=\"#FF6B1A\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-paint-inert-stroke-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" stroke=\"none\" stroke-width=\"3\" stroke-opacity=\"0.5\" stroke-miterlimit=\"10\" stroke-linecap=\"round\" stroke-linejoin=\"bevel\" stroke-dasharray=\"4 2\" stroke-dashoffset=\"1\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" style=\"stroke:none;stroke-miterlimit:10;stroke-width:2\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-paint-inert-stroke-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" stroke=\"none\" stroke-width=\"3\" stroke-opacity=\"0.5\" stroke-miterlimit=\"10\" stroke-linecap=\"round\" stroke-linejoin=\"bevel\" stroke-dasharray=\"4 2\" stroke-dashoffset=\"1\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" style=\"stroke:none;stroke-miterlimit:10;stroke-width:2\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-paint-inert-stroke-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" stroke=\"none\" stroke-width=\"3\" stroke-opacity=\"0.5\" stroke-miterlimit=\"10\" stroke-linecap=\"round\" stroke-linejoin=\"bevel\" stroke-dasharray=\"4 2\" stroke-dashoffset=\"1\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" style=\"stroke:none;stroke-miterlimit:10;stroke-width:2\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-doc-version-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" version=\"1.1\" baseProfile=\"full\"><rect x=\"10\" y=\"10\" width=\"80\" height=\"40\" rx=\"6\" fill=\"#4C8DFF\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-doc-version-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" version=\"1.1\" baseProfile=\"full\"><rect x=\"10\" y=\"10\" width=\"80\" height=\"40\" rx=\"6\" fill=\"#4C8DFF\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-doc-version-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" version=\"1.1\" baseProfile=\"full\"><rect x=\"10\" y=\"10\" width=\"80\" height=\"40\" rx=\"6\" fill=\"#4C8DFF\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-grad-explicit-defaults-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><defs><linearGradient id=\"g\" gradientUnits=\"objectBoundingBox\" spreadMethod=\"pad\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"currentColor\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" fr=\"0\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#3FCF8E\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"50\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"75\" cy=\"30\" r=\"20\" fill=\"url(#r)\"/></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-grad-explicit-defaults-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><defs><linearGradient id=\"g\" gradientUnits=\"objectBoundingBox\" spreadMethod=\"pad\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"currentColor\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" fr=\"0\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#3FCF8E\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"50\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"75\" cy=\"30\" r=\"20\" fill=\"url(#r)\"/></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-grad-explicit-defaults-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><defs><linearGradient id=\"g\" gradientUnits=\"objectBoundingBox\" spreadMethod=\"pad\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"currentColor\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" fr=\"0\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#3FCF8E\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"50\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"75\" cy=\"30\" r=\"20\" fill=\"url(#r)\"/></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-clip-explicit-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/></g><g clip-path=\"none\"><circle cx=\"50\" cy=\"30\" r=\"10\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-clip-explicit-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/></g><g clip-path=\"none\"><circle cx=\"50\" cy=\"30\" r=\"10\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-clip-explicit-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/></g><g clip-path=\"none\"><circle cx=\"50\" cy=\"30\" r=\"10\" fill=\"#1B2A4A\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  },
+  {
+   "id": "gate-doc-metadata-128x128",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\" viewBox=\"0 0 100 60\" version=\"1.1\" xml:space=\"preserve\" enable-background=\"new 0 0 100 60\"><title>t</title><desc>d</desc><metadata><x xmlns=\"urn:x\"><y/></x></metadata><sodipodi:namedview pagecolor=\"#ffffff\"/><g inkscape:label=\"Layer 1\" inkscape:groupmode=\"layer\" class=\"layer\"><rect class=\"a\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\"/></g></svg>",
+   "width": 128,
+   "height": 128
+  },
+  {
+   "id": "gate-doc-metadata-200x120",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\" viewBox=\"0 0 100 60\" version=\"1.1\" xml:space=\"preserve\" enable-background=\"new 0 0 100 60\"><title>t</title><desc>d</desc><metadata><x xmlns=\"urn:x\"><y/></x></metadata><sodipodi:namedview pagecolor=\"#ffffff\"/><g inkscape:label=\"Layer 1\" inkscape:groupmode=\"layer\" class=\"layer\"><rect class=\"a\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\"/></g></svg>",
+   "width": 200,
+   "height": 120
+  },
+  {
+   "id": "gate-doc-metadata-97x61",
+   "kind": "svg",
+   "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\" viewBox=\"0 0 100 60\" version=\"1.1\" xml:space=\"preserve\" enable-background=\"new 0 0 100 60\"><title>t</title><desc>d</desc><metadata><x xmlns=\"urn:x\"><y/></x></metadata><sodipodi:namedview pagecolor=\"#ffffff\"/><g inkscape:label=\"Layer 1\" inkscape:groupmode=\"layer\" class=\"layer\"><rect class=\"a\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\"/></g></svg>",
+   "width": 97,
+   "height": 61
+  }
+ ]
+}
