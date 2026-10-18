@@ -77,8 +77,16 @@ struct PathKey {
 /// and the strike's remaining transform.
 type MatrixKey = (u64, u32, u16, u32, Vec<(u32, u32)>, (u8, u8), [u32; 4]);
 
-/// Face, face index, glyph, strike size bits, variation, skew bits.
-type SdfKey = (u64, u32, u16, u32, Vec<(u32, u32)>, u32);
+/// Face, face index, glyph, strike size bits, variation, skew bits, frame.
+type SdfKey = (
+    u64,
+    u32,
+    u16,
+    u32,
+    Vec<(u32, u32)>,
+    u32,
+    Option<(u32, bool, u8, u32)>,
+);
 
 /// Face buffer, face index, glyph, size bits, em bits, quarter offset.
 type ColorKey = (u64, u32, u16, u32, u32, u8);
@@ -209,6 +217,7 @@ impl super::scene::MaskSource for CgMasks {
         glyph: u16,
         strike: f32,
         skew: f32,
+        frame: Option<super::skpath::Frame>,
     ) -> Option<Arc<super::sdf::SdfGlyph>> {
         let key = (
             face.id,
@@ -220,6 +229,14 @@ impl super::scene::MaskSource for CgMasks {
                 .map(|(t, v)| (*t, v.to_bits()))
                 .collect::<Vec<_>>(),
             skew.to_bits(),
+            frame.map(|f| {
+                (
+                    f.width.to_bits(),
+                    f.fill,
+                    f.join as u8,
+                    f.miter_limit.to_bits(),
+                )
+            }),
         );
         if let Some(g) = self.sdf.get(&key) {
             return g.clone();
@@ -238,6 +255,16 @@ impl super::scene::MaskSource for CgMasks {
                 color: [0.0, 0.0, 0.0, 1.0],
             };
             let font = self.fonts.font_of(face.id, &run)?;
+            if let Some(frame) = frame {
+                // From the path (`fGenerateImageFromPath`): the outline
+                // unhinted in x is not asked for (no subpixel positioning),
+                // framed in strike space, filled as plain A8.
+                let path = glyph_path_with(&font, glyph, 1.0, skew, 0.0)?;
+                let (left, top, w, h, a8) = super::skpath::frame_a8(&path, frame)?;
+                return Some(Arc::new(super::sdf::SdfGlyph::from_a8(
+                    &a8, w as usize, h as usize, left, top,
+                )));
+            }
             let a8 = draw_transformed(&font, glyph, &m, (0, 0), true)?;
             Some(Arc::new(super::sdf::SdfGlyph::from_a8(
                 &a8.coverage,

@@ -403,6 +403,31 @@ pub fn frame_mask(
 /// `pack4xHToMask` to A8: each output pixel is the mean of three subpixel
 /// FIRs over the 4× samples (coefficients sum to 0x110: a little ink
 /// spread), before the mask gamma.
+/// A plain A8 glyph image Skia generates from a path (`GenerateImageFromPath`
+/// without `kGenA8FromLCD`, as the distance-field strike's antialiased
+/// edging asks): `path` framed by `frame` in its own space, its bounds
+/// rounded out, filled by Skia's analytic filler. `(left, top, width,
+/// height, coverage)`.
+pub fn frame_a8(path: &pm_skia_path::Path, frame: Frame) -> Option<(i32, i32, u32, u32, Vec<u8>)> {
+    let framed = framed(path, frame)?;
+    let bounds = framed.bounds();
+    let (l, t, r, b) = (
+        bounds.left().floor() as i32,
+        bounds.top().floor() as i32,
+        bounds.right().ceil() as i32,
+        bounds.bottom().ceil() as i32,
+    );
+    if r <= l || b <= t || r - l > 8192 || b - t > 8192 {
+        return None;
+    }
+    let (w, h) = ((r - l) as u32, (b - t) as u32);
+    let moved = framed.transform(pm_skia_path::Transform::from_translate(
+        -(l as f32),
+        -(t as f32),
+    ))?;
+    Some((l, t, w, h, super::skaaa::fill_path_a8(&moved, w, h)))
+}
+
 fn pack_4x_h(src: &[u8], sample_width: usize, height: usize) -> Vec<u8> {
     const COEFFICIENTS: [[u32; 12]; 3] = [
         [

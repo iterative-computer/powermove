@@ -236,6 +236,8 @@ pub trait MaskSource {
     /// size `strike` (256 px; 162 at exactly 162) with the synthetic skew
     /// `skew`, linearized, no preblend. `None` when the platform does not
     /// provide it.
+    /// `frame` (strike px) is the glyph's path frame when Skia generates
+    /// the strike's A8 from the path: synthesized bold, `strokeText`.
     #[cfg(feature = "cg-masks")]
     fn sdf_glyph(
         &mut self,
@@ -244,8 +246,9 @@ pub trait MaskSource {
         glyph: u16,
         strike: f32,
         skew: f32,
+        frame: Option<super::skpath::Frame>,
     ) -> Option<Arc<super::sdf::SdfGlyph>> {
-        let _ = (face, coords, glyph, strike, skew);
+        let _ = (face, coords, glyph, strike, skew, frame);
         None
     }
     /// The mask gamma of path-generated masks for paint `rgb` (no
@@ -517,7 +520,7 @@ impl Painter<'_> {
             let colr = super::bitmap::has_colr(run.face);
             // Distance-field text: the strike size, when this run's device
             // size is in the GPU canvas's SDFT range.
-            let sdf_strike = if self.masks.is_some() && !run.synthetic_bold {
+            let sdf_strike = if self.masks.is_some() {
                 sdf_strike(run.size, &place)
             } else {
                 None
@@ -589,8 +592,15 @@ impl Painter<'_> {
                 #[cfg(feature = "cg-masks")]
                 if let (Some(strike), Coords::User(coords), Some(masks)) =
                     (sdf_strike, run.coords, self.masks.as_deref_mut())
-                    && let Some(field) =
-                        masks.sdf_glyph(run.face, coords, g.id as u16, strike, skew_of(run) as f32)
+                    && let Some(field) = masks.sdf_glyph(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        strike,
+                        skew_of(run) as f32,
+                        run.synthetic_bold
+                            .then(|| super::skpath::Frame::fake_bold(strike)),
+                    )
                 {
                     // A field beyond the atlas is drawn as its path
                     // (`SkGlyphDigest::fitsInAtlasDirect`).
@@ -811,31 +821,7 @@ impl Painter<'_> {
             ));
         }
         if !sdf_glyphs.is_empty() {
-            let fields: Vec<(i64, i64, Arc<GlyphMask>, bool)> = sdf_glyphs
-                .into_iter()
-                .map(|(x0, y0, w, h, coverage)| {
-                    (
-                        x0,
-                        y0,
-                        Arc::new(GlyphMask {
-                            width: w as u32,
-                            height: h as u32,
-                            left: 0,
-                            top: 0,
-                            coverage,
-                        }),
-                        false,
-                    )
-                })
-                .collect();
-            let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
-            out.extend(mask_image(
-                &fields,
-                [&linear, &linear],
-                color,
-                opacity,
-                blur,
-            ));
+            out.extend(sdf_image(sdf_glyphs, color, opacity, blur));
         }
         if let Some(bounds) = mask.1 {
             out.push(Item {
@@ -1029,6 +1015,7 @@ impl Painter<'_> {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
+        let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
         let mut images = Vec::new();
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -1065,6 +1052,44 @@ impl Painter<'_> {
                 let Coords::User(coords) = run.coords else {
                     return false;
                 };
+                // A wide stroke from 162 to 256 px is distance-field text
+                // too (`SubRunControl::isSDFT`): the strike's A8 is the
+                // glyph's path framed with the stroke scaled into strike
+                // space (`dfPaint.setStrokeWidth(width / strikeToSourceScale)`).
+                if let Some(strike) = sdf_strike(run.size, place) {
+                    let to_source = run.size / strike;
+                    let mut sdf_frame = super::skpath::Frame {
+                        width: frame.width / to_source,
+                        ..frame
+                    };
+                    if run.synthetic_bold {
+                        sdf_frame.width += super::skpath::Frame::fake_bold(strike).width;
+                    }
+                    let Some(masks) = self.masks.as_deref_mut() else {
+                        return false;
+                    };
+                    let Some(field) = masks.sdf_glyph(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        strike,
+                        skew as f32,
+                        Some(sdf_frame),
+                    ) else {
+                        continue;
+                    };
+                    if field.width.max(field.height) > 256 {
+                        return false;
+                    }
+                    let (left_top, matrix) =
+                        place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
+                    if let Some(cov) =
+                        super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
+                    {
+                        sdf_quads.push(cov);
+                    }
+                    continue;
+                }
                 let (x, y) = self.profile.snap.apply(p.x, p.y);
                 let ix = x.floor();
                 let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
@@ -1114,9 +1139,41 @@ impl Painter<'_> {
                 0.0,
             ));
         }
+        if !sdf_quads.is_empty() {
+            out.extend(sdf_image(sdf_quads, color, opacity, 0.0));
+        }
         out.extend(images);
         true
     }
+}
+
+/// Distance-field glyph coverage (`sdf::draw`) as one image item, each
+/// glyph composited over the earlier ones like the glyph masks.
+fn sdf_image(
+    quads: Vec<(i64, i64, usize, usize, Vec<u8>)>,
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Option<Item> {
+    let fields: Vec<(i64, i64, Arc<GlyphMask>, bool)> = quads
+        .into_iter()
+        .map(|(x0, y0, w, h, coverage)| {
+            (
+                x0,
+                y0,
+                Arc::new(GlyphMask {
+                    width: w as u32,
+                    height: h as u32,
+                    left: 0,
+                    top: 0,
+                    coverage,
+                }),
+                false,
+            )
+        })
+        .collect();
+    let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
+    mask_image(&fields, [&linear, &linear], color, opacity, blur)
 }
 
 /// One image item holding the platform masks of a `fillText` call, each
