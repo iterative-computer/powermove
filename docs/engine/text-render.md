@@ -228,12 +228,18 @@ pm-render on macOS):
 - **Caption boxes** are filled with 4× multisampled coverage (the capture's
   box edges take only quarter values), with the standard 4-sample pattern
   and exact circular corners.
+- **Glyphs beyond the atlas** (over 256 px, or a bounding box over 256 px):
+  the capture's alpha takes only five values, so the GPU canvas fills their
+  paths 4× multisampled at exact positions. `scene::msaa_coverage` does the
+  same with one scanline per sample row of the standard pattern over the
+  flattened outline (tolerance 0.12 px, the closest to the GPU's
+  tessellation of those tried).
 
 The outline path with the Canvas2D profile (below) remains for what the
 masks do not cover yet: glyphs under a non-axis-aligned transform (rotated,
-skewed, or non-uniformly scaled animator glyphs), glyphs at the large-text
-size (162 px device and up) or drawn as paths, synthesized bold, caption
-strokes, and platforms without CoreGraphics.
+skewed, or non-uniformly scaled animator glyphs), glyphs from 162 to 256 px
+device size, synthesized bold, caption strokes, and platforms without
+CoreGraphics.
 
 ## Routing
 
@@ -271,7 +277,7 @@ Level 1 rasters against Canvas2D (`tests/text_raster.rs`, 495 cases;
 | variable (`fontAxis.*`) | 27 | 21 | 6 | 1.0000 | |
 | density (0.25 to 4) | 24 | 23 | 126 | 0.9921 | |
 | synthetic (italic, bold) | 6 | 3 (italic) | 220 | 0.9288 (bold) | 0.9288 |
-| large (200, 300 px) | 2 | 0 | 173 | 0.9933 | 0.9933 |
+| large (300 px device, paths) | 2 | 0 | 128 | 0.9978 (about 330 pixels off) | 0.9933 |
 | captions (all presets, strokes) | 65 | 0 | 170 | 0.9881 | 0.985 |
 | **All** | **495** | **414** | | | 0 exact |
 
@@ -446,11 +452,14 @@ Each of these is a visible difference on level 1 content today (amendment
   worse, and no width reaches 1.0, so the exact construction (Skia's
   stroker and rasterizer over the one stroke-and-fill path) is not
   reproduced yet.
-- **Large text** (162 px device and up: `large`, 200 px `sizes`, the 192 px
-  density case): SSIM 0.9835 to 0.9940, max Δ up to 173. Chromium's GPU
-  canvas draws these glyphs another way (exact positions, slightly dilated
-  edges; likely Skia's distance-field text above its 162 px limit). Needs a
-  port of that path.
+- **Large text, 162 to 256 px device** (200 px `sizes`, the 192 px density
+  case): SSIM 0.9835 to 0.9921, max Δ up to 148 (outline path with the
+  fitted large-text profile). The capture's alpha there is continuous and
+  its positions exact, which points at Skia's distance-field text above its
+  162 px limit; that path needs a port.
+- **Glyphs drawn as paths** (over 256 px): about 330 pixels per case still
+  differ by a sample (the GPU's curve tessellation, which kurbo's
+  flattening approximates).
 - **Caption strokes** (every stroked preset): SSIM 0.9881 to 0.9969, max Δ
   up to 159 (the fitted stroke profile). Skia renders stroked glyph images
   from paths with its own stroker and rasterizer; a `vello_cpu` stroke
