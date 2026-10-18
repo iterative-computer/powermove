@@ -263,10 +263,14 @@ impl CgMasks {
 /// (the synthetic italic shear) times a 4× horizontal scale (no hinting in
 /// x), read into `f32` with y negated, scaled back by ¼ in x, then moved
 /// right by the quarter-pixel offset (`internalGetPath`).
-fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option<tiny_skia::Path> {
+fn glyph_path(
+    font: &CFRetained<CTFont>,
+    glyph: u16,
+    style: MaskStyle,
+) -> Option<pm_skia_path::Path> {
     use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
     struct Sink {
-        builder: tiny_skia::PathBuilder,
+        builder: pm_skia_path::PathBuilder,
         started: bool,
         current: CGPoint,
     }
@@ -334,7 +338,7 @@ fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option
     };
     let path: CFRetained<CGPath> = unsafe { font.path_for_glyph(glyph, &xform) }?;
     let mut sink = Sink {
-        builder: tiny_skia::PathBuilder::new(),
+        builder: pm_skia_path::PathBuilder::new(),
         started: false,
         current: CGPoint { x: 0.0, y: 0.0 },
     };
@@ -342,28 +346,30 @@ fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option
     let built = sink.builder.finish()?;
     let dx = f32::from(style.quarter) * 0.25;
     // Scale x by ¼ (`SkMatrix::Scale(1/4, 1)`), then the subpixel offset.
-    let pts: Vec<(tiny_skia::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
-    let mut b = tiny_skia::PathBuilder::new();
-    let m = |q: tiny_skia::Point| (q.x * 0.25 + dx, q.y);
+    let pts: Vec<(pm_skia_path::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
+    let mut b = pm_skia_path::PathBuilder::new();
+    let m = |q: pm_skia_path::Point| (q.x * 0.25 + dx, q.y);
     for (seg, _) in pts {
         match seg {
-            tiny_skia::PathSegment::MoveTo(a) => {
+            pm_skia_path::PathSegment::MoveTo(a) => {
                 let a = m(a);
                 b.move_to(a.0, a.1);
             }
-            tiny_skia::PathSegment::LineTo(a) => {
+            pm_skia_path::PathSegment::LineTo(a) => {
                 let a = m(a);
                 b.line_to(a.0, a.1);
             }
-            tiny_skia::PathSegment::QuadTo(c, a) => {
+            pm_skia_path::PathSegment::QuadTo(c, a) => {
                 let (c, a) = (m(c), m(a));
                 b.quad_to(c.0, c.1, a.0, a.1);
             }
-            tiny_skia::PathSegment::CubicTo(c0, c1, a) => {
+            // CoreGraphics paths have no conics.
+            pm_skia_path::PathSegment::ConicTo(..) => return None,
+            pm_skia_path::PathSegment::CubicTo(c0, c1, a) => {
                 let (c0, c1, a) = (m(c0), m(c1), m(a));
                 b.cubic_to(c0.0, c0.1, c1.0, c1.1, a.0, a.1);
             }
-            tiny_skia::PathSegment::Close => b.close(),
+            pm_skia_path::PathSegment::Close => b.close(),
         }
     }
     b.finish()

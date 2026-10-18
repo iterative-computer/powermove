@@ -724,7 +724,7 @@ impl Painter<'_> {
         let frame = super::skpath::Frame {
             width: width as f32,
             fill: false,
-            join: tiny_skia::LineJoin::Round,
+            join: pm_skia_path::LineJoin::Round,
             miter_limit: 2.0,
         };
         // `SkStrikeSpec::ShouldDrawAsPath`: the text matrix's scale beyond

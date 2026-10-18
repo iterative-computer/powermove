@@ -23,7 +23,7 @@ corpus-tools = ["system", "level2", "dep:flate2"]
 render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu"]
 # Level 1 glyph masks from CoreGraphics, as Canvas2D gets them on macOS
 # (`render::cgmask`), and the CoreText fonts they need.
-cg-masks = ["render", "dep:tiny-skia", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider", "objc2-core-graphics/CGPath"]
+cg-masks = ["render", "dep:pm-skia-path", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider", "objc2-core-graphics/CGPath"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
 coretext-reference = ["cg-masks", "system"]
 
@@ -44,7 +44,7 @@ kurbo = { version = "0.13.1", optional = true }
 skrifa = { version = "0.44", optional = true }
 png = { version = "0.18", optional = true }
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"], optional = true }
-tiny-skia = { version = "0.12", default-features = false, features = ["std"], optional = true }
+pm-skia-path = { path = "../pm-skia-path", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"

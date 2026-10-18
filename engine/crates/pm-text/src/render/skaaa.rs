@@ -964,17 +964,17 @@ pub enum Seg {
     Cubic(Pt, Pt, Pt, Pt),
 }
 
-/// `SkPathEdgeIter` over `tiny_skia::Path`: each contour's segments and its
+/// `SkPathEdgeIter` over `pm_skia_path::Path`: each contour's segments and its
 /// closing line (even when not closed explicitly, and even when empty).
-pub fn path_segments(path: &tiny_skia::Path) -> Vec<Seg> {
+pub fn path_segments(path: &pm_skia_path::Path) -> Vec<Seg> {
     let mut out = Vec::new();
     let mut last = (0.0f32, 0.0f32);
     let mut start = (0.0f32, 0.0f32);
     let mut needs_close = false;
-    let p = |q: tiny_skia::Point| (q.x, q.y);
+    let p = |q: pm_skia_path::Point| (q.x, q.y);
     for seg in path.segments() {
         match seg {
-            tiny_skia::PathSegment::MoveTo(m) => {
+            pm_skia_path::PathSegment::MoveTo(m) => {
                 if needs_close {
                     out.push(Seg::Line(last, start));
                     needs_close = false;
@@ -982,22 +982,33 @@ pub fn path_segments(path: &tiny_skia::Path) -> Vec<Seg> {
                 start = p(m);
                 last = start;
             }
-            tiny_skia::PathSegment::LineTo(a) => {
+            pm_skia_path::PathSegment::LineTo(a) => {
                 out.push(Seg::Line(last, p(a)));
                 last = p(a);
                 needs_close = true;
             }
-            tiny_skia::PathSegment::QuadTo(c, a) => {
+            pm_skia_path::PathSegment::QuadTo(c, a) => {
                 out.push(Seg::Quad(last, p(c), p(a)));
                 last = p(a);
                 needs_close = true;
             }
-            tiny_skia::PathSegment::CubicTo(c0, c1, a) => {
+            pm_skia_path::PathSegment::ConicTo(c, a, w) => {
+                // `SkEdgeBuilder`: a conic becomes quads in device space
+                // (`SkAutoConicToQuads`, tolerance ¼ px).
+                let from = pm_skia_path::Point::from_xy(last.0, last.1);
+                let quads = pm_skia_path::path_geometry::skia_conic_to_quads(from, c, a, w, 0.25);
+                for q in quads[1..].chunks_exact(2) {
+                    out.push(Seg::Quad(last, p(q[0]), p(q[1])));
+                    last = p(q[1]);
+                }
+                needs_close = true;
+            }
+            pm_skia_path::PathSegment::CubicTo(c0, c1, a) => {
                 out.push(Seg::Cubic(last, p(c0), p(c1), p(a)));
                 last = p(a);
                 needs_close = true;
             }
-            tiny_skia::PathSegment::Close => {
+            pm_skia_path::PathSegment::Close => {
                 if needs_close {
                     out.push(Seg::Line(last, start));
                     needs_close = false;
@@ -2145,7 +2156,7 @@ fn aaa_walk_edges(
 /// Fills `path` (device pixels of a `width` × `height` A8 mask, winding
 /// fill) as `SkDraw::drawPath` with an anti-aliased paint into a cleared A8
 /// pixmap: Skia's analytic coverage, exactly.
-pub fn fill_path_a8(path: &tiny_skia::Path, width: u32, height: u32) -> Vec<u8> {
+pub fn fill_path_a8(path: &pm_skia_path::Path, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width as i32, height as i32);
     let mut dev = Device {
         w,
@@ -2263,8 +2274,8 @@ pub fn fill_path_a8(path: &tiny_skia::Path, width: u32, height: u32) -> Vec<u8> 
 mod tests {
     use super::*;
 
-    fn rect_path(x0: f32, y0: f32, x1: f32, y1: f32) -> tiny_skia::Path {
-        let mut b = tiny_skia::PathBuilder::new();
+    fn rect_path(x0: f32, y0: f32, x1: f32, y1: f32) -> pm_skia_path::Path {
+        let mut b = pm_skia_path::PathBuilder::new();
         b.move_to(x0, y0);
         b.line_to(x1, y0);
         b.line_to(x1, y1);
@@ -2287,7 +2298,7 @@ mod tests {
 
     #[test]
     fn a_triangle_covers_half_its_box() {
-        let mut b = tiny_skia::PathBuilder::new();
+        let mut b = pm_skia_path::PathBuilder::new();
         b.move_to(0.0, 0.0);
         b.line_to(40.0, 0.0);
         b.line_to(0.0, 40.0);

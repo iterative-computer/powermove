@@ -9,7 +9,7 @@
 //! frame with `SkStroke`, and maps it to device space again;
 //! `GenerateImageFromPath` fills it with Skia's supersampling scan converter
 //! into an A8 mask and applies the paint's mask gamma
-//! ([`skia_mask_gamma`]). `tiny-skia` is a port of the same stroker and
+//! ([`skia_mask_gamma`]). `pm-skia-path` is a port of the same stroker and
 //! scan converter, in the same `f32` arithmetic.
 
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct Frame {
     pub width: f32,
     /// Stroke and fill (synthesized bold) rather than stroke only.
     pub fill: bool,
-    pub join: tiny_skia::LineJoin,
+    pub join: pm_skia_path::LineJoin,
     pub miter_limit: f32,
 }
 
@@ -37,7 +37,7 @@ impl Frame {
         Frame {
             width: size * fake_bold_scale(size),
             fill: true,
-            join: tiny_skia::LineJoin::Miter,
+            join: pm_skia_path::LineJoin::Miter,
             miter_limit: 4.0,
         }
     }
@@ -61,8 +61,8 @@ pub fn fake_bold_scale(size: f32) -> f32 {
     VALUES[right - 1] + (VALUES[right] - VALUES[right - 1]) * fract
 }
 
-fn to_skia(path: &BezPath, m: Affine) -> Option<tiny_skia::Path> {
-    let mut b = tiny_skia::PathBuilder::new();
+fn to_skia(path: &BezPath, m: Affine) -> Option<pm_skia_path::Path> {
+    let mut b = pm_skia_path::PathBuilder::new();
     let p = |q: kurbo::Point| {
         let q = m * q;
         (q.x as f32, q.y as f32)
@@ -94,34 +94,36 @@ fn to_skia(path: &BezPath, m: Affine) -> Option<tiny_skia::Path> {
 /// `SkPathPriv::ComputeFirstDirection`: the direction (true: clockwise,
 /// y down) of the contour holding the path's lowest point (greatest y),
 /// from the cross product at that point; `None` when unknown.
-fn first_direction(path: &tiny_skia::Path) -> Option<bool> {
+fn first_direction(path: &pm_skia_path::Path) -> Option<bool> {
     // Contours as point lists, as `ContourIter` walks the point array.
     let mut pts: Vec<(f32, f32)> = Vec::new();
     let mut contours: Vec<(usize, usize)> = Vec::new();
     for seg in path.segments() {
-        let add =
-            |q: tiny_skia::Point, pts: &mut Vec<(f32, f32)>, contours: &mut Vec<(usize, usize)>| {
-                pts.push((q.x, q.y));
-                if let Some(c) = contours.last_mut() {
-                    c.1 += 1;
-                }
-            };
+        let add = |q: pm_skia_path::Point,
+                   pts: &mut Vec<(f32, f32)>,
+                   contours: &mut Vec<(usize, usize)>| {
+            pts.push((q.x, q.y));
+            if let Some(c) = contours.last_mut() {
+                c.1 += 1;
+            }
+        };
         match seg {
-            tiny_skia::PathSegment::MoveTo(q) => {
+            pm_skia_path::PathSegment::MoveTo(q) => {
                 contours.push((pts.len(), 0));
                 add(q, &mut pts, &mut contours);
             }
-            tiny_skia::PathSegment::LineTo(q) => add(q, &mut pts, &mut contours),
-            tiny_skia::PathSegment::QuadTo(c, q) => {
+            pm_skia_path::PathSegment::LineTo(q) => add(q, &mut pts, &mut contours),
+            pm_skia_path::PathSegment::QuadTo(c, q)
+            | pm_skia_path::PathSegment::ConicTo(c, q, _) => {
                 add(c, &mut pts, &mut contours);
                 add(q, &mut pts, &mut contours);
             }
-            tiny_skia::PathSegment::CubicTo(c0, c1, q) => {
+            pm_skia_path::PathSegment::CubicTo(c0, c1, q) => {
                 add(c0, &mut pts, &mut contours);
                 add(c1, &mut pts, &mut contours);
                 add(q, &mut pts, &mut contours);
             }
-            tiny_skia::PathSegment::Close => {}
+            pm_skia_path::PathSegment::Close => {}
         }
     }
     let cross_prod = |p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)| -> f32 {
@@ -215,53 +217,63 @@ fn first_direction(path: &tiny_skia::Path) -> Option<bool> {
 }
 
 /// The path with its contours reversed (`SkPath::reverseAddPath`).
-fn reversed(path: &tiny_skia::Path) -> Option<tiny_skia::Path> {
+fn reversed(path: &pm_skia_path::Path) -> Option<pm_skia_path::Path> {
     // Collect contours as point lists with their verbs, then emit each
     // backwards.
     #[derive(Clone, Copy)]
     enum Seg {
-        Line(tiny_skia::Point),
-        Quad(tiny_skia::Point, tiny_skia::Point),
-        Cubic(tiny_skia::Point, tiny_skia::Point, tiny_skia::Point),
+        Line(pm_skia_path::Point),
+        Quad(pm_skia_path::Point, pm_skia_path::Point),
+        Conic(pm_skia_path::Point, pm_skia_path::Point, f32),
+        Cubic(
+            pm_skia_path::Point,
+            pm_skia_path::Point,
+            pm_skia_path::Point,
+        ),
     }
     /// A contour: its start, its segments (each with its start point), and
     /// whether it is closed.
-    type Contour = (tiny_skia::Point, Vec<(tiny_skia::Point, Seg)>, bool);
+    type Contour = (pm_skia_path::Point, Vec<(pm_skia_path::Point, Seg)>, bool);
     let mut contours: Vec<Contour> = Vec::new();
-    let mut last = tiny_skia::Point::zero();
+    let mut last = pm_skia_path::Point::zero();
     for seg in path.segments() {
         match seg {
-            tiny_skia::PathSegment::MoveTo(p) => {
+            pm_skia_path::PathSegment::MoveTo(p) => {
                 contours.push((p, Vec::new(), false));
                 last = p;
             }
-            tiny_skia::PathSegment::LineTo(p) => {
+            pm_skia_path::PathSegment::LineTo(p) => {
                 contours.last_mut()?.1.push((last, Seg::Line(p)));
                 last = p;
             }
-            tiny_skia::PathSegment::QuadTo(c, p) => {
+            pm_skia_path::PathSegment::QuadTo(c, p) => {
                 contours.last_mut()?.1.push((last, Seg::Quad(c, p)));
                 last = p;
             }
-            tiny_skia::PathSegment::CubicTo(c0, c1, p) => {
+            pm_skia_path::PathSegment::ConicTo(c, p, w) => {
+                contours.last_mut()?.1.push((last, Seg::Conic(c, p, w)));
+                last = p;
+            }
+            pm_skia_path::PathSegment::CubicTo(c0, c1, p) => {
                 contours.last_mut()?.1.push((last, Seg::Cubic(c0, c1, p)));
                 last = p;
             }
-            tiny_skia::PathSegment::Close => {
+            pm_skia_path::PathSegment::Close => {
                 contours.last_mut()?.2 = true;
             }
         }
     }
-    let mut b = tiny_skia::PathBuilder::new();
+    let mut b = pm_skia_path::PathBuilder::new();
     for (start, segs, closed) in &contours {
         let end = segs.last().map_or(*start, |(_, s)| match *s {
-            Seg::Line(p) | Seg::Quad(_, p) | Seg::Cubic(_, _, p) => p,
+            Seg::Line(p) | Seg::Quad(_, p) | Seg::Conic(_, p, _) | Seg::Cubic(_, _, p) => p,
         });
         b.move_to(end.x, end.y);
         for (from, s) in segs.iter().rev() {
             match *s {
                 Seg::Line(_) => b.line_to(from.x, from.y),
                 Seg::Quad(c, _) => b.quad_to(c.x, c.y, from.x, from.y),
+                Seg::Conic(c, _, w) => b.conic_to(c.x, c.y, from.x, from.y, w),
                 Seg::Cubic(c0, c1, _) => b.cubic_to(c1.x, c1.y, c0.x, c0.y, from.x, from.y),
             }
         }
@@ -272,16 +284,17 @@ fn reversed(path: &tiny_skia::Path) -> Option<tiny_skia::Path> {
     b.finish()
 }
 
-fn append(dst: &mut tiny_skia::PathBuilder, src: &tiny_skia::Path) {
+fn append(dst: &mut pm_skia_path::PathBuilder, src: &pm_skia_path::Path) {
     for seg in src.segments() {
         match seg {
-            tiny_skia::PathSegment::MoveTo(p) => dst.move_to(p.x, p.y),
-            tiny_skia::PathSegment::LineTo(p) => dst.line_to(p.x, p.y),
-            tiny_skia::PathSegment::QuadTo(c, p) => dst.quad_to(c.x, c.y, p.x, p.y),
-            tiny_skia::PathSegment::CubicTo(c0, c1, p) => {
+            pm_skia_path::PathSegment::MoveTo(p) => dst.move_to(p.x, p.y),
+            pm_skia_path::PathSegment::LineTo(p) => dst.line_to(p.x, p.y),
+            pm_skia_path::PathSegment::QuadTo(c, p) => dst.quad_to(c.x, c.y, p.x, p.y),
+            pm_skia_path::PathSegment::ConicTo(c, p, w) => dst.conic_to(c.x, c.y, p.x, p.y, w),
+            pm_skia_path::PathSegment::CubicTo(c0, c1, p) => {
                 dst.cubic_to(c0.x, c0.y, c1.x, c1.y, p.x, p.y)
             }
-            tiny_skia::PathSegment::Close => dst.close(),
+            pm_skia_path::PathSegment::Close => dst.close(),
         }
     }
 }
@@ -289,19 +302,18 @@ fn append(dst: &mut tiny_skia::PathBuilder, src: &tiny_skia::Path) {
 /// `frame` applied to `user` (`SkStrokeRec::applyToPath`, resolution
 /// scale 1): the stroke, plus the path itself for stroke-and-fill, added
 /// so its first contour winds clockwise.
-fn framed(user: &tiny_skia::Path, frame: Frame) -> Option<tiny_skia::Path> {
-    let stroke = tiny_skia::Stroke {
+fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::Path> {
+    let stroke = pm_skia_path::Stroke {
         width: frame.width,
         miter_limit: frame.miter_limit,
-        line_cap: tiny_skia::LineCap::Butt,
+        line_cap: pm_skia_path::LineCap::Butt,
         line_join: frame.join,
-        dash: None,
     };
     let stroked = user.stroke(&stroke, 1.0)?;
     if !frame.fill {
         return Some(stroked);
     }
-    let mut b = tiny_skia::PathBuilder::new();
+    let mut b = pm_skia_path::PathBuilder::new();
     append(&mut b, &stroked);
     match first_direction(user) {
         Some(false) => append(&mut b, &reversed(user)?),
@@ -323,7 +335,7 @@ pub fn path_mask(device: &BezPath, scale: f32, frame: Option<Frame>) -> Option<A
 /// (`getMatrixFrom2x2`, a uniform scale for level 1 rasters): the frame
 /// applies with it removed. Coverage is before the mask gamma.
 pub fn frame_mask(
-    device: &tiny_skia::Path,
+    device: &pm_skia_path::Path,
     scale: f32,
     frame: Option<Frame>,
 ) -> Option<Arc<GlyphMask>> {
@@ -340,13 +352,13 @@ pub fn frame_mask(
             } else {
                 device
                     .clone()
-                    .transform(tiny_skia::Transform::from_scale(inv, inv))?
+                    .transform(pm_skia_path::Transform::from_scale(inv, inv))?
             };
             let framed = framed(&user, frame)?;
             if scale == 1.0 {
                 framed
             } else {
-                framed.transform(tiny_skia::Transform::from_scale(scale, scale))?
+                framed.transform(pm_skia_path::Transform::from_scale(scale, scale))?
             }
         }
     };
@@ -369,7 +381,7 @@ pub fn frame_mask(
     // `GenerateImageFromPath` from LCD: the path at 4× horizontally into an
     // A8 of `4 × (w − 2)` samples, then `pack4xHToMask`.
     let samples = 4 * (w - 2);
-    let wide = path.transform(tiny_skia::Transform::from_row(
+    let wide = path.transform(pm_skia_path::Transform::from_row(
         4.0,
         0.0,
         0.0,
@@ -524,7 +536,7 @@ mod tests {
         let bold = Frame {
             width: 2.0,
             fill: true,
-            join: tiny_skia::LineJoin::Miter,
+            join: pm_skia_path::LineJoin::Miter,
             miter_limit: 4.0,
         };
         let b = path_mask(&sq, 1.0, Some(bold)).unwrap();
