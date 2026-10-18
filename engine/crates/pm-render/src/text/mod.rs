@@ -817,7 +817,25 @@ impl TextContext {
                 block.y1 - block.y0,
                 style.box_radius,
             );
-            if let Some(item) = fill_path(path, m0, fill, 1.0) {
+            // With platform masks (Canvas2D's look), the box is filled as
+            // the GPU canvas fills paths: 4× multisampled.
+            let item = if self.masks.is_some() && self.profile == Profile::CANVAS2D {
+                pm_text::render::scene::fill_rounded_rect_msaa(
+                    (
+                        0.0,
+                        0.0,
+                        block.x1 - block.x0,
+                        block.y1 - block.y0,
+                        style.box_radius,
+                    ),
+                    m0,
+                    fill,
+                    1.0,
+                )
+            } else {
+                fill_path(path, m0, fill, 1.0)
+            };
+            if let Some(item) = item {
                 scene.items.push(item);
             }
         }

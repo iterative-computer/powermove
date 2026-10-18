@@ -699,6 +699,108 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
     })
 }
 
+/// The sample positions of a 4× multisampled pixel (the standard pattern
+/// of Metal, D3D, and Vulkan), in pixel units from its top-left corner.
+const MSAA4: [(f64, f64); 4] = [
+    (0.375, 0.125),
+    (0.875, 0.375),
+    (0.125, 0.625),
+    (0.625, 0.875),
+];
+
+/// `fill()` of a path as Chromium's GPU canvas fills it: 4× multisampled
+/// coverage (a quarter per sample inside the path, nonzero winding), as a
+/// premultiplied image item in `color` (measured on the caption boxes,
+/// whose edge pixels take only the values 0, 1/4, 1/2, 3/4, 1).
+pub fn fill_path_msaa(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<Item> {
+    let path = m * path;
+    msaa_item(
+        path.bounding_box(),
+        |p| path.winding(p) != 0,
+        color,
+        opacity,
+    )
+}
+
+/// [`fill_path_msaa`] of the canvas `roundedRect(x, y, w, h, r)` through
+/// `m` (a translation and uniform scale), with exact circular corners
+/// (Skia's `arcTo` makes conics, which are exact circles).
+pub fn fill_rounded_rect_msaa(
+    rect: (f64, f64, f64, f64, f64),
+    m: Affine,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    let (x, y, w, h, r) = rect;
+    let [a, b, c, d, e, f] = m.as_coeffs();
+    if b != 0.0 || c != 0.0 || a <= 0.0 || (a - d).abs() > 1e-12 * a {
+        return fill_path_msaa(rounded_rect(x, y, w, h, r), m, color, opacity);
+    }
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0) * a;
+    let (x0, y0, x1, y1) = (x * a + e, y * a + f, (x + w) * a + e, (y + h) * a + f);
+    let inside = |p: kurbo::Point| {
+        if p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1 {
+            return false;
+        }
+        let cx = p.x.clamp(x0 + r, x1 - r);
+        let cy = p.y.clamp(y0 + r, y1 - r);
+        let (dx, dy) = (p.x - cx, p.y - cy);
+        dx * dx + dy * dy <= r * r
+    };
+    msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
+}
+
+fn msaa_item(
+    b: Rect,
+    inside: impl Fn(kurbo::Point) -> bool,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    if !(b.width() > 0.0 && b.height() > 0.0) {
+        return None;
+    }
+    let (x0, y0) = (b.x0.floor() as i64, b.y0.floor() as i64);
+    let (x1, y1) = (b.x1.ceil() as i64, b.y1.ceil() as i64);
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let a = color[3].clamp(0.0, 1.0) as f32;
+    let mut data = Vec::with_capacity(w * h * 4);
+    for py in 0..h {
+        for px in 0..w {
+            let n = MSAA4
+                .iter()
+                .filter(|(sx, sy)| {
+                    inside(kurbo::Point::new(
+                        (x0 + px as i64) as f64 + sx,
+                        (y0 + py as i64) as f64 + sy,
+                    ))
+                })
+                .count();
+            let alpha = a * n as f32 / 4.0;
+            for ch in 0..3 {
+                data.push((color[ch].clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
+            }
+            data.push((alpha * 255.0).round() as u8);
+        }
+    }
+    Some(Item {
+        content: ItemContent::Image {
+            image: Arc::new(Rgba8 {
+                width: w as u32,
+                height: h as u32,
+                data,
+            }),
+            transform: Affine::translate((x0 as f64, y0 as f64)),
+        },
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity,
+        blur: 0.0,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
+    })
+}
+
 /// The canvas `roundedRect` of `captions/render.ts`: `moveTo(x + r, y)`
 /// and four `arcTo` corners with `r = max(0, min(r, w / 2, h / 2))`.
 pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
