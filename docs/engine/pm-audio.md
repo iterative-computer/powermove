@@ -400,11 +400,12 @@ consumers ◀───────────── ClockSlot ◀── clock s
   before the transport moved on cannot publish its old line over the new one.
 - **Pre-roll.** Play and seek start a new epoch: the callback drops queued chunks of older
   epochs, and the render thread requests the blocks of the first 250 ms before it queues
-  the first chunk. Readiness is considered per voice: a ready voice does not wait behind
-  another voice's pre-roll. An entirely cold startup has its configured 400 ms wall-time
-  ceiling; missing-input episodes have at most 120 ms of device time and end earlier
-  when the ring needs refilling. Within a voice's own available budget, what plays equals
-  the offline render bit for bit; see the A4 policy below for committed drops.
+  the first chunk. A start waits for every voice's pre-roll for at most 400 ms of wall
+  time and 120 ms of device time (the A3 hold): nothing of the run is queued yet, so the
+  wait is start latency, not a gap. Mid-run missing-input episodes have at most 120 ms of
+  device time and end earlier when the ring would otherwise run dry under a voice that is
+  sounding. Within a voice's own available budget, what plays equals the offline render
+  bit for bit; see the A4 policy below for committed drops.
 - **Read-ahead.** `Mixer::source_spans` bounds the source samples a range reads, for
   the pre-roll wait and for the 3 s look-ahead queued to the decode workers. Linear
   voices map the range and pad by their reader's filter. Time-mapped voices (speed,
@@ -712,7 +713,8 @@ The rest of the path follows the same rule:
 - Within the wait bound, `Playback::fill` counts a missing segment and retries
   it before advancing to another segment. It queues no incomplete PCM and never
   feeds undecoded silence into the master 2x shuttle or device-rate converter.
-  The A4 policy below ends source waits before the ring's refill reserve is spent.
+  The A4 policy below ends source waits before the ring's refill reserve is spent
+  while another voice is sounding.
   A new pre-roll or stop discards the pending segment and every stretch's
   starved request. Over the bound, only intentional per-voice silence commits.
 - A starved `StretchRun` remembers the starved request's output range. Only a
@@ -741,10 +743,28 @@ The rest of the path follows the same rule:
 
 **Bounded-wait policy (A4, supersedes A3's whole-mix episode).** Each voice
 owns a missing-input episode, ending when that voice renders completely or
-leaves the audible mix. Its deadline is the earlier of 120 ms of device time
-and the usable audio remaining in the ring at the miss. Deadlines can shorten
-when the reserve shrinks; they never extend because another voice drops or
-recovers. `Ring::played_frames` counts callback frames, including underruns,
+leaves the audible mix. Its hard bound is 120 ms of device time from the
+episode's start (the A3 hold). The ring's usable audio shortens it only while
+it protects a voice that is sounding (A4 point 1: "so ready voices never go
+silent because another voice is waiting"):
+
+- Mid-run, with at least one voice rendering whole, the deadline is the
+  earlier of the hard bound and the usable audio left in the ring. It can
+  shorten as the reserve shrinks.
+- With every sounding voice missing, dropping silences nothing that would
+  otherwise play, so the voice keeps the full hold and stays bit exact if
+  its block arrives within 120 ms, as under A3.
+- At a play or seek (review round 2 of A4), every missing voice keeps the full
+  hold, counted from the pre-roll's device frame, until the run's first
+  segment commits. Nothing of the run is queued yet, so the hold delays the
+  start (the clock stays at the target) instead of opening a gap, and a
+  briefly cold voice, alone or beside a ready one, starts bit exact. This is
+  the base branch's A3 start behavior.
+- A drop is sticky for its episode, so a deadline restored to the hard bound
+  (another voice also going missing) never resumes holding a voice already
+  committed as silence.
+
+`Ring::played_frames` counts callback frames, including underruns,
 independently of project rate, shuttle speed, and elapsed wall time.
 
 - The ring exposes a producer-safe frame count from cumulative written and
@@ -758,13 +778,23 @@ independently of project rate, shuttle speed, and elapsed wall time.
   wait is therefore shorter than 120 ms. This prevents source stalls from
   emptying ready audio; unrelated OS scheduling stalls remain separately
   counted ring underruns.
-- A completely cold mix may wait before its first callback, while no ready
-  voice is delayed. Once callback time advances, an empty ring has no wait
-  budget. Startup prefetch requests blocks, and its cold-readiness poll ends
-  as soon as one voice's complete read support is ready; it cannot hold a
-  ready voice behind another decoder. Spans stay keyed by voice even when
-  clips share an asset, and a stretched voice needs all of its pre-roll
-  spans (one decoded group is insufficient).
+- The fill target is the configured 80 ms, and at least half of that beyond
+  the refill reserve (`fill_target`), bounded by the ring. With 512-frame
+  callbacks the target is unchanged; 2,048-frame callbacks (Bluetooth or
+  AirPlay sized) reserve 4,096 frames, more than the 3,840-frame default
+  target, which left a transient miss no wait at all. The ring then keeps
+  23 chunks (5,888 frames, 37 ms of wait). Callbacks of 4,096 frames and more
+  exceed the 160 ms ring (sized at start, before callbacks are seen) and
+  still leave no reserve-bounded wait; mid-run misses beside a sounding voice
+  then drop at once, while starts and all-missing mixes keep the hold.
+- Review round 1 of A4 ended the start pre-roll as soon as one voice was
+  ready or the first callback ran, and gave an empty ring no budget. A real
+  device's callbacks run continuously and advance `played_frames` through
+  underruns, so every cold start or seek dropped its missing voices about one
+  callback (10.7 ms at 512 frames) after starting, while the base branch held
+  them bit exact for up to 120 ms. That poll (`Mixer::has_ready_source`) is
+  removed; the pre-roll again waits for every voice
+  (`Mixer::is_ready`), as on the base branch.
 - `RenderOptions::drop_voices` names only expired voices. A later missing
   voice gets its own remaining-ring budget even while another is dropping.
   `RenderReport::waiting_voices` includes current and outgoing retune versions;
@@ -784,13 +814,27 @@ independently of project rate, shuttle speed, and elapsed wall time.
   Ordinary incomplete retries do not spend this output-distance allowance.
 - Longer stretch outages restart by deterministic bounded pre-roll. Preserving
   exact phase state then requires processing every skipped analysis interval
-  with its real input, whose cost grows with the outage. The earlier
-  seek-after-starve probe measured 4,368,240 source samples and 408 ms for a
-  60 s catch-up, versus 43,920 samples / 3.7 ms for a fresh start (historical
-  audiofix evidence below). Doing that on the shared render thread would
-  starve ready voices again. The continuity test proves feasible short-gap
-  recovery; long-gap continuity needs separate, bounded background catch-up
-  and is not claimed here.
+  with its real input, whose cost grows with the outage. Remeasured in review
+  round 2 (`stretch::tests::measure_gap_catch_up`, ignored by default; release,
+  LTO off, `nice -n 15`, other lanes building; stereo, 48 kHz, speed 1.5):
+
+  | Gap | Catch-up reads | Catch-up time | Fresh-start reads | Fresh-start time |
+  | --- | --- | --- | --- | --- |
+  | 0.12 s | 8,640 | 0.9 ms | 33,120 | 3.9 ms |
+  | 0.5 s | 36,720 | 3.3 ms | 35,280 | 3.2 ms |
+  | 1 s | 73,440 | 6.2 ms | 48,240 | 4.0 ms |
+  | 10 s | 721,440 | 59.0 ms | 30,960 | 2.5 ms |
+  | 60 s | 4,320,000 | 351.1 ms | 43,920 | 3.5 ms |
+
+  Catch-up work is linear in the gap (72,000 reads a second at speed 1.5),
+  a fresh start constant. Both are spent at re-entry on the shared render
+  thread, where a 10 s catch-up (59 ms) would nearly empty the 80 ms ring
+  under the ready voices. The two cost the same near 0.5 s at speed 1.5;
+  the break-even shrinks with speed (more source per output second). The
+  120 ms window is kept; widening it to the break-even (a work-based bound,
+  not a fixed time) is possible future work at no extra worst-case cost and
+  is recorded as a recommendation, not done here. Long-gap continuity beyond
+  that needs a separate, bounded background catch-up.
 - `starved_renders` counts missing segments once, `starve_retries` their
   incomplete retries, `dropped_renders` committed missing segments, and
   `dropped_voice_frames` audible project frames silenced, summed over voices
@@ -798,11 +842,23 @@ independently of project rate, shuttle speed, and elapsed wall time.
   retune envelopes; committed drops advance both exactly once.
 - A voice emits one decode-wait diagnostic when its first drop commits.
   Draining `Playback::take_errors` never repeats an ongoing episode. After
-  that voice recovers, a later episode emits the same diagnostic again,
-  independently of other voices. Decode/evaluation errors likewise deduplicate
-  while continuously present, and re-arm after a successful render or restart.
-  pm-node continues forwarding these through its existing bounded status
-  list; no new protocol, modal, or bridge-owned file changes are needed.
+  that voice recovers, a later episode reports again, independently of other
+  voices. The message names the bound that ended the wait, with stable text
+  (pm-node deduplicates its status list by string):
+  `Audio decode exceeded 120 ms; missing voice plays as silence: <id>` (the
+  A3 wording per voice, which pm-node's
+  `present::audio::tests::recurring_render_errors_are_listed_once` matches
+  unchanged) or `Audio decode fell behind the output buffer; missing voice
+  plays as silence so the others keep playing: <id>`.
+- Per-voice decode and evaluation errors deduplicate while they recur on
+  consecutive renders and re-arm after a render without them or a restart.
+  Whole-mix failures (a failed render, the master converter, the 2x shuttle)
+  used the playback-lifetime set until review round 2; they now report once
+  per run (a play, seek or stop starts a new episode), and a failed render
+  reports again after a successful one (`ErrorLog`,
+  `playback::tests::whole_mix_failures_are_reported_once_per_episode`).
+  pm-node forwards all of these through its existing bounded status list; no
+  pm-node, protocol, modal, or bridge-owned file changes.
 - Playback always reads sources nonblocking. Starting playback ensures at
   least one decode worker even for an initially offline-only cache. Export
   waits for all source data regardless of decode duration.
@@ -818,11 +874,28 @@ of wall time and releases the source within its device reserve: no sample
 is dropped. The stuck case crosses the reserve deadline before 120 ms and
 keeps the ready voice playing until release.
 
-`voices_own_their_waits_and_notifications` keeps A stuck while B becomes
-briefly late. B recovers within its own ring budget and every one of its
+`a_cold_start_holds_by_device_time` and
+`a_cold_start_past_the_bound_drops_only_the_missing_voice` (review round 2)
+drive a cold start with real-device semantics: 64-frame callbacks keep
+running against the empty ring without waiting for it. They cover a play
+from a stop and a seek during an established run, the cold voice alone and
+beside a ready voice, at 48 and 44.1 kHz (the latter with a zero-worker
+cache). One callback before the bound, after 130 ms more of wall time,
+nothing has dropped or been reported; released then, every voice plays bit
+exact from the target with the device clock on its line. Held to the bound,
+only the missing voice drops, with one `exceeded 120 ms` message, and
+re-enters sample-accurately. Both tests fail on review round 1's code
+(`dropped_renders` is already non-zero one callback before the bound).
+
+`voices_own_their_waits_and_notifications` starts with A cold beside a
+ready voice: callbacks hold the start for exactly 120 ms of device time
+(12 callbacks of 512 frames, all silent and counted as underruns), then only
+A drops with the `exceeded 120 ms` message. A stays stuck while B becomes
+briefly late; B recovers within its own ring budget and every one of its
 24,000 audible samples is bit-exact. A recovers and then stalls on its next
-source block, producing the identical diagnostic a second time; there is
-one message per episode and zero ring underruns.
+source block mid-run, reporting a second time (the output-buffer message,
+since the ready voice is sounding); there is one message per episode and no
+ring underrun after the start hold.
 `stretch::tests::short_committed_drops_reenter_with_uninterrupted_phase_history`
 compares both channels to an uninterrupted run across a short committed
 outage with forward and reverse maps, asserting a single vocoder start.
@@ -946,6 +1019,14 @@ suppression. Remaining limits:
 - With playback's single started worker (a cache created with zero workers)
   stuck on one source, other sources' uncached blocks can starve too. Already
   decoded voices continue, and each missing voice has its own episode.
+- Orchestrator decision pending: a start with one voice ready and another
+  cold. This lane keeps the base branch's A3 behavior (hold every voice up
+  to 120 ms of device time, then play all of them bit exact, or drop only
+  the still-missing one). Review round 1 started the ready voice at once and
+  the cold one silent until it decoded, a literal reading of A4 point 1 that
+  turns start latency into a dropout of the cold voice's first milliseconds
+  on such seeks. Today's app plays everything with no start delay; neither
+  option matches it exactly, and the hold is the one with no lost audio.
 
 **Remaining evidence gap for wave-5 A1.** The original intermittent failure did
 not recur with both counters recorded in the 120 audiofix suites or the
@@ -982,7 +1063,7 @@ heavily loaded machine can still fail them; such a failure now names the ring.
 
 ## A4 validation (2026-10-18)
 
-The final A4 implementation passes **30/30 plain and 30/30 stressed playback
+Round 1 (historical; round 2 below supersedes it). The round 1 A4 implementation passed **30/30 plain and 30/30 stressed playback
 suites**, 25 tests each: 1,500 executions, zero failures, none ignored. The
 six mapped-clip comparisons in each suite total 360 comparisons of 80,000
 frames in both channels (57,600,000 sample values): zero differences, source
@@ -1009,3 +1090,56 @@ short-drop vocoder continuity), 9 decode-readiness tests, 14 mixer tests,
 and 6 stretch tests. `cargo check --manifest-path engine/Cargo.toml --release
 -p pm-audio --lib` passes with the normal release configuration and test hooks
 disabled. Modified Rust files pass `rustfmt --check`.
+
+### A4 review round 2 (2026-10-18)
+
+The independent review found two blocking defects in round 1:
+
+1. The per-voice stall message changed wording, and pm-node's
+   `present::audio::tests::recurring_render_errors_are_listed_once`, which
+   round 1 never ran, failed (it matches `exceeded 120 ms`). The 120 ms
+   message is the A3 wording again (per voice); a reserve-ended wait has its
+   own stable message. The pm-node test passes unchanged, and nothing in
+   pm-node changed.
+2. A cold play or seek dropped its missing voices about one device callback
+   after starting, because real callbacks advance `played_frames` through
+   underruns and an empty ring had no wait budget. The A3 start hold is back
+   (see the policy above), and an all-missing mix mid-run keeps it too.
+
+Non-blocking items addressed: whole-mix failures report per run episode
+instead of once per playback; the stale doc comment on
+`a_long_decode_stall_is_reported_and_recovers` is rewritten; the clippy
+`type_complexity` warning is gone with `has_ready_source`; large device
+callbacks keep a wait budget (`fill_target`); the long-gap catch-up cost is
+remeasured (table above).
+
+`a_cold_start_holds_by_device_time` and
+`a_cold_start_past_the_bound_drops_only_the_missing_voice` are new and fail
+on round 1's code (all-cold play from a stop: `dropped_renders` is 1, not 0,
+one 64-frame callback before the bound). Their first version was flaky in
+the seek cases (6 of 25 runs): with the ring full of the old epoch's chunks
+the run renders nothing until a callback retires them, which the probe did
+not do. The probe now calls back until the run waits and bounds the hold
+start accordingly; 40 repetitions (20 plain, 20 stressed) then passed.
+
+Measured at 7586687b (release, `CARGO_PROFILE_RELEASE_LTO=off`, `nice -n 15`,
+four build jobs, four test threads, other lanes building on the same Mac):
+
+- **30/30 plain and 30/30 stressed playback suites**
+  (`PM_AUDIO_PLAYBACK_STRESS=1`), 27 tests each: 1,620 executions, zero
+  failures, none ignored. 360 mapped-clip comparisons of 80,000 frames:
+  zero differing samples, zero source starvation, zero ring underruns.
+  Suite times 20.0 to 23.7 s (median 20.2 s).
+- Full `cargo test --release -p pm-audio`: 44 library (1 ignored: the
+  catch-up measurement), 9 decode-readiness, 2 layouts, 1 legacy-parity,
+  14 mixer, 27 playback, 3 resampler, 5 sources, 6 stretch.
+- `cargo test --release -p pm-node --lib present::audio`: 1 passed.
+- `cargo clippy --release --all-targets` is clean for pm-audio and pm-node.
+  `cargo fmt --check` reports only `pm-audio/src/graph.rs`, which this lane
+  does not touch (it arrived unformatted from the integration branch).
+
+Remaining: the mixed-readiness start needs the orchestrator's confirmation
+(see the A3 review follow-ups); long-gap stretch continuity (over 120 ms of
+dropped output) restarts by deterministic pre-roll; 4,096-frame and larger
+callbacks leave mid-run misses beside a sounding voice no reserve-bounded
+wait; thin-LTO test links still fail locally as in round 1.
