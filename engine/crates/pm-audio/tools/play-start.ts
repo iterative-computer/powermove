@@ -3,6 +3,8 @@
  * App and native addons must already be built. Uses the corpus Node bridge
  * because Bun cannot host Playwright's Electron inspector driver.
  * Measures scheduled device presentation, not acoustic loopback.
+ * PM_AUDIO_START_WAIT_MS (default 250) is the paused time between the seek
+ * and Play; 0 measures seek-then-Play with no time for paused preparation.
  */
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -12,7 +14,8 @@ const [file, output, count = '30'] = process.argv.slice(2);
 if (!file || !output) throw new Error('wav and outside-repository output required');
 // Use the packaged copy so the harness also works after build-target cleanup.
 process.env.POWERMOVE_PM_BRIDGE ??= resolve(import.meta.dir, '../../../../apps/desktop/native/pm_bridge.node');
-const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback' };
+const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
+const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
@@ -68,13 +71,17 @@ for (const native of modes) {
     const samples = [];
     for (let run = 0; run < Number(count); run++) {
       const target = run % 2 === 0 ? 0 : 3;
-      await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
-      await page.waitForTimeout(250);
-      const sample = await page.evaluate(async ({ native, target }) => {
+      if (waitMs > 0) {
+        await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
+        await page.waitForTimeout(waitMs);
+      }
+      const sample = await page.evaluate(async ({ native, target, inline }) => {
         const PM = (window as any).PM;
         const starts = (window as any).__a6starts as any[];
         starts.length = 0;
         const oldEpoch = PM.EngineConnection?.status().clock?.epoch;
+        // Seek and Play in the same task: no paused preparation time.
+        if (inline) { PM.pause(); PM.setTime(target); }
         const requested = performance.now();
         PM.play();
         const deadline = requested + 5000;
@@ -97,7 +104,7 @@ for (const native of modes) {
           }
           await new Promise(r => setTimeout(r, 1));
         }
-      }, { native, target });
+      }, { native, target, inline: waitMs === 0 });
       await page.evaluate(() => (window as any).PM.pause());
       if (native) {
         // The presenter and audio have independent epoch counters. Match
