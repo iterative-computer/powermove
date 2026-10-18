@@ -189,6 +189,33 @@ pub fn sniff(head: &[u8]) -> bool {
         || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
 }
 
+/// Whether the XML cannot be an SVG image document. This is deliberately
+/// independent of usvg's feature support: valid SVG with unsupported paint
+/// records is not a corrupt image. SVGZ and resource-limit failures stay
+/// undecided rather than being mistaken for broken Chromium images.
+pub fn broken_image(data: &[u8]) -> bool {
+    if data.starts_with(&[0x1f, 0x8b]) {
+        return false;
+    }
+    let decoded = utf8_source(data);
+    let Ok(text) = std::str::from_utf8(&decoded) else {
+        return true;
+    };
+    let options = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    match usvg::roxmltree::Document::parse_with_options(text, options) {
+        Ok(doc) => {
+            let root = doc.root_element();
+            root.tag_name().name() != "svg"
+                || root.tag_name().namespace() != Some("http://www.w3.org/2000/svg")
+        }
+        Err(usvg::roxmltree::Error::NodesLimitReached) => false,
+        Err(_) => true,
+    }
+}
+
 /// Rasterizes an SVG file at its intrinsic size (rounded up), the still
 /// [`super::read`] returns; renderers ask [`SvgDocument::render`] for the
 /// size they draw at.
@@ -219,6 +246,32 @@ mod tests {
                 [0, 1, 2, 3].map(|c| *row.add(x * 4 + c))
             })
             .unwrap()
+    }
+
+    #[test]
+    fn broken_images_are_distinct_from_unimplemented_svg_paints() {
+        for data in [
+            "",
+            "<svg",
+            "<svg/>",
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\"/>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">&missing;</svg>",
+        ] {
+            assert!(broken_image(data.as_bytes()), "{data}");
+        }
+        for data in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text>text</text></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject/></svg>"#,
+            r#"<!DOCTYPE svg [<!ENTITY text "hello">]><svg xmlns="http://www.w3.org/2000/svg">&text;</svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="bad path"/></svg>"#,
+        ] {
+            assert!(!broken_image(data.as_bytes()), "{data}");
+        }
+        let source =
+            r#"<?xml version="1.0" encoding="UTF-16"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        let utf16: Vec<_> = source.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert!(!broken_image(&utf16));
+        assert!(!broken_image(&[0x1f, 0x8b]));
     }
 
     #[test]

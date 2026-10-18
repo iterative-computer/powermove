@@ -105,18 +105,6 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
             }
             let document = load(&doc);
             let unsupported = renderer.unsupported_with_media(&document, "Ptest-root", &resolver);
-            if format == "svg" && level == 1 && corrupt != 0 {
-                // Level 1 SVG images are routed without being parsed:
-                // Chromium's `<img>` decides what their bytes show.
-                assert_eq!(
-                    unsupported
-                        .iter()
-                        .map(|u| u.feature.clone())
-                        .collect::<Vec<_>>(),
-                    vec![Feature::SvgImage]
-                );
-                continue;
-            }
             assert!(
                 unsupported.is_empty(),
                 "{kind} level {level} corrupt={corrupt}: {unsupported:?}"
@@ -130,6 +118,19 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
                     &resolver,
                 )
                 .unwrap();
+            if format == "svg" && level == 1 && corrupt != 0 {
+                // Chromium's broken <img> paints nothing. Valid SVG paint
+                // records remain gated independently of this XML check.
+                assert!(frame.failures.is_empty());
+                assert!(
+                    renderer
+                        .read_rgba(&frame)
+                        .unwrap()
+                        .iter()
+                        .all(|&v| v == 0.0)
+                );
+                continue;
+            }
             assert_eq!(frame.failures.len(), 1, "{kind}: {:?}", frame.failures);
             assert_eq!(frame.failures[0].layer, "source");
             assert!(!frame.failures[0].message.is_empty());

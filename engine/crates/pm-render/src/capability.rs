@@ -633,9 +633,9 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Level 1 SVG images (today's `<img>` per size bucket) are routed
-        // without reading them: the bytes Chromium accepts are not
-        // usvg's, so a parse here could only misreport them.
+        // Valid level 1 SVG paint records still need Chromium parity.
+        // Only XML/image-document errors establish a broken <img>;
+        // usvg's unsupported paint features do not establish corruption.
         if !crate::vector::level2(layer) {
             // Offline media is a named layer failure at execution.
             if let Some(assets) = assets
@@ -644,6 +644,13 @@ fn check_media(
                     .is_none_or(|p| std::fs::metadata(p).is_err())
             {
                 return;
+            }
+            if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
+                match std::fs::read(path) {
+                    Ok(bytes) if pm_media::image::svg::broken_image(&bytes) => return,
+                    Err(_) => return, // Execution names the unreadable source.
+                    _ => {}
+                }
             }
             add(layer, Feature::SvgImage);
             return;
