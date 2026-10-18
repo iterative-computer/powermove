@@ -8,7 +8,7 @@
    Prints "ready", then reads one JSON command per line on stdin:
 
      { "doc": <canonical project JSON file>, "answers": <registry answers file>,
-       "faces": [<face file>, ...], "outlines": <bool>,
+       "faces": [<face file>, ...], "outlines": <bool>, "seeds": <{ seeds } JSON>,
        "requests": <one JSON request per line>, "out": <replies file> }
 
    For each command it instantiates a fresh module instance (as a new
@@ -38,6 +38,10 @@ async function run(command) {
   };
   const put = (text) => putBytes(encoder.encode(text));
   const out = (len) => decoder.decode(new Uint8Array(x.memory.buffer, x.pm_out_ptr(), len));
+  // The window's font cache seeds, as main sends them (engine-fonts:seeds).
+  if (command.seeds && x.pm_fonts_seeds(put(command.seeds)) === 2) {
+    throw new Error('pm_fonts_seeds: ' + out(x.pm_out_len()));
+  }
   if (x.pm_fonts_answers(put(readFileSync(command.answers, 'utf8'))) !== 0) {
     throw new Error('pm_fonts_answers: ' + out(x.pm_out_len()));
   }

@@ -183,7 +183,7 @@ fn native_and_mirror_answers_match_and_perturbations_do_not() {
     // The pm-wasm path: the same values through the mirror's queries.
     let canonical = pm_model::canonical::canonical_project(parse(DOC).unwrap());
     let mut service = fonts::FontService::new(false);
-    let mut discovery = wasm::Discovery::new(&mut service, &canonical).unwrap();
+    let mut discovery = wasm::Discovery::new(&mut service, &canonical, r#"{"seeds":[]}"#).unwrap();
     discovery.dump(&items).unwrap();
     let project = discovery.finish();
     let replies = wasm::native_replies(&project, &mut service).unwrap();

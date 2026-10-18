@@ -46,6 +46,8 @@ pub enum Plan {
 
 /// A project's requests and plans.
 pub struct Project {
+    /// The renderer font cache seeds (`{ seeds }` JSON) pm-wasm measures with.
+    pub seeds: String,
     pub doc: String,
     pub requests: Vec<String>,
     pub plans: Vec<Vec<Plan>>,
@@ -75,15 +77,23 @@ pub struct Discovery<'f> {
 }
 
 impl<'f> Discovery<'f> {
-    pub fn new(fonts: &'f mut FontService, canonical: &Value) -> Result<Discovery<'f>, String> {
+    /// `seeds`: the renderer font cache seeds (`{ seeds }` JSON) main sends
+    /// pm-wasm in the app.
+    pub fn new(
+        fonts: &'f mut FontService,
+        canonical: &Value,
+        seeds: &str,
+    ) -> Result<Discovery<'f>, String> {
         let doc = to_canonical_string(canonical);
         let mut engine = Engine::new();
+        engine.set_font_seeds(seeds.as_bytes())?;
         engine.resync(doc.as_bytes(), 1)?;
         engine.set_font_outlines(!fonts.subsets);
         Ok(Discovery {
             fonts,
             engine,
             project: Project {
+                seeds: seeds.to_owned(),
                 doc,
                 requests: Vec::new(),
                 plans: Vec::new(),
@@ -313,6 +323,7 @@ impl<'f> Discovery<'f> {
 /// A fresh engine with the project's fonts, replying to every request.
 pub fn native_replies(project: &Project, fonts: &mut FontService) -> Result<Vec<String>, String> {
     let mut engine = Engine::new();
+    engine.set_font_seeds(project.seeds.as_bytes())?;
     engine.set_font_outlines(!fonts.subsets);
     engine.add_font_answers(&serde_json::to_vec(&project.answers).map_err(|e| e.to_string())?)?;
     for (blob, index) in &project.faces {
@@ -433,6 +444,7 @@ impl NodeRunner {
         }
         let command = serde_json::json!({
             "doc": doc, "answers": answers, "faces": faces, "outlines": !fonts.subsets,
+            "seeds": project.seeds,
             "requests": requests, "out": out,
         });
         writeln!(self.stdin, "{command}").map_err(|e| e.to_string())?;
