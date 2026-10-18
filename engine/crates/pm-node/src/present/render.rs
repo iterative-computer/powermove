@@ -241,6 +241,19 @@ pub struct ThreadConfig {
     pub host_clock: bool,
     /// The program cache folder (`SHADER_CACHE_ENV`).
     pub shader_cache: Option<PathBuf>,
+    /// The engine's font service, through which the renderer lays text out
+    /// (`crate::fonts::hub`); `None`: text and captions are not drawn.
+    pub fonts: Option<TextFontsHub>,
+}
+
+/// The font hub a presenter's renderers lay text out through.
+#[derive(Clone)]
+pub struct TextFontsHub(pub std::sync::Arc<crate::fonts::hub::FontHub>);
+
+impl std::fmt::Debug for TextFontsHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TextFontsHub")
+    }
 }
 
 /// The device's composer, keeping translated programs in the configured
@@ -261,6 +274,11 @@ fn composer(
     composer
         .renderer()
         .apply_media_lease(media_lease(frame_cache));
+    if let Some(TextFontsHub(hub)) = &config.fonts {
+        composer.renderer().set_text_fonts(Some(Box::new(
+            pm_render::text::served::ServedFonts::new(hub.clone(), hub.clone()),
+        )));
+    }
     composer
 }
 
@@ -1943,7 +1961,9 @@ impl Thread {
             view.sample_due = true;
         }
         let composition = view.state.composition.as_str().to_owned();
-        let route = self.docs.entry(key).or_default().route(&composition);
+        let doc = self.docs.entry(key).or_default();
+        doc.set_fonts(self.config.fonts.is_some());
+        let route = doc.route(&composition);
         let view = self.views.get_mut(&key).expect("checked");
         let changed = view.reported.as_ref() != Some(&route);
         let mut stop = false;

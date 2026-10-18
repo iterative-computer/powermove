@@ -763,6 +763,17 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
 /// rendered with Blender are not routed for that reason
 /// (`crate::blender`).
 pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, JobError> {
+    plan_export_with_fonts(job, blender, false)
+}
+
+/// [`plan_export_with`] for a renderer with fonts
+/// (`pm_render::Renderer::set_text_fonts`): text and captions layers are
+/// drawn, not routed.
+pub fn plan_export_with_fonts(
+    job: &ExportJob,
+    blender: bool,
+    fonts: bool,
+) -> Result<ExportPlan, JobError> {
     let s = &job.settings;
     pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
     let document = if s.delivery.hide_captions {
@@ -773,12 +784,16 @@ pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, Jo
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
-    let mut problems: Vec<String> =
+    let issues = if fonts {
+        pm_render::unsupported_with_fonts(doc, &job.composition, Some(&*job.media))
+    } else {
         pm_render::unsupported_with_media(doc, &job.composition, &*job.media)
-            .iter()
-            .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
-            .map(ToString::to_string)
-            .collect();
+    };
+    let mut problems: Vec<String> = issues
+        .iter()
+        .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
+        .map(ToString::to_string)
+        .collect();
     let rate = rate_of(s)?;
     let mut timeline = Timeline::new(s.range.start, s.range.end, rate)?;
     if container == Container::PngStill {
@@ -1273,11 +1288,21 @@ pub fn encode_png(rgba8: &[u8], width: u32, height: u32) -> Result<Vec<u8>, JobE
 #[derive(Debug, Default)]
 pub struct StillRouting {
     checked: std::collections::HashMap<String, Vec<String>>,
+    /// The renderer has fonts: text and captions are drawn.
+    fonts: bool,
 }
 
 impl StillRouting {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Routing for a renderer with fonts (`Renderer::set_text_fonts`).
+    pub fn with_fonts(fonts: bool) -> Self {
+        StillRouting {
+            checked: Default::default(),
+            fonts,
+        }
     }
 
     /// `Err(Unsupported)` when the engine cannot render `composition`; the
@@ -1292,10 +1317,14 @@ impl StillRouting {
             .checked
             .entry(composition.to_owned())
             .or_insert_with(|| {
-                pm_render::unsupported_with_media(document, composition, media)
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect()
+                if self.fonts {
+                    pm_render::unsupported_with_fonts(document, composition, Some(media))
+                } else {
+                    pm_render::unsupported_with_media(document, composition, media)
+                }
+                .iter()
+                .map(ToString::to_string)
+                .collect()
             });
         if problems.is_empty() {
             Ok(())

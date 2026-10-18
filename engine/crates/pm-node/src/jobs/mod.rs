@@ -46,7 +46,7 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_with, render_still,
+    encode_jpeg, encode_png, offline_media, plan_export_with_fonts, render_still,
     run_export_with_blender, sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
@@ -178,6 +178,8 @@ struct Shared {
     gate: Arc<Gate>,
     wake: Wake,
     gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
+    /// The engine's font service: lanes' renderers lay text out through it.
+    fonts: Option<Arc<crate::fonts::hub::FontHub>>,
 }
 
 impl Shared {
@@ -331,7 +333,14 @@ impl Shared {
             *gpu = Some((g.device, g.queue));
         }
         let (device, queue) = gpu.as_ref().expect("set above");
-        Ok(Renderer::new(device.clone(), queue.clone()))
+        let mut renderer = Renderer::new(device.clone(), queue.clone());
+        if let Some(hub) = &self.fonts {
+            renderer.set_text_fonts(Some(Box::new(pm_render::text::served::ServedFonts::new(
+                hub.clone(),
+                hub.clone(),
+            ))));
+        }
+        Ok(renderer)
     }
 }
 
@@ -413,6 +422,15 @@ impl JobEngineService {
     /// Starts the three lanes. `wake` must make the engine's host call
     /// [`pm_engine::Engine::pump`] soon.
     pub fn start(wake: Wake) -> Result<JobEngineService, String> {
+        Self::start_with_fonts(wake, None)
+    }
+
+    /// [`JobEngineService::start`] with the engine's font hub: lanes draw
+    /// text and captions (`crate::fonts::hub`).
+    pub fn start_with_fonts(
+        wake: Wake,
+        fonts: Option<Arc<crate::fonts::hub::FontHub>>,
+    ) -> Result<JobEngineService, String> {
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -424,6 +442,7 @@ impl JobEngineService {
             gate: Arc::new(Gate::new()),
             wake,
             gpu: Mutex::new(None),
+            fonts,
         });
         let mut threads = Vec::new();
         for (lane, name) in [
@@ -1003,7 +1022,7 @@ fn run_frames(
         },
     );
     let playing_at_start = shared.gate.is_playing();
-    let mut routing = StillRouting::new();
+    let mut routing = StillRouting::with_fonts(renderer.text().has_fonts());
     let mut outcomes = Vec::with_capacity(request.frames.len());
     let mut bytes = 0usize;
     for (index, frame) in request.frames.iter().enumerate() {
@@ -1302,17 +1321,18 @@ fn run_job(
         Err(e) => return finish(JobState::Failed, None, Some(e)),
     };
     // Routing first: nothing is created for work the engine cannot do.
-    let mut plan = match plan_export_with(&export, stage.is_some()) {
-        Ok(plan) => plan,
-        Err(e) => {
-            let state = if matches!(e, JobError::Cancelled) {
-                JobState::Cancelled
-            } else {
-                JobState::Failed
-            };
-            return finish(state, None, Some(engine_error(job, &e)));
-        }
-    };
+    let mut plan =
+        match plan_export_with_fonts(&export, stage.is_some(), renderer.text().has_fonts()) {
+            Ok(plan) => plan,
+            Err(e) => {
+                let state = if matches!(e, JobError::Cancelled) {
+                    JobState::Cancelled
+                } else {
+                    JobState::Failed
+                };
+                return finish(state, None, Some(engine_error(job, &e)));
+            }
+        };
     if cancel.load(Ordering::Relaxed) {
         return finish(JobState::Cancelled, None, None);
     }

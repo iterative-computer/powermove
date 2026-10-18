@@ -47,6 +47,11 @@ pub enum Op {
     Generation = 9,
     /// `{}` → `string[]` (installed families, then project families).
     FamilyNames = 10,
+    /// `{ seeds: FontCacheSeed[] }` → `{ generation }`. The editor
+    /// renderer's font cache seeds (amendment 19; `docs/engine/text.md`):
+    /// the engine's own text layout measures as that renderer does. Main
+    /// replays the latest seeds on every new port.
+    Seeds = 11,
 }
 
 impl Op {
@@ -62,6 +67,7 @@ impl Op {
             8 => Op::ClearProjectFonts,
             9 => Op::Generation,
             10 => Op::FamilyNames,
+            11 => Op::Seeds,
             _ => return None,
         })
     }

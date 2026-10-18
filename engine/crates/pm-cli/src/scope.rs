@@ -58,6 +58,8 @@ pub struct Options {
     pub transparent: bool,
     pub columns: Option<u32>,
     pub output: PathBuf,
+    /// The editor's display scale factor (`crate::fonts`).
+    pub ui_scale: Option<f32>,
 }
 
 /// Y′, Cb, Cr (BT.709, full range) of E-encoded R′G′B′.
@@ -497,13 +499,17 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                     .map_err(|_| Failure::Usage(format!("--motion-blur {n:?}")))?,
             ),
         };
-        let issues = pm_render::unsupported_with_media(doc, &loaded.composition, &loaded.media);
+        let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+        crate::fonts::install(
+            &mut renderer,
+            options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
+        );
+        let issues = renderer.unsupported_with_media(doc, &loaded.composition, &loaded.media);
         if !issues.is_empty() {
             return Err(Failure::Unsupported(
                 issues.iter().map(ToString::to_string).collect(),
             ));
         }
-        let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
         let ticks = Ticks::new(
             pm_time::ticks_from_seconds(options.time)
                 .map_err(|e| Failure::Usage(format!("--time: {e}")))?,

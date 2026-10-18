@@ -44,7 +44,7 @@ use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 
 use render::{Command, Key};
-pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, ThreadConfig};
+pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, TextFontsHub, ThreadConfig};
 
 /// Environment main sets for the interactive engine: the per-launch
 /// bootstrap name.
@@ -147,6 +147,8 @@ impl PresenterConfig {
                 shader_cache: env(SHADER_CACHE_ENV)
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
+                // The engine host adds its font hub.
+                fonts: None,
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

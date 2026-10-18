@@ -17,6 +17,7 @@
 
 mod compare;
 mod corpus;
+mod fonts;
 mod parity;
 mod render;
 mod render_parity;
@@ -72,6 +73,8 @@ const USAGE: &str = "usage:
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
       --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
+      --ui-scale S  the editor's display scale factor, which fixes how its
+                    renderer measures system-ui text (default 2)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
       compares engine renders with the legacy captures of the parity corpus
@@ -89,7 +92,8 @@ const USAGE: &str = "usage:
       waveform, RGB parade, and vectorscope of a 32-bit working render (or a
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
-      --motion-blur off|export|N (default export)  --transparent  --columns N";
+      --motion-blur off|export|N (default export)  --transparent  --columns N
+      --ui-scale S (default 2)";
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -219,6 +223,7 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {
@@ -269,6 +274,7 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             }
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
+            "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
                 let v = value(args, &mut i, a)?;
                 o.columns = Some(v.parse().map_err(|_| format!("columns {v:?}"))?);

@@ -65,6 +65,43 @@ pub struct FontCacheSeed {
     pub specified: f32,
 }
 
+/// The CSS sizes of the app's own UI text that create `system-ui` entries in
+/// the editor renderer's font cache before any canvas measures (`--fs-sm`
+/// and `--fs-md`, weight 400, upright; `docs/engine/text.md`, "The
+/// renderer's font cache"). Main sends these as seeds (`engine-fonts:seeds`)
+/// to pm-wasm and to the engines.
+pub const APP_UI_TEXT_SIZES: [f32; 2] = [12.0, 13.0];
+
+/// The seeds of an editor renderer whose window has been on displays with
+/// these device scale factors (each scale factor's entries stay in the
+/// renderer's cache for the life of the window), in that order. Equal to
+/// `appUiFontCacheSeeds` in `apps/desktop/src/shared/engine-fonts-seeds.ts`.
+pub fn app_ui_font_cache_seeds(scale_factors: &[f32]) -> Vec<FontCacheSeed> {
+    let mut out: Vec<FontCacheSeed> = Vec::new();
+    for &scale in scale_factors {
+        if !(scale.is_finite() && scale > 0.0) {
+            continue;
+        }
+        for css in APP_UI_TEXT_SIZES {
+            let seed = FontCacheSeed {
+                family: "system-ui".into(),
+                weight: 400.0,
+                italic: false,
+                size: crate::compat::canvas::effective_font_size(css * scale),
+                specified: css,
+            };
+            // The first creator of a key fixes it.
+            if !out
+                .iter()
+                .any(|s| s.size == seed.size && s.weight == seed.weight && s.italic == seed.italic)
+            {
+                out.push(seed);
+            }
+        }
+    }
+    out
+}
+
 impl FontCacheSeed {
     fn matches(&self, family: &str, desc: &FontDesc) -> bool {
         self.family.eq_ignore_ascii_case(family)
@@ -391,4 +428,35 @@ pub fn measure(
         out.items.push(result);
     }
     out
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn app_ui_seeds_follow_the_windows_scale_factors() {
+        let two = app_ui_font_cache_seeds(&[2.0]);
+        assert_eq!(
+            two.iter()
+                .map(|s| (s.size, s.specified))
+                .collect::<Vec<_>>(),
+            [(24.0, 12.0), (26.0, 13.0)]
+        );
+        assert!(
+            two.iter()
+                .all(|s| s.family == "system-ui" && s.weight == 400.0 && !s.italic)
+        );
+        // At 1x the UI's entries are the canvas's own sizes.
+        let one = app_ui_font_cache_seeds(&[1.0]);
+        assert!(one.iter().all(|s| s.size == s.specified));
+        // A window that went from 2x to 1x keeps both; the first creator of
+        // a key wins, and invalid factors are ignored.
+        let both = app_ui_font_cache_seeds(&[2.0, f32::NAN, 1.0, 2.0]);
+        assert_eq!(both.len(), 4);
+        assert_eq!(both[0].size, 24.0);
+        // Fractional scale factors floor as Blink's effective size does.
+        assert_eq!(app_ui_font_cache_seeds(&[1.1])[0].size, 13.2);
+        assert_eq!(app_ui_font_cache_seeds(&[]).len(), 0);
+    }
 }

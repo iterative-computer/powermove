@@ -79,6 +79,8 @@ pub struct Options {
     pub reel: Option<String>,
     /// Leave captions layers out of the picture.
     pub no_captions: bool,
+    /// The editor's display scale factor (`crate::fonts`).
+    pub ui_scale: Option<f32>,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -613,6 +615,10 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    let fonts = crate::fonts::install(
+        &mut renderer,
+        options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
+    );
     let started = std::time::Instant::now();
     let mut last = -1i64;
     let mut progress = |p: Progress| {
@@ -628,7 +634,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     // Blender compositions (contract 11): the CLI host runs the pinned
     // worker in the installed Blender itself.
     let mut blender = blender_stage(&job).map_err(|e| Failure::Failed(e.to_string()))?;
-    let delivered = pm_export::render::plan_export_with(&job, blender.is_some())
+    let delivered = pm_export::render::plan_export_with_fonts(&job, blender.is_some(), fonts)
         .and_then(|plan| {
             let sink = pm_export::render::sink_for(&plan)?;
             pm_export::render::run_export_with_blender(

@@ -116,6 +116,21 @@ fn main() {
     let mut fresh = Compat::new(CoreTextRegistry::new());
     assert_eq!(c.measure(&bold, "1"), fresh.measure(&bold, "1"));
     assert_eq!(c.measure(&italic, "1"), fresh.measure(&italic, "1"));
+    // The app's UI seeds at 2x are these seeds.
+    let mut app = Compat::new(CoreTextRegistry::new());
+    app.set_font_cache_seeds(pm_text::compat::app_ui_font_cache_seeds(&[2.0]));
+    assert_eq!(app.measure(&content(24.0), "1"), 11.203125);
+    assert_eq!(app.measure(&content(26.0), "T"), 16.6943359375);
+    let line = TextContent {
+        text: "system-ui 24 px measured as the editor does".into(),
+        ..content(24.0)
+    };
+    let seeded = app.line_runs(&line);
+    let plain = fresh.line_runs(&line);
+    assert_ne!(
+        seeded[0].width, plain[0].width,
+        "line runs follow the seeds"
+    );
     println!("ok font cache seeds");
 }
 

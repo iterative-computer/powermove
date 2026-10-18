@@ -84,9 +84,20 @@ pub struct ViewDocument {
         pm_protocol::common::DefinitionId,
     )>,
     cached: Option<Cached>,
+    /// The renderer lays text out over the engine's fonts: text and
+    /// captions layers are drawn.
+    fonts: bool,
 }
 
 impl ViewDocument {
+    /// Whether the renderer has fonts (`pm_render::unsupported_with_fonts`).
+    pub fn set_fonts(&mut self, fonts: bool) {
+        if self.fonts != fonts {
+            self.fonts = fonts;
+            self.cached = None;
+        }
+    }
+
     /// The session's definitions: effects and transitions are drawn with
     /// them (`pm_render::effects`), routed without them.
     /// `registered`: the definitions the update registered again (a delta's
@@ -249,7 +260,12 @@ impl ViewDocument {
                 format!("media offline: {name}")
             })
             .collect();
-        for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
+        let issues = if self.fonts {
+            pm_render::unsupported_with_fonts(&self.doc, composition, Some(&self.media))
+        } else {
+            pm_render::unsupported_with_media(&self.doc, composition, &self.media)
+        };
+        for u in issues {
             // With definitions, effects, transitions, adjustment layers
             // with effects, and extension layers are drawn; one the renderer cannot draw (no
             // definition, a program that needs the fallback runner) fails

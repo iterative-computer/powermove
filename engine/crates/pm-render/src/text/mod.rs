@@ -14,6 +14,7 @@
 //! anchors are `pm-eval`'s.
 
 pub mod gpu;
+pub mod served;
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -57,6 +58,16 @@ pub trait TextFonts: Send {
     /// cached rasters of an older generation are dropped.
     fn generation(&self) -> u64 {
         0
+    }
+    /// Called before each text or captions layer is laid out: fonts whose
+    /// registry changed start over here (never in the middle of a layer,
+    /// whose runs name the current faces).
+    fn sync(&mut self) {}
+    /// Registry questions left unanswered since the last call (a served
+    /// registry that did not answer): the layer that met them is refused,
+    /// never drawn with another font.
+    fn take_failures(&mut self) -> Vec<String> {
+        Vec::new()
     }
     /// Level 2 layout for `compat` ≥ 2 text layers, when the host provides
     /// it (`None`: such layers are refused).
@@ -128,6 +139,8 @@ pub struct TextContext {
     /// The level 1 profile (Canvas2D).
     profile: Profile,
     generation: u64,
+    /// The fonts' own generation when last synced.
+    fonts_generation: u64,
     captions_hidden: bool,
     unsupported: Vec<String>,
 }
@@ -140,6 +153,7 @@ impl Default for TextContext {
             bitmaps: Bitmaps::new(),
             profile: Profile::CANVAS2D,
             generation: 0,
+            fonts_generation: 0,
             captions_hidden: false,
             unsupported: Vec::new(),
         }
@@ -152,6 +166,21 @@ impl TextContext {
         self.outlines.clear();
         self.bitmaps.clear();
         self.generation += 1;
+        self.fonts_generation = self.fonts.as_ref().map_or(0, |f| f.generation());
+    }
+
+    /// Before a layer: the fonts catch up with their registry, and a new
+    /// font generation makes every later raster key new (cached rasters of
+    /// the old fonts are never reused).
+    fn sync_fonts(&mut self) {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            fonts.sync();
+            let g = fonts.generation();
+            if g != self.fonts_generation {
+                self.fonts_generation = g;
+                self.generation += 1;
+            }
+        }
     }
 
     pub fn has_fonts(&self) -> bool {
@@ -179,6 +208,9 @@ impl TextContext {
 
     /// What the last layer built could not draw.
     pub(crate) fn take_unsupported(&mut self) -> Vec<String> {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            self.unsupported.extend(fonts.take_failures());
+        }
         std::mem::take(&mut self.unsupported)
     }
 }
@@ -460,6 +492,7 @@ impl TextContext {
         time: f64,
         scale: f64,
     ) -> JsResult<Option<TextQuad>> {
+        self.sync_fonts();
         let d = scope.resolved_text_content(layer, time)?;
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
@@ -570,6 +603,7 @@ impl TextContext {
         m: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
             pm_eval::node::member(stored, key)
@@ -665,6 +699,7 @@ impl TextContext {
         m: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
         let frame = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
             scope.caption_frame(layer, time, fonts.measure())?
@@ -692,6 +727,7 @@ impl TextContext {
         time: f64,
         scale: f64,
     ) -> JsResult<Option<TextQuad>> {
+        self.sync_fonts();
         let frame = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
             scope.caption_frame(layer, time, fonts.measure())?
