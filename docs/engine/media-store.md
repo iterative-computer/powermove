@@ -398,6 +398,14 @@ A later write under the same storage key does not change the queued content.
 Completion, failure and cancellation release the session bindings. The live
 window's bindings keep their existing lifetime and ambiguity checks.
 
+A job's frozen entry is tried first: link, then hash object, then storage key
+record (each copied asset keeps its key, also when it had no record at snapshot
+time). If that is offline, the job falls back to live bindings from windows on
+the same project id. A job waiting for media therefore resumes on its 2 s
+re-mint when copied media is put later, when the user relinks it with Locate
+Media in that project's window, or when a saved hash object is gone but the key
+still has bytes. Windows on other projects are never consulted.
+
 The unit regressions cover acknowledgement ordering, IndexedDB migration without
 writing/deleting IndexedDB, copied and linked media after window release, reused
 storage keys, session/process isolation, and release after success or submission

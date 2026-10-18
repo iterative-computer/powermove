@@ -361,12 +361,24 @@ Follow-up on `feat/ne-fixups`, integration base `01a9f4af` (2026-10-18).
 Both requested integration merges were already up to date. No router,
 capability reason, corpus case, tolerance or allowed-difference rule changed.
 
-**K1.** Known effect parameters were normalized twice against one global key-id
-set. They now enter that sanitizer once, using their registered defaults while
-keeping unknown parameters and loose primitive values. The regression preserves
-numeric, color, boolean and unknown-parameter ids and requires byte-stable JSON
-on reopen. Its negative control replaced the three registered key ids on the
-first hydration, as the reported defect predicts.
+**K1.** Known effect parameters are sanitized twice against one global key-id
+set: a loose pass (keys typed by the saved value, or 0) and then the
+definition's pass (value typed by `param.def`). The second pass saw the
+channel's own ids as duplicates and replaced them. Each registered channel now
+releases its own ids from the set just before its second pass; both passes and
+their value and keyframe semantics are unchanged. (A first version of this fix
+merged the passes into one def-typed pass. Review showed that changed today's
+hydration of null, missing and mismatched-type values, which owner rule 22
+forbids, and it was replaced.)
+
+Two regressions: the id test preserves numeric, color, boolean and
+unknown-parameter ids and requires byte-stable JSON on reopen; it fails against
+the base (registered ids replaced). The parity test hydrates `{v:null}`, a
+primitive `null`, color and boolean keys with no `v`, a numeric param with
+`v:'5'` and keys `[1,5]`, and a color param with `v:3`, and pins today's
+results: value 0, 0, def, def, def, def, and no keyframes for all of them. It
+passes on the base app.ts except for the key-id assertion, and fails against
+the single-pass version (values became def and the dropped keys animated).
 
 **B1.** Export and Add to Queue await the media binding acknowledgement, as does
 the agent export's `__mcp_context`. They retain their captured project while
@@ -382,6 +394,18 @@ capability resolution now carries engine process and session. Project switches,
 window release and later writes under the same storage key cannot replace those
 bindings. Ending the job releases them. Existing live-window ambiguity checks
 and capability-port validation remain in place.
+
+A job's bindings are not a dead end. Each copied asset keeps its storage key
+next to the frozen hash (also when no record existed at snapshot time), and the
+job remembers its project id. Resolution tries the frozen entry first (link,
+then hash object, then key record, the same order as the window path). When that
+is offline it falls back to windows bound to the same project id, with the usual
+ambiguity check; windows on other projects never count. So `wait_for_media`'s
+2 s re-mint resumes a queued or sheet job when copied media that was offline at
+enqueue is put later, when the user relinks with Locate Media in the project's
+window, or when a saved hash object is missing but the key's record exists. The
+regression covers all three and that another project's window is ignored; it
+fails against the first B1 version.
 
 Negative controls fail without the sheet/agent acknowledgement and without job
 binding. The unit tests cover migration, immutable queue content, copied and
@@ -403,11 +427,19 @@ assertion unconditional when running this test: do not interpret a sleeping
 compositor's lack of presentation as an import or export failure. The media,
 export pixels and layer-failure assertions remain separate requirements.
 
-Outside the lane's named files, the changes are confined to main's engine host
-callback types and their wiring (`main/engine/{index,native-engine,services}.ts`)
-and the agent snapshot call site and test (`legacy/assistant/mcp-project-tools`).
+Outside the lane's named files, the changes are: main's engine host callback
+types and wiring (`main/engine/{index,native-engine,services}.ts`); the
+`bindMediaSession` hook in `main/engine/agent-jobs.ts` and its test; the agent
+snapshot call site and test (`legacy/assistant/mcp-project-tools`); the
+`e2e/media-import-readiness.spec.ts` extension (reopen export, queue after
+project switch); and notes in `export.md`, `media-store.md` and `scene3d.md`.
 The hot `main/index.ts` edit is only the three media callbacks. No preload,
 kernel API, editing or raster implementation changed.
+
+Remaining: `flushBindings` migrates uncached IndexedDB media before a sheet export
+or queue add. For large media that delays the start by a full copy, and the
+progress sheet shows nothing while it runs. It is correct but has no UI
+feedback yet.
 
 **Verification:**
 
@@ -428,6 +460,26 @@ kernel API, editing or raster implementation changed.
   importing renderer `compositions.ts` and `registry.ts`. Those files are unchanged.
 - Every commit's staged file list/diff and gitleaks scan were checked; the local
   hook remains enabled. No push, integration-branch merge, tag or release.
+
+**Verification after the review corrections** (K1 two-stage restore, B1 job
+fallback), app rebuilt by the e2e global setup:
+
+- Eleven targeted unit files (the nine above plus `media-store/store` and
+  `engine/offline-media`): **148 pass**. Negative controls as described under
+  K1 and B1.
+- MP4 delivery and cancellation: **2 pass flag off, 2 pass flag on** (lock,
+  one worker, no retries).
+- Unchanged engine-switch corpus: **131/131 twice, 69 s and 73 s**, zero
+  failures, skips or stamps.
+- `media-import-readiness.spec.ts`: flag off passes; flag on fails at the
+  presentation poll (line 66) because the machine had been idle about 11 h with
+  the display asleep, the precondition stated above. A temporary untracked copy
+  that skipped only that poll (and the presenter check, since no presenter
+  exists while asleep) passed **2/2**, covering import readiness, export pixels,
+  reopen export and the queued snapshot after a project switch. The copy was
+  deleted. The committed spec is unchanged and still needs an awake display.
+- Web and node `tsc --noEmit --composite false`: no errors in changed files.
+  The two R3b test lines that failed `noUncheckedIndexedAccess` were fixed.
 
 Reproduce from `apps/desktop` after sourcing `../../engine/env.sh` and building
 `build:engine` and `build:wasm`. Run `bunx vitest run` on the nine files above with

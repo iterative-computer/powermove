@@ -276,11 +276,12 @@ tests and tools named above are its own files. Everything else it touched:
 
 ## Hydration follow-up (K1 and R3b, 2026-10-18)
 
-Effect parameters now enter the project-wide key-id sanitizer exactly once.
-Registered parameters use their definition's fallback; unknown parameters retain
-inferred values. Saved numeric, color and boolean keys keep their ids on every
-reopen, and loose primitive values remain supported. Duplicate ids across actual
-channels still go through the existing uniqueness check.
+Registered effect parameters still go through both hydration passes (the loose
+pass, then the definition's pass), with today's value and keyframe semantics.
+Before its second pass each channel releases its own key ids from the
+project-wide set, so saved numeric, color and boolean keys keep their ids on
+every reopen. Duplicate ids across different channels still go through the
+existing uniqueness check. See `gate-fixes.md` (K1) for the parity cases.
 
 The legacy-scene hydration regression now includes color and boolean tracks and
 keys without ids in root and nested compositions. It compares quarter/midpoint
