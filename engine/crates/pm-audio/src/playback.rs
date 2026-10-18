@@ -50,6 +50,8 @@ use crate::transport::{Effect, Transport};
 /// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
 /// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
+/// How often fully prepared paused starts are checked again.
+const PAUSED_REFRESH: Duration = Duration::from_secs(1);
 /// Maximum source wait, measured in callback frames at the device rate,
 /// independent of wall-clock scheduling, project rate, and shuttle speed.
 pub const SOURCE_WAIT_MS: u64 = 120;
@@ -408,6 +410,7 @@ impl Playback {
         let worker = RenderThread {
             rx,
             deferred: None,
+            settled: None,
             shared: shared.clone(),
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
@@ -971,6 +974,10 @@ struct RenderThread {
     rx: Receiver<Control>,
     /// A control that interrupted paused preparation; handled first.
     deferred: Option<Control>,
+    /// The paused starts of the last complete preparation pass and when it
+    /// ran: unchanged and still ready, they are re-checked only every
+    /// [`PAUSED_REFRESH`] rather than every idle turn.
+    settled: Option<(Vec<i64>, std::time::Instant)>,
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
@@ -1336,6 +1343,17 @@ impl RenderThread {
             }
         }
         starts.dedup();
+        // Once everything is prepared, re-bounding every voice's spans each
+        // 20 ms turn cost 1-2% CPU with 16 stretched voices while idle.
+        // Recheck occasionally so evicted source blocks are queued again.
+        if let Some((last, at)) = &self.settled
+            && *last == starts
+            && at.elapsed() < PAUSED_REFRESH
+            && self.mixer.prepared_ready(&starts)
+        {
+            return;
+        }
+        self.settled = None;
         self.mixer.retain_prepared(&starts);
         let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
             .max(CHUNK as i64);
@@ -1363,12 +1381,20 @@ impl RenderThread {
                 ready.push(start);
             }
         }
-        for start in starts {
+        let mut behind = true;
+        for start in starts.iter().copied() {
             if self.preempted() {
+                behind = false;
                 break;
             }
-            self.mixer
-                .prefetch_within(start - 2 * ahead, (2 * ahead) as usize, LOOKAHEAD_GROUPS);
+            behind &= self.mixer.prefetch_within(
+                start - 2 * ahead,
+                (2 * ahead) as usize,
+                LOOKAHEAD_GROUPS,
+            );
+        }
+        if behind && ready.len() == starts.len() {
+            self.settled = Some((starts, std::time::Instant::now()));
         }
         *self
             .shared

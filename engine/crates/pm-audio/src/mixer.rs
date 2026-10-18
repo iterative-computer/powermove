@@ -416,6 +416,13 @@ impl Mixer {
         ready
     }
 
+    /// Every start in `starts` holds a ready prepared history.
+    pub(crate) fn prepared_ready(&self, starts: &[i64]) -> bool {
+        starts
+            .iter()
+            .all(|s| self.prepared.get(s).is_some_and(|p| p.ready))
+    }
+
     pub(crate) fn retain_prepared(&mut self, starts: &[i64]) {
         self.prepared.retain(|start, _| starts.contains(start));
     }
