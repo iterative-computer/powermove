@@ -109,6 +109,68 @@ it('replays compact recovery patches over the last full checkpoint', () => {
 });
 
 
+it('the journal keeps one copy of what each edit rewrites whole and replays to the same document', () => {
+  const { PM, mem } = projectsModel();
+  PM.proj = { id: 'J1', name: 'Journal', revision: 0, edits: [], layers: [{ id: 'L1', p: { o: { v: 100 } } }, { id: 'L2', p: { o: { v: 100 } } }] };
+  PM.Projects.put(PM.proj);
+  const log = [];
+  for (let revision = 1; revision <= 5; revision++) {
+    log.push({ id: `e${revision}`, revision });
+    PM.bus.emit('history:project-patch', {
+      projectId: 'J1', revision,
+      patches: [
+        { path: ['revision'], exists: true, value: revision },
+        { path: ['edits'], exists: true, value: structuredClone(log) },
+        { path: ['layers', revision % 2, 'p', 'o', 'v'], exists: true, value: 10 * revision },
+      ],
+    });
+  }
+  const recovered = PM.Projects.get('J1');
+  assert.equal(recovered.revision, 5);
+  assert.deepEqual(recovered.edits.map(e => e.id), ['e1', 'e2', 'e3', 'e4', 'e5']);
+  assert.deepEqual(recovered.layers.map(l => l.p.o.v), [40, 50]);
+  const entries = mem.get('projectJournal.J1');
+  assert.equal(entries.length, 5, 'every edit keeps its entry');
+  assert.deepEqual(entries.map(e => e.patches.filter(p => p.path[0] === 'edits').length), [0, 0, 0, 0, 1], 'one provenance log');
+  assert.deepEqual(entries.map(e => e.patches.length), [1, 1, 1, 1, 3]);
+  // A checkpoint drops the journal; the next edit starts a new one.
+  PM.Projects.put(PM.proj);
+  assert.equal(mem.has('projectJournal.J1'), false);
+  PM.bus.emit('history:project-patch', { projectId: 'J1', revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] });
+  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] }]);
+});
+
+it('hands the journal to an asynchronous store as a snapshot of each version', () => {
+  const { PM, mem } = projectsModel();
+  const writes = [];
+  PM.store.setAsync = (key, value) => { writes.push([key, value]); mem.set(key, value); return Promise.resolve(); };
+  PM.proj = { id: 'A1', name: 'Async', revision: 0, layers: [{ id: 'L1', p: { o: { v: 1 } } }] };
+  PM.Projects.put(PM.proj);
+  for (let revision = 1; revision <= 3; revision++) {
+    PM.bus.emit('history:project-patch', { projectId: 'A1', revision, patches: [{ path: ['layers', 0, 'p', 'o', 'v'], exists: true, value: revision }] });
+  }
+  assert.deepEqual(writes.map(([key, value]) => [key, value.length]), [['projectJournal.A1', 1], ['projectJournal.A1', 2], ['projectJournal.A1', 3]]);
+  assert.equal(PM.Projects.get('A1').layers[0].p.o.v, 3);
+});
+
+it('checkpoints the project when the journal would pass its bound, to the byte', () => {
+  const MAX = 4 * 1024 * 1024;
+  const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  for (const over of [0, 1]) {
+    const { PM, mem } = projectsModel();
+    PM.proj = { id: 'B1', name: 'Big', revision: 0, layers: [] };
+    PM.Projects.put(PM.proj);
+    const first = { revision: 1, patches: [{ path: ['layers', 0], exists: true, value: { id: 'L1' } }] };
+    PM.bus.emit('history:project-patch', { projectId: 'B1', ...first });
+    const second = (note) => ({ revision: 2, patches: [{ path: ['layers', 1], exists: true, value: { id: 'L2', note } }] });
+    // The journal's JSON at exactly the bound, or one byte over it.
+    const n = MAX - bytes([first, second('')]) + over;
+    PM.bus.emit('history:project-patch', { projectId: 'B1', ...second('é'.repeat(n / 2) + 'x'.repeat(n % 2)) });
+    if (over) assert.equal(mem.has('projectJournal.B1'), false, 'one byte over checkpoints the project');
+    else assert.equal(bytes(mem.get('projectJournal.B1')), MAX, 'the bound itself fits');
+  }
+});
+
 it('stores a project written for a newer reader once and never autosaves it afterwards', () => {
   const { PM, mem } = projectsModel();
   PM.proj = { id: 'N1', name: 'Newer', layers: [{ id: 'L1' }], minReaderVersion: 2 };

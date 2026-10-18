@@ -150,6 +150,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     });
   };
   const offPending = PM.EngineDoc?.onPending?.(flushSoon) ?? (() => {});
+  // And before the listeners of a document announcement (an edit's panels
+  // and overlays), not after them.
+  const offEager = PM.EngineDoc?.flushBeforeListeners?.(() => sessions.size > 0 && !flushing) ?? (() => {});
 
   const stream = (): DocumentStream => {
     const doc = PM.EngineDoc;
@@ -253,6 +256,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         onAudio: (message) => {
           if (session) audio.receive(message, session);
         },
+        // The viewer lays out for the new document, as opening a project
+        // makes it do: its state names the new composition, so the engine
+        // draws and plays it (a `PM.proj` assignment emits nothing).
+        onLoaded: () => PM.bus?.emit?.('layout'),
         onRoute: (route, reason) => {
           if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
           transport.refresh();
@@ -315,6 +322,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }),
     dispose: () => {
       offPending();
+      offEager();
       offAssets();
       unrouteAudio();
       target.removeEventListener('message', onMessage);

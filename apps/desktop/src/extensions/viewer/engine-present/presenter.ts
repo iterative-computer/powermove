@@ -21,7 +21,7 @@
  */
 import { decisionOffsetUs, JitterBuffer, type Queued } from './jitter-buffer';
 import { HINT_INTERVAL_MS, hintChanged, nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
-import type { FramePainter } from './gpu';
+import { DeviceLostError, type FramePainter } from './gpu';
 import type {
   ClockSample,
   EngineFrameMessage,
@@ -72,6 +72,18 @@ export type PresenterOptions = {
   displayHz?: number | null;
   /** Predicted rAF to display time, in refreshes (S1: one or two at 120 Hz). */
   latencyRefreshes?: number;
+  /** Added to `latencyRefreshes`: where in its refresh a frame's
+   *  presentation lands after the BeginFrame (ms; measured, see
+   *  present-worker.ts). */
+  presentOffsetMs?: number;
+  /**
+   * Shows the frame whose interval contains the display instant rounded to
+   * the nearest refresh (decides half a refresh later), so a frame reaches
+   * the panel within half a refresh of its time on the audio clock's line
+   * either way; otherwise frames show from the first refresh at or after
+   * their start (up to a refresh late).
+   */
+  nearestRefresh?: boolean;
   /** How long a descriptor may wait for its surface's import. */
   parkTimeoutMs?: number;
   /** performance.now() */
@@ -348,7 +360,9 @@ export class EnginePresenter implements Presenter {
   private enqueue(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
     if (desc.duration !== null) this.lastFrameTicks = desc.duration;
     const item: Queued<Payload> = { desc, payload: { frame }, arrivedMs };
-    for (const old of this.buffer.push(item)) this.dropItem(old, 'superseded');
+    // A timed frame comes back from the buffer when a newer revision of the
+    // same frame replaced it (an edit during playback), not as a drop.
+    for (const old of this.buffer.push(item)) this.dropItem(old, old.desc.duration === null ? 'superseded' : 'replaced');
     this.stats.maxQueued = Math.max(this.stats.maxQueued, this.buffer.size);
     if (desc.duration === null && this.options.drawOnArrival && this.raf) {
       const show = this.buffer.takeImmediate();
@@ -363,14 +377,14 @@ export class EnginePresenter implements Presenter {
     const fit = this.vsync.sample(rafMs);
     this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
-    const decisionMs = this.decisionMs(rafMs, fit);
+    const { decisionMs, displayMs } = this.decision(rafMs, fit);
     const atUs = this.hostUs(decisionMs);
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
     // The display instant itself, without the shift that puts frame
     // boundaries halfway between decisions.
-    if (show) this.draw(show, rafMs, this.hostUs(decisionMs - this.offsetUs / 1000));
+    if (show) this.draw(show, rafMs, this.hostUs(displayMs));
   }
 
   takeTrace(): Promise<TraceRecord | null> {
@@ -395,13 +409,16 @@ export class EnginePresenter implements Presenter {
     this.options.onVsync(next);
   }
 
-  /** The predicted display time of this refresh's frame, moved so frame
-   *  boundaries fall halfway between decisions. */
-  private decisionMs(rafMs: number, fit: VsyncFit | null): number {
+  /** The predicted display time of this refresh's frame (`displayMs`), and
+   *  the instant the frame is picked for (`decisionMs`): half a refresh
+   *  later with `nearestRefresh`, then moved so frame boundaries fall
+   *  halfway between decisions. */
+  private decision(rafMs: number, fit: VsyncFit | null): { decisionMs: number; displayMs: number } {
     const periodMs = fit?.periodMs ?? 1000 / 60;
-    const latency = (this.options.latencyRefreshes ?? 1) * periodMs;
+    const latency = (this.options.latencyRefreshes ?? 1) * periodMs + (this.options.presentOffsetMs ?? 0);
     const vsync = fit ? nextVsync(fit, rafMs - periodMs / 2) : rafMs;
-    const decision = vsync + latency;
+    const displayMs = vsync + latency;
+    const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
     if (fit && clock && head) {
@@ -412,7 +429,7 @@ export class EnginePresenter implements Presenter {
         this.offsetUs = decisionOffsetUs(periodMs * 1000, host, clock, head);
       }
     }
-    return decision + this.offsetUs / 1000;
+    return { decisionMs: decision + this.offsetUs / 1000, displayMs };
   }
 
   private draw(item: Queued<Payload>, rafMs: number, displayUs: number | null = null): void {
@@ -423,6 +440,12 @@ export class EnginePresenter implements Presenter {
       this.options.painter.draw(frame);
     } catch (error) {
       frame.close();
+      // A lost device draws nothing more: the frame goes back to the engine
+      // and the presentation replaces the drawing (`FramePainter.lost`).
+      if (error instanceof DeviceLostError) {
+        this.releaseDesc(desc, 'device-lost');
+        return;
+      }
       this.releaseDesc(desc, 'draw-failed');
       throw error;
     }

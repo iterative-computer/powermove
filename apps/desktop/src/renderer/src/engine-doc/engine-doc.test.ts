@@ -567,6 +567,92 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.auditor!.audit()).toBe(true);
   });
 
+  it('serves structural answers again until the composition shape changes', async () => {
+    const { PM, doc } = await editor('on');
+    const api = doc.api!;
+    for (const name of ['A', 'B', 'C']) PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid', { name })));
+    const byName = (name: string) => PM.proj.layers.find((l: any) => l.name === name);
+    PM.groupLayers([byName('A').id, byName('B').id], 'Group');
+    const a = byName('A'), c = byName('C'), group = PM.proj.layers.find((l: any) => l.type === 'group');
+    const ids = (list: any[]) => list.map(l => l.id);
+    expect(ids(api.groupAncestors(a))).toEqual([group.id]);
+    expect(api.wouldCycle(group, a.id)).toBe(true);
+    expect(api.is3DLayer(a)).toBe(false);
+    const hits = api.stats.shapeHits;
+    // A channel edit (and the provenance it records) leaves the shape alone.
+    expect(PM.Edit.apply({ type: 'set_property', target: a.id, path: 'opacity', value: 40 }).ok).toBe(true);
+    const first = api.groupAncestors(a);
+    expect(ids(first)).toEqual([group.id]);
+    first.pop();
+    expect(ids(api.groupAncestors(a)), 'callers get their own copy').toEqual([group.id]);
+    expect(api.wouldCycle(group, a.id)).toBe(true);
+    expect(api.is3DLayer(a)).toBe(false);
+    expect(api.stats.shapeHits).toBe(hits + 4);
+    // Membership, the 3D switch, and parenting change the answers.
+    PM.hist.do('Move', () => { c.group = group.id; PM.touch(); });
+    expect(ids(api.groupAncestors(c))).toEqual([group.id]);
+    PM.hist.do('3D', () => { group.threeD = true; PM.touch(); });
+    expect(api.is3DLayer(a)).toBe(true);
+    PM.hist.do('Parent', () => { group.parent = c.id; PM.touch(); });
+    expect(api.wouldCycle(c, group.id)).toBe(true);
+    expect(api.stats.shapeHits).toBe(hits + 4);
+    // Undo moves the shape back; the answers follow.
+    PM.hist.undo(); PM.hist.undo(); PM.hist.undo();
+    expect(ids(api.groupAncestors(c))).toEqual([]);
+    expect(api.is3DLayer(a)).toBe(false);
+    expect(api.stats.repairs).toBe(0);
+  });
+
+  it('sends an edit before its listeners run while an engine session wants it', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid', { name: 'A' })));
+    doc.barrier!.flush();
+    const layer = PM.proj.layers[0];
+    const order: string[] = [];
+    const offBatch = doc.subscribe(batch => order.push(`batch ${batch.origin}`));
+    PM.bus.on('layers', () => order.push('layers'));
+    PM.bus.on('history', () => order.push('history'));
+    // Without an engine session: the batch waits for a query or the end of the task.
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 40 }).ok).toBe(true);
+    expect(order).toEqual(['layers', 'history']);
+    doc.barrier!.flush();
+    expect(order).toEqual(['layers', 'history', 'batch edit']);
+    order.length = 0;
+    let wanted = true;
+    const off = doc.flushBeforeListeners(() => wanted);
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 50 }).ok).toBe(true);
+    expect(order[0]).toBe('batch edit');
+    expect(order.slice(1)).toEqual(['layers', 'history']);
+    // The batch carried the edit: nothing is left for the end of the task.
+    doc.barrier!.flush();
+    expect(order.filter(o => o.startsWith('batch'))).toHaveLength(1);
+    expect(JSON.parse(doc.wasm!.toJson()).comps[PM.proj.compId].layers[0].p.opacity.v).toBe(50);
+    order.length = 0;
+    wanted = false;
+    expect(PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 60 }).ok).toBe(true);
+    expect(order).toEqual(['layers', 'history']);
+    off();
+    offBatch();
+  });
+
+  it('names the patch paths that can change a composition shape', async () => {
+    const { changesShape } = await import('./barrier');
+    expect(changesShape([])).toBe(true);
+    expect(changesShape(['compId'])).toBe(true);
+    expect(changesShape(['comps'])).toBe(true);
+    expect(changesShape(['comps', 'C1'])).toBe(true);
+    expect(changesShape(['comps', 'C1', 'layers'])).toBe(true);
+    expect(changesShape(['comps', 'C1', 'layers', 3])).toBe(true);
+    for (const member of ['id', 'type', 'parent', 'group', 'threeD', 'lock']) expect(changesShape(['comps', 'C1', 'layers', 3, member])).toBe(true);
+    expect(changesShape(['comps', 'C1', 'layers', 3, 'p', 'opacity', 'v'])).toBe(false);
+    expect(changesShape(['comps', 'C1', 'layers', 3, 'fx'])).toBe(false);
+    expect(changesShape(['comps', 'C1', 'w'])).toBe(false);
+    expect(changesShape(['edits'])).toBe(false);
+    expect(changesShape(['revision'])).toBe(false);
+    expect(changesShape(['layers', 0, 'group'])).toBe(true);
+    expect(changesShape(['layers', 0, 'p'])).toBe(false);
+  });
+
   it('treats ProjectIndex.invalidate() as an announcement of the layer structure', async () => {
     const { PM, doc } = await editor('audit');
     PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));

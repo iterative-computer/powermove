@@ -96,6 +96,13 @@ export interface EngineDoc {
   /** `fn` runs when a write leaves something to flush where nothing was
    *  (the engine connection then flushes, so edits reach the engine soon). */
   onPending(fn: () => void): () => void;
+  /**
+   * While `wanted()` holds, a document announcement on the bus (`layers`,
+   * `project`, `assets`, `comps`) flushes before its listeners run, so the
+   * engine starts on an edit while the page redraws its panels (an edit's
+   * listeners took 10 to 20 ms at 1,000 layers; docs/engine/perf.md).
+   */
+  flushBeforeListeners(wanted: () => boolean): () => void;
   /** The flushed canonical document and its revision and hash (null until ready). */
   snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
   stats(): Record<string, unknown>;
@@ -117,7 +124,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
-      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
+      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
     };
     PM.EngineDoc = off;
     return off;
@@ -265,10 +272,17 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     // One wrapper per bus; a later install (a replaced registry in tests)
     // takes the announcement over.
     bus.__engineDocAnnounce = unknownWrite;
+    bus.__engineDocEager = () => {
+      if (!barrier?.pending || barrier.flushing || ![...eager].some(wanted => wanted())) return;
+      try { barrier.flush(); } catch (error) { console.warn('[engine-doc] flush before listeners failed', error); }
+    };
     if (!bus.emit.__engineDoc) {
       const emit = bus.emit;
       const wrapped = function (this: unknown, event: unknown, ...args: unknown[]) {
-        if (announcing.has(event as string)) bus.__engineDocAnnounce?.();
+        if (announcing.has(event as string)) {
+          bus.__engineDocAnnounce?.();
+          bus.__engineDocEager?.();
+        }
         return emit.call(this ?? bus, event, ...args);
       };
       (wrapped as any).__engineDoc = true;
@@ -339,6 +353,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
 
   const subscribers = new Set<(batch: PatchBatch) => void>();
   const pendingListeners = new Set<() => void>();
+  const eager = new Set<() => boolean>();
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
@@ -352,6 +367,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     beforeExport(reason = 'export') { state.check(reason); },
     subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
     onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },
+    flushBeforeListeners(wanted) { eager.add(wanted); return () => { eager.delete(wanted); }; },
     snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
     stats() {
       return {

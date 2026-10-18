@@ -68,6 +68,21 @@ impl<'d> Scope<'_, 'd> {
     /// `PM.localMatrix(L, T)`: translate(position) · rotate · skew · scale ·
     /// translate(−anchor), composed directly.
     pub fn local_matrix(&mut self, layer: &'d Node, time: f64) -> JsResult<Mat2d> {
+        if let Some(m) = self
+            .local_memo
+            .as_ref()
+            .and_then(|memo| memo.get(layer, time))
+        {
+            return Ok(m);
+        }
+        let m = self.local_matrix_uncached(layer, time)?;
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.insert(layer, time, m);
+        }
+        Ok(m)
+    }
+
+    fn local_matrix_uncached(&mut self, layer: &'d Node, time: f64) -> JsResult<Mat2d> {
         let px = self.num(layer, "position.x", time)?;
         let py = self.num(layer, "position.y", time)?;
         let ax = self.num(layer, "anchor.x", time)?;

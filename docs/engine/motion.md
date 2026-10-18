@@ -64,7 +64,9 @@ and each sample draws whatever frame is uploaded for `a.el`. In the capture
 both blurred clips (the moving one on `corpus-frames-30.mp4` and the static one on
 `corpus-frames-24.mp4`) showing frame 0 (timecode 00:00:00.000, counter 0), while
 the unblurred clip shows the correct frames (00:00:00.500 / 12 and 00:00:01.167 /
-28). `PM.prepareFrame(t)` does seek `a.el` to the center time before the render;
+28). `tests/motion.rs` checks this: the capture's blurred static clip matches the
+engine's unblurred frame 0 within 2 CV over 8969 interior pixels at both times,
+and differs from the center frame by 255. `PM.prepareFrame(t)` does seek `a.el` to the center time before the render;
 the texture for that element is versioned by its presented-frame count
 (`videoTextureVersion`), not by its time, which is the likely reason the seek is not
 picked up (inferred, not traced further). Each sample also calls

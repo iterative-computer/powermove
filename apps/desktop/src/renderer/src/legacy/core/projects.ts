@@ -4,6 +4,30 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { needsNewerReader } from '../../../../shared/reader-version';
 import { writeDocument } from '../../engine-doc/write';
 
+/**
+ * The journal without what `patches` overwrites. A patch at a member of the
+ * project itself (`['edits']`, `['revision']`) replaces everything earlier
+ * patches wrote under that member, and the project is an object, so no write
+ * between them can move that member elsewhere: replaying the journal gives
+ * the same document without them. Every edit writes the whole provenance log
+ * (`['edits']`), so without this each entry kept a copy of the log and every
+ * edit rewrote all of them (docs/engine/perf.md). Entries stay, possibly with
+ * no patches.
+ */
+export function supersede(entries: any[], patches: any[], changed?: (index: number) => void): any[] {
+  const members = new Set<string>();
+  for (const patch of patches) {
+    if (Array.isArray(patch?.path) && patch.path.length === 1 && typeof patch.path[0] === 'string') members.add(patch.path[0]);
+  }
+  if (!members.size) return entries;
+  entries.forEach((item, index) => {
+    if (!Array.isArray(item?.patches)) return;
+    const kept = item.patches.filter((patch: any) => !(Array.isArray(patch?.path) && patch.path.length >= 1 && members.has(patch.path[0])));
+    if (kept.length !== item.patches.length) { item.patches = kept; changed?.(index); }
+  });
+  return entries;
+}
+
 export function install(PM: PMRegistry): void {
 const R: any = {
   KEY: 'projects',          // [{id, name, at, thumb}]
@@ -41,6 +65,10 @@ function applyPatches(root: any, patches: any[]) {
   return next;
 }
 
+/** The journal as this window last wrote it (see the patch listener). */
+type JournalState = { id: string; entries: any[]; sizes: number[] };
+let written: JournalState | null = null;
+
 function journal(id: any) {
   const value = id ? PM.store.get(R.JOURNAL + id, []) : [];
   return Array.isArray(value) ? value : [];
@@ -76,6 +104,7 @@ R.put = (proj: any, thumb: any) => {
      active. This matters for rename/duplicate and keeps every slot canonical. */
   if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
   PM.store.del(R.JOURNAL + proj.id);
+  if (written?.id === proj.id) written = null;
   return meta;
 };
 
@@ -245,6 +274,7 @@ R.destroy = (id: any) => {
     try { PM.store.del(prefix + id); } catch (e) { }
   }
   try { PM.store.del(R.JOURNAL + id); } catch (e) { }
+  if (written?.id === id) written = null;
   /* The agent's workspace and artifacts live exactly as long as the project.
      Imported media was copied into the project, so nothing it uses is lost. */
   void hostBridge()?.artifacts?.forget?.(id)?.catch?.((error: any) => console.warn('Agent workspace cleanup failed', error));
@@ -265,14 +295,33 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
   if (!entry?.projectId || !Array.isArray(entry.patches) || !entry.patches.length) return;
   // Read-only (newer) projects keep no recovery journal; see R.put.
   if (PM.proj?.id === entry.projectId && needsNewerReader(PM.proj)) return;
-  const entries = journal(entry.projectId);
-  entries.push({ revision: Number(entry.revision) || 0, patches: entry.patches });
-  /* Keep the journal bounded even before the next debounced checkpoint. */
-  if (journalBytes(entries) > MAX_JOURNAL_BYTES) {
+  /* The journal this window wrote last, with each entry's size: an append
+     neither reads the journal back from the store (a structured clone of all
+     of it) nor serializes all of it again to measure it. */
+  const cached = written;
+  const state: JournalState = cached && cached.id === entry.projectId ? cached : (() => {
+    const entries = journal(entry.projectId);
+    return { id: entry.projectId, entries, sizes: entries.map(item => journalBytes(item)) };
+  })();
+  supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
+  const item = { revision: Number(entry.revision) || 0, patches: entry.patches };
+  state.entries.push(item);
+  state.sizes.push(journalBytes(item));
+  /* Keep the journal bounded even before the next debounced checkpoint
+     (its JSON: brackets, the entries, and a comma between each two). */
+  const bytes = 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
+  if (bytes > MAX_JOURNAL_BYTES) {
+    written = null;
     if (PM.proj?.id === entry.projectId) R.put(PM.proj);
     return;
   }
-  PM.store.set(R.JOURNAL + entry.projectId, entries);
+  /* Serialized off the edit's task when the store can (the journal is a
+     snapshot; a newer write supersedes a pending one, and a checkpoint's
+     delete supersedes both). Cloning and posting it in the edit's task cost
+     6 ms per edit at 1,000 layers (docs/engine/perf.md). */
+  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + entry.projectId, state.entries.slice());
+  else PM.store.set(R.JOURNAL + entry.projectId, state.entries);
+  written = state;
 });
 }
 

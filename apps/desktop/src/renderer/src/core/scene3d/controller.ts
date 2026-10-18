@@ -128,17 +128,26 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
     }
     return list;
   }
+  /* The empty viewport drawn last, by stage rectangle: with no 3D layer in
+     the composition every frame drew the same empty overlay again and built
+     the composition's 3D runtime for it (9% of the page's main thread during
+     playback at 1,000 layers; docs/engine/perf.md). */
+  let blank:string|null=null;
   function render(){
     frame=0;if(disposed)return;
     try{
       const prefs=viewportPreferences(PM),visible=available();
-      const view=viewportState(PM);
       if(!visible){
+        const key=JSON.stringify([rect,prefs.orientation,prefs.pivot,prefs.snap]);
+        if(blank===key)return;
+        blank=key;
         gizmo.sync({targets:[],mode:null,orientation:prefs.orientation,pivot:prefs.pivot,activeId:null,cursor:new THREE.Vector3(),snap:prefs.snap,camera:new THREE.PerspectiveCamera()});
         overlay.draw({camera:new THREE.PerspectiveCamera(),rect,runtime:null,userView:false,axis:null,distance:1,fov:50,overlays:false,selected:new Set(),active:new Set(),glyphs:[],guides:[],gizmo:null});
         chrome.update({visible:false,rotation:new THREE.Quaternion(),axis:null,camera:true,orthographic:false,label:'',detail:'',leftInset:0,rightInset:0,cursor:null,modal:null});
         return;
       }
+      blank=null;
+      const view=viewportState(PM);
       const runtime=compositionRuntime(PM),camera=viewCamera(),ids=selected3D(PM),active=activeObject(PM);
       const stageCamera=camera.clone() as typeof camera,width=Math.max(2,stage.clientWidth),height=Math.max(2,stage.clientHeight);
       stageCamera.setViewOffset(rect.width,rect.height,-rect.x,-rect.y,width,height);stageCamera.updateProjectionMatrix();stageCamera.updateMatrixWorld(true);

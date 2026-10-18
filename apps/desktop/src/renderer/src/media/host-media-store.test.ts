@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { blake3Hex } from '../../../shared/blake3';
 import type { MediaLink, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
-import { bindingsFor, createHostMediaStore, decideImport, hashBlob, renditionKey, type LegacyMediaStore } from './host-media-store';
+import { bindingsFor, createHostMediaStore, decideImport, hashBlob, installHostMediaStore, renditionKey, type LegacyMediaStore } from './host-media-store';
 
 /** An in-memory stand-in for main's store with the same contract. */
 function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<string, string>; failConvert?: boolean } = {}) {
@@ -396,5 +396,46 @@ describe('import decisions', () => {
     const seen: number[] = [];
     expect(await hashBlob(new Blob([payload]), async (chunk, offset) => { seen.push(offset); })).toBe(blake3Hex(payload));
     expect(seen).toEqual([0, 4 * 1024 * 1024]);
+  });
+});
+
+describe('the engine stamp', () => {
+  it('announces each requiresEngine write to the write barrier', () => {
+    vi.useFakeTimers();
+    try {
+      const { host } = fakeHost();
+      const { legacy } = fakeLegacy();
+      const handlers = new Map<string, Array<() => void>>();
+      const touched = vi.fn();
+      const put = vi.fn();
+      const PM: any = {
+        MediaStore: legacy,
+        proj: { id: 'P1', assets: { a: { id: 'a', kind: 'image', storage: 'linked', link: { path: '/x.png', hash: 'h', size: 1, mtimeMs: 1 } } }, layers: [], comps: {} },
+        bus: { on: (event: string, fn: () => void) => { handlers.set(event, [...(handlers.get(event) ?? []), fn]); }, emit: vi.fn() },
+        doc: { touched },
+        Projects: { put }
+      };
+      const emit = (event: string) => { for (const fn of handlers.get(event) ?? []) fn(); };
+      installHostMediaStore(PM, { mediaStore: host });
+
+      // Linking media stamps the project after the event's own announcement.
+      emit('assets');
+      expect(PM.proj.requiresEngine).toBe('native');
+      expect(touched).toHaveBeenCalledTimes(1);
+      expect(touched).toHaveBeenLastCalledWith([['requiresEngine']]);
+      // Nothing changed: no write, no announcement.
+      emit('layers');
+      expect(touched).toHaveBeenCalledTimes(1);
+      // The last linked asset goes: the stamp is removed and announced.
+      delete PM.proj.assets.a;
+      emit('project');
+      expect('requiresEngine' in PM.proj).toBe(false);
+      expect(touched).toHaveBeenCalledTimes(2);
+      expect(touched).toHaveBeenLastCalledWith([['requiresEngine']]);
+      expect(put).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

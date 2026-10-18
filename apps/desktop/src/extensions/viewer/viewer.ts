@@ -1108,7 +1108,18 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
   const disposable = api.events.on(event, handler);
   eventOffs.push(() => disposable.dispose());
 };
-listen('project:changed', () => { viewportPlan = null; V.layout(); });
+/* An edit announces several project changes in one task (history, layers,
+   project), and each layout measures the stage, which forces the editor's
+   layout when anything wrote to it: three forced layouts per edit, 9 ms at
+   1,000 layers (docs/engine/perf.md). They lay out once, at the end of the
+   task, before the next frame. */
+let layoutQueued = false;
+const layoutAtEndOfTask = () => {
+  if (layoutQueued) return;
+  layoutQueued = true;
+  queueMicrotask(() => { layoutQueued = false; V.layout(); });
+};
+listen('project:changed', () => { viewportPlan = null; layoutAtEndOfTask(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
 // The engine connection registered or disposed `engine.viewer`: attach or
 // detach now, without a full layout.
@@ -1116,8 +1127,11 @@ const onEngineViewerChanged = () => syncEnginePresentation();
 window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
 eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
 listen('layout', () => V.layout());
-// Shading and X-ray are part of the engine's view override.
-const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation());
+// Shading and X-ray are part of the engine's view override. The 3D viewport
+// reports on every project and selection change; the stage keeps the size
+// the last layout measured (a resize lays out again), so measuring it here
+// only forced the editor's layout once more per edit (docs/engine/perf.md).
+const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation(stageGeometry ?? undefined));
 if (viewportChange) eventOffs.push(() => viewportChange.dispose());
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
