@@ -674,8 +674,8 @@ fn mask_image(
     let mut data = Vec::with_capacity(w * h * 4);
     for c in cov {
         let alpha = c * a;
-        for ch in 0..3 {
-            data.push((color[ch].clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
+        for c in &color[..3] {
+            data.push((c.clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
         }
         data.push((alpha * 255.0).round() as u8);
     }
@@ -899,8 +899,8 @@ fn msaa_item(
                 })
                 .count();
             let alpha = a * n as f32 / 4.0;
-            for ch in 0..3 {
-                data.push((color[ch].clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
+            for c in &color[..3] {
+                data.push((c.clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
             }
             data.push((alpha * 255.0).round() as u8);
         }
