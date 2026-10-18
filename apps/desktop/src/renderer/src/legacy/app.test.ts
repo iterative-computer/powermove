@@ -736,25 +736,47 @@ describe('legacy app install', () => {
   });
 });
 
+it('keeps effect parameter key ids across repeated hydration, including unknown parameters', () => {
+  const { PM } = appRegistry();
+  PM.FX = { custom: { params: [{ k: 'amount', def: 1 }, { k: 'color', def: '#ffffff' }, { k: 'enabled', def: true }, { k: 'primitive', def: 1 }] } };
+  const prop = (v: any, i: string) => ({ v, kf: [{ i, t: 0, v }], expr: null });
+  const raw = PM.mkProject({ layers: [{ id: 'effect-layer', type: 'shape', from: 0, dur: 2, p: {}, d: {},
+    fx: [{ id: 'effect', type: 'custom', p: { amount: prop(2, 'amount-key'), color: prop('#ff0000', 'color-key'),
+      enabled: prop(false, 'boolean-key'), extra: prop(3, 'unknown-key'), primitive: 7 } }] }] });
+  const hydrated = PM.hydrateProject(raw);
+  expect(Object.values<any>(hydrated.layers[0].fx[0].p).flatMap(p => p.kf.map((key: any) => key.i)))
+    .toEqual(['amount-key', 'color-key', 'boolean-key', 'unknown-key']);
+  expect(hydrated.layers[0].fx[0].p.primitive.v).toBe(7);
+  const before = JSON.stringify(hydrated);
+  expect(JSON.stringify(PM.hydrateProject(JSON.parse(before)))).toBe(before);
+});
+
 it('hydrates legacy scene animation before either engine evaluates it', () => {
   const { PM } = appRegistry();
   PM.Ease = makePM('core/easing').Ease;
   installAnim(PM);
-  const prop = () => ({ v: 0, kf: [{ i: PM.uid('k'), t: 0, v: 0 }, { i: PM.uid('k'), t: 1, v: 90 }], expr: null });
+  const prop = (a: any = 0, b: any = 90, ids = true) => ({ v: a, kf: [{ ...(ids ? { i: PM.uid('k') } : {}), t: 0, v: a }, { ...(ids ? { i: PM.uid('k') } : {}), t: 1, v: b }], expr: null });
   const layer = () => ({ id: PM.uid('L'), type: 'extension', from: 0, dur: 2, p: {}, fx: [], masks: [],
     d: { definition: 'powermove.3d.scene', data: { scene: {
-      objects: [{ id: 'box', name: 'Box', p: { ry: prop() }, material: { p: { roughness: prop() } } }],
-      lights: [{ id: 'sun', p: { x: prop() } }], camera: { p: { x: prop() } }, environment: { p: { exposure: prop() } },
+      objects: [{ id: 'box', name: 'Box', p: { ry: prop(), visible: prop(true, false, false) }, material: { p: { roughness: prop(), color: prop('#000000', '#ffffff', false) } } }],
+      lights: [{ id: 'sun', p: { x: prop(0, 90, false), color: prop('#000000', '#ffffff'), visible: prop(true, false) } }], camera: { p: { x: prop() } }, environment: { p: { exposure: prop() } },
     } } } });
   const raw = PM.mkProject({ id: 'scene-project', layers: [layer()], comps: {
     nested: { id: 'nested', w: 64, h: 64, fps: 30, dur: 2, layers: [layer()] },
   } });
+  const expected = [raw, raw.comps.nested].map(comp => sceneProperties(comp.layers[0]).map(({ prop: channel }) =>
+    [0.5, 0.25].map(time => PM.evalKfs(JSON.parse(JSON.stringify(channel.kf)), time, typeof channel.v === 'string'))));
   const project = PM.hydrateProject(raw);
   const before = JSON.stringify(project);
-  for (const comp of [project, project.comps.nested]) {
-    for (const { prop: channel } of sceneProperties(comp.layers[0])) {
-      expect(PM.evalKfs(channel.kf, 0.5)).toBe(45);
-      expect(PM.evalKfs(channel.kf, 0.25)).toBe(22.5);
+  for (const [index, comp] of [project, project.comps.nested].entries()) {
+    for (const [channelIndex, { prop: channel }] of sceneProperties(comp.layers[0]).entries()) {
+      expect(PM.evalKfs(channel.kf, 0.5, typeof channel.v === 'string')).toBe(expected[index][channelIndex][0]);
+      expect(PM.evalKfs(channel.kf, 0.25, typeof channel.v === 'string')).toBe(expected[index][channelIndex][1]);
+      if (typeof channel.v === 'number') {
+        expect(PM.evalKfs(channel.kf, 0.5)).toBe(45);
+        expect(PM.evalKfs(channel.kf, 0.25)).toBe(22.5);
+      }
+      expect(channel.kf.every((key: any) => typeof key.i === 'string' && key.i.length > 0)).toBe(true);
     }
   }
   // A flag-off draw must not add temporal fields to the flag-on baseline.
