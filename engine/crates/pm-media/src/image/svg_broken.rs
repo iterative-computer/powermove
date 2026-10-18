@@ -50,13 +50,21 @@ struct Prolog {
     external_subset: bool,
     /// The internal subset references a parameter entity (`%name;`).
     pe_refs: bool,
-    /// The internal subset declares attribute lists (defaults may bind
-    /// namespaces).
-    attlist: bool,
+    /// The internal subset declares a default value for an `xmlns` or
+    /// `xmlns:*` attribute (`<!ATTLIST e xmlns CDATA "uri">`), which may
+    /// bind a namespace roxmltree does not see.
+    xmlns_default: bool,
     /// A general entity's replacement text contains markup.
     markup_entities: bool,
-    /// General entities declared in the internal subset.
-    entities: Vec<String>,
+    /// General entities declared in the internal subset, with their
+    /// replacement text (empty for external entities).
+    entities: Vec<(String, Vec<u8>)>,
+    /// The prolog is malformed in a way libxml2 reports as an error: an
+    /// XML declaration whose version is not 1.x, a processing instruction
+    /// whose target is `xml` in any letter case, a `PUBLIC` DOCTYPE without
+    /// a system literal, or an internal subset holding something that is
+    /// not a markup declaration.
+    broken: bool,
     /// Byte offset just past the DOCTYPE (0 when there is none).
     doctype_end: usize,
     /// Byte offset of the first byte after the prolog.
@@ -76,13 +84,20 @@ pub fn broken_image(data: &[u8]) -> bool {
     let Some(prolog) = prolog(text) else {
         return false;
     };
+    if prolog.broken {
+        return true;
+    }
+    let body = scan_body(&text.as_bytes()[prolog.body..], &prolog);
+    if body.broken || body.depth > MAX_ELEMENT_DEPTH {
+        return true;
+    }
+    if body.refs.iter().any(|r| entity_loops(&prolog, r)) {
+        return true;
+    }
     if prolog.markup_entities {
         return false;
     }
-    let depth = max_depth(&text.as_bytes()[prolog.body..]);
-    if depth > MAX_ELEMENT_DEPTH {
-        return true;
-    }
+    let depth = body.depth;
     // roxmltree recurses once per element level; give it a stack sized to
     // the document instead of the caller's (engine worker threads have
     // 2 MiB). The nesting is at most MAX_ELEMENT_DEPTH here.
@@ -112,7 +127,7 @@ pub fn broken_image(data: &[u8]) -> bool {
         return false;
     };
     match parsed {
-        Ok(svg_root) => !svg_root && !prolog.attlist,
+        Ok(svg_root) => !svg_root && !prolog.xmlns_default,
         Err(e) => error_is_broken(text, &prolog, &e),
     }
 }
@@ -132,7 +147,7 @@ fn error_is_broken(text: &str, prolog: &Prolog, e: &roxmltree::Error) -> bool {
         | E::EntityResolver(..)
         | E::DtdDetected => false,
         E::UnknownEntityReference(name, pos) => {
-            if in_doctype(*pos) || prolog.entities.iter().any(|n| n == name) {
+            if in_doctype(*pos) || prolog.entities.iter().any(|(n, _)| n == name) {
                 return false;
             }
             prolog.standalone || (!prolog.external_subset && !prolog.pe_refs)
@@ -143,7 +158,7 @@ fn error_is_broken(text: &str, prolog: &Prolog, e: &roxmltree::Error) -> bool {
         | E::UnexpectedXmlnsUri(pos)
         | E::InvalidElementNamePrefix(pos)
         | E::DuplicatedNamespace(_, pos)
-        | E::UnknownNamespace(_, pos) => !prolog.attlist && !in_doctype(*pos),
+        | E::UnknownNamespace(_, pos) => !prolog.xmlns_default && !in_doctype(*pos),
         // roxmltree may misread a valid internal subset to the end.
         E::UnexpectedEndOfStream => !prolog.internal_subset,
         E::NoRootNode | E::UnclosedRootNode => true,
@@ -232,9 +247,11 @@ impl<'a> Scan<'a> {
         self.at += 1;
         self.until(&[q])
     }
-    /// `SYSTEM lit` or `PUBLIC lit lit` (the system literal is optional
-    /// after PUBLIC in a NOTATION; elsewhere roxmltree reports it).
-    fn external_id(&mut self) -> Option<bool> {
+    /// `SYSTEM lit` or `PUBLIC lit lit`. The system literal is optional
+    /// after PUBLIC only in a NOTATION (`strict` false); in a DOCTYPE or an
+    /// entity libxml2 requires it (`XML_ERR_URI_REQUIRED`, fatal), which
+    /// sets `p.broken`.
+    fn external_id(&mut self, strict: bool, p: &mut Prolog) -> Option<bool> {
         if self.starts(b"SYSTEM") {
             self.at += 6;
             self.spaces();
@@ -247,11 +264,21 @@ impl<'a> Scan<'a> {
             self.spaces();
             if matches!(self.rest().first(), Some(b'"' | b'\'')) {
                 self.literal()?;
+            } else if strict {
+                p.broken = true;
             }
             Some(true)
         } else {
             Some(false)
         }
+    }
+    /// A processing instruction target of `xml` in any letter case is
+    /// reserved: libxml2 reports it (`XML_ERR_RESERVED_XML_NAME`, fatal).
+    /// Longer `xml`-prefixed targets are only warnings.
+    fn reserved_pi_target(&self) -> bool {
+        let rest = self.rest();
+        let name_len = rest.iter().position(|&b| !is_name_byte(b)).unwrap_or(rest.len());
+        name_len == 3 && rest[..3].eq_ignore_ascii_case(b"xml")
     }
 }
 
@@ -266,6 +293,14 @@ fn prolog(text: &str) -> Option<Prolog> {
     if s.starts(b"<?xml") && s.rest().get(5).is_some_and(|&b| is_space(b)) {
         let decl = s.until(b"?>")?;
         p.standalone = standalone_yes(decl);
+        // libxml2 accepts any `1.x` version (a warning past 1.0) and
+        // rejects every other number (`XML_ERR_UNKNOWN_VERSION`, fatal).
+        if let Some(v) = pseudo_attribute(decl, b"version")
+            && !(v.starts_with(b"1.") && v.len() > 2 && v[2..].iter().all(u8::is_ascii_digit))
+        {
+            p.broken = true;
+            return Some(p);
+        }
     }
     loop {
         s.spaces();
@@ -273,6 +308,11 @@ fn prolog(text: &str) -> Option<Prolog> {
             s.at += 4;
             s.until(b"-->")?;
         } else if s.starts(b"<?") {
+            s.at += 2;
+            if s.reserved_pi_target() {
+                p.broken = true;
+                return Some(p);
+            }
             s.until(b"?>")?;
         } else if s.starts(b"<!DOCTYPE") && !p.doctype {
             p.doctype = true;
@@ -280,12 +320,18 @@ fn prolog(text: &str) -> Option<Prolog> {
             s.spaces();
             s.name()?;
             s.spaces();
-            p.external_subset = s.external_id()?;
+            p.external_subset = s.external_id(true, &mut p)?;
+            if p.broken {
+                return Some(p);
+            }
             s.spaces();
             if s.starts(b"[") {
                 s.at += 1;
                 p.internal_subset = true;
                 internal_subset(&mut s, &mut p)?;
+                if p.broken {
+                    return Some(p);
+                }
                 s.spaces();
             }
             if !s.starts(b">") {
@@ -301,20 +347,23 @@ fn prolog(text: &str) -> Option<Prolog> {
 }
 
 fn standalone_yes(decl: &[u8]) -> bool {
-    let Some(at) = decl.windows(10).position(|w| w == b"standalone") else {
-        return false;
-    };
+    pseudo_attribute(decl, b"standalone") == Some(b"yes")
+}
+
+/// The quoted value of `name = "..."` in an XML declaration.
+fn pseudo_attribute<'a>(decl: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let at = decl.windows(name.len()).position(|w| w == name)?;
     let mut s = Scan {
-        s: &decl[at + 10..],
+        s: &decl[at + name.len()..],
         at: 0,
     };
     s.spaces();
     if !s.starts(b"=") {
-        return false;
+        return None;
     }
     s.at += 1;
     s.spaces();
-    s.literal() == Some(b"yes")
+    s.literal()
 }
 
 fn internal_subset(s: &mut Scan, p: &mut Prolog) -> Option<()> {
@@ -327,6 +376,10 @@ fn internal_subset(s: &mut Scan, p: &mut Prolog) -> Option<()> {
             s.at += 4;
             s.until(b"-->")?;
         } else if s.starts(b"<?") {
+            s.at += 2;
+            if s.reserved_pi_target() {
+                p.broken = true;
+            }
             s.until(b"?>")?;
         } else if s.starts(b"%") {
             s.at += 1;
@@ -346,31 +399,37 @@ fn internal_subset(s: &mut Scan, p: &mut Prolog) -> Option<()> {
             }
             let name = s.name()?.to_owned();
             s.spaces();
+            let mut value = Vec::new();
             if matches!(s.rest().first(), Some(b'"' | b'\'')) {
-                let value = s.literal()?;
-                if !parameter && value.contains(&b'<') {
+                let v = s.literal()?;
+                if !parameter && v.contains(&b'<') {
                     p.markup_entities = true;
                 }
-                if value.contains(&b'%') {
+                if v.contains(&b'%') {
                     // A parameter entity reference inside a literal.
                     p.pe_refs = true;
                 }
-            } else if !s.external_id()? {
+                value = v.to_vec();
+            } else if !s.external_id(true, p)? {
                 return None;
             }
             // `NDATA name`, then the end of the declaration.
             declaration_end(s, p)?;
             if !parameter {
-                p.entities.push(name);
+                p.entities.push((name, value));
             }
-        } else if s.starts(b"<!ATTLIST") || s.starts(b"<!ELEMENT") || s.starts(b"<!NOTATION") {
-            if s.starts(b"<!ATTLIST") {
-                p.attlist = true;
-            }
+        } else if s.starts(b"<!ATTLIST") {
+            s.at += 9;
+            attlist_decl(s, p)?;
+        } else if s.starts(b"<!ELEMENT") || s.starts(b"<!NOTATION") {
             s.at += 2;
             declaration_end(s, p)?;
         } else {
-            return None;
+            // Anything but a markup declaration or a parameter entity
+            // reference ends libxml2's internal subset with
+            // `XML_ERR_INTERNAL_SUBSET_NOT_FINISHED` (fatal).
+            p.broken = true;
+            return Some(());
         }
     }
 }
@@ -397,14 +456,108 @@ fn declaration_end(s: &mut Scan, p: &mut Prolog) -> Option<()> {
     }
 }
 
-/// The deepest element nesting in the document body, over comments,
-/// CDATA, processing instructions and quoted attribute values. Entity
-/// expansions only add depth, so this is a lower bound.
-fn max_depth(body: &[u8]) -> usize {
+/// `<!ATTLIST element (name type default)*>` after the keyword: records
+/// whether an `xmlns` or `xmlns:*` attribute gets a default value
+/// (`"literal"` or `#FIXED "literal"`; `#IMPLIED` and `#REQUIRED` bind
+/// nothing).
+fn attlist_decl(s: &mut Scan, p: &mut Prolog) -> Option<()> {
+    s.spaces();
+    s.name()?;
+    loop {
+        s.spaces();
+        match s.rest().first()? {
+            b'>' => {
+                s.at += 1;
+                return Some(());
+            }
+            b'%' => {
+                p.pe_refs = true;
+                s.at += 1;
+                s.name()?;
+                if s.starts(b";") {
+                    s.at += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let attr = s.name()?.to_owned();
+        s.spaces();
+        // The type: an enumeration, `NOTATION (...)`, or a keyword.
+        if s.starts(b"(") {
+            s.until(b")")?;
+        } else {
+            let ty = s.name()?;
+            if ty == "NOTATION" {
+                s.spaces();
+                if !s.starts(b"(") {
+                    return None;
+                }
+                s.until(b")")?;
+            }
+        }
+        s.spaces();
+        let defaulted = if s.starts(b"#REQUIRED") {
+            s.at += 9;
+            false
+        } else if s.starts(b"#IMPLIED") {
+            s.at += 8;
+            false
+        } else {
+            if s.starts(b"#FIXED") {
+                s.at += 6;
+                s.spaces();
+            }
+            s.literal()?;
+            true
+        };
+        if defaulted && (attr == "xmlns" || attr.starts_with("xmlns:")) {
+            p.xmlns_default = true;
+        }
+    }
+}
+
+/// What a scan of the document body (after the prolog) establishes.
+#[derive(Default)]
+struct Body {
+    /// The deepest element nesting, counting the markup that general
+    /// entity references in content expand to.
+    depth: usize,
+    /// General entities referenced from content or attribute values.
+    refs: Vec<String>,
+    /// libxml2 reports an error: a reserved processing-instruction target,
+    /// an `xmlns:xmlns` declaration, or an empty namespace name for a
+    /// prefix (`xmlns:a=""`).
+    broken: bool,
+}
+
+/// Scans the body over comments, CDATA, processing instructions and quoted
+/// attribute values (see [`Body`]).
+fn scan_body(body: &[u8], p: &Prolog) -> Body {
+    let mut out = Body::default();
+    let mut memo = HashMap::new();
     let mut s = Scan { s: body, at: 0 };
-    let (mut depth, mut max) = (0usize, 0usize);
-    while let Some(lt) = s.rest().iter().position(|&b| b == b'<') {
-        s.at += lt;
+    let mut depth = 0usize;
+    loop {
+        let rest = s.rest();
+        let Some(next) = rest.iter().position(|&b| b == b'<' || b == b'&') else {
+            break;
+        };
+        s.at += next;
+        if s.starts(b"&") {
+            s.at += 1;
+            if let Some(name) = s.name()
+                && s.starts(b";")
+                && !name.starts_with('#')
+                && !matches!(name, "lt" | "gt" | "amp" | "quot" | "apos")
+            {
+                let (inner, net) = entity_depth(p, name, &mut Vec::new(), &mut memo);
+                out.depth = out.depth.max(depth + inner);
+                depth = (depth as isize + net).max(0) as usize;
+                out.refs.push(name.to_owned());
+            }
+            continue;
+        }
         if s.starts(b"<!--") {
             s.at += 4;
             if s.until(b"-->").is_none() {
@@ -415,6 +568,10 @@ fn max_depth(body: &[u8]) -> usize {
                 break;
             }
         } else if s.starts(b"<?") {
+            s.at += 2;
+            if s.reserved_pi_target() {
+                out.broken = true;
+            }
             if s.until(b"?>").is_none() {
                 break;
             }
@@ -428,9 +585,11 @@ fn max_depth(body: &[u8]) -> usize {
             s.at += 2;
         } else {
             s.at += 1;
-            // A start tag: attributes may quote `>`.
+            s.name();
+            // Attributes: `name = "value"`, where `>` may be quoted.
             let mut empty = false;
             loop {
+                s.spaces();
                 match s.rest().first() {
                     None => break,
                     Some(b'>') => {
@@ -447,16 +606,144 @@ fn max_depth(body: &[u8]) -> usize {
                             s.at = s.s.len();
                         }
                     }
-                    Some(_) => s.at += 1,
+                    Some(_) => {
+                        let Some(attr) = s.name() else {
+                            s.at += 1;
+                            continue;
+                        };
+                        s.spaces();
+                        if !s.starts(b"=") {
+                            continue;
+                        }
+                        s.at += 1;
+                        s.spaces();
+                        let Some(value) = s.literal() else {
+                            s.at = s.s.len();
+                            break;
+                        };
+                        if attr == "xmlns:xmlns" || (attr.starts_with("xmlns:") && value.is_empty()) {
+                            out.broken = true;
+                        }
+                        let mut v = Scan { s: value, at: 0 };
+                        while let Some(amp) = v.rest().iter().position(|&b| b == b'&') {
+                            v.at += amp + 1;
+                            if let Some(name) = v.name()
+                                && v.starts(b";")
+                                && !name.starts_with('#')
+                                && !matches!(name, "lt" | "gt" | "amp" | "quot" | "apos")
+                            {
+                                out.refs.push(name.to_owned());
+                            }
+                        }
+                    }
                 }
             }
-            max = max.max(depth + 1);
+            out.depth = out.depth.max(depth + 1);
             if !empty {
                 depth += 1;
             }
         }
     }
-    max
+    out
+}
+
+/// The nesting a general entity's replacement text adds when expanded in
+/// content: (its deepest nesting, its net depth change), following nested
+/// references. Unknown entities and cycles add nothing.
+fn entity_depth(
+    p: &Prolog,
+    name: &str,
+    stack: &mut Vec<String>,
+    memo: &mut HashMap<String, (usize, isize)>,
+) -> (usize, isize) {
+    if let Some(&d) = memo.get(name) {
+        return d;
+    }
+    if stack.iter().any(|n| n == name) {
+        return (0, 0);
+    }
+    let Some((_, value)) = p.entities.iter().find(|(n, _)| n == name) else {
+        return (0, 0);
+    };
+    stack.push(name.to_owned());
+    let (mut max, mut depth) = (0usize, 0isize);
+    let mut s = Scan { s: value, at: 0 };
+    loop {
+        let Some(next) = s.rest().iter().position(|&b| b == b'<' || b == b'&') else {
+            break;
+        };
+        s.at += next;
+        if s.starts(b"&") {
+            s.at += 1;
+            if let Some(n) = s.name()
+                && s.starts(b";")
+                && !n.starts_with('#')
+            {
+                let (inner, net) = entity_depth(p, n, stack, memo);
+                max = max.max((depth + inner as isize).max(0) as usize);
+                depth += net;
+            }
+        } else if s.starts(b"<!--") {
+            s.at += 4;
+            if s.until(b"-->").is_none() {
+                break;
+            }
+        } else if s.starts(b"</") {
+            s.at += 2;
+            if s.until(b">").is_none() {
+                break;
+            }
+            depth -= 1;
+        } else if s.starts(b"<?") || s.starts(b"<!") {
+            s.at += 2;
+            if s.until(b">").is_none() {
+                break;
+            }
+        } else {
+            s.at += 1;
+            let Some(tag) = s.until(b">") else {
+                break;
+            };
+            max = max.max((depth + 1).max(0) as usize);
+            if !tag.ends_with(b"/") {
+                depth += 1;
+            }
+        }
+    }
+    stack.pop();
+    memo.insert(name.to_owned(), (max, depth));
+    (max, depth)
+}
+
+/// Whether expanding `name` reaches a general entity that references
+/// itself through its replacement text: libxml2 stops with
+/// `XML_ERR_ENTITY_LOOP` (fatal).
+fn entity_loops(p: &Prolog, name: &str) -> bool {
+    fn walk(p: &Prolog, name: &str, stack: &mut Vec<String>) -> bool {
+        if stack.iter().any(|n| n == name) {
+            return true;
+        }
+        let Some((_, value)) = p.entities.iter().find(|(n, _)| n == name) else {
+            return false;
+        };
+        stack.push(name.to_owned());
+        let mut s = Scan { s: value, at: 0 };
+        let mut found = false;
+        while let Some(amp) = s.rest().iter().position(|&b| b == b'&') {
+            s.at += amp + 1;
+            if let Some(n) = s.name()
+                && s.starts(b";")
+                && !n.starts_with('#')
+                && walk(p, n, stack)
+            {
+                found = true;
+                break;
+            }
+        }
+        stack.pop();
+        found
+    }
+    walk(p, name, &mut Vec::new())
 }
 
 /// [`broken_image`] for a file, cached by path, size and modification time
@@ -513,6 +800,74 @@ mod tests {
         };
         let mut v = vec![
             ("ok", x("<svg {NS}>{R}</svg>"), false),
+            // Measured broken in Chromium (the nine the first version left
+            // undecided).
+            (
+                "publicNoSystem",
+                x("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"><svg {NS}>{R}</svg>"),
+                true,
+            ),
+            (
+                "doctypeGarbage",
+                x("<!DOCTYPE svg [ junk ]><svg {NS}>{R}</svg>"),
+                true,
+            ),
+            ("xml20", x("<?xml version=\"2.0\"?><svg {NS}>{R}</svg>"), true),
+            ("declUpper", x("<?XML version=\"1.0\"?><svg {NS}>{R}</svg>"), true),
+            ("emptyPrefixNs", x("<svg {NS} xmlns:a=\"\">{R}</svg>"), true),
+            (
+                "xmlnsPrefixDecl",
+                x("<svg {NS} xmlns:xmlns=\"u\">{R}</svg>"),
+                true,
+            ),
+            (
+                "attlistImplied",
+                x(
+                    "<!DOCTYPE svg [<!ATTLIST svg xmlns CDATA #IMPLIED>]><svg width=\"8\" height=\"8\">{R}</svg>",
+                ),
+                true,
+            ),
+            (
+                "loop",
+                x(
+                    "<!DOCTYPE svg [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">]><svg {NS}>{R}<text>&a;</text></svg>",
+                ),
+                true,
+            ),
+            (
+                "depthEntity",
+                format!(
+                    "<!DOCTYPE svg [<!ENTITY d \"<g><g></g></g>\">]><svg {NS}>{R}{}&d;{}</svg>",
+                    "<g>".repeat(4998),
+                    "</g>".repeat(4998)
+                ),
+                true,
+            ),
+            // Variants that stay painted: an unreferenced entity cycle, a
+            // 1.x version, a longer xml-prefixed target, an attribute
+            // default that binds the namespace, and a nested entity that
+            // stays within the depth limit.
+            (
+                "loopUnreferenced",
+                x("<!DOCTYPE svg [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">]><svg {NS}>{R}</svg>"),
+                false,
+            ),
+            (
+                "depthEntityWithin",
+                format!(
+                    "<!DOCTYPE svg [<!ENTITY d \"<g><g></g></g>\">]><svg {NS}>{R}{}&d;{}</svg>",
+                    "<g>".repeat(4996),
+                    "</g>".repeat(4996)
+                ),
+                false,
+            ),
+            (
+                "attlistNsDefault",
+                x("<!DOCTYPE svg [<!ATTLIST svg xmlns CDATA \"http://www.w3.org/2000/svg\">]><svg width=\"8\" height=\"8\">{R}</svg>"),
+                false,
+            ),
+            ("xmlStylesheetPi", x("<?xml-stylesheet href=\"a.css\"?><svg {NS}>{R}</svg>"), false),
+            ("bodyPiUpper", x("<svg {NS}>{R}<?Xml a?></svg>"), true),
             (
                 "svg11Nbsp",
                 x("{SVG11}<svg {NS}>{R}<text>&nbsp;</text></svg>"),
@@ -802,42 +1157,6 @@ mod tests {
         }
         let x = |s: &str| s.replace("{R}", R).replace("{NS}", NS);
         for (name, source) in [
-            // Broken in Chromium but left undecided: still an explicit
-            // unsupported SVG image, never a wrong paint.
-            (
-                "publicNoSystem",
-                x("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"><svg {NS}>{R}</svg>"),
-            ),
-            (
-                "doctypeGarbage",
-                x("<!DOCTYPE svg [ junk ]><svg {NS}>{R}</svg>"),
-            ),
-            ("xml20", x("<?xml version=\"2.0\"?><svg {NS}>{R}</svg>")),
-            ("emptyPrefixNs", x("<svg {NS} xmlns:a=\"\">{R}</svg>")),
-            (
-                "xmlnsPrefixDecl",
-                x("<svg {NS} xmlns:xmlns=\"u\">{R}</svg>"),
-            ),
-            (
-                "attlistImplied",
-                x(
-                    "<!DOCTYPE svg [<!ATTLIST svg xmlns CDATA #IMPLIED>]><svg width=\"8\" height=\"8\">{R}</svg>",
-                ),
-            ),
-            (
-                "loop",
-                x(
-                    "<!DOCTYPE svg [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">]><svg {NS}>{R}<text>&a;</text></svg>",
-                ),
-            ),
-            (
-                "depthEntity",
-                format!(
-                    "<!DOCTYPE svg [<!ENTITY d \"<g><g></g></g>\">]><svg {NS}>{R}{}&d;{}</svg>",
-                    "<g>".repeat(4998),
-                    "</g>".repeat(4998)
-                ),
-            ),
             // Painted by Chromium; roxmltree stops at its entity depth
             // limit or would need markup entities expanded.
             ("deepEntity", {
@@ -917,11 +1236,13 @@ mod tests {
     #[test]
     fn scans_prologs() {
         let p = prolog(r#"<?xml version="1.0" standalone='yes'?><!-- c --><!DOCTYPE svg SYSTEM "a" [<!ENTITY % p "x"> %p; <!ENTITY e SYSTEM "e"> <!ATTLIST svg a CDATA "v>">]><svg/>"#).unwrap();
-        assert!(p.standalone && p.doctype && p.external_subset && p.pe_refs && p.attlist);
-        assert_eq!(p.entities, ["e"]);
-        assert!(p.internal_subset && !p.markup_entities);
+        assert!(p.standalone && p.doctype && p.external_subset && p.pe_refs && !p.xmlns_default);
+        assert_eq!(p.entities, [("e".to_string(), Vec::new())]);
+        assert!(p.internal_subset && !p.markup_entities && !p.broken);
         assert!(p.doctype_end > 0 && p.body == p.doctype_end);
-        assert_eq!(max_depth(b"<a><b x='>' /><c><!-- <d> --></c></a>"), 2);
+        let body = scan_body(b"<a><b x='>' /><c><!-- <d> --></c></a>", &p);
+        assert_eq!(body.depth, 2);
+        assert!(!body.broken && body.refs.is_empty());
         let text = "a\nbc\u{e9}d";
         assert_eq!(offset(text, roxmltree::TextPos::new(2, 4)), Some(6));
     }
