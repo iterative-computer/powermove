@@ -57,6 +57,9 @@ pub const LEAD_ENV: &str = "POWERMOVE_BRIDGE_LEAD";
 pub const FPS_ENV: &str = "POWERMOVE_BRIDGE_TEST_FPS";
 pub const LOAD_ENV: &str = "POWERMOVE_BRIDGE_TEST_LOAD";
 pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
+/// `1`: keep the stand-in log in the presenter's status (scrub
+/// measurements, docs/engine/scrub.md).
+pub const STAND_IN_LOG_ENV: &str = "POWERMOVE_ENGINE_STAND_IN_LOG";
 /// Where timed frames start on the viewer's refresh grid, in thousandths of
 /// a refresh after it (`off` renders at the due time, as before the hint).
 pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
@@ -125,6 +128,7 @@ impl PresenterConfig {
                 fps: number(FPS_ENV, 60, 240).max(1),
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
+                stand_in_log: env(STAND_IN_LOG_ENV).as_deref() == Some("1"),
                 phase: match env(PHASE_ENV).as_deref() {
                     Some("off") => None,
                     Some(v) => v
@@ -182,6 +186,29 @@ pub struct BridgePresenter {
     /// (`blender`), and the previews (document source only).
     link: Option<Arc<crate::jobs::blender::HostLink>>,
     blender: Option<Arc<blender::PreviewBlender>>,
+    /// The viewer's frame cache: the share sent to the render thread and
+    /// the bytes reserved for it in the lease.
+    frame_cache: Option<usize>,
+    frame_cache_reserved: u64,
+}
+
+/// The largest frame cache the viewer takes: the GOP neighbourhoods a UHD
+/// scrub decodes, about 40 UHD 4:2:0 frames (docs/engine/scrub.md).
+pub const VIEWER_FRAME_CACHE_MAX: u64 = 512 << 20;
+
+/// The viewer's frame-cache share of a lease of `granted` bytes, with
+/// `room` bytes of it not held by anything else: a quarter of the lease
+/// between the default frame cache and [`VIEWER_FRAME_CACHE_MAX`], never
+/// more than the room left. Without a lease (`granted == 0`), the default
+/// frame cache every renderer starts with.
+pub fn viewer_frame_cache(granted: u64, room: u64) -> u64 {
+    let default = pm_render::media::DEFAULT_FRAME_CACHE as u64;
+    if granted == 0 {
+        return default;
+    }
+    (granted / 4)
+        .clamp(default, VIEWER_FRAME_CACHE_MAX)
+        .min(room)
 }
 
 impl BridgePresenter {
@@ -237,6 +264,8 @@ impl BridgePresenter {
             told_no_source: false,
             link,
             blender,
+            frame_cache: None,
+            frame_cache_reserved: 0,
         })
     }
 
@@ -324,6 +353,28 @@ impl BridgePresenter {
         Some(spec)
     }
 
+    /// Sizes the viewer's frame cache from the lease and reserves it there
+    /// (contract 8 `frameCache`). Called on every lease change and with
+    /// each viewer state; a share that did not change sends nothing.
+    fn sync_frame_cache(&mut self, ctx: &mut PresentContext<'_>) {
+        if self.config.source.is_none() {
+            return;
+        }
+        ctx.release_frame_cache(self.frame_cache_reserved);
+        self.frame_cache_reserved = 0;
+        let granted = ctx.granted();
+        let room = granted.saturating_sub(ctx.used());
+        let bytes = viewer_frame_cache(granted, room);
+        if granted > 0 && ctx.reserve_frame_cache(bytes) {
+            self.frame_cache_reserved = bytes;
+        }
+        let bytes = bytes as usize;
+        if self.frame_cache != Some(bytes) {
+            self.frame_cache = Some(bytes);
+            self.send(Command::FrameCache { bytes });
+        }
+    }
+
     fn forget(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
         if let Some(Meta {
             pool: Some((_, bytes)),
@@ -354,7 +405,12 @@ impl FramePresenter for BridgePresenter {
             return;
         }
         let key = (port, session);
+        // The pool comes first (the viewer must show something); the frame
+        // cache takes what the lease has left after it.
+        ctx.release_frame_cache(self.frame_cache_reserved);
+        self.frame_cache_reserved = 0;
         let pool = self.plan_pool(ctx, key, &state);
+        self.sync_frame_cache(ctx);
         self.send(Command::Configure {
             key,
             state: Box::new(state),
@@ -433,6 +489,10 @@ impl FramePresenter for BridgePresenter {
             revision,
         });
         Ok(())
+    }
+
+    fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
+        self.sync_frame_cache(ctx);
     }
 
     fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId) {
@@ -530,5 +590,115 @@ impl Drop for BridgePresenter {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_engine::lease::{Category, LeaseBudget, NoEviction};
+    use pm_protocol::common::{ByteSize, HostMicros, Seq};
+    use pm_protocol::lease::{Lease, LeaseReason};
+    use std::sync::mpsc::Receiver;
+
+    const MIB: u64 = 1 << 20;
+    const DEFAULT: u64 = pm_render::media::DEFAULT_FRAME_CACHE as u64;
+
+    fn presenter() -> (BridgePresenter, Receiver<Command>) {
+        let config = PresenterConfig::from_env(EngineProcess::Interactive, |key| match key {
+            BRIDGE_ENV => Some("test".into()),
+            SOURCE_ENV => Some("document".into()),
+            _ => None,
+        })
+        .unwrap();
+        let (tx, rx) = channel();
+        let presenter = BridgePresenter {
+            config,
+            tx,
+            thread: None,
+            stats: Arc::default(),
+            views: BTreeMap::new(),
+            generations: Generations::default(),
+            told_no_source: false,
+            link: None,
+            blender: None,
+            frame_cache: None,
+            frame_cache_reserved: 0,
+        };
+        (presenter, rx)
+    }
+
+    fn grant(budget: &mut LeaseBudget, epoch: u64, bytes: u64) -> bool {
+        let lease = Lease {
+            process: EngineProcess::Interactive,
+            epoch: Seq::new(epoch).unwrap(),
+            bytes: ByteSize::new(bytes).unwrap(),
+            reason: LeaseReason::MemoryPressure,
+            ack_deadline_ms: 500,
+        };
+        budget
+            .grant(lease, HostMicros::new(epoch).unwrap(), &mut NoEviction)
+            .unwrap()
+            .ack
+    }
+
+    /// The frame-cache shares the presenter sent, oldest first.
+    fn sent(rx: &Receiver<Command>) -> Vec<u64> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                Command::FrameCache { bytes } => Some(bytes as u64),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_share_is_a_quarter_of_the_lease_within_bounds() {
+        assert_eq!(viewer_frame_cache(0, 0), DEFAULT);
+        assert_eq!(viewer_frame_cache(100 * MIB, 100 * MIB), DEFAULT);
+        assert_eq!(viewer_frame_cache(1024 * MIB, 1024 * MIB), 256 * MIB);
+        // An 8 GB Mac's idle interactive lease (60 % of 4 GiB).
+        assert_eq!(
+            viewer_frame_cache(2458 * MIB, 2458 * MIB),
+            VIEWER_FRAME_CACHE_MAX
+        );
+        assert_eq!(viewer_frame_cache(1024 * MIB, 10 * MIB), 10 * MIB);
+    }
+
+    /// The viewer's frame cache follows the lease: it is reserved in the
+    /// ledger (so usage reports show it), shrinks with a shrinking lease
+    /// (whose acknowledgement waits for it), and grows back.
+    #[test]
+    fn the_viewer_frame_cache_follows_the_lease() {
+        let (mut p, rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        // Before a grant: the default cache, nothing reserved.
+        p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+        assert_eq!(sent(&rx), vec![DEFAULT]);
+        assert_eq!(budget.used_in(Category::FrameCache), 0);
+
+        assert!(grant(&mut budget, 1, 4096 * MIB));
+        p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+        assert_eq!(sent(&rx), vec![VIEWER_FRAME_CACHE_MAX]);
+        assert_eq!(budget.used_in(Category::FrameCache), VIEWER_FRAME_CACHE_MAX);
+
+        // Memory pressure: the shrink is not acknowledged while the cache
+        // holds more than fits, and is once the presenter resized it.
+        assert!(!grant(&mut budget, 2, 400 * MIB));
+        p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+        assert_eq!(sent(&rx), vec![100 * MIB]);
+        assert_eq!(budget.used_in(Category::FrameCache), 100 * MIB);
+        let report = budget.poll_report(HostMicros::new(3).unwrap(), false);
+        assert!(report.is_some_and(|r| r.ack));
+
+        // An unchanged share sends nothing.
+        p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+        assert!(sent(&rx).is_empty());
+        assert_eq!(budget.used_in(Category::FrameCache), 100 * MIB);
+
+        assert!(grant(&mut budget, 4, 8192 * MIB));
+        p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+        assert_eq!(sent(&rx), vec![VIEWER_FRAME_CACHE_MAX]);
     }
 }

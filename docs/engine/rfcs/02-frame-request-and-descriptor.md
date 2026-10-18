@@ -212,3 +212,24 @@ pub struct VsyncHint { pub host_time: HostMicros, pub period_us: f64 }
   and at most once a second unless the display link's phase jumped.
 - **Invariant.** `period_us` is finite and within 2,000 to 100,000 µs
   (`ViewerState::validate`).
+
+### Version note: `FrameQuality.stand_in` (long-GOP scrub lane, after `protocol-a6aa78d4b8a57c0d`)
+
+```rust
+pub stand_in: bool, // #[serde(default)], TypeScript `standIn: boolean`
+```
+
+- **What it is.** Set on a scrub frame (a paused frame after
+  `seek {scrub}`) in which at least one video layer shows the nearest
+  decoded frame of its source while its exact frame decodes, as
+  `SeekMode::Scrub` ("nearest fast frame first") allows and as today's
+  viewer draws a video element's last decoded picture. The engine draws the
+  frame again with the exact video as soon as it decodes; that frame has
+  `stand_in` false. Never set on timed (playback) frames, export frames,
+  or agent captures (docs/engine/scrub.md).
+- **Why.** "The viewer always says what is on screen" (section 14.1), and
+  measurements must tell a stand-in from the exact frame at the same `pts`.
+- **Compatibility.** A peer that does not send the key decodes as `false`.
+  The build id moved (`protocol-a6aa78d4b8a57c0d` →
+  `protocol-2e87c1a0e6d5735f`), so draft-contract peers rebuild against it,
+  as with the `vsync` note above.

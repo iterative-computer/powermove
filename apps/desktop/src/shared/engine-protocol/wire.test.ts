@@ -132,7 +132,7 @@ describe('engine protocol wire fixtures', () => {
     if (response.message.kind !== 'response' || response.message.body.type !== 'frame') throw new Error('wrong fixture');
     const descriptor: FrameDescriptor = response.message.body;
     expect(descriptor.seq).toBe(Number.MAX_SAFE_INTEGER);
-    expect(descriptor.quality).toEqual({ resolution: 'half', representation: 'proxy', draft3d: false, cached: true });
+    expect(descriptor.quality).toEqual({ resolution: 'half', representation: 'proxy', draft3d: false, cached: true, standIn: false });
     expect(descriptor.overlay?.layers[0]?.paths[0]?.[1]).toEqual({ op: 'cubicTo', x1: 10, y1: 0, x2: 20, y2: 10, x: 20, y: 20 });
   });
 

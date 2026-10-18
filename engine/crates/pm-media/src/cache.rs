@@ -87,6 +87,19 @@ impl FrameCache {
         Some(frame)
     }
 
+    /// The cached samples of a source and purpose, without touching their
+    /// recency.
+    pub fn samples_of(&self, source: u64, purpose: DecodePurpose) -> Vec<usize> {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .keys()
+            .filter(|k| k.source == source && k.purpose == purpose)
+            .map(|k| k.sample)
+            .collect()
+    }
+
     pub fn contains(&self, key: &FrameKey) -> bool {
         self.inner.lock().unwrap().map.contains_key(key)
     }

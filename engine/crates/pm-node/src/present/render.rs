@@ -190,6 +190,11 @@ pub enum Command {
         key: Key,
         message: pm_protocol::shader_fallback::ShaderFallbackMessage,
     },
+    /// The viewer's frame-cache share of the lease (bytes): the composer's
+    /// decode service evicts down to it at once.
+    FrameCache {
+        bytes: usize,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     /// The paused viewer's Blender previews (sent once, at start).
@@ -214,6 +219,8 @@ pub struct ThreadConfig {
     pub extra_passes: u32,
     /// Keep a per-frame trace for the S1 harness.
     pub trace: bool,
+    /// Keep [`Stats::stand_in_log`] (measurements only).
+    pub stand_in_log: bool,
     /// Fraction of a refresh after the viewer's BeginFrame at which timed
     /// frames start rendering, once the viewer sent its vsync hint; `None`
     /// renders at the due time.
@@ -238,7 +245,12 @@ pub struct ThreadConfig {
 
 /// The device's composer, keeping translated programs in the configured
 /// cache folder.
-fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -> Composer {
+fn composer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    config: &ThreadConfig,
+    frame_cache: usize,
+) -> Composer {
     let mut composer = Composer::new(device, queue);
     composer
         .renderer()
@@ -247,6 +259,19 @@ fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -
     // runner (`engine-connection/shader-fallback.ts`).
     composer.renderer().set_shader_fallback_runner(true);
     composer
+        .renderer()
+        .apply_media_lease(media_lease(frame_cache));
+    composer
+}
+
+/// The composer's decode-service shares: the frame cache follows the
+/// presenter's lease share; decoders are not leased yet
+/// (docs/engine/scrub.md, "Memory").
+fn media_lease(frame_cache: usize) -> pm_media::decode::service::MediaLease {
+    pm_media::decode::service::MediaLease {
+        frame_cache,
+        decoders: usize::MAX,
+    }
 }
 
 /// One frame's record for the S1 harness.
@@ -327,11 +352,31 @@ pub struct Stats {
     pub audio: BTreeMap<String, AudioStatus>,
     /// The paused viewer's Blender previews.
     pub blender_preview: super::blender::BlenderPreviewStats,
+    /// Frames drawn with stand-ins while scrubbing, and the frames drawn
+    /// again once the exact video arrived (docs/engine/scrub.md).
+    pub stand_in_frames: u64,
+    pub stand_in_redraws: u64,
+    /// Stand-in frames sent: (seq, the source frame the first stand-in
+    /// layer shows), for measurements that count the distinct frames a
+    /// drag showed. Kept only with [`ThreadConfig::stand_in_log`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stand_in_log: Vec<(u64, usize)>,
+    /// The viewer's frame cache in bytes (its lease share,
+    /// docs/engine/scrub.md); 0 until the presenter sized it.
+    pub frame_cache: u64,
+    /// The display decode workers (scrubbing, look-ahead, cancellation).
+    pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
 
 const TRACE_CAP: usize = 200_000;
+
+/// Entries kept in [`Stats::stand_in_log`].
+const STAND_IN_LOG_CAP: usize = 20_000;
+
+/// How often a frame drawn with stand-ins checks whether its video decoded.
+const STAND_IN_POLL_US: i64 = 1_000;
 
 struct Gpu {
     device: wgpu::Device,
@@ -378,6 +423,13 @@ struct View {
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
     /// The audio clock version last followed.
     audio_version: u64,
+    /// Paused after a `seek {scrub}`: frames may show stand-ins for video
+    /// still decoding (docs/engine/scrub.md). Exact seeks, steps, and
+    /// playback clear it.
+    scrub: bool,
+    /// The frame on screen showed stand-ins: the media "landed" counter when
+    /// it was drawn. A change draws the frame again.
+    stand_in: Option<u64>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -423,6 +475,8 @@ struct Thread {
     /// Shader fallback requests sent to each view's renderer and not yet
     /// answered (by request key), and the bands received so far.
     fallback: Fallback,
+    /// The viewer's frame-cache share ([`Command::FrameCache`]).
+    frame_cache: usize,
 }
 
 /// The decision 19 fallback runner's state on this thread.
@@ -462,6 +516,7 @@ pub fn run(
     let peaks = super::peaks::PeakWorker::new(sink.clone());
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
+        frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
         config,
         sink,
         stats,
@@ -755,9 +810,9 @@ impl Thread {
                 if self.config.document
                     && let Some(gpu) = self.gpu.as_mut()
                 {
-                    let composer = gpu
-                        .composer
-                        .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+                    let composer = gpu.composer.get_or_insert_with(|| {
+                        composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+                    });
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
@@ -785,6 +840,13 @@ impl Thread {
                 }
             }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
+            Command::FrameCache { bytes } => {
+                self.frame_cache = bytes;
+                self.stats().frame_cache = bytes as u64;
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.renderer().apply_media_lease(media_lease(bytes));
+                }
+            }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
@@ -973,6 +1035,15 @@ impl Thread {
             }
             return;
         }
+        if matches!(
+            command,
+            TransportCommand::Play { .. }
+                | TransportCommand::PlayAround { .. }
+                | TransportCommand::Pause
+        ) {
+            // Playback and the frame a pause lands on are exact.
+            view.scrub = false;
+        }
         match command {
             TransportCommand::Play { rate } => {
                 if view.awaiting.is_some_and(|a| a.2 == rate)
@@ -1064,6 +1135,7 @@ impl Thread {
             TransportCommand::Seek { time, mode } => {
                 let playing = view.clock.following() && view.clock.is_playing();
                 let awaiting = view.awaiting;
+                view.scrub = mode == SeekMode::Scrub && !playing && awaiting.is_none();
                 view.clock.apply(TransportCommand::Seek { time, mode }, at);
                 if playing || awaiting.is_some() {
                     // The audio seeks and starts a new run; the line holds the
@@ -1104,6 +1176,8 @@ impl Thread {
             }
             TransportCommand::Step { frames } => {
                 // Steps while paused: the line, and a grain where it lands.
+                // A step shows its exact frame.
+                view.scrub = false;
                 let paused = !view.clock.is_playing() && view.awaiting.is_none();
                 if view.clock.apply(TransportCommand::Step { frames }, at) {
                     view.schedule.reset();
@@ -1285,6 +1359,8 @@ impl Thread {
             layer_reports: Default::default(),
             awaiting: None,
             audio_version: 0,
+            scrub: false,
+            stand_in: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -1710,6 +1786,10 @@ impl Thread {
             if view.dirty || !view.requests.is_empty() || view.sample_due {
                 return Duration::ZERO;
             }
+            if view.stand_in.is_some() {
+                // A frame with stand-ins waits for its video to decode.
+                wake = wake.min(now + STAND_IN_POLL_US);
+            }
             if view.awaiting.is_some() || view.clock.following() {
                 // Follow the audio clock promptly (it publishes on its own).
                 wake = wake.min(now + 2_000);
@@ -1984,6 +2064,24 @@ impl Thread {
         {
             self.answer(key, id, &request, revision);
         }
+        // A frame drawn with stand-ins is drawn again once video it asked
+        // for has decoded.
+        let landed = self
+            .gpu
+            .as_mut()
+            .and_then(|g| g.composer.as_mut())
+            .map(|c| c.renderer().media_landed());
+        if let Some(view) = self.views.get_mut(&key)
+            && let (Some(at), Some(landed)) = (view.stand_in, landed)
+            && at != landed
+        {
+            if view.clock.is_playing() {
+                view.stand_in = None;
+            } else {
+                view.dirty = true;
+                self.stats().stand_in_redraws += 1;
+            }
+        }
         // A paused frame after a view or transport change.
         let paused_dirty = self
             .views
@@ -2136,11 +2234,13 @@ impl Thread {
         let seq = view.next_seq;
         let start = now();
         let overlay;
+        let mut stand_in = false;
+        let mut stand_in_shown = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu
-                .composer
-                .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+            let composer = gpu.composer.get_or_insert_with(|| {
+                composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+            });
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
@@ -2159,6 +2259,12 @@ impl Thread {
                 Some(host) => pm_render::blender::BlenderRender::Preview(host.clone()),
                 None => pm_render::blender::BlenderRender::Native,
             });
+            // Stand-ins only for paused frames after a scrub seek; read the
+            // counter first so a frame landing during the render is not
+            // missed.
+            let scrub = view.scrub && timing.is_none() && !view.clock.is_playing();
+            composer.renderer().set_scrub(scrub);
+            let landed_before = composer.renderer().media_landed();
             let composed = composer.compose(
                 doc.document(),
                 &composition,
@@ -2177,15 +2283,22 @@ impl Thread {
                 let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                 blender.submit(key, shading, revision, preview.as_deref());
             }
+            composer.renderer().set_scrub(false);
+            let scrub_stats = composer.renderer().scrub_stats();
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    stand_in = !composed.stand_ins.is_empty();
+                    view.stand_in = stand_in.then_some(landed_before);
+                    stand_in_shown = composed.stand_ins.first().copied();
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    stats.stand_in_frames += u64::from(stand_in);
+                    stats.scrub = Some(scrub_stats);
                     drop(stats);
                     // Shader compile errors and missing extension layers at
                     // this frame's revision, before the frame (section 11).
@@ -2367,6 +2480,7 @@ impl Thread {
                 representation: Representation::Original,
                 draft_3d: false,
                 cached: false,
+                stand_in,
             },
             overlay: Some(overlay),
             depth_id: None,
@@ -2383,6 +2497,12 @@ impl Thread {
             stats.timed_frames += 1;
         } else {
             stats.immediate_frames += 1;
+        }
+        if let Some(shown) = stand_in_shown
+            && self.config.stand_in_log
+            && stats.stand_in_log.len() < STAND_IN_LOG_CAP
+        {
+            stats.stand_in_log.push((seq, shown));
         }
         stats.gpu_us_max = stats.gpu_us_max.max(gpu_done - start);
         stats.gpu_us_total += gpu_done - start;
