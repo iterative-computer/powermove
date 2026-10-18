@@ -880,6 +880,7 @@ impl Engine {
                 };
                 let session = self.sessions.get_mut(&sid).expect("owned");
                 let result = session.definitions.apply(&update);
+                let mut deferred = false;
                 if result.is_ok() {
                     // The presenter renders with the session's definitions.
                     let (session_port, set) = (session.port, session.definitions.snapshot());
@@ -895,8 +896,15 @@ impl Engine {
                     self.with_presenter(out, |p, ctx| {
                         p.definitions(ctx, session_port, sid, &set, &registered)
                     });
+                    // The job engine compiles what it was given and answers
+                    // with the failures itself (validate_effect, contract 10).
+                    deferred = self
+                        .jobs
+                        .as_mut()
+                        .is_some_and(|jobs| jobs.definitions_pushed(port, id, sid, &update));
                 }
                 match result {
+                    Ok(()) if deferred => {}
                     Ok(()) => self.respond(
                         port,
                         id,

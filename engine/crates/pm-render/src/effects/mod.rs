@@ -540,6 +540,18 @@ impl Effects {
         })
     }
 
+    /// Builds a ready definition's GPU pipeline for the working format, as
+    /// its first frame would (the Metal compiler runs here), and returns its
+    /// definition-scoped failure, if any: `ShaderCompile` for a program WebGL
+    /// refuses too, `NotHeadlessRenderable` for one only the fallback runner
+    /// draws (a device refusal turns a ready definition into that). What
+    /// `validate_effect` and the job engine's acknowledgment report.
+    pub fn build(&mut self, device: &wgpu::Device, kind: DefinitionKind, id: &str) -> Option<EngineError> {
+        let _ = self.program(device, kind, id, wgpu::TextureFormat::Rgba16Float);
+        self.status(kind, id)
+            .and_then(|status| definition_error(&DefinitionId::from(id), status))
+    }
+
     /// The GPU program of a ready definition, built on first use. A build
     /// failure turns the definition into a fallback one.
     pub(crate) fn program(

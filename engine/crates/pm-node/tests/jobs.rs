@@ -1160,7 +1160,9 @@ impl Host {
         update: pm_protocol::definitions::DefinitionsUpdate,
     ) -> Message {
         let id = self.send_request(Request::PushDefinitions(update), Some(session), None);
-        self.answers.remove(&id).expect("answered at once")
+        // The compile worker answers once the update is compiled.
+        assert!(self.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+        self.answers.remove(&id).expect("answered")
     }
 
     /// The top-left pixel of each frame of a batch on `session`.
@@ -1308,4 +1310,85 @@ fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
     let status = terminal(&host, "job-bare").unwrap();
     assert_eq!(status.state, JobState::Failed);
     assert_eq!(status.error.as_ref().map(|e| e.code), Some(ErrorCode::Unsupported));
+}
+
+fn raw_effect(id: &str, source: &str) -> pm_protocol::definitions::DefinitionSnapshot {
+    serde_json::from_value(json!({
+        "id": id, "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+        "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.encode_utf16().count(), "bodyUtf8Len": source.len() },
+        "params": [],
+        "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+    }))
+    .unwrap()
+}
+
+/// The job engine compiles what it is pushed before acknowledging it
+/// (`validate_effect`): a program WebGL refuses too fails with its
+/// diagnostics in the author's lines, one only the WebGL fallback runner
+/// draws is reported as not headless-renderable (valid in the app, never a
+/// compile error), and valid programs and the built-ins pass.
+#[test]
+fn pushed_definitions_are_compiled_before_they_are_acknowledged() {
+    use pm_protocol::definitions::DefinitionsUpdate;
+    let mut host = Host::new("compile", &[]);
+    let sid = host.snapshot(&project(false), SessionRole::Job, 1);
+    let good = raw_effect(
+        "acme.gain",
+        "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) * 2.0; }\n",
+    );
+    let broken = raw_effect(
+        "acme.broken",
+        "#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main(){\n  o = nope;\n}\n",
+    );
+    let runner = raw_effect(
+        "acme.sky",
+        "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform samplerCube u_sky;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) + texture(u_sky, vec3(0.0, 0.0, 1.0)); }\n",
+    );
+    let mut upserts = pm_render::builtin_definitions().definitions;
+    upserts.extend([good, broken, runner]);
+    let answer = host.push_definitions(
+        sid,
+        DefinitionsUpdate {
+            generation: Seq::new(1).unwrap(),
+            full: true,
+            upserts,
+            removals: vec![],
+        },
+    );
+    let Message::Response {
+        body: Response::DefinitionsApplied(applied),
+        ..
+    } = answer
+    else {
+        panic!("{answer:?}")
+    };
+    assert_eq!(applied.generation.get(), 1);
+    let mut failures: Vec<_> = applied
+        .failures
+        .iter()
+        .map(|e| match &e.scope {
+            ErrorScope::Definition { definition } => (definition.as_str().to_owned(), e.code),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    failures.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        failures,
+        vec![
+            ("acme.broken".to_owned(), ErrorCode::ShaderCompile),
+            ("acme.sky".to_owned(), ErrorCode::NotHeadlessRenderable),
+        ]
+    );
+    let broken = applied
+        .failures
+        .iter()
+        .find(|e| e.code == ErrorCode::ShaderCompile)
+        .unwrap();
+    let Some(pm_protocol::error::ErrorDetail::ShaderCompile { diagnostics }) = &broken.detail else {
+        panic!("{broken:?}")
+    };
+    assert!(
+        diagnostics.iter().any(|d| d.line == 5 && d.message.contains("nope")),
+        "{diagnostics:?}"
+    );
 }

@@ -139,6 +139,23 @@ pub trait JobService: Send {
     /// Takes everything waiting to be sent.
     fn drain(&mut self) -> Drained;
 
+    /// A definitions update the engine applied to a job `session` (contract
+    /// 10). A service that compiles it answers `id` on `port` itself, with
+    /// `Response::DefinitionsApplied` carrying every upserted definition's
+    /// compile failure, through its outbox, and returns true; the engine
+    /// then sends no answer. The default (false): the engine acknowledges at
+    /// once, without failures.
+    fn definitions_pushed(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        session: SessionId,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> bool {
+        let _ = (port, id, session, update);
+        false
+    }
+
     /// A session closed: work on it that has not started is dropped.
     fn session_closed(&mut self, session: SessionId);
 
