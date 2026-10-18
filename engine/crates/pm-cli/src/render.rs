@@ -31,6 +31,10 @@ use crate::corpus::{member, string};
 pub enum Failure {
     Usage(String),
     Unsupported(Vec<String>),
+    /// Programs only a WebGL runner draws (decision 19): `pm-cli` has none,
+    /// so the project is not headless-renderable (exit 4). Named per layer
+    /// and definition; the same answer on every run.
+    NotHeadless(Vec<String>),
     Failed(String),
 }
 
@@ -79,6 +83,11 @@ pub struct Options {
     pub reel: Option<String>,
     /// Leave captions layers out of the picture.
     pub no_captions: bool,
+    /// A definition set snapshot (contract 10, `DefinitionSetSnapshot` as
+    /// JSON) to render with instead of the built-in definitions: the
+    /// winning registrations of the app that made the project, forks and
+    /// overrides by id included.
+    pub definitions: Option<PathBuf>,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -613,6 +622,26 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    let (definitions, source) = definitions(options)?;
+    // Programs WebGL refuses too are skipped, as the app skips them; the
+    // capability check reads the rest of each definition's status.
+    for refused in renderer
+        .set_definitions(&definitions)
+        .map_err(|e| Failure::Failed(format!("definitions: {e}")))?
+    {
+        if refused.code == pm_protocol::error::ErrorCode::ShaderCompile {
+            eprintln!("pm-cli: {} (skipped, as in the app)", refused.message);
+        }
+    }
+    let headless: Vec<String> = renderer
+        .unsupported_with_media(&job.document, &job.composition, &*job.media)
+        .into_iter()
+        .filter(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_)))
+        .map(|u| u.to_string())
+        .collect();
+    if !headless.is_empty() {
+        return Err(Failure::NotHeadless(headless));
+    }
     let started = std::time::Instant::now();
     let mut last = -1i64;
     let mut progress = |p: Progress| {
@@ -628,7 +657,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     // Blender compositions (contract 11): the CLI host runs the pinned
     // worker in the installed Blender itself.
     let mut blender = blender_stage(&job).map_err(|e| Failure::Failed(e.to_string()))?;
-    let delivered = pm_export::render::plan_export_with(&job, blender.is_some())
+    let delivered = pm_export::render::plan_export_for(&job, blender.is_some(), &renderer)
         .and_then(|plan| {
             let sink = pm_export::render::sink_for(&plan)?;
             pm_export::render::run_export_with_blender(
@@ -670,7 +699,27 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "hardwareEncoder": r.hardware_encoder,
         "seconds": seconds,
         "fps": r.frames as f64 / seconds.max(1e-9),
+        "definitions": source,
     }))
+}
+
+/// The definitions a render draws with: the `--definitions` snapshot, or
+/// the built-in effects, transitions, and layers as the kernel snapshots
+/// them. Returns the set and where it came from.
+fn definitions(
+    options: &Options,
+) -> Result<(pm_protocol::definitions::DefinitionSetSnapshot, String), Failure> {
+    let Some(path) = &options.definitions else {
+        return Ok((pm_render::all_builtin_definitions(), "built-in".into()));
+    };
+    let bytes = std::fs::read(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+    let set: pm_protocol::definitions::DefinitionSetSnapshot = serde_json::from_slice(&bytes)
+        .map_err(|e| usage(format!("{}: not a definition set: {e}", path.display())))?;
+    for d in &set.definitions {
+        pm_protocol::validate::Validate::validate(d)
+            .map_err(|e| usage(format!("{}: {}: {e}", path.display(), d.id.as_str())))?;
+    }
+    Ok((set, path.display().to_string()))
 }
 
 fn absolute(p: &Path) -> Result<PathBuf, Failure> {

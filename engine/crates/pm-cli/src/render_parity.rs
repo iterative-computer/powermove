@@ -667,7 +667,9 @@ fn real_media(pmv: &Path, record_sha: Option<String>) -> Result<crate::render::L
     }
     crate::render::load_project(pmv, None, &[]).map_err(|e| match e {
         crate::render::Failure::Usage(m) | crate::render::Failure::Failed(m) => m,
-        crate::render::Failure::Unsupported(r) => r.join(", "),
+        crate::render::Failure::Unsupported(r) | crate::render::Failure::NotHeadless(r) => {
+            r.join(", ")
+        }
     })
 }
 
