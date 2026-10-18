@@ -50,6 +50,9 @@ use crate::transport::{Effect, Transport};
 /// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
 /// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
+/// Maximum source wait, measured in callback frames at the device rate,
+/// independent of wall-clock scheduling, project rate, and shuttle speed.
+pub const SOURCE_WAIT_MS: u64 = 120;
 
 #[derive(Clone, Debug)]
 pub struct PlaybackConfig {
@@ -109,6 +112,12 @@ impl DeviceSide {
     pub fn queued_chunks(&self) -> usize {
         self.consumer.ring().queued()
     }
+
+    /// Frames of the current epoch queued for the device: what the next
+    /// callback can play without an underrun.
+    pub fn queued_frames(&self) -> usize {
+        self.consumer.queued_frames()
+    }
 }
 
 /// Reads the output device's id and presentation latency (µs).
@@ -134,9 +143,37 @@ struct Shared {
     latency_us: AtomicU32,
     reanchor: AtomicBool,
     meters: Mutex<VecDeque<Meters>>,
-    errors: Mutex<Vec<String>>,
+    errors: Mutex<ErrorLog>,
     starved: AtomicU64,
+    starve_retries: AtomicU64,
+    dropped_renders: AtomicU64,
+    dropped_voice_frames: AtomicU64,
     device_rate: u32,
+}
+
+/// The render errors of one playback. A failure recurs on every segment
+/// that meets it (a bad block's decode error is memoized, a broken clip
+/// fails each evaluation), so each distinct message is handed out by
+/// [`Playback::take_errors`] once for the life of the playback, however
+/// often it is drained. The counters in [`PlaybackStats`] keep counting
+/// every occurrence.
+#[derive(Default)]
+struct ErrorLog {
+    pending: Vec<String>,
+    reported: HashSet<String>,
+}
+
+impl ErrorLog {
+    fn push(&mut self, message: String) {
+        if !self.reported.contains(&message) {
+            self.reported.insert(message.clone());
+            self.pending.push(message);
+        }
+    }
+
+    fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 /// A read-only view of a [`Playback`]'s clock, for another thread.
@@ -172,7 +209,16 @@ pub struct Playback {
 pub struct PlaybackStats {
     pub underruns: u64,
     pub played_frames: u64,
+    /// Segments a source miss stopped (each counted once, however often
+    /// it was retried).
     pub starved_renders: u64,
+    /// Renders of a stopped segment that were still missing a source block
+    /// (playback retries every turn of its render loop, about 2 ms).
+    pub starve_retries: u64,
+    /// Committed segments containing a voice with missing input.
+    pub dropped_renders: u64,
+    /// Project output frames silenced for missing input (summed over voices).
+    pub dropped_voice_frames: u64,
 }
 
 impl Playback {
@@ -221,6 +267,7 @@ impl Playback {
         if !(8_000..=192_000).contains(&device_rate) {
             return Err(AudioError::Device(format!("device rate {device_rate}")));
         }
+        cache.ensure_workers(1);
         let ring_channels = device_channels.clamp(1, crate::ring::MAX_CHANNELS);
         let chunk_ms = CHUNK as f64 * 1000.0 / device_rate as f64;
         let chunks = ((config.ahead_ms as f64 * 2.0 / chunk_ms).ceil() as usize).max(8);
@@ -231,8 +278,11 @@ impl Playback {
             latency_us: AtomicU32::new(latency_us),
             reanchor: AtomicBool::new(false),
             meters: Mutex::new(VecDeque::new()),
-            errors: Mutex::new(Vec::new()),
+            errors: Mutex::new(ErrorLog::default()),
             starved: AtomicU64::new(0),
+            starve_retries: AtomicU64::new(0),
+            dropped_renders: AtomicU64::new(0),
+            dropped_voice_frames: AtomicU64::new(0),
             device_rate,
         });
         let (tx, rx) = channel();
@@ -257,6 +307,8 @@ impl Playback {
             shared: shared.clone(),
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
+            pending_segment: None,
+            stalled_since: None,
             mixer,
             config,
             solo: None,
@@ -389,9 +441,15 @@ impl Playback {
             .cloned()
     }
 
-    /// Errors met while rendering (decode or evaluation), each once.
+    /// Errors met while rendering (decode or evaluation) since the last
+    /// call. Each distinct message comes out once for the life of the
+    /// playback, so polling this never repeats a recurring failure.
     pub fn take_errors(&self) -> Vec<String> {
-        std::mem::take(&mut *self.shared.errors.lock().unwrap_or_else(|e| e.into_inner()))
+        self.shared
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     pub fn stats(&self) -> PlaybackStats {
@@ -399,6 +457,9 @@ impl Playback {
             underruns: self.ring.underruns(),
             played_frames: self.ring.played_frames(),
             starved_renders: self.shared.starved.load(Ordering::Relaxed),
+            starve_retries: self.shared.starve_retries.load(Ordering::Relaxed),
+            dropped_renders: self.shared.dropped_renders.load(Ordering::Relaxed),
+            dropped_voice_frames: self.shared.dropped_voice_frames.load(Ordering::Relaxed),
         }
     }
 
@@ -752,6 +813,13 @@ struct RenderThread {
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
+    /// An undecoded segment is retried before advancing the transport.
+    /// Never feed its zero-filled samples into the shuttle or converter.
+    pending_segment: Option<crate::transport::Segment>,
+    /// Device frame when this missing-input episode began, and whether
+    /// crossing its bound was reported. Persists across dropped segments
+    /// until every voice has recovered.
+    stalled_since: Option<(u64, bool)>,
     mixer: Mixer,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
@@ -856,10 +924,11 @@ impl RenderThread {
     }
 
     fn error(&self, e: String) {
-        let mut errors = self.shared.errors.lock().unwrap_or_else(|e| e.into_inner());
-        if !errors.contains(&e) {
-            errors.push(e);
-        }
+        self.shared
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(e);
     }
 
     /// The media position heard now, from the published clock. Until the
@@ -913,6 +982,11 @@ impl RenderThread {
                         true
                     }
                     Ok(Effect::Stopped) => {
+                        // A stop drops the run's starved segment: the next
+                        // run renders from its own position.
+                        self.pending_segment = None;
+                        self.stalled_since = None;
+                        self.mixer.abandon_retries();
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
                         self.stop_pending = false;
@@ -1017,8 +1091,12 @@ impl RenderThread {
 
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
-        // A seek or a new run starts on the current mix.
+        self.pending_segment = None;
+        self.stalled_since = None;
+        // A seek or a new run starts on the current mix, and its first
+        // render is a new request, not a retry of a starved one.
         self.mixer.end_glides();
+        self.mixer.abandon_retries();
         let position = self.transport.position();
         let rate = self.transport.rate() as i64;
         let speed = self.transport.play_rate();
@@ -1030,11 +1108,17 @@ impl RenderThread {
         };
         let frames = frames as usize;
         self.mixer.prefetch(from, frames);
+        let device_start = self.ring.played_frames();
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
-        while !self.mixer.is_ready(from, frames) && std::time::Instant::now() < deadline {
+        while !self.mixer.is_ready(from, frames)
+            && std::time::Instant::now() < deadline
+            && self.ring.played_frames().saturating_sub(device_start)
+                < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
+        {
             std::thread::sleep(Duration::from_millis(1));
         }
+        self.stalled_since = Some((device_start, false));
         if let Some(c) = &mut self.converter {
             c.reset();
         }
@@ -1051,7 +1135,12 @@ impl RenderThread {
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
         while self.ring.queued() < target {
-            let Some(seg) = self.transport.next(CHUNK) else {
+            let retry = self.pending_segment.is_some();
+            let Some(seg) = self
+                .pending_segment
+                .take()
+                .or_else(|| self.transport.next(CHUNK))
+            else {
                 if self.transport.take_stop() == Effect::Stopped {
                     // The shuttle's and the converter's tails belong to the run.
                     self.finish_shuttle();
@@ -1067,8 +1156,13 @@ impl RenderThread {
             // play them backwards. Reverse renders each chunk on its own,
             // so stretched voices resample there (see RenderOptions).
             let (lo, hi) = seg.media_span();
+            let drop_starved = self.stalled_since.is_some_and(|(start, _)| {
+                self.ring.played_frames().saturating_sub(start)
+                    >= self.device_rate as u64 * SOURCE_WAIT_MS / 1000
+            });
             let options = RenderOptions {
-                wait: !self.mixer.cache().has_workers(),
+                wait: false,
+                drop_starved,
                 monitor_solo: self.solo.clone(),
                 meters: true,
                 no_stretch: seg.rate < 0,
@@ -1077,13 +1171,42 @@ impl RenderThread {
             match self.mixer.render(lo, n, &mut planar, &options) {
                 Ok(report) => {
                     if report.starved > 0 {
-                        self.shared.starved.fetch_add(1, Ordering::Relaxed);
+                        let counter = if retry {
+                            &self.shared.starve_retries
+                        } else {
+                            &self.shared.starved
+                        };
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        let device_now = self.ring.played_frames();
+                        let (_, reported) = self.stalled_since.get_or_insert((device_now, false));
+                        if !drop_starved {
+                            self.pending_segment = Some(seg);
+                            for (id, e) in report.errors {
+                                self.error(format!("{id}: {e}"));
+                            }
+                            return;
+                        }
+                        let notify = !*reported;
+                        *reported = true;
+                        if notify {
+                            self.error(format!(
+                                "Audio decode exceeded {SOURCE_WAIT_MS} ms; missing voices play as silence: {}",
+                                report.starved_voices.join(", ")
+                            ));
+                        }
+                        self.shared.dropped_renders.fetch_add(1, Ordering::Relaxed);
+                        self.shared
+                            .dropped_voice_frames
+                            .fetch_add(report.dropped_voice_frames, Ordering::Relaxed);
+                    } else {
+                        self.stalled_since = None;
                     }
                     for (id, e) in report.errors {
                         self.error(format!("{id}: {e}"));
                     }
                 }
                 Err(e) => {
+                    self.stalled_since = None;
                     self.error(e.to_string());
                     for c in &mut planar {
                         c.clear();

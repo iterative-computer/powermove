@@ -487,6 +487,16 @@ pub fn decode(
         }
         Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
     }
+    // Maps upload stored samples: a PNG gamma Chromium or ImageIO would
+    // apply is not implemented for them.
+    if pm_media::image::png_gamma::png_gamma(path)
+        .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?
+        .is_some()
+    {
+        return Err(MapError::Unsupported(
+            "3D texture map image (PNG gamma (gAMA))".into(),
+        ));
+    }
     let still = pm_media::image::read(path, pool)
         .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?;
     let f = &still.frame.format;

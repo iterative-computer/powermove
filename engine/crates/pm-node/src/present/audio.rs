@@ -526,10 +526,163 @@ impl Control {
 
     fn report(&self) {
         if let Some(playback) = &self.playback {
-            let stats = playback.stats();
-            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-            status.underruns = stats.underruns;
-            status.starved_renders = stats.starved_renders;
+            report_playback(&self.status, playback);
         }
+    }
+}
+
+/// Copies a playback's counters and new render errors into the status
+/// (every [`LEVELS_INTERVAL`]). A message already listed is not listed
+/// again, so a recurring error never pushes the others out of the 16.
+fn report_playback(status: &Mutex<AudioStatus>, playback: &Playback) {
+    let stats = playback.stats();
+    let errors = playback.take_errors();
+    let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
+    status.underruns = stats.underruns;
+    status.starved_renders = stats.starved_renders;
+    for error in errors {
+        if !status.problems.contains(&error) {
+            status.problems.push(error);
+        }
+    }
+    let excess = status.problems.len().saturating_sub(16);
+    status.problems.drain(..excess);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use pm_audio::offline::{PcmFormat, WavWriter};
+    use pm_model::json::parse;
+
+    use super::*;
+
+    fn write_wav(path: &Path, rate: u32, planar: &[Vec<f32>]) {
+        let frames = planar[0].len();
+        let inter: Vec<f32> = (0..frames)
+            .flat_map(|i| planar.iter().map(move |c| c[i]))
+            .collect();
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = WavWriter::new(
+            std::io::BufWriter::new(file),
+            PcmFormat::F32,
+            planar.len() as u16,
+            rate,
+        )
+        .unwrap();
+        w.write(0, &inter).unwrap();
+        w.finish().unwrap();
+    }
+
+    fn clip(id: &str, asset: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"audio","name":"{id}","from":0,"dur":1,"on":true,"solo":false,"group":null,"parent":null,"p":{{}},"fx":[],"masks":[],"d":{{"asset":"{asset}","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}}}"#
+        )
+    }
+
+    /// The status polls every 33 ms while a bad block fails each segment
+    /// and a stuck decoder drops its voice (A3): each message is listed
+    /// once, and a problem listed before (a media resolve) stays.
+    #[test]
+    fn recurring_render_errors_are_listed_once() {
+        let rate = 48_000u32;
+        let dir =
+            std::env::temp_dir().join(format!("pm-node-audio-problems-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (good_file, bad_file, late_file) = (
+            dir.join("good.wav"),
+            dir.join("bad.wav"),
+            dir.join("late.wav"),
+        );
+        let n = rate as usize;
+        write_wav(&good_file, rate, &[vec![0.25; n], vec![0.0; n]]);
+        write_wav(&bad_file, rate, &[vec![0.3; n], vec![0.3; n]]);
+        write_wav(&late_file, rate, &[vec![0.0; n], vec![0.2; n]]);
+        let cache = SourceCache::new(64 << 20, 2);
+        let good = cache.open(&good_file, None).unwrap();
+        cache.block(&good, 0, true).unwrap();
+        let bad = cache.open(&bad_file, None).unwrap();
+        cache.set_decode_failing(&bad, true);
+        let late = cache.open(&late_file, None).unwrap();
+        cache.set_decode_blocked(&late, true);
+        let (playback, mut side) = Playback::start_headless(
+            MixFormat::stereo(rate),
+            cache.clone(),
+            PlaybackConfig {
+                preroll_ms: 0,
+                preroll_wait_ms: 0,
+                ..PlaybackConfig::default()
+            },
+            rate,
+            2,
+            5_000,
+        )
+        .unwrap();
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":1,"layers":[{},{},{}],"comps":{{}},"assets":{{}},"params":{{}}}}"#,
+            clip("good", "g"),
+            clip("bad", "b"),
+            clip("late", "s"),
+        );
+        let doc = pm_model::Document::new(Some(parse(&text).unwrap()), 1);
+        let resolver = |id: &str| {
+            Some(match id {
+                "g" => good_file.clone(),
+                "b" => bad_file.clone(),
+                _ => late_file.clone(),
+            })
+        };
+        assert!(
+            playback
+                .set_project(Arc::new(doc), "C", &resolver)
+                .unwrap()
+                .is_empty()
+        );
+        let status = Mutex::new(AudioStatus {
+            problems: vec!["m (/media/m.wav): file not found".into()],
+            ..AudioStatus::default()
+        });
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let host_start = pm_audio::clock::host_now_us();
+        let mut out = vec![0.0; 256 * 2];
+        let mut frame = 0u64;
+        let mut heard = false;
+        // Half a second of device time past the 120 ms bound, one status
+        // report per buffer (far more often than the real 33 ms).
+        while frame < rate as u64 / 2 {
+            side.callback(&mut out, 2, host_start + frame * 1_000_000 / rate as u64);
+            heard |= out.chunks_exact(2).any(|p| p[0] == 0.25);
+            frame += 256;
+            report_playback(&status, &playback);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cache.set_decode_blocked(&late, false);
+        let status = status.into_inner().unwrap();
+        assert!(heard, "the good voice plays on");
+        assert!(status.starved_renders > 0);
+        let problems = &status.problems;
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems[0], "m (/media/m.wav): file not found");
+        assert_eq!(
+            problems.iter().filter(|p| p.starts_with("bad:")).count(),
+            1,
+            "{problems:?}"
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|p| p.contains("exceeded 120 ms") && p.ends_with(": late"))
+                .count(),
+            1,
+            "{problems:?}"
+        );
+        drop(playback);
+        cache.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

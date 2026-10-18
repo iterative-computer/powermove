@@ -87,25 +87,11 @@ fn untested_still_classes_are_unsupported() {
     let d = dir().join("other");
     std::fs::create_dir_all(&d).unwrap();
     let cases: &[(&str, &[&str], &str)] = &[
-        ("a.bmp", &[], "BMP stills"),
-        ("a.gif", &[], "GIF stills"),
-        ("a.ico", &["-c:v", "bmp", "-f", "ico"], "ICO stills"),
         (
             "a.exr",
             &["-c:v", "exr", "-pix_fmt", "gbrpf32le"],
             "floating-point stills",
         ),
-        (
-            "a16.tiff",
-            &["-pix_fmt", "rgb48le"],
-            "TIFF stills deeper than 8 bits",
-        ),
-        (
-            "alpha.tiff",
-            &["-pix_fmt", "rgba"],
-            "TIFF stills with alpha",
-        ),
-        ("mono.png", &["-pix_fmt", "monob"], "1-bit PNG stills"),
         ("a.dpx", &["-pix_fmt", "gbrp10le"], ""),
     ];
     for (name, args, message) in cases {
@@ -115,15 +101,15 @@ fn untested_still_classes_are_unsupported() {
         assert!(got.contains(message), "{name}: {got}");
         eprintln!("{name:<12} unsupported: {got}");
     }
-    // PNG gamma and chromaticity chunks Chromium honors and pm-media does
-    // not: unsupported unless an sRGB chunk overrides them.
+    // Gamma-only PNG uses the measured compatibility transform; independent
+    // chromaticity/HDR metadata is still a distinct class.
     let plain = d.join("plain.png");
     ffmpeg(&plain, &["-pix_fmt", "rgb24"]);
     assert_eq!(probe_image(&plain), Ok(()));
     let bytes = std::fs::read(&plain).unwrap();
     let gama = d.join("gama.png");
     std::fs::write(&gama, with_chunk(&bytes, b"gAMA", &55555u32.to_be_bytes())).unwrap();
-    assert!(unsupported(&gama).contains("gAMA"));
+    assert_eq!(probe_image(&gama), Ok(()));
     let overridden = d.join("gama-srgb.png");
     let srgb = with_chunk(&bytes, b"sRGB", &[0]);
     std::fs::write(
@@ -138,10 +124,8 @@ fn untested_still_classes_are_unsupported() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Y'CbCr JPEG (every layout) is unsupported: pm-media's decoder differs
-/// from Chromium's libjpeg-turbo (docs/engine/pm-render.md). Gray JPEG is
-/// drawn and compared in `tests/corpus.rs` (`render/still-photo-gray-jpg`);
-/// header classes are covered by `stills::tests::jpeg_classes`.
+/// Y'CbCr JPEG uses Chromium's libjpeg-turbo path; gray and Y'CbCr layouts
+/// are compared in `tests/corpus.rs` and accepted by the media probe.
 #[test]
 fn ycbcr_jpeg_is_drawn() {
     // Decoded by libjpeg-turbo, as Chromium decodes it (corpus
@@ -337,20 +321,12 @@ fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
     b[at + 8..at + 10].copy_from_slice(&v);
 }
 
-fn decoded_orientation(path: &Path) -> u8 {
-    let pool = pm_media::pool::FramePool::new(0);
-    pm_media::image::read(path, &pool)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-        .orientation
-}
-
-/// No oriented still of a drawn class has been compared with the legacy
-/// renderer, so EXIF orientation (PNG `eXIf`, JPEG APP1, WebP `EXIF`, TIFF
-/// tag 274) and HEIF transform properties other than the identity are
-/// unsupported in every container, whether or not pm-media's decoder
-/// reports them. The unrotated controls are drawn.
+/// The compatibility bitmap consumes the decoder's applied orientation
+/// where Chromium applies it (PNG eXIf before the image data, JPEG, TIFF,
+/// HEIF; compared in `e2e/native-still-orientation-parity.spec.ts`). WebP
+/// EXIF and post-IDAT PNG eXIf are ignored, as Blink ignores them.
 #[test]
-fn oriented_stills_are_unsupported() {
+fn decoded_orientation_and_ignored_late_exif_match_blink() {
     let d = dir().join("oriented");
     std::fs::create_dir_all(&d).unwrap();
     let mut cases: Vec<PathBuf> = Vec::new();
@@ -398,7 +374,24 @@ fn oriented_stills_are_unsupported() {
         probe_image(&write("exif1.webp", &webp_with_exif(&webp, 1))),
         Ok(())
     );
-    cases.push(write("exif6.webp", &webp_with_exif(&webp, 6)));
+    let exif6_webp = write("exif6.webp", &webp_with_exif(&webp, 6));
+    cases.push(exif6_webp.clone());
+    // Chromium shows a WebP as stored whatever its EXIF says.
+    let plain_webp = write("plain.webp", &webp);
+    assert!(
+        compat_rgba8(&exif6_webp) == compat_rgba8(&plain_webp),
+        "WebP EXIF orientation must not be applied"
+    );
+    {
+        let pool = pm_media::pool::FramePool::new(0);
+        let s = pm_media::image::read(&exif6_webp, &pool).unwrap();
+        assert_eq!(s.orientation, 1);
+        assert_eq!(
+            (s.frame.format.width, s.frame.format.height),
+            (160, 90),
+            "the box today's import measured"
+        );
+    }
 
     // 8-bit opaque TIFF and HEIC written by ImageIO. The TIFF is an
     // untagged device RGB image (ImageIO embeds a profile otherwise, which
@@ -435,9 +428,10 @@ fn oriented_stills_are_unsupported() {
             _ => pm_media::image::ImageFormat::Heif,
         };
         let t = pm_render::stills::container_transform(p, format);
-        assert!(
-            matches!(t, Ok(Some(_))),
-            "{}: header parse found {t:?}",
+        assert_eq!(
+            t.unwrap().is_some(),
+            p.file_name().unwrap() != "exif6-late.png",
+            "{}: pre-IDAT transforms only",
             p.display()
         );
     }
@@ -450,13 +444,261 @@ fn oriented_stills_are_unsupported() {
     }
 
     for p in &cases {
-        let got = unsupported(p);
-        assert!(got.contains("oriented stills"), "{}: {got}", p.display());
-        eprintln!(
-            "{:<16} decoder orientation {}: {got}",
-            p.file_name().unwrap().to_string_lossy(),
-            decoded_orientation(p)
+        assert_eq!(probe_image(p), Ok(()), "{}", p.display());
+    }
+    // Applied orientations are pixel permutations of the unoriented
+    // bitmap (so is Chromium's oriented ImageBitmap; media.md).
+    let plain_rgba = compat_rgba8(&plain);
+    assert_eq!(
+        compat_rgba8(&d.join("exif6-late.png")),
+        plain_rgba,
+        "late EXIF is ignored"
+    );
+    for (name, o) in [("exif6.png", 6u8), ("exif2.png", 2)] {
+        let expect = orient_rgba8(&plain_rgba, 96, 54, o);
+        assert!(compat_rgba8(&d.join(name)) == expect, "{name}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// EXIF orientation applied to packed RGBA8, placing each source pixel as
+/// the EXIF definitions (and Chromium's `ImageOrientation`) do.
+fn orient_rgba8(px: &[u8], w: usize, h: usize, o: u8) -> Vec<u8> {
+    let (ow, oh) = if o >= 5 { (h, w) } else { (w, h) };
+    let mut out = Vec::with_capacity(px.len());
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (sx, sy) = match o {
+                2 => (w - 1 - ox, oy),
+                3 => (w - 1 - ox, h - 1 - oy),
+                4 => (ox, h - 1 - oy),
+                5 => (oy, ox),
+                6 => (oy, h - 1 - ox),
+                7 => (w - 1 - oy, h - 1 - ox),
+                8 => (w - 1 - oy, ox),
+                _ => (ox, oy),
+            };
+            let i = (sy * w + sx) * 4;
+            out.extend_from_slice(&px[i..i + 4]);
+        }
+    }
+    out
+}
+
+/// The level-1 AVIF bitmap follows Blink's `AVIFImageDecoder`: `irot` and
+/// `imir` become the orientation (`kAxisAngleToOrientation`), a valid
+/// `clap` at (0, 0) crops, any other `clap` shows the whole image; 8-bit
+/// 4:2:0 at either range is the compared class (app comparison:
+/// `e2e/native-still-orientation-parity.spec.ts`).
+#[test]
+fn avif_container_transforms_follow_blink() {
+    let d = dir().join("avif");
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("src.png");
+    ffmpeg(&src, &["-pix_fmt", "rgb24"]); // 96x54
+    let odd_src = d.join("odd.png");
+    // ImageIO codes 95x63 as 96x64 with a clean aperture.
+    ffmpeg(
+        &odd_src,
+        &["-pix_fmt", "rgb24", "-vf", "scale=96:64,crop=95:63:0:0"],
+    );
+    let plain = d.join("plain.avif");
+    imageio_write(&src, &plain, "public.avif", &ImageIo::default());
+    let odd = d.join("odd.avif");
+    imageio_write(&odd_src, &odd, "public.avif", &ImageIo::default());
+    let bytes = std::fs::read(&plain).unwrap();
+    // A property box by its size and type (`irot` 9 bytes, `clap` 40).
+    let find = |b: &[u8], size: u8, ty: &[u8]| {
+        let mut head = vec![0, 0, 0, size];
+        head.extend_from_slice(ty);
+        4 + b.windows(8).position(|w| w == &head[..]).expect("box")
+    };
+    let patch = |name: &str, f: &dyn Fn(&mut Vec<u8>)| {
+        let mut b = bytes.clone();
+        f(&mut b);
+        let p = d.join(name);
+        std::fs::write(&p, b).unwrap();
+        p
+    };
+    let compat = |p: &Path| {
+        let pool = pm_media::pool::FramePool::new(0);
+        let original = pm_media::image::read(p, &pool).unwrap();
+        assert!(
+            pm_media::image::avif_compat::applies(&original),
+            "{}",
+            p.display()
         );
+        let s = pm_media::image::avif_compat::read(p, &original, &pool).unwrap();
+        let (w, h) = (s.frame.format.width, s.frame.format.height);
+        let px = s
+            .frame
+            .with_planes(|planes| {
+                let p = &planes[0];
+                let mut out = Vec::new();
+                for y in 0..h {
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
+                    });
+                }
+                out
+            })
+            .unwrap();
+        (px, w, h, s.orientation)
+    };
+    assert_eq!(probe_image(&plain), Ok(()));
+    let (base, w, h, o) = compat(&plain);
+    assert_eq!((w, h, o), (96, 54, 1));
+    let irot = find(&bytes, 9, b"irot");
+    for (angle, exif) in [(1u8, 8u8), (2, 3), (3, 6)] {
+        let p = patch(&format!("irot{angle}.avif"), &|b| b[irot + 4] = angle);
+        assert_eq!(probe_image(&p), Ok(()), "irot {angle}");
+        let (px, ..) = compat(&p);
+        assert!(px == orient_rgba8(&base, w, h, exif), "irot {angle}");
+    }
+    for (axis, exif) in [(0u8, 4u8), (1, 2)] {
+        let p = patch(&format!("imir{axis}.avif"), &|b| {
+            b[irot..irot + 4].copy_from_slice(b"imir");
+            b[irot + 4] = axis;
+        });
+        assert_eq!(probe_image(&p), Ok(()), "imir {axis}");
+        let (px, ..) = compat(&p);
+        assert!(px == orient_rgba8(&base, w, h, exif), "imir {axis}");
+    }
+    // Blink accepts AV1 items without `pixi` (libheif 1.11 and older): an
+    // unknown property in its place leaves the item without one.
+    let pixi = find(&bytes, 16, b"pixi");
+    let p = patch("no-pixi.avif", &|b| {
+        b[pixi..pixi + 4].copy_from_slice(b"xixi")
+    });
+    assert_eq!(probe_image(&p), Ok(()), "no pixi");
+    assert!(compat(&p).0 == base, "no pixi");
+    // ImageIO writes a clap anchored at (0, 0) for odd sizes.
+    assert_eq!(probe_image(&odd), Ok(()));
+    let (_, cw, ch, _) = compat(&odd);
+    assert_eq!((cw, ch), (95, 63), "clap crops");
+    let mut shifted = std::fs::read(&odd).unwrap();
+    let clap = find(&shifted, 40, b"clap") + 4;
+    let n = i32::from_be_bytes(shifted[clap + 16..clap + 20].try_into().unwrap());
+    let den = i32::from_be_bytes(shifted[clap + 20..clap + 24].try_into().unwrap());
+    shifted[clap + 16..clap + 20].copy_from_slice(&(n + den).to_be_bytes());
+    let shifted_path = d.join("clap-shifted.avif");
+    std::fs::write(&shifted_path, shifted).unwrap();
+    assert_eq!(probe_image(&shifted_path), Ok(()));
+    let (_, sw, sh, _) = compat(&shifted_path);
+    assert_eq!(
+        (sw, sh),
+        (96, 64),
+        "an off-origin clap shows the whole image"
+    );
+
+    // Limited range (the app fixture) is in the class.
+    let limited = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/still-limited-range.avif");
+    assert_eq!(probe_image(&limited), Ok(()));
+    assert_eq!(
+        pm_media::image::avif_compat::unmeasured(&plain).unwrap(),
+        None
+    );
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// The level-1 AVIF bitmap, tightly packed.
+fn avif_compat_rgba8(path: &Path) -> Vec<u8> {
+    let pool = pm_media::pool::FramePool::new(0);
+    let original = pm_media::image::read(path, &pool)
+        .or_else(|_| pm_media::image::avif_compat::read_bitmap(path, &pool))
+        .unwrap();
+    assert!(
+        pm_media::image::avif_compat::applies(&original),
+        "{}",
+        path.display()
+    );
+    let s = pm_media::image::avif_compat::read(path, &original, &pool)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    s.frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::new();
+            for y in 0..p.desc.height {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                });
+            }
+            out
+        })
+        .unwrap()
+}
+
+/// Blink gives an AVIF without an ICC profile the sRGB profile when its
+/// container's primaries are BT.709 (or unspecified) and its transfer is
+/// sRGB, BT.709, SMPTE 170M, either BT.2020 transfer, or unspecified
+/// (`gfx::ColorSpace` gives all of those the sRGB curve), so those draw the
+/// same bitmap as sRGB-tagged files; FFmpeg and many tools write transfer
+/// 1 for BT.709 sources. Chromium converts every other description, which
+/// stays a named unsupported class, never a layer failure (app comparison:
+/// `e2e/native-still-orientation-parity.spec.ts`).
+#[test]
+fn avif_color_descriptions_blink_reads_as_srgb_are_drawn() {
+    let d = dir().join("avif-cicp");
+    std::fs::create_dir_all(&d).unwrap();
+    let encode = |p: u8, t: u8, m: u8| {
+        let out = d.join(format!("cicp-{p}-{t}-{m}.avif"));
+        // `setparams` reaches the muxer's `colr` box (encoder options do
+        // not).
+        let vf = format!(
+            "setparams=color_primaries={p}:color_trc={t}:colorspace={m}:range=pc,format=yuv420p"
+        );
+        ffmpeg(
+            &out,
+            &[
+                "-vf",
+                &vf,
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                "8",
+                "-crf",
+                "30",
+            ],
+        );
+        out
+    };
+    let srgb = avif_compat_rgba8(&encode(1, 13, 1));
+    for t in [1, 6, 14, 15] {
+        let p = encode(1, t, 1);
+        assert_eq!(probe_image(&p), Ok(()), "{}", p.display());
+        assert!(avif_compat_rgba8(&p) == srgb, "{}", p.display());
+    }
+    // Unspecified primaries read as BT.709 (matrix 2 reads as BT.601 in
+    // both decoders, so compare with the unspecified file).
+    let unspecified = avif_compat_rgba8(&encode(2, 2, 2));
+    let p = encode(2, 1, 2);
+    assert_eq!(probe_image(&p), Ok(()));
+    assert!(avif_compat_rgba8(&p) == unspecified);
+    // Matrices are CrabbyAvif's in both decoders.
+    for (t, m) in [(6, 6), (14, 9)] {
+        let p = encode(1, t, m);
+        assert_eq!(probe_image(&p), Ok(()), "{}", p.display());
+    }
+    // Linear, gamma 2.2, SMPTE 240M, xvYCC, BT.1361, PQ and HLG transfers
+    // and BT.601, BT.470 and BT.2020 primaries are converted by Chromium:
+    // a named unsupported class whichever profile ImageIO reports.
+    for (p, t, m) in [
+        (1, 4, 1),
+        (1, 7, 1),
+        (1, 8, 1),
+        (1, 11, 1),
+        (1, 12, 1),
+        (1, 16, 1),
+        (1, 18, 1),
+        (6, 6, 6),
+        (5, 13, 5),
+        (9, 1, 9),
+    ] {
+        let f = encode(p, t, m);
+        let why = unsupported(&f);
+        eprintln!("{p}/{t}/{m}: {why}");
+        assert!(why.starts_with("AVIF stills "), "{}: {why}", f.display());
     }
     std::fs::remove_dir_all(&d).ok();
 }
@@ -484,15 +726,34 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
         .unwrap()
 }
 
+fn compat_rgba8(path: &Path) -> Vec<u8> {
+    let pool = pm_media::pool::FramePool::new(0);
+    let original = pm_media::image::read(path, &pool).unwrap();
+    let bitmap = pm_media::image::compat::bitmap_at(path, &original, &pool).unwrap();
+    bitmap
+        .frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::new();
+            for y in 0..p.desc.height {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                });
+            }
+            out
+        })
+        .unwrap()
+}
+
 /// The TIFF class pm-render draws was compared with the legacy renderer on
 /// an uncompressed file (`render/still-photo-tiff`). The lossless
 /// compressions it also accepts (LZW with and without predictor 2, both
 /// Deflate tags, PackBits) decode, in pm-media, to the same pixels as the
 /// uncompressed file (and FFmpeg, the legacy converter, decodes them
-/// losslessly by definition), so they are the same class. Tiled and gray
-/// files are routed (palette, Y'CbCr, planar, fill order, sample format,
-/// and colorimetry tags are covered by `stills::tests::tiff_classes`;
-/// pm-media cannot read FFmpeg's palette or Y'CbCr TIFF at all).
+/// losslessly by definition), so they are the same class. Tiled layouts
+/// remain gated. Gray and palette strips have separate app comparisons;
+/// other photometric/sample/colorimetry boundaries are covered by
+/// `stills::tests::tiff_classes`.
 #[test]
 fn tiff_compressions_decode_alike() {
     let d = dir().join("tiff");
@@ -559,19 +820,19 @@ fn tiff_compressions_decode_alike() {
     eprintln!("imageio-tiled.tiff unsupported: {got}");
     let gray = d.join("gray.tiff");
     ffmpeg(&gray, &["-pix_fmt", "gray"]);
-    let got = unsupported(&gray);
-    assert!(got.contains("photometric interpretation 1"), "{got}");
-    eprintln!("gray.tiff    unsupported: {got}");
+    assert_eq!(
+        probe_image(&gray),
+        Ok(()),
+        "gray TIFF is compared through the app"
+    );
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// A TIFF with an ICC profile (tag 34675) is unsupported whatever the
-/// profile: pm-media's TIFF decoder does not report it (so a wide-gamut
-/// TIFF would otherwise be drawn as untagged sRGB), and no tagged TIFF was
-/// compared with the legacy renderer. ImageIO embeds a profile in every
-/// TIFF of a tagged image, including sRGB for an untagged source.
+/// RGB TIFF's shipped FFmpeg conversion forwards ICC to its PNG. The
+/// compatibility bitmap must be byte-identical to that PNG's, while the
+/// native-depth reader retains the source ICC for level 2/interpretation.
 #[test]
-fn tagged_tiff_is_unsupported() {
+fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
     let d = dir().join("tagged-tiff");
     std::fs::create_dir_all(&d).unwrap();
     let plain = d.join("plain.png");
@@ -603,18 +864,37 @@ fn tagged_tiff_is_unsupported() {
             tags.contains(&34675),
             "{name}: ImageIO wrote no profile: {tags:?}"
         );
-        let got = unsupported(&p);
-        assert!(got.contains("ICC profile"), "{name}: {got}");
-        eprintln!("{name:<16} unsupported: {got}");
+        assert_eq!(probe_image(&p), Ok(()), "{name}");
+        let pool = pm_media::pool::FramePool::new(0);
+        let original = pm_media::image::read(&p, &pool).unwrap();
+        assert!(
+            original.color.icc.as_ref().is_some_and(|p| !p.is_empty()),
+            "native ICC retained: {name}"
+        );
+        let converted = d.join(format!("{name}.png"));
+        let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+        assert!(
+            Command::new(bin)
+                .args(["-v", "error", "-y", "-i"])
+                .arg(&p)
+                .args(["-frames:v", "1", "-c:v", "png"])
+                .arg(&converted)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (a, b) = (compat_rgba8(&p), compat_rgba8(&converted));
+        let max = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(max == 0, "{name}: shipped FFmpeg PNG bitmap max {max}");
     }
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Gray JPEG is drawn only as baseline, the structure compared with the
-/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray is
-/// routed.
+/// Baseline gray JPEG is compared with the legacy renderer in
+/// `render/still-photo-gray-jpg`; progressive gray now
+/// also has a rotated/filtered comparison through the app.
 #[test]
-fn progressive_gray_jpeg_is_unsupported() {
+fn progressive_gray_jpeg_is_supported() {
     let d = dir().join("gray-jpeg");
     std::fs::create_dir_all(&d).unwrap();
     let gray_png = d.join("gray.png");
@@ -637,8 +917,275 @@ fn progressive_gray_jpeg_is_unsupported() {
         bytes.windows(2).any(|w| w == [0xFF, 0xC2]),
         "ImageIO wrote no progressive frame header"
     );
-    let got = unsupported(&progressive);
-    assert!(got.contains("progressive gray"), "{got}");
-    eprintln!("progressive gray JPEG unsupported: {got}");
+    assert_eq!(probe_image(&progressive), Ok(()));
     std::fs::remove_dir_all(&d).ok();
+}
+
+/// Full app comparisons of these classes live in the explicit
+/// svgstills-parity harness; keep the capability and source precision
+/// boundaries covered without depending on private fixtures.
+#[test]
+fn additional_integer_decoder_classes_are_drawn() {
+    let d = dir().join("integer-classes");
+    std::fs::create_dir_all(&d).unwrap();
+    for (name, args) in [
+        ("a.bmp", vec!["-pix_fmt", "bgr24"]),
+        ("a.ico", vec!["-vf", "scale=64:64"]),
+        ("a.gif", vec!["-pix_fmt", "pal8"]),
+    ] {
+        let path = d.join(name);
+        ffmpeg(&path, &args);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+    }
+    for bits in [png::BitDepth::One, png::BitDepth::Two, png::BitDepth::Four] {
+        let path = d.join(format!("gray-{}.png", bits as u8));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 8, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(bits);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![0x55; bits as usize * 2])
+            .unwrap();
+        assert_eq!(probe_image(&path), Ok(()));
+    }
+    let avif = d.join("ten-bit.avif");
+    ffmpeg(
+        &avif,
+        &[
+            "-vf",
+            "setparams=color_primaries=1:color_trc=13:colorspace=1,format=yuv420p10le",
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            "10",
+            "-crf",
+            "25",
+        ],
+    );
+    assert_eq!(probe_image(&avif), Ok(()));
+    let original = pm_media::image::read(&avif, &pm_media::pool::FramePool::new(0)).unwrap();
+    assert!(original.bit_depth > 8, "native precision is retained");
+    assert_eq!(avif_compat_rgba8(&avif).len(), 96 * 54 * 4);
+    let palette = d.join("palette.tiff");
+    ffmpeg(&palette, &["-pix_fmt", "pal8"]);
+    assert_eq!(probe_image(&palette), Ok(()));
+    let converted = d.join("palette.png");
+    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    assert!(
+        Command::new(bin)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&palette)
+            .args(["-frames:v", "1", "-c:v", "png"])
+            .arg(&converted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(compat_rgba8(&palette), compat_rgba8(&converted));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn integer_and_alpha_tiff_bitmaps_match_the_shipped_png_conversion() {
+    let d = dir().join("integer-tiff");
+    std::fs::create_dir_all(&d).unwrap();
+    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    for fmt in ["rgb48le", "rgba", "rgba64le"] {
+        let tiff = d.join(format!("{fmt}.tiff"));
+        let mut args = Vec::new();
+        if fmt.starts_with("rgba") {
+            args.extend([
+                "-vf",
+                "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='X/W*255'",
+            ]);
+        }
+        args.extend(["-pix_fmt", fmt]);
+        ffmpeg(&tiff, &args);
+        assert_eq!(probe_image(&tiff), Ok(()));
+        let png = d.join(format!("{fmt}.png"));
+        assert!(
+            Command::new(&bin)
+                .args(["-v", "error", "-y", "-i"])
+                .arg(&tiff)
+                .args(["-frames:v", "1", "-c:v", "png"])
+                .arg(&png)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (a, b) = (compat_rgba8(&tiff), compat_rgba8(&png));
+        if fmt.starts_with("rgba") {
+            assert!(a.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
+        }
+        let max = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(
+            max == 0,
+            "{fmt} TIFF bitmap differs from its shipped PNG by {max}"
+        );
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+/// The app alpha-ramp references are matched by quantizing source-space
+/// premultiplied pixels and delaying gamut clipping until the final store.
+#[test]
+fn wide_gamut_alpha_and_opaque_rgba_are_supported() {
+    let d = dir().join("icc-alpha");
+    std::fs::create_dir_all(&d).unwrap();
+    for (label, alpha) in [("opaque", 255u8), ("translucent", 128)] {
+        let source = d.join(format!("{label}.png"));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&source).unwrap(), 4, 4);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[255, 0, 0, alpha].repeat(16))
+            .unwrap();
+        for space in ["p3", "adobe"] {
+            for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
+                let path = d.join(format!("{label}-{space}.{ext}"));
+                imageio_write(
+                    &source,
+                    &path,
+                    uti,
+                    &ImageIo {
+                        color_space: Some(space),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(probe_image(&path), Ok(()));
+                if alpha != 255 {
+                    let px = compat_rgba8(&path);
+                    assert!(
+                        px.chunks_exact(4).all(|p| p[0] > p[3] && p[3] == alpha),
+                        "{}: gamut clips only after premultiplication",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+/// SHA-256 references are Chromium 152 ImageBitmap uploads, captured through
+/// the app under the Electron lock. All 39 SDR AVIFs also pass transformed
+/// composition parity; these redistributable synthetic fixtures pin decoding.
+#[test]
+fn avif_sdr_chroma_depth_and_icc_match_chromium_uploads() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    for (name, expected) in [
+        (
+            "still-avif-400-full.avif",
+            "bad584762d7c9d8faba67b0eeeacc4d76e29ada8517af647df4ff1c832732ee7",
+        ),
+        (
+            "still-avif-422-full.avif",
+            "db4a34ff6a6b35bd140be7fa8c0b5dde82e1c6fd8bd90965f5a799612447b528",
+        ),
+        (
+            "still-avif-444-full.avif",
+            "97761dacec6a1eb2fc102a190c54831d9811df51f6221a0b61a93be3e7c95302",
+        ),
+        (
+            "still-avif-icc-adobe-alpha.avif",
+            "34520f1c8e1c576fc24ad32bfc7fa082dc2e4b30c33d0fbeef8307b724247e97",
+        ),
+        (
+            "still-avif-icc-p3-alpha.avif",
+            "d9131d331c26ea078e851a65426ee99f98a70d9e325b780ce5f380c921103416",
+        ),
+        (
+            "still-red-limited-range-420-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-422-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-444-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-with-alpha-12bpc.avif",
+            "efb2a3897a86e2b25d51f66e9bbeaf6f4329c82bd86a35d1718016bbbd5863a4",
+        ),
+        (
+            "still-red-with-profile-12bpc.avif",
+            "d7b8eab2c246b0cbc1e10701de7cc2412f7055bfa95967d023a7d101699340f4",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let rgba = avif_compat_rgba8(&path);
+        assert_eq!(format!("{:x}", Sha256::digest(&rgba)), expected, "{name}");
+        // ImageIO rejects the valid deep-alpha container; level 1 must
+        // decode it independently. Other native-depth sources stay deep.
+        if name.contains("12bpc") && name.contains("limited-range") {
+            let native = pm_media::image::read(&path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert!(native.bit_depth > 8, "{name}: level 2 source precision");
+        }
+    }
+}
+
+/// Native decoder bytes against app-uploaded, premultiplied Chromium RGBA8.
+#[test]
+fn rgb_jpeg_and_gray_tiff_match_chromium() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let pool = pm_media::pool::FramePool::new(0);
+    for (name, hash) in [
+        (
+            "still-tiff-gray8.tiff",
+            "e49788dbae66c0412fc14365211c0e2e51f37e23dd8b3152faceea788f8b0a00",
+        ),
+        (
+            "still-tiff-gray-alpha.tiff",
+            "2a0555044928c6b6f33fbe32c3ab1eac70f368ee2d316bcbdbc65297abdaf946",
+        ),
+        (
+            "still-jpeg-rgb-baseline.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-jpeg-rgb-progressive.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-tiff-white8.tiff",
+            "130c95b327eec004b30f2b7145629cf5402181f35360c7a3d827f2c2066aaed8",
+        ),
+        (
+            "still-tiff-gray16.tiff",
+            "1f165643c5578330fa32b729f3162845a089ae5eea791fb7b41c65b79f40890b",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let native = pm_media::image::read(&path, &pool).unwrap();
+        let bitmap = pm_media::image::compat::bitmap_at(&path, &native, &pool).unwrap();
+        let bytes = bitmap
+            .frame
+            .with_planes(|planes| {
+                let p = &planes[0];
+                let mut out = Vec::new();
+                for y in 0..p.desc.height {
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                    });
+                }
+                out
+            })
+            .unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), hash, "{name}");
+    }
+    let deflate = fixtures.join("still-tiff32f-deflate.tiff");
+    assert_eq!(probe_image(&deflate), Ok(()));
+    let native = pm_media::image::read(&deflate, &pool).unwrap();
+    assert!(native.float);
+    assert_eq!(native.bit_depth, 32, "float sources keep their precision");
 }

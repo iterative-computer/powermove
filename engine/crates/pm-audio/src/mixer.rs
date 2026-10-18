@@ -100,6 +100,9 @@ pub struct RenderOptions {
     /// Decode missing source blocks on this thread (export, offline). When
     /// false (playback), missing blocks are queued and play as silence.
     pub wait: bool,
+    /// Commit missing playback input as silence instead of retrying it.
+    /// Offline renders leave this false and wait for all input.
+    pub drop_starved: bool,
     /// Strips heard (the mixer's monitor solo; never part of an export).
     /// `None` or empty: every strip.
     pub monitor_solo: Option<HashSet<String>>,
@@ -118,6 +121,11 @@ pub struct RenderReport {
     pub voices: usize,
     /// Voices that had source blocks missing (playback only).
     pub starved: usize,
+    /// IDs of voices missing input, including outgoing retune voices, each
+    /// once.
+    pub starved_voices: Vec<String>,
+    /// Project output frames silenced for missing input, summed over voices.
+    pub dropped_voice_frames: u64,
     /// Errors decoding or evaluating, one per voice.
     pub errors: Vec<(String, String)>,
 }
@@ -191,6 +199,8 @@ pub struct Mixer {
     /// Source samples per output sample, per sample (free reads).
     steps: Vec<f64>,
     src: Vec<Vec<f32>>,
+    src_valid: Vec<bool>,
+    voice_dropped_frames: u64,
     voice_out: Vec<Vec<f32>>,
     strips: Vec<Vec<Vec<f32>>>,
     kernel: Vec<f32>,
@@ -201,6 +211,9 @@ pub struct Mixer {
     glide_len: usize,
     glide_acc: Vec<Vec<f32>>,
     glide_tmp: Vec<Vec<f32>>,
+    /// Strip buffers of the outgoing mixes (the current mix's stay in
+    /// `strips` for its meters).
+    glide_strips: Vec<Vec<Vec<f32>>>,
     /// Read bounds of time-mapped voices, per (voice, control-point group).
     reads: HashMap<(usize, i64), Spans>,
 }
@@ -231,6 +244,8 @@ impl Mixer {
             positions: vec![],
             steps: vec![],
             src: vec![],
+            src_valid: vec![],
+            voice_dropped_frames: 0,
             voice_out: vec![],
             strips: vec![],
             kernel: vec![],
@@ -239,6 +254,7 @@ impl Mixer {
             glide_len: 0,
             glide_acc: vec![],
             glide_tmp: vec![],
+            glide_strips: vec![],
             reads: HashMap::new(),
         };
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
@@ -309,6 +325,21 @@ impl Mixer {
     /// current mix).
     pub fn end_glides(&mut self) {
         self.outgoing.clear();
+    }
+
+    /// Forgets every stretch's starved request: the next render after a
+    /// seek or a new run is a new request, which starts by the pre-roll
+    /// rules (so it equals an offline render from there), never a retry
+    /// that walks a run over the gap.
+    pub fn abandon_retries(&mut self) {
+        let outgoing = self.outgoing.iter().flat_map(|g| g.voices.iter());
+        for v in self.voices.iter().chain(outgoing) {
+            if let Some(run) = &v.stretch {
+                run.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .abandon_retry();
+            }
+        }
     }
 
     /// Whether a retune glide is in progress.
@@ -401,18 +432,21 @@ impl Mixer {
         out: &mut [Vec<f32>],
         options: &RenderOptions,
     ) -> Result<RenderReport> {
-        let report = self.render_current(
-            start,
-            frames,
-            out,
-            options,
-            options.monitor_solo.as_ref(),
-            options.meters,
-        )?;
+        let mut report =
+            self.render_current(start, frames, out, options, options.monitor_solo.as_ref())?;
         if !self.outgoing.is_empty() && frames > 0 {
-            self.render_glides(start, frames, out, options);
+            // The outgoing mixes render into spare strips: the current
+            // mix's strips feed its meters below.
+            std::mem::swap(&mut self.strips, &mut self.glide_strips);
+            self.render_glides(start, frames, out, options, &mut report);
+            std::mem::swap(&mut self.strips, &mut self.glide_strips);
         }
-        if options.meters {
+        // A starved render is retried (playback) or not heard as rendered:
+        // the meters take only complete renders, once each.
+        if options.meters && (report.starved == 0 || options.drop_starved) {
+            for (tap, strip) in self.taps.iter_mut().zip(&self.strips) {
+                tap.push(strip, frames);
+            }
             self.master_tap.push(out, frames);
         }
         Ok(report)
@@ -426,6 +460,7 @@ impl Mixer {
         frames: usize,
         out: &mut [Vec<f32>],
         options: &RenderOptions,
+        report: &mut RenderReport,
     ) {
         let channels = self.format.channels();
         let len = self.glide_len as f32;
@@ -440,13 +475,23 @@ impl Mixer {
             self.swap_state(&mut outgoing[j]);
             let solo = outgoing[j].solo.clone();
             // An outgoing mix that fails renders silence under the fade.
-            if self
-                .render_current(start, frames, target, options, solo.as_ref(), false)
-                .is_err()
-            {
-                for c in target.iter_mut() {
-                    c.clear();
-                    c.resize(frames, 0.0);
+            match self.render_current(start, frames, target, options, solo.as_ref()) {
+                Ok(outgoing_report) => {
+                    report.starved += outgoing_report.starved;
+                    for id in outgoing_report.starved_voices {
+                        if !report.starved_voices.contains(&id) {
+                            report.starved_voices.push(id);
+                        }
+                    }
+                    report.dropped_voice_frames += outgoing_report.dropped_voice_frames;
+                    report.errors.extend(outgoing_report.errors);
+                }
+                Err(e) => {
+                    report.errors.push(("retune".into(), e.to_string()));
+                    for c in target.iter_mut() {
+                        c.clear();
+                        c.resize(frames, 0.0);
+                    }
                 }
             }
             self.swap_state(&mut outgoing[j]);
@@ -464,7 +509,11 @@ impl Mixer {
             }
         }
         for g in &mut outgoing {
-            g.done += frames;
+            // Playback retries a segment whose source was missing. Its
+            // retune envelope must stay at the same rendered position.
+            if report.starved == 0 || options.drop_starved {
+                g.done += frames;
+            }
         }
         // A finished glide leaves the mixes before it unheard.
         if let Some(last) = outgoing.iter().rposition(|g| g.done >= self.glide_len) {
@@ -483,7 +532,7 @@ impl Mixer {
         std::mem::swap(&mut self.retime, &mut g.retime);
     }
 
-    /// Mixes the current state (no glides, no master tap).
+    /// Mixes the current state (no glides, no meters).
     fn render_current(
         &mut self,
         start: i64,
@@ -491,7 +540,6 @@ impl Mixer {
         out: &mut [Vec<f32>],
         options: &RenderOptions,
         monitor_solo: Option<&HashSet<String>>,
-        meters: bool,
     ) -> Result<RenderReport> {
         let channels = self.format.channels();
         assert_eq!(out.len(), channels, "one output vector per bus channel");
@@ -517,10 +565,17 @@ impl Mixer {
         let comps = graph.resolve(&doc)?;
         let open = comps[0].clone();
         for (vi, plan) in graph.voices.iter().enumerate() {
+            self.voice_dropped_frames = 0;
             match self.render_voice(vi, plan, &comps, &open, start, frames, options) {
                 Ok(Some(starved)) => {
                     report.voices += 1;
                     report.starved += starved as usize;
+                    if starved {
+                        if !report.starved_voices.contains(&plan.id) {
+                            report.starved_voices.push(plan.id.clone());
+                        }
+                        report.dropped_voice_frames += self.voice_dropped_frames;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => report.errors.push((plan.id.clone(), e.to_string())),
@@ -528,9 +583,6 @@ impl Mixer {
         }
         let solo = monitor_solo.filter(|s| !s.is_empty());
         for (si, strip) in self.strips.iter().enumerate() {
-            if meters {
-                self.taps[si].push(strip, frames);
-            }
             if solo.is_some_and(|s| !s.contains(&graph.strips[si])) {
                 continue;
             }
@@ -687,9 +739,26 @@ impl Mixer {
                 }
                 let mut views: Vec<&mut [f32]> =
                     self.voice_out.iter_mut().map(|c| &mut c[..n]).collect();
-                complete &= self
-                    .cache
-                    .read(&source, a - shift, n, &mut views, options.wait)?;
+                self.src_valid.resize(n, true);
+                complete &= self.cache.read_valid(
+                    &source,
+                    a - shift,
+                    n,
+                    &mut views,
+                    options.wait,
+                    options
+                        .drop_starved
+                        .then_some(self.src_valid.as_mut_slice()),
+                )?;
+                if options.drop_starved {
+                    // Like the other readers, only frames that would be
+                    // heard count as dropped.
+                    self.voice_dropped_frames += self.src_valid[..n]
+                        .iter()
+                        .zip(&self.gains[..n])
+                        .filter(|&(&valid, &gain)| !valid && gain != 0.0)
+                        .count() as u64;
+                }
             }
             Reader::Grid {
                 bank,
@@ -708,15 +777,33 @@ impl Mixer {
                 }
                 let mut views: Vec<&mut [f32]> =
                     self.src.iter_mut().map(|c| &mut c[..span]).collect();
-                complete &= self
-                    .cache
-                    .read(&source, lo, span, &mut views, options.wait)?;
+                self.src_valid.resize(span, true);
+                complete &= self.cache.read_valid(
+                    &source,
+                    lo,
+                    span,
+                    &mut views,
+                    options.wait,
+                    options
+                        .drop_starved
+                        .then_some(self.src_valid.as_mut_slice()),
+                )?;
                 for i in 0..n {
                     if self.gains[i] == 0.0 {
                         continue;
                     }
                     let u = unit(a + i as i64);
                     let (si, ph) = (u.div_euclid(*phases) as i64, u.rem_euclid(*phases) as usize);
+                    if !complete
+                        && options.drop_starved
+                        && !self.src_valid[(si - bank.before() as i64 - lo) as usize
+                            ..(si - bank.before() as i64 - lo) as usize + bank.taps]
+                            .iter()
+                            .all(|&v| v)
+                    {
+                        self.voice_dropped_frames += 1;
+                        continue;
+                    }
                     for c in 0..sc {
                         self.voice_out[c][i] = bank.grid(&self.src[c], lo, si, ph);
                     }
@@ -751,9 +838,17 @@ impl Mixer {
                     }
                     let mut views: Vec<&mut [f32]> =
                         self.src.iter_mut().map(|c| &mut c[..span]).collect();
-                    complete &= self
-                        .cache
-                        .read(&source, lo, span, &mut views, options.wait)?;
+                    self.src_valid.resize(span, true);
+                    complete &= self.cache.read_valid(
+                        &source,
+                        lo,
+                        span,
+                        &mut views,
+                        options.wait,
+                        options
+                            .drop_starved
+                            .then_some(self.src_valid.as_mut_slice()),
+                    )?;
                     self.kernel.resize(bank.taps, 0.0);
                     for (j, &pos) in seg.iter().enumerate() {
                         if self.gains[i + j] == 0.0 {
@@ -761,7 +856,18 @@ impl Mixer {
                         }
                         let fl = pos.floor();
                         bank.free_kernel(pos - fl, &mut self.kernel);
-                        let at = (fl as i64 - bank.before() as i64 - lo) as usize;
+                        let first = fl as i64 - bank.before() as i64;
+                        if !complete
+                            && options.drop_starved
+                            && !self.src_valid
+                                [(first - lo) as usize..(first - lo) as usize + bank.taps]
+                                .iter()
+                                .all(|&v| v)
+                        {
+                            self.voice_dropped_frames += 1;
+                            continue;
+                        }
+                        let at = (first - lo) as usize;
                         for c in 0..sc {
                             self.voice_out[c][i + j] =
                                 kernel::dot(&self.src[c][at..at + bank.taps], &self.kernel);
@@ -840,6 +946,12 @@ impl Mixer {
         let complete = run.render(a, n, &mut map, &mut read, &mut self.voice_out);
         self.src = src;
         let complete = complete?;
+        if !complete && options.drop_starved {
+            self.voice_dropped_frames += n as u64;
+            // The next segment is a new request, not a catch-up through an
+            // arbitrarily long missing span. Never feed missing PCM to DSP.
+            run.abandon_retry();
+        }
         drop(run);
         let voice = &self.voices[vi];
         let strip = &mut self.strips[voice.strip];
@@ -1023,7 +1135,7 @@ fn group_spans(
     let rate = plan.source.sample_rate() as f64;
     let first = g * READ_GROUP * CONTROL;
     // As `render_voice`: a time-mapped voice sounds where it is in its span.
-    let on = |pt: &Point| pt.active && pt.in_span && pt.gain != 0.0;
+    let on = |pt: &Point| pt.active && pt.in_span && (stretch_block.is_some() || pt.gain != 0.0);
     let mut spans: Vec<(i64, i64)> = Vec::new();
     let mut prev: Option<Point> = None;
     for k in 0..=READ_GROUP {

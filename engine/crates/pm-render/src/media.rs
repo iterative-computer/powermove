@@ -164,6 +164,17 @@ fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), Probe
 /// ([`still_facts`]); each interpretation is then resolved from its facts.
 pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
     let (color, float) = still_facts(path)?;
+    // A PNG gamma is the file's transfer; only a transfer override replaces
+    // it. Interpretations of it are not implemented.
+    if interp.transfer.is_none()
+        && pm_media::image::png_gamma::imageio_gamma(path)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?
+            .is_some()
+    {
+        return Err(ProbeIssue::Unsupported(Feature::Media(
+            "PNG gamma (gAMA) with Interpret Footage overrides".into(),
+        )));
+    }
     interpreted_color(&color, float, interp).map(|_| ())
 }
 
@@ -243,6 +254,26 @@ fn interpreted_color(
     })
 }
 
+/// Keep native-depth sources unchanged. At level 1, a file Chromium can
+/// decode must not depend on ImageIO accepting the same AVIF container.
+fn image_source(
+    path: &Path,
+    pool: &FramePool,
+    compat: bool,
+) -> pm_media::Result<pm_media::image::StillImage> {
+    pm_media::image::read(path, pool).or_else(|error| {
+        if compat {
+            use std::io::Read;
+            let mut head = [0; 512];
+            let n = std::fs::File::open(path)?.read(&mut head)?;
+            if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Avif {
+                return pm_media::image::avif_compat::read_bitmap(path, pool);
+            }
+        }
+        Err(error)
+    })
+}
+
 /// Whether an image file can be drawn: readable, not animated, in a tested
 /// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
@@ -254,12 +285,82 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         let pool = FramePool::new(0);
-        let still = pm_media::image::read(path, &pool)
+        let still = image_source(path, &pool, true)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        // Chromium cannot show an AVIF its decoder cannot parse, whatever
+        // ImageIO reads: a named failure, not a class.
+        if pm_media::image::avif_compat::applies(&still) {
+            pm_media::image::avif_compat::unmeasured(path).map_err(|e| {
+                ProbeIssue::Unreadable(format!(
+                    "{}: Chromium's AVIF decoder cannot parse it ({e})",
+                    path.display()
+                ))
+            })?;
+        }
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        image_color(&still).map(|_| ())
+        if pm_media::image::avif_compat::applies(&still) {
+            let bitmap = pm_media::image::avif_compat::read(path, &still, &pool)
+                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
+            image_color(&bitmap).map(|_| ())
+        } else if pm_media::image::compat::applies(&still) {
+            let bitmap = pm_media::image::compat::bitmap_at(path, &still, &pool)
+                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
+            image_color(&bitmap).map(|_| ())
+        } else {
+            image_color(&still).map(|_| ())
+        }
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// The shipped `sequencePlaybackTime`: select an available CFR slot,
+/// clamp to its ends, then seek one millisecond inside it. In particular,
+/// sequences do not use ordinary video's 40 ms end padding.
+pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64> {
+    use pm_eval::node;
+    let sequence = node::member(Some(record), "imageSequence")?;
+    let number =
+        |name| node::member(Some(sequence), name).map(|v| node::js_value_opt(Some(v)).to_number());
+    let (fps, frames) = (number("fps")?, number("frames")?);
+    if !fps.is_finite()
+        || !(1.0..=240.0).contains(&fps)
+        || !frames.is_finite()
+        || frames.fract() != 0.0
+        || !(2.0..=9_007_199_254_740_991.0).contains(&frames)
+    {
+        return None;
+    }
+    let index = crate::js::max(
+        0.0,
+        crate::js::min(frames - 1.0, ((time + 1e-7) * fps).floor()),
+    );
+    Some(index / fps + 0.001)
+}
+
+/// Numbered/animated imports today persist a WebM rendition, even when
+/// their document format is GIF or PNG. An EBML header identifies the
+/// rendition independently of path extensions and original metadata.
+/// The native video probe validates readability and indexability before
+/// a valid rendition can use the video path.
+pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
+    static CACHE: StampCache<Result<bool, String>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        use std::io::Read;
+        let mut magic = [0; 4];
+        std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if magic == [0x1a, 0x45, 0xdf, 0xa3] {
+            MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(true);
+        }
+        // A readable original animation retains its parity gate. Broken
+        // bytes are a named failure, not an unsupported sequence.
+        pm_media::image::read(path, &FramePool::new(0))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(false)
+    })
+    .unwrap_or_else(|| Err(offline(path)))
 }
 
 /// Whether a video file is drawn without routing: it opens and indexes,
@@ -284,28 +385,50 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 /// routing asks at every document revision, and opening a source indexes
 /// it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
-    static CACHE: StampCache<Result<(), String>> = OnceLock::new();
-    per_stamp(&CACHE, path, || {
-        MediaSource::open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|src| video_supported(&src))
+    probe_video_issue(path).map_err(|issue| match issue {
+        ProbeIssue::Unreadable(message) => message,
+        ProbeIssue::Unsupported(Feature::Media(message)) => message,
+        ProbeIssue::Unsupported(feature) => feature.to_string(),
     })
-    .unwrap_or_else(|| Err(offline(path)))
 }
 
-/// [`probe_video`] for an asset with Interpret Footage overrides: only what
-/// the renderer cannot draw at all is refused. The file is opened and
-/// indexed once per size and modification time; each interpretation is
-/// then resolved from its video probe.
+/// Typed video probe: corrupt/offline media is a media failure, not a
+/// capability reason that could send a project to another renderer.
+pub fn probe_video_issue(path: &Path) -> Result<(), ProbeIssue> {
+    static CACHE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        let src = MediaSource::open(path)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        video_supported(&src).map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
+    })
+    .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// [`probe_video`] for an asset with Interpret Footage overrides.
 pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(), String> {
+    probe_interpreted_video_issue(path, interp).map_err(|issue| match issue {
+        ProbeIssue::Unreadable(message) => message,
+        ProbeIssue::Unsupported(Feature::Media(message)) => message,
+        ProbeIssue::Unsupported(feature) => feature.to_string(),
+    })
+}
+
+/// Typed interpreted probe. Facts are kept per source stamp, independently
+/// of changing interpretation overrides.
+pub fn probe_interpreted_video_issue(
+    path: &Path,
+    interp: &Interpretation,
+) -> Result<(), ProbeIssue> {
     static CACHE: StampCache<Result<Option<VideoProbe>, String>> = OnceLock::new();
     let video = per_stamp(&CACHE, path, || {
         MediaSource::open(path)
             .map(|src| src.probe.video.clone())
             .map_err(|e| format!("{}: {e}", path.display()))
     })
-    .unwrap_or_else(|| Err(offline(path)))?;
+    .unwrap_or_else(|| Err(offline(path)))
+    .map_err(ProbeIssue::Unreadable)?;
     video_probe_drawable(video.as_ref(), interp)
+        .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
 }
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {
@@ -471,7 +594,16 @@ fn source_uniform(
             u32::from(convert_primaries),
         ],
         matte,
-        hdr: [tone.map_or(0.0, |t| t.peak_nits as f32), 0.0, 0.0, 0.0],
+        hdr: [
+            tone.map_or(0.0, |t| t.peak_nits as f32),
+            if color.matrix == MatrixCoefficients::Bt2020Cl {
+                1.0
+            } else {
+                0.0
+            },
+            0.0,
+            0.0,
+        ],
         ..Default::default()
     };
     // Primaries columns (the matrix is row-major).
@@ -608,6 +740,7 @@ struct ImageKey {
     reading: String,
     /// Converted textures hold working values: linear light differs.
     linear: bool,
+    compat: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -718,6 +851,7 @@ impl MediaCache {
         working: WorkingEncoding,
         precision: Precision,
         interpret: Option<&Interpretation>,
+        compat: bool,
     ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
@@ -728,6 +862,7 @@ impl MediaCache {
             precision: precision as u8,
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
+            compat,
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
@@ -741,8 +876,15 @@ impl MediaCache {
             None => probe_image(path),
         }
         .map_err(issue)?;
-        let mut still = pm_media::image::read(path, &self.pool)
+        let mut still = image_source(path, &self.pool, compat && interpret.is_none())
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
+            still = pm_media::image::avif_compat::read(path, &still, &self.pool)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
+            still = pm_media::image::compat::bitmap_at(path, &still, &self.pool)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        }
         let color = match interpret {
             Some(i) => {
                 let read = interpreted_image_color(&still, i).map_err(issue)?;
@@ -755,7 +897,27 @@ impl MediaCache {
                 }
                 read.color
             }
-            None => image_color(&still).map_err(issue)?,
+            None => {
+                // Level 2 reads a gamma-only PNG as ImageIO does; level 1's
+                // bitmap above already applied Chromium's reading.
+                if !compat
+                    && still.format == pm_media::image::ImageFormat::Png
+                    && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
+                {
+                    still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
+                if still.color.icc_class == Some(IccClass::Other) {
+                    still = pm_media::image::imageio::convert_to_linear_srgb(
+                        &still,
+                        &self.pool,
+                        still.color.alpha,
+                    )
+                    .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
+                image_color(&still).map_err(issue)?
+            }
         };
         let importer = self.importer()?;
         let imported = importer
@@ -834,6 +996,8 @@ impl MediaCache {
         precision: Precision,
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
+        sequence: bool,
+        compat: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
@@ -857,7 +1021,7 @@ impl MediaCache {
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{interp:?}{composition:?}").hash(&mut h);
+            format!("{interp:?}{composition:?}{sequence}{compat}").hash(&mut h);
             self.interpretations
                 .get(path)
                 .map(|c| format!("{c:?}"))
@@ -918,6 +1082,20 @@ impl MediaCache {
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
         }
+        let bitmap = if sequence
+            && compat
+            && interp.is_empty()
+            && fields.is_none()
+            && !self.interpretations.contains_key(path)
+            && v.color.tagged.matrix.is_none()
+        {
+            pm_media::image::compat::video_bitmap(&frame, &self.pool)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+        } else {
+            None
+        };
+        let sequence_bitmap = bitmap.is_some();
+        let frame = bitmap.unwrap_or(frame);
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
@@ -969,11 +1147,20 @@ impl MediaCache {
                 .normalize(queue, encoder, &imported)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
-        let desc: ColorDescription = match self.interpretations.get(path) {
+        let mut desc: ColorDescription = match self.interpretations.get(path) {
             Some(d) => *d,
             None if !interp.is_empty() => reading.color,
             None => frame.color.unwrap_or(reading.color),
         };
+        // raster.ts encodes image sequences as untagged BT.601 VP9, even
+        // at HD sizes. Honor explicit file or Interpret Footage matrices.
+        if sequence
+            && v.color.tagged.matrix.is_none()
+            && interp.matrix.is_none()
+            && !self.interpretations.contains_key(path)
+        {
+            desc.matrix = pm_protocol::color::MatrixCoefficients::Bt601;
+        }
         let color = SourceColor {
             transfer: desc.transfer,
             primaries: standard_video_primaries(desc.primaries),
@@ -994,6 +1181,17 @@ impl MediaCache {
                 })),
                 _ => None,
             },
+        };
+        let color = if sequence_bitmap {
+            SourceColor {
+                transfer: pm_protocol::color::Transfer::DisplayE,
+                primaries: pm_protocol::color::Primaries::Bt709,
+                matrix: pm_protocol::color::MatrixCoefficients::Identity,
+                alpha: AlphaMode::Premultiplied,
+                ..color
+            }
+        } else {
+            color
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
         // A converted frame retired by an earlier render (its reads are

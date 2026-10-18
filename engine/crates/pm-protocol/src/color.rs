@@ -76,13 +76,16 @@ pub enum MatrixCoefficients {
     Bt601,
     /// BT.2020 non-constant luminance (code 9).
     Bt2020Ncl,
+    /// BT.2020 constant luminance (code 10), a nonlinear transform.
+    Bt2020Cl,
 }
 
 impl MatrixCoefficients {
-    /// Luma coefficients (Kr, Kb); Kg = 1 − Kr − Kb.
+    /// Linear matrix coefficients (Kr, Kb); Kg = 1 − Kr − Kb.
+    /// Constant luminance is nonlinear and has no such matrix.
     pub const fn kr_kb(self) -> Option<(f64, f64)> {
         match self {
-            MatrixCoefficients::Identity => None,
+            MatrixCoefficients::Identity | MatrixCoefficients::Bt2020Cl => None,
             MatrixCoefficients::Bt709 => Some((0.2126, 0.0722)),
             MatrixCoefficients::Bt601 => Some((0.299, 0.114)),
             MatrixCoefficients::Bt2020Ncl => Some((0.2627, 0.0593)),

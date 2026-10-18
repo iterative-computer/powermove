@@ -3,10 +3,11 @@
 //! Graphite device into a 4× multisampled RGBA8 target, resolved to the
 //! bitmap the legacy compositor uploads.
 
+use super::analytic;
 use super::blink::{CanvasPath, Drawn, sat_f32};
 use super::msaa::{MsaaTarget, Rule, SAMPLES_1X, SAMPLES_4X, fill_polygons};
+use super::paint::Paint;
 use super::skpath::{Mat, P, SkPath};
-use super::analytic;
 use super::stroke::{self, Cap, StrokeParams};
 use super::tess;
 use crate::render::color::{CanvasColor, StyleSlot};
@@ -48,6 +49,9 @@ struct State {
     cap: LineCap,
     miter_limit: f32,
     global_alpha: f64,
+    fill_paint: Option<Paint>,
+    stroke_paint: Option<Paint>,
+    clips: Vec<Clip>,
     /// Blink's `AffineTransform` `[a, b, c, d, e, f]` in double (decides
     /// whether a call changes the transform at all).
     ctm: [f64; 6],
@@ -66,11 +70,17 @@ impl Default for State {
             cap: LineCap::Butt,
             miter_limit: 10.0,
             global_alpha: 1.0,
+            fill_paint: None,
+            stroke_paint: None,
+            clips: Vec::new(),
             ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             m44: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         }
     }
 }
+
+type ClipShape = (SkPath, Mat, Rule, Option<analytic::Geometry>);
+type Clip = Vec<ClipShape>;
 
 /// One recorded draw, rasterized when the canvas is finished.
 #[derive(Debug, Clone)]
@@ -78,11 +88,35 @@ enum Op {
     /// Closed polygons in window coordinates with the nonzero rule: the
     /// tessellated fill renderers (which require MSAA) or the non-AA bounds
     /// renderer (which does not).
-    Polygons { polys: Vec<Vec<[f64; 2]>>, color: [f32; 4], msaa: bool },
+    Polygons {
+        polys: Vec<Vec<[f64; 2]>>,
+        color: Paint,
+        msaa: bool,
+        rule: Rule,
+    },
     /// The union of triangles (the tessellated stroke renderer, MSAA).
-    Triangles { tris: Vec<[P; 3]>, color: [f32; 4] },
+    Triangles {
+        tris: Vec<[P; 3]>,
+        color: Paint,
+    },
     /// One `AnalyticRRectRenderStep` instance (no MSAA requirement).
-    Analytic { inst: analytic::Instance, color: [f32; 4] },
+    Analytic {
+        inst: analytic::Instance,
+        color: Paint,
+    },
+    Clip {
+        op: Box<Op>,
+        clips: Vec<Clip>,
+    },
+    Bitmap {
+        rgba: Vec<u8>,
+    },
+    Layer {
+        ops: Vec<Op>,
+        alpha: f32,
+        blur: [f64; 2],
+        linear: bool,
+    },
 }
 
 /// A Canvas2D context on a `width` × `height` canvas.
@@ -92,6 +126,7 @@ pub struct Context {
     ops: Vec<Op>,
     state: State,
     stack: Vec<State>,
+    layers: Vec<usize>,
     pub path: CanvasPath,
 }
 
@@ -126,6 +161,7 @@ impl Context {
             ops: Vec::new(),
             state: State::default(),
             stack: Vec::new(),
+            layers: Vec::new(),
             path: CanvasPath::new(),
         }
     }
@@ -228,11 +264,22 @@ impl Context {
         }
     }
 
+    pub fn set_transform(&mut self, t: [f64; 6]) {
+        self.state.ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        self.state.m44 = State::default().m44;
+        self.transform(t);
+    }
     pub fn set_fill_style(&mut self, s: &str) {
+        if crate::render::color::parse(s).is_some() {
+            self.state.fill_paint = None;
+        }
         self.state.fill.set(s);
     }
 
     pub fn set_stroke_style(&mut self, s: &str) {
+        if crate::render::color::parse(s).is_some() {
+            self.state.stroke_paint = None;
+        }
         self.state.stroke.set(s);
     }
 
@@ -276,8 +323,68 @@ impl Context {
     }
 
     /// The premultiplied paint color.
-    fn paint(&self, c: CanvasColor) -> [f32; 4] {
-        c.with_alpha_scale(self.state.global_alpha as f32).premultiplied()
+    fn paint(&self, c: CanvasColor) -> Paint {
+        Paint::Solid(c.with_alpha_scale(self.state.global_alpha as f32).premultiplied())
+    }
+    fn fill_paint(&self) -> Paint {
+        self.state
+            .fill_paint
+            .clone()
+            .map_or_else(|| self.paint(self.state.fill.0), |p| p.alpha(self.state.global_alpha as f32))
+    }
+    fn stroke_paint(&self) -> Paint {
+        self.state
+            .stroke_paint
+            .clone()
+            .map_or_else(|| self.paint(self.state.stroke.0), |p| p.alpha(self.state.global_alpha as f32))
+    }
+    pub fn set_fill_paint(&mut self, p: Paint) {
+        self.state.fill_paint = Some(p)
+    }
+    pub fn set_stroke_paint(&mut self, p: Paint) {
+        self.state.stroke_paint = Some(p)
+    }
+    pub fn set_miter_limit(&mut self, v: f32) {
+        if v > 0.0 {
+            self.state.miter_limit = v
+        }
+    }
+    pub fn clip_path(&mut self, p: SkPath, rule: Rule) {
+        self.state.clips.push(vec![(p, self.matrix(), rule, None)]);
+    }
+    pub fn clip_geometry(&mut self, p: SkPath, rule: Rule, g: Option<analytic::Geometry>) {
+        self.state.clips.push(vec![(p, self.matrix(), rule, g)]);
+    }
+    pub fn clip_shapes(&mut self, shapes: Vec<ClipShape>) {
+        self.state.clips.push(shapes);
+    }
+    pub fn stroke_geometry(&mut self, g: analytic::Geometry) {
+        let m = self.matrix();
+        let color = self.stroke_paint();
+        self.draw_analytic(&g, &m, color);
+    }
+    pub fn draw_bitmap(&mut self, rgba: Vec<u8>) {
+        assert_eq!(rgba.len(), (self.width * self.height * 4) as usize);
+        self.record(Op::Bitmap { rgba });
+    }
+    pub fn begin_layer(&mut self) {
+        self.layers.push(self.ops.len());
+    }
+    pub fn end_layer(&mut self, alpha: f32, blur: [f64; 2], linear: bool) {
+        if let Some(start) = self.layers.pop() {
+            let ops = self.ops.drain(start..).collect();
+            self.ops.push(Op::Layer { ops, alpha, blur, linear });
+        }
+    }
+    fn record(&mut self, op: Op) {
+        if self.state.clips.is_empty() {
+            self.ops.push(op)
+        } else {
+            self.ops.push(Op::Clip {
+                op: Box::new(op),
+                clips: self.state.clips.clone(),
+            })
+        }
     }
 
     /// `fill()` of the current path.
@@ -291,22 +398,30 @@ impl Context {
 
     /// `fill(path2d)` / the fill of an `SkPath` (`Device::drawPath`).
     pub fn fill_path(&mut self, p: &SkPath) -> Result<(), Unsupported> {
+        self.fill_path_rule(p, Rule::NonZero)
+    }
+    pub fn fill_path_rule(&mut self, p: &SkPath, rule: Rule) -> Result<(), Unsupported> {
         if p.is_line().is_some() {
             return Ok(());
         }
         let m = self.matrix();
-        let color = self.paint(self.state.fill.0);
+        let color = self.fill_paint();
         if let Some((r, _)) = p.is_rect() {
             return self.fill_rect(r, &m, color);
         }
         if p.is_convex() {
             let tris = tess::convex_wedge_triangles(p, &m, self.width, self.height);
-            self.ops.push(Op::Triangles { tris, color });
+            self.record(Op::Triangles { tris, color });
             return Ok(());
         }
         let local = tess::fill_polygons_local(p, &m);
         let polys = tess::to_device(&local, &m, self.width, self.height);
-        self.ops.push(Op::Polygons { polys, color, msaa: true });
+        self.record(Op::Polygons {
+            polys,
+            color,
+            msaa: true,
+            rule,
+        });
         Ok(())
     }
 
@@ -323,8 +438,12 @@ impl Context {
     fn stroke_line(&mut self, a: P, b: P) -> Result<(), Unsupported> {
         let m = self.matrix();
         let (params, cap) = self.stroke_params();
-        let color = self.paint(self.state.stroke.0);
-        let g = analytic::Geometry::StrokeLine { line: [a[0], a[1], b[0], b[1]], radius: params.radius, cap };
+        let color = self.stroke_paint();
+        let g = analytic::Geometry::StrokeLine {
+            line: [a[0], a[1], b[0], b[1]],
+            radius: params.radius,
+            cap,
+        };
         self.draw_analytic(&g, &m, color);
         Ok(())
     }
@@ -332,7 +451,7 @@ impl Context {
     /// `Device::drawRect` with a fill: the non-AA bounds renderer when the
     /// device rectangle is pixel aligned (within `kDefaultPixelTolerance`),
     /// else the analytic renderer.
-    fn fill_rect(&mut self, r: [f32; 4], m: &Mat, color: [f32; 4]) -> Result<(), Unsupported> {
+    fn fill_rect(&mut self, r: [f32; 4], m: &Mat, color: Paint) -> Result<(), Unsupported> {
         if r[2] - r[0] <= 0.0 || r[3] - r[1] <= 0.0 {
             return Ok(());
         }
@@ -344,7 +463,12 @@ impl Context {
             if near(a[0]) && near(a[1]) && near(b[0]) && near(b[1]) {
                 let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
                 let polys = tess::to_device(&[corners.to_vec()], m, self.width, self.height);
-                self.ops.push(Op::Polygons { polys, color, msaa: false });
+                self.record(Op::Polygons {
+                    polys,
+                    color,
+                    msaa: false,
+                    rule: Rule::NonZero,
+                });
                 return Ok(());
             }
         }
@@ -352,9 +476,14 @@ impl Context {
         Ok(())
     }
 
-    fn draw_analytic(&mut self, g: &analytic::Geometry, m: &Mat, color: [f32; 4]) {
+    fn draw_analytic(&mut self, g: &analytic::Geometry, m: &Mat, color: Paint) {
         let inst = analytic::instance(g, m);
-        self.ops.push(Op::Analytic { inst, color });
+        self.record(Op::Analytic { inst, color });
+    }
+
+    pub fn fill_geometry(&mut self, g: analytic::Geometry) {
+        let m = self.matrix();
+        self.draw_analytic(&g, &m, self.fill_paint());
     }
 
     /// The stroke parameters Graphite receives (`StrokeStyle`).
@@ -369,7 +498,13 @@ impl Context {
             LineCap::Round => Cap::Round,
             LineCap::Square => Cap::Square,
         };
-        (StrokeParams { radius: self.state.line_width / 2.0, join }, cap)
+        (
+            StrokeParams {
+                radius: self.state.line_width / 2.0,
+                join,
+            },
+            cap,
+        )
     }
 
     /// `stroke(path2d)` / the stroke of an `SkPath` (`Device::drawPath`
@@ -381,14 +516,18 @@ impl Context {
         let m = self.matrix();
         let (params, cap) = self.stroke_params();
         if let Some((r, true)) = p.is_rect() {
-            let color = self.paint(self.state.stroke.0);
-            let g = analytic::Geometry::StrokeRect { rect: r, radius: params.radius, join: params.join };
+            let color = self.stroke_paint();
+            let g = analytic::Geometry::StrokeRect {
+                rect: r,
+                radius: params.radius,
+                join: params.join,
+            };
             self.draw_analytic(&g, &m, color);
             return Ok(());
         }
-        let color = self.paint(self.state.stroke.0);
+        let color = self.stroke_paint();
         let tris = stroke::stroke_triangles(p, &m, params, cap);
-        self.ops.push(Op::Triangles { tris, color });
+        self.record(Op::Triangles { tris, color });
         Ok(())
     }
 
@@ -405,31 +544,192 @@ impl Context {
     /// (the tessellating renderers); otherwise every draw is rasterized once
     /// per pixel at its center.
     pub fn finish(&self) -> Vec<u8> {
-        let msaa = self.ops.iter().any(|o| match o {
-            Op::Polygons { msaa, .. } => *msaa,
-            Op::Triangles { .. } => true,
-            Op::Analytic { .. } => false,
-        });
-        let pattern: &'static [[f64; 2]] = if msaa { &SAMPLES_4X } else { &SAMPLES_1X };
-        let mut target = MsaaTarget::new(self.width, self.height, pattern);
-        for op in &self.ops {
-            match op {
-                Op::Polygons { polys, color, .. } => {
-                    let mut mask = target.mask();
-                    fill_polygons(&mut mask, polys, Rule::NonZero);
-                    target.blend(&mask, *color);
+        render_ops(self.width, self.height, &self.ops)
+    }
+}
+
+fn needs_msaa(o: &Op) -> bool {
+    match o {
+        Op::Polygons { msaa, .. } => *msaa,
+        Op::Triangles { .. } => true,
+        Op::Clip { op, clips } => needs_msaa(op) || clips.iter().flatten().any(|c| c.3.is_none()),
+        Op::Analytic { .. } | Op::Layer { .. } | Op::Bitmap { .. } => false,
+    }
+}
+fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
+    let pattern = if ops.iter().any(needs_msaa) {
+        &SAMPLES_4X[..]
+    } else {
+        &SAMPLES_1X[..]
+    };
+    let mut target = MsaaTarget::new(width, height, pattern);
+    for op in ops {
+        render_op(&mut target, op, None)
+    }
+    target.resolve()
+}
+fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
+    use super::msaa::{fill_triangles, unorm8};
+    let mut mask = target.mask();
+    let mut coverage = None;
+    let paint = match op {
+        Op::Polygons { polys, color, rule, .. } => {
+            fill_polygons(&mut mask, polys, *rule);
+            color
+        }
+        Op::Triangles { tris, color } => {
+            fill_triangles(&mut mask, tris);
+            color
+        }
+        Op::Analytic { inst, color } => {
+            coverage = Some(analytic::rasterize(inst, target.width, target.height, target.pattern));
+            color
+        }
+        Op::Clip { op, clips } => {
+            let mut combined = vec![1.0; target.samples.len()];
+            for shapes in clips {
+                let mut union = vec![0.0; target.samples.len()];
+                for (p, m, rule, geometry) in shapes {
+                    let local = tess::fill_polygons_local(p, m);
+                    let polys = tess::to_device(&local, m, target.width, target.height);
+                    if let Some(g) = geometry {
+                        let c = analytic::rasterize(&analytic::instance(g, m), target.width, target.height, target.pattern);
+                        for (a, b) in union.iter_mut().zip(c.coverage) {
+                            let b = b.unwrap_or(0.0);
+                            *a += b * (1.0 - *a);
+                        }
+                    } else {
+                        let mut c = target.mask();
+                        fill_polygons(&mut c, &polys, *rule);
+                        for (i, a) in union.iter_mut().enumerate() {
+                            let b = f32::from(u8::from(c.bits[i / target.pattern.len()] & (1 << (i % target.pattern.len())) != 0));
+                            *a += b * (1.0 - *a);
+                        }
+                    }
                 }
-                Op::Triangles { tris, color } => {
-                    let mut mask = target.mask();
-                    super::msaa::fill_triangles(&mut mask, tris);
-                    target.blend(&mask, *color);
+                for (a, b) in combined.iter_mut().zip(union) {
+                    *a *= b;
                 }
-                Op::Analytic { inst, color } => {
-                    let samples = analytic::rasterize(inst, self.width, self.height, pattern);
-                    target.blend_coverage(&samples, *color);
+            }
+            if let Some(c) = clip {
+                for (a, b) in combined.iter_mut().zip(c) {
+                    *a *= *b
+                }
+            }
+            render_op(target, op, Some(&combined));
+            return;
+        }
+        Op::Bitmap { rgba } => {
+            for (i, d) in target.samples.iter_mut().enumerate() {
+                let p = i / target.pattern.len();
+                let alpha = clip.map_or(1.0, |c| c[i]);
+                let s = &rgba[p * 4..p * 4 + 4];
+                let inv = 1.0 - f32::from(s[3]) / 255.0 * alpha;
+                for c in 0..4 {
+                    d[c] = unorm8(f32::from(s[c]) / 255.0 * alpha + f32::from(d[c]) / 255.0 * inv);
+                }
+            }
+            return;
+        }
+        Op::Layer { ops, alpha, blur, linear } => {
+            let mut pixels = render_ops(target.width, target.height, ops);
+            if blur[0] > 0.0 || blur[1] > 0.0 {
+                if *linear {
+                    linear_rgb(&mut pixels, false);
+                }
+                pixels = gaussian(&pixels, target.width, target.height, *blur);
+                if *linear {
+                    linear_rgb(&mut pixels, true);
+                }
+            }
+            for (i, d) in target.samples.iter_mut().enumerate() {
+                let p = i / target.pattern.len();
+                let alpha = alpha * clip.map_or(1.0, |c| c[i]);
+                let s = &pixels[p * 4..p * 4 + 4];
+                let inv = 1.0 - f32::from(s[3]) / 255.0 * alpha;
+                for c in 0..4 {
+                    d[c] = unorm8(f32::from(s[c]) / 255.0 * alpha + f32::from(d[c]) / 255.0 * inv)
+                }
+            }
+            return;
+        }
+    };
+    for (i, d) in target.samples.iter_mut().enumerate() {
+        let p = i / target.pattern.len();
+        let s = i % target.pattern.len();
+        let cov = if let Some(c) = &coverage {
+            c.coverage[i].unwrap_or(0.0)
+        } else if mask.bits[p] & (1 << s) != 0 {
+            1.0
+        } else {
+            0.0
+        };
+        let cov = cov * clip.map_or(1.0, |c| c[i]);
+        if cov == 0.0 {
+            continue;
+        }
+        let color = paint
+            .at((p % target.width as usize) as f32 + 0.5, (p / target.width as usize) as f32 + 0.5)
+            .map(|v| v * cov);
+        let inv = 1.0 - color[3];
+        for c in 0..4 {
+            d[c] = unorm8(color[c] + f32::from(d[c]) / 255.0 * inv)
+        }
+    }
+}
+fn gaussian(pixels: &[u8], w: u32, h: u32, sigma: [f64; 2]) -> Vec<u8> {
+    let mut data = pixels.to_vec();
+    for (axis, sigma) in sigma.into_iter().enumerate() {
+        if sigma <= 0.0 {
+            continue;
+        }
+        let r = (sigma * 3.0).ceil() as i32;
+        let mut kernel: Vec<f64> = (-r..=r).map(|i| libm::exp(-0.5 * (f64::from(i) / sigma).powi(2))).collect();
+        let sum: f64 = kernel.iter().sum();
+        for k in &mut kernel {
+            *k /= sum
+        }
+        let mut out = vec![0; data.len()];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                for c in 0..4 {
+                    let mut v = 0.0;
+                    for (i, k) in (-r..=r).zip(&kernel) {
+                        let (xx, yy) = if axis == 0 { (x + i, y) } else { (x, y + i) };
+                        if xx >= 0 && xx < w as i32 && yy >= 0 && yy < h as i32 {
+                            v += f64::from(data[(yy as usize * w as usize + xx as usize) * 4 + c]) * k;
+                        }
+                    }
+                    out[(y as usize * w as usize + x as usize) * 4 + c] = (v + 0.5) as u8;
                 }
             }
         }
-        target.resolve()
+        data = out;
+    }
+    data
+}
+
+fn linear_rgb(pixels: &mut [u8], encode: bool) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = f64::from(p[3]) / 255.0;
+        if a == 0.0 {
+            p.fill(0);
+            continue;
+        }
+        for c in p.iter_mut().take(3) {
+            let v = (f64::from(*c) / 255.0 / a).clamp(0.0, 1.0);
+            let v = if encode {
+                if v <= 0.0031308 {
+                    v * 12.92
+                } else {
+                    1.055 * libm::pow(v, 1.0 / 2.4) - 0.055
+                }
+            } else if v <= 0.04045 {
+                v / 12.92
+            } else {
+                libm::pow((v + 0.055) / 1.055, 2.4)
+            };
+            *c = (v * a * 255.0 + 0.5) as u8;
+        }
     }
 }

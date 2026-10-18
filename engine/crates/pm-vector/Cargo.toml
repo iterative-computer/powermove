@@ -15,11 +15,12 @@ conformance = []
 # rasterizer of compat level 1, the scene model, the vello_cpu coverage
 # backend, and SVG through usvg (text off) with filters through resvg.
 # Off for pm-eval and pm-wasm, which need geometry only.
-render = ["dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
+render = ["dep:pm-text", "usvg/text", "usvg/system-fonts", "dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
 # Vello's GPU compute coverage backend on the engine's wgpu device.
 gpu = ["render", "dep:vello", "dep:wgpu"]
 
 [dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["render"], optional = true }
 kurbo = "0.13.1"
 libm.workspace = true
 ryu-js.workspace = true
@@ -32,6 +33,7 @@ vello = { version = "0.11", default-features = false, features = ["wgpu"], optio
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"], optional = true }
 
 [dev-dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["render", "system"] }
 png = "0.18"
 # Exact float parsing for the bit-for-bit vector comparisons.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
@@ -55,4 +57,8 @@ required-features = ["render"]
 
 [[test]]
 name = "svg"
+required-features = ["render"]
+
+[[example]]
+name = "svg_compat_compare"
 required-features = ["render"]

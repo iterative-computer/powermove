@@ -18,9 +18,9 @@
 //!   output resolution ([`SvgDocument::raster_device`]), clipped as the
 //!   image's box and viewport clip it.
 //!
-//! usvg parses without its `text` feature: SVG text is not converted here.
-//! [`SvgDocument::has_text`] reports it so the renderer routes such SVGs
-//! until text goes through `pm-text`.
+//! The production renderer still gates SVG text. The diagnostic
+//! [`SvgDocument::raster_compat_with_text`] shapes and paints resolved text
+//! spans through the caller's pm-text resolver, never usvg glyph outlines.
 //!
 //! As in an `<img>`, an SVG image loads no external resources: only
 //! `data:` URLs resolve.
@@ -46,32 +46,51 @@ impl std::error::Error for SvgError {}
 pub struct SvgDocument {
     tree: usvg::Tree,
     has_text: bool,
+    data: Vec<u8>,
 }
 
 impl core::fmt::Debug for SvgDocument {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let (w, h) = self.size();
-        f.debug_struct("SvgDocument").field("size", &(w, h)).field("has_text", &self.has_text).finish()
+        f.debug_struct("SvgDocument")
+            .field("size", &(w, h))
+            .field("has_text", &self.has_text)
+            .finish()
     }
 }
 
-fn options() -> usvg::Options<'static> {
-    usvg::Options {
+fn options(text: bool) -> usvg::Options<'static> {
+    let mut options = usvg::Options {
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
             resolve_string: Box::new(|_, _| None),
         },
         ..usvg::Options::default()
+    };
+    if text {
+        static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
+        options.fontdb = FONTS
+            .get_or_init(|| {
+                let mut db = usvg::fontdb::Database::new();
+                db.load_system_fonts();
+                std::sync::Arc::new(db)
+            })
+            .clone();
     }
+    options
 }
 
 impl SvgDocument {
     /// Parses SVG bytes (SVGZ is not read: usvg's compression feature is
     /// off).
     pub fn parse(data: &[u8]) -> Result<Self, SvgError> {
-        let tree = usvg::Tree::from_data(data, &options()).map_err(|e| SvgError(e.to_string()))?;
+        let tree = usvg::Tree::from_data(data, &options(contains_text(data))).map_err(|e| SvgError(e.to_string()))?;
         let has_text = contains_text(data);
-        Ok(Self { tree, has_text })
+        Ok(Self {
+            tree,
+            has_text,
+            data: data.to_vec(),
+        })
     }
 
     /// The SVG's size in user units (`width`/`height`, else the viewBox).
@@ -80,7 +99,7 @@ impl SvgDocument {
         (f64::from(s.width()), f64::from(s.height()))
     }
 
-    /// Whether the SVG has `<text>` (not drawn: usvg's text feature is off).
+    /// Whether the SVG has `<text>` (production text gate remains).
     pub fn has_text(&self) -> bool {
         self.has_text
     }
@@ -100,13 +119,21 @@ impl SvgDocument {
     /// device pixels) limits it, antialiased.
     pub fn raster_device(&self, transform: Affine, rect: PixelRect, clip: Option<&[kurbo::Point]>) -> Bitmap {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
-        let empty = || Bitmap { width: w, height: h, rgba: vec![0; (w * h * 4) as usize] };
+        let empty = || Bitmap {
+            width: w,
+            height: h,
+            rgba: vec![0; (w * h * 4) as usize],
+        };
         let Some(mut pixmap) = tiny_skia::Pixmap::new(w, h) else {
             return empty();
         };
         let to_rect = Affine::translate((-f64::from(rect.x), -f64::from(rect.y)));
         let c = (to_rect * transform).as_coeffs().map(|v| v as f32);
-        resvg::render(&self.tree, tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]), &mut pixmap.as_mut());
+        resvg::render(
+            &self.tree,
+            tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]),
+            &mut pixmap.as_mut(),
+        );
         if let Some(points) = clip {
             let mut pb = tiny_skia::PathBuilder::new();
             for (i, p) in points.iter().enumerate() {
@@ -124,7 +151,37 @@ impl SvgDocument {
             mask.fill_path(&path, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
             pixmap.apply_mask(&mask);
         }
-        Bitmap { width: w, height: h, rgba: pixmap.take() }
+        Bitmap {
+            width: w,
+            height: h,
+            rgba: pixmap.take(),
+        }
+    }
+
+    pub fn raster_compat(&self, width: u32, height: u32) -> Result<Bitmap, SvgError> {
+        if self.has_text {
+            return Err(SvgError("SVG text needs pm-text".into()));
+        }
+
+        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
+        let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
+        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut |_, _, _, _| {
+            Err(SvgError("SVG text needs pm-text".into()))
+        })
+    }
+
+    /// Bucket paint with text shaped and rasterized by the caller's pm-text
+    /// font resolver. This diagnostic API does not retire the level-1 gate.
+    pub fn raster_compat_with_text<R: pm_text::font::FontResolver>(
+        &self,
+        width: u32,
+        height: u32,
+        compat: &mut pm_text::compat::Compat<R>,
+    ) -> Result<Bitmap, SvgError> {
+        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
+        let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
+        let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
+        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter
@@ -135,7 +192,12 @@ impl SvgDocument {
             return None;
         }
         let b = root.abs_layer_bounding_box();
-        Some(kurbo::Rect::new(f64::from(b.left()), f64::from(b.top()), f64::from(b.right()), f64::from(b.bottom())))
+        Some(kurbo::Rect::new(
+            f64::from(b.left()),
+            f64::from(b.top()),
+            f64::from(b.right()),
+            f64::from(b.bottom()),
+        ))
     }
 
     /// The SVG as coverage items under `transform` (user units to device
@@ -155,7 +217,10 @@ fn contains_text(data: &[u8]) -> bool {
     };
     let Ok(doc) = usvg::roxmltree::Document::parse_with_options(
         s,
-        usvg::roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() },
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
     ) else {
         return false;
     };
@@ -163,10 +228,17 @@ fn contains_text(data: &[u8]) -> bool {
 }
 
 fn affine(t: tiny_skia::Transform) -> Affine {
-    Affine::new([f64::from(t.sx), f64::from(t.ky), f64::from(t.kx), f64::from(t.sy), f64::from(t.tx), f64::from(t.ty)])
+    Affine::new([
+        f64::from(t.sx),
+        f64::from(t.ky),
+        f64::from(t.kx),
+        f64::from(t.sy),
+        f64::from(t.tx),
+        f64::from(t.ty),
+    ])
 }
 
-fn bez(path: &tiny_skia::Path) -> BezPath {
+pub(crate) fn bez(path: &tiny_skia::Path) -> BezPath {
     use tiny_skia::PathSegment;
     let p = |q: tiny_skia::Point| kurbo::Point::new(f64::from(q.x), f64::from(q.y));
     let mut out = BezPath::new();
@@ -329,8 +401,14 @@ mod tests {
     /// compositor.test.ts's expectations.
     #[test]
     fn raster_dimensions_follow_the_compositor() {
-        assert_eq!(svg_raster_dimensions(100.0, 50.0, 400.0, 200.0, &[2.0, 0.0, 0.0, 2.0, 0.0, 0.0], 8192.0), (800, 400, 8.0));
-        assert_eq!(svg_raster_dimensions(100.0, 50.0, 400.0, 400.0, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 8192.0), (800, 400, 8.0));
+        assert_eq!(
+            svg_raster_dimensions(100.0, 50.0, 400.0, 200.0, &[2.0, 0.0, 0.0, 2.0, 0.0, 0.0], 8192.0),
+            (800, 400, 8.0)
+        );
+        assert_eq!(
+            svg_raster_dimensions(100.0, 50.0, 400.0, 400.0, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 8192.0),
+            (800, 400, 8.0)
+        );
         assert_eq!(
             svg_raster_dimensions(100.0, 50.0, 20_000.0, 10_000.0, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 8192.0),
             (8192, 4096, 81.92)

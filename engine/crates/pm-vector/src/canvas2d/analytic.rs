@@ -39,11 +39,29 @@ pub struct Instance {
 pub enum Geometry {
     /// A filled rectangle `[l, t, r, b]`.
     FillRect([f32; 4]),
+    FillRRect {
+        rect: [f32; 4],
+        radii: [f32; 2],
+    },
     /// A stroked rectangle with the stroke radius and join (`StrokeStyle`
     /// convention: negative round, zero bevel, positive miter limit).
-    StrokeRect { rect: [f32; 4], radius: f32, join: f32 },
+    StrokeRRect {
+        rect: [f32; 4],
+        corner_radius: f32,
+        radius: f32,
+        join: f32,
+    },
+    StrokeRect {
+        rect: [f32; 4],
+        radius: f32,
+        join: f32,
+    },
     /// A stroked line `(x0, y0, x1, y1)` with a cap.
-    StrokeLine { line: [f32; 4], radius: f32, cap: super::stroke::Cap },
+    StrokeLine {
+        line: [f32; 4],
+        radius: f32,
+        cap: super::stroke::Cap,
+    },
 }
 
 fn svd_min(m: &Mat) -> f32 {
@@ -74,6 +92,13 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
     let mut center_weight = SOLID_INTERIOR;
     let (a, b, c, center_xy, intersects);
     match *g {
+        Geometry::FillRRect { rect: r, radii } => {
+            a = [radii[0]; 4];
+            b = [radii[1]; 4];
+            c = r;
+            center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
+            intersects = (r[2] - r[0]) <= 2.0 * aa_radius || (r[3] - r[1]) <= 2.0 * aa_radius;
+        }
         Geometry::FillRect(r) => {
             a = [-1.0; 4];
             b = [r[0], r[2], r[2], r[0]];
@@ -81,6 +106,35 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
             center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
             // opposite_insets_intersect for an all-AA rect quad.
             intersects = (r[2] - r[0]) <= 2.0 * aa_radius || (r[3] - r[1]) <= 2.0 * aa_radius;
+        }
+        Geometry::StrokeRRect {
+            rect: r,
+            corner_radius,
+            radius,
+            join,
+        } => {
+            let size = [r[2] - r[0], r[3] - r[1]];
+            if (size[0] <= 2.0 * radius || size[1] <= 2.0 * radius) && radius > 0.0 {
+                stroke_inset = -radius;
+            } else {
+                center_weight = STROKE_INTERIOR;
+                stroke_inset = radius;
+            }
+            a = [
+                -2.0,
+                0.0,
+                radius,
+                if join > 0.0 {
+                    if join < core::f32::consts::SQRT_2 { 0.0 } else { 1.0 }
+                } else {
+                    join
+                },
+            ];
+            b = [corner_radius; 4];
+            c = r;
+            center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
+            let inset = stroke_inset + 2.0 * aa_radius;
+            intersects = inset >= size[0] - corner_radius || inset >= size[1] - corner_radius;
         }
         Geometry::StrokeRect { rect: r, radius, join } => {
             let size = [r[2] - r[0], r[3] - r[1]];
@@ -96,7 +150,11 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
             if empty[0] && empty[1] {
                 // A point would produce caps; Canvas2D rectangles never reach here.
             } else if join > 0.0 {
-                join_style = if join < core::f32::consts::SQRT_2 || empty[0] || empty[1] { 0.0 } else { 1.0 };
+                join_style = if join < core::f32::consts::SQRT_2 || empty[0] || empty[1] {
+                    0.0
+                } else {
+                    1.0
+                };
             }
             a = [-2.0, 0.0, radius, join_style];
             b = [0.0; 4];
@@ -123,7 +181,12 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
             b = [0.0; 4];
             c = line;
             // bounds of a line shape: the bounding box of its points.
-            let bl = [line[0].min(line[2]), line[1].min(line[3]), line[0].max(line[2]), line[1].max(line[3])];
+            let bl = [
+                line[0].min(line[2]),
+                line[1].min(line[3]),
+                line[0].max(line[2]),
+                line[1].max(line[3]),
+            ];
             center_xy = [(bl[0] + bl[2]) * 0.5, (bl[1] + bl[3]) * 0.5];
             intersects = stroke_inset <= aa_radius;
         }
@@ -181,20 +244,74 @@ const INDICES: [u16; 69] = {
     const BR: u16 = 18;
     const BL: u16 = 27;
     [
-        TL, TL + 4, TL + 1, TL + 5, TL + 2, TL + 3, TL + 5,
-        TR, TR + 4, TR + 1, TR + 5, TR + 2, TR + 3, TR + 5,
-        BR, BR + 4, BR + 1, BR + 5, BR + 2, BR + 3, BR + 5,
-        BL, BL + 4, BL + 1, BL + 5, BL + 2, BL + 3, BL + 5,
-        TL, TL + 4,
-        TL + 4, TL + 6, TL + 5, TL + 7,
-        TR + 4, TR + 6, TR + 5, TR + 7,
-        BR + 4, BR + 6, BR + 5, BR + 7,
-        BL + 4, BL + 6, BL + 5, BL + 7,
-        TL + 4, TL + 6,
-        TL + 6, TL + 8, TL + 7, TL + 7, TR + 8,
-        TR + 6, TR + 8, TR + 7, TR + 7, BR + 8,
-        BR + 6, BR + 8, BR + 7, BR + 7, BL + 8,
-        BL + 6, BL + 8, BL + 7, BL + 7, TL + 8,
+        TL,
+        TL + 4,
+        TL + 1,
+        TL + 5,
+        TL + 2,
+        TL + 3,
+        TL + 5,
+        TR,
+        TR + 4,
+        TR + 1,
+        TR + 5,
+        TR + 2,
+        TR + 3,
+        TR + 5,
+        BR,
+        BR + 4,
+        BR + 1,
+        BR + 5,
+        BR + 2,
+        BR + 3,
+        BR + 5,
+        BL,
+        BL + 4,
+        BL + 1,
+        BL + 5,
+        BL + 2,
+        BL + 3,
+        BL + 5,
+        TL,
+        TL + 4,
+        TL + 4,
+        TL + 6,
+        TL + 5,
+        TL + 7,
+        TR + 4,
+        TR + 6,
+        TR + 5,
+        TR + 7,
+        BR + 4,
+        BR + 6,
+        BR + 5,
+        BR + 7,
+        BL + 4,
+        BL + 6,
+        BL + 5,
+        BL + 7,
+        TL + 4,
+        TL + 6,
+        TL + 6,
+        TL + 8,
+        TL + 7,
+        TL + 7,
+        TR + 8,
+        TR + 6,
+        TR + 8,
+        TR + 7,
+        TR + 7,
+        BR + 8,
+        BR + 6,
+        BR + 8,
+        BR + 7,
+        BR + 7,
+        BL + 8,
+        BL + 6,
+        BL + 8,
+        BL + 7,
+        BL + 7,
+        TL + 8,
         TL + 6,
     ]
 };
@@ -245,7 +362,11 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
     let l = inst.ltrb_or_quad_ys;
     if xr[0] < -1.0 {
         stroked_line = xr[1] > 0.0;
-        xs = if stroked_line { [l[0], l[0], l[2], l[2]] } else { [l[0], l[2], l[2], l[0]] };
+        xs = if stroked_line {
+            [l[0], l[0], l[2], l[2]]
+        } else {
+            [l[0], l[2], l[2], l[0]]
+        };
         ys = [l[1], l[1], l[3], l[3]];
         if xr[1] < 0.0 {
             x_radii = xr.map(|v| -v - 2.0);
@@ -318,7 +439,12 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
                 (yzwx(dy), yzwx(dx).map(|v| -v))
             };
             let mixv = |a: [f32; 4], b: [f32; 4], t: [f32; 4]| {
-                [(b[0] - a[0]).mul_add(t[0], a[0]), (b[1] - a[1]).mul_add(t[1], a[1]), (b[2] - a[2]).mul_add(t[2], a[2]), (b[3] - a[3]).mul_add(t[3], a[3])]
+                [
+                    (b[0] - a[0]).mul_add(t[0], a[0]),
+                    (b[1] - a[1]).mul_add(t[1], a[1]),
+                    (b[2] - a[2]).mul_add(t[2], a[2]),
+                    (b[3] - a[3]).mul_add(t[3], a[3]),
+                ]
             };
             dx = mixv(edge_x, dx, edge_mask);
             dy = mixv(edge_y, dy, edge_mask);
@@ -361,7 +487,10 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
         }
     } else {
         let s = [corner_radii[0] + stroke_radius[0], corner_radii[1] + stroke_radius[1]];
-        local = [s[0] * (position[0] + join_scale * position[1]), s[1] * (position[1] + join_scale * position[0])];
+        local = [
+            s[0] * (position[0] + join_scale * position[1]),
+            s[1] * (position[1] + join_scale * position[0]),
+        ];
     }
     if snap_center {
         local = [center[0], center[1]];
@@ -493,7 +622,10 @@ fn inverse_grad_len(g: [f32; 2], j: &[f32; 4]) -> f32 {
 }
 
 fn elliptical_distance(uv: [f32; 2], radii: [f32; 2], stroke_radius: f32, j: &[f32; 4]) -> [f32; 2] {
-    let inv_r2 = [1.0 / (radii[0] * radii[0] + stroke_radius * stroke_radius), 1.0 / (radii[1] * radii[1] + stroke_radius * stroke_radius)];
+    let inv_r2 = [
+        1.0 / (radii[0] * radii[0] + stroke_radius * stroke_radius),
+        1.0 / (radii[1] * radii[1] + stroke_radius * stroke_radius),
+    ];
     let norm_uv = [inv_r2[0] * uv[0], inv_r2[1] * uv[1]];
     let igl = inverse_grad_len(norm_uv, j);
     let f = 0.5 * igl * ((uv[0] * norm_uv[0] + uv[1] * norm_uv[1]) - 1.0);
@@ -545,7 +677,10 @@ pub fn coverage(v: &Varyings) -> f32 {
         d[1] = -inner[0].max(inner[1]);
         if s[0] > 0.0 {
             let narrow = sw[0].min(sw[1]);
-            let dim = [if inner[0] >= -0.5 { sw[0] } else { narrow }, if inner[1] >= -0.5 { sw[1] } else { narrow }];
+            let dim = [
+                if inner[0] >= -0.5 { sw[0] } else { narrow },
+                if inner[1] >= -0.5 { sw[1] } else { narrow },
+            ];
             scale = dim[0].max(dim[1]).clamp(0.0, 1.0);
             bias = coverage_bias(scale);
         } else {
@@ -576,10 +711,18 @@ pub struct Samples {
 pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]]) -> Samples {
     let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
     let n = pattern.len();
-    let mut out = Samples { width, height, coverage: vec![None; (width * height) as usize * n] };
+    let mut out = Samples {
+        width,
+        height,
+        coverage: vec![None; (width * height) as usize * n],
+    };
     let one = 1i64 << SUBPIXEL_BITS;
     for k in 2..INDICES.len() {
-        let tri = [verts[INDICES[k - 2] as usize], verts[INDICES[k - 1] as usize], verts[INDICES[k] as usize]];
+        let tri = [
+            verts[INDICES[k - 2] as usize],
+            verts[INDICES[k - 1] as usize],
+            verts[INDICES[k] as usize],
+        ];
         let p: Vec<(i64, i64)> = tri.iter().map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1])))).collect();
         let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1);
         if area == 0 {
@@ -652,7 +795,11 @@ fn inside_triangle(p: &[(i64, i64)], sx: i64, sy: i64) -> bool {
         if a.1 == b.1 {
             continue;
         }
-        let (x0, y0, x1, y1, wd) = if a.1 < b.1 { (a.0, a.1, b.0, b.1, 1) } else { (b.0, b.1, a.0, a.1, -1) };
+        let (x0, y0, x1, y1, wd) = if a.1 < b.1 {
+            (a.0, a.1, b.0, b.1, 1)
+        } else {
+            (b.0, b.1, a.0, a.1, -1)
+        };
         if sy < y0 || sy >= y1 {
             continue;
         }

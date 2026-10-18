@@ -21,5 +21,11 @@ rubato = "5.0.1"
 cpal = "0.18.2"
 libc = "0.2"
 
+[features]
+# Test hooks on production types (an artificial decode delay); off in the
+# app. The crate's own tests turn it on through the dev-dependency below.
+test-hooks = []
+
 [dev-dependencies]
 proptest.workspace = true
+pm-audio = { path = ".", features = ["test-hooks"] }
