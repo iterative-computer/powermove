@@ -41,6 +41,20 @@ Rules carried over, each checked against the captures below:
 | Precomps | a blurred precomp renders its child at the child time of each sample; layers inside blur again with the child's rate | the same |
 | Video in samples | see below | the frame selected at the center time of its level, the transform moving |
 
+Every layer type is blurred (on the layer, inside a blurred group, inside a
+blurred precomp): shapes, paths, and text re-rasterize at each sample's density
+and content time; a blurred 3D object layer draws the composition's scene rebuilt
+at each sample time (`Pass3d::at_time`: today's `compositionRuntime(PM, T + dt)`
+syncs objects, lights, and camera at the sample time, and `compositionDepthIds`
+reads activity and opacity then, over the pass ordered at the center time); a
+blurred layer that also needs its own target (masks, effects, matte, blend mode,
+transition) takes the accumulated samples as its layer target and the masks,
+effects, and matte apply at the center time, as today's slow path does.
+Measured (compclose capture): `motion/blur-vector`, `motion/blur-slow` bit-exact
+in float frames at 20, 3, and 6 samples, opaque within 1 CV; `motion/blur-3d`,
+`motion/blur-3d-group`, and v1 `3d/motion-blur` within the 3D class;
+`motion/blur-text` within the text class.
+
 `motionBlurSamples` (section 6, additive) is an object keyed by contract 2's
 `MotionBlurKind` names: `{"export": 16, "alphaExport": 20, "previewPlaying": 6,
 "previewPaused": 12}`. A finite number ≥ 1 is floored and capped at 256; a missing or
@@ -82,8 +96,24 @@ deviation applies there too. Video and image are
 compared types, so such layers are not routed by `pm_render::unsupported`; no
 corpus case covers them yet (`motion/blur-precomps` holds only solids).
 The engine draws the frame selected at the center time (what the viewer shows at
-the playhead) with the transform sampled across the shutter. Recorded as a
-deviation in `tests/motion.rs`; it is an appendix A candidate (owner: plan).
+the playhead) with the transform sampled across the shutter.
+
+**Today's export and preview, measured** (`e2e/legacy-blurred-video-export.spec.ts`,
+legacy engine, a 64² VP9 clip whose frames are flat levels 20 + 10i, 20 frames
+at 30 fps, MP4 export with motion blur on):
+
+- the sharp export holds each frame (levels 20, 30, …, 210, within 1 code
+  value of H.264);
+- **the blurred export holds frame 0 in every frame** (level 20 twenty times):
+  users' exports today contain the stale frame;
+- the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
+  50, 100, 170, the same as without blur).
+
+So today's preview and export disagree, and the engine follows the preview.
+This is an appendix A item for the plan owner, not a parity target the engine
+should reproduce: side-by-sides of the corpus capture against the engine at
+`/tmp/ne-compclose/evidence/blur-video/side-by-side-t0.5.png` and `-t1.2.png`,
+the export levels at `/tmp/ne-compclose/evidence/blur-video/legacy-export-levels.jsonl`.
 
 ## 2.5D
 
@@ -100,19 +130,30 @@ timeline order; surfaces sort by their first layer's anchor depth), 2D layers an
 object blocks are barriers. The 3D scene lane's `order_pass` does the same for
 non-model blocks and supersedes this call when the lanes merge.
 
-Drawn (and no longer routed) for solid, image, video, precomp, and group layers;
-shapes, text, and other layer types with the 3D switch, or inside a 3D group, stay
-routed until their renderers are compared in 2.5D (`capability.rs`). 3D object,
-light, and camera layers draw in screen space, so their own 3D switch does not
-route them, but inside a 3D group they are routed (their placement in a 3D group
-has no parity case).
+Drawn for every layer type: solids, images, video, precomps, groups, shapes and
+editable paths, text and captions, shader and extension layers, and masked
+adjustment layers inside 3D groups. Level 1 shapes and text keep today's raster
+density (the continuous raster scale of the 2D world matrix, as `contentQuad`
+computes it for a 3D layer outside the preview's clipping) and draw through the
+plane. 3D object, light, and camera layers draw in screen space, as today, also
+inside 3D groups (`space25d/others`).
 
-Motion blur routes the same way: a layer of another type is routed when it has
-motion blur itself, when an enclosing group has it, or when its composition is
-reached through a blurred precomp or a precomp inside a blurred group (the
-capability check carries that context down nested precomps, so the layers drawn at
-every sample time are the compared types only). 3D object, light, and camera
-layers in any of those positions are routed too.
+**Level 2 content on planes** (`space25d/local.rs`; no legacy reference): level 2
+coverage scenes (solids, shapes, paths, plain SVG images) used to draw through the
+2D world matrix and ignore the plane. They are now flattened in layer space at the
+plane's densest-corner density and every vertex is projected through the
+homography (clipped at the camera plane in homogeneous coordinates), so the
+projected outline is exact and analytically covered at output resolution
+(`tests/space25d_level2.rs`: a flat plane equals the 2D render within 0.005 in
+alpha, coverage within 1e-4; a turned plane covers its homography). Level 2 text
+and resvg rasters are rasterized in layer space at that density and drawn by the
+level 2 resampler.
+
+Measured on `compclose-20261018-121218-230f9731`: `space25d/vector` (shapes, a
+path, a masked shape, shapes in a 3D group, a blurred 3D shape) bit-exact in
+opaque and float frames; `space25d/text` within the text class (SSIM ≥ 0.9975,
+other pixels exact); `space25d/others` within the 3D class; v1 `space/groups-25d`
+is now drawn (composite.md, Gaps, for its residual).
 
 ## Retiming
 
@@ -139,9 +180,14 @@ layers in any of those positions are routed too.
 
 Level 1 content keeps today's sampling exactly (bilinear, no mipmaps, hard UV edges,
 pixel-center coverage); `level1_keeps_todays_sampling` checks that the resampler
-setting does not reach it. Level 2 raster content (`compat` ≥ 2 image, video, and
-precomp layers; SVG images, shapes, text, and solids belong to their own renderers)
-is drawn by `sampling::gpu`:
+setting does not reach it. Level 1 stills are sampled from today's 8-bit texture
+(composite.md, "Today's composite drift"). Level 2 raster content (`compat` ≥ 2
+image, video, precomp, shader, and extension layers; SVG images, shapes, text, and
+solids belong to their own renderers) is drawn by `sampling::gpu`. Level 2 shader
+and extension fragment layers render at the density they are drawn at, without
+today's 4,096 px cap (level 1 keeps it), up to 16,384 px. Every layer type is
+drawn at level 2; level 2 text that `pm-text` does not lay out yet (animators,
+range styles, typography anchoring) is a named text reason, not a level 2 route.
 
 - **Geometry.** The draw covers the pixel bounds of the content polygon: the
   layer's quad, or the part of it the UV window fills (`contain` letterboxing),
@@ -245,18 +291,18 @@ deviations:
 
 Recorded deviations:
 
-1. **f16 accumulation of blurred stills.** Each sample of a still differs from
-   Chromium's by up to 2 f16 ulps (the still class), and the f16 accumulator rounds
-   every partial sum, so the two paths diverge with the count: 0.25 CV at 1 sample,
-   0.87 to 1.0 CV at 12, 1.49 to 1.62 CV at 20. At 32-bit precision the engine's sum
-   is the exact mean (alpha 1.0000001 where Chromium's f16 sum reads 0.99658, 0.87 CV
-   off), and the difference is the same 1.47 to 1.58 CV, so it is the legacy
-   accumulator's rounding plus the still class, not this lane's accumulation.
-2. **Video decode** (above): differences at saturated chroma edges, frame identity
+1. **Video decode** (above): differences at saturated chroma edges, frame identity
    shown.
-3. **Blurred video** draws a stale, unseeked frame in today's captures (frame 0
-   in the capture; above). It applies to video inside blurred precomps as well;
-   no corpus case covers that yet.
+2. **Blurred video** draws a stale, unseeked frame in today's captures and exports
+   (frame 0; above), while today's viewer shows the right frame. The engine draws
+   the right frame: an appendix A item for the plan owner.
+
+The f16 accumulation deviation of blurred stills (1.49 to 1.62 CV at 20
+samples) is resolved: its cause was the still's sampling, not the
+accumulation (both paths add into `rgba16float` with the same rounding).
+Sampling today's 8-bit texture makes `motion/blur-solids` bit-exact at every
+captured sample count (1, 3, 6, 12, 20), and `tests/motion.rs` holds it to the
+alpha class.
 
 The existing corpus test (`tests/corpus.rs`, v1 and render captures) and `pm-cli
 parity render` now request the captures' 16 and 20 samples; 70 frames, 0 failures.
@@ -288,22 +334,23 @@ unchanged, continuous precomp rasterization, level 2 routing.
   level 2 draws, the frame-rate override in `MediaCache::video`, routing).
 - `engine/corpus/src/{capture,page,verify,media}.ts`, `projects/{common,index}.ts`,
   `test/corpus.test.ts`: `blurSamples` captures, the generated videos, the cases.
+- Phase 3c closure (lane compclose): `scene3d/layers.rs` (`Pass3d::at_time`, the
+  depth sets factored into `depth_sets`), `shader_layers/plan.rs` (level 2
+  target size), `exec.rs` (level 2 pyramids for vector, text, and shader
+  sources), `plan.rs` (blurred slow path, 3D samples, level 2 on planes),
+  `engine/corpus/src/projects/compclose.ts` (new cases), and
+  `apps/desktop/e2e/legacy-blurred-video-export.spec.ts` (today's export and
+  preview of blurred video).
 
 ## Gaps
 
-- Motion blur on 3D object layers, shapes, text, and other layer types (on the layer,
-  an enclosing group, or a blurred precomp above it) stays routed until their
-  renderers are compared with blur (the 3D scene lane's pass context is
-  built per pass at the center time; a blurred object needs one per sample).
-  Blender surface requests per shutter sample are the Blender lane's (routed).
-- 2.5D shapes, text, and other types stay routed (their rasters use `affinePlane`
-  for continuous rasterization; their lanes compare them).
 - The cached preview (section 8, "used by every path including … cached preview")
   does not exist in the engine yet; content keys do not include the sample count.
 - Level 2 has no legacy reference (new content); the antialiasing bar is read as
   fidelity to each path's declared kernel (see above). Anisotropic minification
   beyond 4 texels per kernel unit along the major axis reads a box-filtered level
-  that also blurs the minor axis.
+  that also blurs the minor axis. Level 2 text and resvg rasters on planes are
+  resampled from a layer-space raster rather than projected analytically.
 - Video decode differences at saturated chroma edges (up to 9 CV at a few pixels)
   belong to the media lane's decode path; an H.264 file tagged only with a BT.709
   matrix (no primaries or transfer) is read with BT.601 coefficients by Chromium and
@@ -311,3 +358,4 @@ unchanged, continuous precomp rasterization, level 2 routing.
   for the color lane (the corpus videos are untagged).
 - WebM exports have no `MotionBlurKind`; the export lane passes `AlphaExport` (20)
   for them.
+- Blurred video: appendix A decision (above).

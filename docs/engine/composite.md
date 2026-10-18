@@ -15,7 +15,8 @@ today, and what is not done.
 | Feature | Status | Parity evidence |
 |---|---|---|
 | Nine blend modes (normal, add, screen, multiply, overlay, soft light, difference, lighten, darken), keyframed blend modes, with opacity | Drawn | Corpus `composite/blend-modes`, `composite/blend-animated`: ≤ 1 CV, 100% within 1; `tests/composite.rs` against the f64 `FRAG_COMPOSITE` in both encodings and precisions |
-| Blend modes over translucent stacks | Drawn; today's drift not reproduced (below) | `composite/blend-modes-alpha`: 99.944% within 1, max 5 CV opaque, 4.61 CV float |
+| Blend modes over translucent stacks, including today's drift | Drawn | `composite/blend-modes-alpha`: bit-exact (opaque and transparent float), see "Today's composite drift" |
+| Unknown and keyed blend modes, unknown and keyed matte modes | Drawn | `composite/unknown-modes` (4 samples): bit-exact |
 | Parametric masks: rect and ellipse, add and subtract, subtract-only coverage, feather (smoothstep, the 0.01 threshold), rotation, negative and tiny sizes, animated channels, animatable enable and mode, the 8-mask limit, masks on rotated, scaled, and skewed layers, singular world matrices | Drawn | `composite/masks` (3 samples), v1 `masks/more-than-eight`: ≤ 1 CV, transparent float ≤ 0.25 CV; `tests/composite.rs` coverage against `pm_vector::ParametricMasks::coverage` |
 | Track mattes: alpha, alpha inverted, luma (Rec.709 on premultiplied E), luma inverted; hidden sources still matte and never draw; source opacity, masks, and blend mode apply; nested mattes; keyframed modes; sources outside their time span give an empty matte; cycles stop at depth 8 | Drawn | `composite/mattes` (3 samples): ≤ 1 CV, float ≤ 0.62 CV; `tests/composite.rs` |
 | Styled groups (opacity, blend, masks, matte) as compositing boundaries, nested; transform-only groups flattened with blended members | Drawn | `composite/groups`: ≤ 1 CV, float 0.25 CV |
@@ -28,12 +29,18 @@ today, and what is not done.
 | 16- and 32-bit precision, project precision as a floor | Drawn | `tests/composite.rs` |
 | Region of interest with effect padding | Drawn | `tests/composite.rs`: regions equal the full frame bit for bit with masks, mattes, blends, adjustments, and padded effects |
 | Bezier path masks | Routed (`Feature::PathMasks`) | Gaps |
-| Masks on 3D object layers | Routed (`Feature::Masks`) | `composite/3d-mask`, `composite/3d-blend-mask` (below) |
+| Masks on 3D object layers, animated and keyed | Drawn | `composite/3d-mask`, `composite/3d-blend-mask`, v1 `3d/transparency`, `motion/blur-3d`: 3D class, max 1 CV (below) |
+| Masks that are not an array | A named layer failure, as today's `.some` throws | `tests/composite.rs` |
+| Motion blur with masks, blend modes, mattes, effects, styled groups | Drawn (the accumulated samples are the layer target) | `motion/blur-slow`: bit-exact float, opaque ≤ 1 CV |
 
-Corpus figures are from capture `composite-20261016-042859-be1e4467` (Chromium,
-ANGLE Metal, Apple M4 Max), compared by `tests/corpus.rs` under section 25's
-Standard class (≤ 1 CV for 99.9% of pixels, ≤ 4 CV anywhere) and, for transparent
-captures, the float frames within 1 CV.
+Corpus figures are from captures `composite-20261016-042859-be1e4467`,
+`compclose-20261018-121218-230f9731`, and `compclose2-20261018-124247-4857382c`
+(Chromium, ANGLE Metal, Apple M4 Max), compared by `tests/corpus.rs` under
+section 25's Standard class (≤ 1 CV for 99.9% of pixels, ≤ 4 CV anywhere) and,
+for transparent captures, the float frames within 1 CV. The corpus tests fail
+any project routed for masks, motion blur, 2.5D, `compat` level 2, the
+`requiresEngine` stamp, or project color (`support::routing_forbidden`); path
+masks are the one compositing reason still listed as a skip.
 
 ## Graph
 
@@ -70,35 +77,41 @@ The passes compile with wgpu's default Metal fast math. Safe math was measured o
 `composite/blend-modes-alpha`: 163 pixels over 1 CV against 62 with fast math, so
 fast math is what today's ANGLE programs use as well.
 
-## Today's composite drift (proposed appendix A item)
+## Today's composite drift (reproduced)
 
 `FRAG_COMPOSITE` runs over the whole frame for every blend layer and sends every
-pixel through `(d.rgb / d.a) · d.a`. On a translucent stack, the RGBA16F target's
-conversion loses up to an ulp per pass where the round trip lands low; across the
-48 blend layers of `composite/blend-modes-alpha`, pixels no layer covers drift by up
-to 4.6 CV. Measured: the legacy frame differs from the same stack rendered without
-any blend layer by up to 3.9 CV in cells no blend layer touches; with today's
-formula evaluated literally, the engine drifts by up to 46 f16 ulps at different
-pixels (the exact rounding outcome depends on each pass's arithmetic).
+pixel through `(d.rgb / d.a) · d.a`. An `RGBA16F` render target stores a
+fragment's f32 output **rounded toward zero** on this GPU (measured with a
+probe pass: 0.75 − 1 f32 ulp stores as 0.74951, half of 64 values below an f16
+value truncate), so where the round trip lands an f32 ulp low, the stored value
+loses an f16 ulp, once per blend pass. On a translucent stack of 48 blend layers
+(`composite/blend-modes-alpha`) pixels no layer covers drift by up to 4.6 CV in
+today's frames.
 
-The engine passes the destination through exactly where the layer has no
-coverage (`s.a == 0`: the formula's exact value is `d`, or zero color under the
-0.0001 guard). This is closer to section 25's alpha class reference (an f64
-reference) than today's frame, and makes pixels outside a layer independent of
-how many blend layers exist. `tests/corpus.rs` lists the one affected case in
-`COMPOSITE_DRIFT` with its measured bounds (5 CV float, 5 CV opaque); every other
-case keeps the full class. Opaque stacks (`d.a = 1`) are exact either way.
+The engine now evaluates the formula literally at every pixel, as today's
+program does; its targets are the same `rgba16float` with the same rounding, so
+the drift is reproduced. Fused mask and matte steps round toward zero as well
+(`half_rtz` in `ops.wgsl`), as today's separate passes store them. The residual
+that remained on the rotated soft-alpha images came from image sampling: today's
+image layers sample Blink's 8-bit premultiplied bitmap as an `RGBA8` texture,
+and the GPU's bilinear filter weighs 8-bit texels differently from half float
+ones. Level 1 stills in the display encoding are now uploaded and sampled as
+`Rgba8Unorm` (`media.rs`, `rgba8_bitmap`; linear light keeps the converted
+texture). With both, `composite/blend-modes-alpha` is bit-exact in the opaque
+and transparent float frames (was 252 float pixels over 1 CV, max 4.61 CV), and
+the corpus test's drift exemption is removed.
 
 ## Masks on 3D object layers
 
-Today a masked 3D object layer goes through the slow path and its scene pass shows
-turned by 180° (the sun's highlight moves from the upper left to the lower right;
-`composite/3d-mask` against the unmasked `composite/3d-blend`, which matches within
-the 3D bar). The engine draws the scene pass upright and the mask through the
-projected plane inverse as `applyMasks` computes it, so the cases differ by up to
-171 CV. Until the plan owner decides whether to reproduce the turn, masks on 3D
-object layers are routed. Blend modes on 3D layers are drawn, and their linear view
-depth stays in the depth and id surface.
+Today a masked 3D object layer writes no shared depth (`userData.layerOccludes`
+is false while an enabled mask exists), so its color pass draws without a depth
+test against itself and the far hemisphere's inside shows (the "turned by 180°"
+look of `composite/3d-mask`). The 3D scene lane's pass already models
+`layerOccludes`, so the routing is removed: `composite/3d-mask`,
+`composite/3d-blend-mask`, and v1 `3d/transparency` match within the 3D class
+(max 1 CV, object SSIM ≥ 0.99998), and `motion/blur-3d` adds a masked blurred
+object. The mask maps through the projected plane inverse, as `applyMasks`
+computes it.
 
 ## Effects (seam with the effects lane)
 
@@ -161,18 +174,36 @@ Recapture the corpus cases with
 
 ## Gaps
 
-- **Bezier path masks** are routed. Today they rasterize every mask of the layer with
-  Canvas2D and blur each by CSS `blur()` (Skia); matching needs a Skia-equivalent
-  antialiased fill and Gaussian blur within 1 CV. `pm_vector::mask::PathMasks`
-  already holds the geometry and the blur radius.
-- **Masks on 3D object layers** are routed (above).
-- **Effects, transitions, motion blur** remain routed until the effects lane installs
-  an `EffectHost` and adds transitions and motion blur to the graph. Section 2's third
-  linear-blending line (a Gaussian blur of a white line conserves energy within
-  0.5%) needs the blur effect and is not measured here.
+- **Bezier path masks** are routed (`Feature::PathMasks`; `composite/path-masks`,
+  `composite/path-masks-nested`, v1 `masks/path`). Today's `applyPathMasks`
+  rasterizes every enabled mask of the layer into its own Canvas2D canvas
+  (Graphite) and draws it onto one coverage canvas with `source-over` or
+  `destination-out` through `ctx.filter = blur(feather · hypot(a, b) / 2 px)`.
+  The fill is the vector lane's Canvas2D emulation (`pm_vector::canvas2d`); the
+  blur is Skia's GPU image filter at Chromium 152's Skia
+  (`b6d106297ff9ef2ff8094033695d045e87775581`), which must be reproduced pass
+  for pass on the GPU to stay within 1 CV:
+  - `SkBlurEngine::SigmaToRadius` = ⌈3σ⌉, identity at σ ≤ 0.03;
+  - `FilterResult::Builder::blur`: σ above `kMaxLinearSigma` (4) is reached by
+    `FilterResult::rescale` (`downscale_step_count`: ½ steps then one final
+    step between ½ and 1, centered, bilinear, `kSrc`, decal edges, 8-bit
+    intermediates), the blur runs at the low resolution, and the result is
+    drawn back up with bilinear filtering under the paint's blend mode;
+  - `SkShaderBlurAlgorithm::blur`: a single 2D pass with nearest sampling when
+    (2r + 1)² ≤ 28, otherwise two 1D passes with the linear-filtering kernel
+    (`Compute1DBlurLinearKernel`, pairs of taps merged into one bilinear
+    sample), `half4` accumulation and `half4` uniforms, 8-bit outputs, the
+    fast interior and strict (shader-clamped) border draws of `renderBlur`,
+    and `makePixelOutset` with clamp tiling.
+  No part of this is implemented; reference captures of the coverage canvas
+  (the vector lane's `tools/canvas-ref` page can take them) are the next step.
+- **Text and shape residuals on 2.5D planes** (`space/groups-25d`, v1): the text
+  class passes (SSIM ≥ 0.999) but 0.004% of non-text pixels differ by up to
+  47 CV: the corners of the radius-24 rectangles (the vector lane's pinned
+  Canvas2D MSAA residual for `rect r24`, magnified through the plane) and caption
+  glyph pixels outside the 3-pixel text mask (the text lane's raster). Evidence:
+  `/tmp/ne-compclose/evidence/groups-25d-t0-engine-left-legacy-right.png`.
 - **The run-in-E option** has no UI (the plan names only the two rows).
-- **Today's composite drift** is not reproduced (above); needs the plan owner's
-  decision as an appendix A item.
 - Today's masks have no expansion, opacity, or inversion; there is nothing to port.
 
 ## Changes outside the lane
@@ -187,7 +218,13 @@ Recapture the corpus cases with
   `capability.rs` (blend modes, parametric masks, mattes, and supported project
   color no longer routed; path masks and masks on 3D objects routed).
 - `pm-render/tests`: `headless.rs` capability expectations, `color.rs` linear
-  variants, `corpus.rs` and `support/mod.rs` (composite captures, the drift entry).
+  variants, `corpus.rs` and `support/mod.rs` (composite captures; the drift
+  entry, since removed; `routing_forbidden`), `text_corpus.rs` (the capture's
+  16 motion-blur samples, routing forbidden).
+- Phase 3c closure (lane compclose): `media.rs` (`rgba8_bitmap`: level 1 stills
+  sampled as `Rgba8Unorm`), `pm-node` `present/document.rs` (the two removed
+  reasons), `capability.rs` (the `requiresEngine` stamp, 3D masks, non-array
+  masks, `TrackMatte` and `BlendMode` removed).
 - `engine/corpus/src/projects/composite.ts` (new) and `index.ts`.
 - App: `legacy/ui/project-settings.ts` (Color section), `settings/install.ts`,
   `settings/project-color.ts` (new), `shared/project-color.ts` (new),

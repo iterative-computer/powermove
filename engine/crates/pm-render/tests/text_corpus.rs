@@ -87,6 +87,16 @@ fn main() {
                 continue;
             }
             let issues = renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
+            // Amendment 21: these classes are drawn natively; routing one
+            // of them is a failure, not a skip.
+            let forbidden: Vec<String> = issues
+                .iter()
+                .filter(|u| routing_forbidden(&u.feature))
+                .map(|u| u.to_string())
+                .collect();
+            if !forbidden.is_empty() {
+                failed.push(format!("{}: routed for {}", p.name, forbidden.join(", ")));
+            }
             if !issues.is_empty() {
                 let mut reasons: Vec<String> =
                     issues.iter().map(|u| u.feature.to_string()).collect();
