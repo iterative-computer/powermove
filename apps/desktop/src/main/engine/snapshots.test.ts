@@ -18,6 +18,7 @@ const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Par
     class: 'sync',
     viewSeq: 3,
     waitMs: 1000,
+    uploaded: [],
     ...over
   },
   ...top
@@ -64,6 +65,9 @@ describe('snapshot requests', () => {
     expect(validSnapshotRequest(request({ target: { kind: 'frame', motionBlurSamples: 257, background: true, draft3d: false } }))).toBe(false);
     expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale: 0, crop: null } }))).toBe(false);
     expect(validSnapshotRequest(request({}, { session: -1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ uploaded: ['a'.repeat(64)] }))).toBe(true);
+    expect(validSnapshotRequest(request({ uploaded: [''] }))).toBe(false);
+    expect(validSnapshotRequest(request({ uploaded: Array.from({ length: 65 }, () => 'k') }))).toBe(false);
     expect(validSnapshotRequest(null)).toBe(false);
   });
 });

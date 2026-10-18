@@ -74,6 +74,8 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
   if (!Number.isInteger(s['waitMs']) || (s['waitMs'] as number) < 1 || (s['waitMs'] as number) > MAX_WAIT_MS) return false;
+  const uploaded = s['uploaded'];
+  if (!Array.isArray(uploaded) || uploaded.length > 64 || !uploaded.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 512)) return false;
   const target = s['target'] as Record<string, unknown> | null;
   if (!target || typeof target !== 'object') return false;
   if (target['kind'] === 'frame') {
