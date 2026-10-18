@@ -837,7 +837,11 @@ fn level2_content_of_every_layer_type_is_drawn() {
         assert!(!level2(&mk(ty, d, None)), "{ty}");
     }
     // Level 2 text the text renderer does not lay out yet is named.
-    let animated = mk("text", json!({ "text": "x", "animators": [{ "id": "a" }] }), None);
+    let animated = mk(
+        "text",
+        json!({ "text": "x", "animators": [{ "id": "a" }] }),
+        None,
+    );
     assert!(
         animated
             .iter()

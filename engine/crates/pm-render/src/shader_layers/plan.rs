@@ -182,7 +182,12 @@ fn size<'d>(
                 js::max(2.0, js::round(size * js::max(s, d))),
             )
         };
-        return Ok((w, h, side(w, scale.0, dx) as u32, side(h, scale.1, dy) as u32));
+        return Ok((
+            w,
+            h,
+            side(w, scale.0, dx) as u32,
+            side(h, scale.1, dy) as u32,
+        ));
     }
     Ok((w, h, tw as u32, th as u32))
 }

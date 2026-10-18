@@ -6,6 +6,9 @@
 //! driver rounds to nearest instead, this test says so.
 use pm_render::Renderer;
 
+/// One f16 ulp in [0.5, 1).
+const HALF_ULP: f32 = 1.0 / 2048.0;
+
 #[test]
 fn rgba16float_targets_store_fragment_outputs_toward_zero() {
     let r = Renderer::headless().unwrap();
@@ -35,8 +38,8 @@ fn rgba16float_targets_store_fragment_outputs_toward_zero() {
             match k % 4 {
                 0 => f32::from_bits(base.to_bits() - 1),
                 1 => f32::from_bits(base.to_bits() + 1),
-                2 => base + 0.000244140625 - 1e-7,
-                _ => base + 0.000244140625 + 1e-7,
+                2 => base + HALF_ULP / 2.0 - 1e-7,
+                _ => base + HALF_ULP / 2.0 + 1e-7,
             }
         })
         .collect();

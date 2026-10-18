@@ -97,7 +97,6 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
     within as f64 / pixels.max(1) as f64
 }
 
-
 /// Frames outside the render class by a measured, explained residual:
 /// (project, most pixels off by more than 1, largest difference). A frame
 /// within its pin is listed as known instead of failed; one beyond it fails.
@@ -425,9 +424,7 @@ fn corpus_render_parity() {
             if known && !class {
                 eprintln!("  known residual: {}", p.name);
             } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
-                if bar.is_none()
-                    && webgl_unstable(&p.document)
-                    && d.fraction_within_one() >= 0.999
+                if bar.is_none() && webgl_unstable(&p.document) && d.fraction_within_one() >= 0.999
                 {
                     unstable.push(line);
                     continue;

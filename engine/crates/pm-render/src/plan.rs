@@ -890,7 +890,14 @@ pub(crate) fn push_sample_3d<'d>(
     let Some(center) = b.pass3d.last() else {
         return Ok(false);
     };
-    let ctx = center.at_time(scope, time, width, height, b.assets, b.options3d.view.as_ref())?;
+    let ctx = center.at_time(
+        scope,
+        time,
+        width,
+        height,
+        b.assets,
+        b.options3d.view.as_ref(),
+    )?;
     b.pass3d.push(ctx);
     Ok(true)
 }
@@ -1132,12 +1139,12 @@ fn native_content_quad<'d>(
             let radius = js::get(&d, "radius").to_number();
             let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                 let scene = crate::vector::level2::solid_scene(sw, sh, radius, rgba, world);
-                Ok(scene.pixel_bounds(target).map(|rect| {
-                    crate::vector::VectorQuad::Device {
+                Ok(scene
+                    .pixel_bounds(target)
+                    .map(|rect| crate::vector::VectorQuad::Device {
                         source: crate::vector::VectorSource::Scene { scene, rect },
                         rect,
-                    }
-                }))
+                    }))
             };
             if scope.is_3d_layer(layer)? {
                 return local_level2(
@@ -1234,13 +1241,17 @@ fn native_content_quad<'d>(
                 let world = vector_world(scope, layer, time, scale)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
-                    Ok(crate::vector::svg::SvgPlan::Drawn(Some(_))) if scope.is_3d_layer(layer)? => {
+                    Ok(crate::vector::svg::SvgPlan::Drawn(Some(_)))
+                        if scope.is_3d_layer(layer)? =>
+                    {
                         let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                            Ok(match crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
-                            {
-                                Ok(crate::vector::svg::SvgPlan::Drawn(q)) => q.map(|q| *q),
-                                _ => None,
-                            })
+                            Ok(
+                                match crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
+                                {
+                                    Ok(crate::vector::svg::SvgPlan::Drawn(q)) => q.map(|q| *q),
+                                    _ => None,
+                                },
+                            )
                         };
                         local_level2(
                             scope,
@@ -1596,6 +1607,15 @@ fn vector_world<'d>(
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
 
+/// Places vector content under a world matrix into a clip
+/// ([`local_level2`]).
+type PlanVector<'p, 'd> = dyn FnMut(
+        &mut Scope<'_, 'd>,
+        &Mat2d,
+        pm_vector::render::scene::PixelRect,
+    ) -> JsResult<Option<crate::vector::VectorQuad>>
+    + 'p;
+
 /// Level 2 device content of a 3D layer (`crate::space25d::local`):
 /// `plan` places the content under a world matrix into a clip. It runs
 /// once in content coordinates; a coverage scene is then projected through
@@ -1608,11 +1628,7 @@ fn local_level2<'d>(
     time: f64,
     scale: (f64, f64),
     target: pm_vector::render::scene::PixelRect,
-    plan: &mut dyn FnMut(
-        &mut Scope<'_, 'd>,
-        &Mat2d,
-        pm_vector::render::scene::PixelRect,
-    ) -> JsResult<Option<crate::vector::VectorQuad>>,
+    plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
     let clip = crate::space25d::local::unbounded();
     let rect_of = |q: &crate::vector::VectorQuad| match q {
@@ -1790,7 +1806,11 @@ fn local_text<'d>(
         }
     };
     let side = (2.0 * MARGIN) as u32;
-    let first = lay(scope, kurbo::Affine::translate((MARGIN, MARGIN)), (side, side))?;
+    let first = lay(
+        scope,
+        kurbo::Affine::translate((MARGIN, MARGIN)),
+        (side, side),
+    )?;
     let Some(first) = first else {
         for what in text.take_unsupported() {
             b.unsupported
@@ -1803,7 +1823,10 @@ fn local_text<'d>(
     let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
     // Layer space at density, shifted so the content starts near the
     // canvas origin.
-    let (ox, oy) = ((bounds[0] * dx).floor() - 1.0, (bounds[1] * dy).floor() - 1.0);
+    let (ox, oy) = (
+        (bounds[0] * dx).floor() - 1.0,
+        (bounds[1] * dy).floor() - 1.0,
+    );
     let size = (
         ((bounds[0] + bounds[2]) * dx - ox).ceil() as u32 + 2,
         ((bounds[1] + bounds[3]) * dy - oy).ceil() as u32 + 2,

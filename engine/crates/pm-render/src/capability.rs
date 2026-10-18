@@ -764,7 +764,8 @@ mod tests {
         assert!(drawn(&stamped(precomp)));
         // A stamp whose only reason is the project color (linear blending)
         // or clip pitch is drawn: those are judged by their own checks.
-        let color = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
+        let color =
+            stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
         assert!(drawn(&color));
         let doc = color;
         assert!(

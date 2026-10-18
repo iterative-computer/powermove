@@ -68,7 +68,11 @@ fn solid() -> Value {
         50.0,
         2.0,
     );
-    set(&mut l, "rotation", json!({ "v": 8.0, "kf": [], "expr": null }));
+    set(
+        &mut l,
+        "rotation",
+        json!({ "v": 8.0, "kf": [], "expr": null }),
+    );
     l
 }
 
@@ -130,9 +134,21 @@ fn a_turned_plane_covers_its_homography() {
         45.0,
         2.0,
     );
-    set(&mut l, "rotation.y", json!({ "v": 50.0, "kf": [], "expr": null }));
-    set(&mut l, "anchor.x", json!({ "v": 50.0, "kf": [], "expr": null }));
-    set(&mut l, "anchor.y", json!({ "v": 35.0, "kf": [], "expr": null }));
+    set(
+        &mut l,
+        "rotation.y",
+        json!({ "v": 50.0, "kf": [], "expr": null }),
+    );
+    set(
+        &mut l,
+        "anchor.x",
+        json!({ "v": 50.0, "kf": [], "expr": null }),
+    );
+    set(
+        &mut l,
+        "anchor.y",
+        json!({ "v": 35.0, "kf": [], "expr": null }),
+    );
     let ours = render(&mut renderer, vec![level2(l.clone(), true)]);
     let mut level1 = l.clone();
     level1["threeD"] = json!(true);
@@ -144,7 +160,8 @@ fn a_turned_plane_covers_its_homography() {
     for y in 1..H as usize - 1 {
         for x in 1..W as usize - 1 {
             let at = |dx: isize, dy: isize| {
-                reference[((y as isize + dy) as usize * W as usize + (x as isize + dx) as usize) * 4 + 3]
+                reference
+                    [((y as isize + dy) as usize * W as usize + (x as isize + dx) as usize) * 4 + 3]
             };
             let block: Vec<f32> = (-1..=1)
                 .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
@@ -196,7 +213,11 @@ fn level2_paths_and_text_free_layers_on_planes_are_supported() {
         80.0,
         2.0,
     );
-    set(&mut l, "rotation.x", json!({ "v": 35.0, "kf": [], "expr": null }));
+    set(
+        &mut l,
+        "rotation.x",
+        json!({ "v": 35.0, "kf": [], "expr": null }),
+    );
     let plane = render(&mut renderer, vec![level2(l.clone(), true)]);
     let flat = render(&mut renderer, vec![level2(l, false)]);
     let covered = |f: &[f32]| f.chunks_exact(4).map(|p| f64::from(p[3])).sum::<f64>();

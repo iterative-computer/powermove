@@ -212,7 +212,11 @@ fn level2_shader_layers_render_at_the_density_they_are_drawn_at() {
     l["compat"] = json!(2);
     let doc = document(160, 90, 30.0, vec![l]);
     let (px, _) = render(&mut r, &doc, (160, 90), 1.0).unwrap();
-    assert!(close(&px[..1], [6000.0 / 8192.0, 0.0, 0.0, 1.0]), "{:?}", &px[..4]);
+    assert!(
+        close(&px[..1], [6000.0 / 8192.0, 0.0, 0.0, 1.0]),
+        "{:?}",
+        &px[..4]
+    );
 }
 
 #[test]

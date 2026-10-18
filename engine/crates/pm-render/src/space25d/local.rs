@@ -45,8 +45,16 @@ pub fn density<'d>(
     let [x, y, w, h] = bounds;
     let (w, h) = (w.max(1e-9), h.max(1e-9));
     let offset = scope.size_anchor_offset(layer, time)?;
-    let corner = match super::projected(scope, layer, time, scale, w, h, -x - offset.x, -y - offset.y)?
-    {
+    let corner = match super::projected(
+        scope,
+        layer,
+        time,
+        scale,
+        w,
+        h,
+        -x - offset.x,
+        -y - offset.y,
+    )? {
         Some(plane) => super::corner_density(&plane).map(|(du, dv)| (du / w, dv / h)),
         None => None,
     };
@@ -120,9 +128,7 @@ pub fn project_scene(
         let mut path = BezPath::new();
         for c in contours {
             let clipped = clip_near(&c);
-            let mut points = clipped
-                .iter()
-                .map(|[x, y, w]| Point::new(x / w, y / w));
+            let mut points = clipped.iter().map(|[x, y, w]| Point::new(x / w, y / w));
             if let Some(first) = points.next() {
                 path.move_to(first);
                 for p in points {
@@ -159,11 +165,7 @@ fn clip_near(contour: &[[f64; 3]]) -> Vec<[f64; 3]> {
         }
         if ina != inb {
             let t = (NEAR - a[2]) / (b[2] - a[2]);
-            out.push([
-                a[0] + (b[0] - a[0]) * t,
-                a[1] + (b[1] - a[1]) * t,
-                NEAR,
-            ]);
+            out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, NEAR]);
         }
     }
     out
@@ -173,7 +175,12 @@ fn clip_near(contour: &[[f64; 3]]) -> Vec<[f64; 3]> {
 mod tests {
     #[test]
     fn contours_are_clipped_at_the_camera_plane() {
-        let c = [[0.0, 0.0, 1.0], [1.0, 0.0, -1.0], [1.0, 1.0, -1.0], [0.0, 1.0, 1.0]];
+        let c = [
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [0.0, 1.0, 1.0],
+        ];
         let clipped = super::clip_near(&c);
         assert_eq!(clipped.len(), 4);
         assert!(clipped.iter().all(|p| p[2] >= 1e-6));
