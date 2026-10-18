@@ -82,7 +82,11 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     if (!comp || !Array.isArray(comp.layers)) return null;
     const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
     const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true });
-    return snapshot ? engine.toCanvas(snapshot).toDataURL('image/jpeg', .8) : null;
+    if (!snapshot) return null;
+    // The page's own work (the canvas and the JPEG encode) waits out
+    // interaction, navigation, and playback, as today's capture does.
+    while (blocked() && !disposed) await new Promise((resolve) => window.setTimeout(resolve, RETRY_MS));
+    return disposed ? null : engine.toCanvas(snapshot).toDataURL('image/jpeg', .8);
   }
 
   function step() {
