@@ -16,6 +16,10 @@
  *
  * Starts Electron: run under the machine-wide lock.
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-vector/tools/canvas-ref/run.ts [--out <dir>]
+ *
+ * `--svg-gate` captures the level 1 SVG gate references instead
+ * (svg-gate-cases.ts; `svg-gate-<stamp>-<commit>/` and
+ * tests/fixtures/svg-gate-cases.json).
  */
 import { existsSync } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
@@ -25,6 +29,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { cases, type Case } from './cases';
+import { svgGateCases } from './svg-gate-cases';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
@@ -33,7 +38,8 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const commit = execSync('git rev-parse --short=8 HEAD', { cwd: repo }).toString().trim();
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
-const out = path.resolve(flag('--out') || path.join(homedir(), 'Library/Application Support/Powermove Engine Corpus', `canvas-${stamp}-${commit}`));
+const svgGate = args.includes('--svg-gate');
+const out = path.resolve(flag('--out') || path.join(homedir(), 'Library/Application Support/Powermove Engine Corpus', `${svgGate ? 'svg-gate' : 'canvas'}-${stamp}-${commit}`));
 if (out.startsWith(path.resolve(repo) + path.sep)) throw new Error('references never go inside the repository');
 
 // The page's copy of rasterShape and rr must be today's code, character for character.
@@ -52,8 +58,8 @@ if (legacyCopy.trim() !== pageCopy.trim()) throw new Error('page.ts rasterShape 
 // experiments against Chromium; the fixture is only rewritten for the
 // built-in list.
 const custom = flag('--cases');
-const list: Case[] = custom ? JSON.parse(readFileSync(custom, 'utf8')).cases : cases();
-if (!custom) writeFileSync(path.join(crate, 'tests/fixtures/canvas-cases.json'), JSON.stringify({ cases: list }, null, 1) + '\n');
+const list: Case[] = custom ? JSON.parse(readFileSync(custom, 'utf8')).cases : svgGate ? svgGateCases() : cases();
+if (!custom) writeFileSync(path.join(crate, `tests/fixtures/${svgGate ? 'svg-gate-cases' : 'canvas-cases'}.json`), JSON.stringify({ cases: list }, null, 1) + '\n');
 
 const crcTable = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc = (b: Uint8Array) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 255]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
