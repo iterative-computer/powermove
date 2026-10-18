@@ -13,7 +13,8 @@
 
      node engine/crates/pm-cli/scripts/wasm-budget-3d.mjs [capture dir]
 
-   Prints one JSON line per project and a summary. */
+   Prints one JSON line per project and a summary, with the number of
+   queries that answered an error (counted per op). */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -58,17 +59,24 @@ for (const [name, dir] of dirs) {
   const open = doc.compId ?? doc.id;
   const times = (record.samples ?? []).map((s) => s.time);
   let queries = 0;
+  // Every reply is read: an error reply (`{"error":…}`) is counted, so a
+  // failing query cannot pass for a cheap one and understate memory.
+  const errors = {};
+  const query = (request) => {
+    const text = out(x.pm_query(put(JSON.stringify(request))));
+    queries++;
+    if (text.startsWith('{"error"')) errors[request.op] = (errors[request.op] ?? 0) + 1;
+  };
   for (const [comp, layers] of comps) {
     layers.forEach((layer, index) => {
       for (const t of times) {
-        for (const op of OPS) { x.pm_query(put(JSON.stringify({ op, comp, open, layer: index, t }))); queries++; }
-        x.pm_query(put(JSON.stringify({ op: 'world3D', comp, open, layer: index, t, positioning: true }))); queries++;
-        for (const key of Object.keys(layer.p ?? {})) { x.pm_query(put(JSON.stringify({ op: 'ev', comp, open, layer: index, key, t }))); queries++; }
+        for (const op of OPS) query({ op, comp, open, layer: index, t });
+        query({ op: 'world3D', comp, open, layer: index, t, positioning: true });
+        for (const key of Object.keys(layer.p ?? {})) query({ op: 'ev', comp, open, layer: index, key, t });
       }
     });
     for (let i = 0; i < 64; i++) {
-      x.pm_query(put(JSON.stringify({ op: 'pick', comp, open, x: (i % 8) * (doc.w ?? 1920) / 8, y: Math.floor(i / 8) * (doc.h ?? 1080) / 8, t: times[i % Math.max(1, times.length)] ?? 0, includeLocked: false })));
-      queries++;
+      query({ op: 'pick', comp, open, x: (i % 8) * (doc.w ?? 1920) / 8, y: Math.floor(i / 8) * (doc.h ?? 1080) / 8, t: times[i % Math.max(1, times.length)] ?? 0, includeLocked: false });
     }
   }
   const row = {
@@ -76,6 +84,8 @@ for (const [name, dir] of dirs) {
     layers: comps.reduce((a, [, l]) => a + l.length, 0),
     documentBytes: text.length,
     queries,
+    queryErrors: Object.values(errors).reduce((a, n) => a + n, 0),
+    queryErrorsByOp: errors,
     heapLiveAfterLoad: loadedLive,
     heapLive: x.pm_heap_live(),
     heapPeak: x.pm_heap_peak(),
@@ -93,6 +103,7 @@ console.log(JSON.stringify({
   heapPeakMax: max('heapPeak'),
   linearMax: max('linearBytes'),
   budget: { heapLive: LIVE_BUDGET, linear: LINEAR_BUDGET },
+  queryErrors: rows.reduce((a, r) => a + r.queryErrors, 0),
   within: max('heapLive') <= LIVE_BUDGET && max('linearBytes') <= LINEAR_BUDGET,
   real: rows.find((r) => r.project.startsWith('real/')) ?? null
 }));
