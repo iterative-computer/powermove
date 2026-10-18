@@ -64,6 +64,7 @@ fn main() {
     let px = picture(0);
     let t = Instant::now();
     let params = ConvertParams {
+        legacy_png: true,
         working: WorkingEncoding::Standard,
         alpha: AlphaOutput::None,
         dither: spec.dither_enabled(),

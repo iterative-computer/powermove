@@ -1023,6 +1023,7 @@ where
     let frames = spec.frames;
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
+    pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
         (
             pm_audio::Mixer::new(
