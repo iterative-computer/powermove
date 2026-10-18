@@ -30,6 +30,7 @@ use crate::capability::{self, Feature, Unsupported};
 use crate::composite::{self, EffectHost};
 use crate::error::LayerFailure;
 use crate::js;
+use crate::request::VideoEnd;
 use crate::scene3d::Object3dPlan;
 
 /// One composition (or one group's members) rendered into a target.
@@ -169,6 +170,8 @@ pub struct Build<'r> {
     pub(crate) video_center: Option<f64>,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
+    /// `videoPlaybackTime`'s `endPadding` for this output ([`VideoEnd`]).
+    video_padding: f64,
 }
 
 /// Options of a build beyond the frame's geometry.
@@ -177,13 +180,16 @@ pub struct BuildOptions {
     /// Resolved motion blur (`crate::motion::resolve`).
     pub blur: Option<crate::motion::Blur>,
     pub sampling: crate::sampling::Sampling,
+    /// The end-of-clip padding of video sources ([`VideoEnd`]).
+    pub video_end: VideoEnd,
 }
 
 /// Today's `PC_MAX_DEPTH`.
 pub const PRECOMP_MAX_DEPTH: u32 = 6;
 
 /// Builds the plan of `composition` at `time` (seconds) into a target of
-/// `width` × `height` at `scale` output pixels per composition pixel.
+/// `width` × `height` at `scale` output pixels per composition pixel, with
+/// the video end padding of the output kind (`video_end`).
 #[allow(clippy::too_many_arguments)]
 pub fn build<'r>(
     ev: &mut Evaluator,
@@ -193,10 +199,25 @@ pub fn build<'r>(
     width: u32,
     height: u32,
     scale: (f64, f64),
+    video_end: VideoEnd,
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
-    build_with_effects(
-        ev, root_comp, project, time, width, height, scale, assets, None,
+    build_with(
+        ev,
+        root_comp,
+        project,
+        time,
+        width,
+        height,
+        scale,
+        assets,
+        None,
+        crate::scene3d::Options3d::default(),
+        None,
+        BuildOptions {
+            video_end,
+            ..BuildOptions::default()
+        },
     )
 }
 
@@ -290,6 +311,7 @@ pub(crate) fn build_blender<'r>(
         blur: options.blur,
         video_center: None,
         sampling: options.sampling,
+        video_padding: video_padding(options.video_end, root_comp),
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -1089,7 +1111,7 @@ fn native_content_quad<'d>(
                     // The file's frames on the overridden grid; the last
                     // frame clamps when the media is opened.
                     Some(_) => js::max(0.0, st),
-                    None => playback_time(st, rec("dur").to_number()),
+                    None => playback_time(st, rec("dur").to_number(), b.video_padding),
                 };
                 Source::Video {
                     asset: asset_id,
@@ -1433,11 +1455,24 @@ pub fn fit_uv(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
     }
 }
 
-/// `videoPlaybackTime(asset, time)` for container sources: clamped to
-/// `[0, dur − 0.04]`. The engine then selects the frame by section 5 rule 7
+/// `videoPlaybackTime(asset, time, endPadding)` for container sources:
+/// clamped to `[0, dur − endPadding]`. The engine then selects the frame by section 5 rule 7
 /// (today's microsecond rounding only steers Chromium's seek to the same
 /// frame).
 pub use crate::retime::playback_time;
+
+/// Today's `endPadding` for an output kind. The viewer's compositor seeks
+/// with the default 0.04 s; `prepareFrame`, which every export and agent
+/// still runs first, passes `1 / PM.proj.fps`, the exported composition's
+/// rate (`fps` of the composition rendered, as expressions see it; at the
+/// open composition that is `PM.proj.fps`). Precomps inside it keep that
+/// padding, as `prepareFrame` does.
+pub fn video_padding(video_end: VideoEnd, root_comp: &Comp<'_>) -> f64 {
+    match video_end {
+        VideoEnd::Preview => 0.04,
+        VideoEnd::Final => 1.0 / root_comp.expression_fps().to_number(),
+    }
+}
 
 /// `PM.normalizeFill(comp.backgroundFill, comp.bg)` and the clear it gives.
 pub fn background(comp: &Comp<'_>) -> Background {

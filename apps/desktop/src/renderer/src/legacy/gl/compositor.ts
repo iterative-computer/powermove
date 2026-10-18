@@ -708,6 +708,25 @@ void main(){
   fragColor=vec4(color,1);
 }`;
 
+/* The context is the viewer's: the viewer panel gives the compositor its
+   canvas when it mounts (and a lost context comes back on restore). Offline
+   renders (exports, agent stills) that start before that wait for it here
+   instead of failing to capture: a project file opened right after launch
+   can finish loading before the editor's viewer has mounted. A wait that
+   timed out (no viewer in the workspace) is not repeated per frame until a
+   context arrives. */
+const readyWaiters = new Set<(ready: boolean) => void>();
+let readyGaveUp = false;
+GL.whenReady = (timeoutMs = 10_000): Promise<boolean> => {
+  if (GL.gl) return Promise.resolve(true);
+  if (readyGaveUp) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const done = (ready: boolean) => { window.clearTimeout(timer); readyWaiters.delete(done); resolve(ready); };
+    const timer = window.setTimeout(() => { readyGaveUp = true; done(false); }, timeoutMs);
+    readyWaiters.add(done);
+  });
+};
+
 /* ── init ──────────────────────────────────────────────── */
 GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   previewFrames.clear();
@@ -750,6 +769,8 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   gl.disable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  readyGaveUp = false;
+  for (const ready of [...readyWaiters]) ready(true);
   return true;
 };
 

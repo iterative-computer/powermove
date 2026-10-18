@@ -141,6 +141,7 @@ fn build_options(comp: &Comp<'_>, request: &RenderRequest) -> plan::BuildOptions
     plan::BuildOptions {
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
+        video_end: request.video_end,
     }
 }
 

@@ -14,9 +14,9 @@
  * 2. opens a copy of the corpus project through the app's own Open
  *    Project path (the dialog answers with the copy);
  * 3. injects measure-app-page.ts, which records compositor draws (today)
- *    or registers `engine.viewer` so the real viewer presents the
- *    interactive engine's frames (engine; main hands the page fresh engine
- *    ports);
+ *    or wraps the kernel's `engine.viewer` so the real viewer presents the
+ *    interactive engine's frames over the kernel's own engine connection
+ *    (engine, tracer);
  * 4. applies S1's load (the main-thread autosave is left out with the
  *    `no-autosave` profile, as the app runs since autosave serialization
  *    moved to a worker), traces Chromium's PipelineReporter, and plays or
@@ -126,6 +126,18 @@ const { MainLoad } = require('../../../../../../engine/spikes/s1-bridge/app/load
     stop(): Record<string, unknown>;
   };
 };
+
+/**
+ * The interactive engine's per-frame trace since the last call (render
+ * start, GPU done, descriptor sent; host µs), emptied: it rides on the
+ * engine's status report with POWERMOVE_BRIDGE_TRACE=1.
+ */
+async function takeEngineTrace(): Promise<unknown[] | null> {
+  const engine = (globalThis as { __powermoveNativeEngine?: { engine?: { report(): Promise<unknown> } | null } }).__powermoveNativeEngine?.engine;
+  if (!engine) return null;
+  const report = (await engine.report().catch(() => null)) as { presentTrace?: unknown[] } | null;
+  return report?.presentTrace ?? null;
+}
 
 async function run(config: AppConfig): Promise<void> {
   const harness = require(process.env['POWERMOVE_PM_BRIDGE']!) as HarnessAddon; // eslint-disable-line @typescript-eslint/no-require-imports
@@ -260,13 +272,6 @@ async function run(config: AppConfig): Promise<void> {
 
     if (!pageInjected) await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
     await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false, offMainThread: config.offMainThread !== false })})`);
-    if (config.mode === 'engine') {
-      const installed = (globalThis as { __powermoveNativeEngine?: { engine?: { reconnectClient(id: number): void } } }).__powermoveNativeEngine;
-      if (!installed?.engine) throw new Error('the native engine is not installed (POWERMOVE_NEW_ENGINE=1)');
-      // The page loaded before the measurement's engine connection existed:
-      // give it fresh ports, as main does after a reload.
-      installed.engine.reconnectClient(contents.id);
-    }
     await run('seek', `window.PM.setTime(${config.startS ?? 0})`);
     await waitFor('the viewer to present', () => call<boolean>('window.__measureApp.ready()'), 60_000);
     log('presenting');
@@ -312,6 +317,7 @@ async function run(config: AppConfig): Promise<void> {
       if (!(await call<boolean>(`window.__measureApp.play(${config.startS ?? 0})`))) throw new Error('could not start playback');
       await sleep(1500);
       await run('reset', 'window.__measureApp.reset()');
+      await takeEngineTrace();
       // Diagnostics only (PM_MEASURE_CPU_PROFILE=<file>): a CPU profile of
       // the editor's renderer over the recording window. Attaching the
       // debugger costs time, so a profiled run is not a measurement.
@@ -338,6 +344,7 @@ async function run(config: AppConfig): Promise<void> {
         result['cpuProfile'] = profilePath;
       }
       result['page'] = await call('window.__measureApp.collect()');
+      result['engineFrames'] = await takeEngineTrace();
       await run('pause', 'window.__measureApp.pause()');
     } else {
       const runs: Record<string, unknown> = {};
@@ -351,6 +358,7 @@ async function run(config: AppConfig): Promise<void> {
         await sleep(400);
         await run('input mode', `window.__measureApp.setInputMode(${JSON.stringify(inputMode)})`);
         await run('reset', 'window.__measureApp.reset()');
+        await takeEngineTrace();
         const generated: [number, number][] = [];
         const done = new Promise<void>((resolve) => setTimeout(resolve, config.durationMs + 500));
         let last = { x: press.x, y: press.y };
@@ -365,7 +373,7 @@ async function run(config: AppConfig): Promise<void> {
         await sleep(300);
         await run('input mode off', 'window.__measureApp.setInputMode(null)');
         contents.sendInputEvent({ type: 'mouseUp', x: last.x, y: last.y, button: press.button, clickCount: 1 });
-        runs[inputMode] = { generated, page: await call('window.__measureApp.collect()') };
+        runs[inputMode] = { generated, page: await call('window.__measureApp.collect()'), engineFrames: await takeEngineTrace() };
         log(`input mode ${inputMode}: ${generated.length} events`);
         await sleep(500);
       }

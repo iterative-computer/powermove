@@ -12,16 +12,16 @@
 //!
 //! # The integration step (rule 5, amendment 16)
 //!
-//! The legacy code integrates with a midpoint rule at a step of
-//! `1 / (max(30, PM.proj.fps) × 2)` seconds: twice the *open* composition's
-//! rate, at least 60 Hz, so a nested layer's source time depends on which
-//! composition is open (appendix A item 9). Amendment 16 keeps the same rule
-//! with the *owning* composition's rate ([`Retiming::Engine`]: two midpoint
-//! samples per frame of `comp.fps || PM.proj.fps`, the rate expressions
-//! see, at no less than 60 Hz). A root composition then matches today bit
-//! for bit; a nested composition keeps its own rate whichever composition
-//! is open. [`Retiming::Legacy`] reproduces the TypeScript exactly for
-//! parity comparisons.
+//! Variable speed is integrated with a midpoint rule: two samples per frame,
+//! at no less than 60 Hz, a step of `1 / (max(30, fps) × 2)` seconds, plus a
+//! partial step to the requested time. The legacy code takes `fps` from the
+//! *open* composition (`PM.proj.fps`), so a nested layer's source time
+//! depends on which composition is open (appendix A item 9).
+//! [`Retiming::Engine`] takes it from the *owning* composition
+//! (`comp.fps || PM.proj.fps`, the rate its expressions see). At the root both
+//! are `PM.proj.fps`, so a root composition matches today bit for bit;
+//! [`Retiming::Legacy`] reproduces the TypeScript exactly for parity
+//! comparisons of nested layers.
 
 use std::collections::HashMap;
 
@@ -34,11 +34,12 @@ use crate::scope::{Scope, js_max};
 /// Which integration step variable speed uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Retiming {
-    /// Amendment 16: two midpoint steps per frame of the owning
-    /// composition, at no less than 60 Hz.
+    /// Section 5 rule 5 with amendment 16: `1 / (max(30, fps) × 2)` seconds
+    /// with the owning composition's `fps` (`comp.fps || PM.proj.fps`).
     #[default]
     Engine,
-    /// `retiming.ts`: `1 / (max(30, PM.proj.fps) × 2)` seconds.
+    /// `retiming.ts`: `1 / (max(30, PM.proj.fps) × 2)` seconds, the open
+    /// composition's `fps`.
     Legacy,
 }
 
@@ -56,7 +57,7 @@ struct Key {
     comp: JsString,
     layer: JsString,
     from: u64,
-    step: (Retiming, u64, u64),
+    step: (Retiming, u64),
 }
 
 impl RetimeCache {
@@ -126,7 +127,7 @@ impl<'d> Scope<'_, 'd> {
         let from_n = from.to_number();
         let end = js_max(0.0, local);
         let mut scratch = vec![0.0];
-        let key = |step: (Retiming, u64, u64), cx: &crate::comp::Comp<'_>| Key {
+        let key = |step: (Retiming, u64), cx: &crate::comp::Comp<'_>| Key {
             root: cx.root() as *const Node as usize,
             revision: cx.revision(),
             comp: cx.id().clone(),
@@ -136,15 +137,14 @@ impl<'d> Scope<'_, 'd> {
         };
         // Amendment 16: two midpoint samples per frame, at no less than
         // 60 Hz, of the owning composition (engine) or of the open one
-        // (legacy, `PM.proj.fps`). At the root both are the open
-        // composition's rate, so the engine matches today bit for bit there.
+        // (legacy). At the root both are `PM.proj.fps`.
         let fps = match mode {
             Retiming::Legacy => node::to_number(self.project.member("fps")),
             Retiming::Engine => self.comp.expression_fps().to_number(),
         };
         let step = 1.0 / (js_max(30.0, fps) * 2.0);
         let sums = match cache {
-            Some(c) => c.sums(key((mode, step.to_bits(), 0), self.comp)),
+            Some(c) => c.sums(key((mode, step.to_bits()), self.comp)),
             None => &mut scratch,
         };
         let full = (end / step).floor();

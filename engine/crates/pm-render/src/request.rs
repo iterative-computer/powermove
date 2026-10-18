@@ -10,6 +10,34 @@ use crate::error::RenderError;
 use crate::motion::MotionBlur;
 use crate::sampling::Sampling;
 
+/// How close to a video clip's end its source time may go: today's
+/// `videoPlaybackTime(asset, time, endPadding)` keeps a source time at least
+/// `endPadding` before the asset's duration, and the padding depends on the
+/// path that draws the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoEnd {
+    /// The viewer, scrubbing, and thumbnails: the compositor's own seeks,
+    /// `endPadding = 0.04` s.
+    #[default]
+    Preview,
+    /// Exports and agent stills: `prepareFrame` seeks every clip first with
+    /// `endPadding = 1 / fps` of the exported composition, so the last
+    /// frame of a clip that ends with the composition is kept.
+    Final,
+}
+
+impl VideoEnd {
+    /// The output kind of a contract 2 request: exports and agent captures
+    /// are final output.
+    pub const fn of(purpose: pm_protocol::frame::FramePurpose) -> VideoEnd {
+        if purpose.is_final() {
+            VideoEnd::Final
+        } else {
+            VideoEnd::Preview
+        }
+    }
+}
+
 /// A render of one composition at one time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderRequest {
@@ -49,6 +77,8 @@ pub struct RenderRequest {
     /// The resampler of `compat` level 2 raster content
     /// (`crate::sampling`).
     pub sampling: Sampling,
+    /// The end-of-clip padding of video sources ([`VideoEnd`]).
+    pub video_end: VideoEnd,
 }
 
 impl RenderRequest {
@@ -68,6 +98,7 @@ impl RenderRequest {
             blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
+            video_end: VideoEnd::Preview,
         }
     }
 
@@ -86,6 +117,7 @@ impl RenderRequest {
             blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
+            video_end: VideoEnd::Preview,
         }
     }
 
@@ -121,6 +153,7 @@ impl RenderRequest {
                 kind => MotionBlur::Kind(kind),
             },
             sampling,
+            video_end: VideoEnd::of(request.purpose),
         })
     }
 

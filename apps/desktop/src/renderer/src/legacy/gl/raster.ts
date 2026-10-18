@@ -1410,13 +1410,16 @@ PM.assets = {
       PM.touch();
       checkpointAssetMetadata(project);
     }
+    let hydratedFormat = false;
     restored.forEach((a: any) => {
       /* Older projects already preserve the original .svg bytes and name but
          predate the explicit vector marker. Hydrate that marker in place so
          the editor UI and subsequent web exports also identify the asset. */
       const meta: any = project.assets?.[a.id];
-      if (a.format && meta && meta.format !== a.format) meta.format = a.format;
+      if (a.format && meta && meta.format !== a.format) { meta.format = a.format; hydratedFormat = true; }
     });
+    /* A document write like any other: the write barrier must hear of it. */
+    if (hydratedFormat) PM.touch?.();
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {

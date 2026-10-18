@@ -5,8 +5,8 @@
 //! constant speed and trim, variable speed integrated at the owning
 //! composition's rate). The render graph turns it into what is drawn:
 //!
-//! - **Video.** The source time is clamped to `[0, dur − 0.04]` as today's
-//!   `videoPlaybackTime`, then the media frame is selected by section 5
+//! - **Video.** The source time is clamped to `[0, dur − endPadding]` as
+//!   today's `videoPlaybackTime`, then the media frame is selected by section 5
 //!   rule 7 in `pm-media` (the last frame with PTS ≤ t + q/2). With an
 //!   Interpret Footage frame-rate override (`asset.interpret.frameRate`),
 //!   frame n is shown at n / rate instead of at its PTS: the frame is the
@@ -22,11 +22,13 @@ use pm_eval::{Comp, JsValue};
 use pm_model::Node;
 use pm_time::{Rate, TICKS_PER_SECOND, Tick};
 
-/// `videoPlaybackTime(asset, time)` for container sources: clamped to
-/// `[0, dur − 0.04]`. Without a duration the clamp is to 0.
-pub fn playback_time(time: f64, dur: f64) -> f64 {
+/// `videoPlaybackTime(asset, time, endPadding)` for container sources:
+/// clamped to `[0, dur − endPadding]` (0.04 s in the viewer, `1 / fps` of
+/// the rendered composition for final output; `crate::plan::video_padding`).
+/// Without a duration the clamp is to 0.
+pub fn playback_time(time: f64, dur: f64, padding: f64) -> f64 {
     let dur = if dur.is_nan() { 0.0 } else { dur };
-    crate::js::max(0.0, crate::js::min(crate::js::max(0.0, dur - 0.04), time))
+    crate::js::max(0.0, crate::js::min(crate::js::max(0.0, dur - padding), time))
 }
 
 /// The Interpret Footage frame-rate override of an asset record:
@@ -120,10 +122,12 @@ mod tests {
 
     #[test]
     fn playback_time_clamps_like_video_timing() {
-        assert_eq!(playback_time(-1.0, 2.0), 0.0);
-        assert_eq!(playback_time(1.0, 2.0), 1.0);
-        assert!((playback_time(5.0, 2.0) - 1.96).abs() < 1e-12);
-        assert_eq!(playback_time(0.5, f64::NAN), 0.0);
+        assert_eq!(playback_time(-1.0, 2.0, 0.04), 0.0);
+        assert_eq!(playback_time(1.0, 2.0, 0.04), 1.0);
+        assert!((playback_time(5.0, 2.0, 0.04) - 1.96).abs() < 1e-12);
+        assert_eq!(playback_time(0.5, f64::NAN, 0.04), 0.0);
+        assert_eq!(playback_time(5.0, 2.0, 0.1), 1.9);
+        assert_eq!(playback_time(5.0, 0.01, 0.04), 0.0);
     }
 
     #[test]

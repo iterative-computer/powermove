@@ -534,3 +534,28 @@ it('restores OBJ assets beyond 64 MB without marking their geometry missing', as
   expect(PM.assets.get('model')?.mesh.triangleCount).toBe(1);
   expect(PM.assets.get('model')?.size).toBe(blob.size);
 });
+
+it('announces the format it hydrates on an older asset record', async () => {
+  const obj = 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n';
+  const restore = async (meta: any) => {
+    const blob = new Blob([obj], { type: 'model/obj' });
+    const project = { assets: { model: meta } };
+    const touch = vi.fn();
+    const PM = rasterRegistry({
+      proj: project,
+      touch,
+      MediaStore: { get: async () => blob },
+      MediaImport: { mapBounded: async (items: any[], _concurrency: number, fn: (item: any) => Promise<any>) => Promise.all(items.map(fn)) },
+    } as any);
+    await PM.assets.restoreProject(project);
+    return { meta: project.assets.model, touch };
+  };
+  // An older record without the format marker: hydrated and announced.
+  const older = await restore({ id: 'model', name: 'mesh.obj', kind: 'model' });
+  expect(older.meta.format).toBe('obj');
+  expect(older.touch).toHaveBeenCalledTimes(1);
+  // A record that has it: nothing written, nothing announced.
+  const current = await restore({ id: 'model', name: 'mesh.obj', kind: 'model', format: 'obj' });
+  expect(current.meta.format).toBe('obj');
+  expect(current.touch).not.toHaveBeenCalled();
+});

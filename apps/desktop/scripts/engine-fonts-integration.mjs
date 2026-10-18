@@ -43,6 +43,8 @@ try {
     ...process.env,
     PM_IT_ENGINE_PROCESS: path.join(out, 'engine-process.js'),
     POWERMOVE_ENGINE_ADDON: path.join(desktop, 'native', 'pm_node.node'),
+    // Main's host clock is the engines' clock through pm-bridge (built with pm-node).
+    POWERMOVE_PM_BRIDGE: path.join(desktop, 'native', 'pm_bridge.node'),
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1'
   };
   delete env.ELECTRON_RUN_AS_NODE;

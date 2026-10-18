@@ -99,11 +99,17 @@ arrived. Then:
   measured host offset); a run ends when a stopped sample of the run
   arrives; without the loop a run stops at the work-area end.
 - **The audio device clock is the master** (section 15). The presenter
-  sends Play to the view's audio thread (pm-audio `Playback`, opened at
-  the first Play) and starts its line with the audio's first playing
-  sample; samples of the same epoch re-anchor it every 100 ms. With no
-  output device, or after 1.5 s without a playing sample, the line runs on
-  the host clock (counted in `hostClockRuns`).
+  sends Play to the view's audio thread (pm-audio `Playback`) and starts
+  its line with the audio's first playing sample; samples of the same
+  epoch re-anchor it every 100 ms. With no output device, or after 1.5 s
+  without a playing sample, the line runs on the host clock (counted in
+  `hostClockRuns`). The thread opens the device ahead of the first Play
+  once the composition has something to hear and the controls rest for
+  100 ms (today's `requestContextWarmup`), so that Play does not wait for
+  the device to open (about 150 ms on the reference machine). A
+  composition with nothing to hear (`pm_audio::graph::audible`) plays on
+  the host clock from Play, as today's playhead does, after the line's
+  50 ms frame pre-roll (counted in `silentRuns`); see `gate-fixes.md`, D2.
 - **A run starts where Play was pressed.** The audio's first playing
   sample names the instant its first buffer is heard, output latency
   included (160 ms on the Bluetooth output measured in pm-audio.md). The

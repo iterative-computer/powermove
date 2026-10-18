@@ -383,6 +383,18 @@ pub fn replay(vectors: &Value, check: &mut Check<'_>) {
                 ours,
                 &want,
             );
+            // Amendment 16: at the root the engine's integration step is
+            // today's, so its answer must match the TypeScript too.
+            if op == "sourceTime" {
+                let l = layer.unwrap();
+                let engine = result(scope.source_time_with(l, t, Retiming::Engine, None), V::N);
+                check(
+                    "sourceTime (engine step)",
+                    &|| format!("{comp_id} sourceTime (engine step) layer {index:?} t={t}"),
+                    engine,
+                    &want,
+                );
+            }
         }
     }
 
