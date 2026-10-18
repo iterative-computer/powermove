@@ -25,6 +25,10 @@ fn exif_number(o: Orientation) -> u8 {
 /// The first image's `PhotometricInterpretation` (tag 262) of a classic or
 /// Big TIFF, None when the file has no such tag or is not a TIFF.
 pub(crate) fn tiff_photometric(path: &Path) -> Result<Option<u16>> {
+    tiff_short(path, 262)
+}
+
+fn tiff_short(path: &Path, tag: u16) -> Result<Option<u16>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let mut head = [0u8; 16];
@@ -79,7 +83,7 @@ pub(crate) fn tiff_photometric(path: &Path) -> Result<Option<u16>> {
     f.read_exact(&mut entries)?;
     Ok(entries
         .chunks_exact(entry_size)
-        .find(|e| u16_at(e) == 262)
+        .find(|e| u16_at(e) == tag)
         .map(|e| u16_at(&e[if entry_size == 12 { 8 } else { 12 }..])))
 }
 
@@ -88,6 +92,11 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let mut decoder = reader.into_decoder().map_err(err)?;
     let profile = decoder.icc_profile().map_err(err)?;
+    let profile = if format == ImageFormat::Tiff && profile.is_none() {
+        tiff_icc(path)?
+    } else {
+        profile
+    };
     let orientation = decoder.orientation().map(exif_number).unwrap_or(1);
     let color_type = decoder.color_type();
     let img = DynamicImage::from_decoder(decoder).map_err(err)?;
@@ -143,7 +152,12 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
             } else {
                 Transfer::DisplayE
             },
-            alpha: if color_type.has_alpha() {
+            alpha: if format == ImageFormat::Tiff
+                && color_type.has_alpha()
+                && tiff_short(path, 338)? == Some(1)
+            {
+                AlphaMode::Premultiplied
+            } else if color_type.has_alpha() {
                 AlphaMode::Straight
             } else {
                 AlphaMode::Opaque
@@ -152,4 +166,57 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
         },
         orientation,
     })
+}
+
+/// ICC's TIFF tag is UNDEFINED, which some versions of the TIFF decoder's
+/// `get_tag_u8_vec` reject. Read that bounded first-IFD payload directly so
+/// native-depth/level-2 color management retains the original profile.
+fn tiff_icc(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut h = [0u8; 16];
+    f.read_exact(&mut h)?;
+    let le = &h[..2] == b"II";
+    let n = |b: &[u8]| -> u64 {
+        if le {
+            b.iter().rev().fold(0, |v, b| (v << 8) | u64::from(*b))
+        } else {
+            b.iter().fold(0, |v, b| (v << 8) | u64::from(*b))
+        }
+    };
+    let (ifd, count_size, entry_size, inline) = match n(&h[2..4]) {
+        42 => (n(&h[4..8]), 2, 12, 4),
+        43 => (n(&h[8..16]), 8, 20, 8),
+        _ => return Ok(None),
+    };
+    f.seek(SeekFrom::Start(ifd))?;
+    let mut count = [0u8; 8];
+    f.read_exact(&mut count[..count_size])?;
+    let count = n(&count[..count_size]);
+    if count > 65536 {
+        return Err(MediaError::invalid("TIFF IFD exceeds metadata limit"));
+    }
+    let mut entry = vec![0u8; entry_size];
+    for _ in 0..count {
+        f.read_exact(&mut entry)?;
+        if n(&entry[..2]) != 34675 {
+            continue;
+        }
+        if !matches!(n(&entry[2..4]), 1 | 7) {
+            return Err(MediaError::invalid("TIFF ICC tag type"));
+        }
+        let size = n(&entry[4..entry_size - inline]);
+        if size > 1 << 20 {
+            return Err(MediaError::invalid("TIFF ICC profile exceeds 1 MiB"));
+        }
+        let value = &entry[entry_size - inline..];
+        if size <= inline as u64 {
+            return Ok(Some(value[..size as usize].to_vec()));
+        }
+        f.seek(SeekFrom::Start(n(value)))?;
+        let mut bytes = vec![0; size as usize];
+        f.read_exact(&mut bytes)?;
+        return Ok(Some(bytes));
+    }
+    Ok(None)
 }

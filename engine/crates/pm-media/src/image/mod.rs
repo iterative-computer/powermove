@@ -11,6 +11,8 @@
 //! browser applies it today.
 
 pub mod animation;
+pub mod avif_compat;
+pub mod compat;
 pub mod exr;
 pub mod icc;
 pub mod imageio;

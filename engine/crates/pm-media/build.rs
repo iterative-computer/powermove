@@ -4,7 +4,7 @@
 //!   at `PM_FFMPEG_DIR` (`engine/env.sh` sets it), linked as dylibs. Bindings
 //!   come from that build's headers, so struct layouts are exact for the
 //!   version that ships.
-//! * **dav1d, OpenEXRCore, and libjpeg-turbo**: static libraries from
+//! * **dav1d, OpenEXRCore, libjpeg-turbo, CrabbyAvif/libyuv and skcms**: static libraries from
 //!   `native/build.sh` (pinned, checksummed sources) at `PM_MEDIA_NATIVE_DIR`,
 //!   by default a directory named after the stamp (the checksum of
 //!   `native/sources.lock` and `native/build.sh`), so worktrees on different
@@ -47,6 +47,9 @@ fn native_dir(manifest: &Path) -> PathBuf {
     let mut h = Sha256::new();
     h.update(std::fs::read(&lock).expect("native/sources.lock"));
     h.update(std::fs::read(&script).expect("native/build.sh"));
+    let rust_lock = native.join("crabby.Cargo.lock");
+    println!("cargo:rerun-if-changed={}", rust_lock.display());
+    h.update(std::fs::read(&rust_lock).expect("native/crabby.Cargo.lock"));
     let stamp: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     let cache = home().join("Library/Caches/powermove-engine/media-native");
     let dir = std::env::var_os("PM_MEDIA_NATIVE_DIR")
@@ -57,7 +60,7 @@ fn native_dir(manifest: &Path) -> PathBuf {
         .unwrap_or(false);
     if !current {
         println!(
-            "cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore, libjpeg-turbo) into {}",
+            "cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore, JPEG, AVIF, skcms) into {}",
             dir.display()
         );
         let status = Command::new("bash")
@@ -92,6 +95,12 @@ fn bindings(name: &str, header: &str, include: &[&Path], allow: &[&str], out: &P
         .derive_default(true)
         .generate_comments(false)
         .size_t_is_usize(true);
+    if name == "avif" {
+        b = b
+            .clang_arg("-xc++")
+            .clang_arg("-std=c++17")
+            .enable_cxx_namespaces();
+    }
     for dir in include {
         b = b.clang_arg(format!("-I{}", dir.display()));
     }
@@ -167,6 +176,8 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         native.join("lib").display()
     );
+    println!("cargo:rustc-link-lib=static=crabby_avif");
+    println!("cargo:rustc-link-lib=static=skcms");
     println!("cargo:rustc-link-lib=static=dav1d");
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");
     println!("cargo:rustc-link-lib=static=turbojpeg");
@@ -192,6 +203,22 @@ fn main() {
         "#include <stddef.h>\n#include <turbojpeg/turbojpeg.h>\n",
         &[&inc],
         &["tj.*", "TJ.*"],
+        &out,
+    );
+
+    bindings(
+        "avif",
+        "#include <avif/avif.h>\n",
+        &[&inc],
+        &[".*avif.*", ".*AVIF_.*"],
+        &out,
+    );
+
+    bindings(
+        "skcms",
+        "#include <skcms/skcms.h>\n",
+        &[&inc],
+        &["skcms_.*"],
         &out,
     );
 

@@ -657,12 +657,13 @@ fn check_media(
         && (node::member(Some(record), "imageSequence").is_some_and(|s| node::truthy(Some(s)))
             || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"))
     {
-        // Both original animation containers and persisted WebM renditions
-        // retain the parity gate. Only unreadable media bypasses it, so
-        // execution can report a named error instead of routing.
+        // Existing imports persist a WebM rendition: that rendition is
+        // the shipped appearance and uses the tested video path. Original
+        // animation containers still need an explicit import policy.
         match assets.and_then(|a| a.path(&asset_id, Some(record))) {
             Some(path) => match crate::media::sequence_rendition(&path) {
-                Ok(_) => {
+                Ok(true) => {}
+                Ok(false) => {
                     add(layer, Feature::ImageSequence);
                     return;
                 }

@@ -95,16 +95,6 @@ fn untested_still_classes_are_unsupported() {
             &["-c:v", "exr", "-pix_fmt", "gbrpf32le"],
             "floating-point stills",
         ),
-        (
-            "a16.tiff",
-            &["-pix_fmt", "rgb48le"],
-            "TIFF stills deeper than 8 bits",
-        ),
-        (
-            "alpha.tiff",
-            &["-pix_fmt", "rgba"],
-            "TIFF stills with alpha",
-        ),
         ("mono.png", &["-pix_fmt", "monob"], "1-bit PNG stills"),
         ("a.dpx", &["-pix_fmt", "gbrp10le"], ""),
     ];
@@ -138,10 +128,8 @@ fn untested_still_classes_are_unsupported() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Y'CbCr JPEG (every layout) is unsupported: pm-media's decoder differs
-/// from Chromium's libjpeg-turbo (docs/engine/pm-render.md). Gray JPEG is
-/// drawn and compared in `tests/corpus.rs` (`render/still-photo-gray-jpg`);
-/// header classes are covered by `stills::tests::jpeg_classes`.
+/// Y'CbCr JPEG uses Chromium's libjpeg-turbo path; gray and Y'CbCr layouts
+/// are compared in `tests/corpus.rs` and accepted by the media probe.
 #[test]
 fn ycbcr_jpeg_is_drawn() {
     // Decoded by libjpeg-turbo, as Chromium decodes it (corpus
@@ -337,20 +325,10 @@ fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
     b[at + 8..at + 10].copy_from_slice(&v);
 }
 
-fn decoded_orientation(path: &Path) -> u8 {
-    let pool = pm_media::pool::FramePool::new(0);
-    pm_media::image::read(path, &pool)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-        .orientation
-}
-
-/// No oriented still of a drawn class has been compared with the legacy
-/// renderer, so EXIF orientation (PNG `eXIf`, JPEG APP1, WebP `EXIF`, TIFF
-/// tag 274) and HEIF transform properties other than the identity are
-/// unsupported in every container, whether or not pm-media's decoder
-/// reports them. The unrotated controls are drawn.
+/// The compatibility bitmap consumes the decoder's applied orientation.
+/// Late PNG eXIf is still gated when the decoder did not apply it.
 #[test]
-fn oriented_stills_are_unsupported() {
+fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
     let d = dir().join("oriented");
     std::fs::create_dir_all(&d).unwrap();
     let mut cases: Vec<PathBuf> = Vec::new();
@@ -450,13 +428,11 @@ fn oriented_stills_are_unsupported() {
     }
 
     for p in &cases {
-        let got = unsupported(p);
-        assert!(got.contains("oriented stills"), "{}: {got}", p.display());
-        eprintln!(
-            "{:<16} decoder orientation {}: {got}",
-            p.file_name().unwrap().to_string_lossy(),
-            decoded_orientation(p)
-        );
+        if p.file_name().unwrap() == "exif6-late.png" {
+            assert!(unsupported(p).contains("oriented stills"));
+        } else {
+            assert_eq!(probe_image(p), Ok(()), "{}", p.display());
+        }
     }
     std::fs::remove_dir_all(&d).ok();
 }
@@ -477,6 +453,25 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
                 // SAFETY: the plane view covers `height` rows of `stride` bytes.
                 out.extend_from_slice(unsafe {
                     std::slice::from_raw_parts(p.ptr.add(y * p.stride), row)
+                });
+            }
+            out
+        })
+        .unwrap()
+}
+
+fn compat_rgba8(path: &Path) -> Vec<u8> {
+    let pool = pm_media::pool::FramePool::new(0);
+    let original = pm_media::image::read(path, &pool).unwrap();
+    let bitmap = pm_media::image::compat::bitmap(&original, &pool).unwrap();
+    bitmap
+        .frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::new();
+            for y in 0..p.desc.height {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
                 });
             }
             out
@@ -565,13 +560,11 @@ fn tiff_compressions_decode_alike() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// A TIFF with an ICC profile (tag 34675) is unsupported whatever the
-/// profile: pm-media's TIFF decoder does not report it (so a wide-gamut
-/// TIFF would otherwise be drawn as untagged sRGB), and no tagged TIFF was
-/// compared with the legacy renderer. ImageIO embeds a profile in every
-/// TIFF of a tagged image, including sRGB for an untagged source.
+/// RGB TIFF's shipped FFmpeg conversion forwards ICC to its PNG. The
+/// compatibility bitmap must be byte-identical to that PNG's, while the
+/// native-depth reader retains the source ICC for level 2/interpretation.
 #[test]
-fn tagged_tiff_is_unsupported() {
+fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
     let d = dir().join("tagged-tiff");
     std::fs::create_dir_all(&d).unwrap();
     let plain = d.join("plain.png");
@@ -603,9 +596,28 @@ fn tagged_tiff_is_unsupported() {
             tags.contains(&34675),
             "{name}: ImageIO wrote no profile: {tags:?}"
         );
-        let got = unsupported(&p);
-        assert!(got.contains("ICC profile"), "{name}: {got}");
-        eprintln!("{name:<16} unsupported: {got}");
+        assert_eq!(probe_image(&p), Ok(()), "{name}");
+        let pool = pm_media::pool::FramePool::new(0);
+        let original = pm_media::image::read(&p, &pool).unwrap();
+        assert!(
+            original.color.icc.as_ref().is_some_and(|p| !p.is_empty()),
+            "native ICC retained: {name}"
+        );
+        let converted = d.join(format!("{name}.png"));
+        let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+        assert!(
+            Command::new(bin)
+                .args(["-v", "error", "-y", "-i"])
+                .arg(&p)
+                .args(["-frames:v", "1", "-c:v", "png"])
+                .arg(&converted)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (a, b) = (compat_rgba8(&p), compat_rgba8(&converted));
+        let max = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(max == 0, "{name}: shipped FFmpeg PNG bitmap max {max}");
     }
     std::fs::remove_dir_all(&d).ok();
 }
@@ -641,4 +653,84 @@ fn progressive_gray_jpeg_is_unsupported() {
     assert!(got.contains("progressive gray"), "{got}");
     eprintln!("progressive gray JPEG unsupported: {got}");
     std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn integer_and_alpha_tiff_bitmaps_match_the_shipped_png_conversion() {
+    let d = dir().join("integer-tiff");
+    std::fs::create_dir_all(&d).unwrap();
+    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    for fmt in ["rgb48le", "rgba", "rgba64le"] {
+        let tiff = d.join(format!("{fmt}.tiff"));
+        let mut args = Vec::new();
+        if fmt.starts_with("rgba") {
+            args.extend([
+                "-vf",
+                "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='X/W*255'",
+            ]);
+        }
+        args.extend(["-pix_fmt", fmt]);
+        ffmpeg(&tiff, &args);
+        assert_eq!(probe_image(&tiff), Ok(()));
+        let png = d.join(format!("{fmt}.png"));
+        assert!(
+            Command::new(&bin)
+                .args(["-v", "error", "-y", "-i"])
+                .arg(&tiff)
+                .args(["-frames:v", "1", "-c:v", "png"])
+                .arg(&png)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (a, b) = (compat_rgba8(&tiff), compat_rgba8(&png));
+        if fmt.starts_with("rgba") {
+            assert!(a.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
+        }
+        let max = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(
+            max == 0,
+            "{fmt} TIFF bitmap differs from its shipped PNG by {max}"
+        );
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+/// The extra alpha-ramp app capture fails the unchanged 2D bar. Keep that
+/// combination explicit without excluding opaque RGBA files from ICC support.
+#[test]
+fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
+    let d = dir().join("icc-alpha");
+    std::fs::create_dir_all(&d).unwrap();
+    for (label, alpha) in [("opaque", 255u8), ("translucent", 128)] {
+        let source = d.join(format!("{label}.png"));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&source).unwrap(), 4, 4);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[192, 96, 32, alpha].repeat(16))
+            .unwrap();
+        for space in ["p3", "adobe"] {
+            for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
+                let path = d.join(format!("{label}-{space}.{ext}"));
+                imageio_write(
+                    &source,
+                    &path,
+                    uti,
+                    &ImageIo {
+                        color_space: Some(space),
+                        ..Default::default()
+                    },
+                );
+                if alpha == 255 {
+                    assert_eq!(probe_image(&path), Ok(()));
+                } else {
+                    assert!(unsupported(&path).contains("wide-gamut ICC stills with alpha"));
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(d).unwrap();
 }

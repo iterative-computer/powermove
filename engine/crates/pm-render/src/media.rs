@@ -257,7 +257,13 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        image_color(&still).map(|_| ())
+        if pm_media::image::compat::applies(&still) {
+            let bitmap = pm_media::image::compat::bitmap(&still, &pool)
+                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
+            image_color(&bitmap).map(|_| ())
+        } else {
+            image_color(&still).map(|_| ())
+        }
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
@@ -290,7 +296,7 @@ pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64>
 /// their document format is GIF or PNG. An EBML header identifies the
 /// rendition independently of path extensions and original metadata.
 /// The native video probe validates readability and indexability before
-/// a valid rendition retains its compatibility gate.
+/// a valid rendition can use the video path.
 pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
     static CACHE: StampCache<Result<bool, String>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
@@ -689,6 +695,7 @@ struct ImageKey {
     reading: String,
     /// Converted textures hold working values: linear light differs.
     linear: bool,
+    compat: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -799,6 +806,7 @@ impl MediaCache {
         working: WorkingEncoding,
         precision: Precision,
         interpret: Option<&Interpretation>,
+        compat: bool,
     ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
@@ -809,6 +817,7 @@ impl MediaCache {
             precision: precision as u8,
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
+            compat,
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
@@ -824,6 +833,13 @@ impl MediaCache {
         .map_err(issue)?;
         let mut still = pm_media::image::read(path, &self.pool)
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
+            still = pm_media::image::avif_compat::read(path, &still, &self.pool)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
+            still = pm_media::image::compat::bitmap(&still, &self.pool)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        }
         let color = match interpret {
             Some(i) => {
                 let read = interpreted_image_color(&still, i).map_err(issue)?;
@@ -836,7 +852,17 @@ impl MediaCache {
                 }
                 read.color
             }
-            None => image_color(&still).map_err(issue)?,
+            None => {
+                if still.color.icc_class == Some(IccClass::Other) {
+                    still = pm_media::image::imageio::convert_to_linear_srgb(
+                        &still,
+                        &self.pool,
+                        still.color.alpha,
+                    )
+                    .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
+                image_color(&still).map_err(issue)?
+            }
         };
         let importer = self.importer()?;
         let imported = importer
@@ -915,6 +941,8 @@ impl MediaCache {
         precision: Precision,
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
+        sequence: bool,
+        compat: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
@@ -938,7 +966,7 @@ impl MediaCache {
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{interp:?}{composition:?}").hash(&mut h);
+            format!("{interp:?}{composition:?}{sequence}{compat}").hash(&mut h);
             self.interpretations
                 .get(path)
                 .map(|c| format!("{c:?}"))
@@ -999,6 +1027,20 @@ impl MediaCache {
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
         }
+        let bitmap = if sequence
+            && compat
+            && interp.is_empty()
+            && fields.is_none()
+            && !self.interpretations.contains_key(path)
+            && v.color.tagged.matrix.is_none()
+        {
+            pm_media::image::compat::video_bitmap(&frame, &self.pool)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+        } else {
+            None
+        };
+        let sequence_bitmap = bitmap.is_some();
+        let frame = bitmap.unwrap_or(frame);
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
@@ -1050,11 +1092,20 @@ impl MediaCache {
                 .normalize(queue, encoder, &imported)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
-        let desc: ColorDescription = match self.interpretations.get(path) {
+        let mut desc: ColorDescription = match self.interpretations.get(path) {
             Some(d) => *d,
             None if !interp.is_empty() => reading.color,
             None => frame.color.unwrap_or(reading.color),
         };
+        // raster.ts encodes image sequences as untagged BT.601 VP9, even
+        // at HD sizes. Honor explicit file or Interpret Footage matrices.
+        if sequence
+            && v.color.tagged.matrix.is_none()
+            && interp.matrix.is_none()
+            && !self.interpretations.contains_key(path)
+        {
+            desc.matrix = pm_protocol::color::MatrixCoefficients::Bt601;
+        }
         let color = SourceColor {
             transfer: desc.transfer,
             primaries: standard_video_primaries(desc.primaries),
@@ -1075,6 +1126,17 @@ impl MediaCache {
                 })),
                 _ => None,
             },
+        };
+        let color = if sequence_bitmap {
+            SourceColor {
+                transfer: pm_protocol::color::Transfer::DisplayE,
+                primaries: pm_protocol::color::Primaries::Bt709,
+                matrix: pm_protocol::color::MatrixCoefficients::Identity,
+                alpha: AlphaMode::Premultiplied,
+                ..color
+            }
+        } else {
+            color
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
         // A converted frame retired by an earlier render (its reads are

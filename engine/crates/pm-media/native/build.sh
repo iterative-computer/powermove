@@ -40,6 +40,8 @@ done
 PYTHON="${PM_MEDIA_NATIVE_PYTHON:-$(command -v python3)}"
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
   || die "meson needs python3 >= 3.10; set PM_MEDIA_NATIVE_PYTHON"
+CARGO="$(command -v cargo)"
+RUSTC_BIN="$(rustup which rustc)"
 NINJA="$(command -v ninja)"
 CMAKE="$(command -v cmake)"
 
@@ -61,7 +63,7 @@ done < "$LOCK"
 
 idx() { local i; for i in "${!NAMES[@]}"; do [[ "${NAMES[$i]}" == "$1" ]] && { echo "$i"; return 0; }; done; die "unknown source $1"; }
 archive() { local i; i="$(idx "$1")"; printf '%s/%s' "$DOWNLOADS" "${URLS[$i]##*/}"; }
-src_of() { echo "$WORK/src/${DIRS[$(idx "$1")]}"; }
+src_of() { local dir="$WORK/src/${DIRS[$(idx "$1")]}"; [[ "$1" != "skcms" ]] || dir="$dir/modules/skcms"; echo "$dir"; }
 
 fetch() {
   local i file actual; i="$(idx "$1")"; file="$(archive "$1")"
@@ -84,7 +86,7 @@ extract() {
 
 # Content only (no paths), so every worktree computes the same stamp; build.rs
 # compares it to decide whether to run this script.
-STAMP="$(cat "$LOCK" "$HERE/build.sh" | shasum -a 256 | cut -d' ' -f1)"
+STAMP="$(cat "$LOCK" "$HERE/build.sh" "$HERE/crabby.Cargo.lock" | shasum -a 256 | cut -d' ' -f1)"
 if [[ -f "$OUT/stamp" && "$(cat "$OUT/stamp")" == "$STAMP" ]]; then
   log "up to date: $OUT"
   exit 0
@@ -128,9 +130,54 @@ CFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libjpeg-turbo)" -B "$WORK/build/l
   -DWITH_JAVA=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF -DWITH_SIMD=ON
 "$CMAKE" --build "$WORK/build/libjpeg-turbo" --target turbojpeg-static -j "$JOBS"
 
+log "build libyuv (Chromium 152)"
+CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libyuv)" -B "$WORK/build/libyuv" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+  -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" -DLIBYUV_BUILD_TESTS=OFF -DLIBYUV_BUILD_TOOLS=OFF
+"$CMAKE" --build "$WORK/build/libyuv" --target yuv -j "$JOBS"
+mkdir -p "$PREFIX/lib/pkgconfig"
+cp "$WORK/build/libyuv/libyuv.a" "$PREFIX/lib/"
+cp -R "$(src_of libyuv)/include/"* "$PREFIX/include/"
+cat > "$PREFIX/lib/pkgconfig/yuv.pc" <<EOF
+prefix=$PREFIX
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+Name: libyuv
+Description: Chromium libyuv
+Version: 0.0.1917
+Libs: -L\${libdir} -lyuv
+Cflags: -I\${includedir}
+EOF
+# Use the same pinned dav1d and libyuv, never Homebrew libraries. Cargo's
+# transitive dependencies are frozen alongside the checksummed sources.
+log "build CrabbyAvif (Chromium 152)"
+# rust-lang/rust#157750: stripped build-time proc macros fail to load on
+# macOS 27. Keep their debug info; the shipped archive uses release code.
+cp "$HERE/crabby.Cargo.lock" "$(src_of crabbyavif)/Cargo.lock"
+PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" PKG_CONFIG_ALL_STATIC=1 \
+  CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=1 \
+  RUSTC="$RUSTC_BIN" RUSTC_WRAPPER="" CARGO_BUILD_JOBS="$JOBS" CARGO_TARGET_DIR="$WORK/build/crabby" \
+  "$CARGO" build --locked --release --manifest-path "$(src_of crabbyavif)/Cargo.toml" \
+  --lib --no-default-features --features capi,dav1d,libyuv
+
+log "build skcms (Chromium 152)"
+mkdir -p "$WORK/build/skcms"
+for unit in skcms.cc src/skcms_TransformBaseline.cc; do
+  clang++ -O2 $BASE_FLAGS -std=c++17 -ffp-contract=off -DSKCMS_DISABLE_HSW -DSKCMS_DISABLE_SKX \
+    -I"$(src_of skcms)" -c "$(src_of skcms)/$unit" -o "$WORK/build/skcms/$(basename "$unit").o"
+done
+ar -rcs "$WORK/build/skcms/libskcms.a" "$WORK/build/skcms/"*.o
+
 log "stage $OUT"
 rm -rf "$OUT.partial"
 mkdir -p "$OUT.partial/lib" "$OUT.partial/include/openexr"
+cp "$WORK/build/skcms/libskcms.a" "$OUT.partial/lib/"
+mkdir -p "$OUT.partial/include/skcms/src"
+cp "$(src_of skcms)/skcms.h" "$OUT.partial/include/skcms/"
+cp "$(src_of skcms)/src/skcms_public.h" "$OUT.partial/include/skcms/src/"
+cp "$WORK/build/crabby/release/libcrabby_avif.a" "$OUT.partial/lib/"
+cp -R "$(src_of crabbyavif)/include/avif" "$OUT.partial/include/"
 cp "$PREFIX/lib/libdav1d.a" "$OUT.partial/lib/"
 cp -R "$PREFIX/include/dav1d" "$OUT.partial/include/"
 cp "$WORK/build/libjpeg-turbo/libturbojpeg.a" "$OUT.partial/lib/"
@@ -150,11 +197,13 @@ clang -fsyntax-only -x c -I"$OUT.partial/include" - <<<'#include <stddef.h>
 #include <turbojpeg/turbojpeg.h>' || die "staged TurboJPEG header does not compile"
 [[ -f "$OUT.partial/include/openexr/openexr_config.h" ]] || die "openexr_config.h missing"
 # Nothing may link outside the archives except libc++ and the system.
-DEFINED="$(nm "$OUT.partial"/lib/*.a 2>/dev/null | awk '$2 == "T" { print $3 }' | sort -u)"
+# Apple nm rejects Rust metadata members in libcrabby_avif.a. Audit the
+# C archives here; the CrabbyAvif entry points are checked by the Rust link.
+DEFINED="$(nm "$OUT.partial/lib/libdav1d.a" "$OUT.partial/lib/libturbojpeg.a" "$OUT.partial/lib/libOpenEXRCore-3_5.a" 2>/dev/null | awk '$2 == "T" { print $3 }' | sort -u)"
 for sym in _ZSTD_createDCtx _libdeflate_alloc_decompressor _dav1d_open _exr_start_read _tj3Init _tj3Decompress8 _tj3Decompress12; do
   grep -qx "$sym" <<<"$DEFINED" || die "$sym is not defined in the staged archives"
 done
-for n in dav1d openexr libjpeg-turbo; do
+for n in dav1d openexr libjpeg-turbo crabbyavif libyuv skcms; do
   mkdir -p "$OUT.partial/share/licenses/$n"
 done
 cp "$(src_of dav1d)/COPYING" "$OUT.partial/share/licenses/dav1d/"
@@ -162,6 +211,9 @@ cp "$(src_of openexr)/LICENSE.md" "$OUT.partial/share/licenses/openexr/"
 cp "$(src_of libjpeg-turbo)/LICENSE.md" "$(src_of libjpeg-turbo)/README.ijg" "$OUT.partial/share/licenses/libjpeg-turbo/"
 cp "$(src_of libjpeg-turbo)/src/spng/LICENSE" "$OUT.partial/share/licenses/libjpeg-turbo/spng-LICENSE"
 cp "$(src_of libjpeg-turbo)/src/spng/zlib/LICENSE" "$OUT.partial/share/licenses/libjpeg-turbo/zlib-LICENSE"
+cp "$(src_of crabbyavif)/LICENSE" "$OUT.partial/share/licenses/crabbyavif/"
+cp "$(src_of libyuv)/LICENSE" "$OUT.partial/share/licenses/libyuv/"
+cp "$HERE/skcms.LICENSE" "$OUT.partial/share/licenses/skcms/LICENSE"
 ls "$OUT.partial/lib" > "$OUT.partial/libs.txt"
 echo "$STAMP" > "$OUT.partial/stamp"
 rm -rf "$OUT"
