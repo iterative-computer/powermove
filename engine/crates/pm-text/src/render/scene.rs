@@ -501,7 +501,7 @@ impl Painter<'_> {
         // Glyphs drawn as multisampled paths (sample counts per pixel).
         let mut msaa_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
         // Glyphs drawn as distance-field text (coverage per pixel).
-        let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
+        let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -1024,7 +1024,7 @@ impl Painter<'_> {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
-        let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
+        let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
         let mut images = Vec::new();
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -1157,32 +1157,65 @@ impl Painter<'_> {
 }
 
 /// Distance-field glyph coverage (`sdf::draw`) as one image item, each
-/// glyph composited over the earlier ones like the glyph masks.
+/// glyph blended source-over into the 8-bit target with its unquantized
+/// coverage (the fragment's value), quantized after every glyph, as the GPU
+/// canvas blends glyph quads.
 fn sdf_image(
-    quads: Vec<(i64, i64, usize, usize, Vec<u8>)>,
+    quads: Vec<(i64, i64, usize, usize, Vec<f32>)>,
     color: Rgba,
     opacity: f64,
     blur: f64,
 ) -> Option<Item> {
-    let fields: Vec<(i64, i64, Arc<GlyphMask>, bool)> = quads
-        .into_iter()
-        .map(|(x0, y0, w, h, coverage)| {
-            (
-                x0,
-                y0,
-                Arc::new(GlyphMask {
-                    width: w as u32,
-                    height: h as u32,
-                    left: 0,
-                    top: 0,
-                    coverage,
-                }),
-                false,
-            )
-        })
-        .collect();
-    let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
-    mask_image(&fields, [&linear, &linear], color, opacity, blur)
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for (x, y, w, h, _) in &quads {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(x + *w as i64);
+        y1 = y1.max(y + *h as i64);
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
+    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
+    let mut data = vec![0u8; w * h * 4];
+    for (qx, qy, qw, qh, cov) in &quads {
+        let (ox, oy) = ((qx - x0) as usize, (qy - y0) as usize);
+        for row in 0..*qh {
+            let src = &cov[row * qw..(row + 1) * qw];
+            let start = ((oy + row) * w + ox) * 4;
+            let dst = &mut data[start..start + qw * 4];
+            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
+                if c <= 0.0 {
+                    continue;
+                }
+                let sa = c * a;
+                let keep = 1.0 - sa;
+                for k in 0..3 {
+                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
+                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+                let v = sa + f32::from(d[3]) / 255.0 * keep;
+                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    let image = Arc::new(Rgba8 {
+        width: w as u32,
+        height: h as u32,
+        data,
+    });
+    Some(Item {
+        content: ItemContent::Image {
+            image,
+            transform: Affine::translate((x0 as f64, y0 as f64)),
+        },
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity: 1.0,
+        blur,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
+    })
 }
 
 /// One image item holding the platform masks of a `fillText` call, each

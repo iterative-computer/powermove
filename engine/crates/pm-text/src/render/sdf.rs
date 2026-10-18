@@ -421,8 +421,8 @@ pub const APPLE_GPU: GpuModel = GpuModel {
     filter_steps: 256.0,
 };
 
-/// The coverage the GPU canvas draws `glyph` with (rounded to 8 bits as the
-/// target stores it), for a glyph whose quad's strike-space top-left is
+/// The coverage the GPU canvas draws `glyph` with (the fragment's value,
+/// before the blend writes the 8-bit target), for a glyph whose quad's strike-space top-left is
 /// `left_top` (`SubRunContainer`'s `prepare_for_SDFT_drawing`: the glyph
 /// position mapped into strike space plus the field's inset bounds) under
 /// the strike-to-device matrix `m` (`[a, b, c, d, e, f]`: `x' = a x + c y
@@ -433,7 +433,7 @@ pub fn draw(
     left_top: (f32, f32),
     m: [f32; 6],
     gpu: GpuModel,
-) -> Option<(i64, i64, usize, usize, Vec<u8>)> {
+) -> Option<(i64, i64, usize, usize, Vec<f32>)> {
     let (fw, fh) = (glyph.width as i32, glyph.height as i32);
     if fw <= 2 * INSET || fh <= 2 * INSET {
         return None;
@@ -560,7 +560,7 @@ pub fn draw(
             inside[y * w + x] = inn;
         }
     }
-    let mut cov = vec![0u8; w * h];
+    let mut cov = vec![0f32; w * h];
     let mut any = false;
     for y in 0..h {
         for x in 0..w {
@@ -589,14 +589,13 @@ pub fn draw(
             // float2x2(dFdx(uv), dFdy(uv)) × n: columns are the derivatives.
             let grad = (j.0.0 * n.0 + j.1.0 * n.1, j.0.1 * n.0 + j.1.1 * n.1);
             let afw = 0.65 * (grad.0 * grad.0 + grad.1 * grad.1).sqrt();
-            // smoothstep(-afw, afw, d), stored to 8 bits.
+            // smoothstep(-afw, afw, d).
             let t = ((dist[i] + afw) / (2.0 * afw)).clamp(0.0, 1.0);
             let s = t * t * (3.0 - 2.0 * t);
-            let v = (s * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u8;
-            if v != 0 {
+            if s > 0.0 {
                 any = true;
             }
-            cov[i] = v;
+            cov[i] = s;
         }
     }
     any.then_some((ix0, iy0, w, h, cov))
@@ -665,9 +664,9 @@ mod tests {
             draw(&g, lt, [1.0, 0.0, 0.0, 1.0, 100.0, 100.0], APPLE_GPU).expect("drawn");
         let at = |x: i64, y: i64| cov[((y - y0) as usize) * cw + (x - x0) as usize];
         // The square spans x 2..18 from the origin (100 + 2 .. 100 + 18).
-        assert_eq!(at(110, 90), 255);
-        assert_eq!(at(100, 90), 0);
+        assert_eq!(at(110, 90), 1.0);
+        assert_eq!(at(100, 90), 0.0);
         // Edges fall off across about a pixel.
-        assert!(at(102, 90) > 0 && at(102, 90) < 255, "{}", at(102, 90));
+        assert!(at(102, 90) > 0.0 && at(102, 90) < 1.0, "{}", at(102, 90));
     }
 }
