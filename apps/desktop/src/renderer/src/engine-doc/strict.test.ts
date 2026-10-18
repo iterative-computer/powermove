@@ -12,14 +12,17 @@ import { makePM } from '../legacy/__tests__/make-pm';
 import { makeVectorPath, makeVertex } from '../legacy/core/vector-paths';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode, profileOverride } from './flags';
+import type { FontProvider } from './fonts';
+import { createRequire } from 'node:module';
 
-const MODULE = fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
+const MODULE = process.env['POWERMOVE_PM_WASM'] ?? fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
+const BRIDGE = process.env['POWERMOVE_PM_BRIDGE'] ?? fileURLToPath(new URL('../../../../../../engine/target/pm-bridge/pm_bridge.node', import.meta.url));
 let compiled: Promise<WebAssembly.Module> | null = null;
 const loadModule = () => (compiled ??= WebAssembly.compile(readFileSync(MODULE)));
 
-async function editor(mode: string, strict = true) {
+async function editor(mode: string, strict = true, fonts?: FontProvider) {
   const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
-  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: () => {}, auditMs: 1e9, strict });
+  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: () => {}, auditMs: 1e9, strict, ...(fonts ? { fonts } : {}) });
   PM.proj = PM.mkProject({ dur: 10 });
   PM.time = 0;
   expect(await doc.whenReady).toBe(true);
@@ -138,5 +141,31 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(profileOverride('off', false)!.evaluator).toBe(false);
     expect(profileOverride('audit', true)!.name).toBe('audit');
     expect(profileOverride(null, false)).toBeNull();
+  });
+
+  it.runIf(existsSync(BRIDGE))("loads an open project's faces before anything asks, so an editor's first text question is native", async () => {
+    // The editor's provider is asynchronous (main relays to the font service).
+    const { FontRegistry } = createRequire(import.meta.url)(BRIDGE) as { FontRegistry: new () => { answer(q: string): string; subset(b: string, i: number): Uint8Array } };
+    const registry = new FontRegistry();
+    const provider: FontProvider = { sync: false, answer: async (q) => registry.answer(q), subset: async (b, i) => registry.subset(b, i) };
+    const { PM, doc } = await editor('on', true, provider);
+    const title = PM.mkLayer('text', { name: 'Title' });
+    title.d.text = 'Warm faces';
+    PM.proj.layers = [title];
+    PM.ProjectIndex.invalidate();
+    PM.touch();
+    await doc.warmFonts();
+    const layout = doc.api!.textLayout(title, 0);
+    expect(layout).toBeTruthy();
+    expect(fallbacks(doc)).toEqual({});
+    // Without warming, the same first question waits on the provider and falls back.
+    const { PM: cold, doc: coldDoc } = await editor('on', true, { ...provider });
+    const other = cold.mkLayer('text', { name: 'Title' });
+    other.d.text = 'Cold faces';
+    cold.proj.layers = [other];
+    cold.ProjectIndex.invalidate();
+    cold.touch();
+    coldDoc.api!.textLayout(other, 0);
+    expect(fallbacks(coldDoc)).toEqual({ 'textLayout:fonts': 1 });
   });
 });

@@ -97,6 +97,9 @@ export class FontLoader {
 
   constructor(readonly provider: FontProvider) {}
 
+  /** Resolves when no background load is running (an asynchronous provider). */
+  whenIdle(): Promise<void> { return this.busy ?? Promise.resolve(); }
+
   /** Declares whole faces to a module instance once (a replaced instance asks again). */
   private declared = new WeakSet<object>();
   private declareOutlines(wasm: PmWasm): void {

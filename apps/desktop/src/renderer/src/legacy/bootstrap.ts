@@ -104,7 +104,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The native evaluator's document mirror and write barrier (behind the
      "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
      PM.touch and PM.proj, so it follows anim and history. */
-  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), newEngineOn()), strict: newEngineOn() })],
+  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), NEW_ENGINE), strict: NEW_ENGINE })],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
@@ -160,6 +160,11 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).then(() => PM.Kernel.events.emit('extensions:ready', {})).catch((error) => console.error('[kernel] boot failed', error))]
 ];
 
+/** Waits for `promise`, or `ms` at most: a boot never hangs on the engine. */
+const bounded = (promise: Promise<unknown> | undefined, ms: number): Promise<unknown> =>
+  Promise.race([Promise.resolve(promise).catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ms))]);
+
+const NEW_ENGINE = newEngineOn();
 for (const [name, install] of INSTALLS) {
   try {
     install(PM);
@@ -167,4 +172,15 @@ for (const [name, install] of INSTALLS) {
     // Keep independent engine failures isolated while the registry boots.
     console.error(`[legacy] install failed: ${name}`, error);
   }
+  if (!NEW_ENGINE) continue;
+  /* With "Use New Engine" on, pm-wasm answers from the first question: the
+     project opens once the mirror is ready (a module that does not load is a
+     named failure with Retry, engine-doc strict mode), and the boot
+     project's faces are loaded before the editor asks about its text. */
+  if (name === 'engine-doc') await bounded(PM.EngineDoc?.whenReady, 15_000);
+  if (name === 'app') await bounded(PM.EngineDoc?.warmFonts?.(), 10_000);
+}
+if (NEW_ENGINE) {
+  // Every project opened later: its faces load as it opens.
+  PM.bus?.on?.('projects:open', () => { void PM.EngineDoc?.warmFonts?.(); });
 }
