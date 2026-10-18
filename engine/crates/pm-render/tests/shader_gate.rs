@@ -629,7 +629,6 @@ fn webgl_unstable(dir: &Path, folder: &str, name: &str, width: usize) -> Option<
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Side-by-side images of a WebGL-unstable variant for review (amendment
 /// 22: escalated with a comparison), written only when
 /// `PM_SHADER_GATE_DIFFS` names a folder outside the repository: the
@@ -688,6 +687,7 @@ fn dump_unstable(
     support::write_png(&dir.join(format!("{stem}-diff.png")), w, h, &diff);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record(
     tally: &mut Tally,
     shown: &str,
