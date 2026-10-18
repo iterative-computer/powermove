@@ -182,6 +182,28 @@ function pathMaskGroups(): CorpusProject {
   return project(b, { group: 'Compositing', title: 'Path masks on groups and precomps', covers: ['path mask on a styled group', 'path mask on a precomp'], samples: [0, 1.5], alpha: true });
 }
 
+function unknownModes(): CorpusProject {
+  const b = newProject('composite/unknown-modes', { name: 'Unknown and animated blend and matte modes', w: 400, h: 240, dur: 3, backgroundFill: GRADIENT });
+  b.add(b.layer('image', { name: 'Photo', d: { asset: ref('corpus-photo.tiff'), fit: 'cover', w: 400, h: 240 }, p: { 'position.x': 200, 'position.y': 120, opacity: 80 } }));
+  // Modes today's BLEND_ID does not know draw normally. Normalization turns
+  // a stored unknown mode into normal; a keyed one reaches the compositor.
+  b.add(b.layer('solid', { name: 'Keyed unknown mode', blend: b.ch('hardlight'), d: { color: '#FF6B1A', w: 90, h: 60 }, p: { 'position.x': 20, 'position.y': 20, opacity: 85 } }));
+  b.add(b.layer('solid', { name: 'Keyed empty mode', blend: b.ch(''), d: { color: '#4C8DFF', w: 90, h: 60 }, p: { 'position.x': 120, 'position.y': 20 } }));
+  b.add(b.layer('solid', { name: 'Keyed into an unknown mode', blend: b.ch('multiply', [[0, 'multiply', { hold: true }], [1, 'colorDodge', { hold: true }], [2, 'screen', { hold: true }]]), d: { color: '#3FCF8E', w: 90, h: 60 }, p: { 'position.x': 220, 'position.y': 20, opacity: 70 } }));
+  // Unknown and keyed matte modes read with startsWith('luma') and
+  // endsWith('inverted'). (A missing matte source does not pass validation;
+  // tests/composite.rs draws it.)
+  const source = b.add(b.layer('solid', { name: 'Matte (hidden)', on: false, d: { color: '#808080', w: 80, h: 80 }, p: { 'position.x': 130, 'position.y': 110, rotation: 15 } }));
+  const unknown = b.add(b.layer('solid', { name: 'Unknown matte mode', d: { color: '#A73366', w: 100, h: 70 }, p: { 'position.x': 120, 'position.y': 120 } }));
+  unknown.matteSource = source.id;
+  unknown.matteMode = b.ch('luma-ish');
+  const source2 = b.add(b.layer('solid', { name: 'Matte 2 (hidden)', on: false, d: { color: '#C0C0C0', w: 90, h: 70 }, p: { 'position.x': 250, 'position.y': 110, rotation: -10 } }));
+  const keyed = b.add(b.layer('solid', { name: 'Keyed matte modes', d: { color: '#7DD3FC', w: 100, h: 70 }, p: { 'position.x': 240, 'position.y': 120 } }));
+  keyed.matteSource = source2.id;
+  keyed.matteMode = b.ch('alpha', [[0, 'alpha', { hold: true }], [0.8, 'luma', { hold: true }], [1.6, 'alpha-inverted', { hold: true }], [2.4, 'mode-inverted', { hold: true }]]);
+  return project(b, { group: 'Compositing', title: 'Unknown and animated blend and matte modes', covers: ['keyed unknown blend mode', 'keyed empty blend mode', 'keyed blend mode into an unknown mode', 'unknown matte mode', 'keyed matte modes'], samples: [0.4, 1.2, 2, 2.8], alpha: true });
+}
+
 export function compcloseProjects(): CorpusProject[] {
-  return [blurVector(), blurSlow(), blurText(), blur3d(), blurGroup3d(), spaceVector(), spaceText(), spaceOthers(), pathMasks(), pathMaskGroups()];
+  return [blurVector(), blurSlow(), blurText(), blur3d(), blurGroup3d(), spaceVector(), spaceText(), spaceOthers(), pathMasks(), pathMaskGroups(), unknownModes()];
 }
