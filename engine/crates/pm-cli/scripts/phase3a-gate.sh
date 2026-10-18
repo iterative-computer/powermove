@@ -92,6 +92,10 @@ run video-class cargo test --release -p pm-cli --test phase3a_video_class -- --i
 # bit-identical on the corpus (needs pm_wasm.wasm: bun run --cwd apps/desktop build:wasm).
 run eval-wasm ./target/release/pm-cli parity eval --wasm --json "$out/parity-eval.json"
 
+# The memory row's pm-wasm part: the mirror's heap and linear memory per
+# window with each 3D corpus project (and the real project) loaded.
+run wasm-budget-3d node "$here/wasm-budget-3d.mjs"
+
 # Phase 3a performance rows the engine measures on its own.
 export PM_GLTF_BIG="${PM_GLTF_BIG:-$corpus/big-skinned.glb}"
 run pick-1m cargo test --release -p pm-geom3d --test gltf_picks million_vertex_picks_meet_the_targets \
