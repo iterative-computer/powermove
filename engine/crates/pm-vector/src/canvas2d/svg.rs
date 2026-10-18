@@ -209,7 +209,7 @@ fn paint_source(raw: &RawElements<'_>, id: &str, prop: &str) -> Option<String> {
     let mut n = raw.get(id)?;
     loop {
         let declared = n.attribute("style").and_then(|style| {
-            style.split(';').filter_map(|d| d.split_once(':')).filter(|(k, _)| k.trim() == prop).map(|(_, v)| v).last()
+            style.split(';').filter_map(|d| d.split_once(':')).filter(|(k, _)| k.trim() == prop).map(|(_, v)| v).next_back()
         });
         if let Some(v) = declared.or_else(|| n.attribute(prop))
             && v.trim() != "inherit"
