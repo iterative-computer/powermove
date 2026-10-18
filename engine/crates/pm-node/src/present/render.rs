@@ -187,6 +187,12 @@ pub enum Command {
     },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
+    /// The paused viewer's Blender previews (sent once, at start).
+    UseBlender(Arc<super::blender::PreviewBlender>),
+    /// Preview surfaces of the view arrived: draw it again when paused.
+    BlenderReady {
+        key: Key,
+    },
     Shutdown,
 }
 
@@ -308,6 +314,8 @@ pub struct Stats {
     pub silent_runs: u64,
     /// Audio playback, per view.
     pub audio: BTreeMap<String, AudioStatus>,
+    /// The paused viewer's Blender previews.
+    pub blender_preview: super::blender::BlenderPreviewStats,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -397,6 +405,8 @@ struct Thread {
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
     generations: Generations,
+    /// The paused viewer's Blender previews (document source).
+    blender: Option<Arc<super::blender::PreviewBlender>>,
 }
 
 fn now() -> i64 {
@@ -437,6 +447,7 @@ pub fn run(
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
+        blender: None,
     };
     thread.check_in();
     loop {
@@ -752,11 +763,22 @@ impl Thread {
                     gpu.device.destroy();
                 }
             }
+            Command::UseBlender(blender) => self.blender = Some(blender),
+            Command::BlenderReady { key } => {
+                if let Some(view) = self.views.get_mut(&key)
+                    && !view.clock.is_playing()
+                {
+                    view.dirty = true;
+                }
+            }
         }
         true
     }
 
     fn forget_session(&mut self, key: Key) {
+        if let Some(blender) = &self.blender {
+            blender.forget(key);
+        }
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -1095,8 +1117,8 @@ impl Thread {
         if self.config.host_clock || !self.config.document || self.audio.contains_key(&key) {
             return;
         }
-        let ready = self.views.contains_key(&key)
-            && self.docs.get(&key).is_some_and(|d| d.has_document());
+        let ready =
+            self.views.contains_key(&key) && self.docs.get(&key).is_some_and(|d| d.has_document());
         if ready && let Some(link) = self.audio_for(key) {
             link.send(AudioCtl::Warm);
         }
@@ -2023,14 +2045,37 @@ impl Thread {
             let registered = doc.take_registered();
             let _ = composer.use_definitions(key, doc.definitions(), &registered);
             composer.set_playing(timing.is_some());
-            match composer.compose(
+            // Paused in Material Preview or Rendered: Blender surfaces
+            // (`super::blender`); playback and draft shadings draw natively.
+            let paused = timing.is_none() && !view.clock.is_playing();
+            let shading = super::blender::blender_shading(view.state.view.as_ref());
+            let preview = match (&self.blender, paused, shading, view.state.view.as_ref()) {
+                (Some(blender), true, Some(_), Some(v)) => Some(blender.host(v)),
+                _ => None,
+            };
+            composer.set_blender(match &preview {
+                Some(host) => pm_render::blender::BlenderRender::Preview(host.clone()),
+                None => pm_render::blender::BlenderRender::Native,
+            });
+            let composed = composer.compose(
                 doc.document(),
                 &composition,
                 doc.media(),
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &view.state,
                 &live.working,
-            ) {
+            );
+            composer.set_blender(pm_render::blender::BlenderRender::Native);
+            if paused && let Some(blender) = &self.blender {
+                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                blender.submit(
+                    key,
+                    shading.filter(|_| composed.is_ok()),
+                    revision,
+                    preview.as_deref(),
+                );
+            }
+            match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;

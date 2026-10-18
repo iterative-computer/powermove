@@ -24,12 +24,12 @@ use pm_blender::BlenderError;
 use pm_blender::job::{BlenderBackend, RenderJob, RenderedFrame, RenderedSurface, SurfacePng};
 use pm_blender::key::hex;
 use pm_blender::snapshot::AssetBytes;
+use pm_engine::jobs::HostRequest;
 use pm_protocol::blender::{
     BlenderAsset, BlenderJobRequest, BlenderSurface, ShutterSample, SnapshotEncoding, SnapshotRef,
     SurfaceRequest, limits,
 };
 use pm_protocol::common::{ByteSize, ContentHash, JobId, SessionId, Size, Ticks};
-use pm_engine::jobs::HostRequest;
 use pm_protocol::envelope::{Event, Request, Response};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 use pm_protocol::host::{
