@@ -253,6 +253,20 @@ describe('legacy app install', () => {
     expect(hydrated.edits).toEqual([{ id: 'bulk', summary: ['Cut out subject'], operations: [], payloadOmitted: true }]);
   });
 
+  it('keeps today\'s export format ids in the document for apiVersion 1 to 3 readers (issue P1)', () => {
+    const { PM } = appRegistry();
+    const hydrated = PM.hydrateProject({ ...PM.proj, exportDefaults: { format: 'prores', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: true, audio: true, alpha: true } });
+    expect(hydrated.exportDefaults.format).toBe('prores');
+    PM.proj = hydrated;
+    PM.hist.do = (_label: string, fn: () => void) => fn();
+    expect(PM.exportDefaults.read().format).toBe('prores-4444');
+    PM.exportDefaults.write({ format: 'h264' });
+    expect(PM.proj.exportDefaults.format).toBe('mp4');
+    expect(PM.exportDefaults.read().format).toBe('h264');
+    PM.exportDefaults.write({ format: 'prores-hq' });
+    expect(PM.proj.exportDefaults.format).toBe('prores-hq');
+  });
+
   it('hydrates extension layers without needing their renderer and preserves safe structured data', () => {
     const bootProject = {
       id: 'P1', name: 'Hybrid', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',

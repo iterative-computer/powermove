@@ -28,6 +28,7 @@ import {
   migrateFormat,
   normalizeDelivery,
   normalizeTimecode,
+  storedFormatId,
   supportsAlpha,
   type ExportPreset,
   type ExportPresetOptions,
@@ -370,7 +371,9 @@ X.dialog = () => {
     if (BUILT_IN_PRESETS.some((preset) => preset.name === name)) { PM.toast('Built-in presets keep their name; choose another.'); return; }
     const stored = (PM.store.get('renderPresets', []) as any[]).filter((preset: any) => preset?.name !== name);
     const id = PM.uid('preset');
-    stored.push({ id, name, options: presetOptionsOf(opts) });
+    // Saved with today's format id where one exists (issue P1); read back through migratePreset.
+    const options = presetOptionsOf(opts);
+    stored.push({ id, name, options: { ...options, format: storedFormatId(options.format) } });
     PM.store.set('renderPresets', stored);
     presets = allPresets(stored).filter((preset) => engine || !formatInfo(preset.options.format).engine);
     chosenPreset = id;
