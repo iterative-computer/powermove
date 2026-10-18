@@ -731,10 +731,27 @@ impl Engine {
             (None, Some(i)) if i >= 0.0 => layers.get(i as usize),
             _ => None,
         };
+        // A parent layer outside the composition (`transformParentMatrix`,
+        // `parent3D`), a channel outside the layer (`hasKeyAt`), and a
+        // vector path outside `d.paths` (`pathValues`, `groupMatrix`) are
+        // evaluated ad hoc from their JSON, as the layer itself is.
+        let detached_parent: Option<Node> = match get(request, "parent") {
+            Some(v @ Value::Object(_)) => Some(Node::from_value(v.clone(), revision)),
+            _ => None,
+        };
+        let detached_prop: Option<Node> = match get(request, "prop") {
+            Some(v @ Value::Object(_)) => Some(Node::from_value(v.clone(), revision)),
+            _ => None,
+        };
+        let detached_path: Option<Node> = match get(request, "pathJson") {
+            Some(v @ Value::Object(_)) => Some(Node::from_value(v.clone(), revision)),
+            _ => None,
+        };
         let layer_at = |key: &str| -> Option<Option<&Node>> {
             match get(request, key) {
                 None => None,
                 Some(Value::Number(i)) if *i >= 0.0 => Some(layers.get(*i as usize)),
+                Some(Value::Object(_)) if key == "parent" => Some(detached_parent.as_ref()),
                 Some(_) => Some(None),
             }
         };
@@ -781,10 +798,6 @@ impl Engine {
                     .unwrap_or_default();
                 // A channel object outside the layer (evaluated ad hoc from
                 // its JSON, with the layer as context).
-                let detached_prop = match get(request, "prop") {
-                    Some(v @ Value::Object(_)) => Some(Node::from_value(v.clone(), revision)),
-                    _ => None,
-                };
                 let prop = if detached_prop.is_some() {
                     detached_prop.as_ref()
                 } else if get(request, "path").is_some_and(Value::is_null) {
@@ -874,7 +887,7 @@ impl Engine {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let Some(prop) = at_path(l, &path) else {
+                let Some(prop) = detached_prop.as_ref().or_else(|| at_path(l, &path)) else {
                     return Ok(Err(JsThrow::type_error(
                         "Cannot read properties of undefined (reading 'kf')",
                     )));
@@ -998,7 +1011,8 @@ impl Engine {
                 let index = number(get(request, "index")).unwrap_or(-1.0);
                 let paths =
                     node::array(node::member(node::member(Some(l), "d"), "paths")).unwrap_or(&[]);
-                let Some(path) = (index >= 0.0).then(|| paths.get(index as usize)).flatten() else {
+                let stored = (index >= 0.0).then(|| paths.get(index as usize)).flatten();
+                let Some(path) = detached_path.as_ref().or(stored) else {
                     return Ok(Err(JsThrow::type_error(
                         "Cannot read properties of undefined (reading 'p')",
                     )));
@@ -1047,6 +1061,10 @@ impl Engine {
                 // `groupMatrix(PM, layer, d.paths[index], time)`.
                 let l = layer!();
                 let index = number(get(request, "index")).unwrap_or(-1.0);
+                if let Some(path) = detached_path.as_ref() {
+                    out.nums(&try_js!(scope.detached_group_matrix(l, path, t)));
+                    return Ok(Ok(()));
+                }
                 let (_, matrices, _) = try_js!(scope.path_geometry(l, t));
                 match (index >= 0.0)
                     .then(|| matrices.get(index as usize))
