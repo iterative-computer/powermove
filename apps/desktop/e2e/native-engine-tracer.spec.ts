@@ -426,7 +426,7 @@ test.describe('Use New Engine: the tracer bullet', () => {
     await expect.poll(() => page.evaluate(() => (window as any).PM.playing), { timeout: 10_000 }).toBe(false);
     expect(await page.evaluate(() => (window as any).PM.time)).toBeGreaterThanOrEqual(3.9);
     // With the loop on the work area, it wraps.
-    await page.evaluate(() => { const PM = (window as any).PM; PM.proj.work = [1, 1.5]; PM.loop = true; PM.setTime(1.2); PM.play(); });
+    await page.evaluate(() => { const PM = (window as any).PM; PM.proj.work = [1, 1.5]; PM.touch(); PM.loop = true; PM.setTime(1.2); PM.play(); });
     const times: number[] = [];
     for (let i = 0; i < 20; i++) {
       times.push(await page.evaluate(() => (window as any).PM.time as number));

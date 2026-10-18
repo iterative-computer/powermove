@@ -104,5 +104,5 @@ test('output presets restore settings and persist across desktop sessions',async
  const {page}=session;await clean(page);await page.evaluate(()=>{const PM=(window as any).PM;PM.Export.remember({format:'prores',scale:.5,fps:24000/1001,range:'work',quality:'high',mblur:false,alpha:true,audio:false});PM.Export.dialog();});
  await page.getByRole('textbox',{name:'Render preset name',exact:true}).fill('Alpha master');await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByRole('button',{name:'Cancel',exact:true}).click();
  await page.evaluate(async()=>{const PM=(window as any).PM;await PM.store.flush();});await session.relaunch();
- expect(await session.page.evaluate(()=>(window as any).PM.store.get('renderPresets',[])[0])).toMatchObject({name:'Alpha master',options:{format:'prores',scale:.5,alpha:true,fps:24000/1001}});expect(session.diagnostics.pageErrors).toEqual([]);
+ expect(await session.page.evaluate(()=>(window as any).PM.store.get('renderPresets',[])[0])).toMatchObject({name:'Alpha master',options:{format:'prores-4444',scale:.5,alpha:true,fps:24000/1001}});expect(session.diagnostics.pageErrors).toEqual([]);
 });
