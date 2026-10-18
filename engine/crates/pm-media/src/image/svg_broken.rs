@@ -668,10 +668,7 @@ fn entity_depth(
     stack.push(name.to_owned());
     let (mut max, mut depth) = (0usize, 0isize);
     let mut s = Scan { s: value, at: 0 };
-    loop {
-        let Some(next) = s.rest().iter().position(|&b| b == b'<' || b == b'&') else {
-            break;
-        };
+    while let Some(next) = s.rest().iter().position(|&b| b == b'<' || b == b'&') {
         s.at += next;
         if s.starts(b"&") {
             s.at += 1;
