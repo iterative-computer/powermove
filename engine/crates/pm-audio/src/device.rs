@@ -218,15 +218,18 @@ impl OutputStream {
     pub fn open(
         mut callback: impl FnMut(&mut [f32], usize, u64) + Send + 'static,
     ) -> Result<OutputStream> {
-        let info = default_output_info()?;
+        let mut info = default_output_info()?;
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or_else(|| AudioError::Device("no output device".into()))?;
+        let supported = device
+            .default_output_config()
+            .map_err(|e| AudioError::Device(e.to_string()))?;
         let config = cpal::StreamConfig {
             channels: info.channels as u16,
             sample_rate: info.sample_rate,
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: interactive_buffer(supported.buffer_size()),
         };
         let channels = info.channels;
         let failed = Arc::new(AtomicBool::new(false));
@@ -255,6 +258,13 @@ impl OutputStream {
                 None,
             )
             .map_err(|e| AudioError::Device(e.to_string()))?;
+        // Opening a fixed-size stream can change the HAL buffer and latency.
+        // Report the actual open device rather than its previous/default size.
+        if let Ok(opened) = default_output_info() {
+            info.latency_frames = opened.latency_frames;
+            info.safety_offset_frames = opened.safety_offset_frames;
+            info.buffer_frames = opened.buffer_frames;
+        }
         stream
             .play()
             .map_err(|e| AudioError::Device(e.to_string()))?;
@@ -288,5 +298,44 @@ impl OutputStream {
         self.stream
             .pause()
             .map_err(|e| AudioError::Device(e.to_string()))
+    }
+}
+
+/// One WebAudio render quantum when supported. The inherited HAL default can
+/// be 512 frames: both the callback phase and its scheduling lead then add a
+/// full 10.7 ms to an interactive start. Respect devices with larger minima
+/// (the producer adapts its reserve to the actual callback size).
+fn interactive_buffer(supported: &cpal::SupportedBufferSize) -> cpal::BufferSize {
+    match *supported {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed(128u32.clamp(min, max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_buffer_respects_device_limits() {
+        use cpal::{BufferSize::*, SupportedBufferSize::Range};
+        assert_eq!(
+            interactive_buffer(&Range { min: 32, max: 4096 }),
+            Fixed(128)
+        );
+        assert_eq!(interactive_buffer(&Range { min: 32, max: 64 }), Fixed(64));
+        assert_eq!(
+            interactive_buffer(&Range {
+                min: 4096,
+                max: 8192
+            }),
+            Fixed(4096)
+        );
+        assert_eq!(
+            interactive_buffer(&cpal::SupportedBufferSize::Unknown),
+            Default
+        );
     }
 }

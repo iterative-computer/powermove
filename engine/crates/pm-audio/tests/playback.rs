@@ -2803,106 +2803,108 @@ fn paused_prefetch_starts_within_one_callback() {
         SR,
         &[tone(SR, 12.0, 997.0, 0.2), tone(SR, 12.0, 631.0, 0.1)],
     );
-    for warm in [false, true] {
-        let cache = SourceCache::new(64 << 20, 2);
-        let source = cache.open(&file, None).unwrap();
-        if warm {
-            for b in 0..9 {
-                cache.block(&source, b, true).unwrap();
-            }
-        } else {
-            cache.set_decode_delay(Duration::from_millis(8));
-        }
-        let (playback, mut side) = Playback::start_headless(
-            MixFormat::stereo(SR),
-            cache.clone(),
-            PlaybackConfig::default(),
-            SR,
-            2,
-            LATENCY_US,
-        )
-        .unwrap();
-        let doc = Arc::new(project(
-            30.0,
-            8.0,
-            &[
-                audio("stretched", "s", 0.0, 8.0, r#", "speed":1.5"#, ""),
-                audio("plain", "s", 0.0, 8.0, "", ""),
-            ],
-            &[],
-            "",
-        ));
-        playback
-            .set_project(doc.clone(), "C", &|_: &str| Some(file.clone()))
-            .unwrap();
-        playback
-            .command(TransportCommand::SetLoop {
-                range: Some(TickRange {
-                    start: ticks(4.0),
-                    end: ticks(6.0),
-                }),
-            })
-            .unwrap();
-        let mut out = vec![0.0; BUFFER * 2];
-        // Preparation of the work start happens without seeking there.
-        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
-        for target in [0, 4 * SR as i64, 2 * SR as i64] {
-            playback.command(TransportCommand::Pause).unwrap();
-            // Retire previous epoch's queued chunks just as a live device
-            // does continuously while paused.
-            side.callback(&mut out, 2, host_now_us());
-            playback
-                .command(TransportCommand::Seek {
-                    time: ticks(target as f64 / SR as f64),
-                    mode: SeekMode::Exact,
-                })
-                .unwrap();
-            until(|| playback.prepared_starts().contains(&target));
-            let before = playback.stats();
-            let start = std::time::Instant::now();
-            playback
-                .command(TransportCommand::Play {
-                    rate: PlaybackRate::NORMAL,
-                })
-                .unwrap();
-            let deadline = start + Duration::from_secs_f64(BUFFER as f64 / SR as f64);
-            while side.queued_frames() < BUFFER && std::time::Instant::now() < deadline {
-                std::thread::yield_now();
-            }
-            assert!(
-                side.queued_frames() >= BUFFER,
-                "warm={warm} target={target}: first callback missed, {:?}",
-                start.elapsed()
-            );
-            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-            side.callback(&mut out, 2, host_now_us());
-            let rig = Rig::new(&[("s", file.as_path())]);
-            let mut mixer = rig.mixer((*doc).clone(), "C", MixFormat::stereo(SR));
-            let mut expected = vec![Vec::new(); 2];
-            mixer
-                .render(
-                    target,
-                    BUFFER,
-                    &mut expected,
-                    &pm_audio::RenderOptions {
-                        wait: true,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-            for i in 0..BUFFER {
-                for c in 0..2 {
-                    assert_eq!(out[2 * i + c], expected[c][i]);
+    for buffer in [128, BUFFER] {
+        for warm in [false, true] {
+            let cache = SourceCache::new(64 << 20, 2);
+            let source = cache.open(&file, None).unwrap();
+            if warm {
+                for b in 0..9 {
+                    cache.block(&source, b, true).unwrap();
                 }
+            } else {
+                cache.set_decode_delay(Duration::from_millis(8));
             }
-            assert_eq!(playback.stats().starved_renders, before.starved_renders);
-            assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
-            eprintln!(
-                "A6 start warm={warm} target={target}: {latency_ms:.3} ms (one callback {:.3} ms)",
-                BUFFER as f64 * 1000.0 / SR as f64
-            );
+            let (playback, mut side) = Playback::start_headless(
+                MixFormat::stereo(SR),
+                cache.clone(),
+                PlaybackConfig::default(),
+                SR,
+                2,
+                LATENCY_US,
+            )
+            .unwrap();
+            let doc = Arc::new(project(
+                30.0,
+                8.0,
+                &[
+                    audio("stretched", "s", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                    audio("plain", "s", 0.0, 8.0, "", ""),
+                ],
+                &[],
+                "",
+            ));
+            playback
+                .set_project(doc.clone(), "C", &|_: &str| Some(file.clone()))
+                .unwrap();
+            playback
+                .command(TransportCommand::SetLoop {
+                    range: Some(TickRange {
+                        start: ticks(4.0),
+                        end: ticks(6.0),
+                    }),
+                })
+                .unwrap();
+            let mut out = vec![0.0; buffer * 2];
+            // Preparation of the work start happens without seeking there.
+            until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+            for target in [0, 4 * SR as i64, 2 * SR as i64] {
+                playback.command(TransportCommand::Pause).unwrap();
+                // Retire previous epoch's queued chunks just as a live device
+                // does continuously while paused.
+                side.callback(&mut out, 2, host_now_us());
+                playback
+                    .command(TransportCommand::Seek {
+                        time: ticks(target as f64 / SR as f64),
+                        mode: SeekMode::Exact,
+                    })
+                    .unwrap();
+                until(|| playback.prepared_starts().contains(&target));
+                let before = playback.stats();
+                let start = std::time::Instant::now();
+                playback
+                    .command(TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL,
+                    })
+                    .unwrap();
+                let deadline = start + Duration::from_secs_f64(buffer as f64 / SR as f64);
+                while side.queued_frames() < buffer && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                assert!(
+                    side.queued_frames() >= buffer,
+                    "buffer={buffer} warm={warm} target={target}: first callback missed, {:?}",
+                    start.elapsed()
+                );
+                let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                side.callback(&mut out, 2, host_now_us());
+                let rig = Rig::new(&[("s", file.as_path())]);
+                let mut mixer = rig.mixer((*doc).clone(), "C", MixFormat::stereo(SR));
+                let mut expected = vec![Vec::new(); 2];
+                mixer
+                    .render(
+                        target,
+                        buffer,
+                        &mut expected,
+                        &pm_audio::RenderOptions {
+                            wait: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                for i in 0..buffer {
+                    for c in 0..2 {
+                        assert_eq!(out[2 * i + c], expected[c][i]);
+                    }
+                }
+                assert_eq!(playback.stats().starved_renders, before.starved_renders);
+                assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
+                eprintln!(
+                    "A6 start buffer={buffer} warm={warm} target={target}: {latency_ms:.3} ms (one callback {:.3} ms)",
+                    buffer as f64 * 1000.0 / SR as f64
+                );
+            }
+            drop(playback);
+            cache.shutdown();
         }
-        drop(playback);
-        cache.shutdown();
     }
 }

@@ -67,7 +67,7 @@ for (const native of modes) {
       const target = run % 2 === 0 ? 0 : 3;
       await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
       await page.waitForTimeout(250);
-      samples.push(await page.evaluate(async ({ native, target }) => {
+      const sample = await page.evaluate(async ({ native, target }) => {
         const PM = (window as any).PM;
         const starts = (window as any).__a6starts as any[];
         starts.length = 0;
@@ -82,7 +82,7 @@ for (const native of modes) {
             const clock = s.clock;
             if (clock && clock.epoch !== oldEpoch && clock.state === 'playing') {
               const firstUs = clock.hostTime - (clock.mediaTime / 705600000 - target) * 1e6;
-              return { target, outputMs: (firstUs - s.hostOffsetUs) / 1000 - requested,
+              return { target, presenterEpoch: clock.epoch, requestedHostUs: requested * 1000 + s.hostOffsetUs, outputMs: (firstUs - s.hostOffsetUs) / 1000 - requested,
                 observedMs: performance.now() - requested, offsetErrorUs: s.hostOffsetErrorUs,
                 outputLatencyUs: clock.outputLatencyUs, sampleRate: clock.sampleRate };
             }
@@ -94,8 +94,26 @@ for (const native of modes) {
           }
           await new Promise(r => setTimeout(r, 1));
         }
-      }, { native, target }));
+      }, { native, target });
       await page.evaluate(() => (window as any).PM.pause());
+      if (native) {
+        // The presenter and audio have independent epoch counters. Match
+        // this request on the shared host clock, after the 33 ms status poll.
+        const deadline = performance.now() + 1000;
+        for (;;) {
+          const timing = await session.evaluateMain(async () => {
+            const report = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
+            return (Object.values(report.presenter.audio)[0] as any)?.startTiming;
+          });
+          if (timing && timing.requestedUs >= sample.requestedHostUs) {
+            Object.assign(sample, { timing });
+            break;
+          }
+          if (performance.now() >= deadline) throw new Error('first-buffer timing missing');
+          await Bun.sleep(10);
+        }
+      }
+      samples.push(sample);
     }
     const audio = native ? await session.evaluateMain(async () => {
       const report = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');

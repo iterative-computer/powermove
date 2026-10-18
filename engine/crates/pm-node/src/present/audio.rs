@@ -97,6 +97,8 @@ pub struct AudioStatus {
     pub underruns: u64,
     pub starved_renders: u64,
     pub problems: Vec<String>,
+    pub start_timing: Option<pm_audio::playback::StartTiming>,
+    pub prepared_starts: Vec<i64>,
 }
 
 pub struct AudioLink {
@@ -235,6 +237,9 @@ impl Control {
                 _ if self.playback.is_none() && self.warm_due.is_some() => self
                     .warm_due
                     .map_or(Duration::ZERO, |due| due.saturating_duration_since(Instant::now())),
+                // Paused preparation and device health continue changing
+                // without controls or levels; keep diagnostics current too.
+                _ if feeding => LEVELS_INTERVAL,
                 _ => Duration::from_secs(3600),
             };
             // Levels while the device plays (or is about to).
@@ -552,6 +557,8 @@ fn report_playback(status: &Mutex<AudioStatus>, playback: &Playback) {
     let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
     status.underruns = stats.underruns;
     status.starved_renders = stats.starved_renders;
+    status.start_timing = playback.start_timing();
+    status.prepared_starts = playback.prepared_starts();
     for error in errors {
         if !status.problems.contains(&error) {
             status.problems.push(error);

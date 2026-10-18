@@ -93,6 +93,9 @@ impl DeviceSide {
     pub fn callback(&mut self, out: &mut [f32], channels: usize, host_us: u64) {
         let heard = self.consumer.fill(out, channels);
         if let Some(h) = heard {
+            self.shared
+                .start_timing
+                .heard(h.tag.epoch, host_us, out.len() / channels.max(1));
             let latency = self.shared.latency_us.load(Ordering::Relaxed);
             if self.shared.reanchor.swap(false, Ordering::Relaxed) {
                 self.core.invalidate();
@@ -126,7 +129,11 @@ impl DeviceSide {
 type DeviceWatch = Box<dyn FnMut() -> Option<(u32, u32)> + Send>;
 
 enum Control {
-    Command(TransportCommand, std::sync::mpsc::SyncSender<Result<()>>),
+    Command(
+        TransportCommand,
+        std::sync::mpsc::SyncSender<Result<()>>,
+        u64,
+    ),
     Project(
         Arc<Document>,
         Arc<MixGraph>,
@@ -152,6 +159,78 @@ struct Shared {
     dropped_voice_frames: AtomicU64,
     device_rate: u32,
     prepared: Mutex<Vec<i64>>,
+    start_timing: StartTrace,
+}
+
+/// Times of a run's first buffer on the shared monotonic host clock.
+/// Separates control delivery, render preparation, callback phase and HAL lead.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTiming {
+    pub epoch: u32,
+    pub requested_us: u64,
+    pub applied_us: u64,
+    pub queued_us: u64,
+    pub callback_us: u64,
+    pub device_host_us: u64,
+    pub callback_frames: u64,
+}
+
+#[derive(Default)]
+struct StartTrace {
+    epoch: AtomicU32,
+    requested: AtomicU64,
+    applied: AtomicU64,
+    queued: AtomicU64,
+    callback: AtomicU64,
+    callback_epoch: AtomicU32,
+    device_host: AtomicU64,
+    callback_frames: AtomicU64,
+}
+
+impl StartTrace {
+    fn begin(&self, epoch: u32, requested: u64) {
+        self.epoch.store(0, Ordering::Release);
+        self.requested.store(requested, Ordering::Relaxed);
+        self.applied.store(host_now_us(), Ordering::Relaxed);
+        self.queued.store(0, Ordering::Relaxed);
+        self.epoch.store(epoch, Ordering::Release);
+    }
+
+    fn queued(&self) {
+        self.queued.store(host_now_us(), Ordering::Release);
+    }
+
+    fn heard(&self, epoch: u32, device_host: u64, frames: usize) {
+        if self.epoch.load(Ordering::Acquire) == epoch
+            && self.callback_epoch.load(Ordering::Relaxed) != epoch
+        {
+            self.device_host.store(device_host, Ordering::Relaxed);
+            self.callback_frames.store(frames as u64, Ordering::Relaxed);
+            self.callback.store(host_now_us(), Ordering::Relaxed);
+            self.callback_epoch.store(epoch, Ordering::Release);
+        }
+    }
+
+    fn latest(&self) -> Option<StartTiming> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let heard_epoch = self.callback_epoch.load(Ordering::Acquire);
+        let callback = self.callback.load(Ordering::Relaxed);
+        let s = StartTiming {
+            epoch,
+            requested_us: self.requested.load(Ordering::Relaxed),
+            applied_us: self.applied.load(Ordering::Relaxed),
+            queued_us: self.queued.load(Ordering::Acquire),
+            callback_us: callback,
+            device_host_us: self.device_host.load(Ordering::Relaxed),
+            callback_frames: self.callback_frames.load(Ordering::Relaxed),
+        };
+        (epoch != 0
+            && heard_epoch == epoch
+            && epoch == self.epoch.load(Ordering::Acquire)
+            && heard_epoch == self.callback_epoch.load(Ordering::Acquire))
+        .then_some(s)
+    }
 }
 
 /// Pending diagnostics, each reported once per episode however often the
@@ -302,6 +381,7 @@ impl Playback {
             dropped_voice_frames: AtomicU64::new(0),
             device_rate,
             prepared: Mutex::new(Vec::new()),
+            start_timing: StartTrace::default(),
         });
         let (tx, rx) = channel();
         let empty = Arc::new(Document::new(None, 0));
@@ -410,7 +490,7 @@ impl Playback {
     pub fn command(&self, command: TransportCommand) -> Result<()> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.tx
-            .send(Control::Command(command, reply))
+            .send(Control::Command(command, reply, host_now_us()))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         answer
             .recv_timeout(Duration::from_secs(5))
@@ -483,8 +563,12 @@ impl Playback {
         }
     }
 
-    /// Paused starts whose source and DSP pre-roll is ready (test probe).
-    #[cfg(feature = "test-hooks")]
+    /// Diagnostic timing of the most recently started device epoch.
+    pub fn start_timing(&self) -> Option<StartTiming> {
+        self.shared.start_timing.latest()
+    }
+
+    /// Paused starts whose source and voice DSP pre-roll is ready (diagnostics).
     pub fn prepared_starts(&self) -> Vec<i64> {
         self.shared
             .prepared
@@ -896,7 +980,7 @@ struct RenderThread {
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
     converter: Option<Converter>,
-    /// The 2× J/K/L stretch, made at the first 2× run.
+    /// The 2× J/K/L stretch, warmed during the first audible pause.
     shuttle: Option<Shuttle>,
     device_rate: u32,
     ring_channels: usize,
@@ -1048,7 +1132,7 @@ impl RenderThread {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         match c {
-            Control::Command(cmd, reply) => {
+            Control::Command(cmd, reply, requested_us) => {
                 // A pause, a step, a play around, or a new J/K/L rate while
                 // running starts from what is heard.
                 if self.transport.is_running()
@@ -1066,6 +1150,9 @@ impl RenderThread {
                 let result = self.transport.apply(&cmd);
                 let restart = match &result {
                     Ok(Effect::Restart) => {
+                        self.shared
+                            .start_timing
+                            .begin(self.transport.epoch(), requested_us);
                         self.epoch_start =
                             Some((self.transport.epoch(), self.transport.position()));
                         self.ring.set_epoch(self.transport.epoch());
@@ -1194,6 +1281,19 @@ impl RenderThread {
         if self.stop_pending {
             return;
         }
+        if self.shuttle.is_none() && !self.mixer.graph().voices.is_empty() {
+            // Master FFT plans/workspace need no project input. Allocate and
+            // exercise them off the Play path without advancing the mix.
+            match Shuttle::new(self.mixer.format().channels(), self.transport.rate()) {
+                Ok(mut shuttle) => {
+                    if let Err(error) = shuttle.warm() {
+                        self.error(error.to_string());
+                    }
+                    self.shuttle = Some(shuttle);
+                }
+                Err(error) => self.error(error.to_string()),
+            }
+        }
         let rate = self.transport.rate() as i64;
         let mut starts = vec![self.transport.position()];
         if let Some(range) = self.transport.loop_range() {
@@ -1227,6 +1327,8 @@ impl RenderThread {
             .max(CHUNK as i64);
         let mut ready = Vec::new();
         for start in starts {
+            self.mixer
+                .prefetch_within(start - 2 * ahead, (2 * ahead) as usize, LOOKAHEAD_GROUPS);
             // Read bounds include stretch's deterministic pre-roll. Do not
             // block commands evaluating a large work area all in one turn.
             if !self
@@ -1573,6 +1675,9 @@ impl RenderThread {
                     den: 1,
                 },
             };
+            if self.startup.is_some() {
+                self.shared.start_timing.queued();
+            }
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -1611,6 +1716,9 @@ impl RenderThread {
 
     fn push_chunks(&mut self, chunks: Vec<(Tag, Vec<f32>)>) {
         for (tag, inter) in chunks {
+            if self.startup.is_some() {
+                self.shared.start_timing.queued();
+            }
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -1622,6 +1730,30 @@ impl RenderThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_buffer_timing_ignores_other_epochs_and_later_callbacks() {
+        let trace = StartTrace::default();
+        trace.begin(3, host_now_us());
+        trace.queued();
+        assert!(trace.latest().is_none());
+        trace.heard(2, 10, 512);
+        assert!(trace.latest().is_none());
+        trace.heard(3, 20, 128);
+        let first = trace.latest().unwrap();
+        trace.heard(3, 30, 256);
+        assert_eq!(trace.latest().unwrap().device_host_us, 20);
+        assert_eq!(first.callback_frames, 128);
+        assert!(first.requested_us <= first.applied_us);
+        assert!(first.applied_us <= first.queued_us);
+        assert!(first.queued_us <= first.callback_us);
+        trace.begin(4, host_now_us());
+        trace.heard(3, 40, 512);
+        assert!(trace.latest().is_none());
+        trace.queued();
+        trace.heard(4, 50, 256);
+        assert_eq!(trace.latest().unwrap().device_host_us, 50);
+    }
 
     #[test]
     fn whole_mix_failures_are_reported_once_per_episode() {
