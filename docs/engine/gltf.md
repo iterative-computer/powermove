@@ -135,6 +135,16 @@ outside the repository), 2026-10-17, load average about 9 to 10.
 | `frame_time_gltf_at_1080p` (ignored, release) | Scene build and render of every output, 1920 × 1080, a new time per frame | `BrainStem` 7.9 ms median render (0.41 ms build), `ToyCar` 3.1 ms, extension grid 3.4 ms, transmission 3.4 ms, `Fox` 0.8 ms; not gated, loaded machine |
 | scene pass regressions | `tests/scene3d.rs` sweep and programs, `scene3d_document`, `scene3d_resources`, `scene3d_mesh`, `scene3d_layering`, `three_programs`, `headless` | Pass |
 
+Re-run after merging `feat/native-engine` at `ec8f05f2` (wave 4, with
+the scene3d lane): the sweep (165 outputs, worst ≤ 2 CV fraction 99.934%
+`TextureTransformMultiTest`, max outside edges 6 CV, min SSIM 0.99973
+`CompareSheen`), programs and uniforms (3,527 draws, 386,969 values),
+poses (1,170 drawables, difference 0), picks (7,584 rays agree), the
+render corpus (235 frames, 0 failed; `3d/gltf` and `3d/gltf-materials`
+max 2 CV), the scene pass regressions, `pm-geom3d`'s tests, and clippy
+with `-D warnings` on `pm-geom3d`, `pm-gpu`, and `pm-render` all pass;
+`pm-geom3d` checks for wasm32-unknown-unknown.
+
 Khronos sample models are downloaded into the corpus directory
 (`Powermove Engine Corpus/khronos-gltf/`, 108 files), never into the
 repository.
@@ -183,3 +193,6 @@ repository.
   `sync`'s time and per-object mixer times, instanced draws recorded,
   pose and pick dumps.
 - `engine/Cargo.lock`: the `gltf` crate in `pm-geom3d`.
+- `pm-render/tests/motion.rs`: the wave 4 motion merge moved the
+  request before cloning it; the unblurred render now clones it, so the
+  test target compiles again.
