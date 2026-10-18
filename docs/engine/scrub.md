@@ -44,8 +44,11 @@ decode order. A picture that nothing references and that shows before N
 need not be decoded: H.264 pictures whose every VCL NAL unit has
 `nal_ref_idc` 0, and HEVC sub-layer non-reference pictures (`TRAIL_N`,
 `TSA_N`, `STSA_N`, `RADL_N`, `RASL_N`, reserved `RSV_VCL_N*`) in the highest
-temporal sub-layer (`hvcC` numTemporalLayers; unknown means nothing is left
-out). No decoded picture changes: such pictures are never prediction
+temporal sub-layer (`hvcC` numTemporalLayers, used only when every SPS
+in the record agrees, `sps_max_sub_layers_minus1 + 1`; a record that
+under-reports its sub-layers would make referenced `TRAIL_N` pictures look
+like top-layer ones, so a disagreement, a record without an SPS, or an
+unknown count leaves nothing out). No decoded picture changes: such pictures are never prediction
 references (H.264 7.4.1, HEVC 3.160), H.264 non-reference pictures do not
 advance `PrevRefFrameNum` and carry no `dec_ref_pic_marking`, so leaving
 them out creates no `frame_num` gap. AVFoundation drops the same pictures
@@ -99,20 +102,34 @@ it (export frames still decode on the caller's thread, with `DecodePurpose::Expo
   in-flight seek before starting the newest one (`legacy/core/video-seek.ts`).
 - **Look-ahead.** A move of at most 16 frames is a drag; its step is the
   stride. After a target lands, the worker decodes ahead by the stride
-  into the frame cache: 8 steps forward (within half the cache); in
+  into the frame cache: 8 steps forward (within half the worker's part
+  of the cache: running workers share it equally, so sources scrubbed or
+  played together do not each claim half of it); in
   reverse, one neighbourhood, because every reverse neighbourhood costs a
   seek from the GOP start: that seek keeps every reference picture up to
   32 frames before its target and the unreferenced pictures on the
   stride (`set_keep_before(frames, stride)`, within three quarters of the
-  cache). A forward drag through look-ahead frames is served from the
+  worker's part). A forward drag through look-ahead frames is served from the
   cache, and each cache hit moves the look-ahead along. A larger move is a
   jump (a ruler click, a random seek): nothing is decoded ahead of it, so
   speculation never delays the next seek. A request elsewhere stops
   look-ahead.
-- **Memory.** The frame cache (the lease's frame-cache share) is 512 MiB in
-  the viewer's renderer (about 40 UHD 4:2:0 frames); the decoder share
-  applies to the worker's session window as to any session. Idle workers
-  exit after 30 s.
+- **Memory.** Every renderer starts with the 64 MiB frame cache it had
+  before (`pm_render::media::DEFAULT_FRAME_CACHE`): export jobs, `pm-cli`,
+  and headless renders read each frame once and keep it there. Only the
+  viewer's renderer (the presenter's composer) takes a share of the
+  engine's lease: a quarter of the lease, between 64 and 512 MiB (512 MiB
+  holds about 40 UHD 4:2:0 frames), never more than the lease has left
+  after the viewer's surface pools (`pm_node::present::viewer_frame_cache`).
+  The presenter reserves it in the lease ledger as `frameCache`, so usage
+  reports show it, and resizes it on every grant (pm-engine calls
+  `FramePresenter::lease_changed`; `Renderer::apply_media_lease` forwards to
+  `DecodeService::apply_lease`, which evicts at once). A shrinking lease is
+  acknowledged once the smaller reservation fits (the next lease tick).
+  Before the host's first grant the viewer keeps 64 MiB, unreserved, like
+  everything else the engine holds then. An 8 GB Mac's idle interactive
+  lease (60% of 4 GiB) gives 512 MiB. Idle workers exit after 30 s; a
+  request that meets a worker exiting starts another.
 
 ### Stand-ins on screen (`pm-render`, `pm-node`, contract 2)
 
@@ -151,8 +168,10 @@ fresh renders, `reused_frame_textures_never_change_what_a_render_reads`).
 
 - Exact requests (playback, a paused frame after an exact seek, steps,
   Pause) wait for their exact frame. Exports decode on the export renderer's
-  thread through the unchanged synchronous path, never draw stand-ins, and
-  never use the viewer workers.
+  thread through the synchronous path (the session skips unreferenced
+  pictures before a target as every session does), with the 64 MiB frame
+  cache they had before; they never draw stand-ins and never use the
+  viewer workers.
 - A frame with a stand-in says so (`FrameQuality.stand_in`) and is followed
   by the exact frame when it decodes.
 - Leaving out unreferenced pictures changes no decoded picture
@@ -233,6 +252,31 @@ the 2160p row again: seek to draw p50 63.7, p95 201.2, max 211.9 ms (first
 frame p95 10.2 ms); drags 362 (361), 316 (315), 174 (1), 179 (121); and
 `native-engine-tracer.spec.ts` passes (11 of 11).
 
+After the review fixes (2026-10-17 evening: the frame cache sized from the
+lease for the viewer only and 64 MiB elsewhere, look-ahead shared among
+workers, the idle-exit race, the HEVC sub-layer check; load average 2.7 to
+5.8), the presenter reported a 512 MiB frame cache (`frameCacheBytes`
+536870912, the lease share). Two runs of the engine rows:
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| 2160p seek to draw | p50 64.1, p95 202.2, max 208.4 ms | p50 63.5, p95 202.2, max 211.6 ms |
+| 2160p first frame | p95 7.9 ms | p95 7.5 ms |
+| 2160p drags (1, −1, 7, −7) | 362 (361), 316 (315), 176 (1), 179 (126) | 362 (361), 311 (310), 173 (1), 183 (134) |
+| 1080p H.264 seek to draw; drags | p95 57.0 ms; 361 (361), 359 (359), 363 (360), 316 (298) | |
+| ProRes 1080p seek to draw; drags | p95 7.2 ms; 362, 362, 362, 361 (all 361 exact) | |
+
+Playback through the workers (`A/V sync during playback`, 15 s, the timed
+frames presented; today's viewer is not measured by this row):
+
+| Clip | Frames | Skipped | Repeated | Presenter late-skipped | Outside the audio line's frame |
+|---|---|---|---|---|---|
+| H.264 GOP 250 2160p (run 1) | 450 | 0 | 0 | 0 | 0 |
+| H.264 GOP 250 2160p (run 2) | 450 | 0 | 0 | 0 | 0 |
+| ProRes 422 HQ 1080p with audio | 449 | 0 | 0 | 0 | 0 |
+
+`native-engine-tracer.spec.ts` passes (11 of 11) on this code.
+
 Earlier runs of the same spec while the work landed, for the record: after
 the decode changes only (load 12.9), 2160p seek p95 297.0 ms and the
 forward drag 256 exact frames (drawing a cached UHD frame cost 7.7 ms);
@@ -244,17 +288,25 @@ and the no-output decoding (load 9.8), seek p95 194.9 ms, drags 363, 318,
 ## Tests
 
 - `pm-media`: `decode::skip` unit tests (H.264 `nal_ref_idc`, HEVC
-  sub-layer non-reference types and temporal layers, Annex B, malformed
-  samples); `tests/scrub.rs` (exact requests equal the sequential decode,
-  scrub stand-ins then the exact frame, superseded targets, look-ahead,
-  released workers; `--ignored`: long-GOP corpus drags in both directions
+  sub-layer non-reference types and temporal layers, `hvcC` against the
+  SPS, Annex B, malformed samples); `decode::scrub` unit tests (a worker
+  that exited idle takes no requests); `tests/scrub.rs` (exact requests
+  equal the sequential decode, scrub stand-ins then the exact frame,
+  superseded targets, look-ahead, released workers and the live-worker
+  count, requests racing idle exits; `--ignored`: long-GOP corpus drags in both directions
   stay equal to the sequential decode); the random-access suite with the new
   `only` group (`PM_MEDIA_ONLY=h264,hevc,uhd-,mov-600,ts-90k`).
 - `pm-render`: `tests/scrub.rs` (a scrub render stands in until the exact
   frame lands and then equals an exact render; exports never stand in;
-  reused textures change no pixel; `--ignored`: the UHD drawing cost).
+  reused textures change no pixel; renderers start with the 64 MiB cache
+  and follow a lease share; `--ignored`: the UHD drawing cost).
 - `pm-node`: `tests/scrub.rs` (the composer reports stand-ins after a scrub
-  and none once the video landed; exact seeks never stand in).
+  and none once the video landed; exact seeks never stand in); `present`
+  unit tests (the share's bounds; the viewer cache follows grants and
+  shrinks, is reserved in the ledger, and a shrink is acknowledged once it
+  fits).
+- `pm-engine`: `tests/present.rs` (every grant reaches the presenter after
+  the ledger took it).
 - vitest: the viewer's presented frames carry `standIn`.
 - e2e: `native-engine-tracer.spec.ts` waits for an exact frame before
   reading colors after a scrub; `native-engine-tracer-measure.spec.ts` as
@@ -269,12 +321,21 @@ Kept small; listed for the owning lanes.
   02 version note, regenerated TypeScript and wire fixtures; the build id
   moved to `protocol-2e87c1a0e6d5735f`.
 - `engine/crates/pm-render`: `media.rs` (display frames through the
-  workers, the 512 MiB frame cache, texture reuse), `renderer.rs`
-  (`set_scrub`, `media_landed`, `scrub_stats`, `Rendered::stand_ins`).
+  workers, texture reuse, `DEFAULT_FRAME_CACHE`, `apply_lease`,
+  `media_usage`), `renderer.rs` (`set_scrub`, `media_landed`,
+  `scrub_stats`, `Rendered::stand_ins`, `apply_media_lease`,
+  `media_usage`).
+- `engine/crates/pm-engine`: `present.rs` (`FramePresenter::lease_changed`,
+  a default no-op; `PresentContext::granted`, `used`,
+  `reserve_frame_cache`, `release_frame_cache`), `engine.rs` (both grant
+  paths call `lease_changed` after the ledger took the grant),
+  `tests/present.rs`.
 - `engine/crates/pm-gpu/src/decode_in/mod.rs`: `DecodeImporter::recycle`.
 - `engine/crates/pm-node/src/present/`: `compose.rs` (`Composed::stand_ins`),
-  `render.rs` (scrub mode per view, stand-in redraws, report counters and
-  the stand-in log).
+  `render.rs` (scrub mode per view, stand-in redraws, report counters, the
+  stand-in log kept only with `POWERMOVE_ENGINE_STAND_IN_LOG=1`, the
+  composer's frame-cache share), `mod.rs` (the lease share and its
+  reservation).
 - `apps/desktop/src/extensions/viewer/`: `engine-present/protocol.ts`,
   `presenter.ts` (`PresentedFrame.standIn`), `presenter.test.ts`, `viewer.ts`
   (`V.engineFrame().standIn`).
@@ -295,10 +356,25 @@ Kept small; listed for the owning lanes.
   rather than exact frames (1 exact of 174 shown): each target waits for the
   decoder's 5.5 ms output latency before the next starts. Submitting the
   next targets while waiting (a pipelined session) is the next step.
-- **Leases.** The viewer's frame cache is a fixed 512 MiB (it was 64 MiB);
-  the engine does not yet apply its lease's frame-cache and decoder shares to
-  pm-render's decode service (`MediaCache` has no lease entry point; the
-  service's `apply_lease` exists).
+- **Leases.** The viewer's frame cache follows its lease share (above), but
+  the decoder share is not leased: decoded memory outside the frame cache
+  (session windows, decoder references, the reverse neighbourhood a seek
+  keeps) is bounded by each session's window, not by the lease, and is not
+  reported in `decoders`. Neither the job engine's per-job renderers nor
+  `pm-cli` take lease shares (they keep 64 MiB, as before this lane). No
+  other engine cache is charged to the ledger yet (no evictor is installed;
+  pm-engine's `NoEviction`), so the viewer's reservation is the only
+  `frameCache` usage the host sees.
+- **Exact waits block the render thread.** A paused or playback frame
+  whose exact video is not decoded waits on the presenter's render thread,
+  as the synchronous path did before; the 2160p runs log one such wait
+  (the first frame of the clip) and `composeUsMax` 258 to 262 ms.
+- **One unexplained suite failure.** Running the random-access `only`
+  group (HEVC, UHD HEVC, B pyramid, open GOP) and `e2e_fixtures` together
+  once failed `e2e_fixtures` after 65 s (the message was not kept; it
+  passes alone in 6 s). Four reruns of the same pair passed (48 to 50 s).
+  A probe-time limit under load, like the stall below, is the likely kind;
+  not confirmed.
 - **Reference machines.** Only this Mac was measured, under other lanes'
   load; no base M1 or M-series Air (no ProRes engine, fewer media engines).
 - **The viewer label.** `FrameQuality.stand_in` reaches the viewer, which
