@@ -1119,3 +1119,193 @@ fn media_facts_resolve_their_handle_through_the_host() {
         assert_eq!(value, alpha);
     }
 }
+
+/// The project with Invert on its background solid (the top-left corner).
+fn inverted_project() -> Value {
+    let mut doc = project(false);
+    let back = doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "back")
+        .unwrap();
+    back["fx"] = json!([{ "id": "fx1", "type": "invert", "on": true, "p": { "amount": ch(json!(100)) } }]);
+    doc
+}
+
+/// `invert` replaced by a fork that paints the layer blue (an override by
+/// id: the same id, the fork's GLSL).
+fn blue_invert_fork() -> pm_protocol::definitions::DefinitionSnapshot {
+    let mut fork = pm_render::builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    fork.origin = pm_protocol::definitions::DefinitionOrigin::Fork;
+    let glsl = fork.glsl.as_mut().unwrap();
+    let body = "\n      vec4 c = texture(u_tex, v_st); o = vec4(0.0, 0.0, c.a, c.a);\n}";
+    let at = glsl.source.rfind("void main(){").unwrap() + "void main(){".len();
+    glsl.source.truncate(at);
+    glsl.source.push_str(body);
+    glsl.body_utf16_len = body.encode_utf16().count() as u32;
+    glsl.body_utf8_len = body.len() as u32;
+    fork
+}
+
+impl Host {
+    /// Pushes a definitions update to `session`; the engine's answer.
+    fn push_definitions(
+        &mut self,
+        session: SessionId,
+        update: pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Message {
+        let id = self.send_request(Request::PushDefinitions(update), Some(session), None);
+        self.answers.remove(&id).expect("answered at once")
+    }
+
+    /// The top-left pixel of each frame of a batch on `session`.
+    fn corner_pixels(&mut self, session: SessionId, revision: u64) -> Vec<Result<[u8; 3], ErrorCode>> {
+        let id = self.send_request(
+            Request::AgentFrames(frames_request(2)),
+            Some(session),
+            Some(revision),
+        );
+        assert!(self.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+        let Message::Response {
+            body: Response::AgentFrames(result),
+            ..
+        } = &self.answers[&id]
+        else {
+            panic!("{:?}", self.answers[&id])
+        };
+        result
+            .outcomes
+            .iter()
+            .map(|o| match o {
+                AgentFrameOutcome::Rendered {
+                    image: ImagePayload::Inline { bytes },
+                    ..
+                } => {
+                    let decoded =
+                        image::load_from_memory_with_format(&bytes.0, image::ImageFormat::Jpeg)
+                            .unwrap();
+                    Ok(decoded.to_rgb8().get_pixel(2, 2).0)
+                }
+                AgentFrameOutcome::Failed { error, .. } => Err(error.code),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+}
+
+fn near(px: [u8; 3], want: [u8; 3]) -> bool {
+    px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 6)
+}
+
+/// Contract 10 in the job engine: agent frames and exports draw effects
+/// with the definitions their session holds when the work is submitted (the
+/// window's winning registrations), an override by id draws the fork's
+/// GLSL from the next batch, disposing it restores the built-in, a removed
+/// definition is skipped with its data kept (as a missing effect), and a
+/// session without definitions reports the effect unsupported instead of
+/// drawing from a stale or built-in set.
+#[test]
+fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
+    use pm_protocol::definitions::{DefinitionKind, DefinitionRemoval, DefinitionsUpdate};
+    let mut host = Host::new("definitions", &[]);
+    let doc = inverted_project();
+    let sid = host.snapshot(&doc, SessionRole::Job, 1);
+    // No definitions pushed: the effect cannot be drawn, and nothing is
+    // drawn without it.
+    let none = host.corner_pixels(sid, 1);
+    assert!(
+        none.iter().all(|p| *p == Err(ErrorCode::Unsupported)),
+        "{none:?}"
+    );
+    let builtins = pm_render::builtin_definitions();
+    let update = |generation: u64, full: bool, upserts, removals| DefinitionsUpdate {
+        generation: Seq::new(generation).unwrap(),
+        full,
+        upserts,
+        removals,
+    };
+    // The window's set (built-ins): acknowledged, then drawn.
+    let applied = host.push_definitions(sid, update(1, true, builtins.definitions.clone(), vec![]));
+    assert!(
+        matches!(&applied, Message::Response { body: Response::DefinitionsApplied(a), .. } if a.generation.get() == 1),
+        "{applied:?}"
+    );
+    // #E83A5E inverted.
+    let inverted = [0x17, 0xC5, 0xA1];
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), inverted), "{px:?}");
+    }
+    // A fork registers `invert` (a delta): the next batch draws the fork.
+    host.push_definitions(sid, update(2, false, vec![blue_invert_fork()], vec![]));
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), [0, 0, 255]), "the override wins: {px:?}");
+    }
+    // The fork is disposed: the built-in registration is restored.
+    let original = builtins
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    host.push_definitions(sid, update(3, false, vec![original], vec![]));
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), inverted), "restored: {px:?}");
+    }
+    // No registration remains: missing, skipped with its data kept.
+    host.push_definitions(
+        sid,
+        update(
+            4,
+            false,
+            vec![],
+            vec![DefinitionRemoval {
+                kind: DefinitionKind::Effect,
+                id: "invert".into(),
+            }],
+        ),
+    );
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), [0xE8, 0x3A, 0x5E]), "skipped: {px:?}");
+    }
+    // An export from a snapshot session with the window's set draws every
+    // effect (it was routed before definitions reached the job engine).
+    let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.push_definitions(snapshot, update(1, true, builtins.definitions.clone(), vec![]));
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-fx",
+            "run-d",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(120), |h| terminal(h, "job-fx").is_some()));
+    let status = terminal(&host, "job-fx").unwrap();
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    // Without definitions the same export is refused before anything is
+    // written.
+    let bare = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-bare",
+            "run-d",
+            bare,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(60), |h| terminal(h, "job-bare").is_some()));
+    let status = terminal(&host, "job-bare").unwrap();
+    assert_eq!(status.state, JobState::Failed);
+    assert_eq!(status.error.as_ref().map(|e| e.code), Some(ErrorCode::Unsupported));
+}

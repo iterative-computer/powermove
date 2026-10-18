@@ -763,6 +763,34 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
 /// rendered with Blender are not routed for that reason
 /// (`crate::blender`).
 pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, blender, &|doc, composition, media| {
+        pm_render::unsupported_with_media(doc, composition, media)
+    })
+}
+
+/// [`plan_export_with`] routed with `renderer`'s own capabilities
+/// (`Renderer::unsupported_with_media`): the definitions the job embeds
+/// (contract 10; set on the renderer before planning) draw its effects,
+/// transitions, and extension layers, and its fonts its text.
+pub fn plan_export_for(
+    job: &ExportJob,
+    blender: bool,
+    renderer: &Renderer,
+) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, blender, &|doc, composition, media| {
+        renderer.unsupported_with_media(doc, composition, media)
+    })
+}
+
+/// The capability check an export plan routes with.
+pub type CapabilityCheck<'a> =
+    dyn Fn(&Document, &str, &MediaPaths) -> Vec<pm_render::Unsupported> + 'a;
+
+fn plan_export_checked(
+    job: &ExportJob,
+    blender: bool,
+    check: &CapabilityCheck<'_>,
+) -> Result<ExportPlan, JobError> {
     let s = &job.settings;
     pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
     let document = if s.delivery.hide_captions {
@@ -773,12 +801,11 @@ pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, Jo
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
-    let mut problems: Vec<String> =
-        pm_render::unsupported_with_media(doc, &job.composition, &*job.media)
-            .iter()
-            .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
-            .map(ToString::to_string)
-            .collect();
+    let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
+        .iter()
+        .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
+        .map(ToString::to_string)
+        .collect();
     let rate = rate_of(s)?;
     let mut timeline = Timeline::new(s.range.start, s.range.end, rate)?;
     if container == Container::PngStill {
@@ -1268,11 +1295,12 @@ pub fn encode_png(rgba8: &[u8], width: u32, height: u32) -> Result<Vec<u8>, JobE
 }
 
 /// Capability routing of agent stills (as [`plan_export`] routes exports):
-/// pm-render's `unsupported_with_media` for each composition, checked once
-/// per batch because it opens media headers.
+/// the renderer's own check (`Renderer::unsupported_with_media`: its
+/// definitions and fonts) for each composition, checked once per batch and
+/// definition set because it opens media headers.
 #[derive(Debug, Default)]
 pub struct StillRouting {
-    checked: std::collections::HashMap<String, Vec<String>>,
+    checked: std::collections::HashMap<(String, Option<u64>), Vec<String>>,
 }
 
 impl StillRouting {
@@ -1280,19 +1308,25 @@ impl StillRouting {
         Self::default()
     }
 
-    /// `Err(Unsupported)` when the engine cannot render `composition`; the
-    /// host renders such stills on the current engine.
+    /// `Err(Unsupported)` when the engine cannot render `composition` with
+    /// `renderer` as configured.
     pub fn check(
         &mut self,
+        renderer: &Renderer,
         document: &Document,
         composition: &str,
         media: &MediaPaths,
     ) -> Result<(), JobError> {
+        let generation = renderer
+            .effects()
+            .configured()
+            .then(|| renderer.effects().generation().map_or(0, |g| g.get()));
         let problems = self
             .checked
-            .entry(composition.to_owned())
+            .entry((composition.to_owned(), generation))
             .or_insert_with(|| {
-                pm_render::unsupported_with_media(document, composition, media)
+                renderer
+                    .unsupported_with_media(document, composition, media)
                     .iter()
                     .map(ToString::to_string)
                     .collect()
@@ -1322,7 +1356,7 @@ pub fn render_still(
     seed: u64,
     cancel: &AtomicBool,
 ) -> Result<ReadFrame, JobError> {
-    routing.check(document, composition, media)?;
+    routing.check(renderer, document, composition, media)?;
     let (cw, ch) = composition_size(document, composition)?;
     let size = still_size(cw, ch, max_dimension);
     // Today's agent stills run `prepareFrame` first (`snapshotAsync`).

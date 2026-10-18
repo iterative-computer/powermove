@@ -272,6 +272,15 @@ pub struct Engine {
     jobs: Option<Box<dyn JobService>>,
     /// Shared snapshots of session mirrors handed to the service, by revision.
     job_docs: BTreeMap<SessionId, (Revision, std::sync::Arc<pm_model::Document>)>,
+    /// The definition set snapshots jobs and agent frames embed, per session
+    /// and generation (shared by every job until the next push).
+    job_definitions: BTreeMap<
+        SessionId,
+        (
+            u64,
+            std::sync::Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        ),
+    >,
     /// Agent frame requests waiting for their revision.
     waiting_frames: Vec<WaitingFrames>,
     /// Breadcrumbs of the service's running work, by its token.
@@ -396,6 +405,7 @@ impl Engine {
             pending_updates: Vec::new(),
             jobs: None,
             job_docs: BTreeMap::new(),
+            job_definitions: BTreeMap::new(),
             waiting_frames: Vec::new(),
             job_work: BTreeMap::new(),
             logged_once: BTreeSet::new(),
@@ -575,6 +585,7 @@ impl Engine {
         self.waiting_frames.retain(|w| w.port != port);
         for id in &closed {
             self.job_docs.remove(id);
+            self.job_definitions.remove(id);
         }
         if let Some(jobs) = self.jobs.as_mut() {
             for id in &closed {
@@ -852,6 +863,7 @@ impl Engine {
                 self.with_presenter(out, |p, ctx| p.session_closed(ctx, port, sid));
                 self.viewers_stopped(|key| *key == (port, sid), out);
                 self.job_docs.remove(&sid);
+                self.job_definitions.remove(&sid);
                 self.waiting_frames.retain(|w| w.session != sid);
                 if let Some(jobs) = self.jobs.as_mut() {
                     jobs.session_closed(sid);
@@ -2121,10 +2133,22 @@ impl Engine {
                 doc
             }
         };
+        let definitions = session.definitions.generation().map(|generation| {
+            match self.job_definitions.get(&sid) {
+                Some((g, set)) if *g == generation.get() => set.clone(),
+                _ => {
+                    let set = std::sync::Arc::new(session.definitions.snapshot());
+                    self.job_definitions
+                        .insert(sid, (generation.get(), set.clone()));
+                    set
+                }
+            }
+        });
         Some(JobDocument {
             session: sid,
             revision,
             document,
+            definitions,
         })
     }
 

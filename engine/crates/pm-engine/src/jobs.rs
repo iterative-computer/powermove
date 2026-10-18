@@ -40,6 +40,12 @@ pub struct JobDocument {
     pub session: SessionId,
     pub revision: Revision,
     pub document: Arc<pm_model::Document>,
+    /// The session's definitions (contract 10) when the host pushed any: the
+    /// winning effect, transition, and layer registrations the job renders
+    /// with, frozen with the document (a later push never reaches a job
+    /// already submitted). `None`: the host sent none, so effects,
+    /// transitions, and extension layers cannot be drawn.
+    pub definitions: Option<Arc<pm_protocol::definitions::DefinitionSetSnapshot>>,
 }
 
 /// A host services call the service wants made, answered through

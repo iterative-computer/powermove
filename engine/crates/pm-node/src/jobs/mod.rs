@@ -33,6 +33,7 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+mod definitions;
 pub mod gate;
 
 use std::collections::{HashMap, VecDeque};
@@ -46,7 +47,7 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_with, render_still,
+    encode_jpeg, encode_png, offline_media, plan_export_for, render_still,
     run_export_with_blender, sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
@@ -800,6 +801,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     };
     let mut renderer: Option<Renderer> = None;
     let mut blender = LaneBlender::default();
+    let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         if renderer.is_none() {
             match shared.renderer() {
@@ -811,6 +813,16 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             }
         }
         let r = renderer.as_mut().expect("set above");
+        // The work's own definitions (contract 10), before it is planned.
+        let loaded = match &work {
+            Work::Frames { document, .. } | Work::Export { document, .. } => {
+                definitions.use_for(r, document)
+            }
+        };
+        if let Err(message) = loaded {
+            fail_work(shared, work, ErrorCode::InvalidMessage, &message);
+            continue;
+        }
         match work {
             Work::Frames {
                 port,
@@ -1302,7 +1314,7 @@ fn run_job(
         Err(e) => return finish(JobState::Failed, None, Some(e)),
     };
     // Routing first: nothing is created for work the engine cannot do.
-    let mut plan = match plan_export_with(&export, stage.is_some()) {
+    let mut plan = match plan_export_for(&export, stage.is_some(), renderer) {
         Ok(plan) => plan,
         Err(e) => {
             let state = if matches!(e, JobError::Cancelled) {
