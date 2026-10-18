@@ -804,4 +804,75 @@ mod tests {
             );
         }
     }
+
+    /// Measurement (A4 point 3), not a pass/fail check: what exact vocoder
+    /// continuity across a dropped gap costs. Continuing the phase history
+    /// exactly means analysing every skipped interval with its real input,
+    /// i.e. rendering the whole gap; a fresh start reads only its pre-roll.
+    /// Run with `cargo test --release -p pm-audio --lib
+    /// stretch::tests::measure_gap_catch_up -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_gap_catch_up() {
+        let rate = 48_000;
+        let n = 512usize;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let from = 48_000i64;
+        eprintln!("gap_s, catch_up_reads, catch_up_ms, fresh_reads, fresh_ms");
+        for gap_ms in [120i64, 500, 1_000, 10_000, 60_000] {
+            let target = from + gap_ms * rate as i64 / 1000;
+            let reads = std::cell::Cell::new(0usize);
+            let mut counted = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+                reads.set(reads.get() + len);
+                sine(lo, len, out);
+                Ok(true)
+            };
+            let mut out = vec![Vec::new(); 2];
+            // A run playing up to the drop.
+            let mut run = StretchRun::new(2, rate, 0);
+            for start in (from - 4 * n as i64..from).step_by(n) {
+                assert!(
+                    run.render(start, n, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+            }
+            reads.set(0);
+            let t = std::time::Instant::now();
+            let mut at = from;
+            while at < target {
+                let len = n.min((target - at) as usize);
+                assert!(
+                    run.render(at, len, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+                at += len as i64;
+            }
+            assert!(
+                run.render(target, n, &mut map, &mut counted, &mut out)
+                    .unwrap()
+            );
+            let catch_up = (reads.replace(0), t.elapsed());
+            let mut fresh = StretchRun::new(2, rate, 0);
+            let t = std::time::Instant::now();
+            assert!(
+                fresh
+                    .render(target, n, &mut map, &mut counted, &mut out)
+                    .unwrap()
+            );
+            let fresh = (reads.get(), t.elapsed());
+            eprintln!(
+                "{:.3}, {}, {:.1}, {}, {:.1}",
+                gap_ms as f64 / 1000.0,
+                catch_up.0,
+                catch_up.1.as_secs_f64() * 1000.0,
+                fresh.0,
+                fresh.1.as_secs_f64() * 1000.0
+            );
+        }
+    }
 }
