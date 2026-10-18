@@ -258,12 +258,18 @@ export class MediaStoreService {
     return await this.store.hasObject(hash, length) ? this.store.objectPath(hash) : null;
   }
 
-  /** Frozen bindings for a job snapshot; independent of live windows. */
-  private readonly jobBindings = new Map<number, Map<string, MediaBinding>>();
+  /**
+   * A job snapshot's bindings, taken when it starts: they survive the window
+   * switching projects or closing. The frozen entry is tried first; when it is
+   * offline the job falls back to windows bound to the same project, so a
+   * relink (Locate Media) or media that comes back lets a waiting job resume.
+   */
+  private readonly jobBindings = new Map<number, { projectId: string | null; assets: Map<string, MediaBinding> }>();
 
   async bindJob(session: number, project: Record<string, any> | null): Promise<void> {
     if (!project) { this.jobBindings.delete(session); return; }
-    this.jobBindings.set(session, await this.snapshotBindings(project));
+    const projectId = typeof project['id'] === 'string' && project['id'] ? project['id'] : null;
+    this.jobBindings.set(session, { projectId, assets: await this.snapshotBindings(project) });
   }
 
   /** Persist content references when a queue entry is added, before its
@@ -287,7 +293,10 @@ export class MediaStoreService {
         const hash = typeof meta.contentHash === 'string' && HASH_HEX.test(meta.contentHash)
           ? meta.contentHash : (await this.store.record(key))?.hash;
         // Freeze the hash now: later key writes must not change this snapshot.
-        if (hash) assets.set(meta.id, { hash });
+        // The key stays as the window path's fallback for when that object is
+        // missing (offline at snapshot time, or put later).
+        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}) };
+        if (binding.key || binding.hash) assets.set(meta.id, binding);
       }
     }
     return assets;
@@ -319,9 +328,17 @@ export class MediaStoreService {
    * unknown, or bound to different content in two windows.
    */
   async resolveAsset(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    const candidates = context?.process === 'job' && this.jobBindings.has(context.session)
-      ? [this.jobBindings.get(context.session)!.get(asset)]
-      : [...this.bindings.values()].map((b) => b.assets.get(asset));
+    const job = context?.process === 'job' ? this.jobBindings.get(context.session) : undefined;
+    if (job) {
+      const frozen = job.assets.get(asset);
+      const resolved = frozen ? await this.resolveBindings([frozen]) : null;
+      if (resolved || job.projectId === null) return resolved;
+      return this.resolveBindings([...this.bindings.values()].filter((b) => b.projectId === job.projectId).map((b) => b.assets.get(asset)));
+    }
+    return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
+  }
+
+  private async resolveBindings(candidates: (MediaBinding | undefined)[]): Promise<{ path: string; contentHash: ContentHash | null } | null> {
     const bound = candidates.filter((b): b is MediaBinding => !!b);
     if (!bound.length) return null;
     const hashes = new Set(bound.map((b) => b.link?.hash ?? b.hash).filter(Boolean));

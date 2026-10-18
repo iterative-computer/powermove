@@ -807,8 +807,8 @@ it('hydrates legacy scene animation before either engine evaluates it', () => {
   const before = JSON.stringify(project);
   for (const [index, comp] of [project, project.comps.nested].entries()) {
     for (const [channelIndex, { prop: channel }] of sceneProperties(comp.layers[0]).entries()) {
-      expect(PM.evalKfs(channel.kf, 0.5, typeof channel.v === 'string')).toBe(expected[index][channelIndex][0]);
-      expect(PM.evalKfs(channel.kf, 0.25, typeof channel.v === 'string')).toBe(expected[index][channelIndex][1]);
+      expect(PM.evalKfs(channel.kf, 0.5, typeof channel.v === 'string')).toBe(expected[index]![channelIndex]![0]);
+      expect(PM.evalKfs(channel.kf, 0.25, typeof channel.v === 'string')).toBe(expected[index]![channelIndex]![1]);
       if (typeof channel.v === 'number') {
         expect(PM.evalKfs(channel.kf, 0.5)).toBe(45);
         expect(PM.evalKfs(channel.kf, 0.25)).toBe(22.5);

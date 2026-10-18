@@ -215,6 +215,46 @@ describe('MediaStoreService', () => {
     expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toBeNull();
   });
 
+  it('lets a waiting job resume when its media is put, relinked in its project window, or found by key', async () => {
+    const svc = service();
+    const gone = path.join(media, 'gone.mov');
+    await settledFile(gone, bytes(2000, 3));
+    const offlineLink = await svc.link(gone);
+    await rm(gone);
+    const keyed = path.join(media, 'keyed.png');
+    await settledFile(keyed, bytes(800, 4));
+    const keyedRecord = await svc.store.putFile(keyed, { key: 'media:v2:keyed' });
+    const project = { id: 'waiting-project', assets: {
+      // Copied media that was offline (no store record) when the job started.
+      late: { id: 'late', storageKey: 'media:v2:late' },
+      linked: { id: 'linked', storage: 'linked', link: offlineLink },
+      // A saved content hash whose object is gone while its key still has bytes.
+      keyed: { id: 'keyed', storageKey: keyedRecord.key, contentHash: blake3Hex(bytes(9, 9)) },
+    } };
+    await svc.bindJob(20, project);
+    const job = { process: 'job' as const, session: 20 };
+    expect(await svc.resolveAsset('late', job)).toBeNull();
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+    expect(await svc.resolveAsset('keyed', job)).toMatchObject({ path: svc.store.objectPath(keyedRecord.hash) });
+
+    // wait_for_media re-mints every 2 s: the copy lands under the asset's key.
+    const late = path.join(media, 'late.png');
+    await settledFile(late, bytes(600, 5));
+    const lateRecord = await svc.store.putFile(late, { key: 'media:v2:late' });
+    expect(await svc.resolveAsset('late', job)).toMatchObject({ path: svc.store.objectPath(lateRecord.hash) });
+
+    // Locate Media in a window: only a window bound to the job's project counts.
+    const relinked = path.join(media, 'relinked.mov');
+    await settledFile(relinked, bytes(2000, 6));
+    const newLink = await svc.link(relinked);
+    svc.bind(1, 'other-project', { linked: { link: newLink } });
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+    svc.bind(2, project.id, { linked: { link: newLink } });
+    expect(await svc.resolveAsset('linked', job)).toMatchObject({ path: relinked });
+    await svc.release(2);
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+  });
+
   it('gives desktop Save the store object only at the expected length', async () => {
     const svc = service();
     const file = path.join(media, 'x.bin');
