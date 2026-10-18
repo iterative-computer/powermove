@@ -571,6 +571,11 @@ describe('the engine font client', () => {
     expect(JSON.parse(next.sent.at(-1)!.json).sessions).toEqual([{ session: 10, owner: 4 }]);
     timers.fire();
     await closed;
+    // Naming a window the engine never takes fails: the export would
+    // otherwise lay text out with every window's seeds.
+    const named = job.setSessionOwner(11, 4);
+    timers.fire();
+    await expect(named).rejects.toThrow(/did not take the font cache seeds of window 4/);
   });
 
   it('serves the channels, and main\'s own registry then stays unloaded', async () => {

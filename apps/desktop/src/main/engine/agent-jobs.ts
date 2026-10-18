@@ -702,14 +702,32 @@ export class AgentJobs {
     if (!this.available) throw new AgentJobError('The job engine is not running.', 'internal');
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
-    if (owner !== null) await this.sessionOwner(opened.session, owner);
+    if (owner !== null) {
+      try {
+        await this.ownSession(opened.session, owner);
+      } catch (error) {
+        await this.closeSession(opened.session);
+        throw new AgentJobError(`The job engine could not lay text out as this window does, so the export did not start: ${error instanceof Error ? error.message : String(error)}`, 'internal');
+      }
+    }
     return opened.session;
   }
 
-  /** Tells the job engine's font service whose window a session is for. A
-   *  failure is logged, never fatal: the session then measures with every
-   *  window's seeds. */
-  private async sessionOwner(session: number, owner: number | null): Promise<void> {
+  /** Tells the job engine's font service whose window a session is for,
+   *  once more if it did not answer: without it the session would measure
+   *  text with every window's seeds, which can differ from this window's
+   *  layout, so the job does not run. */
+  private async ownSession(session: number, owner: number): Promise<void> {
+    try {
+      await this.options.sessionOwner?.(session, owner);
+    } catch (error) {
+      this.options.log?.('warn', `font cache seeds for session ${session}: ${error instanceof Error ? error.message : String(error)}; trying again`);
+      await this.options.sessionOwner?.(session, owner);
+    }
+  }
+
+  /** Forgets a closed session's window; failures only log. */
+  private async sessionOwner(session: number, owner: null): Promise<void> {
     try {
       await this.options.sessionOwner?.(session, owner);
     } catch (error) {
