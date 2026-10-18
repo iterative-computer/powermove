@@ -43,6 +43,10 @@ export type FrameQuality = {
   representation: 'original' | 'reducedResolution' | 'proxy' | 'optimizedMedia' | 'keptRender';
   draft3d: boolean;
   cached: boolean;
+  /** A scrub frame in which a video layer shows the nearest decoded frame
+   *  while its exact frame decodes; the exact frame follows
+   *  (docs/engine/scrub.md). */
+  standIn?: boolean;
 };
 
 export type FrameDescriptor = {

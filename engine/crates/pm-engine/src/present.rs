@@ -57,6 +57,27 @@ impl<'a> PresentContext<'a> {
         self.lease.charge_over(Category::SurfacePool, bytes);
     }
 
+    /// Granted lease bytes (zero before the first grant).
+    pub fn granted(&self) -> u64 {
+        self.lease.granted()
+    }
+
+    /// Bytes charged across every category.
+    pub fn used(&self) -> u64 {
+        self.lease.used()
+    }
+
+    /// Reserves frame-cache memory if it fits the lease as it is (caches
+    /// are not evicted for it). Returns false when it does not fit.
+    pub fn reserve_frame_cache(&mut self, bytes: u64) -> bool {
+        self.lease.try_charge(Category::FrameCache, bytes).is_ok()
+    }
+
+    /// Releases frame-cache memory reserved earlier.
+    pub fn release_frame_cache(&mut self, bytes: u64) {
+        self.lease.release(Category::FrameCache, bytes);
+    }
+
     pub fn release_pool(&mut self, bytes: u64) {
         self.lease.release(Category::SurfacePool, bytes);
     }
@@ -133,6 +154,11 @@ pub trait FramePresenter: Send {
         request: FrameRequest,
         revision: Option<Revision>,
     ) -> Result<(), Box<EngineError>>;
+
+    /// The host granted a new lease (a grow or a shrink). Presenters that
+    /// size caches from the lease resize them here; a shrink is
+    /// acknowledged once usage fits.
+    fn lease_changed(&mut self, _ctx: &mut PresentContext<'_>) {}
 
     /// The session closed: retire its pool.
     fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId);

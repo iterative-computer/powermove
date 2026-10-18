@@ -16,7 +16,10 @@ use pm_color::chroma::{Factors, Filter, filters, sample_origin};
 use pm_color::ycbcr::Matrix;
 use pm_gpu::decode_in::{DecodeImporter, Normalized};
 use pm_gpu::{Target, working_format};
-use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
+use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
+use pm_media::decode::service::{
+    DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
+};
 use pm_media::image::icc::IccClass;
 use pm_media::pool::FramePool;
 use pm_media::probe::FieldOrder;
@@ -301,6 +304,7 @@ pub(crate) fn convert(
     working: WorkingEncoding,
     precision: Precision,
     factors: Factors,
+    reuse: Option<Target>,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -311,14 +315,18 @@ pub(crate) fn convert(
         ),
     };
     let (w, h) = (luma.width(), luma.height());
-    let out = Target::new(
-        device,
-        "pm source",
-        w,
-        h,
-        working_format(precision),
-        pm_gpu::target::working_usage(),
-    );
+    let out = reuse
+        .filter(|t| t.width() == w && t.height() == h && t.format() == working_format(precision))
+        .unwrap_or_else(|| {
+            Target::new(
+                device,
+                "pm source",
+                w,
+                h,
+                working_format(precision),
+                pm_gpu::target::working_usage(),
+            )
+        });
     let uniform = source_uniform(color, working, precision, chroma_info);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
@@ -397,11 +405,29 @@ struct FrameKey {
     linear: bool,
 }
 
+/// The frame cache of a renderer without a lease share: export jobs,
+/// headless renders, and the viewer before the host grants a lease.
+pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
+
 /// Media state kept across frames: decoded and converted stills, video
 /// sources and sessions, and the last converted frame of each source.
 pub struct MediaCache {
     pool: FramePool,
-    service: DecodeService,
+    service: Arc<DecodeService>,
+    /// Display frames decode on workers (docs/engine/scrub.md); export
+    /// frames decode here, on the caller's thread.
+    viewer: ViewerDecode,
+    /// Scrub frames: a video whose exact frame is not decoded yet shows
+    /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
+    pub scrub: bool,
+    /// The frame (presented index in its source) of each video layer drawn
+    /// with a stand-in since the list was reset.
+    pub stand_ins: Vec<usize>,
+    /// Converted video frames replaced during the current render, and those
+    /// replaced earlier (free to overwrite: every read of them is
+    /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
+    retired_frames: Vec<Target>,
+    free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
     /// Open video sources with the file's size and modification time when
@@ -424,12 +450,22 @@ pub enum MediaFailure {
 
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
+        // Every renderer starts with a small frame cache (export jobs and
+        // headless renders read their frames once). The viewer's renderer
+        // takes its share of the engine's lease through
+        // [`MediaCache::apply_lease`] (docs/engine/scrub.md, "Memory").
+        let service = Arc::new(DecodeService::new(ServiceConfig {
+            cache_bytes: DEFAULT_FRAME_CACHE,
+            ..ServiceConfig::default()
+        }));
         MediaCache {
             pool: FramePool::new(64 << 20),
-            service: DecodeService::new(ServiceConfig {
-                cache_bytes: 64 << 20,
-                ..ServiceConfig::default()
-            }),
+            viewer: ViewerDecode::new(service.clone()),
+            service,
+            scrub: false,
+            stand_ins: Vec::new(),
+            retired_frames: Vec::new(),
+            free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
             sources: BTreeMap::new(),
@@ -497,6 +533,7 @@ impl MediaCache {
             working,
             precision,
             Factors { x: 1, y: 1 },
+            None,
         );
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
@@ -518,7 +555,10 @@ impl MediaCache {
             Some((s, src)) if *s == stamp => return Ok(src.clone()),
             Some(_) => {
                 // Replaced on disk: drop the stale index and frames.
-                self.sources.remove(path);
+                if let Some((_, old)) = self.sources.remove(path) {
+                    self.viewer.release(Some(old.id));
+                    self.service.release(None, Some(old.id));
+                }
                 self.frames.retain(|k, _| k.path != path);
                 self.recount();
             }
@@ -566,30 +606,42 @@ impl MediaCache {
         if src.pts.is_empty() {
             return Ok(None);
         }
-        let key = FrameKey {
+        let key_of = |frame: usize| FrameKey {
             path: path.to_path_buf(),
-            frame: n,
+            frame,
             precision: precision as u8,
             export,
             linear: working == WorkingEncoding::LinearLight,
         };
+        // The newest converted frame of the source (a paused redraw).
+        if let Some(t) = self.frames.get(&key_of(n)) {
+            return Ok(Some(t.clone()));
+        }
+        let (n, frame) = if export {
+            let mut session = self
+                .service
+                .session(&src, instance, DecodePurpose::Export)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            let frame = session
+                .frame(n)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            (n, frame)
+        } else {
+            let want = if self.scrub { Want::Scrub } else { Want::Exact };
+            let fetched = self
+                .viewer
+                .fetch(&src, instance, n, want)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            if !fetched.exact {
+                self.stand_ins.push(fetched.shown);
+            }
+            (fetched.shown, fetched.frame)
+        };
+        // A stand-in may be the frame converted last.
+        let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
         }
-        let purpose = if export {
-            DecodePurpose::Export
-        } else {
-            DecodePurpose::Display
-        };
-        let frame = {
-            let mut session = self
-                .service
-                .session(&src, instance, purpose)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-            session
-                .frame(n)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?
-        };
         let importer = self.importer()?;
         let imported = importer
             .import(&frame)
@@ -616,6 +668,16 @@ impl MediaCache {
             },
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
+        // A converted frame retired by an earlier render (its reads are
+        // submitted) is overwritten instead of allocating another.
+        let (w, h) = (frame.format.width as u32, frame.format.height as u32);
+        let reuse = self
+            .free_frames
+            .iter()
+            .position(|t| {
+                t.width() == w && t.height() == h && t.format() == working_format(precision)
+            })
+            .map(|i| self.free_frames.swap_remove(i));
         let target = convert(
             device,
             queue,
@@ -626,15 +688,24 @@ impl MediaCache {
             working,
             precision,
             factors,
+            reuse,
         );
+        self.importer()?.recycle(normalized);
         drop(imported);
-        // Keep only the newest frame per source and precision.
-        self.frames.retain(|k, _| {
-            k.path != key.path
+        // Keep only the newest frame per source and precision. The older
+        // one may still be read by this render: it is reused from the next.
+        let mut retired = Vec::new();
+        self.frames.retain(|k, t| {
+            let keep = k.path != key.path
                 || k.precision != key.precision
                 || k.export != key.export
-                || k.linear != key.linear
+                || k.linear != key.linear;
+            if !keep {
+                retired.push(t.clone());
+            }
+            keep
         });
+        self.retired_frames.extend(retired);
         self.frames.insert(key, target.clone());
         self.recount();
         Ok(Some(target))
@@ -681,14 +752,45 @@ impl MediaCache {
             .images
             .values()
             .chain(self.frames.values())
+            .chain(&self.retired_frames)
+            .chain(&self.free_frames)
             .map(Target::bytes)
             .sum();
     }
 
-    /// Releases CoreVideo texture cache entries no longer in use.
-    pub fn flush(&self) {
+    /// Changes whenever a display frame a scrub asked for has decoded.
+    pub fn landed(&self) -> u64 {
+        self.viewer.landed()
+    }
+
+    /// The display decode workers' counters.
+    pub fn scrub_stats(&self) -> ScrubStats {
+        self.viewer.stats()
+    }
+
+    /// Applies the renderer's shares of the engine's lease to its decode
+    /// service: the frame cache evicts down to `lease.frame_cache` at once
+    /// and idle decoders close past `lease.decoders`. Returns what the
+    /// service holds afterwards.
+    pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+        self.service.apply_lease(lease)
+    }
+
+    /// What the decode service holds (frame cache, decoders, sessions).
+    pub fn media_usage(&self) -> MediaUsage {
+        self.service.usage()
+    }
+
+    /// After a render's commands are submitted: releases CoreVideo texture
+    /// cache entries no longer in use, and makes converted frames this
+    /// render replaced free for reuse (two are kept).
+    pub fn flush(&mut self) {
         if let Some(i) = &self.importer {
             i.flush_cache();
         }
+        self.free_frames.append(&mut self.retired_frames);
+        let excess = self.free_frames.len().saturating_sub(2);
+        self.free_frames.drain(..excess);
+        self.recount();
     }
 }

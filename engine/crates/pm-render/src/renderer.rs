@@ -71,6 +71,11 @@ pub struct Rendered {
     /// item 6). A layer drawn as several quads (a flattened group) reports
     /// each of them.
     pub quads: Vec<LayerQuad>,
+    /// Video layers drawn with the nearest decoded frame while their exact
+    /// frame decodes (scrub renders only, [`Renderer::set_scrub`]): the
+    /// frame each shows (its presented index in its source). Empty when
+    /// every video layer shows its exact frame.
+    pub stand_ins: Vec<usize>,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -548,6 +553,42 @@ impl Renderer {
             .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
     }
 
+    /// Scrub renders (a paused `seek {scrub}`, docs/engine/scrub.md): a
+    /// video layer whose exact frame has not decoded yet draws the nearest
+    /// decoded frame of its source while the exact one decodes, and
+    /// [`Rendered::stand_ins`] counts such layers. Off by default; never
+    /// applies to export requests.
+    pub fn set_scrub(&mut self, on: bool) {
+        self.media.scrub = on;
+    }
+
+    /// Changes whenever a frame a scrub render asked for has decoded: a
+    /// frame drawn with stand-ins can be drawn again.
+    pub fn media_landed(&self) -> u64 {
+        self.media.landed()
+    }
+
+    /// Counters of the display decode workers.
+    pub fn scrub_stats(&self) -> pm_media::decode::scrub::ScrubStats {
+        self.media.scrub_stats()
+    }
+
+    /// Applies this renderer's shares of the engine's lease to its decode
+    /// service (the viewer's renderer: docs/engine/scrub.md, "Memory").
+    /// Renderers that never get a share keep
+    /// [`crate::media::DEFAULT_FRAME_CACHE`].
+    pub fn apply_media_lease(
+        &self,
+        lease: pm_media::decode::service::MediaLease,
+    ) -> pm_media::decode::service::MediaUsage {
+        self.media.apply_lease(lease)
+    }
+
+    /// What the decode service holds.
+    pub fn media_usage(&self) -> pm_media::decode::service::MediaUsage {
+        self.media.media_usage()
+    }
+
     /// Frees idle intermediate targets and cached vector textures so that
     /// together they hold at most `bytes` (lease pressure): the pool trims
     /// first, and the vector cache gets what the pool leaves. The text
@@ -745,6 +786,10 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
+        // Exports never draw stand-ins (docs/engine/scrub.md).
+        self.media.stand_ins.clear();
+        let scrub = self.media.scrub;
+        self.media.scrub = scrub && !request.export;
         // Only renderers drawing their own definitions time effects.
         let timer = if self.effects.configured() && self.effect_host.is_none() {
             self.effects.watchdog.frame_timer(&self.device)
@@ -838,6 +883,7 @@ impl Renderer {
             self.pool.give(t);
         }
         self.media.flush();
+        self.media.scrub = scrub;
         failures.extend(exec_failures);
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
@@ -852,6 +898,7 @@ impl Renderer {
             legend,
             failures,
             seconds,
+            stand_ins: std::mem::take(&mut self.media.stand_ins),
         })
     }
 

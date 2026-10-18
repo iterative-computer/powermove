@@ -21,4 +21,14 @@ draft3d: boolean,
 /**
  * Served from the engine memory cache (cached preview).
  */
-cached: boolean, };
+cached: boolean, 
+/**
+ * A scrub frame in which a video layer shows the nearest decoded frame
+ * of its source while its exact frame decodes (`SeekMode::Scrub`, as
+ * today's viewer draws a video element's last decoded picture). The
+ * exact frame follows when it decodes. Never set on timed frames,
+ * exports, or captures. Added after `protocol-a6aa78d4b8a57c0d`
+ * (RFC 02 version notes); a peer that does not send it decodes as
+ * `false`.
+ */
+standIn: boolean, };

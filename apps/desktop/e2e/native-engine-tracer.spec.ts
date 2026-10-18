@@ -462,8 +462,13 @@ test.describe('Use New Engine: the tracer bullet', () => {
         // A quarter in from a corner: the center carries the anchor handle.
         return windowPixel(session, quad.x0 + (quad.x1 - quad.x0) / 4, quad.y0 + ((quad.y1 - quad.y0) * 3) / 4);
       };
+      // The exact frame at `t`: a scrub may show the nearest decoded frame
+      // first (a stand-in, docs/engine/scrub.md).
       const showsAt = async (t: number): Promise<void> => {
-        await expect.poll(async () => Math.abs(((await engineFrame(page))?.pts ?? -1) / 705_600_000 - t), { timeout: 10_000 }).toBeLessThan(1e-6);
+        await expect.poll(async () => {
+          const frame = await engineFrame(page);
+          return frame && !frame.standIn ? Math.abs(frame.pts / 705_600_000 - t) : 1;
+        }, { timeout: 10_000 }).toBeLessThan(1e-6);
       };
       // A scrub: many paused seeks in a row; the last one's frame stays.
       await page.evaluate(() => {

@@ -24,7 +24,8 @@ import type { Page } from 'playwright';
 import { buildSyntheticProject, type SyntheticSummary } from '../src/main/engine/integration/synthetic-project';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
 
-const ON = { POWERMOVE_NEW_ENGINE: '1' };
+// The stand-in log tells which frame each stand-in showed (drag counts).
+const ON = { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_STAND_IN_LOG: '1' };
 const OUT = process.env.PM_TRACER_MEASURE_OUT ?? path.join(os.tmpdir(), 'powermove-tracer-measure.jsonl');
 const TICKS = 705_600_000;
 const MEDIA = process.env.PM_TRACER_MEDIA ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/tracer-media');
@@ -69,6 +70,33 @@ async function synthetic(session: LaunchedApp, layers: number, extra: Partial<Pa
   return summary;
 }
 
+const SCRUB_CLIPS = [
+  { file: 'prores422hq-1080p-2997.mov', row: 'scrub-intra-prores422hq-1080p' },
+  { file: 'h264-longgop-1080p-2997.mp4', row: 'scrub-longgop-h264-1080p-gop250' },
+  { file: 'h264-longgop-2160p-2997.mp4', row: 'scrub-longgop-h264-2160p-gop250' }
+];
+/** Drag shapes: frames moved per animation frame (the first is the drag
+ *  the Phase 2 gate measured). */
+const DRAGS = [1, -1, 7, -7];
+
+/** A 1080p29.97 project with the clip imported through the file picker. */
+async function importScrubClip(session: LaunchedApp, file: string, engine = true): Promise<void> {
+  const { page } = session;
+  await session.openEditor();
+  if (engine) await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Scrub', w: 1920, h: 1080, fps: 30000 / 1001, dur: 30, bg: '#000000' });
+    project.fpsRational = { num: 30000, den: 1001 };
+    PM.replaceProject(project);
+    PM.setTime(0);
+  });
+  const chooser = page.waitForEvent('filechooser');
+  await page.evaluate(() => (window as any).PM.pickFiles());
+  await (await chooser).setFiles(file);
+  await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 120_000 });
+}
+
 test.describe('Use New Engine: Phase 2 measurements', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
@@ -82,34 +110,20 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
     expect(report.presenter.layerFailures).toBe(0);
   });
 
-  for (const clip of [
-    { file: 'prores422hq-1080p-2997.mov', row: 'scrub-intra-prores422hq-1080p' },
-    { file: 'h264-longgop-1080p-2997.mp4', row: 'scrub-longgop-h264-1080p-gop250' },
-    { file: 'h264-longgop-2160p-2997.mp4', row: 'scrub-longgop-h264-2160p-gop250' }
-  ]) {
+  for (const clip of SCRUB_CLIPS) {
     test(`scrub latency: ${clip.row}`, async ({ session }) => {
       test.setTimeout(300_000);
       const file = path.join(MEDIA, clip.file);
       test.skip(!existsSync(file), `generate ${file} first (docs/engine/tracer.md)`);
       const { page } = session;
-      await session.openEditor();
-      await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
-      await page.evaluate(() => {
-        const PM = (window as any).PM;
-        const project = PM.mkProject({ name: 'Scrub', w: 1920, h: 1080, fps: 30000 / 1001, dur: 30, bg: '#000000' });
-        project.fpsRational = { num: 30000, den: 1001 };
-        PM.replaceProject(project);
-        PM.setTime(0);
-      });
-      const chooser = page.waitForEvent('filechooser');
-      await page.evaluate(() => (window as any).PM.pickFiles());
-      await (await chooser).setFiles(file);
-      await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 120_000 });
+      await importScrubClip(session, file);
       await engineReady(page, 120_000);
-      // Random frames across the clip, each seek waiting for its frame: the
-      // time from the seek to the animation frame that drew the frame at
-      // that time (the presentation worker's draw, on the page's clock).
-      const result = await page.evaluate(async ({ count, ticks }) => {
+      // Random frames across the clip, each seek waiting for its exact
+      // frame: the time from the seek to the animation frame that drew the
+      // exact frame (the presentation worker's draw, on the page's clock).
+      // A scrub seek may show the nearest decoded frame first (a stand-in,
+      // docs/engine/scrub.md); its time is recorded apart.
+      const result = await page.evaluate(async ({ count, ticks, drags }) => {
         const PM = (window as any).PM;
         const presentation = PM.Kernel.services.get('viewer').enginePresentation;
         const fps = 30000 / 1001;
@@ -118,16 +132,20 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
         let seed = 7;
         const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
         const latencies: number[] = [];
+        const firstFrame: number[] = [];
         let timeouts = 0;
         const missed: string[] = [];
         for (let i = 0; i < count; i++) {
           const k = 1 + Math.floor(random() * frames);
           const t = k / fps;
           const target = Math.round(t * ticks);
+          let first: number | null = null;
           const ms = await new Promise<number | null>((resolve) => {
             let done = false;
             const off = presentation.onPresented((f: any) => {
               if (done || Math.abs(f.pts - target) > 1) return;
+              if (first === null) first = f.rafMs - t0;
+              if (f.standIn) return;
               done = true;
               off();
               resolve(f.rafMs - t0);
@@ -141,6 +159,7 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
               resolve(null);
             }, 3000);
           });
+          if (first !== null) firstFrame.push(first);
           if (ms === null) {
             timeouts++;
             const s = PM.EngineConnection.status();
@@ -148,39 +167,69 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
           } else latencies.push(ms);
           await new Promise((r) => setTimeout(r, 30));
         }
-        // A playhead drag: a seek at every animation frame for 3 s; how far
-        // behind the requested time each drawn frame is.
-        const lag: number[] = [];
-        const shown = new Set<number>();
-        let requested = new Map<number, number>();
-        const off = presentation.onPresented((f: any) => {
-          shown.add(f.pts);
-          const at = requested.get(f.pts);
-          if (at !== undefined) lag.push(f.rafMs - at);
-        });
-        const start = performance.now();
-        let k = 0;
-        while (performance.now() - start < 3000) {
-          await new Promise((r) => requestAnimationFrame(r));
-          k = (k + 1) % frames;
-          const t = (k + 1) / fps;
-          requested.set(Math.round(t * ticks), performance.now());
-          PM.setTime(t);
+        // Playhead drags: a seek at every animation frame for 3 s, `step`
+        // frames apart; the distinct exact frames drawn, the stand-in frames
+        // drawn, and how far behind its request each exact frame was drawn.
+        // The presenter's stand-in log names the video frame each stand-in
+        // showed, so `framesShown` counts every distinct video frame drawn.
+        const dragResults: any[] = [];
+        for (const step of drags) {
+          PM.setTime((step > 0 ? 1 : frames) / fps);
+          await new Promise((r) => setTimeout(r, 1000));
+          const lag: number[] = [];
+          const exact = new Set<number>();
+          const standInSeqs: number[] = [];
+          const requested = new Map<number, number>();
+          const off = presentation.onPresented((f: any) => {
+            if (f.standIn) {
+              standInSeqs.push(f.seq);
+              return;
+            }
+            if (!requested.has(f.pts) || exact.has(f.pts)) return;
+            exact.add(f.pts);
+            lag.push(f.rafMs - requested.get(f.pts)!);
+          });
+          const start = performance.now();
+          let k = step > 0 ? 1 : frames;
+          let asked = 0;
+          while (performance.now() - start < 3000) {
+            await new Promise((r) => requestAnimationFrame(r));
+            k = ((k - 1 + step) % frames + frames) % frames + 1;
+            const t = k / fps;
+            const pts = Math.round(t * ticks);
+            if (!requested.has(pts)) requested.set(pts, performance.now());
+            asked++;
+            PM.setTime(t);
+          }
+          await new Promise((r) => setTimeout(r, 500));
+          off();
+          dragResults.push({ step, asked, distinctAsked: requested.size, exactFramesShown: exact.size, standInFramesDrawn: standInSeqs.length, lagMs: lag, exactFrames: [...exact].map((p) => Math.round((p / ticks) * fps)), standInSeqs });
         }
-        await new Promise((r) => setTimeout(r, 500));
-        off();
-        const asked = requested.size;
-        requested = new Map();
-        return { latencies, timeouts, missed, drag: { asked, shown: shown.size, lagMs: lag } };
-      }, { count: 60, ticks: TICKS });
+        return { latencies, firstFrame, timeouts, missed, drags: dragResults };
+      }, { count: 60, ticks: TICKS, drags: DRAGS });
       const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+      // The video frame each stand-in showed (one video layer here).
+      const standInShown = new Map<number, number>((report?.presenter?.standInLog ?? []).map((e: [number, number]) => [e[0], e[1]]));
+      const drags = result.drags.map((d: any) => {
+        const shown = new Set<number>(d.exactFrames);
+        for (const seq of d.standInSeqs) {
+          const n = standInShown.get(seq);
+          if (n !== undefined) shown.add(n);
+        }
+        return { step: d.step, asked: d.asked, distinctAsked: d.distinctAsked, exactFramesShown: d.exactFramesShown, standInFramesDrawn: d.standInFramesDrawn, framesShown: shown.size, requestToDrawMs: dist(d.lagMs) };
+      });
       await record(clip.row, {
         file: clip.file,
         seekToDrawMs: dist(result.latencies),
+        seekToFirstFrameMs: dist(result.firstFrame),
         timeouts: result.timeouts,
         missed: result.missed.slice(0, 20),
-        dragScrub: { asked: result.drag.asked, distinctFramesShown: result.drag.shown, requestToDrawMs: dist(result.drag.lagMs) },
+        drags,
+        standInFrames: report?.presenter?.standInFrames ?? null,
+        standInRedraws: report?.presenter?.standInRedraws ?? null,
+        decode: report?.presenter?.scrub ?? null,
         composeUsMax: report?.presenter?.composeUsMax ?? null,
+        frameCacheBytes: report?.presenter?.frameCache ?? null,
         renderErrors: report?.presenter?.renderErrors ?? null
       });
       expect(result.timeouts).toBe(0);
@@ -189,7 +238,10 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
 
   for (const source of [
     { name: 'synthetic-500-silent', clip: null },
-    { name: 'prores-clip-with-audio', clip: 'prores422hq-1080p-2997.mov' }
+    { name: 'prores-clip-with-audio', clip: 'prores422hq-1080p-2997.mov' },
+    // Playback through the viewer's decode workers on long GOP
+    // (docs/engine/scrub.md): skipped and repeated frames.
+    { name: 'longgop-h264-2160p', clip: 'h264-longgop-2160p-2997.mp4' }
   ]) {
     test(`A/V sync during playback: ${source.name}`, async ({ session }) => {
       test.setTimeout(300_000);
@@ -261,7 +313,11 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
         skippedFrames: result.skips,
         repeatedFrames: result.repeats,
         audio: audio ? { device: audio.device, latencyUs: audio.latencyUs, underruns: audio.underruns, starvedRenders: audio.starvedRenders } : null,
-        hostClockRuns: report?.presenter?.hostClockRuns ?? null
+        hostClockRuns: report?.presenter?.hostClockRuns ?? null,
+        lateSkipped: report?.presenter?.lateSkipped ?? null,
+        frameCacheBytes: report?.presenter?.frameCache ?? null,
+        composeUsMax: report?.presenter?.composeUsMax ?? null,
+        scrub: report?.presenter?.scrub ?? null
       });
       expect(result.frames).toBeGreaterThan(100);
     });
@@ -413,5 +469,117 @@ test('cold start: the engine is ready before the window finished loading the las
     await record('cold-start-500', { runs });
   } finally {
     await rm(userData, { recursive: true, force: true });
+  }
+});
+
+/*
+ * Today's viewer on the same clips and the same seeks and drags (Use New
+ * Engine off; docs/engine/scrub.md). The legacy compositor draws a video
+ * layer from its preview <video> element, so a frame can be on screen at
+ * the first animation frame after the element's `seeked` event: that
+ * instant is the seek-to-draw time here, and the distinct times the
+ * element completed a seek at during a drag are the frames today can have
+ * shown (an upper bound: a completed seek the compositor did not draw
+ * before the next one still counts).
+ */
+test.describe("Today's viewer (Use New Engine off): scrub", () => {
+  test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '0' } } });
+
+  for (const clip of SCRUB_CLIPS) {
+    test(`scrub latency, today: ${clip.row}`, async ({ session }) => {
+      test.setTimeout(300_000);
+      const file = path.join(MEDIA, clip.file);
+      test.skip(!existsSync(file), `generate ${file} first (docs/engine/tracer.md)`);
+      const { page } = session;
+      await importScrubClip(session, file, false);
+      await page.waitForTimeout(2000);
+      const result = await page.evaluate(async ({ count, drags }) => {
+        const PM = (window as any).PM;
+        const fps = 30000 / 1001;
+        // Every completed seek of a media element: its time and when.
+        const seeks: { time: number; at: number }[] = [];
+        const watched = new WeakSet<HTMLMediaElement>();
+        const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')!;
+        Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+          configurable: true,
+          get() { return desc.get!.call(this); },
+          set(value: number) {
+            if (!watched.has(this)) {
+              watched.add(this);
+              this.addEventListener('seeked', () => seeks.push({ time: desc.get!.call(this), at: performance.now() }));
+            }
+            desc.set!.call(this, value);
+          }
+        });
+        const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+        const frames = Math.floor(Math.min(PM.proj.layers.find((l: any) => l.type === 'video').dur, PM.proj.dur) * fps) - 2;
+        // The video's own time of composition frame k (no trim, speed 1).
+        const near = (a: number, b: number) => Math.abs(a - b) < 0.5 / fps;
+        let seed = 7;
+        const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+        const latencies: number[] = [];
+        let timeouts = 0;
+        for (let i = 0; i < count; i++) {
+          const k = 1 + Math.floor(random() * frames);
+          const t = k / fps;
+          const from = seeks.length;
+          const t0 = performance.now();
+          PM.setTime(t);
+          let ms: number | null = null;
+          while (performance.now() - t0 < 3000) {
+            const raf = await nextFrame();
+            if (seeks.slice(from).some((s) => near(s.time, t) && s.at <= raf)) {
+              ms = raf - t0;
+              break;
+            }
+          }
+          if (ms === null) timeouts++;
+          else latencies.push(ms);
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        const dragResults: any[] = [];
+        for (const step of drags) {
+          PM.setTime((step > 0 ? 1 : frames) / fps);
+          await new Promise((r) => setTimeout(r, 1000));
+          const from = seeks.length;
+          const requested = new Map<number, number>();
+          const start = performance.now();
+          let k = step > 0 ? 1 : frames;
+          let asked = 0;
+          while (performance.now() - start < 3000) {
+            await nextFrame();
+            k = ((k - 1 + step) % frames + frames) % frames + 1;
+            if (!requested.has(k)) requested.set(k, performance.now());
+            asked++;
+            PM.setTime(k / fps);
+          }
+          await new Promise((r) => setTimeout(r, 500));
+          const shown = new Map<number, number>();
+          for (const s of seeks.slice(from)) {
+            const k = Math.round(s.time * fps);
+            if (requested.has(k) && !shown.has(k)) shown.set(k, s.at - requested.get(k)!);
+          }
+          dragResults.push({ step, asked, distinctAsked: requested.size, framesSeeked: shown.size, lagMs: [...shown.values()] });
+        }
+        // Which media today's compositor decodes: the original, or the
+        // all-intra editing copy (`intra-1280`) it builds after import and
+        // uses under Automatic performance or a reduced quality.
+        const asset = PM.assets.get(PM.proj.layers.find((l: any) => l.type === 'video').d.asset);
+        const media = {
+          editingCopy: Boolean(asset?.preview?.el),
+          editingCopyInUse: Boolean(asset?.preview?.el) && Boolean(PM.perf?.auto || PM.quality < 1),
+          quality: PM.quality,
+          perfAuto: Boolean(PM.perf?.auto)
+        };
+        return { latencies, timeouts, drags: dragResults, media };
+      }, { count: 60, drags: DRAGS });
+      await record(`${clip.row}-today`, {
+        file: clip.file,
+        media: result.media,
+        seekToDrawMs: dist(result.latencies),
+        timeouts: result.timeouts,
+        drags: result.drags.map((d: any) => ({ ...d, lagMs: undefined, requestToSeekedMs: dist(d.lagMs) }))
+      });
+    });
   }
 });

@@ -15,8 +15,10 @@
 //! | Everything else (DNxHD/DNxHR, CineForm, MJPEG, DV, MPEG-2, ...) | FFmpeg |
 
 pub mod arbiter;
+pub mod scrub;
 pub mod service;
 pub mod session;
+pub mod skip;
 
 use crate::dav1d::Dav1dDecoder;
 use crate::error::{MediaError, Result};

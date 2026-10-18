@@ -130,6 +130,9 @@ pub struct Composed {
     pub failures: Vec<LayerFailure>,
     /// Render and placement time on the CPU (µs), the GPU work submitted.
     pub cpu_us: i64,
+    /// Video layers drawn with a stand-in while their exact frame decodes
+    /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
+    pub stand_ins: Vec<usize>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -379,6 +382,7 @@ impl Composer {
         let queue = self.renderer.queue().clone();
         let mut failures = Vec::new();
         let mut quads = Vec::new();
+        let mut stand_ins = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -432,6 +436,7 @@ impl Composer {
             )?;
             failures = rendered.failures;
             quads = rendered.quads;
+            stand_ins = rendered.stand_ins;
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -506,6 +511,7 @@ impl Composer {
             overlay: overlay(&place, cw, ch, &quads),
             failures,
             cpu_us: super::render::now_us() - start,
+            stand_ins,
         })
     }
 }

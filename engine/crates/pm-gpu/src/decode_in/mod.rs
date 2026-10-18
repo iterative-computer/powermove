@@ -137,7 +137,15 @@ pub struct DecodeImporter {
     layout: wgpu::BindGroupLayout,
     dummy: wgpu::TextureView,
     dummy_out: wgpu::TextureView,
+    /// Output textures handed back with [`DecodeImporter::recycle`], reused
+    /// by the next normalization of the same size and format: a UHD frame
+    /// normalizes into about 150 MB, and fresh allocations each frame cost
+    /// more than the passes (docs/engine/scrub.md).
+    free: std::sync::Mutex<Vec<wgpu::Texture>>,
 }
+
+/// Normalized textures kept for reuse.
+const FREE_TEXTURES: usize = 4;
 
 /// An `MTLBuffer` over one pool slot, cached on the slot.
 struct SlotBuffer(Retained<ProtocolObject<dyn MTLBuffer>>);
@@ -269,6 +277,7 @@ impl DecodeImporter {
                 wgpu::TextureFormat::Rg32Float,
                 wgpu::TextureUsages::STORAGE_BINDING,
             ),
+            free: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -487,6 +496,15 @@ impl DecodeImporter {
         let cw = (w + (1 << f.log2_chroma_w) - 1) >> f.log2_chroma_w;
         let ch = (h + (1 << f.log2_chroma_h) - 1) >> f.log2_chroma_h;
         let mk = |w, h, format, label| {
+            let reuse = {
+                let mut free = self.free.lock().unwrap();
+                free.iter()
+                    .position(|t| t.width() == w && t.height() == h && t.format() == format)
+                    .map(|i| free.swap_remove(i))
+            };
+            if let Some(t) = reuse {
+                return t;
+            }
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -581,6 +599,22 @@ impl DecodeImporter {
             Some(chroma) => Normalized::YCbCr { luma: out0, chroma },
             None => Normalized::Rgb { rgba: out0 },
         })
+    }
+
+    /// Hands a normalization's textures back for reuse once the commands
+    /// that read them are recorded: later commands in the same queue order
+    /// see them overwritten only after those reads.
+    pub fn recycle(&self, normalized: Normalized) {
+        let mut free = self.free.lock().unwrap();
+        match normalized {
+            Normalized::YCbCr { luma, chroma } => {
+                free.push(luma);
+                free.push(chroma);
+            }
+            Normalized::Rgb { rgba } => free.push(rgba),
+        }
+        let excess = free.len().saturating_sub(FREE_TEXTURES);
+        free.drain(..excess);
     }
 
     /// Releases CoreVideo's texture cache entries no longer in use.
