@@ -122,14 +122,33 @@ was found on the corpus's real project and checked against Chromium itself
      `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
      takes them through the new `pm_fonts_seeds` export (kept across
      registry generation changes, applied to a revived instance);
-   - sends the seeds of all windows to both engines' font services
-     (`Op::Seeds`, replayed last on every port).
+   - sends every window's own seeds to both engines' font services
+     (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds }] }`, replayed last
+     on every port; see "Seeds per window" below).
    Text layer weights default to 500, so only weight 400 `system-ui` text at
    24 and 26 px (2x) or 12 and 13 px (1x, no change) is affected. Not
    modelled: other UI text (11, 15, 18 px; weights 500 and 600) and page
-   zoom, which the decision does not cover; windows on different kinds of
-   display share the union of their seeds in the engines (pm-wasm in each
-   window has its own).
+   zoom, which the decision does not cover.
+
+   **Seeds per window (2026-10-18).** Each BrowserWindow is its own
+   renderer with its own Chromium font cache, so the engines measure a
+   layout with the seeds of the window it is drawn for, never the union:
+   - main names the window of every renderer port when it connects it
+     (`connect` carries `owner`, the webContents id; `EngineHost::attach`
+     records it in the hub), so a view measures with its window's seeds;
+   - the job engine's sessions are opened by main: `AgentJobs` tells the
+     job engine's font client which window a session is for
+     (`EngineFontClient::setSessionOwner`, the `sessions` list of
+     `Op::Seeds`, job engine only) and waits for the engine to take it
+     before submitting the job, so an export measures with the seeds of
+     the window it was started from;
+   - a render thread's `ServedFonts` takes the scope of each layer
+     (`Renderer::set_text_seed_scope`: the view's port in the presenter,
+     the work's port and session in the job lanes) and resolves it port
+     first, then session, then the fallback (every window's seeds, for
+     work of no known window: unattended render queue jobs, `pm-cli`); it
+     parks one measurer per seed set, so windows on different displays
+     never rebuild each other's layouts.
 
    Measured (`pm-cli parity eval --wasm`, corpus v1, 2026-10-18): pm-wasm
    in Node with the seeds main sends gives 1,891,448 compared, 0
@@ -236,7 +255,11 @@ the utility process's main thread (AppKit). Both meet in
   sources, a new generation base after a restart) or when the seeds change.
   `ServedFonts::sync`, called before each text layer, then starts over with
   a fresh resolver and measurer, and the generation enters every raster's
-  content key.
+  content key. The text context drops every glyph cache then (outlines,
+  color bitmaps, CoreGraphics masks, path masks and their CTFonts), and
+  every glyph cache keys a face by `FontBytes::id`, a process-unique id
+  that new bytes never reuse (never by the buffer's address, which a
+  replaced font of the same size can land on).
 - `EngineHost` drops the hub's waits before the presenter and job lanes are
   joined (shutdown never hangs on a render thread waiting for fonts).
 - Only a host whose registry starts (macOS, on the main thread) gives its
@@ -256,11 +279,17 @@ three layouts on a render thread equal the registry's glyph for glyph,
 including the seeded `system-ui` case, a mixed-script line, and a hidden
 system font; a whole frame rendered on a render thread equals one rendered
 on the main thread; a project font changes the frame through the
-generation; new seeds move the generation; a restarted engine with main's
-replay lays text out the same; shutdown ends a waiting render thread), the
-hub's and `served`'s unit tests, and main's (`engine-fonts.test.ts`: seeds
-replayed last, mirrors while down; `engine-fonts-seeds.test.ts`;
-`shared/engine-fonts-seeds.test.ts`).
+generation; new seeds move the generation; a 1x editor window and a 2x
+popout lay `system-ui` 24 px out differently, each view and the 1x
+window's export with its own window's seeds, switching without rebuilds;
+a restarted engine with main's replay lays text out the same; shutdown
+ends a waiting render thread), the hub's and `served`'s unit tests (seeds
+by port, session and fallback; a `DirectServer` never drops its registry
+off its thread), and main's (`engine-fonts.test.ts`: seeds replayed last,
+mirrors while down, session owners after the next replay;
+`engine-fonts-seeds.test.ts`; `shared/engine-fonts-seeds.test.ts`;
+`native-engine.test.ts`: connects name the window; `agent-jobs.test.ts`:
+the session's window before the job).
 
 ## Main's registry ("Use New Engine" off)
 

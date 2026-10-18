@@ -215,8 +215,14 @@ pm-render on macOS):
   must be measured again if an Electron update changes them
   (`tests/text_raster.rs` fails then).
 - **Compositing.** A `fillText` call's masks become one premultiplied image
-  item, each glyph composited source-over on the earlier ones (Skia draws
-  glyph quads one by one), in the fill color through the table.
+  item: each glyph blended source-over into an 8-bit target with the
+  paint's color and alpha (`globalAlpha` included), quantized after every
+  glyph, as the GPU canvas blends glyph quads one by one. Overlapping
+  glyphs of a translucent paint build up (the whisper preset, `#00000099`
+  strokes, `#FFFFFF80` text).
+- **Glyph origins** are mapped as Skia maps a text blob: the canvas matrix
+  in `f32`, pre-translated by the blob origin (`SkMatrix::preTranslate`),
+  then each glyph position, all in `f32` (`Placement::glyph_origin`).
 - **Color glyphs.** Color bitmap faces (`sbix`, `CBDT`; not monochrome
   `EBDT`, which draw as masks) are drawn by CoreGraphics into a
   premultiplied RGBA bitmap at the em size CoreText uses for the strike
@@ -225,21 +231,54 @@ pm-render on macOS):
   6 to 160 px is pixel-identical.
 - **Synthesized italic** is Skia's text-matrix shear, drawn by CoreGraphics
   about the glyph origin: exact.
-- **Caption boxes** are filled with 4× multisampled coverage (the capture's
-  box edges take only quarter values), with the standard 4-sample pattern
-  and exact circular corners.
-- **Glyphs beyond the atlas** (over 256 px, or a bounding box over 256 px):
-  the capture's alpha takes only five values, so the GPU canvas fills their
-  paths 4× multisampled at exact positions. `scene::msaa_coverage` does the
-  same with one scanline per sample row of the standard pattern over the
-  flattened outline (tolerance 0.12 px, the closest to the GPU's
-  tessellation of those tried).
+- **Glyph frames: synthesized bold and `strokeText`** (2026-10-18). Skia
+  draws a glyph image from its path when the glyph has a frame
+  (`SkScalerContext::internalGetPath`, `GenerateImageFromPath`): the
+  CoreGraphics outline at the device size (4× in x, then ¼, plus the
+  quarter offset), mapped back to user space, framed with `SkStroke`
+  (fake bold: stroke-and-fill of `size × interp(size, {9, 36}, {1/24,
+  1/32})`, miter; captions: `lineWidth`, round joins, miter limit 2),
+  mapped to device space, filled 4× horizontally into A8 and packed
+  (`pack4xHToMask`, the mask is generated "from LCD"), then Skia's mask
+  gamma for the paint's luminance bucket (`skpath::skia_mask_gamma`; the
+  measured tables are this gamma over CoreGraphics' linearized coverage,
+  checked for every entry). The fill is a port of Skia m149's analytic
+  rasterizer (`render::skaaa`: `SkScan_AAAPath`, analytic edges, the
+  edge builder and sort, in its 16.16 fixed point). The stroker is
+  `pm-skia-path` (tiny-skia-path 0.12 with conics kept, as `SkPath` keeps
+  them): round joins and caps stay conics through the device transform and
+  the 4× sampling and are cut into quads only at edge building
+  (`SkAutoConicToQuads`, ¼ px, Skia's own subdivision), which is what made
+  every caption outline exact. A synthesized bold run under `strokeText`
+  strokes with the two widths added. A color bitmap glyph has no outline
+  to frame: Skia draws its image in the stroke pass as well, so the fill
+  draws it over itself (its antialiased rim thickens); the engine does the
+  same.
+- **Strike scale.** Skia's strike descriptor keeps the device matrix to
+  1/1024 (`sk_relax`), so a scaled word (caption highlight and pop, the pop
+  and pulse animators) has its masks generated at `size × relax(scale)`
+  (`Placement::strike_scale`); positions keep the exact matrix.
+- **Rotated, skewed and non-uniformly scaled glyphs** are masks too: the
+  Mac scaler's `computeMatrices(kVertical)` of the strike (the relaxed
+  device 2×2, a Givens rotation, the vertical scale as the CTFont size,
+  the rest as CoreGraphics' text matrix), bounds from
+  `CTFontGetBoundingRectsForGlyphs` through it, quarter-pixel positions in
+  x and y (`cgmask::StrikeMatrix`, `draw_transformed`).
+- **Caption boxes** are `roundedRect`'s path (`arcTo` corners, quarter
+  conics), tessellated as Graphite tessellates a conic (`T = k / 2^L`, `L`
+  from Wang's formula at precision 4 in device space, De Casteljau in
+  local space), vertices snapped to the rasterizer's 1/256 px, then the
+  standard 4-sample pattern with nonzero winding.
+- **Glyphs beyond the atlas** (over 256 px, or a bounding box over 256 px)
+  are drawn as Skia draws text as paths: the CoreText outline at the
+  canonical 64 px (`MaskSource::canonical_path`), under the glyph's matrix
+  (the canvas matrix, the glyph position, `size / 64`), each quad as its
+  cubic, cubics cut at `T = k / 2^L` (Wang's formula), vertices snapped to
+  1/256 px, 4 samples per pixel (`scene::tessellated_coverage`).
 
 The outline path with the Canvas2D profile (below) remains for what the
-masks do not cover yet: glyphs under a non-axis-aligned transform (rotated,
-skewed, or non-uniformly scaled animator glyphs), glyphs from 162 to 256 px
-device size, synthesized bold, caption strokes, and platforms without
-CoreGraphics.
+masks do not cover yet: glyphs from 162 to 256 px device size (Skia's
+distance-field text) and platforms without CoreGraphics.
 
 ## Routing
 
@@ -257,6 +296,38 @@ draws it when asked. `Renderer::set_captions_hidden` is `PM.captionsHidden`
 (exports with `captionsBurn: false`).
 
 ## Measurements
+
+**2026-10-18 (second pass: glyph frames, blending, exactness gates)**, Apple
+M4 Max, macOS 27, references from Electron 44 / Chromium 152.
+
+`tests/text_raster.rs` now gates on exactness (every channel of every
+pixel within 1 code value), with the remaining cases pinned
+(`tests/fixtures/text-raster-pins.json`: the most pixels beyond 1 code
+value and the largest difference; pins only shrink):
+
+| Group | Cases | Exact | Pinned: most pixels off / max Δ |
+|---|---:|---:|---|
+| families, weights, italic, scripts, tracking, paragraph, emoji | 302 | 302 | |
+| colors | 21 | 21 | (`#FFFFFF80` now exact) |
+| synthetic (italic and bold) | 6 | 4 | bold: 1 and 7 pixels by 2 (was ink SSIM 0.9288, max Δ 220) |
+| variable | 27 | 21 | 6 to 448 pixels by 2 to 6 |
+| sizes, sizes-regular | 48 | 46 | the two 200 px cases: 31,975 and 30,632 pixels, max Δ 148 |
+| density | 24 | 23 | the 192 px case: 16,169 pixels, max Δ 126 |
+| large (paths over 256 px) | 2 | 2 | (were 332 and 341 pixels, max Δ 128) |
+| caption strokes | 26 | 24 | 2 and 7 pixels by 2 and 4 (were max Δ 98 to 170) |
+| caption presets, word states, scripts | 39 | 16 | boxed: all exact; classic, whisper, paper, fade: 1 to 2 pixels by 2; spotlight: 2 pixels by 3; pop: 2 of 6 exact, the rest 2 to 75 pixels by 2 to 13 |
+| **All** | **495** | **459** | 36 pinned (first pass: 414 exact) |
+
+`tests/text_corpus.rs` now gates on exactness too (every text pixel within
+2 code values; `tests/fixtures/text-corpus-pins.json`) and has no escapes:
+the 35 projects refused for features outside text are compared through
+their text in isolation (`text-iso-20261018-175328-e9f22842`). 237 frames,
+235 exact, 0 failed, 0 not compared. All 111 isolated frames are exact
+(effects on text: blur, glow, shadow, color, levels and the rest; 2.5D and
+motion-blurred text drawn flat and sharp). Every caption, scaled (`pop`,
+`pulse`) and rotated (`tumble`) animator frame is exact; pinned are only
+two `animator-blur` frames (1 and 5 pixels by 3). `captions/middle-lines`
+(0.9892 before) is exact.
 
 **2026-10-18, glyph masks and fonts on render threads** (Apple M4 Max,
 macOS 27, references from Electron 44 / Chromium 152).
@@ -441,39 +512,41 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
 
 ## Gaps
 
-Each of these is a visible difference on level 1 content today (amendment
-22), measured on the capture; none is accepted, each is open work:
+Each of these is a visible or measurable difference on level 1 content
+today (amendment 22), pinned in the exactness gates so it cannot grow;
+none is accepted, each is open work. Updated 2026-10-18 (second pass).
 
-- **Synthesized bold** (fonts without a bold face asked for weight 700):
-  ink SSIM 0.9288 to 0.9561 (unchanged; outline path with the fitted
-  outset). Skia's fake bold strokes and fills the outline with `size ×
-  interp(size, {9, 36}, {1/24, 1/32})`; CoreGraphics' fill-and-stroke at
-  that width gives 0.905 to 0.961, a separately rasterized path union is
-  worse, and no width reaches 1.0, so the exact construction (Skia's
-  stroker and rasterizer over the one stroke-and-fill path) is not
-  reproduced yet.
-- **Large text, 162 to 256 px device** (200 px `sizes`, the 192 px density
-  case): SSIM 0.9835 to 0.9921, max Δ up to 148 (outline path with the
-  fitted large-text profile). The capture's alpha there is continuous and
-  its positions exact, which points at Skia's distance-field text above its
-  162 px limit; that path needs a port.
-- **Glyphs drawn as paths** (over 256 px): about 330 pixels per case still
-  differ by a sample (the GPU's curve tessellation, which kurbo's
-  flattening approximates).
-- **Caption strokes** (every stroked preset): SSIM 0.9881 to 0.9969, max Δ
-  up to 159 (the fitted stroke profile). Skia renders stroked glyph images
-  from paths with its own stroker and rasterizer; a `vello_cpu` stroke
-  through the mask tables scored lower (0.9812), so the fitted profile
-  stays.
-- **Caption box corners**: 3 to 9 pixels per box differ at the arcs (the GPU
-  tessellates the conic corners).
-- **Animated glyphs under rotation, skew, or non-uniform scale** use the
-  outline path: frame SSIM 0.9978 to 0.9999.
-- **Colors with alpha** (`#FFFFFF80`): 2 pixels off by up to 8 (8-bit
-  premultiplied rounding order). **Variable fonts**: 8 to 448 pixels off by 2
-  to 6 (Chromium's CTFont carries its variations differently from ours).
-- **`COLR` color fonts** are still refused rather than drawn (Chromium may
-  rasterize them through FreeType's COLRv1 path; not investigated).
+- **Large text, 162 to 256 px device** (the 200 px `sizes` cases, the 192
+  px density case): 16,170 to 31,975 pixels, max Δ 126 to 148 (outline path
+  with the fitted large-text profile). Chromium's Skia draws this range as
+  distance-field text (`sktext::gpu::SubRunControl`: from
+  `kLargeDFFontLimit` 162 to the maximum, 256 px SDF masks on Mac, A8
+  masks turned into distance fields by `SkGenerateDistanceFieldFromA8Image`,
+  sampled bilinearly and shaded by Graphite's `sdf_text_coverage_fn` in
+  half precision with screen-space derivatives). What is known: the base
+  mask is CoreGraphics' A8 at 256 px without smoothing, linearized
+  (`gLinearCoverageFromCGLCDValue`), no preblend (`kNone` flags); the
+  field is padded by 4 (`SK_DistanceFieldPad`), drawn with a 2 px inset
+  (`SK_DistanceFieldInset`); on Mac `SK_GAMMA_APPLY_TO_A8` is not defined,
+  so the gamma adjustment is 0 and coverage is `smoothstep(-w, w, d)` with
+  `d = 7.96875 (texel − 128/255)` and `w = 0.65 |J · ∇d / |∇d||`. Matching
+  it means porting the field generator and running the same shader on the
+  same GPU (its bilinear sampling and fp16 arithmetic); not done.
+- **Caption pop at density 1** (`caption-pop-0455`, `-0456`, `-0458`,
+  `-0459`): 2 to 75 pixels by 2 to 13 in `text_raster` (the corpus's pop
+  frames are exact).
+- **Blurred animator glyphs** (`animator-blur`): 1 to 5 pixels by 3.
+- **Small residuals**: synthesized bold 1 and 7 pixels by 2; variable fonts
+  6 to 448 pixels by 2 to 6 (Chromium's CTFont carries variations
+  differently); caption strokes 2 and 7 pixels by 2 and 4; classic,
+  whisper, paper, spotlight and fade captions 1 to 2 pixels by 2 or 3
+  (8-bit rounding between the box, stroke and fill items, which the
+  engine composites in float).
+- **`COLR` color fonts** are still refused rather than drawn, and CSS colors
+  the module does not reproduce (`lab()`, `lch()`, `oklab()`, `oklch()`,
+  `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`,
+  system colors) refuse their layer (`Feature::Text`). Neither is in the
+  corpus or the captures; both need a capture to match.
 - **Level 2**: animated and range-styled text and typography anchoring are
   still refused, and `compat` level 2 content still routes
   (`Feature::CompatLevel2`); level 2 layer semantics (bounds, picks,
@@ -489,10 +562,30 @@ Each of these is a visible difference on level 1 content today (amendment
   fallback otherwise; the engine always draws the fallback. Not seen in the
   corpus.
 - The tables and the emoji shift are data measured from one Electron
-  (Chromium 152) on macOS 27; an update that changes Skia's tables or
-  CoreText's emoji placement needs them measured again.
+  (Chromium 152) on macOS 27 with default font smoothing; an update that
+  changes Skia's tables or CoreText's emoji placement (or a user-level
+  `AppleFontSmoothing` default) needs them measured again;
+  `tests/text_raster.rs` fails only when the references are captured
+  again.
+- Unattended render queue jobs (possibly after a relaunch, no window)
+  measure with every open window's seeds.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts, second pass):
+
+- `engine/crates/pm-skia-path/` (new crate): tiny-skia-path 0.12.0 with
+  conics kept, BSD-3-Clause.
+- `apps/desktop/src/main/engine/{native-engine,engine-process,ports,agent-jobs,index}.ts`
+  (small): `connect` names the window (`owner`); agent jobs tell the job
+  engine's font client the window of each session.
+- `engine/crates/pm-node/src/{lib,node}.rs`, `present/render.rs`,
+  `jobs/mod.rs` (small): `attach` takes the owner; views and job work set
+  the seed scope.
+- `engine/corpus/src/{capture,text-only}.ts`: `--text-only`.
+- `apps/desktop/e2e/{canvas-text,captions,font-anchor,split-text,text-animators,text-layout-resize}.spec.ts`:
+  an `afterEach` that, with the new engine on, checks the engine drew the
+  text (`e2e/helpers/engine-drew.ts`).
 
 2026-10-18 (lane ne-fonts):
 
