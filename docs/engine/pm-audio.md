@@ -1682,3 +1682,178 @@ devices were not attached to this machine. The buffer request matches
 Chromium's for them too, but no measurement on them is claimed.
 `RenderReport.heard_whole` is kept: it is a public diagnostic with its own
 decode-readiness test.
+
+## A7/A8: prepared loop histories and edit-to-play (2026-10-18)
+
+A7 keeps the loop/work-area history when Play consumes the playhead's
+prepared start. During playback the producer replenishes one prepared voice
+between ring fills. A forward wrap installs that start's ready histories;
+continuous entry from before the work area keeps its uninterrupted phase
+history. Prepared histories and source windows remain bounded to three
+positions. Preparation never advances meters, retune envelopes, or the
+current vocoders. The first input chunk, including its deterministic
+analysis pre-roll, is prepared before the optional long look-ahead.
+
+A static level/fade edit retains a voice's prepared history only when its
+source and complete map key agree. That key now includes each level's span,
+on state, group on states, and audio-muted input as well as its existing
+source, trim, speed, remap, conform, and rate inputs. Animated levels and
+nonconstant maps invalidate prepared histories on a revision: a map
+expression may depend on another edited property. Partially prepared starts
+install only their ready voices; other voices take the existing no-loss
+start hold. No missing voice is faded in late to improve these measurements.
+
+The app-level trace exposed two additional causes of missed preparation:
+
+- A callback publishes the first clock line before its device presentation.
+  Pause in that interval now stays at the epoch's target instead of
+  extrapolating backwards before it (or around the loop).
+- Audio can stop a fraction of a frame past the displayed frame. Paused
+  preparation warms that composition frame first, then retains the exact
+  sample position for raw seeks and the work-area boundaries.
+
+The minimal presenter change is `pm-node/src/present/audio.rs`: Play sends
+SetLoop, Seek, and Play as one ordered batch through `Playback::commands`.
+Previously each synchronous command could trigger another paused bounding
+step before the next command arrived. The batch preserves command order,
+error reporting, start timing, and the existing levels watch. A failed
+command returns its error and leaves earlier commands applied.
+
+Regressions compare both channels exactly: repeated prepared loop starts
+against a fresh offline render; level edits against the edited offline mix;
+map/span edits and animated maps invalidating histories; a pause before the
+first device presentation; preparation of both displayed and raw seek
+positions; and uninterrupted stretched PCM through the first entry into a
+loop. The 16-voice level-edit regression requires the first 512-frame buffer
+within one callback and asserts no source starve or committed drop. The
+existing loaded remap comparisons retain their zero-underrun assertions and
+bit equality.
+
+The paired app harness is `engine/crates/pm-audio/tools/playback-gates.ts`.
+It opens hidden isolated apps under `pm-electron-lock`, using the same
+10 s stereo WAV, sixteen speed-1.5 voices, and work area [4 s, 6 s) for
+both engines. It measures 60 s of continuous looping after a 1 s settling
+period, then 30 edit-and-Play requests in the same renderer task. Before a
+level/speed edit it seeks to 4 s and allows 250 ms for preparation;
+`PM_AUDIO_START_WAIT_MS=0` alternates previously unprepared 2 s / 3 s
+same-task seek/edit/Play requests.
+`PM_AUDIO_LOAD_THREADS=4` runs four joined busy-loop processes at the
+harness's inherited niceness throughout the stressed capture. Output is
+scheduled device presentation through WebAudio's output timestamp or the
+native device clock and measured host offset, without acoustic loopback.
+Native traces also record the pre-edit prepared positions and first-buffer
+timing. Generated media, app profiles and raw captures stay outside Git.
+
+Reproduce with the A6 app/addon build commands above, then:
+
+```sh
+L=~/Library/Caches/powermove-engine/bin/pm-electron-lock
+$L nice -n 15 bun engine/crates/pm-audio/tools/playback-gates.ts \
+  /tmp/pm-audio-start.wav /tmp/pm-audio-a7-plain.json 30
+PM_AUDIO_LOAD_THREADS=4 $L nice -n 15 bun \
+  engine/crates/pm-audio/tools/playback-gates.ts \
+  /tmp/pm-audio-start.wav /tmp/pm-audio-a7-stress.json 30
+PM_AUDIO_START_EDIT=speed PM_AUDIO_LOOP_SECONDS=0 $L nice -n 15 bun \
+  engine/crates/pm-audio/tools/playback-gates.ts \
+  /tmp/pm-audio-start.wav /tmp/pm-audio-a8-speed.json 30
+PM_AUDIO_START_WAIT_MS=0 PM_AUDIO_LOOP_SECONDS=0 $L nice -n 15 bun \
+  engine/crates/pm-audio/tools/playback-gates.ts \
+  /tmp/pm-audio-start.wav /tmp/pm-audio-a8-immediate.json 30
+```
+
+### Paired app latency: delivered and remaining
+
+The final speaker captures used a 48 kHz device, 256-frame native callbacks,
+15.625 ms native device/stream latency, and WebAudio `baseLatency` 5.333 ms.
+Each row has 30 requests per engine. Times below are ms from `PM.play` to
+scheduled presentation of the first program sample:
+
+| Scenario | Engine | p50 | p95 | max |
+| --- | --- | ---: | ---: | ---: |
+| Level edit, playhead prepared before the edit | Today's app | 30.920 | 32.518 | 32.529 |
+| Level edit, playhead prepared before the edit | Native | 28.547 | 31.604 | 31.784 |
+| Speed edit invalidating every history | Today's app | 29.633 | 32.331 | 32.434 |
+| Speed edit invalidating every history | Native | 143.900 | 146.738 | 146.750 |
+| Same-task unprepared seek, level edit, Play | Today's app | 31.011 | 32.410 | 32.515 |
+| Same-task unprepared seek, level edit, Play | Native | 171.279 | 186.590 | 203.590 |
+
+The level-edit case meets all three comparison points. **A8 is still a
+blocker for invalidated or unprepared starts.** The native first-buffer
+trace measures up to 112.988 ms from audio-control application to queueing
+after a speed edit, and 113.346–169.195 ms for the immediate unprepared
+seeks. These captures have consistent 15.625 ms native clock/status latency
+in all 30 samples and zero page errors; this failure is independent of the
+Bluetooth metadata discrepancy below. Cold starts preserve every initial
+sample through the no-loss hold. Meeting today's latency still requires
+moving the serial per-voice map/pre-roll work off the producer or reusing
+its exact evaluated maps; faster dispatch and retained static histories do
+not close the cold case.
+
+One earlier stressed app capture switched output configuration between the
+paired launches: WebAudio reported 168 ms output latency, native audio
+status reported 160 ms, but the renderer's clock carried 15.625 ms. The
+native status retains the device descriptor from opening, while playback
+watches the current default output, so this is evidence of inconsistent
+metadata during output changes, not proof of which latency is acoustically
+correct. Its raw renderer-clock comparison (172.912/175.511/176.004 ms today,
+37.753/42.897/43.611 ms native) is **not a latency pass**. Reconstructing the
+native first-buffer presentation using the reported status latency instead
+gives 182.079/187.272/187.986 ms. That alternative is an inference, also not
+a same-device pass. Both paths recorded zero ring underruns for their 60 s
+loop windows; native also recorded zero decode starvation and device
+overloads. A repeat with consistent output metadata is reported separately.
+
+### A7 real-device loop gate and repeated stressed latency
+
+The final plain capture and the repeated stressed capture each played
+sixteen 1.5x voices over [4 s, 6 s) for 60 s: **zero loop-window ring
+underruns in both today's app and the native engine**. Native also counted
+zero source-starved renders and zero device overloads in both windows. The
+stressed capture used four busy-loop processes. The repeat had consistent
+15.625 ms native clock/status latency in every sample; WebAudio reported
+24 ms output latency and a 5.333 ms base latency, as in the plain capture.
+
+| Level edit under stress | p50 (ms) | p95 (ms) | max (ms) |
+| --- | ---: | ---: | ---: |
+| Today's app | 30.034 | 32.632 | 32.635 |
+| Native | 28.530 | 32.250 | 32.938 |
+
+P50 and p95 meet today's latency. Maximum latency is **0.303 ms slower**,
+so this row also misses the brief's strict every-number requirement. It is
+not rounded into a pass. Combined with the cold-start rows above, A8 remains
+open despite the improvement for already prepared static level edits.
+
+### Final Rust validation and qualification
+
+The final binary passed **30/30 plain and 30/30 stressed playback suites**,
+35 tests each: 2,100 executions, zero failures and none ignored. Stress is
+`PM_AUDIO_PLAYBACK_STRESS=1` (two shared CPU contention threads and 8 ms cold
+decode delay). Suite times were 23.04–23.45 s plain and 23.09–23.42 s
+stressed. The 360 mapped comparisons of 80,000 stereo frames remained exact
+(57,600,000 sample values), with zero source starvation and ring underruns
+in those comparisons. The original simulated-device patience and all
+comparison tolerances are unchanged.
+
+| Sixteen-voice level edit → first 512-frame buffer | Starts | p50 (ms) | p95 (ms) | max (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Plain | 120 | 0.719 | 1.274 | 1.683 |
+| Stressed | 120 | 0.700 | 0.839 | 2.701 |
+
+Every start met the one-callback 10.667 ms bound and the edited offline PCM
+comparison. Before those final repetitions, one 35-test suite during
+concurrent builds failed the loaded-remap zero-underrun assertion: one ring
+underrun, zero source-starved renders, and zero differences in its 80,000
+compared frames. The final consecutive runs pass the same assertion; the
+earlier scheduling failure remains evidence for review, not an allowed
+difference.
+
+Targeted checks pass: 52 library tests (one existing ignored catch-up
+measurement), 11 decode-readiness, 14 mixer, 6 stretch and all 37 presenter
+unit tests. Strict release clippy for all pm-audio/pm-node targets, pm-audio
+formatting, and the normal production-profile pm-node library check with
+test hooks disabled pass. App, pm-wasm and native addon builds pass.
+Validation used pinned Rust 1.96.1, kache, four build jobs, niceness 15 and
+four test threads, with the existing local `CARGO_PROFILE_RELEASE_LTO=off`
+setting for test/addon links. The normal production check uses the default
+release configuration; no successful thin-LTO test link is claimed. The
+30-iteration reproduction commands in the A4/A6 sections still apply.
