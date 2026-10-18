@@ -71,7 +71,7 @@ impl Ray {
         }
     }
 
-    fn at(&self, t: f64) -> Vec3 {
+    pub fn at(&self, t: f64) -> Vec3 {
         add(self.origin, scale(self.direction, t))
     }
 
@@ -153,7 +153,7 @@ pub fn intersect_triangle(r: &Ray, a: Vec3, b: Vec3, c: Vec3, cull: bool) -> Opt
 
 /// A triangle BVH (binned SAH, leaves of 4), refit for new positions.
 #[derive(Debug, Clone, Default)]
-struct Bvh {
+pub(crate) struct Bvh {
     /// Node bounds and links: leaf `(first, count > 0)`, interior
     /// `(left child, 0)` with the right child after it.
     nodes: Vec<([f64; 3], [f64; 3], u32, u32)>,
@@ -188,7 +188,7 @@ fn area(lo: Vec3, hi: Vec3) -> f64 {
 }
 
 impl Bvh {
-    fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
+    pub(crate) fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
         let n = tris.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let empty = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0, 0);
@@ -352,7 +352,11 @@ impl Bvh {
 
     /// Every triangle the ray may hit, nearest boxes first, with `test`
     /// returning a ray parameter; the closest accepted hit.
-    fn closest(&self, r: &Ray, mut test: impl FnMut(u32) -> Option<f64>) -> Option<(f64, u32)> {
+    pub(crate) fn closest(
+        &self,
+        r: &Ray,
+        mut test: impl FnMut(u32) -> Option<f64>,
+    ) -> Option<(f64, u32)> {
         let inv = [
             1.0 / r.direction[0],
             1.0 / r.direction[1],

@@ -26,6 +26,7 @@ pub mod layering;
 pub mod normals;
 pub mod obj;
 pub mod primitives;
+pub mod query;
 pub mod shapes;
 pub mod source;
 
