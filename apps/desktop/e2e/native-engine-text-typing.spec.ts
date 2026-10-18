@@ -101,9 +101,16 @@ for (const scenario of [
         requestAnimationFrame(tick);
       });
       const letters = 'abcdefghijklmnopqrstuvwxyz ';
+      // A keystroke whose frame never comes is a miss, counted (never
+      // dropped from the percentiles silently): the gate wants every one.
+      let missed = 0;
       for (let i = 0; i < KEYS; i++) {
         await page.keyboard.type(letters[i % letters.length]!);
-        await page.waitForFunction(() => (window as any).__typing.pending === null, undefined, { timeout: 5_000 }).catch(() => {});
+        const drawn = await page.waitForFunction(() => (window as any).__typing.pending === null, undefined, { timeout: 5_000 }).then(() => true, () => false);
+        if (!drawn) {
+          missed++;
+          await page.evaluate(() => { (window as any).__typing.pending = null; });
+        }
         await page.waitForTimeout(60);
       }
       const result = await page.evaluate(() => {
@@ -118,6 +125,7 @@ for (const scenario of [
         scenario: scenario.name,
         keys: KEYS,
         measured: samples.length,
+        missed,
         p50: samples.length ? Math.round(percentile(samples, 50) * 100) / 100 : null,
         p95: samples.length ? Math.round(percentile(samples, 95) * 100) / 100 : null,
         max: samples.length ? Math.round(Math.max(...samples) * 100) / 100 : null,
@@ -129,7 +137,8 @@ for (const scenario of [
       await appendFile(OUT, `${JSON.stringify({ row: 'canvas-text-typing', at: new Date().toISOString(), cpu: os.cpus()[0]?.model ?? null, load: os.loadavg(), value })}\n`);
       console.log(`[measure] canvas text typing: ${JSON.stringify(value)}`);
       expect(result.route).toBe('engine');
-      expect(samples.length).toBeGreaterThan(KEYS * 0.9);
+      expect(missed).toBe(0);
+      expect(samples.length).toBe(KEYS);
       expect(value.p95!).toBeLessThanOrEqual(33);
     } finally {
       await session.close();

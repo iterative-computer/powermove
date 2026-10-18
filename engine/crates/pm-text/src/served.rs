@@ -270,25 +270,44 @@ impl FontResolver for ServedResolver {
 ///
 /// The caller guarantees the thread: [`DirectServer`] is `Send + Sync` so it
 /// fits [`FontServer`], but the registry inside is only ever touched from
-/// the thread that created it ([`DirectServer::serve`] checks).
+/// the thread that created it. Every call checks the thread; the registry is
+/// dropped there, or leaked when the last reference goes away on another
+/// thread (never dropped off its thread). Off its thread, `generation`
+/// answers the generation last read on it.
 pub struct DirectServer<R> {
-    inner: std::sync::Mutex<R>,
+    inner: std::mem::ManuallyDrop<std::sync::Mutex<R>>,
     thread: std::thread::ThreadId,
     generation: Box<dyn Fn(&R) -> u64 + Send + Sync>,
+    /// The registry's generation as last read on its thread.
+    last_generation: std::sync::atomic::AtomicU64,
 }
 
-// SAFETY: the registry is used only on the thread that created the server
-// (checked on every call); the mutex makes the access exclusive.
+// SAFETY: the registry is used and dropped only on the thread that created
+// the server (checked on every call and in `drop`); the mutex makes the
+// access exclusive.
 unsafe impl<R> Send for DirectServer<R> {}
 unsafe impl<R> Sync for DirectServer<R> {}
+
+impl<R> Drop for DirectServer<R> {
+    fn drop(&mut self) {
+        if std::thread::current().id() == self.thread {
+            // SAFETY: dropped once, here, on the registry's thread.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.inner) };
+        }
+        // Off its thread the registry is leaked: dropping it there is not
+        // allowed (AppKit objects belong to their thread).
+    }
+}
 
 impl<R: FontResolver + 'static> DirectServer<R> {
     /// `generation` reads the registry's generation.
     pub fn new(registry: R, generation: impl Fn(&R) -> u64 + Send + Sync + 'static) -> Self {
+        let last = generation(&registry);
         DirectServer {
-            inner: std::sync::Mutex::new(registry),
+            inner: std::mem::ManuallyDrop::new(std::sync::Mutex::new(registry)),
             thread: std::thread::current().id(),
             generation: Box::new(generation),
+            last_generation: std::sync::atomic::AtomicU64::new(last),
         }
     }
 
@@ -300,7 +319,14 @@ impl<R: FontResolver + 'static> DirectServer<R> {
             "a direct font server is used on the thread that made it"
         );
         let mut r = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut r)
+        let out = f(&mut r);
+        self.note_generation(&r);
+        out
+    }
+
+    fn note_generation(&self, r: &R) {
+        self.last_generation
+            .store((self.generation)(r), std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -338,14 +364,19 @@ impl<R: FontResolver + 'static> FontServer for DirectServer<R> {
         }
         let mut r = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let generation = (self.generation)(&r);
+        self.last_generation
+            .store(generation, std::sync::atomic::Ordering::SeqCst);
         Ok(serve_from(&mut *r, generation, queries))
     }
 
     fn generation(&self) -> u64 {
         if std::thread::current().id() != self.thread {
-            return 0;
+            return self
+                .last_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
         }
         let r = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        self.note_generation(&r);
         (self.generation)(&r)
     }
 }
@@ -550,5 +581,65 @@ mod tests {
             .join()
             .unwrap();
         assert!(other);
+        // Off its thread the generation is the one last read on it, and the
+        // last reference dropped there leaks the registry, never drops it.
+        struct Tracked(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct WithDrop(Registry, Tracked);
+        impl FontResolver for WithDrop {
+            fn face(&self, id: FaceId) -> &FaceInfo {
+                self.0.face(id)
+            }
+            fn family(&mut self, family: &str, d: &FontDesc) -> Option<FaceId> {
+                self.0.family(family, d)
+            }
+            fn standard(&mut self, d: &FontDesc) -> Option<FaceId> {
+                self.0.standard(d)
+            }
+            fn fallback_for_char(
+                &mut self,
+                d: &FontDesc,
+                ch: u32,
+                p: FaceId,
+                e: bool,
+            ) -> Option<FaceId> {
+                self.0.fallback_for_char(d, ch, p, e)
+            }
+            fn last_resort(&mut self, d: &FontDesc) -> Option<FaceId> {
+                self.0.last_resort(d)
+            }
+            fn variable_face(&mut self, family: &str) -> Option<FaceId> {
+                self.0.variable_face(family)
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = Arc::new(DirectServer::new(
+            WithDrop(Registry(vec![info("a")]), Tracked(dropped.clone())),
+            |_| 9,
+        ));
+        let s = server.clone();
+        drop(server);
+        let g = std::thread::spawn(move || {
+            let g = s.generation();
+            drop(s);
+            g
+        })
+        .join()
+        .unwrap();
+        assert_eq!(g, 9);
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "not dropped off its thread"
+        );
+        let here = DirectServer::new(
+            WithDrop(Registry(vec![info("a")]), Tracked(dropped.clone())),
+            |_| 1,
+        );
+        drop(here);
+        assert!(dropped.load(Ordering::SeqCst), "dropped on its thread");
     }
 }
