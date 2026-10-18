@@ -38,6 +38,11 @@ describe('ViewSequencer', () => {
     expect(rendered.view).toEqual({ camera, shading: 'rendered', xray: false, localView: [] });
     const solid = sequencer.next({ ...input, camera, shading: 'solid', xray: true, localView: ['a'] }).state;
     expect(solid.view).toEqual({ camera, shading: 'solid', xray: true, localView: ['a'] });
+    // Rendered shading without a camera is still an override: the engine
+    // draws Blender surfaces in it while paused.
+    const blender = sequencer.next({ ...input, shading: 'rendered' }).state;
+    expect(blender.view).toEqual({ camera: null, shading: 'rendered', xray: false, localView: [] });
+    expect(sequencer.next({ ...input }).state.view).toBeNull();
   });
 
   it('sanitizes sizes and numbers', () => {

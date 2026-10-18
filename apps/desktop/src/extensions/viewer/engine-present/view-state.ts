@@ -54,8 +54,11 @@ export class ViewSequencer {
 
   /** The state for `input`, and whether it changed since the last call. */
   next(input: ViewInput): { state: ViewerState; changed: boolean } {
+    // A 3D composition always carries its shading: Rendered and Material
+    // Preview draw Blender surfaces while paused (contract 11), so
+    // Rendered is not the same as no override.
     const view =
-      input.camera || (input.shading && input.shading !== 'rendered') || input.xray || input.localView?.length
+      input.camera || input.shading || input.xray || input.localView?.length
         ? {
             camera: input.camera ?? null,
             shading: input.shading ?? 'rendered',
