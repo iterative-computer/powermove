@@ -148,7 +148,11 @@ const RUNS = [
   // connection draws a synthetic project of slice features (Use New
   // Engine on); "today" is the WebGL viewer on the same project. Summaries
   // go to docs/engine/tracer-measurements/.
-  ...tracerRuns()
+  ...tracerRuns(),
+  // Phase 3a (docs/engine/phase3a-gate.md): layer drag on the 884-layer
+  // project (the corpus perf copy), today and with Use New Engine on, idle.
+  { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'docs/engine/phase3a-gate-measurements' },
+  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' }
 ];
 
 /** The tracer's runs: layer drag on 500 layers (engine and today, idle and
@@ -201,7 +205,15 @@ const waitDisplay = process.argv.includes('--wait-display');
 /** Whether the panel shows what a run measures: display awake, session unlocked. */
 const displayUsable = (state) => !state.asleep && !state.locked;
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const common = { bundle: true, logLevel: 'warning', alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
+/** Vite's `?raw` imports (the Blender worker script in src/main/engine/blender.ts): the file's text. */
+const rawImports = {
+  name: 'raw-imports',
+  setup(b) {
+    b.onResolve({ filter: /\?raw$/ }, (args) => ({ path: path.resolve(args.resolveDir, args.path.slice(0, -'?raw'.length)), namespace: 'raw' }));
+    b.onLoad({ filter: /.*/, namespace: 'raw' }, (args) => ({ contents: fs.readFileSync(args.path, 'utf8'), loader: 'text' }));
+  }
+};
+const common = { bundle: true, logLevel: 'warning', alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') }, plugins: [rawImports] };
 await build({
   ...common,
   entryPoints: { main: path.join(desktop, 'src/main/engine/integration/measure-main.ts'), 'engine-process': path.join(desktop, 'src/main/engine/engine-process.ts') },
@@ -985,7 +997,7 @@ try {
       process.stdout.write(`   analysis failed: ${error.message}\n${(raw.log ?? []).slice(-15).join('\n')}\n`);
       continue;
     }
-    const dir = run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
+    const dir = run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;

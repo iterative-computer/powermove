@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! pm-cli render <project.pmv|.json> -o <out.mov|.mp4> [options]
-//! pm-cli parity render [--capture <dir>]... [--only <prefix>] [--diffs <dir>] [--json <file>]
+//! pm-cli parity render [--capture <dir>]... [--only <prefix>] [--real <file.pmv>]
+//!                      [--no-definitions] [--determinism] [--diffs <dir>] [--json <file>]
 //! pm-cli parity eval [options]
 //! pm-cli scope <project.pmv|.json> -o <dir> [options] | --frame <file> -o <dir>
 //! ```
@@ -72,8 +73,15 @@ const USAGE: &str = "usage:
       --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
+                       [--real FILE.pmv] [--no-definitions] [--determinism]
       compares engine renders with the legacy captures of the parity corpus
-      (default: the newest v1-* and render-* captures)
+      (default: the newest v1-* and render-* captures). The renderer holds
+      the built-in definitions as the kernel pushes them (--no-definitions:
+      none, so effects and transitions route). --real adds each capture's
+      real/<slug> project with its media unpacked from FILE.pmv (the file the
+      capture opened, checked by SHA-256). --determinism renders every
+      sample again with the renderer's caches dropped and requires
+      bit-identical buffers
   pm-cli parity eval [options]
       evaluation parity against the corpus (see pm-cli parity eval --help)
   pm-cli scope <project.pmv|.json> -o <dir> [options]
@@ -289,6 +297,9 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
         only: None,
         diffs: None,
         json: None,
+        real: None,
+        definitions: true,
+        determinism: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -298,6 +309,9 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
             "--only" => o.only = Some(value(args, &mut i, a)?.into()),
             "--diffs" => o.diffs = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--json" => o.json = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--real" => o.real = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--no-definitions" => o.definitions = false,
+            "--determinism" => o.determinism = true,
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;
@@ -345,7 +359,13 @@ fn main() -> ExitCode {
                     Err(e) => return fail_usage(&e),
                 };
                 match render_parity::run(&options) {
-                    Ok(report) if report.compared > 0 && report.failed == 0 => ExitCode::SUCCESS,
+                    Ok(report)
+                        if report.compared > 0
+                            && report.failed == 0
+                            && report.determinism_failed == 0 =>
+                    {
+                        ExitCode::SUCCESS
+                    }
                     Ok(report) => {
                         if report.compared == 0 {
                             eprintln!("pm-cli: no supported corpus project was compared");
@@ -460,6 +480,26 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parity_render_options_parse() {
+        let o = parse_parity(&s(&[
+            "--capture",
+            "/c/v1",
+            "--real",
+            "/c/perf/a.pmv",
+            "--determinism",
+        ]))
+        .unwrap();
+        assert_eq!(o.captures, vec![PathBuf::from("/c/v1")]);
+        assert_eq!(o.real, Some(PathBuf::from("/c/perf/a.pmv")));
+        assert!(o.definitions, "the built-in definitions by default");
+        assert!(o.determinism);
+        let o = parse_parity(&s(&["--capture", "/c/v1", "--no-definitions"])).unwrap();
+        assert!(!o.definitions && !o.determinism && o.real.is_none());
+        assert!(parse_parity(&s(&["--real"])).is_err(), "no file");
+        assert!(parse_parity(&s(&["--bogus"])).is_err());
     }
 
     #[test]
