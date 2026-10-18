@@ -1846,6 +1846,60 @@ disagree, this subsection wins; the earlier text is kept for history.
 19. **Text measurement.** Level 1 measures at Blink's effective font size, `floorf(size × 100) / 100` in f32, applied once in `pm_text::compat`. The corpus comparison pins its "not compared" counts per font and fails if they grow.
 20. **Evaluation parity classes.** A rotation that differs by exactly 360° at the `atan2` branch cut (180° against −180°) is an allowed difference. Bounds and pick cases classed as fragile (the TypeScript answer changes under a 1e-12 s, 1e-7 px, or edge perturbation) may differ in at most 5% of fragile cases.
 
+**Amendments from the owner (2026-10-18)**
+
+These amendments override any earlier text that conflicts with them, including the
+allowed-difference and capability-routing text in sections 21, 25, and 30.
+
+21. **The setting decides.** With "Use New Engine" on, every project opens in the new
+    engine, including existing ones. The engine never silently hands a project or frame
+    to the legacy engine.
+    - Capability routing (`pm_render::unsupported`, the `routed` session, job, and
+      export results, and their TypeScript consumers) is development scaffolding only.
+    - The Phase 3c and 5a gates require the unsupported set to be empty for every
+      corpus, performance, and local-extension project, with fonts, definitions, and
+      media present.
+    - A feature the engine cannot draw at beta shows a named, visible failure; it never
+      falls back to the legacy engine.
+    - Flag off keeps today's engine. The `requiresEngine` refusal and the
+      on → off → on round trip stay.
+22. **Existing projects are unchanged.** Any visible difference on an existing project is
+    a blocker, not a DECISION.
+    - Appendix A fixes apply only to new layers or `compat` level 2.
+    - Tolerances in section 25 measure invisibility and are not permission for a
+      visible change. Each documented drift or allowed difference on level 1 content
+      (composite appendix A, text small sizes and synthesized bold, masked 3D layers)
+      is resolved to match today or escalated to Jude with a side-by-side comparison.
+23. **Deprecated compatibility APIs.** Every compatibility API keeps working fully at
+    apiVersion 1 to 3. This covers the `render.gl.context` compatibility context;
+    synchronous `render.snapshot`, `renderFrameTo`, and `raster` pixels; the
+    `services` `raster` override; the `assets.get` live fields (`el`, `url`,
+    `audioBlob`, `object3d`); and any other legacy-shaped member.
+    - Each one is marked `@deprecated` in the typings and the API pack and in
+      `EXTENSIONS.md`, naming its replacement. `EXTENSIONS.md` carries the table of
+      deprecated members and their replacements.
+    - Agent guidance (extension-authoring docs, harness instructions, MCP tool
+      descriptions) says never to use them in new code.
+    - When an agent reads, compiles, validates, or publishes an extension that uses one,
+      the tools return a structured warning naming the file, line, and replacement.
+      This applies to every provider, `publish_extensions`, and Store prepare. The
+      agent suggests the migration to the user and makes it when they agree.
+    - Nothing rewrites working code silently, blocks the edit, or requires an apiVersion
+      bump.
+24. **Customizations are part of the product.** Users customize the app through new
+    extensions, overrides by id, and forks of built-ins. Forks are frozen copies of the
+    built-in's code at fork time.
+    - Phase 3c gates a fork of every built-in at today's shipped version, and the oldest
+      fork shape still loadable, working unchanged on the new engine without a rebase.
+    - It also gates an override by id of each built-in contribution, and a synthesized
+      extension per API member at apiVersion 1, 2, and 3 in every trust context it is
+      allowed in.
+    - `api.extensions.rebase` must three-way merge a modified fork onto each
+      engine-rewritten built-in, migrating deprecated calls while keeping the user's
+      changes.
+    - Every built-in the engine changes bumps its version, so fork update notices fire.
+    - The runtime auto-disable policy must not hide compatibility regressions.
+
 ### Phase 1: Evaluation and the write path
 
 `pm-time`, `pm-model` (`v1_ingest`, reconciliation, identity registry), `pm-eval`,
