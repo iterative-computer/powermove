@@ -68,6 +68,9 @@ export type PresentedFrame = {
   /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
    *  when the viewer asked for it and its pool arrived. */
   depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  /** The frame's size in pixels (the canvas takes it when the frame lands). */
+  width?: number;
+  height?: number;
 };
 
 export type PresenterOptions = {
@@ -468,6 +471,7 @@ export class EnginePresenter implements Presenter {
       throw error;
     }
     const submitMs = this.now();
+    const width = frame.codedWidth, height = frame.codedHeight;
     frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
@@ -488,7 +492,9 @@ export class EnginePresenter implements Presenter {
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
       displayUs,
-      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null
+      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null,
+      width,
+      height
     };
     for (const listener of this.listeners) listener(presented);
   }

@@ -293,6 +293,40 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
   });
 
+  it('a worker’s first frame counts once the canvas took its size (the frame reached the page)', async () => {
+    const service = new Service();
+    service.revealFrames = 2;
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const canvases = offscreenCanvases(window as unknown as Window);
+    const painter = new Painter();
+    const worker = inProcessWorker(painter);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter(), createWorker: () => worker });
+    await settleLong();
+    expect(canvases.transferred).toEqual([presentation.canvas]);
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const presented: number[] = [];
+    presentation.onPresented((frame) => presented.push(frame.seq));
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    expect(painter.draws).toBe(1);
+    // Two animation frames pass, but the canvas has not taken the frame's size.
+    runFrames(rafs, 100);
+    runFrames(rafs, 116);
+    runFrames(rafs, 133);
+    expect(presented).toEqual([]);
+    expect(presentation.presenting).toBe(false);
+    // The frame lands (the canvas takes its size): it counts at the next one.
+    Object.defineProperty(presentation.canvas, 'width', { configurable: true, value: 1280 });
+    Object.defineProperty(presentation.canvas, 'height', { configurable: true, value: 720 });
+    runFrames(rafs, 150);
+    expect(presented).toEqual([1]);
+    expect(presentation.presenting).toBe(true);
+    presentation.dispose();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
   it('re-sends the current view with the vsync hint (same viewSeq) and keeps the hint on later states', async () => {
     const service = new Service();
     Object.assign(service, { hostOffsetUs: () => 2_000_000, displayHz: () => 120 });

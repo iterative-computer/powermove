@@ -121,7 +121,7 @@ describe('EnginePresenter', () => {
     await flush();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presented).toEqual([
-      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null, depthId: null }
+      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null, depthId: null, width: 640, height: 360 }
     ]);
   });
 

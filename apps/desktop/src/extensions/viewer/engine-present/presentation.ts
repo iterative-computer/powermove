@@ -102,11 +102,15 @@ export interface EngineViewerService {
    *  kernel emits `frame:rendered` and `overlay` from it). */
   presented?(frame: PresentedFrame, quality: number): void;
   /** Animation frames a canvas that was hidden waits after its first frame
-   *  before that frame counts as on screen (default 2: the drawing's canvas
-   *  and the page commit separately, so a frame just submitted is not shown
-   *  yet). Tests that run frames by hand set 0. */
+   *  before that frame counts as on screen, and for a worker's frame until
+   *  the canvas took its size (default 2: the drawing's canvas and the page
+   *  commit separately, so a frame just submitted is not shown yet). 0
+   *  counts it at once (tests that run frames by hand). */
   readonly revealFrames?: number;
 }
+
+/** Longest a newly shown canvas waits for its first frame to land (animation frames). */
+export const MAX_REVEAL_FRAMES = 30;
 
 /** Dispatched (bubbling) by a viewer's own presentation on its stage. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
@@ -332,12 +336,24 @@ export class ViewerPresentation {
       this.revealing = null;
       if (frame && this.canvasElement.style.visibility === 'visible') this.show(frame);
     };
-    const wait = (left: number): void => {
-      if (left <= 0) return done();
-      if (view?.requestAnimationFrame) view.requestAnimationFrame(() => wait(left - 1));
-      else setTimeout(() => wait(left - 1), 16);
+    // The canvas element takes the size of a frame from a presentation
+    // worker only when that frame reached the page's compositor: until
+    // then it still shows nothing. Wait for that too (at most `MAX_REVEAL_FRAMES`).
+    const landed = (): boolean => {
+      const frame = this.revealing;
+      if (!frame?.width || !frame.height || !this.worker) return true;
+      return this.canvasElement.width === frame.width && this.canvasElement.height === frame.height;
     };
-    wait(Math.max(0, Math.floor(this.options.service.revealFrames ?? 2)));
+    const least = Math.max(0, Math.floor(this.options.service.revealFrames ?? 2));
+    // 0: frames run by hand (tests): a shown frame counts at once.
+    if (least === 0) return done();
+    const wait = (count: number): void => {
+      if (token !== this.revealToken) return;
+      if ((count >= least && landed()) || count >= MAX_REVEAL_FRAMES) return done();
+      if (view?.requestAnimationFrame) view.requestAnimationFrame(() => wait(count + 1));
+      else setTimeout(() => wait(count + 1), 16);
+    };
+    wait(0);
   }
 
   /** A frame is on screen: the newest frame, listeners, and the service. */
