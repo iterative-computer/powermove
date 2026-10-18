@@ -122,6 +122,7 @@ pub struct SourceCache {
     evicted: AtomicU64,
     stop: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    decode_delay_us: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -146,6 +147,7 @@ impl SourceCache {
             evicted: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             workers: Mutex::default(),
+            decode_delay_us: AtomicU64::new(0),
         });
         let mut handles = lock(&cache.workers);
         for i in 0..workers {
@@ -174,6 +176,16 @@ impl SourceCache {
     /// decodes on its render thread).
     pub fn has_workers(&self) -> bool {
         !lock(&self.workers).is_empty()
+    }
+
+    /// Injects decoder latency for loaded-machine diagnostics. Applies to
+    /// cache misses only, on both the calling thread and decode workers.
+    #[doc(hidden)]
+    pub fn set_decode_delay(&self, delay: std::time::Duration) {
+        self.decode_delay_us.store(
+            delay.as_micros().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -226,7 +238,11 @@ impl SourceCache {
         }
     }
 
-    fn decode(source: &Source, index: u64) -> Result<Block> {
+    fn decode(&self, source: &Source, index: u64) -> Result<Block> {
+        let delay = self.decode_delay_us.load(Ordering::Relaxed);
+        if delay != 0 {
+            std::thread::sleep(std::time::Duration::from_micros(delay));
+        }
         let mut decoder = lock(&source.decoder);
         let start = index * BLOCK as u64;
         decoder.seek_anchored(start)?;
@@ -295,7 +311,7 @@ impl SourceCache {
             self.misses.fetch_add(1, Ordering::Relaxed);
             blocks.in_flight.insert(key);
             drop(blocks);
-            let decoded = Self::decode(source, index);
+            let decoded = self.decode(source, index);
             let mut b = lock(&self.blocks);
             b.in_flight.remove(&key);
             let out = match decoded {
@@ -446,7 +462,7 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
             continue;
         };
         let key = (source.id, index);
-        let decoded = SourceCache::decode(&source, index);
+        let decoded = c.decode(&source, index);
         let mut blocks = lock(&c.blocks);
         blocks.in_flight.remove(&key);
         match decoded {

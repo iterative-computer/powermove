@@ -6,7 +6,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use common::*;
@@ -20,12 +21,62 @@ const SR: u32 = 48_000;
 const BUFFER: usize = 512;
 const LATENCY_US: u32 = 7_000;
 
+struct CpuContention {
+    stop: Arc<AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl CpuContention {
+    fn start() -> Arc<Self> {
+        // At most two contention threads across all four concurrent tests.
+        static LOAD: Mutex<Weak<CpuContention>> = Mutex::new(Weak::new());
+        let mut shared = LOAD.lock().unwrap();
+        if let Some(load) = shared.upgrade() {
+            return load;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let threads = (0..2)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut value = 1u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        for _ in 0..4096 {
+                            value = std::hint::black_box(
+                                value.wrapping_mul(6364136223846793005).wrapping_add(1),
+                            );
+                        }
+                        std::thread::yield_now();
+                    }
+                })
+            })
+            .collect();
+        let load = Arc::new(Self { stop, threads });
+        *shared = Arc::downgrade(&load);
+        load
+    }
+}
+
+impl Drop for CpuContention {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn stress_enabled() -> bool {
+    std::env::var_os("PM_AUDIO_PLAYBACK_STRESS").is_some()
+}
+
 fn ticks(s: f64) -> Ticks {
     Ticks::new((s * TICKS_PER_SECOND as f64).round() as i64).unwrap()
 }
 
 /// A device whose sample clock runs `ppm` fast against the host clock.
 struct SimDevice {
+    _load: Option<Arc<CpuContention>>,
     side: DeviceSide,
     rate: u32,
     channels: usize,
@@ -40,6 +91,7 @@ struct SimDevice {
 impl SimDevice {
     fn new(side: DeviceSide, rate: u32, channels: usize, ppm: f64) -> SimDevice {
         SimDevice {
+            _load: stress_enabled().then(CpuContention::start),
             side,
             rate,
             channels,
@@ -105,6 +157,9 @@ fn setup_doc(
 ) -> (Playback, SimDevice, Rig) {
     let mut rig = Rig::new(media);
     rig.cache = SourceCache::new(64 << 20, 2);
+    if stress_enabled() {
+        rig.cache.set_decode_delay(Duration::from_millis(8));
+    }
     let cache: Arc<SourceCache> = rig.cache.clone();
     let (playback, side) = Playback::start_headless(
         MixFormat::stereo(SR),
@@ -606,7 +661,51 @@ fn a_live_edit_glides() {
 /// render, no dropout). The source is AAC, so decoding takes real time.
 #[test]
 fn time_mapped_clips_play_as_rendered_offline() {
-    let dir = temp_dir("time-mapped");
+    time_mapped_playback(false);
+}
+
+#[test]
+fn time_mapped_clips_play_as_rendered_offline_under_load() {
+    time_mapped_playback(true);
+}
+
+/// A one-chunk ring underrun explains the reported 79,744/80,000
+/// difference even when the decoder never misses. Keep this distinction
+/// explicit: the callback reports a ring underrun, not a source starvation.
+#[test]
+fn a_partial_callback_underrun_is_reported_and_recovers_in_order() {
+    use pm_audio::ring::{CHUNK, Consumer, Ring, Tag};
+    let ring = Ring::new(400, 1);
+    let mut consumer = Consumer::new(ring.clone());
+    let reference: Vec<f32> = (1..=80_128).map(|n| n as f32).collect();
+    let tag = Tag {
+        frames: CHUNK as u32,
+        ..Tag::default()
+    };
+    assert!(ring.push(tag, &reference[..CHUNK]));
+    let mut heard = vec![0.0; 80_000];
+    consumer.fill(&mut heard[..BUFFER], 1);
+    for chunk in reference[CHUNK..].chunks_exact(CHUNK) {
+        assert!(ring.push(tag, chunk));
+    }
+    consumer.fill(&mut heard[BUFFER..], 1);
+    assert_eq!(ring.underruns(), 1);
+    assert_eq!(&heard[..CHUNK], &reference[..CHUNK]);
+    assert!(heard[CHUNK..BUFFER].iter().all(|&s| s == 0.0));
+    assert_eq!(&heard[BUFFER..], &reference[CHUNK..80_000 - CHUNK]);
+    assert_eq!(
+        heard.iter().zip(&reference).filter(|(a, b)| a != b).count(),
+        79_744
+    );
+}
+
+fn time_mapped_playback(loaded: bool) {
+    let _load = loaded.then(CpuContention::start);
+    let dir = temp_dir(if loaded {
+        "time-mapped-loaded"
+    } else {
+        "time-mapped"
+    });
     let file = dir.join("tone.m4a");
     generate(
         &file,
@@ -643,6 +742,9 @@ fn time_mapped_clips_play_as_rendered_offline() {
     for (name, layer, at) in cases {
         let doc = || project(30.0, 12.0, std::slice::from_ref(&layer), &[], "");
         let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+        if loaded {
+            rig.cache.set_decode_delay(Duration::from_millis(8));
+        }
         playback
             .command(TransportCommand::Seek {
                 time: ticks(at),
@@ -673,6 +775,12 @@ fn time_mapped_clips_play_as_rendered_offline() {
         let lead = offline[0].iter().position(|v| *v != 0.0).unwrap();
         assert!(start >= lead && played.len() >= start - lead + n, "{name}");
         let played = &played[start - lead..start - lead + n];
+        let right: Vec<f32> = dev
+            .log
+            .iter()
+            .flat_map(|(_, b)| b.iter().skip(1).step_by(2).copied())
+            .collect();
+        let right = &right[start - lead..start - lead + n];
         let differ = played
             .iter()
             .zip(&offline[0])
@@ -686,11 +794,17 @@ fn time_mapped_clips_play_as_rendered_offline() {
             "{name}: {} starved renders, {differ} of {n} samples differ from the offline render (worst {worst})",
             stats.starved_renders
         );
+        eprintln!(
+            "{name}: stats {stats:?}, first difference {:?}",
+            played.iter().zip(&offline[0]).position(|(a, b)| a != b)
+        );
         assert_eq!(stats.starved_renders, 0, "{name}: starved renders");
+        assert_eq!(stats.underruns, 0, "{name}: device ring underruns");
         assert_eq!(
             differ, 0,
             "{name}: played audio differs from the offline render"
         );
+        assert_eq!(right, &offline[1], "{name}: right channel differs");
     }
 }
 
@@ -1359,4 +1473,90 @@ fn a_rate_change_continues_from_what_is_heard() {
         (first_s - heard_now).abs() < 0.03,
         "{first_s} vs {heard_now}"
     );
+}
+
+/// A source miss must not enter any stateful DSP stage. Compare a cold,
+/// delayed run with a fully decoded run, including the master 2x stretch,
+/// reverse's free-position reader, and the device-rate converter.
+#[test]
+fn starved_playback_recovers_without_poisoning_dsp() {
+    let _load = CpuContention::start();
+    let dir = temp_dir("playback-starve");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        44_100,
+        &[tone(44_100, 8.0, 997.0, 0.2), tone(44_100, 8.0, 631.0, 0.1)],
+    );
+    for (rate, device_rate) in [(1, SR), (2, 44_100), (-2, 44_100)] {
+        let rig = Rig::new(&[("s", &file)]);
+        // Cold source per case, with background workers as in production.
+        let cache = SourceCache::new(64 << 20, 2);
+        cache.set_decode_delay(Duration::from_millis(20));
+        let clip = audio("A", "s", 0.0, 4.0, r#", "speed":1.5"#, "");
+        let mut captures = Vec::new();
+        for cold in [true, false] {
+            let (playback, side) = Playback::start_headless(
+                MixFormat::stereo(SR),
+                cache.clone(),
+                PlaybackConfig {
+                    preroll_ms: 0,
+                    preroll_wait_ms: 0,
+                    ..PlaybackConfig::default()
+                },
+                device_rate,
+                2,
+                LATENCY_US,
+            )
+            .unwrap();
+            let resolver = |id: &str| rig.media.get(id).cloned();
+            let problems = playback
+                .set_project(
+                    Arc::new(project(30.0, 4.0, std::slice::from_ref(&clip), &[], "")),
+                    "C",
+                    &resolver,
+                )
+                .unwrap();
+            assert!(problems.is_empty());
+            playback
+                .command(TransportCommand::Seek {
+                    time: ticks(2.0),
+                    mode: SeekMode::Exact,
+                })
+                .unwrap();
+            playback
+                .command(TransportCommand::Play {
+                    rate: PlaybackRate { num: rate, den: 1 },
+                })
+                .unwrap();
+            let mut dev = SimDevice::new(side, device_rate, 2, 0.0);
+            dev.run(90);
+            let stats = playback.stats();
+            drop(playback);
+            let samples: Vec<f32> = dev
+                .log
+                .iter()
+                .flat_map(|(_, b)| b.iter().copied())
+                .collect();
+            let first = samples
+                .chunks_exact(2)
+                .position(|s| s.iter().any(|&v| v != 0.0))
+                .unwrap()
+                * 2;
+            captures.push(samples[first..first + 48_000].to_vec());
+            if cold {
+                assert!(
+                    stats.starved_renders > 0,
+                    "{rate}x/{device_rate}: forced miss must be counted"
+                );
+            } else {
+                assert_eq!(stats.starved_renders, 0, "{rate}x/{device_rate}: warm run");
+            }
+        }
+        assert_eq!(
+            captures[0], captures[1],
+            "{rate}x/{device_rate}: delayed decode changes decoded audio"
+        );
+        cache.shutdown();
+    }
 }
