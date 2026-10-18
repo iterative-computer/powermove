@@ -15,6 +15,19 @@ fn main() {
     let mut results = Vec::new();
     for row in rows {
         let name = row["name"].as_str().unwrap();
+        if row["reachable"] != true
+            && PathBuf::from(row["file"].as_str().unwrap())
+                .extension()
+                .is_some_and(|e| e == "tiff" || e == "tif")
+        {
+            let decoded = image::compat::read_tiff_source(
+                &PathBuf::from(row["file"].as_str().unwrap()),
+                &pool,
+            );
+            let error = decoded.as_ref().err().map(ToString::to_string);
+            results.push(json!({"case":name,"pass":false,"status":"app rejects import; no pixel reference", "native_rejects":error.is_some(),"native_error":error}));
+            continue;
+        }
         if row["reachable"] != true || row["error"] != 0 {
             results.push(
                 json!({"case":name,"app":row,"pass":false,"status":"no usable app-upload bitmap"}),
@@ -23,7 +36,12 @@ fn main() {
         }
         let path = PathBuf::from(row["file"].as_str().unwrap());
         let attempt = (|| -> pm_media::Result<_> {
-            let original = image::read(&path, &pool).or_else(|error| {
+            let original = if path.extension().is_some_and(|e| e == "tiff" || e == "tif") {
+                image::compat::read_tiff_source(&path, &pool)
+            } else {
+                image::read(&path, &pool)
+            }
+            .or_else(|error| {
                 if path.extension().is_some_and(|e| e == "avif") {
                     image::avif_compat::read_bitmap(&path, &pool)
                 } else {
