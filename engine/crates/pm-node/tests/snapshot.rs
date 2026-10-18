@@ -132,6 +132,11 @@ fn blender_compositions_are_captured_as_today() {
 }
 
 #[test]
+fn raster_override_layers_wait_for_the_producer_s_answer() {
+    run_child("child_compat");
+}
+
+#[test]
 fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
@@ -1558,4 +1563,154 @@ fn child_host_session() {
         Err(ErrorCode::UnknownSession)
     );
     println!("CHILD-OK host session");
+}
+
+fn shape_project(x: f64) -> Value {
+    let mut doc = project(x);
+    doc["layers"][0]["type"] = json!("shape");
+    doc["layers"][0]["d"] =
+        json!({ "shape": "rect", "w": 40, "h": 20, "color": "#E8E2CF", "stroke": 0 });
+    doc
+}
+
+#[test]
+#[ignore = "run by raster_override_layers_wait_for_the_producer_s_answer"]
+fn child_compat() {
+    use pm_protocol::snapshot::{
+        CompatFormat, CompatKey, CompatMessage, CompatNative, CompatPixels, CompatSource,
+    };
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    let small = Size::new(320, 180);
+    c.resync(2, 1, &shape_project(60.0));
+    let ask = |c: &mut Child, id: u64, revision: u64| {
+        c.snapshot(
+            id,
+            frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+            Some(revision),
+            WINDOW,
+            session,
+        );
+        c.inbox.wait(Duration::from_secs(20), answer(id))
+    };
+    // No producer: the engine draws the shape without asking.
+    let native = pixels_of(&rendered(ask(&mut c, 40, 1)));
+    assert_eq!(at(&native, 320, 60, 60), BOX);
+    // A raster override registered: the frame names the layer it needs.
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: vec![CompatSource::RasterOverride],
+    }));
+    let need = match ask(&mut c, 41, 1) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            revision,
+            fallback,
+            compat,
+        }) => {
+            assert_eq!(revision.get(), 1);
+            assert!(fallback.is_empty());
+            assert_eq!(compat.len(), 1, "{compat:?}");
+            compat[0].clone()
+        }
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!(
+        (
+            need.composition.as_str(),
+            need.layer.as_str(),
+            need.time,
+            need.source
+        ),
+        (
+            "Psnap-root",
+            "box",
+            Ticks::ZERO,
+            CompatSource::RasterOverride
+        )
+    );
+    assert!((need.scale - 1.0).abs() < 1e-12, "{}", need.scale);
+    // Passed through: drawn exactly as without a producer.
+    c.event(Event::Compat(CompatMessage::Native(CompatNative {
+        composition: need.composition.clone(),
+        layer: need.layer.clone(),
+        time: need.time,
+        source: need.source,
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+    })));
+    assert_eq!(pixels_of(&rendered(ask(&mut c, 42, 1))), native);
+    // An edit invalidates the answer: the next frame asks again. The
+    // producer's raster (red, on a 40 × 20 quad anchored at its center)
+    // replaces the layer where it moved.
+    c.resync(3, 2, &shape_project(200.0));
+    let need = match ask(&mut c, 43, 2) {
+        Ok(SnapshotOutcome::NeedsRenderer { compat, .. }) => compat[0].clone(),
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    let id = CompatKey {
+        composition: need.composition.clone(),
+        layer: need.layer.clone(),
+        time: need.time,
+        source: need.source,
+        key: "typewriter-3:box:2".into(),
+    };
+    // Asked again before the pixels land (the ports race): the job waits.
+    c.snapshot(
+        44,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(2),
+        WINDOW,
+        session,
+    );
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(44))
+            .is_none(),
+        "answered before the raster arrived"
+    );
+    c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
+        id: id.clone(),
+        revision: Revision::new(2).unwrap(),
+        width: 4,
+        height: 2,
+        format: CompatFormat::Rgba8Premultiplied,
+        origin: [20.0, 10.0],
+        scale: need.scale,
+        row: 0,
+        rows: 2,
+        data: Bytes([255u8, 0, 0, 255].repeat(8)),
+        size: Some([40.0, 20.0]),
+        uv: None,
+    })));
+    let red = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(44))));
+    assert_eq!(at(&red, 320, 200, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&red, 320, 60, 60), BACKGROUND);
+    // The quad is the raster's own: 40 × 20 around (200, 60).
+    assert_eq!(at(&red, 320, 181, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&red, 320, 178, 60), BACKGROUND);
+    // Another edit, the same raster (the producer's key did not change).
+    c.resync(4, 3, &{
+        let mut doc = shape_project(200.0);
+        doc["layers"][0]["name"] = json!("renamed");
+        doc
+    });
+    match ask(&mut c, 45, 3) {
+        Ok(SnapshotOutcome::NeedsRenderer { .. }) => {}
+        other => panic!("expected needsRenderer, got {other:?}"),
+    }
+    c.event(Event::Compat(CompatMessage::Reuse {
+        id,
+        scale: need.scale,
+        revision: Revision::new(3).unwrap(),
+    }));
+    assert_eq!(pixels_of(&rendered(ask(&mut c, 46, 3))), red);
+    // The override disposed: nothing is asked and the shape is the engine's.
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: Vec::new(),
+    }));
+    let after = pixels_of(&rendered(ask(&mut c, 47, 3)));
+    assert_eq!(at(&after, 320, 200, 60), BOX);
+    println!("CHILD-OK");
 }
