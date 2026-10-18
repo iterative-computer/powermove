@@ -528,6 +528,9 @@ impl Control {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             status.underruns = stats.underruns;
             status.starved_renders = stats.starved_renders;
+            status.problems.extend(playback.take_errors());
+            let excess = status.problems.len().saturating_sub(16);
+            status.problems.drain(..excess);
         }
     }
 }

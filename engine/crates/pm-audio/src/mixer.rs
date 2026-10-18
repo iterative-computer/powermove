@@ -100,6 +100,9 @@ pub struct RenderOptions {
     /// Decode missing source blocks on this thread (export, offline). When
     /// false (playback), missing blocks are queued and play as silence.
     pub wait: bool,
+    /// Commit missing playback input as silence instead of retrying it.
+    /// Offline renders leave this false and wait for all input.
+    pub drop_starved: bool,
     /// Strips heard (the mixer's monitor solo; never part of an export).
     /// `None` or empty: every strip.
     pub monitor_solo: Option<HashSet<String>>,
@@ -118,6 +121,10 @@ pub struct RenderReport {
     pub voices: usize,
     /// Voices that had source blocks missing (playback only).
     pub starved: usize,
+    /// IDs of voices missing input, including outgoing retune voices.
+    pub starved_voices: Vec<String>,
+    /// Project output frames silenced for missing input, summed over voices.
+    pub dropped_voice_frames: u64,
     /// Errors decoding or evaluating, one per voice.
     pub errors: Vec<(String, String)>,
 }
@@ -191,6 +198,8 @@ pub struct Mixer {
     /// Source samples per output sample, per sample (free reads).
     steps: Vec<f64>,
     src: Vec<Vec<f32>>,
+    src_valid: Vec<bool>,
+    voice_dropped_frames: u64,
     voice_out: Vec<Vec<f32>>,
     strips: Vec<Vec<Vec<f32>>>,
     kernel: Vec<f32>,
@@ -234,6 +243,8 @@ impl Mixer {
             positions: vec![],
             steps: vec![],
             src: vec![],
+            src_valid: vec![],
+            voice_dropped_frames: 0,
             voice_out: vec![],
             strips: vec![],
             kernel: vec![],
@@ -431,7 +442,7 @@ impl Mixer {
         }
         // A starved render is retried (playback) or not heard as rendered:
         // the meters take only complete renders, once each.
-        if options.meters && report.starved == 0 {
+        if options.meters && (report.starved == 0 || options.drop_starved) {
             for (tap, strip) in self.taps.iter_mut().zip(&self.strips) {
                 tap.push(strip, frames);
             }
@@ -466,6 +477,8 @@ impl Mixer {
             match self.render_current(start, frames, target, options, solo.as_ref()) {
                 Ok(outgoing_report) => {
                     report.starved += outgoing_report.starved;
+                    report.starved_voices.extend(outgoing_report.starved_voices);
+                    report.dropped_voice_frames += outgoing_report.dropped_voice_frames;
                     report.errors.extend(outgoing_report.errors);
                 }
                 Err(e) => {
@@ -493,7 +506,7 @@ impl Mixer {
         for g in &mut outgoing {
             // Playback retries a segment whose source was missing. Its
             // retune envelope must stay at the same rendered position.
-            if report.starved == 0 {
+            if report.starved == 0 || options.drop_starved {
                 g.done += frames;
             }
         }
@@ -547,10 +560,15 @@ impl Mixer {
         let comps = graph.resolve(&doc)?;
         let open = comps[0].clone();
         for (vi, plan) in graph.voices.iter().enumerate() {
+            self.voice_dropped_frames = 0;
             match self.render_voice(vi, plan, &comps, &open, start, frames, options) {
                 Ok(Some(starved)) => {
                     report.voices += 1;
                     report.starved += starved as usize;
+                    if starved {
+                        report.starved_voices.push(plan.id.clone());
+                        report.dropped_voice_frames += self.voice_dropped_frames;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => report.errors.push((plan.id.clone(), e.to_string())),
@@ -714,9 +732,21 @@ impl Mixer {
                 }
                 let mut views: Vec<&mut [f32]> =
                     self.voice_out.iter_mut().map(|c| &mut c[..n]).collect();
-                complete &= self
-                    .cache
-                    .read(&source, a - shift, n, &mut views, options.wait)?;
+                self.src_valid.resize(n, true);
+                complete &= self.cache.read_valid(
+                    &source,
+                    a - shift,
+                    n,
+                    &mut views,
+                    options.wait,
+                    options
+                        .drop_starved
+                        .then_some(self.src_valid.as_mut_slice()),
+                )?;
+                if options.drop_starved {
+                    self.voice_dropped_frames +=
+                        self.src_valid.iter().filter(|&&v| !v).count() as u64;
+                }
             }
             Reader::Grid {
                 bank,
@@ -735,15 +765,33 @@ impl Mixer {
                 }
                 let mut views: Vec<&mut [f32]> =
                     self.src.iter_mut().map(|c| &mut c[..span]).collect();
-                complete &= self
-                    .cache
-                    .read(&source, lo, span, &mut views, options.wait)?;
+                self.src_valid.resize(span, true);
+                complete &= self.cache.read_valid(
+                    &source,
+                    lo,
+                    span,
+                    &mut views,
+                    options.wait,
+                    options
+                        .drop_starved
+                        .then_some(self.src_valid.as_mut_slice()),
+                )?;
                 for i in 0..n {
                     if self.gains[i] == 0.0 {
                         continue;
                     }
                     let u = unit(a + i as i64);
                     let (si, ph) = (u.div_euclid(*phases) as i64, u.rem_euclid(*phases) as usize);
+                    if !complete
+                        && options.drop_starved
+                        && !self.src_valid[(si - bank.before() as i64 - lo) as usize
+                            ..(si - bank.before() as i64 - lo) as usize + bank.taps]
+                            .iter()
+                            .all(|&v| v)
+                    {
+                        self.voice_dropped_frames += 1;
+                        continue;
+                    }
                     for c in 0..sc {
                         self.voice_out[c][i] = bank.grid(&self.src[c], lo, si, ph);
                     }
@@ -778,9 +826,17 @@ impl Mixer {
                     }
                     let mut views: Vec<&mut [f32]> =
                         self.src.iter_mut().map(|c| &mut c[..span]).collect();
-                    complete &= self
-                        .cache
-                        .read(&source, lo, span, &mut views, options.wait)?;
+                    self.src_valid.resize(span, true);
+                    complete &= self.cache.read_valid(
+                        &source,
+                        lo,
+                        span,
+                        &mut views,
+                        options.wait,
+                        options
+                            .drop_starved
+                            .then_some(self.src_valid.as_mut_slice()),
+                    )?;
                     self.kernel.resize(bank.taps, 0.0);
                     for (j, &pos) in seg.iter().enumerate() {
                         if self.gains[i + j] == 0.0 {
@@ -788,7 +844,18 @@ impl Mixer {
                         }
                         let fl = pos.floor();
                         bank.free_kernel(pos - fl, &mut self.kernel);
-                        let at = (fl as i64 - bank.before() as i64 - lo) as usize;
+                        let first = fl as i64 - bank.before() as i64;
+                        if !complete
+                            && options.drop_starved
+                            && !self.src_valid
+                                [(first - lo) as usize..(first - lo) as usize + bank.taps]
+                                .iter()
+                                .all(|&v| v)
+                        {
+                            self.voice_dropped_frames += 1;
+                            continue;
+                        }
+                        let at = (first - lo) as usize;
                         for c in 0..sc {
                             self.voice_out[c][i + j] =
                                 kernel::dot(&self.src[c][at..at + bank.taps], &self.kernel);
@@ -867,6 +934,12 @@ impl Mixer {
         let complete = run.render(a, n, &mut map, &mut read, &mut self.voice_out);
         self.src = src;
         let complete = complete?;
+        if !complete && options.drop_starved {
+            self.voice_dropped_frames += n as u64;
+            // The next segment is a new request, not a catch-up through an
+            // arbitrarily long missing span. Never feed missing PCM to DSP.
+            run.abandon_retry();
+        }
         drop(run);
         let voice = &self.voices[vi];
         let strip = &mut self.strips[voice.strip];

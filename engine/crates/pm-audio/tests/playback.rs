@@ -1717,34 +1717,79 @@ fn a_seek_after_a_starve_plays_as_rendered_offline() {
     );
 }
 
-/// Playback waits for a missing source block instead of playing wrong
-/// samples. A wait that goes on is surfaced as an error, counted as one
-/// starve however often it is retried, and playback resumes once the
-/// block decodes.
+/// A callback-driven, deterministic stuck decoder probe. Below the bound
+/// the first segment is held exactly; beyond it, only the missing voice is
+/// silent. No wall-time decode delay or simulated-device patience hides it.
 #[test]
 fn a_long_decode_stall_is_reported_and_recovers() {
-    let dir = temp_dir("playback-stall");
-    let file = dir.join("tone.wav");
-    write_wav(&file, SR, &[tone(SR, 4.0, 997.0, 0.2)]);
-    let rig = Rig::new(&[("s", &file)]);
-    let cache = SourceCache::new(64 << 20, 2);
-    cache.set_decode_delay(Duration::from_millis(1_500));
-    let clip = audio("A", "s", 0.0, 4.0, "", "");
-    let (playback, side) = Playback::start_headless(
-        MixFormat::stereo(SR),
+    bounded_decode_wait(true, 48_000, 2);
+    bounded_decode_wait(true, 44_100, 0);
+}
+
+#[test]
+fn a_decode_wait_below_the_bound_is_bit_exact() {
+    bounded_decode_wait(false, 48_000, 2);
+    bounded_decode_wait(false, 44_100, 0);
+}
+
+fn until(mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker/render did not progress"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir(&format!("bounded-{exceed}-{device_rate}"));
+    let good_file = dir.join("good.wav");
+    let late_file = dir.join("late.wav");
+    // Project == device isolates dropped input from the master converter;
+    // existing starvation tests exercise bit equality through conversion/2x.
+    let n = device_rate as usize;
+    let good: Vec<f32> = (0..n).map(|i| 0.1 + (i % 997) as f32 / 10_000.0).collect();
+    let late: Vec<f32> = (0..n).map(|i| 0.2 + (i % 991) as f32 / 10_000.0).collect();
+    write_wav(&good_file, device_rate, &[good.clone(), vec![0.0; n]]);
+    write_wav(&late_file, device_rate, &[vec![0.0; n], late.clone()]);
+    let cache = SourceCache::new(64 << 20, workers);
+    let good_source = cache.open(&good_file, None).unwrap();
+    cache.block(&good_source, 0, true).unwrap();
+    let late_source = cache.open(&late_file, None).unwrap();
+    cache.set_decode_blocked(&late_source, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(device_rate),
         cache.clone(),
         PlaybackConfig {
             preroll_ms: 0,
             preroll_wait_ms: 0,
             ..PlaybackConfig::default()
         },
-        SR,
+        device_rate,
         2,
         LATENCY_US,
     )
     .unwrap();
-    let resolver = |id: &str| rig.media.get(id).cloned();
-    let doc = project(30.0, 4.0, std::slice::from_ref(&clip), &[], "");
+    let doc = project(
+        30.0,
+        1.0,
+        &[
+            audio("good", "g", 0.0, 1.0, "", ""),
+            audio("late", "s", 0.0, 1.0, "", ""),
+        ],
+        &[],
+        "",
+    );
+    let resolver = |id: &str| {
+        Some(if id == "g" {
+            good_file.clone()
+        } else {
+            late_file.clone()
+        })
+    };
     assert!(
         playback
             .set_project(Arc::new(doc), "C", &resolver)
@@ -1756,25 +1801,99 @@ fn a_long_decode_stall_is_reported_and_recovers() {
             rate: PlaybackRate::NORMAL,
         })
         .unwrap();
-    let mut dev = SimDevice::new(side, SR, 2, 0.0).patient(Duration::from_secs(5));
-    dev.run(40);
+    until(|| playback.stats().starved_renders > 0 && cache.blocked_decoders() > 0);
+    let bound = device_rate as u64 * pm_audio::playback::SOURCE_WAIT_MS / 1000;
+    let mut held = 0u64;
+    let mut out = vec![0.0; 64 * 2];
+    let host_start = host_now_us();
+    // Stop one callback before the bound: elapsed wall time cannot trigger
+    // a drop. The decoder remains blocked throughout.
+    while held + 64 < bound {
+        side.callback(
+            &mut out,
+            2,
+            host_start + held * 1_000_000 / device_rate as u64,
+        );
+        held += 64;
+        assert!(out.iter().all(|&v| v == 0.0));
+    }
+    std::thread::sleep(Duration::from_millis(130));
+    assert_eq!(playback.stats().dropped_renders, 0);
+    assert_eq!(side.queued_frames(), 0);
+    assert!(playback.take_errors().is_empty());
+    if exceed {
+        while held < bound {
+            side.callback(
+                &mut out,
+                2,
+                host_start + held * 1_000_000 / device_rate as u64,
+            );
+            held += 64;
+        }
+        until(|| side.queued_frames() >= 512);
+        assert!(
+            cache.blocked_decoders() > 0,
+            "playback continues with a stuck worker"
+        );
+        let errors = playback.take_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("120 ms") && errors[0].contains("late"));
+    } else {
+        cache.set_decode_blocked(&late_source, false);
+        until(|| cache.is_ready(&late_source, 0, n));
+        until(|| side.queued_frames() >= 512);
+    }
+    let mut played = Vec::new();
+    let mut frame = 0usize;
+    out.resize(512 * 2, 0.0);
+    for turn in 0..20 {
+        until(|| side.queued_frames() >= 512);
+        let host = host_start + (held + frame as u64) * 1_000_000 / device_rate as u64;
+        side.callback(&mut out, 2, host);
+        played.extend_from_slice(&out);
+        if exceed && turn == 3 {
+            // Consuming multiple buffers while stuck proves the clock and
+            // the good voice do not wait for the decoder again.
+            cache.set_decode_blocked(&late_source, false);
+            until(|| cache.is_ready(&late_source, 0, n));
+        }
+        let clock = playback.clock().unwrap();
+        let actual = clock
+            .media_time_at(HostMicros::new(host + LATENCY_US as u64).unwrap())
+            .get();
+        let expected = frame as i64 * TICKS_PER_SECOND / device_rate as i64;
+        assert!(
+            (actual - expected).abs() <= TICKS_PER_SECOND / 500_000,
+            "device clock: {actual} vs {expected}"
+        );
+        frame += 512;
+    }
+    let mut resumed = !exceed;
+    let mut missing = 0;
+    for (i, pair) in played.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0], good[i], "other voice at {i}");
+        if pair[1] == 0.0 {
+            assert!(!resumed, "no second missing span after re-entry at {i}");
+            missing += 1;
+        } else {
+            resumed = true;
+            assert_eq!(pair[1], late[i], "sample-accurate re-entry at {i}");
+        }
+    }
+    assert!(resumed);
     let stats = playback.stats();
-    let errors = playback.take_errors();
+    if exceed {
+        assert!(missing >= 2_048);
+        assert_eq!(stats.dropped_voice_frames, missing as u64);
+        assert!(stats.dropped_renders > 0);
+    } else {
+        assert_eq!(stats.dropped_renders, 0);
+        assert_eq!(missing, 0);
+    }
+    assert!(
+        playback.take_errors().is_empty(),
+        "reported only once after draining"
+    );
     drop(playback);
     cache.shutdown();
-    assert_eq!(stats.starved_renders, 1, "one stall: {stats:?}");
-    assert!(stats.starve_retries > 0, "{stats:?}");
-    assert!(
-        errors.iter().any(|e| e.contains("waited over 1 s")),
-        "{errors:?}"
-    );
-    let played: Vec<f32> = dev
-        .log
-        .iter()
-        .flat_map(|(_, b)| b.iter().step_by(2).copied())
-        .collect();
-    let first = played.iter().position(|&v| v != 0.0).unwrap();
-    let source = tone(SR, 4.0, 997.0, 0.2);
-    // The tone's first sample is 0: what plays is the source from sample 1.
-    assert_eq!(&played[first..first + 8_000], &source[1..8_001]);
 }

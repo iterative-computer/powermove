@@ -124,6 +124,12 @@ pub struct SourceCache {
     workers: Mutex<Vec<JoinHandle<()>>>,
     #[cfg(feature = "test-hooks")]
     decode_delay_us: AtomicU64,
+    #[cfg(feature = "test-hooks")]
+    decode_gate: Mutex<HashSet<u64>>,
+    #[cfg(feature = "test-hooks")]
+    decode_gate_changed: Condvar,
+    #[cfg(feature = "test-hooks")]
+    gated_decoders: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -150,10 +156,23 @@ impl SourceCache {
             workers: Mutex::default(),
             #[cfg(feature = "test-hooks")]
             decode_delay_us: AtomicU64::new(0),
+            #[cfg(feature = "test-hooks")]
+            decode_gate: Mutex::default(),
+            #[cfg(feature = "test-hooks")]
+            decode_gate_changed: Condvar::new(),
+            #[cfg(feature = "test-hooks")]
+            gated_decoders: AtomicU64::new(0),
         });
-        let mut handles = lock(&cache.workers);
-        for i in 0..workers {
-            let weak = Arc::downgrade(&cache);
+        cache.ensure_workers(workers);
+        cache
+    }
+
+    /// Playback always reads nonblocking, even when its cache was created
+    /// for offline use with no workers. Decoding must never own its thread.
+    pub(crate) fn ensure_workers(self: &Arc<Self>, count: usize) {
+        let mut handles = lock(&self.workers);
+        for i in handles.len()..count {
+            let weak = Arc::downgrade(self);
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("pm-audio-decode-{i}"))
@@ -161,21 +180,24 @@ impl SourceCache {
                     .expect("spawn audio decode worker"),
             );
         }
-        drop(handles);
-        cache
     }
 
     /// Stops the decode workers (they also stop when the cache is dropped).
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.work.notify_all();
+        #[cfg(feature = "test-hooks")]
+        {
+            let _gate = lock(&self.decode_gate);
+            self.decode_gate_changed.notify_all();
+        }
         for h in lock(&self.workers).drain(..) {
             let _ = h.join();
         }
     }
 
-    /// Whether background decode workers run (without them, playback
-    /// decodes on its render thread).
+    /// Whether background decode workers run. Playback starts one if the
+    /// cache was created without any; offline reads may decode inline.
     pub fn has_workers(&self) -> bool {
         !lock(&self.workers).is_empty()
     }
@@ -188,6 +210,24 @@ impl SourceCache {
             delay.as_micros().min(u64::MAX as u128) as u64,
             Ordering::Relaxed,
         );
+    }
+
+    /// Holds a source's decoder until explicitly released (a stuck-worker
+    /// regression hook). Cache hits and other sources are unaffected.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_decode_blocked(&self, source: &Source, blocked: bool) {
+        let mut gate = lock(&self.decode_gate);
+        if blocked {
+            gate.insert(source.id);
+        } else {
+            gate.remove(&source.id);
+        }
+        self.decode_gate_changed.notify_all();
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn blocked_decoders(&self) -> u64 {
+        self.gated_decoders.load(Ordering::Acquire)
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -243,6 +283,18 @@ impl SourceCache {
     fn decode(&self, source: &Source, index: u64) -> Result<Block> {
         #[cfg(feature = "test-hooks")]
         {
+            let mut gate = lock(&self.decode_gate);
+            if gate.contains(&source.id) {
+                self.gated_decoders.fetch_add(1, Ordering::Release);
+                while gate.contains(&source.id) && !self.stop.load(Ordering::SeqCst) {
+                    gate = self
+                        .decode_gate_changed
+                        .wait(gate)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+                self.gated_decoders.fetch_sub(1, Ordering::Release);
+            }
+            drop(gate);
             let delay = self.decode_delay_us.load(Ordering::Relaxed);
             if delay != 0 {
                 std::thread::sleep(std::time::Duration::from_micros(delay));
@@ -388,6 +440,25 @@ impl SourceCache {
         out: &mut [&mut [f32]],
         wait: bool,
     ) -> Result<bool> {
+        self.read_valid(source, start, len, out, wait, None)
+    }
+
+    /// Like `read`, with validity from the blocks actually copied into
+    /// scratch. Rechecking cache readiness afterwards races a decoder's
+    /// arrival (or eviction) and can treat zero-filled scratch as decoded.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_valid(
+        &self,
+        source: &Arc<Source>,
+        start: i64,
+        len: usize,
+        out: &mut [&mut [f32]],
+        wait: bool,
+        mut valid: Option<&mut [bool]>,
+    ) -> Result<bool> {
+        if let Some(valid) = valid.as_deref_mut() {
+            valid[..len].fill(true); // Outside the program is valid silence.
+        }
         for c in out.iter_mut() {
             c[..len].fill(0.0);
         }
@@ -398,6 +469,13 @@ impl SourceCache {
         for index in first..=last {
             let Some(block) = self.block(source, index, wait)? else {
                 complete = false;
+                if let Some(valid) = valid.as_deref_mut() {
+                    let from = start.max((index * BLOCK as u64) as i64);
+                    let to = (start + len as i64)
+                        .min(((index + 1) * BLOCK as u64) as i64)
+                        .min(source.length().unwrap_or(i64::MAX as u64) as i64);
+                    valid[(from - start) as usize..(to - start) as usize].fill(false);
+                }
                 continue;
             };
             let block_start = (index * BLOCK as u64) as i64;
