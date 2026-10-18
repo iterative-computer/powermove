@@ -1083,93 +1083,128 @@ Engine" on; with it off nothing here is installed.
 
 | Item | Code | Tests |
 |---|---|---|
-| Synchronous pixels (`render.snapshot`, `renderFrameTo`; apiVersion 1 to 3) | renderer `engine-connection/render-transport.ts` → preload `snapshotSync` (`sendSync`) → main `engine/snapshots.ts` → host `snapshot` request → `pm-node/src/present/snapshot.rs` and `render.rs` (`run_snapshot`) → pixels inline or through `pm-bridge/src/shm.rs` | `pm-node/tests/snapshot.rs` (child engine), `pm-bridge` `shm` unit tests, `main/engine/snapshots.test.ts`, `render-transport.test.ts`, `e2e/engine-render-transport.spec.ts` |
+| Synchronous pixels (`render.snapshot`, `renderFrameTo`, `raster`; apiVersion 1 to 3) | renderer `engine-connection/render-transport.ts` → preload `snapshotSync` (`sendSync`) → main `engine/snapshots.ts` → host `snapshot` request → `pm-node/src/present/snapshot.rs` and `render.rs` (`run_snapshot`, `run_layer_snapshot`) → pixels inline or through `pm-bridge/src/shm.rs` | `pm-node/tests/snapshot.rs` (child engine), `pm-bridge` `shm` unit tests, `main/engine/snapshots.test.ts`, `render-transport.test.ts`, `e2e/engine-render-transport.spec.ts` |
+| Render fonts (text and captions in the viewer, snapshots, and rasters) | `pm-node/src/fonts/render.rs` (broker, `BrokerResolver`, `EngineFonts`), `lib.rs` (`serve_fonts` in `pump`/`tick`), `present/render.rs` (`Gpu::composer_with`, font failures), `present/document.rs` (routing with fonts) | `fonts::render` unit tests, `pm-node/tests/render_fonts.rs` (main-thread child), e2e text test |
+| Sync snapshots the window's session cannot serve (boot, closed viewer, staged resync in flight) | renderer `windowDocument`, `documentSnapshotSync`; main `engine/window-sessions.ts`; pm-engine host-owned sessions | `window-sessions.test.ts`, `snapshots.test.ts`, `render-transport.test.ts`, `snapshot.rs` `child_host_session`, e2e staged-resync test |
+| Layer rasters of every kind in today's surface shape | `pm-render/src/renderer/layer_raster.rs` (`Renderer::layer_raster`), `SnapshotResult.raster`, renderer `engine-connection/raster-surface.ts`, `kernel/install.ts` (engine base beneath wrappers while a public call runs) | `snapshot.rs` `child_snapshots`, `render_fonts.rs`, `raster-surface.test.ts`, `kernel/install.test.ts`, e2e |
 | Async siblings (`snapshotAsync`, `renderFrameToAsync`, `rasterAsync`) | `kernel/install.ts` `makeRender`; preload `snapshot` (`invoke`) | the same |
-| UI snapshots (composition thumbnails, project thumbnail, the Library's and the agent's captures) | `EngineThumbnails` (idle class, stale-rejecting); `panels/comp-thumbnails.svelte.ts`, `legacy/app.ts` `projectThumb`, `PM.Export.snapshot`/`snapshotAsync` routed in `engine-connection/install.ts` | `snapshot.rs` scheduling child, `render-transport.test.ts`, e2e |
+| UI snapshots and the app's captures (composition thumbnails, project thumbnail, the Library's and the agent's captures) | `EngineThumbnails` (idle class, stale-rejecting); `panels/comp-thumbnails.svelte.ts` (encodes only when unblocked), `legacy/app.ts` `projectThumb`, `PM.EngineCaptures` (`engine-connection/app-captures.ts`) asked by `legacy/core/exporter.ts` | `app-captures.test.ts`, `comp-thumbnails.test.ts`, `snapshot.rs` scheduling child, e2e |
 | Depth and object-id surface per presented frame | `ViewerState.depthId` → `pm-node` `plan_depth`/`configure_depth`, `Composer::compose_with_depth`; `FrameDescriptor.depthId`; viewer `presenter.ts`/`worker-presenter.ts` (`role: depthId` pools), `ViewerPresentation.depthFrame` | `snapshot.rs` `child_depth`, `presenter.test.ts` |
-| Presentation events and stats | `ViewerPresentation` → `EngineViewerService.presented` → `engine-connection/presentation-events.ts` (`preview:presented` → `frame:rendered`, then `overlay`); `pm-node/src/present/stats.rs` (`RenderStats`) → `PM.EngineStats` → `runtime/install-legacy.ts` | `stats.rs` unit, `child_scheduling`, `presentation-events.test.ts`, e2e |
+| Presentation events and stats | `ViewerPresentation` (a shown canvas's first frame counts once it is on screen) → `EngineViewerService.presented` → `engine-connection/presentation-events.ts` (`preview:presented` → `frame:rendered`, then `overlay`); `pm-node/src/present/stats.rs` (`RenderStats`) → `PM.EngineStats` → `runtime/install-legacy.ts` | `stats.rs` unit, `child_scheduling`, `presentation-events.test.ts`, `presentation.test.ts`, e2e |
 | Compatibility pixels (upload and export frames) | renderer `uploadCompat`/`provideCompat`; `pm-node/src/present/compat.rs` (store); main `engine/compat-frames.ts` (job engine `compatFrame` host service) | `compat.rs` unit, `child_snapshots`, `compat-frames.test.ts`, `render-transport.test.ts` |
 | Crash, GPU loss, cold start with the flag on | `EngineViewerService.exclusive`; `ViewerPresentation` status and no hand-back; `viewer.ts` hides the WebGL canvas; `EngineTransport` `exclusive` (holds and replays the playhead) | `presentation.test.ts`, `presentation-events.test.ts`, e2e crash test |
 | `render.gl.init`/`resize` bind presentation to the caller's canvas | `engine-connection/canvas-binding.ts` (`PM.EngineCanvas`), `kernel/install.ts`; viewer stages marked `data-engine-stage` | `canvas-binding.test.ts` |
 
 ### How a synchronous snapshot works
 
-1. The renderer flushes pending edits to the engine (`PM.EngineDoc.barrier`)
-   and asks main with `sendSync`, naming its session, its engine launch, and
-   the revision it has.
-2. Main checks the request, names the window's own port to the interactive
-   engine (a window cannot name another's session), waits for a starting
-   engine within the request's wait, and sends a host `snapshot` request
-   with the revision as the envelope minimum. It sets the sync reply when
-   the engine answers, or after the request's wait plus 10 s.
-3. The engine routes it to the presenter's render thread after checking the
-   session belongs to the named renderer port. The render thread queues it
-   (sync before async before idle), waits for the revision (the patches are
-   already on the renderer's port), renders it between viewer frames with
-   the session's renderer, definitions, media, and fonts (`Renderer::render`
+1. The renderer flushes pending edits to the engine (`PM.EngineDoc.barrier`).
+   If its session has the document and no staged resync is on its way, it
+   asks main with `sendSync`, naming the session, its engine launch, and
+   the revision. Otherwise (no session yet, a closed viewer, a staged
+   resync whose next step would need this blocked thread) it sends the
+   document instead: `{ id, revision }`, with the canonical JSON and hash
+   unless main already has that revision.
+2. Main checks the request and names the window's own port to the
+   interactive engine (a window cannot name another's session), or opens
+   and prepares its own session for the window (definitions from main's
+   relay, the document resynced inline up to 12 MiB or staged, fallback
+   pixels posted), waits for a starting engine within the request's wait,
+   and sends a host `snapshot` request with the revision as the envelope
+   minimum. It sets the sync reply when the engine answers, or after the
+   request's wait plus 10 s (main's own preparation counts against it).
+3. The engine checks the session belongs to the named port (the window's
+   renderer port, or main's host port for main's sessions) and routes it to
+   the presenter's render thread. The render thread queues it (sync before
+   async before idle), waits for the revision and for the host's media
+   answers, renders it between viewer frames with the session's
+   definitions and media and the engine's render fonts (`Renderer::render`
    at Float16, today's scale derivation), reads it back, encodes RGBA8 like
    today's capture (round half to even), and answers on main's port: inline
    up to 1 MiB, otherwise a `/pm.<24 hex>` shared-memory segment.
 4. Main maps the segment once (`takePixels`, which unlinks it) and hands the
    buffer to the renderer; the facade makes today's shape (a canvas, a JPEG
-   data URL at 0.74).
+   data URL at 0.74, a `RasterSurface`).
 
 A frame that needs the renderer's own pixels (a shader the native pipeline
 cannot translate, decision 19) is answered `needsRenderer`: the transport
 draws those programs on the calling thread
-(`ShaderFallbackRunner.renderSync`), posts them on the session's port, and
-asks again naming them in `uploaded`, and the engine waits for those bands
-instead of naming them again. Nothing waits for a renderer task, so a call
-from a `raster` wrapper or an animation-frame callback cannot deadlock (the
-e2e proves both).
+(`ShaderFallbackRunner.renderSync`), posts them on the session's port (or
+sends them to main with the next ask, for main's sessions), and asks again
+naming them in `uploaded`; the engine waits for those bands instead of
+naming them again. Nothing waits for a renderer task, so a call from a
+`raster` wrapper or an animation-frame callback cannot deadlock (the e2e
+proves both).
 
-### Measured (2026-10-18, M4 Max, load average 17 to 35 from other lanes)
+### Render fonts
 
+The registry stays on the utility process's main thread (AppKit). The
+render thread lays text out with pm-text's level 1 layout over a replay of
+the registry's answers and the full font files (`BrokerResolver`). A
+lookup the replay cannot answer is asked of the main thread through a
+`FontBroker`: the render thread queues it, wakes the host (an empty action
+list makes the utility process call `pump`), and waits at most 8 s. The
+main thread answers with the registry's answers and the full bytes of
+every face they name (shared, not copied). It never waits for the render
+thread, and a closing engine releases waiting asks at once. A frame whose
+fonts did not answer is not shown (the viewer draws it again; a snapshot
+fails with `timeout`), and later asks in that render fail at once. Project
+fonts move the broker's generation: the composer installs fresh fonts (its
+glyph and raster caches go) and the views draw again. With fonts, routing
+uses `unsupported_with_fonts`, so text and captions no longer route the
+viewer to the current engine.
+
+### Measured (2026-10-18, M4 Max)
+
+- `pm-node/tests/render_fonts.rs`: a text frame's pixels through the
+  broker equal a renderer over the CoreText registry byte for byte (0 of
+  230,400 bytes differ), and the layer raster equals `text_raster`'s; the
+  first frame took 4 asks; a project font moved the generation 100 → 101
+  and the next frame drew with it; a silent font service failed the
+  snapshot with `timeout` after 8.0 s.
 - `child_scheduling`: a sync snapshot during playback answered in 8.4 to
-  9.1 ms (five runs); an idle snapshot waited until the transport stopped.
-- `e2e/engine-render-transport.spec.ts` (four tests): 12 of 12 with
-  `--repeat-each=3`.
-- The flag-on engine specs together (`engine-render-transport`,
-  `native-engine-tracer`, `native-engine-transport`,
-  `engine-present-recovery`, `native-engine`): 22 of 22 in the final run.
-- Two findings on the way, fixed: a standby snapshot session opened at
-  every boot made the tracer's effects frame and the J/K/L A/V sync check
-  fail 3 of 6 runs (6 of 6 pass without it, as on the base); it now opens
-  only on demand. Frame events emitted from the presentation's callback
-  for every frame are now coalesced to animation frames.
-- Still open, as measured: `native-engine-tracer.spec.ts:144` failed 2 of
-  23 runs on this branch (both the first test of a batch; the box's red
-  read 245 instead of 255) and 0 of 19 on the base (`ee14b2fa`); not
-  reproduced in a 36-sample probe of the first frames. The J/K/L A/V sync
-  check failed 1 of 6 runs on both this branch and the base under the
-  same load.
-- Frame-event listeners on the page's main thread: 88 emissions in 3 s of
-  30 fps playback took 2.2 ms in all (slowest 0.1 ms).
+  9.1 ms (five runs, earlier); an idle snapshot waited until the transport
+  stopped.
+- `e2e/engine-render-transport.spec.ts` (six tests): see the lane report
+  for the final run; a sync snapshot during a staged resync of a 13 MiB
+  document answered through main's session at once (`documentSync` 1).
+- Two regressions found and fixed on the way: waveform requests made
+  before the host answered for a just-imported file were told the media
+  is offline and never asked again (`native-engine-transport`'s audio
+  scrub test failed 3 of 4 runs; 4 of 4 after); and the viewer announced a
+  newly shown canvas's first frame before the page showed it, so for a
+  display frame the composition area showed the panel's background (the
+  tracer's first-frame pixel read 245, 245, 247 in 1 of 12 first-of-batch
+  runs).
 
 ### What remains
 
-- **Layer rasters.** The engine paints text and captions layer rasters
-  (`Renderer::text_raster`, with anchor and box), but the interactive
-  engine's renderer has no render fonts yet (text-render.md, "render-thread
-  fonts"), so today they are refused naming that; other layer kinds have no
-  raster pass in pm-render. `render.raster` stays on today's rasterizer;
-  `rasterAsync`/`rasterSync` are the engine path the compatibility lane
-  switches it to once fonts reach the engine (lanes L1 and extcompat).
+- **The job engine's fonts.** Export and agent frames still refuse text:
+  the job engine has no font service, and pm-export gates with the
+  fonts-less capability check (`plan_export`, `StillRouting`). The broker
+  and `RenderFonts` are process-independent; the job engine needs main to
+  replay project fonts to a job-engine font port and pm-export to gate
+  with fonts (export lane).
+- **Compat level 2 text** needs level 2 fonts (`TextFonts::level2`); the app
+  creates no level 2 layers yet, so none are drawn either way.
 - **Compatibility rasters in frames.** The interactive engine assembles and
   holds uploaded compatibility rasters, and main serves the job engine's
   `compatFrame`, but pm-render does not draw a layer from them yet and
   pm-export does not ask for them yet; `needsRenderer.compat` is always
   empty (lanes L1, L4, L6).
-- **Blender in snapshots** renders with native shading (`draft3d` is
-  reported as asked); the synchronous path cannot run a Blender job.
-- **Snapshots during boot**, before the window's first engine session, fail
-  with `noSession` (the standby session covers the time after it while no
-  viewer is open). A sync snapshot while a staged resync of a large
-  document is in flight times out: the resync's next step waits for the
-  blocked renderer.
-- **`FX passes`** in the performance panel reads 0 with the engine (the
-  engine counts no effect passes); the other fields come from
-  `RenderStats`.
+- **Blender in snapshots.** A Blender composition without `draft3d` fails
+  with today's words, as today's sync capture does; today's async capture
+  (`PM.Export.snapshotAsync`) first renders the frame with Blender, which
+  the interactive engine's snapshot path cannot do yet, so the agent's
+  `look` of a Blender composition fails where today's draws it (3D and
+  export lanes: a Blender job for an async snapshot).
+- **What the engine still refuses** (masks the renderer cannot draw yet,
+  and the other `pm_render::unsupported` reasons) fails a snapshot with
+  the engine's reasons, while the viewer still routes such compositions to
+  the current engine (capability routing, the derouter lane's). L1 closes
+  the reasons.
+- **Performance panel.** `FX passes` reads 0 (the engine counts no effect
+  passes) and `GL draws` shows the layers the engine drew (not WebGL draw
+  calls).
 - **Depth and id consumers.** The surfaces are delivered with each
   frame (`child_depth` proves the pool, the per-frame tag, and the slot
   rule; `presenter.test.ts` the viewer side), but nothing reads
