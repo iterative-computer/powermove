@@ -761,23 +761,39 @@ device time. A stopped run or new epoch discards the old wait.
   Validity comes from the blocks actually copied into scratch; a later
   readiness lookup would race decoder arrival or cache eviction.
 - A stretched voice returns silent incomplete output without ever feeding
-  missing input into Signalsmith. Committing a dropped request abandons that
-  voice's retry; later requests use the existing bounded, deterministic
-  pre-roll rules at their current project position, rather than walking DSP
-  over an arbitrarily long missing span. Complete voices keep their history.
+  missing input into Signalsmith. Its loss is segment-granular: the whole
+  committed segment (256 frames at 1x) of that voice is silent, including
+  any valid samples before the missing block. Committing a dropped request
+  abandons that voice's retry; later requests use the existing bounded,
+  deterministic pre-roll rules at their current project position (the same
+  fresh start a seek gets, not the uninterrupted vocoder output), rather
+  than walking DSP over an arbitrarily long missing span. Complete voices
+  keep their history.
   The master converter and shuttle consume the committed mix continuously.
 - Retune envelopes and meters advance once for each committed segment,
   including intentional silence. Retry attempts still do not advance them.
 - `starved_renders` counts missing segments once; `starve_retries` counts
   incomplete retries; `dropped_renders` counts committed missing segments;
-  `dropped_voice_frames` counts project output frames silenced for missing
-  input, summed over voices (and outgoing retune voice versions).
-- Crossing the bound reports one error per missing-input episode through
-  `Playback::take_errors`, naming the voices missing at that crossing. Draining
-  errors does not re-arm an ongoing episode. The minimal bridge-owned edit
-  in `pm-node/src/present/audio.rs` drains these errors into the existing
-  bounded `AudioStatus.problems` list alongside the existing starvation and
-  underrun counters. No modal or new protocol event is introduced.
+  `dropped_voice_frames` counts audible project output frames (gain not
+  zero) silenced for missing input, summed over voices (and outgoing retune
+  voice versions); every reader counts the same way.
+- Crossing the bound reports an error naming the voices missing at that
+  crossing (each ID once, even when an outgoing retune version of the same
+  voice also misses). `Playback::take_errors` hands out each distinct
+  message once for the life of the playback, however often it is drained:
+  a memoized bad block fails every segment that reads it, and a broken clip
+  fails every evaluation, so a per-drain "once" would repeat them about 30
+  times a second. A later episode with the same voices therefore adds no
+  second message; `dropped_renders` and `dropped_voice_frames` still count
+  every one. A memoized decode failure reads with the same text as the
+  first (the cache keeps the decode error's own message, not its
+  `media: decode:` rendering, which used to be wrapped a second time).
+- The minimal bridge-owned edit in `pm-node/src/present/audio.rs`
+  (`report_playback`, called from `Control::report` every 33 ms) copies the
+  counters and drains these errors into the existing bounded
+  `AudioStatus.problems` list (16 entries), skipping messages already
+  listed, so a recurring error never pushes the media-resolve, `transport:`
+  or `mix:` problems out. No modal or new protocol event is introduced.
 - Playback always reads sources nonblocking. If its cache was created with
   zero workers for offline use, starting playback starts one decode worker;
   no decoder can take ownership of the render thread. Offline export keeps
@@ -877,11 +893,63 @@ ongoing stall. The existing DSP recovery and seek-after-starve comparisons
 remain bit-exact.
 
 Direct checks pass: 41 library tests, 8 decode-readiness tests, 14 mixer tests,
-and 6 stretch tests. `cargo check --manifest-path engine/Cargo.toml --release
+and 6 stretch tests (9 decode-readiness and 24 playback tests after the
+review round below). `cargo check --manifest-path engine/Cargo.toml --release
 -p pm-node` passes with the test hooks disabled. Modified pm-audio files pass
 `rustfmt --check`; staged gitleaks scans and the pre-commit hook are required
 for both implementation and documentation commits. The repetition command
 above is unchanged, with `PM_AUDIO_PLAYBACK_STRESS=1` for the stress runs.
+
+**Review round (A3 diagnostics).** The independent review found that the
+first forwarding flooded `AudioStatus.problems`: `take_errors` emptied its
+list, so the next segment that met the same memoized decode error queued it
+again, and `Control::report` appended it every 33 ms with no duplicate check.
+Reverting both fixes reproduces it: the new pm-node test
+`present::audio::tests::recurring_render_errors_are_listed_once` then fails
+with all 16 slots holding the same `bad:` decode message and the earlier
+media-resolve problem evicted, and the pm-audio test
+`recurring_errors_are_taken_once` takes the decode message 46 times in half
+a second of device time. With the fixes, over 0.5 s of device time polled on
+every 256-frame buffer (more often than the real 33 ms), with one voice's
+blocks failing to decode (the `set_decode_failing` test hook) and another's
+decoder held past the bound: exactly one decode message, exactly one A3
+message naming `late` once, the earlier problem still first, the good voice
+still audible, and several dropped segments. `decode_readiness` adds
+`a_memoized_decode_failure_reads_as_the_first`.
+
+Measured after the review round (2026-10-18, `nice -n 15`, four test
+threads): **30/30 plain and 30/30 stressed playback suites**
+(`PM_AUDIO_PLAYBACK_STRESS=1`), 24 tests each, 0 failed, none ignored. The
+full `cargo test --release -p pm-audio` passes (41 library, 9
+decode-readiness, 2 layouts, 1 legacy-parity, 14 mixer, 24 playback, 3
+resampler, 5 sources, 6 stretch); the pm-node test passes; `cargo clippy
+--release --all-targets` is clean for pm-audio and pm-node; and `cargo
+check --release -p pm-node` (no test hooks) passes.
+
+**What remains (A3).**
+
+- No renderer code reads `AudioStatus.problems` or `starvedRenders` yet
+  (nothing in `apps/desktop` consumes them), so an A3 drop reaches the
+  engine status JSON but is not shown in the app. Surfacing it belongs to
+  the bridge/UI lanes.
+- The budget starts at the render thread's first miss, about `ahead_ms`
+  (80 ms) before the device reaches that audio. Once the ring drains, the
+  whole mix underruns for up to about 40 ms mid-play (the full 120 ms at a
+  pre-roll miss): ready voices go silent too and the clock holds before the
+  drop begins. This is the "hold at most 120 ms" policy as specified, but it
+  is an audible full-mix gap, not silence in the starved voice only.
+- A drop episode covers every voice: while one voice is past the bound, a
+  second voice that misses only briefly is dropped at once without its own
+  120 ms wait, so that brief miss is not bit-exact. A per-voice budget would
+  need per-voice retry, which the segment-level retry does not have.
+- Stretched voices drop whole segments and re-enter with a fresh start (see
+  above).
+- With playback's single started worker (a cache created with zero workers)
+  stuck on one source, other sources' uncached blocks starve and drop too;
+  playback keeps running.
+- Error messages are deduplicated for the life of the playback, so the set
+  of distinct messages grows with distinct failing blocks and voice sets;
+  in practice that is bounded by the project's assets and voices.
 
 **Remaining evidence gap for wave-5 A1.** The original intermittent failure did
 not recur with both counters recorded in the 120 audiofix suites or the
