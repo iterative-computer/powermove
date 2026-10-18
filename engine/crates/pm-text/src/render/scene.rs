@@ -231,6 +231,23 @@ pub trait MaskSource {
         let _ = (face, coords, glyph);
         None
     }
+    /// The distance field of `glyph` as the GPU canvas's distance-field
+    /// text generates it (`sdf`): CoreGraphics' smoothed mask at the strike
+    /// size `strike` (256 px; 162 at exactly 162) with the synthetic skew
+    /// `skew`, linearized, no preblend. `None` when the platform does not
+    /// provide it.
+    #[cfg(feature = "cg-masks")]
+    fn sdf_glyph(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        strike: f32,
+        skew: f32,
+    ) -> Option<Arc<super::sdf::SdfGlyph>> {
+        let _ = (face, coords, glyph, strike, skew);
+        None
+    }
     /// The mask gamma of path-generated masks for paint `rgb` (no
     /// CoreGraphics linearization).
     fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
@@ -340,6 +357,57 @@ impl Placement {
         [relax(a), relax(b), relax(c), relax(d)]
     }
 
+    /// A distance-field glyph's quad as `prepare_for_SDFT_drawing` and
+    /// Graphite's `VertexFiller` place it: the glyph position mapped into
+    /// strike space by the creation matrix (`1 / strikeToSourceScale`, in
+    /// `f32`) plus the field's bounds inset by 2, drawn through the canvas
+    /// matrix pre-translated by the blob origin and post-scaled by the
+    /// creation matrix's inverse (`[a, b, c, d, e, f]`).
+    #[cfg(feature = "cg-masks")]
+    fn sdf_placement(
+        &self,
+        origin: (f64, f64),
+        g: (f64, f64),
+        text_size: f32,
+        strike: f32,
+        field: &super::sdf::SdfGlyph,
+    ) -> ((f32, f32), [f32; 6]) {
+        let to_source = text_size / strike;
+        let creation = 1.0 / to_source;
+        let inverse = 1.0 / creation;
+        let mapped = (g.0 as f32 * creation, g.1 as f32 * creation);
+        let inset = super::sdf::INSET as f32;
+        let left_top = (
+            (field.left as f32 + inset) + mapped.0,
+            (field.top as f32 + inset) + mapped.1,
+        );
+        let [a, b, c, d, e, f] = self.m.as_coeffs().map(|v| v as f32);
+        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
+        (
+            left_top,
+            [
+                a * inverse,
+                b * inverse,
+                c * inverse,
+                d * inverse,
+                a * ox + c * oy + e,
+                b * ox + d * oy + f,
+            ],
+        )
+    }
+
+    /// `SkMatrix::getMaxScale` of the 2×2 (the largest singular value).
+    fn max_scale(&self) -> f32 {
+        let [a, b, c, d, _, _] = self.m.as_coeffs();
+        // Singular values of [[a, c], [b, d]].
+        let s1 = a * a + b * b;
+        let s2 = c * c + d * d;
+        let s12 = a * c + b * d;
+        let mean = (s1 + s2) / 2.0;
+        let diff = ((s1 - s2) / 2.0).hypot(s12);
+        ((mean + diff).max(0.0).sqrt()) as f32
+    }
+
     fn of(m: Affine) -> Placement {
         let [a, b, c, d, _, _] = m.as_coeffs();
         let det = a * d - b * c;
@@ -362,6 +430,23 @@ impl Placement {
             residual,
             axis_aligned,
         }
+    }
+}
+
+/// The GPU canvas's distance-field strike size for text of `size` under
+/// the placement's matrix, or `None` outside its range
+/// (`SubRunControl::isSDFT`, `getSDFFont` on macOS): from 162 to 256 device
+/// px (`SkFontPriv::ApproximateTransformedTextSize`), the 162 px strike at
+/// exactly 162 and the 256 px strike above.
+fn sdf_strike(size: f32, place: &Placement) -> Option<f32> {
+    let approx = size * place.max_scale();
+    if !(approx.is_finite() && approx > 0.0) {
+        return None;
+    }
+    if (162.0..=256.0).contains(&approx) {
+        Some(if approx <= 162.0 { 162.0 } else { 256.0 })
+    } else {
+        None
     }
 }
 
@@ -411,6 +496,8 @@ impl Painter<'_> {
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
         // Glyphs drawn as multisampled paths (sample counts per pixel).
         let mut msaa_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
+        // Glyphs drawn as distance-field text (coverage per pixel).
+        let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -428,6 +515,13 @@ impl Painter<'_> {
                 None
             };
             let colr = super::bitmap::has_colr(run.face);
+            // Distance-field text: the strike size, when this run's device
+            // size is in the GPU canvas's SDFT range.
+            let sdf_strike = if self.masks.is_some() && !run.synthetic_bold {
+                sdf_strike(run.size, &place)
+            } else {
+                None
+            };
             let large = self.profile.is_large(device_size);
             let (ex, ey) = if large {
                 (self.profile.large.expand_x, self.profile.large.expand_y)
@@ -491,7 +585,29 @@ impl Painter<'_> {
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                let mut as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                #[cfg(feature = "cg-masks")]
+                if let (Some(strike), Coords::User(coords), Some(masks)) =
+                    (sdf_strike, run.coords, self.masks.as_deref_mut())
+                    && let Some(field) =
+                        masks.sdf_glyph(run.face, coords, g.id as u16, strike, skew_of(run) as f32)
+                {
+                    // A field beyond the atlas is drawn as its path
+                    // (`SkGlyphDigest::fitsInAtlasDirect`).
+                    if field.width.max(field.height) <= 256 {
+                        let (left_top, matrix) =
+                            place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
+                        if let Some(cov) =
+                            super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
+                        {
+                            sdf_glyphs.push(cov);
+                        }
+                        continue;
+                    }
+                    as_path = true;
+                }
+                #[cfg(not(feature = "cg-masks"))]
+                let _ = sdf_strike;
                 // Beyond the atlas, the GPU canvas draws a glyph as its path,
                 // 4× multisampled, at its exact position.
                 if as_path && self.masks.is_some() && !run.synthetic_bold {
@@ -688,6 +804,33 @@ impl Painter<'_> {
             let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
             out.extend(mask_image(
                 &quarters,
+                [&linear, &linear],
+                color,
+                opacity,
+                blur,
+            ));
+        }
+        if !sdf_glyphs.is_empty() {
+            let fields: Vec<(i64, i64, Arc<GlyphMask>, bool)> = sdf_glyphs
+                .into_iter()
+                .map(|(x0, y0, w, h, coverage)| {
+                    (
+                        x0,
+                        y0,
+                        Arc::new(GlyphMask {
+                            width: w as u32,
+                            height: h as u32,
+                            left: 0,
+                            top: 0,
+                            coverage,
+                        }),
+                        false,
+                    )
+                })
+                .collect();
+            let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
+            out.extend(mask_image(
+                &fields,
                 [&linear, &linear],
                 color,
                 opacity,

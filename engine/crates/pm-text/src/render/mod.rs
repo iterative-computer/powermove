@@ -27,6 +27,7 @@ pub mod outline;
 pub mod paint;
 pub mod profile;
 pub mod scene;
+pub mod sdf;
 #[cfg(feature = "cg-masks")]
 pub mod skaaa;
 #[cfg(feature = "cg-masks")]

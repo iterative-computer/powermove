@@ -110,7 +110,11 @@ pub fn app_ui_font_cache_seeds(scale_factors: &[f32]) -> Vec<FontCacheSeed> {
 const SYSTEM_FONT_ALIASES: [&str; 3] = ["system-ui", "-apple-system", "blinkmacsystemfont"];
 
 fn same_cache_family(a: &str, b: &str) -> bool {
-    let system = |n: &str| SYSTEM_FONT_ALIASES.iter().any(|s| n.eq_ignore_ascii_case(s));
+    let system = |n: &str| {
+        SYSTEM_FONT_ALIASES
+            .iter()
+            .any(|s| n.eq_ignore_ascii_case(s))
+    };
     a.eq_ignore_ascii_case(b) || (system(a) && system(b))
 }
 

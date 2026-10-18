@@ -1,14 +1,6 @@
 {
  "note": "Cases of text-raster captures not yet within 1 code value of Canvas2D everywhere: the most pixels beyond 1 code value (over1) and the largest channel difference (max) each may have, as measured 2026-10-18. Each is a gap in docs/engine/text-render.md. A case may not get worse; a pin whose case becomes exact fails the test until it is removed, so pins only shrink.",
  "pins": {
-  "sizes-0046": {
-   "over1": 31975,
-   "max": 148
-  },
-  "sizes-regular-0047": {
-   "over1": 30632,
-   "max": 147
-  },
   "synthetic-0276": {
    "over1": 1,
    "max": 2
@@ -40,10 +32,6 @@
   "variable-0300": {
    "over1": 448,
    "max": 2
-  },
-  "density-0427": {
-   "over1": 16169,
-   "max": 126
   },
   "caption-classic-0433": {
    "over1": 2,

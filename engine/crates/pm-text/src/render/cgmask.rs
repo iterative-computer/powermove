@@ -53,6 +53,8 @@ pub struct CgMasks {
     canonical: HashMap<PathKey, Option<Arc<pm_skia_path::Path>>>,
     /// Masks of glyphs under a rotated, skewed or non-uniform matrix.
     matrix_masks: HashMap<MatrixKey, Option<Arc<GlyphMask>>>,
+    /// Distance fields of glyphs drawn as distance-field text.
+    sdf: HashMap<SdfKey, Option<Arc<super::sdf::SdfGlyph>>>,
     bytes: usize,
 }
 
@@ -74,6 +76,9 @@ struct PathKey {
 /// Face, face index, glyph, text size bits, variation, subpixel offsets,
 /// and the strike's remaining transform.
 type MatrixKey = (u64, u32, u16, u32, Vec<(u32, u32)>, (u8, u8), [u32; 4]);
+
+/// Face, face index, glyph, strike size bits, variation, skew bits.
+type SdfKey = (u64, u32, u16, u32, Vec<(u32, u32)>, u32);
 
 /// Face buffer, face index, glyph, size bits, em bits, quarter offset.
 type ColorKey = (u64, u32, u16, u32, u32, u8);
@@ -188,13 +193,66 @@ impl super::scene::MaskSource for CgMasks {
         let mask = self
             .fonts
             .font_of(face.id, &run)
-            .and_then(|font| draw_transformed(&font, glyph, &strike, sub).map(Arc::new));
+            .and_then(|font| draw_transformed(&font, glyph, &strike, sub, false).map(Arc::new));
         if self.bytes > CACHE_BYTES {
             self.clear();
         }
         self.bytes += mask.as_ref().map_or(0, |m| m.coverage.len() + 64);
         self.matrix_masks.insert(key, mask.clone());
         mask
+    }
+
+    fn sdf_glyph(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        strike: f32,
+        skew: f32,
+    ) -> Option<Arc<super::sdf::SdfGlyph>> {
+        let key = (
+            face.id,
+            face.index,
+            glyph,
+            strike.to_bits(),
+            coords
+                .iter()
+                .map(|(t, v)| (*t, v.to_bits()))
+                .collect::<Vec<_>>(),
+            skew.to_bits(),
+        );
+        if let Some(g) = self.sdf.get(&key) {
+            return g.clone();
+        }
+        // The SDF strike: the text size alone (`SkStrikeSpec::MakeSDFT`
+        // passes the identity device matrix), the synthetic skew, no
+        // subpixel offset; smoothing on (`kNormal` hinting), linearized
+        // and without the preblend (the SDF mask filter ignores it).
+        let field = StrikeMatrix::new(strike, [1.0, 0.0, 0.0, 1.0], skew).and_then(|m| {
+            let run = RefRun {
+                data: face.data,
+                index: face.index,
+                size: m.text_size,
+                coords,
+                glyphs: Vec::new(),
+                color: [0.0, 0.0, 0.0, 1.0],
+            };
+            let font = self.fonts.font_of(face.id, &run)?;
+            let a8 = draw_transformed(&font, glyph, &m, (0, 0), true)?;
+            Some(Arc::new(super::sdf::SdfGlyph::from_a8(
+                &a8.coverage,
+                a8.width as usize,
+                a8.height as usize,
+                a8.left,
+                a8.top,
+            )))
+        });
+        if self.bytes > CACHE_BYTES {
+            self.clear();
+        }
+        self.bytes += field.as_ref().map_or(0, |g| g.field.len() + 64);
+        self.sdf.insert(key, field.clone());
+        field
     }
 
     fn canonical_path(
@@ -297,6 +355,7 @@ impl CgMasks {
         self.paths.clear();
         self.canonical.clear();
         self.matrix_masks.clear();
+        self.sdf.clear();
         self.bytes = 0;
     }
 
@@ -644,6 +703,7 @@ fn draw_transformed(
     glyph: u16,
     strike: &StrikeMatrix,
     sub: (u8, u8),
+    linear: bool,
 ) -> Option<GlyphMask> {
     use objc2_core_foundation::{CGAffineTransform, CGRect};
     let t = strike.cg();
@@ -717,10 +777,13 @@ fn draw_transformed(
     };
     CGContext::flush(c);
     drop(ctx);
+    // `gLinearCoverageFromCGLCDValue` (`(v² + 128) / 255`) undoes
+    // CoreGraphics' smoothing gamma when no preblend follows.
+    let lin = |v: u32| if linear { (v * v + 128) / 255 } else { v };
     let coverage = pixels
         .iter()
         .map(|p| {
-            let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+            let (r, g, b) = (lin((p >> 16) & 0xff), lin((p >> 8) & 0xff), lin(p & 0xff));
             let (r, g, b) = (255 - r, 255 - g, 255 - b);
             ((r * 54 + g * 183 + b * 19) >> 8) as u8
         })
