@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -1905,6 +1906,196 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
         assert_eq!(missing, 0, "briefly late voice remains bit-exact");
     }
     assert!(playback.take_errors().is_empty());
+    drop(playback);
+    cache.shutdown();
+}
+
+/// A live edit while playing (a fader drag, a monitor solo toggle) keeps up
+/// to four retune glides in flight, and a waiting render holds them, so the
+/// mixer renders the missing voice once per mix. The reserve deadline must
+/// still apply: one voice missing beside a ready one, under a drag, drops
+/// on the ring's reserve and the ready voice never underruns.
+#[test]
+fn a_decode_miss_during_a_live_edit_keeps_ready_voices_heard() {
+    decode_miss_while_editing(LiveEdit::Gain);
+    decode_miss_while_editing(LiveEdit::Solo);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LiveEdit {
+    /// The late voice's gain, dragged.
+    Gain,
+    /// The monitor solo toggled between every strip and both strips, which
+    /// glides without changing what is heard.
+    Solo,
+}
+
+fn decode_miss_while_editing(edit: LiveEdit) {
+    let _load = stress_enabled().then(CpuContention::start);
+    let rate = 48_000u32;
+    let dir = temp_dir(&format!("edit-miss-{edit:?}"));
+    let good_file = dir.join("good.wav");
+    let late_file = dir.join("late.wav");
+    let n = 3 * pm_audio::source::BLOCK;
+    let good: Vec<f32> = (0..n).map(|i| 0.1 + (i % 997) as f32 / 10_000.0).collect();
+    let late: Vec<f32> = (0..n).map(|i| 0.2 + (i % 991) as f32 / 10_000.0).collect();
+    write_wav(&good_file, rate, &[good.clone(), vec![0.0; n]]);
+    write_wav(&late_file, rate, &[vec![0.0; n], late.clone()]);
+    let cache = SourceCache::new(64 << 20, 2);
+    let good_source = cache.open(&good_file, None).unwrap();
+    for block in 0..3 {
+        cache.block(&good_source, block, true).unwrap();
+    }
+    let late_source = cache.open(&late_file, None).unwrap();
+    cache.block(&late_source, 0, true).unwrap();
+    cache.set_decode_blocked(&late_source, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(rate),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_ms: 0,
+            preroll_wait_ms: 0,
+            lookahead_ms: 0,
+            ..PlaybackConfig::default()
+        },
+        rate,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let dur = n as f64 / rate as f64;
+    let doc = |late_gain: f64| {
+        project(
+            30.0,
+            dur,
+            &[
+                audio("good", "g", 0.0, dur, "", ""),
+                audio(
+                    "late",
+                    "s",
+                    0.0,
+                    dur,
+                    &format!(r#","gain":{late_gain}"#),
+                    "",
+                ),
+            ],
+            &[],
+            "",
+        )
+    };
+    let resolver = |id: &str| {
+        Some(if id == "g" {
+            good_file.clone()
+        } else {
+            late_file.clone()
+        })
+    };
+    assert!(
+        playback
+            .set_project(Arc::new(doc(1.0)), "C", &resolver)
+            .unwrap()
+            .is_empty()
+    );
+    let from = pm_audio::source::BLOCK - 8192;
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(from as f64 / rate as f64),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    until(|| side.queued_frames() >= 3072);
+    let host_start = host_now_us();
+    let mut out = vec![0.0; 256 * 2];
+    let mut played = Vec::new();
+    let mut held_at = None;
+    let mut first_drop = None;
+    let mut released_at = None;
+    let both: HashSet<String> = ["good".to_string(), "late".to_string()].into();
+    for turn in 0..90u64 {
+        // The drag: one edit per callback (5.3 ms) against a 12 ms glide,
+        // from before the miss until well after the voice re-enters.
+        if released_at.is_none_or(|at| turn < at + 10) {
+            match edit {
+                LiveEdit::Gain => {
+                    let gain = if turn % 2 == 0 { 0.75 } else { 0.5 };
+                    playback
+                        .set_project(Arc::new(doc(gain)), "C", &resolver)
+                        .unwrap();
+                }
+                LiveEdit::Solo => {
+                    playback.set_monitor_solo((turn % 2 == 0).then(|| both.clone()));
+                }
+            }
+        }
+        assert!(
+            side.queued_frames() >= 256,
+            "{edit:?}: the ready voice ran out at turn {turn}: {:?}",
+            playback.stats()
+        );
+        side.callback(
+            &mut out,
+            2,
+            host_start + turn * 256 * 1_000_000 / rate as u64,
+        );
+        played.extend_from_slice(&out);
+        std::thread::sleep(Duration::from_secs_f64(256.0 / rate as f64));
+        if held_at.is_none() && playback.stats().starved_renders > 0 {
+            held_at = Some(turn);
+        }
+        if playback.stats().dropped_renders > 0 && first_drop.is_none() {
+            first_drop = Some(turn);
+        }
+        if let (Some(drop), None) = (first_drop, released_at)
+            && turn > drop + 8
+        {
+            cache.set_decode_blocked(&late_source, false);
+            until(|| cache.is_ready(&late_source, pm_audio::source::BLOCK as i64, 256));
+            released_at = Some(turn);
+        }
+    }
+    let (held_at, first_drop) = (held_at.unwrap(), first_drop.unwrap());
+    assert!(released_at.is_some());
+    // The reserve, not the 120 ms hold, ended the wait.
+    assert!(
+        (first_drop - held_at) * 256 < rate as u64 * 120 / 1000,
+        "{edit:?}: held from turn {held_at} to {first_drop}"
+    );
+    let errors = playback.take_errors();
+    assert_eq!(
+        errors,
+        [
+            "Audio decode fell behind the output buffer; missing voice plays as silence so the others keep playing: late"
+        ],
+        "{edit:?}"
+    );
+    let mut missing = 0u64;
+    let mut resumed = false;
+    for (i, pair) in played.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0], good[from + i], "{edit:?}: ready voice at {i}");
+        if pair[1] == 0.0 {
+            assert!(!resumed, "{edit:?}: one gap at {i}");
+            missing += 1;
+        } else {
+            if missing > 0 {
+                resumed = true;
+            }
+            if let LiveEdit::Solo = edit {
+                assert_eq!(pair[1], late[from + i], "{edit:?}: late voice at {i}");
+            }
+        }
+    }
+    assert!(missing > 0 && resumed, "{edit:?}: {missing} {resumed}");
+    let stats = playback.stats();
+    assert_eq!(
+        stats.underruns, 0,
+        "{edit:?}: a stuck voice must never silence ready voices"
+    );
+    assert_eq!(stats.dropped_voice_frames, missing, "{edit:?}");
     drop(playback);
     cache.shutdown();
 }
