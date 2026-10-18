@@ -120,7 +120,7 @@ fn untested_still_classes_are_unsupported() {
     assert_eq!(probe_image(&overridden), Ok(()));
     let cicp = d.join("cicp.png");
     std::fs::write(&cicp, with_chunk(&bytes, b"cICP", &[9, 16, 0, 1])).unwrap();
-    assert!(unsupported(&cicp).contains("CICP"));
+    assert_eq!(probe_image(&cicp), Ok(()));
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -689,11 +689,8 @@ fn avif_color_descriptions_blink_reads_as_srgb_are_drawn() {
         (1, 8, 1),
         (1, 11, 1),
         (1, 12, 1),
-        (1, 16, 1),
-        (1, 18, 1),
         (6, 6, 6),
         (5, 13, 5),
-        (9, 1, 9),
     ] {
         let f = encode(p, t, m);
         let why = unsupported(&f);
@@ -815,9 +812,11 @@ fn tiff_compressions_decode_alike() {
             ..Default::default()
         },
     );
-    let got = unsupported(&tiled);
-    assert!(got.contains("tiled"), "{got}");
-    eprintln!("imageio-tiled.tiff unsupported: {got}");
+    assert_eq!(probe_image(&tiled), Ok(()));
+    let bitmap =
+        pm_media::image::compat::read_tiff_source(&tiled, &pm_media::pool::FramePool::new(0))
+            .unwrap();
+    assert_eq!(bitmap.bit_depth, 8);
     let gray = d.join("gray.tiff");
     ffmpeg(&gray, &["-pix_fmt", "gray"]);
     assert_eq!(

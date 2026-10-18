@@ -74,6 +74,27 @@ class FakeEngine implements AgentJobsEngine {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+it('binds export snapshot media before resync and releases it after success or submission failure', async () => {
+  const engine = new FakeEngine();
+  const bindMediaSession = vi.fn(async (_session: number, _project: unknown) => {});
+  const request = engine.request.bind(engine);
+  engine.request = async (...args) => {
+    if (args[1].type === 'resync') expect(bindMediaSession).toHaveBeenLastCalledWith(args[2], expect.objectContaining({ id: 'P1' }));
+    return request(...args);
+  };
+  const jobs = new AgentJobs({ engine, bindMediaSession });
+  const input = { format: 'mp4', range: 'all' as const, audio: false, motionBlur: false, alpha: false, mode: 'async' as const };
+  const submitted = await jobs.exportVideo(1, 'run', project(), input);
+  expect(submitted.status).toBe('queued');
+  engine.status((submitted as { jobId: string }).jobId, 'done', { path: '/tmp/export.mp4' });
+  await tick();
+  expect(bindMediaSession).toHaveBeenLastCalledWith(10, null);
+  engine.submit = () => error('mediaOffline', 'offline');
+  await jobs.exportVideo(1, 'run', project(), input);
+  expect(bindMediaSession).toHaveBeenLastCalledWith(11, null);
+  jobs.dispose();
+});
+
 describe('export settings', () => {
   it('match the legacy exporter: even size, exact rate, work area, tiers, tags, dither', () => {
     const mp4 = exportSettingsFor(project(), { format: 'mp4', range: 'work', audio: true, motionBlur: false, alpha: false });

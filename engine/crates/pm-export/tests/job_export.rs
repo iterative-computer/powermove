@@ -369,6 +369,53 @@ fn sliced_frames_equal_whole_frames_bit_for_bit() {
 }
 
 #[test]
+fn png_byte_compatibility_follows_the_frozen_document() {
+    let mut renderer = Renderer::headless().unwrap();
+    for compat in [1, 2] {
+        let mut solid = layer(
+            "low-alpha",
+            "solid",
+            json!({"color":"#336699", "w":64, "h":32}),
+            W as f64 / 2.0,
+            H as f64 / 2.0,
+            1.0,
+        );
+        solid["compat"] = json!(compat);
+        set(&mut solid, "opacity", json!(0.3));
+        let doc = project(W, H, 1.0, no_fill(), vec![solid]);
+        let mut s = settings(
+            ExportFormat::PngStill { sixteen_bit: false },
+            WireAlpha::Straight,
+            1.0 / 30.0,
+        );
+        s.audio = false;
+        s.color = OutputColor::SrgbImage;
+        let job = job(&doc, MediaPaths::default(), s, PathBuf::from("/unused.png"));
+        let plan = plan_export(&job).unwrap();
+        let output = run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap();
+        let rgba = output.frames[0].planes[0].u8().unwrap();
+        let center = ((H / 2 * W + W / 2) * 4) as usize;
+        assert_eq!(
+            &rgba[center..center + 4],
+            if compat == 1 {
+                &[0, 0, 0, 1]
+            } else {
+                &[51, 102, 153, 1]
+            }
+        );
+    }
+}
+
+#[test]
 fn the_pipeline_matches_rendering_and_converting_each_frame() {
     let dur = 0.2;
     let (doc, media) = generated(dur);
@@ -417,6 +464,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
             },
             InputFormat::V420,
             &convert::ConvertParams {
+                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: true,

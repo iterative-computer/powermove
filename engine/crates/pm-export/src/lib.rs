@@ -27,6 +27,7 @@ pub mod mp4box;
 pub(crate) mod par;
 pub mod pipeline;
 pub mod png;
+mod png_compat;
 pub mod render;
 pub mod settings;
 pub mod timescale;

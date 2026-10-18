@@ -415,12 +415,32 @@ describe('the engine stamp', () => {
       installHostMediaStore(PM, { mediaStore: host });
       let done = false;
       const flushing = PM.HostMedia.flushBindings().then(() => { done = true; });
-      expect(host.bind).toHaveBeenCalledWith('P1', { a: { key: 'media:v2:new' } });
+      await vi.waitFor(() => expect(host.bind).toHaveBeenCalledWith('P1', { a: { key: 'media:v2:new' } }));
       await Promise.resolve();
       expect(done).toBe(false);
       acknowledge();
       await flushing;
       expect(done).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('migrates IndexedDB media before binding an export snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      const payload = data(64, 3);
+      const { host, keys } = fakeHost();
+      const { legacy, puts, removes } = fakeLegacy({ 'media:v2:old': new Blob([payload]) });
+      host.bind = vi.fn(async () => {});
+      const PM: any = { MediaStore: legacy, proj: { id: 'P1', assets: { a: { id: 'a', storageKey: 'media:v2:old' } } }, bus: { on: vi.fn() } };
+      installHostMediaStore(PM, { mediaStore: host });
+      await PM.HostMedia.flushBindings();
+      expect(keys.get('media:v2:old')?.hash).toBe(blake3Hex(payload));
+      expect(host.bind).toHaveBeenCalledWith('P1', { a: { key: 'media:v2:old', hash: blake3Hex(payload) } });
+      expect(puts).toEqual([]);
+      expect(removes).toEqual([]);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

@@ -1,5 +1,133 @@
 # Phase 1 gate
 
+## Rerun after the gate fixes (2026-10-17)
+
+Every item of the gate measured again on `feat/ne-regate`: the integration branch
+`feat/native-engine` at `c4c1c5f5` (waves 1 to 4 through "Merge lane longgop (wave
+3d)"; `feat/ne-correct`, `feat/ne-bridgefix`, `feat/ne-perf`, and `feat/ne-longgop`
+had nothing left to merge) plus this lane's measurement scripts. No engine code was
+changed. Same reference machine (M4 Max, 128 GB, macOS 27, Electron 44.0.0), shared
+with other lanes; the 1-minute load average is given per item. Every Electron run was
+hidden and unfocused, one at a time under the machine lock, `--workers=1`, no
+retries. Raw results (Playwright JSON, native evaluator reports, logs) are outside
+the repository; `apps/desktop/scripts/gate-rerun.sh` reruns each step and records its
+load average.
+
+> Gate: 2D evaluation parity on the corpus; zero dual-answer mismatches beyond
+> tolerance and zero auditor failures across the e2e suite per the ledger; text
+> sub-gate; native and WASM bit-identical; S5 targets met in the app.
+
+| Gate line | First run (2026-10-15) | Rerun (2026-10-17) | Result | What changed |
+|---|---|---|---|---|
+| 2D evaluation parity, native | 1,891,448 compared, 0 mismatched, 810 tolerance questions (T2) | 1,891,448 compared, 0 mismatched, 810 tolerance questions (max 1.191e-4 px, relative 4.29e-6); `sourceTime` max relative error 0 (1.4e-16 before); 6.1 s, load 7.8 | **fail pending T2** | T3's fix (exact `sourceTime`); otherwise unchanged |
+| 2D evaluation parity, pm-wasm in Node | 1,888,298 compared, 1,260 mismatched (T1), 810 questions | 1,888,298 compared, 1,260 mismatched (the same `system-ui` 24 and 26 px layouts), 810 questions; `--fresh-font-cache` natively gives the same; `--wasm-subsets` 1,878,476 compared, 1,260 mismatched; 27 s, load 7.8 | **fail pending T1, T2** | unchanged |
+| Dual answers across the e2e suite | 792,865 compared, 0 mismatched | 756,305 compared, **0 mismatched**, 0 stale, 0 allowed; 1 fragile case, 0 differed; consistency checks 346, 0 mismatched | pass | the suite grew from 567 to 605 tests; same verdict |
+| Auditor across the e2e suite | 7,467 audits, 4 failures (T5 1, T6 3) | 7,804 audits, 0 mirror mismatches, 0 stale answers, **2 failures**: 2 missed writes, both by test code in specs added since the gate (below); 0 from app writers | **fail** (test code) | T5 and T6 fixed: 0 failures in `import-svg` and `media-store` |
+| Text sub-gate | breaks identical; advances bit-identical natively, 1,260 layouts over 0.25 px as a fresh renderer | S4: 5,200 cases, identical breaks, max 0.001047 px (p99 0.000172). Parity corpus: 6,162 layouts, breaks identical in all; native bit-identical; pm-wasm 1,260 layouts over 0.25 px, max 18.21 px | pass for breaks; advances **fail pending T1** | unchanged |
+| Native and WASM bit-identical | all identical | corpus v1 and v0: 1,815,420 replies each, 0 differ; `identity.mjs`: 636,463 replies, 0 differ; pm-eval digests equal (evaluation 243,703, layers 148,904, captions 91,003); pm-text 5,200 layouts identical under Bun and under Electron 44's V8 | pass | the layer vectors gained T3's 183 engine-step cases |
+| S5 targets in the app | pass | `evP` cached 59.6 and 59.9 ns (< 1 µs); property apply p95 0.1 ms (the timer's resolution), mean 0.0175 and 0.018 ms, back to back 0.0070 and 0.0075 ms (< 0.2 ms); structural apply p95 0.3 to 0.5 ms (< 2 ms); load 4.5 and 3.9 | pass | none beyond noise; structural flushes p95 2.9 to 3.6 ms |
+
+As rerun the gate does not pass. What stands between it and a pass is now only:
+
+1. **T1** and **T2**, Jude's decisions (unchanged; "Decisions for Jude" below).
+2. **Two auditor missed writes by test code** in specs written after the gate, which
+   assign `PM.proj` members without `PM.touch()` (the write-barrier contract this lane
+   applied to eleven older specs): `engine-delivery.spec.ts:199`
+   (`PM.proj.name = 'Edited after queuing'`, delivery lane) and
+   `native-engine-tracer.spec.ts:429` (`PM.proj.work = [1, 1.5]`, tracer lane). Each
+   needs one `PM.touch()` after the write; no app writer failed an audit.
+
+### Decisions for Jude
+
+| # | Decision | Evidence (this rerun) |
+|---|---|---|
+| T1 | How level 1 measures `system-ui` at the sizes the app's own UI text puts into Chromium's font cache: model the renderer's font-cache seeds (a `pm_fonts_seeds` export fed from main), or accept the fresh-renderer answer | 1,260 corpus text layouts (`system-ui` 24 and 26 px, the real project) differ through pm-wasm by up to 18.21 px of accumulated advance (3.7% per glyph); natively with the capture's font cache every one is bit-identical; `--fresh-font-cache` natively reproduces the pm-wasm result exactly; line breaks identical in all 6,162 |
+| T2 | A variable-font ink class in the bounds tolerance (differences up to 1.191e-4 px against section 25's 1e-6), or a port of CoreText's variation arithmetic | 810 values (405 text bounds, 405 raster selections) in one variable font of the real project; relative error at most 4.29e-6; pm-eval's own corpus test accepts 2e-4 (`VARIABLE_INK`) |
+
+### Items
+
+**Corpus evaluation parity** (`pm-cli parity eval`, corpus
+`v1-20261012-230504-ae47a3b3`, the newest v1 capture: no corpus has been captured
+since T3's `retiming/variable-speed` project was added, so the corpus still does not
+exercise it). Every category's counts equal the first run's table below, natively and
+through pm-wasm; the only change is `sourceTime` (242 compared) at maximum relative
+error 0. Corpus v0 gives the same counts. No allowed difference occurred, no value
+threw on one side only. Exit status 2 natively (only tolerance questions), 1 with
+`--wasm` (T1).
+
+**Dual answers and the auditor** (`VITE_POWERMOVE_NATIVE_EVALUATOR=audit`,
+`POWERMOVE_ENGINE_FONTS=1`, `POWERMOVE_NATIVE_REPORT_FILE`, the whole suite with the
+quarantine included, 21:37 to 22:01, load 9.1 at the start, 4.0 at the end):
+
+| | |
+|---|---|
+| Tests | 605: 542 passed, 28 failed, 35 skipped, 23.7 min |
+| Failures | 26 in quarantined tests (the quarantine's 27th test, `project-file-media.spec.ts` "saved project files restore imported video without the original session media", passed), and 2 outside it, both failing with the flag `off` too: `chatgpt-connection.spec.ts:5` (environment, the Phase 2 gate) and `ae-audit-implementation.spec.ts:102` (new since the gate: a saved render preset of format `prores` with alpha comes back as `prores-4444`, the delivery lane's format ids, `shared/delivery.ts`; the spec predates them) |
+| Launches | 636 pages, 654 mirrors ready |
+| Dual answers | 756,305 compared, **0 mismatched**, 0 stale, 0 allowed; 1 fragile case, 0 differed |
+| Consistency checks | 346, **0 mismatched** |
+| pm-wasm | 0 refused batches; 7,046 flushes, 2,160 batches, 39,404 operations, 1,481 resyncs; tracking violations 0 (app writers 0) |
+| Auditor | 7,804 audits, 0 mirror mismatches, 0 stale answers; **2 failures** (missed writes): `engine-delivery.spec.ts:199` `name`, `native-engine-tracer.spec.ts:348` (the write at line 429) `comps.<id>.work` |
+| Fallbacks to the legacy answer (by design, not compared) | `gl.bounds` 963 fonts, 2,922 ink, 2 host; `gl.pick` 38 ink, 43 3D, 6 fonts; raster metrics 35 fonts, 141 ink; text layout 35 fonts; `hasKeyAt` 48 detached properties |
+
+T5 and T6 are fixed: `import-svg.spec.ts` and `media-store.spec.ts` produced no auditor
+failure in the whole-suite run (the first run's 4).
+
+**Text sub-gate.** `cargo test --release -p pm-text` (load 10.4): 34 tests pass; level
+1 against Canvas2D 5,200 cases, identical breaks 5,200, within 0.25 px 5,200, max
+0.001047 px (p99 0.000172), the same per group as before; subsets lay out identically
+to full fonts; the replay is identical to native in 5,200. The parity corpus as above.
+
+**Native and WASM bit-identity.**
+
+| Check | Rerun |
+|---|---|
+| `pm-cli parity eval --wasm`, corpus v1 and v0 | 1,815,420 replies each, 0 differ (Node 24, V8) |
+| `identity.mjs --seeds 20 --layers 60` | 636,463 replies (about 2.6 million numbers), 0 differ, 0 throws |
+| `check-wasm-identity.ts` | evaluation 243,703 values `74dd9610e4ebff84`, layers 148,904 `40e836a822221390` (148,721 before: T3's engine-step cases), captions 91,003 `85f7dbc79ed55c85`; native and wasm32 equal |
+| pm-text `wasm-identity.mjs` | Bun: 5,200 of 5,200 identical to the native CoreText run, level 2 bytes identical. Electron 44's V8 (`ELECTRON_RUN_AS_NODE`, under the lock): 5,200 of 5,200, bytes identical to the native subset run, level 2 identical |
+
+One environment note: building pm-eval's `wasm_identity` example for
+`wasm32-unknown-unknown` through `RUSTC_WRAPPER=kache` failed ("can't find crate for
+`core`") for crates kache had not compiled for wasm32 before; with the wrapper unset
+it builds and the check passes. Not an engine defect.
+
+**S5 targets in the app** (`node scripts/pm-wasm-bench.mjs --rounds 200`, two runs
+under the lock, 22:14 to 22:32, load 4.5 to 3.5; `performance.now()` resolves 0.1 ms):
+
+| Measurement | S5 target | Run 1 | Run 2 | |
+|---|---|---|---|---|
+| `evP` cached, all channels | < 1 µs | 59.6 ns (legacy 18.6) | 59.9 ns (legacy 18.9) | pass |
+| `evP` cached, animated channels | < 1 µs | 37.9 ns | 37.9 ns | pass |
+| `evP` at a new time, animated | - | 151.5 ns | 121.2 ns | - |
+| Fast path batch, per value | - | 7.19 ns | 6.94 ns | - |
+| Property edit: apply p50 / p95 / mean | < 0.2 ms | 0.0 / 0.1 / 0.0175 ms | 0.0 / 0.1 / 0.018 ms | pass |
+| Property edit with its path, mean of 200 back to back | < 0.2 ms | 0.0070 ms | 0.0075 ms | pass |
+| Property edit flush p50 / p95 | - | 0.2 / 0.3 ms | 0.2 / 0.3 ms | - |
+| Structural reorder / insert / delete: apply p95 | < 2 ms | 0.5 / 0.3 / 0.3 ms | 0.5 / 0.3 / 0.3 ms | pass |
+| Structural reorder / insert / delete: flush p95 | - | 3.5 / 2.9 / 3.0 ms | 3.6 / 2.9 / 2.9 ms | as before, not an S5 line |
+| Load (resync) / consistency check | - | 49.3 ms / 25.7 ms, ok | 47.9 ms / 24.5 ms, ok | - |
+| Linear memory / heap live / heap peak | - | 39.9 / 25.8 / 27.2 MB | same | - |
+
+The property flush (diff, encode, apply) fell from 0.3 / 0.4 ms to 0.2 / 0.3 ms
+(p50 / p95) since the first run.
+
+### Changes since the first run, item by item
+
+- T3, T5, T6, R1 fixed (`gate-fixes.md`); the rerun confirms T3 (`sourceTime` exact),
+  T5 and T6 (no auditor failure from them across the suite).
+- The previous T7 (`chatgpt-connection.spec.ts:5`) is unchanged: Settings shows two
+  Disconnect buttons with the developer's Claude settings imported (environment). The
+  other T7 (`import-image-sequence.spec.ts:7`) passes in all three suite runs (ledger,
+  flag on, audit).
+- New: `ae-audit-implementation.spec.ts:102` fails with the flag off and in `audit`
+  (the delivery lane's ProRes 4444 format id; a spec update for its owner, Export and
+  agents) and the two test-code missed writes above.
+
+The first run's report follows unchanged.
+
+---
+
 The Phase 1 gate (plan section 26, "Phase 1: Evaluation and the write path", with
 amendments 16, 19, and 20), measured on `feat/ne-parity` with `feat/native-engine` at
 `c1e74f2b` merged (waves 1 to 3, including the edit, audio, present, and store lanes;

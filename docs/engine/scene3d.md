@@ -156,6 +156,16 @@ pass") into the full pass. The plan stays the authority.
 
 ## Integration notes
 
+Legacy `powermove.3d.scene` animation channels are hydrated on project open,
+including nested compositions. Previously the legacy renderer adopted their
+temporal-ease fields only when it evaluated a frame; the native renderer did
+not write them, so switching off could change a saved document depending on
+which frames had drawn. Hydration adopts the scene's existing linear defaults
+before general keyframe normalization, preserving old handles and numeric
+interpolation. The regression in `legacy/app.test.ts` checks all scene channel
+groups, nested scenes, quarter/midpoint values, evaluation without a document
+write, and idempotent reopen. It fails before this fix.
+
 - The view override travels with each render: `RenderRequest::view`
   (contract 2's `FrameRequest.view`). `RenderRequest::from_frame_request`
   carries it for viewer frames and drops it for exports and agent captures
@@ -262,3 +272,20 @@ tests and tools named above are its own files. Everything else it touched:
 - `pm-render/tests/headless.rs`: the capability test's 3D section.
 - `docs/engine/pm-render.md`: its 3D section points here.
 - `engine/Cargo.lock`: `pm-geom3d` in `pm-render`'s dependencies.
+
+
+## Hydration follow-up (K1 and R3b, 2026-10-18)
+
+Registered effect parameters still go through both hydration passes (the loose
+pass, then the definition's pass), with today's value and keyframe semantics.
+Before its second pass each channel releases its own key ids from the
+project-wide set, so saved numeric, color and boolean keys keep their ids on
+every reopen. Duplicate ids across different channels still go through the
+existing uniqueness check. See `gate-fixes.md` (K1) for the parity cases.
+
+The legacy-scene hydration regression now includes color and boolean tracks and
+keys without ids in root and nested compositions. It compares quarter/midpoint
+answers with the unhydrated legacy evaluator, retains the absolute numeric
+22.5/45 assertions, checks assigned ids, and requires unchanged JSON after
+evaluation and a second hydration. Removing scene adoption fails the expanded
+regression; no easing behavior or renderer tolerance changed.

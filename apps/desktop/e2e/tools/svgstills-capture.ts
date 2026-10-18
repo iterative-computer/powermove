@@ -44,7 +44,7 @@ test('record reachable still decoder classes through the shipped importer', asyn
   expect(output, 'set an evidence directory outside Git').toBeTruthy();
   const sources = path.join(output!, 'sources'); await mkdir(sources, { recursive: true });
   const corpus = path.join(process.env.PM_MEDIA_CORPUS || path.join(os.homedir(), 'Library/Caches/powermove-engine/media-corpus'), 'formats/image');
-  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: process.env.PM_SVGSTILLS_NATIVE === '1' ? '1' : '0' } });
   const cases: Array<{ name: string; file: string; mime: string }> = [];
   const add = async (name: string, bytes: Buffer, mime = '') => {
     const file = path.join(sources, name); await writeFile(file, bytes); cases.push({ name, file, mime }); return file;
