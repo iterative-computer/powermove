@@ -261,9 +261,11 @@ fn check(
             feature: Feature::ProjectColor,
         });
     }
-    // The stamp (section 6) marks native-only features. The ones this
-    // renderer draws are linked media and Interpret Footage overrides; a
-    // stamp with neither stands for a feature it does not know.
+    // The stamp (section 6) only tells the legacy engine to refuse the
+    // project: every native-only feature it stands for is drawn here or
+    // judged by its own check ([`STAMP_FIELDS`]), so it routes nothing.
+    // `Feature::RequiresEngine` remains for a stamping field no lane draws;
+    // the classification test keeps that list empty.
     if let Some(r) = node::member(Some(root), "requiresEngine")
         && node::truthy(Some(r))
         && !native_features_drawn(root)
@@ -498,45 +500,29 @@ fn check_composition(
     }
 }
 
-/// Whether the document's native-only features (the `requiresEngine`
-/// stamp's reasons, `shared/engine-stamp.ts`; the section 6 field table,
-/// [`pm_protocol::patch::FIELD_TABLE`]) are all ones this engine draws, and
-/// at least one is present. The stamp carries no reasons, so each field
-/// that stamps is classified ([`STAMP_FIELDS`]):
+/// Whether every native-only feature the document uses (the
+/// `requiresEngine` stamp's reasons, `shared/engine-stamp.ts`; the section 6
+/// field table, [`pm_protocol::patch::FIELD_TABLE`]) is one this engine
+/// draws. The stamp carries no reasons, so each field that stamps is
+/// classified ([`STAMP_FIELDS`]):
 ///
-/// - drawn here: linked media (`storage: "linked"` or `link`) and Interpret
-///   Footage overrides (`interpret`);
-/// - judged elsewhere, never enough on its own: the project `color`
-///   ([`Feature::ProjectColor`]) and clip `pitch` (audio, `pm-audio`);
-/// - not drawn: precomp `keepFrameRate` — a stamp that may carry it routes
-///   the project away.
+/// - drawn here: linked media (`storage: "linked"` or `link`), Interpret
+///   Footage overrides (`interpret`), and precomp `keepFrameRate`
+///   (`crate::retime::keep_frame_rate`);
+/// - judged elsewhere: the project `color` ([`Feature::ProjectColor`] lists
+///   only settings this renderer does not know) and clip `pitch` (audio,
+///   `pm-audio`).
+///
+/// A stamp without any of them (a project whose only native-only setting is
+/// its color, or one stamped before its feature was removed) is accepted:
+/// the stamp is the legacy engine's refusal, not a capability.
 fn native_features_drawn(root: &Node) -> bool {
     // Every stamping field not drawn here is set (`true`, or any value
     // other than absent, false, or null) nowhere in the document.
     let set = |v: &Node| !matches!(v.kind(), NodeKind::Null | NodeKind::Bool(false));
-    if STAMP_FIELDS
+    !STAMP_FIELDS
         .iter()
         .any(|&(_, field, class)| class == StampField::NotDrawn && any_member(root, field, &set))
-    {
-        return false;
-    }
-    let Some(assets) = node::member(Some(root), "assets") else {
-        return false;
-    };
-    let mut any = false;
-    let mut visit = |asset: &Node| {
-        let linked = js::member_string(asset, "storage").as_deref() == Some("linked")
-            || node::member(Some(asset), "link").is_some_and(|l| node::truthy(Some(l)));
-        let interpreted =
-            node::member(Some(asset), "interpret").is_some_and(|i| node::truthy(Some(i)));
-        any |= linked || interpreted;
-    };
-    match assets.kind() {
-        NodeKind::Object(map) => map.values().for_each(&mut visit),
-        NodeKind::Array(list) => list.iter().for_each(&mut visit),
-        _ => {}
-    }
-    any
 }
 
 /// How [`native_features_drawn`] treats each field of the section 6 table
@@ -545,6 +531,9 @@ fn native_features_drawn(root: &Node) -> bool {
 enum StampField {
     Drawn,
     JudgedElsewhere,
+    /// A native-only field no lane draws: a document that sets it routes
+    /// ([`Feature::RequiresEngine`]). None today.
+    #[allow(dead_code)]
     NotDrawn,
 }
 
@@ -555,7 +544,7 @@ const STAMP_FIELDS: [(&str, &str, StampField); 6] = [
     ("asset", "link", StampField::Drawn),
     ("asset", "interpret", StampField::Drawn),
     ("asset", "storage", StampField::Drawn),
-    ("precomp", "keepFrameRate", StampField::NotDrawn),
+    ("precomp", "keepFrameRate", StampField::Drawn),
     ("clip", "pitch", StampField::JudgedElsewhere),
     ("project", "color", StampField::JudgedElsewhere),
 ];
@@ -762,23 +751,37 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_is_accepted_only_when_every_reason_is_drawn() {
+    fn every_stamp_reason_is_drawn() {
         let drawn = |doc: &Document| native_features_drawn(doc.root().unwrap());
         assert!(drawn(&stamped(serde_json::json!({}))));
-        // A native-only feature this renderer does not draw, next to one it
-        // does, routes the project away.
+        // keepFrameRate is drawn (`crate::retime::keep_frame_rate`).
         let precomp = serde_json::json!({ "comps": { "c": { "layers": [
             { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": true } }
         ] } } });
-        assert!(!drawn(&stamped(precomp)));
-        let off = serde_json::json!({ "comps": { "c": { "layers": [
-            { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": false } }
-        ] } } });
-        assert!(drawn(&stamped(off)));
-        // Without a reason drawn here, the stamp stands for something else.
-        let mut plain = stamped(serde_json::json!({ "assets": {} }));
-        assert!(!drawn(&plain));
-        plain = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
-        assert!(!drawn(&plain));
+        assert!(drawn(&stamped(precomp)));
+        // A stamp whose only reason is the project color (linear blending)
+        // or clip pitch is drawn: those are judged by their own checks.
+        let color = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
+        assert!(drawn(&color));
+        let doc = color;
+        assert!(
+            super::unsupported(&doc, "root").is_empty(),
+            "{:?}",
+            super::unsupported(&doc, "root")
+        );
+        let pitch = serde_json::json!({ "assets": {}, "layers": [
+            { "id": "a", "type": "audio", "d": { "pitch": "follow" } }
+        ] });
+        assert!(drawn(&stamped(pitch)));
+        assert!(drawn(&stamped(serde_json::json!({ "assets": {} }))));
+        // Invalid project color is still its own named feature.
+        let bad = stamped(serde_json::json!({ "color": { "mode": "nonsense" } }));
+        assert_eq!(
+            super::unsupported(&bad, "root")
+                .iter()
+                .map(|u| u.feature.clone())
+                .collect::<Vec<_>>(),
+            vec![Feature::ProjectColor]
+        );
     }
 }
