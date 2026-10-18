@@ -695,6 +695,65 @@ pub(crate) fn convert(
     out
 }
 
+/// An 8-bit RGBA still (Blink's compatibility bitmap) as an `Rgba8Unorm`
+/// texture, or `None` when its pixels are not one 8-bit RGBA plane.
+fn rgba8_bitmap(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    still: &pm_media::image::StillImage,
+) -> Option<Target> {
+    let (w, h) = (still.frame.format.width, still.frame.format.height);
+    let rgba = still
+        .frame
+        .with_planes(|planes| {
+            let p = planes.first()?;
+            if planes.len() != 1 || p.desc.format != pm_media::frame::PlaneFormat::Rgba8 {
+                return None;
+            }
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                // SAFETY: the plane holds `height` rows of `stride` bytes,
+                // each with `width` RGBA8 texels.
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
+                });
+            }
+            Some(out)
+        })
+        .ok()??;
+    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    let target = Target::new(
+        device,
+        "pm still bitmap",
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+    );
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    Some(target)
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ImageKey {
     path: PathBuf,
@@ -843,12 +902,31 @@ impl MediaCache {
         .map_err(issue)?;
         let mut still = pm_media::image::read(path, &self.pool)
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        let mut bitmap = false;
         if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
             still = pm_media::image::avif_compat::read(path, &still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+            bitmap = true;
         } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
             still = pm_media::image::compat::bitmap(&still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+            bitmap = true;
+        }
+        // Today's image layers sample Blink's 8-bit premultiplied bitmap as
+        // an RGBA8 texture (`texImage2D` with `UNPACK_PREMULTIPLY_ALPHA`).
+        // The GPU's bilinear filter weighs 8-bit texels differently from
+        // half float ones, so the compatibility bitmap is sampled as it is
+        // (in the display encoding; linear light converts it below).
+        if bitmap
+            && working == WorkingEncoding::Standard
+            && let Some(target) = rgba8_bitmap(device, queue, &still)
+        {
+            self.images.retain(|k, _| {
+                k.path != key.path || k.precision != key.precision || k.linear != key.linear
+            });
+            self.images.insert(key, target.clone());
+            self.recount();
+            return Ok(target);
         }
         let color = match interpret {
             Some(i) => {

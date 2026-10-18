@@ -97,16 +97,6 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
     within as f64 / pixels.max(1) as f64
 }
 
-/// Frames with a measured residual of the soft-alpha image class
-/// (docs/engine/composite.md, "Today's composite drift"): the engine
-/// evaluates `FRAG_COMPOSITE` as today does at every pixel, so the
-/// translucent stack drifts as today's does (the half float target
-/// truncates each pass); what remains is 32 pixels on the edges of the
-/// rotated soft-alpha images, where the bilinear still samples differ by
-/// the still class and the blend passes carry it. Bounds as measured
-/// (largest transparent-float and opaque differences, in CV); the rest of
-/// the class still applies. This is a gap, not an allowed difference.
-const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 4.61, 4)];
 
 /// Frames outside the render class by a measured, explained residual:
 /// (project, most pixels off by more than 1, largest difference). A frame
@@ -378,11 +368,8 @@ fn corpus_render_parity() {
                     ))
                 );
                 eprintln!("{line}");
-                let drift = COMPOSITE_DRIFT.iter().find(|d| d.0 == p.name);
-                let bound = drift.map_or(1.0, |d| d.1);
-                if max > bound || bar.as_ref().is_some_and(|b| !b.pass()) {
+                if max > 1.0 || bar.as_ref().is_some_and(|b| !b.pass()) {
                     if bar.is_none()
-                        && drift.is_none()
                         && webgl_unstable(&p.document)
                         && float_fraction_within_one(&ours, &reference) >= 0.999
                     {
@@ -421,11 +408,7 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            let drift_max = COMPOSITE_DRIFT.iter().find(|x| x.0 == p.name).map(|x| x.2);
-            let class = match drift_max {
-                Some(m) => d.fraction_within_one() >= 0.999 && d.max <= m,
-                None => d.passes(),
-            };
+            let class = d.passes();
             let known = KNOWN_RESIDUALS.iter().any(|&(name, pixels, max)| {
                 p.name == name && bar.is_none() && d.pixels - d.within_one <= pixels && d.max <= max
             });
@@ -433,7 +416,6 @@ fn corpus_render_parity() {
                 eprintln!("  known residual: {}", p.name);
             } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
                 if bar.is_none()
-                    && drift_max.is_none()
                     && webgl_unstable(&p.document)
                     && d.fraction_within_one() >= 0.999
                 {
