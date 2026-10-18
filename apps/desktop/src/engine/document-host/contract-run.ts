@@ -24,7 +24,7 @@ export function answerOf(response: AgentToolResponseEvent | Omit<AgentToolRespon
   return JSON.parse(JSON.stringify(rest));
 }
 
-export const canonicalDocument = (doc: unknown): string => canonicalStringify(canonicalProject(doc as never));
+export const canonicalDocument = (doc: unknown): string => canonicalStringify(canonicalProject(doc as never)) ?? '';
 
 const ID_KEYS = new Set(['id', 'i', 'historyId']);
 

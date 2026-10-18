@@ -178,7 +178,8 @@ on or off and nothing else (`flags.ts profileOverride`).
 | Pool against real workers | `vitest run src/engine/document-host/pool.test.ts` | 8 tests: reader guards (stamped project refused with the flag off, newer project read-only); two projects in two processes with interleaved calls, answers attributed by run and call; rollback on one never touches the other; restart (new pool, same store) resumes 3 and 1 undo entries; SIGKILL'd worker restarts and resumes; remote session edits applied without undo entries; missing pm-wasm and missing font service fail by name with retry and recover when the module appears; flag off keeps today's evaluator; export_video refused as `wrong-route` |
 | Worker without a browser | `vitest run src/engine/document-host/hosts.test.ts` | 5 tests: `generate_captions` through host services; no-model answer without a service; 2D and text edits in `audit` mode with **0 fallbacks, 0 dual mismatches, 0 auditor failures**; the measured ink fallback (below); local extension registration and Store refusal |
 | Contract sequence | `vitest run src/engine/document-host/contract.test.ts` | 15 calls answered, two workers byte-identical |
-| Desktop vs worker | `playwright test e2e/document-host-contract.spec.ts --workers=1` | see the lane report |
+| Serve wiring | `vitest run src/engine/document-host/serve.integration.test.ts` | a pool on the supervisor's link services against a real serve host: a tab and a worker share the session both ways; the history reaches the host's profile store |
+| Desktop vs worker | `pm-electron-lock playwright test e2e/document-host-contract.spec.ts --workers=1` | 15 calls from the same document: **byte-identical canonical documents and identical answers**, ids minted during the run renamed by order of appearance (they come from `Math.random`, which the desktop UI also draws from); one pinned difference, `check_project`'s `mediaChecked` (below) |
 | Exact answers | `vitest run src/renderer/src/engine-doc/strict.test.ts` | detached inputs native with 0 dual mismatches; trap answered by a fresh instance; double trap named; unloadable module named and recovered by `retry()`; development modes kept out of production overrides |
 
 ## What remains
@@ -190,6 +191,13 @@ on or off and nothing else (`flags.ts profileOverride`).
   records no `fontAnchorBounds` where the desktop records them: a document
   difference for those edits until `FontProvider.whole` exists
   (`hosts.test.ts` pins it as `edit.captureFontAnchor:ink: 1`).
+- **`check_project` media status.** A worker has no media runtime (`PM.assets` lives in
+  `legacy/gl/raster.ts`), so `check_project` answers `mediaChecked: false` and cannot
+  report offline or failed media, where the desktop checks its decoded media. Workers
+  need media status from the host's media store and engine probes (survey C24, the
+  agents lane's media tools); the contract spec pins the difference.
+- **Scripts** (`PM.Script.preview`/`apply`, used by generated workspace tools) refuse
+  by name in workers: their guarantees need the browser's opaque-origin frame.
 - **The editor's boot window and first font question** still answer with the legacy
   code (`unavailable` before `whenReady`, `fonts` while main serves a face for the
   first time). Closing them needs the renderer's bootstrap to await the mirror and the
