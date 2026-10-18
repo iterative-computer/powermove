@@ -70,8 +70,8 @@ function idsIn(value: unknown, out = new Set<string>()): Set<string> {
  */
 export function normalizeMintedIds(transcript: ContractTranscript, initial: unknown): ContractTranscript {
   const known = idsIn(initial);
-  // Generated ids carry digits (`PM.uid`, keys, cues); words that happen to be ids do not count.
-  const minted = [...idsIn(transcript)].filter((id) => !known.has(id) && id.length >= 3 && /\d/.test(id));
+  // Ids from Math.random may be any letters, so every new id counts; only whole values are renamed.
+  const minted = [...idsIn(transcript)].filter((id) => !known.has(id) && id.length >= 3);
   const names = new Map<string, string>();
   // Whole string values only (an id never matches inside other text), in
   // order of first appearance; JSON held in strings is renamed inside.
