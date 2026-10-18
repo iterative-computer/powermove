@@ -7,7 +7,13 @@ pub struct Profile {
     pub map_us: u64,
     pub read_us: u64,
     pub dsp_us: u64,
+    pub dsp_init_us: u64,
+    pub dsp_seek_us: u64,
+    pub dsp_process_us: u64,
     pub hold_us: u64,
+    /// Producer wall wait, overlaps the summed worker scopes above.
+    pub prepare_wait_us: u64,
+    pub first_render_us: u64,
 }
 thread_local! { static COUNTS: Cell<Profile> = Cell::new(Profile::default()); }
 fn enabled() -> bool {
@@ -25,7 +31,12 @@ pub(crate) enum Kind {
     Map,
     Read,
     Dsp,
+    DspInit,
+    DspSeek,
+    DspProcess,
     Hold,
+    PrepareWait,
+    FirstRender,
 }
 pub(crate) struct Timer(Option<Instant>, Kind);
 pub(crate) fn timer(kind: Kind) -> Timer {
@@ -42,7 +53,12 @@ impl Drop for Timer {
                     Kind::Map => &mut p.map_us,
                     Kind::Read => &mut p.read_us,
                     Kind::Dsp => &mut p.dsp_us,
+                    Kind::DspInit => &mut p.dsp_init_us,
+                    Kind::DspSeek => &mut p.dsp_seek_us,
+                    Kind::DspProcess => &mut p.dsp_process_us,
                     Kind::Hold => &mut p.hold_us,
+                    Kind::PrepareWait => &mut p.prepare_wait_us,
+                    Kind::FirstRender => &mut p.first_render_us,
                 };
                 *field += us.round() as u64;
                 c.set(p);
@@ -58,7 +74,12 @@ pub(crate) fn add(other: Profile) {
         p.map_us += other.map_us;
         p.read_us += other.read_us;
         p.dsp_us += other.dsp_us;
+        p.dsp_init_us += other.dsp_init_us;
+        p.dsp_seek_us += other.dsp_seek_us;
+        p.dsp_process_us += other.dsp_process_us;
         p.hold_us += other.hold_us;
+        p.prepare_wait_us += other.prepare_wait_us;
+        p.first_render_us += other.first_render_us;
         c.set(p);
     });
 }

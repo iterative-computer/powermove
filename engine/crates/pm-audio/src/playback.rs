@@ -11,10 +11,9 @@
 //! The render thread keeps the ring [`PlaybackConfig::ahead_ms`] ahead of
 //! the device. A play or seek starts a new epoch: queued audio of the old
 //! epoch is dropped by the callback. Detached workers prime independent
-//! voices ahead of Play. The first ready audible voice can start the run;
-//! a late voice joins at its current sample with the original offline phase.
-//! Its omitted prefix is counted per voice in [`StartTiming`]. When nothing
-//! is ready, the bounded A3 start hold still applies. The clock line starts
+//! voices ahead of Play. Ordinary starts wait for every voice and publish
+//! complete audio together. Only a decoder still missing after the bounded
+//! A3 device-time hold can omit a counted prefix. The clock line starts
 //! when the device presents the first buffer.
 //!
 //! When the device does not run at the project rate, `rubato::Async` (sinc,
@@ -94,6 +93,7 @@ impl DeviceSide {
     /// Fills one device buffer (interleaved, `channels` wide) whose first
     /// frame reaches the device output at host time `host_us`.
     pub fn callback(&mut self, out: &mut [f32], channels: usize, host_us: u64) {
+        let before = self.consumer.ring().underruns();
         let heard = self.consumer.fill(out, channels);
         if let Some(h) = heard {
             self.shared
@@ -106,6 +106,16 @@ impl DeviceSide {
             if let Some(s) = self.core.observe(h, host_us + latency as u64, latency) {
                 self.pending = Some(s);
             }
+        }
+        let missed = self.consumer.ring().underruns().saturating_sub(before);
+        let trace = &self.shared.start_timing;
+        let epoch = self.consumer.ring().epoch();
+        if missed > 0
+            && trace.running.load(Ordering::Relaxed)
+            && trace.epoch.load(Ordering::Acquire) == epoch
+            && trace.callback_epoch.load(Ordering::Acquire) == epoch
+        {
+            trace.program_underruns.fetch_add(missed, Ordering::Relaxed);
         }
         if let Some(s) = self.pending
             && self.shared.clock.try_store(s)
@@ -179,6 +189,12 @@ pub struct StartTiming {
     pub requested_us: u64,
     pub applied_us: u64,
     pub queued_us: u64,
+    pub ready_us: u64,
+    pub start_spread_frames: u64,
+    pub omitted_prefix_frames: u64,
+    pub safety_net_fires: u64,
+    pub program_underruns: u64,
+    pub voice_start_samples: Vec<(String, i64)>,
     pub callback_us: u64,
     pub device_host_us: u64,
     pub callback_frames: u64,
@@ -192,6 +208,11 @@ struct StartTrace {
     requested: AtomicU64,
     applied: AtomicU64,
     queued: AtomicU64,
+    ready: AtomicU64,
+    safety_net: AtomicU64,
+    running: AtomicBool,
+    program_underruns: AtomicU64,
+    voices: Mutex<HashMap<String, i64>>,
     callback: AtomicU64,
     callback_epoch: AtomicU32,
     device_host: AtomicU64,
@@ -204,6 +225,14 @@ impl StartTrace {
     fn begin(&self, epoch: u32, requested: u64) {
         crate::profile::reset();
         self.late.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.voices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.ready.store(0, Ordering::Relaxed);
+        self.safety_net.store(0, Ordering::Relaxed);
+        self.program_underruns.store(0, Ordering::Relaxed);
+        self.running.store(true, Ordering::Relaxed);
         self.epoch.store(0, Ordering::Release);
         self.requested.store(requested, Ordering::Relaxed);
         self.applied.store(host_now_us(), Ordering::Relaxed);
@@ -231,11 +260,43 @@ impl StartTrace {
         let epoch = self.epoch.load(Ordering::Acquire);
         let heard_epoch = self.callback_epoch.load(Ordering::Acquire);
         let callback = self.callback.load(Ordering::Relaxed);
+        let voice_start_samples: Vec<_> = self
+            .voices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(id, sample)| (id.clone(), *sample))
+            .collect();
+        let start_spread_frames = voice_start_samples
+            .iter()
+            .map(|(_, at)| *at)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(
+                voice_start_samples
+                    .iter()
+                    .map(|(_, at)| *at)
+                    .min()
+                    .unwrap_or(0),
+            ) as u64;
+        let omitted_prefix_frames = self
+            .late
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .copied()
+            .sum();
         let s = StartTiming {
             epoch,
             requested_us: self.requested.load(Ordering::Relaxed),
             applied_us: self.applied.load(Ordering::Relaxed),
             queued_us: self.queued.load(Ordering::Acquire),
+            ready_us: self.ready.load(Ordering::Acquire),
+            start_spread_frames,
+            omitted_prefix_frames,
+            safety_net_fires: self.safety_net.load(Ordering::Relaxed),
+            program_underruns: self.program_underruns.load(Ordering::Relaxed),
+            voice_start_samples,
             callback_us: callback,
             device_host_us: self.device_host.load(Ordering::Relaxed),
             callback_frames: self.callback_frames.load(Ordering::Relaxed),
@@ -1294,6 +1355,7 @@ impl RenderThread {
                         if let Some(start) = self.late_start.take() {
                             self.mixer.discard_prepared(start);
                         }
+                        self.mixer.abandon_prefills();
                         self.mixer.clear_preparing();
                         // A stop drops the run's starved segment: the next
                         // run renders from its own position.
@@ -1418,6 +1480,10 @@ impl RenderThread {
     /// stores afterwards (a higher `seq` on the older epoch) never replaces
     /// it: the slot orders by `(epoch, seq)`.
     fn publish_stopped(&mut self) {
+        self.shared
+            .start_timing
+            .running
+            .store(false, Ordering::Relaxed);
         if self.stopped_published {
             return;
         }
@@ -1611,6 +1677,7 @@ impl RenderThread {
         // A seek or a new run starts on the current mix, and its first
         // render is a new request, not a retry of a starved one.
         self.mixer.end_glides();
+        self.mixer.abandon_prefills();
         self.mixer.abandon_retries();
         let position = self.transport.position();
         let device_start = self.ring.played_frames();
@@ -1622,8 +1689,8 @@ impl RenderThread {
                 + Duration::from_millis(self.config.preroll_wait_ms as u64);
             self.preparation
                 .schedule(&mut self.mixer, &[position], true);
+            let _wait = crate::profile::timer(crate::profile::Kind::PrepareWait);
             while !self.mixer.stretches_ready(position)
-                && !self.mixer.any_stretch_prepared(position)
                 && std::time::Instant::now() < deadline
                 && self.ring.played_frames().saturating_sub(device_start)
                     < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
@@ -1639,12 +1706,18 @@ impl RenderThread {
         }
         let prepared = self.transport.play_rate() == 1 && self.mixer.prepared_ready(&[position]);
         if self.transport.play_rate() == 1
-            && self.mixer.any_stretch_prepared(position)
             && !self.mixer.stretches_ready(position)
+            && self.ring.played_frames().saturating_sub(device_start)
+                >= self.device_rate as u64 * SOURCE_WAIT_MS / 1000
+            && !self.mixer.is_ready(position, CHUNK)
             && self.mixer.begin_prepared(position)
         {
             self.late_start = Some(position);
         }
+        self.shared
+            .start_timing
+            .ready
+            .store(host_now_us(), Ordering::Release);
         let speed = self.transport.play_rate();
         // Only the first input chunk gates Play. The ordinary bounded
         // look-ahead fills the rest after output is queued; evaluating a
@@ -1659,7 +1732,8 @@ impl RenderThread {
         if !prepared {
             self.mixer.prefetch(from, frames);
         }
-        // The A3 source hold (detached late voices follow A4): wait for
+        // The A3 source hold: ordinary starts wait for all voices. Only
+        // a decoder missing beyond the device-time bound may drop. Wait for
         // the remaining first-chunk input, for at most
         // `preroll_wait_ms` of wall time and SOURCE_WAIT_MS of device time.
         // Nothing of this run is queued, so no ready voice goes silent while
@@ -1689,6 +1763,7 @@ impl RenderThread {
 
     /// Renders until the ring holds its callback-adapted look-ahead target.
     fn fill(&mut self) {
+        self.preparation.poll(&mut self.mixer);
         let ahead = self.config.ahead_ms as usize * self.device_rate as usize / 1000;
         let reserve = self.ring.refill_reserve() as usize;
         // Callback only observes its size. Allocation and growth stay on the
@@ -1728,6 +1803,10 @@ impl RenderThread {
                     // run's end position once it has.
                     self.stopped_published = false;
                     self.stop_pending = true;
+                    self.shared
+                        .start_timing
+                        .running
+                        .store(false, Ordering::Relaxed);
                 }
                 return;
             };
@@ -1735,6 +1814,11 @@ impl RenderThread {
             // play them backwards. Reverse renders each chunk on its own,
             // so stretched voices resample there (see RenderOptions).
             let (lo, hi) = seg.media_span();
+            if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
+                self.pending_segment = Some(seg);
+                return;
+            }
+            let track_start = self.startup.is_some() || self.late_start.is_some();
             if let Some(start) = self.late_start {
                 self.preparation.poll(&mut self.mixer);
                 if self.mixer.join_prepared(start, lo) {
@@ -1770,7 +1854,10 @@ impl RenderThread {
             {
                 self.mixer.use_prepared(lo);
             }
-            let mut result = self.mixer.render(lo, n, &mut planar, &options);
+            let mut result = {
+                let _render = crate::profile::timer(crate::profile::Kind::FirstRender);
+                self.mixer.render(lo, n, &mut planar, &options)
+            };
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
                 let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
@@ -1831,9 +1918,26 @@ impl RenderThread {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         for (id, frames) in &report.dropped_by_voice {
-                            if preparing.contains(id) {
+                            if track_start {
                                 *late.entry(id.clone()).or_default() += frames;
                             }
+                        }
+                    }
+                    if track_start && report.waiting_voices.is_empty() {
+                        let mut voices = self
+                            .shared
+                            .start_timing
+                            .voices
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        for id in &report.heard_whole {
+                            voices.entry(id.clone()).or_insert(lo);
+                        }
+                        if report.dropped_voice_frames > 0 {
+                            self.shared
+                                .start_timing
+                                .safety_net
+                                .store(1, Ordering::Relaxed);
                         }
                     }
                     self.report_render_errors(report.errors);
@@ -1857,9 +1961,7 @@ impl RenderThread {
                                     stall.reported = true;
                                     let by_reserve =
                                         stall.deadline < stall.start.saturating_add(hold);
-                                    if !preparing.contains(id) {
-                                        notifications.push(stall_message(id, by_reserve));
-                                    }
+                                    notifications.push(stall_message(id, by_reserve));
                                 }
                             }
                         }

@@ -781,6 +781,16 @@ impl StaticMap {
             conform: plan.conform,
         }))
     }
+    /// Exact signal identity, independent of the strip's level/fades.
+    /// Compare bits: signed zero and arithmetic order must survive reuse.
+    pub(crate) fn same_signal(&self, other: &Self) -> bool {
+        self.active == other.active
+            && self.conform.to_bits() == other.conform.to_bits()
+            && self.levels.len() == other.levels.len()
+            && self.levels.iter().zip(&other.levels).all(|(a, b)| {
+                [a.0, a.1, a.2, a.3].map(f64::to_bits) == [b.0, b.1, b.2, b.3].map(f64::to_bits)
+            })
+    }
     fn position(&self, mut t: f64) -> (bool, f64, f64, f64) {
         let mut on = true;
         let mut local = 0.0;

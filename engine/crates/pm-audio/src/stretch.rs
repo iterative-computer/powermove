@@ -444,6 +444,7 @@ impl StretchRun {
         self.end_live();
         let mut stretcher = {
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
+            let _scope = crate::profile::timer(crate::profile::Kind::DspInit);
             match self.spare.take() {
                 Some(mut st) => {
                     st.reset().map_err(stretch_error)?;
@@ -465,6 +466,7 @@ impl StretchRun {
         {
             let views: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
+            let _scope = crate::profile::timer(crate::profile::Kind::DspSeek);
             stretcher.output_seek(&views).map_err(stretch_error)?;
         }
         self.live = Some(Live {
@@ -588,6 +590,7 @@ impl StretchRun {
             let mut output: Vec<&mut [f32]> =
                 self.scratch_out.iter_mut().map(|c| &mut c[..m]).collect();
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
+            let _scope = crate::profile::timer(crate::profile::Kind::DspProcess);
             live.stretcher
                 .process(if len == 0 { &[] } else { &input }, &mut output)
                 .map_err(stretch_error)?;

@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pm_eval::Evaluator;
 use pm_eval::retime::RetimeCache;
@@ -174,6 +175,7 @@ struct Voice {
     project_reader: Option<Reader>,
     preparing: Option<i64>,
     fixed: Option<crate::graph::StaticMap>,
+    prefill: Option<Prefill>,
 }
 
 /// Whether a voice plays through the time stretch.
@@ -240,6 +242,49 @@ pub struct Mixer {
     standard_content: bool,
 }
 
+// A normal ring's worth of complete PCM covers independent priming.
+// Keep the time reserve across project rates. Reuse applies only to
+// exactly equal constant signals, before each voice's gain and strip.
+const HEAD_FRAMES: usize = 4096;
+fn head_frames(rate: u32) -> usize {
+    (HEAD_FRAMES * rate as usize)
+        .div_ceil(48_000)
+        .next_multiple_of(crate::ring::CHUNK)
+}
+struct Head {
+    start: i64,
+    pcm: Vec<Vec<f32>>,
+}
+impl Head {
+    fn covers(&self, at: i64, frames: usize) -> bool {
+        at >= self.start && (at - self.start) as usize + frames <= self.pcm[0].len()
+    }
+}
+struct HeadSlot {
+    pcm: std::sync::Mutex<Option<Arc<Head>>>,
+    available: Arc<AtomicBool>,
+}
+impl HeadSlot {
+    fn new() -> Self {
+        Self {
+            pcm: std::sync::Mutex::new(None),
+            available: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+impl std::ops::Deref for HeadSlot {
+    type Target = std::sync::Mutex<Option<Arc<Head>>>;
+    fn deref(&self) -> &Self::Target {
+        &self.pcm
+    }
+}
+type SharedHead = Arc<HeadSlot>;
+#[derive(Clone)]
+struct Prefill {
+    head: Arc<Head>,
+    finished: Arc<AtomicBool>,
+}
+
 /// Detached priming work. It never touches live histories, meters or the transport.
 pub(crate) struct PrepareVoice {
     pub(crate) start: i64,
@@ -252,6 +297,8 @@ pub(crate) struct PrepareVoice {
     reader: Reader,
     project_reader: Reader,
     run: Arc<std::sync::Mutex<StretchRun>>,
+    head: Option<SharedHead>,
+    pub(crate) gate: Option<Arc<AtomicBool>>,
 }
 impl PrepareVoice {
     pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
@@ -264,7 +311,7 @@ impl PrepareVoice {
         cancelled: impl Fn() -> bool,
     ) -> Result<bool> {
         let mut retime = RetimeCache::new();
-        (|| -> Result<bool> {
+        let result = (|| -> Result<bool> {
             let comps = self.graph.resolve(&self.doc)?;
             let plan = &self.graph.voices[self.vi];
             let p = self.rate as f64;
@@ -374,17 +421,62 @@ impl PrepareVoice {
                 )
             };
             let mut out = vec![Vec::new(); source.channels()];
-            self.run
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .prepare_join(a, self.target.max(first), &mut map, &mut read, &mut out)
-        })()
+            let mut run = self.run.lock().unwrap_or_else(|e| e.into_inner());
+            let ready =
+                run.prepare_join(a, self.target.max(first), &mut map, &mut read, &mut out)?;
+            if ready
+                && self.target == self.start
+                && let Some(head) = &self.head
+            {
+                let frames = head_frames(self.rate).min((last - a) as usize);
+                if !run.render(a, frames, &mut map, &mut read, &mut out)? {
+                    return Ok(false);
+                }
+                let mut shared = head.lock().unwrap_or_else(|e| e.into_inner());
+                if shared.is_none() {
+                    *shared = Some(Arc::new(Head { start: a, pcm: out }));
+                    head.available.store(true, Ordering::Release);
+                }
+            }
+            Ok(ready)
+        })();
+        // A caught-up A3 history or an evaluation/decode error may have no
+        // immutable head. Release dependents anyway; they must not remain
+        // gated forever when the representative no longer needs a retry.
+        if !matches!(&result, Ok(false))
+            && let Some(head) = &self.head
+        {
+            head.available.store(true, Ordering::Release);
+        }
+        result
     }
 }
 
 struct Prepared {
     runs: Vec<Option<Arc<std::sync::Mutex<StretchRun>>>>,
     ready: Vec<bool>,
+    heads: Vec<Option<SharedHead>>,
+    finished: Vec<Arc<AtomicBool>>,
+    installed: bool,
+}
+impl Prepared {
+    fn new(voices: usize) -> Self {
+        Self {
+            runs: (0..voices).map(|_| None).collect(),
+            ready: vec![false; voices],
+            heads: vec![None; voices],
+            finished: (0..voices)
+                .map(|_| Arc::new(AtomicBool::new(false)))
+                .collect(),
+            installed: false,
+        }
+    }
+    fn output_ready(&self, i: usize) -> bool {
+        self.ready[i]
+            || self.heads[i]
+                .as_ref()
+                .is_some_and(|h| h.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+    }
 }
 
 impl Mixer {
@@ -440,8 +532,23 @@ impl Mixer {
     /// Replaces the evaluator (an expression engine, hooks).
     pub fn set_evaluator(&mut self, ev: Evaluator) {
         self.standard_content = false;
-        for voice in &mut self.voices {
+        for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices).chain(
+            self.outgoing
+                .iter_mut()
+                .flat_map(|g| g.voices.iter_mut().zip(&g.graph.voices)),
+        ) {
             voice.fixed = None;
+            voice.prefill = None;
+            if voice.stretch.is_some() {
+                voice.stretch = Some(Arc::new(std::sync::Mutex::new(StretchRun::new(
+                    plan.source.channels(),
+                    self.format.sample_rate,
+                    plan.map_key,
+                ))));
+            }
+        }
+        for outgoing in &mut self.outgoing {
+            outgoing.retime.clear();
         }
         self.prepared.clear();
         self.ev = ev;
@@ -538,10 +645,10 @@ impl Mixer {
     /// the audible mix; keeping the unit small lets controls and ring fills
     /// run between fresh vocoder pre-rolls.
     pub(crate) fn prepare_start(&mut self, start: i64) -> bool {
-        let mut prepared = self.prepared.remove(&start).unwrap_or_else(|| Prepared {
-            runs: self.voices.iter().map(|_| None).collect(),
-            ready: vec![false; self.voices.len()],
-        });
+        let mut prepared = self
+            .prepared
+            .remove(&start)
+            .unwrap_or_else(|| Prepared::new(self.voices.len()));
         if let Some(vi) = prepared.ready.iter().position(|ready| !ready) {
             if let Some(live) = &self.voices[vi].stretch {
                 let run = prepared.runs[vi].get_or_insert_with(|| {
@@ -563,6 +670,8 @@ impl Mixer {
                     reader: self.voices[vi].reader.clone(),
                     project_reader: self.voices[vi].project_reader.clone().unwrap(),
                     run: run.clone(),
+                    head: None,
+                    gate: None,
                 };
                 let result = work.run(&mut self.ev, false, || false).unwrap_or(false);
                 prepared.ready[vi] = result;
@@ -581,16 +690,41 @@ impl Mixer {
     /// Queue detached work for the nearest sounding voices first. Ready
     /// histories remain reusable; a job owns only its separate pending run.
     pub(crate) fn preparation_work(&mut self, start: i64, target: i64) -> Vec<PrepareVoice> {
-        let prepared = self.prepared.entry(start).or_insert_with(|| Prepared {
-            runs: self.voices.iter().map(|_| None).collect(),
-            ready: vec![false; self.voices.len()],
-        });
+        let prepared = self
+            .prepared
+            .entry(start)
+            .or_insert_with(|| Prepared::new(self.voices.len()));
         let mut work = Vec::new();
         for (vi, voice) in self.voices.iter().enumerate() {
             if prepared.ready[vi] || voice.stretch.is_none() {
                 continue;
             }
             let plan = &self.graph.voices[vi];
+            if prepared.heads[vi].is_none()
+                && let Some(fixed) = &voice.fixed
+            {
+                let peer = (0..self.voices.len()).find(|&i| {
+                    i != vi
+                        && self.graph.voices[i].source.id() == plan.source.id()
+                        && self.voices[i]
+                            .fixed
+                            .as_ref()
+                            .is_some_and(|f| fixed.same_signal(f))
+                        && voice_bounds(&voice.reader, plan, self.format.sample_rate as f64)
+                            == voice_bounds(
+                                &self.voices[i].reader,
+                                &self.graph.voices[i],
+                                self.format.sample_rate as f64,
+                            )
+                });
+                if let Some(peer) = peer {
+                    prepared.heads[vi] = Some(
+                        prepared.heads[peer]
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(HeadSlot::new())),
+                    );
+                }
+            }
             let run = prepared.runs[vi].get_or_insert_with(|| {
                 Arc::new(std::sync::Mutex::new(StretchRun::new(
                     plan.source.channels(),
@@ -598,6 +732,18 @@ impl Mixer {
                     plan.map_key,
                 )))
             });
+            let gate = prepared.heads[vi]
+                .as_ref()
+                .filter(|head| {
+                    (0..vi).any(|i| {
+                        !prepared.ready[i]
+                            && prepared.heads[i]
+                                .as_ref()
+                                .is_some_and(|h| Arc::ptr_eq(h, head))
+                    })
+                })
+                .map(|head| head.available.clone());
+            prepared.finished[vi].store(false, Ordering::Release);
             work.push(PrepareVoice {
                 start,
                 target,
@@ -609,6 +755,8 @@ impl Mixer {
                 reader: voice.reader.clone(),
                 project_reader: voice.project_reader.clone().unwrap(),
                 run: run.clone(),
+                head: prepared.heads[vi].clone(),
+                gate,
             });
         }
         work.sort_by_key(|w| {
@@ -624,7 +772,14 @@ impl Mixer {
 
     pub(crate) fn prepared_voice(&mut self, start: i64, vi: usize, ready: bool) {
         if let Some(p) = self.prepared.get_mut(&start) {
-            p.ready[vi] = ready;
+            // Once installed, the immutable head remains complete even if
+            // this independent job met an evicted input block. Release its
+            // history to the ordinary per-voice retry path at the head's end.
+            p.ready[vi] = ready || p.installed;
+            p.finished[vi].store(true, Ordering::Release);
+            if p.installed && p.ready.iter().all(|r| *r) {
+                self.prepared.remove(&start);
+            }
         }
     }
 
@@ -633,6 +788,7 @@ impl Mixer {
         // leave a failed job hidden behind a permanent preparation mask.
         if let Some(p) = self.prepared.get_mut(&start) {
             p.ready[vi] = true;
+            p.finished[vi].store(true, Ordering::Release);
             p.runs[vi] = None;
         }
         self.voices[vi].preparing = None;
@@ -648,24 +804,11 @@ impl Mixer {
 
     pub(crate) fn stretches_ready(&self, start: i64) -> bool {
         self.voices.iter().enumerate().all(|(vi, voice)| {
-            voice.stretch.is_none() || self.prepared.get(&start).is_some_and(|p| p.ready[vi])
-        })
-    }
-
-    pub(crate) fn any_stretch_prepared(&self, start: i64) -> bool {
-        self.prepared.get(&start).is_some_and(|p| {
-            self.voices.iter().enumerate().any(|(i, v)| {
-                let plan = &self.graph.voices[i];
-                let (first, last) = voice_bounds(&v.reader, plan, self.format.sample_rate as f64);
-                v.stretch.is_some()
-                    && p.ready[i]
-                    && p.runs[i].is_some()
-                    && start >= first
-                    && start < last
-                    && plan
-                        .static_point
-                        .is_none_or(|pt| pt.active && pt.gain != 0.0)
-            })
+            voice.stretch.is_none()
+                || self
+                    .prepared
+                    .get(&start)
+                    .is_some_and(|p| p.output_ready(vi))
         })
     }
 
@@ -684,6 +827,18 @@ impl Mixer {
                 if let Some(run) = p.runs[i].take() {
                     voice.stretch = Some(run);
                 }
+            } else if let Some(p) = self.prepared.get(&start)
+                && let Some(head) = p.heads[i]
+                    .as_ref()
+                    .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            {
+                // Even at A3's decoder bound, a complete PCM head is a
+                // ready voice. Never silence it for an unfinished CPU job.
+                voice.stretch = p.runs[i].clone();
+                voice.prefill = Some(Prefill {
+                    head,
+                    finished: p.finished[i].clone(),
+                });
             } else {
                 voice.preparing = Some(start);
             }
@@ -734,6 +889,23 @@ impl Mixer {
         self.prepared.clear();
     }
 
+    pub(crate) fn abandon_prefills(&mut self) {
+        self.prepared.retain(|_, p| !p.installed);
+        for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices) {
+            if let Some(prefill) = voice.prefill.take()
+                && !prefill.finished.load(Ordering::Acquire)
+            {
+                // A cancelled worker owns the old history until it exits.
+                // A new epoch must not wait on its mutex.
+                voice.stretch = Some(Arc::new(std::sync::Mutex::new(StretchRun::new(
+                    plan.source.channels(),
+                    self.format.sample_rate,
+                    plan.map_key,
+                ))));
+            }
+        }
+    }
+
     pub(crate) fn clear_preparing(&mut self) {
         for v in &mut self.voices {
             v.preparing = None;
@@ -745,30 +917,58 @@ impl Mixer {
         starts.iter().all(|s| {
             self.prepared
                 .get(s)
-                .is_some_and(|p| p.ready.iter().all(|r| *r))
+                .is_some_and(|p| (0..p.ready.len()).all(|i| p.output_ready(i)))
         })
     }
 
     pub(crate) fn retain_prepared(&mut self, starts: &[i64]) {
-        self.prepared.retain(|start, _| starts.contains(start));
+        self.prepared.retain(|start, p| {
+            starts.contains(start) || (p.installed && p.ready.iter().any(|r| !r))
+        });
     }
 
     /// Install every ready voice at this start. Partial preparation still
     /// saves work on an immediate Play; unprepared voices use ordinary pre-roll.
     /// Other starts survive Play and are replenished after a loop consumes one.
     pub(crate) fn use_prepared(&mut self, start: i64) {
-        if let Some(prepared) = self.prepared.remove(&start) {
-            for ((v, run), ready) in self
-                .voices
-                .iter_mut()
-                .zip(prepared.runs)
-                .zip(prepared.ready)
-            {
-                if ready && run.is_some() {
-                    v.stretch = run;
+        let mut complete = true;
+        if let Some(p) = self.prepared.get_mut(&start) {
+            p.installed = true;
+            for (i, voice) in self.voices.iter_mut().enumerate() {
+                if p.ready[i] && p.runs[i].is_some() {
+                    voice.stretch = p.runs[i].take();
+                    voice.prefill = None;
+                } else if let Some(run) = p.runs[i].clone()
+                    && let Some(head) = p.heads[i]
+                        .as_ref()
+                        .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                {
+                    voice.stretch = Some(run);
+                    voice.prefill = Some(Prefill {
+                        head,
+                        finished: p.finished[i].clone(),
+                    });
                 }
+                complete &= p.ready[i];
             }
         }
+        if complete {
+            self.prepared.remove(&start);
+        }
+    }
+
+    /// A complete immutable head can be queued before its independent
+    /// history finishes. Never turn a CPU wait at its end into silence.
+    pub(crate) fn awaiting_history(&self, at: i64, frames: usize) -> bool {
+        self.voices.iter().zip(&self.graph.voices).any(|(v, plan)| {
+            let (first, last) = voice_bounds(&v.reader, plan, self.format.sample_rate as f64);
+            let a = at.max(first);
+            let b = (at + frames as i64).min(last);
+            b > a
+                && v.prefill.as_ref().is_some_and(|p| {
+                    !p.finished.load(Ordering::Acquire) && !p.head.covers(a, (b - a) as usize)
+                })
+        })
     }
 
     /// Whether a retune glide is in progress.
@@ -777,12 +977,28 @@ impl Mixer {
     }
 
     fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
+        // Project updates cancel the detached jobs. Installed histories now
+        // belong to the audible mixes: do not submit new jobs on them. Keep
+        // their immutable prefix and resume from its original phase if the
+        // cancelled history was not yet complete.
+        self.prepared.retain(|_, p| !p.installed);
+        for voice in self
+            .voices
+            .iter()
+            .chain(self.outgoing.iter().flat_map(|g| &g.voices))
+        {
+            if let Some(prefill) = &voice.prefill {
+                prefill.finished.store(true, Ordering::Release);
+            }
+        }
         // A level/fade edit does not change the signal entering a vocoder.
         // Dynamic plans can depend on other properties: invalidate those.
         let old = &self.graph.voices;
         for prepared in self.prepared.values_mut() {
             let mut runs = Vec::with_capacity(graph.voices.len());
             let mut ready = Vec::with_capacity(graph.voices.len());
+            let mut heads = Vec::with_capacity(graph.voices.len());
+            let mut finished = Vec::with_capacity(graph.voices.len());
             for plan in &graph.voices {
                 let previous = old.iter().position(|p| {
                     !p.animated
@@ -794,14 +1010,24 @@ impl Mixer {
                 });
                 runs.push(previous.and_then(|i| prepared.runs[i].take()));
                 ready.push(previous.is_some_and(|i| prepared.ready[i]));
+                heads.push(previous.and_then(|i| prepared.heads[i].clone()));
+                finished.push(
+                    previous
+                        .map(|i| prepared.finished[i].clone())
+                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                );
             }
             prepared.runs = runs;
             prepared.ready = ready;
+            prepared.heads = heads;
+            prepared.finished = finished;
+            prepared.installed = false;
         }
         let p = self.format.sample_rate;
         // Stretches in progress carry over to voices whose map did not
         // change (a fader drag during playback must not restart them).
         let mut runs: HashMap<(String, u64), Arc<std::sync::Mutex<StretchRun>>> = HashMap::new();
+        let mut prefills: HashMap<(String, u64), Prefill> = HashMap::new();
         let previous = self.graph.voices.iter().zip(&self.voices).chain(
             self.outgoing
                 .last()
@@ -810,6 +1036,11 @@ impl Mixer {
                 .flatten(),
         );
         for (plan, voice) in previous {
+            if let Some(prefill) = &voice.prefill {
+                prefills
+                    .entry((plan.id.clone(), plan.map_key))
+                    .or_insert_with(|| prefill.clone());
+            }
             if let Some(run) = &voice.stretch {
                 runs.entry((plan.id.clone(), plan.map_key))
                     .or_insert_with(|| run.clone());
@@ -838,6 +1069,7 @@ impl Mixer {
                     project_reader: stretched.then(|| linear_reader(v.source.sample_rate(), p)),
                     preparing: None,
                     fixed: None,
+                    prefill: prefills.get(&(v.id.clone(), v.map_key)).cloned(),
                 }
             })
             .collect();
@@ -1417,47 +1649,79 @@ impl Mixer {
         options: &RenderOptions,
     ) -> Result<bool> {
         let p = self.format.sample_rate as f64;
-        let mut run = run.lock().unwrap_or_else(|e| e.into_inner());
-        // The control points the gains used, as map points.
-        if !self.points.is_empty() {
-            let c0 = a.div_euclid(CONTROL);
-            run.offer(
-                c0,
-                self.points.iter().map(|pt| MapPoint {
+        let head = self.voices[vi]
+            .prefill
+            .as_ref()
+            .map(|p| p.head.clone())
+            .filter(|h| h.covers(a, n));
+        let complete = if let Some(head) = head {
+            self.voice_out.resize_with(plan.source.channels(), Vec::new);
+            let from = (a - head.start) as usize;
+            for (out, input) in self.voice_out.iter_mut().zip(&head.pcm) {
+                out.clear();
+                out.extend_from_slice(&input[from..from + n]);
+            }
+            true
+        } else {
+            let mut run = run.lock().unwrap_or_else(|e| e.into_inner());
+            // The control points the gains used, as map points.
+            if !self.points.is_empty() {
+                let c0 = a.div_euclid(CONTROL);
+                run.offer(
+                    c0,
+                    self.points.iter().map(|pt| MapPoint {
+                        x: pt.source_time * p,
+                        on: pt.active && pt.in_span,
+                    }),
+                );
+            }
+            let source = plan.source.clone();
+            let cache = self.cache.clone();
+            let wait = options.wait;
+            let project = self.format.sample_rate;
+            let (ev, retime) = (&mut self.ev, &mut self.retime);
+            let mut map = |c: i64| -> Result<MapPoint> {
+                let pt = plan.evaluate(ev, comps, open, (c * CONTROL) as f64 / p, retime)?;
+                Ok(MapPoint {
                     x: pt.source_time * p,
                     on: pt.active && pt.in_span,
-                }),
-            );
-        }
-        let source = plan.source.clone();
-        let cache = self.cache.clone();
-        let wait = options.wait;
-        let project = self.format.sample_rate;
-        let (ev, retime) = (&mut self.ev, &mut self.retime);
-        let mut map = |c: i64| -> Result<MapPoint> {
-            let pt = plan.evaluate(ev, comps, open, (c * CONTROL) as f64 / p, retime)?;
-            Ok(MapPoint {
-                x: pt.source_time * p,
-                on: pt.active && pt.in_span,
-            })
+                })
+            };
+            self.voice_out.resize_with(source.channels(), Vec::new);
+            let mut src = std::mem::take(&mut self.src);
+            let mut read = |lo: i64, len: usize, out: &mut [Vec<f32>]| -> Result<bool> {
+                read_linear(
+                    &cache, &source, project, &reader, lo, len, out, &mut src, wait,
+                )
+            };
+            let complete = if let Some(prefill) = &self.voices[vi].prefill
+                && !run.can_continue_at(a)
+            {
+                if run.prepare_join(
+                    prefill.head.start,
+                    a,
+                    &mut map,
+                    &mut read,
+                    &mut self.voice_out,
+                )? {
+                    run.render(a, n, &mut map, &mut read, &mut self.voice_out)
+                } else {
+                    Ok(false)
+                }
+            } else {
+                run.render(a, n, &mut map, &mut read, &mut self.voice_out)
+            };
+            self.src = src;
+            let complete = complete?;
+            if !complete && options.drop_starved {
+                self.voice_dropped_frames += n as u64;
+                // Keep valid vocoder history through short dropped spans. The
+                // run bounds catch-up work itself; missing PCM never enters DSP.
+                run.commit_drop(a);
+            }
+            drop(run);
+            complete
         };
-        self.voice_out.resize_with(source.channels(), Vec::new);
-        let mut src = std::mem::take(&mut self.src);
-        let mut read = |lo: i64, len: usize, out: &mut [Vec<f32>]| -> Result<bool> {
-            read_linear(
-                &cache, &source, project, &reader, lo, len, out, &mut src, wait,
-            )
-        };
-        let complete = run.render(a, n, &mut map, &mut read, &mut self.voice_out);
-        self.src = src;
-        let complete = complete?;
-        if !complete && options.drop_starved {
-            self.voice_dropped_frames += n as u64;
-            // Keep valid vocoder history through short dropped spans. The
-            // run bounds catch-up work itself; missing PCM never enters DSP.
-            run.commit_drop(a);
-        }
-        drop(run);
         let voice = &self.voices[vi];
         let strip = &mut self.strips[voice.strip];
         for (bus, row) in strip.iter_mut().zip(&voice.matrix) {
@@ -1514,7 +1778,10 @@ impl Mixer {
             }
             if frames <= crate::ring::CHUNK
                 && self.voices[vi].stretch.is_some()
-                && self.prepared.get(&start).is_some_and(|p| p.ready[vi])
+                && self
+                    .prepared
+                    .get(&start)
+                    .is_some_and(|p| p.output_ready(vi))
             {
                 continue;
             }
@@ -1969,16 +2236,16 @@ mod prepared_tests {
         assert!(m.prepared_ready(&[start]));
     }
     #[test]
-    fn a_silent_preparation_does_not_release_other_cold_voices() {
+    fn a_partial_preparation_does_not_release_other_cold_voices() {
         let f = Fixture::new();
         let mut mix = f.mixer(1.0, 1.5, 8.0);
         mix.prepare_start(9 * 48_000);
-        assert!(!mix.any_stretch_prepared(9 * 48_000));
+        assert!(!mix.stretches_ready(9 * 48_000));
         mix.prepare_start(4 * 48_000);
-        assert!(mix.any_stretch_prepared(4 * 48_000));
+        assert!(!mix.stretches_ready(4 * 48_000));
         let mut muted = f.mixer(0.0, 1.5, 8.0);
         muted.prepare_start(4 * 48_000);
-        assert!(!muted.any_stretch_prepared(4 * 48_000));
+        assert!(!muted.stretches_ready(4 * 48_000));
     }
 
     #[test]
@@ -2025,6 +2292,243 @@ mod prepared_tests {
             .unwrap();
         make()
             .render(192_000, 4096, &mut expected, &options)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn immutable_heads_start_complete_then_handoff_to_independent_histories() {
+        let f = Fixture::new();
+        let mut mix = f.mixer(0.7, 1.5, 10.0);
+        mix.standard_content(true);
+        let start = 192_000;
+        let mut jobs = mix.preparation_work(start, start).into_iter();
+        let first = jobs.next().unwrap();
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        mix.prepared_voice(start, 0, true);
+        assert!(mix.prepared_ready(&[start]), "all voices have complete PCM");
+        assert!(
+            !mix.prepared[&start].ready[1],
+            "other histories deliberately not run yet"
+        );
+        let heads = &mix.prepared[&start].heads;
+        assert!(
+            heads
+                .iter()
+                .all(|h| Arc::ptr_eq(h.as_ref().unwrap(), heads[0].as_ref().unwrap()))
+        );
+        mix.use_prepared(start);
+        assert!(mix.awaiting_history(start + HEAD_FRAMES as i64, 256));
+        let mut reference = f.mixer(0.7, 1.5, 10.0);
+        let mut actual = vec![vec![]; 2];
+        let mut expected = vec![vec![]; 2];
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        for offset in (0..HEAD_FRAMES).step_by(256) {
+            mix.render(start + offset as i64, 256, &mut actual, &options)
+                .unwrap();
+            reference
+                .render(start + offset as i64, 256, &mut expected, &options)
+                .unwrap();
+            assert_eq!(actual, expected, "prefilled complete mix at {offset}");
+        }
+        for job in jobs {
+            let vi = job.vi;
+            let ready = if vi == 1 {
+                false
+            } else {
+                job.run(&mut Evaluator::new(), true, || false).unwrap()
+            };
+            mix.prepared_voice(start, vi, ready);
+        }
+        assert!(!mix.awaiting_history(start + HEAD_FRAMES as i64, 256));
+        assert!(mix.voices.iter().enumerate().all(|(i, v)| {
+            mix.voices.iter().enumerate().all(|(j, w)| {
+                i == j || !Arc::ptr_eq(v.stretch.as_ref().unwrap(), w.stretch.as_ref().unwrap())
+            })
+        }));
+        for offset in (HEAD_FRAMES..HEAD_FRAMES + 8192).step_by(256) {
+            mix.render(start + offset as i64, 256, &mut actual, &options)
+                .unwrap();
+            reference
+                .render(start + offset as i64, 256, &mut expected, &options)
+                .unwrap();
+            assert_eq!(actual, expected, "independent handoff at {offset}");
+        }
+    }
+
+    #[test]
+    fn a_live_level_edit_keeps_the_prefilled_phase_without_waiting_on_cancelled_jobs() {
+        let f = Fixture::new();
+        let start = 196_480;
+        let mut actual = f.mixer(0.3, 1.5, 10.0);
+        actual.standard_content(true);
+        let mut jobs = actual.preparation_work(start, start).into_iter();
+        assert!(
+            jobs.next()
+                .unwrap()
+                .run(&mut Evaluator::new(), true, || false)
+                .unwrap()
+        );
+        actual.prepared_voice(start, 0, true);
+        actual.use_prepared(start);
+        let mut reference = f.mixer(0.3, 1.5, 10.0);
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let mut a = vec![vec![]; 2];
+        let mut b = vec![vec![]; 2];
+        actual.render(start, 512, &mut a, &options).unwrap();
+        reference.render(start, 512, &mut b, &options).unwrap();
+        assert_eq!(a, b);
+        let (doc, graph) = f.graph(0.8, 1.5, 10.0);
+        actual.glide_to(doc.clone(), graph.clone(), None);
+        reference.glide_to(doc, graph, None);
+        assert!(
+            !actual.awaiting_history(start + HEAD_FRAMES as i64, 256),
+            "a live edit cancels the detached jobs, so their flags cannot gate the producer"
+        );
+        for offset in (512..HEAD_FRAMES + 4096).step_by(256) {
+            actual
+                .render(start + offset as i64, 256, &mut a, &options)
+                .unwrap();
+            reference
+                .render(start + offset as i64, 256, &mut b, &options)
+                .unwrap();
+            assert_eq!(a, b, "live edit at {offset}");
+        }
+    }
+
+    #[test]
+    fn replacing_the_evaluator_never_reuses_a_previous_factories_pcm() {
+        struct Hooks;
+        impl pm_eval::EvalHooks for Hooks {
+            fn resolve_content(
+                &self,
+                _: &pm_eval::Comp<'_>,
+                _: &pm_model::Node,
+                _: f64,
+                d: &mut pm_eval::evaluator::Content,
+                _: &mut dyn pm_eval::evaluator::PropEval,
+            ) -> pm_eval::js_sem::JsResult<()> {
+                d.insert(
+                    pm_model::JsString::from("speed"),
+                    pm_eval::js_sem::JsValue::Number(1.25),
+                );
+                Ok(())
+            }
+        }
+        let f = Fixture::new();
+        let start = 196_480;
+        let mut actual = f.mixer(0.7, 1.5, 10.0);
+        actual.standard_content(true);
+        let first = actual.preparation_work(start, start).remove(0);
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        actual.prepared_voice(start, 0, true);
+        actual.use_prepared(start);
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let mut a = vec![vec![]; 2];
+        let mut b = vec![vec![]; 2];
+        actual.render(start, 512, &mut a, &options).unwrap();
+        let evaluator = || Evaluator::new().with_hooks(Arc::new(Hooks));
+        actual.set_evaluator(evaluator());
+        let (doc, graph) = f.graph(0.7, 1.5, 10.0);
+        let mut reference = Mixer::new(
+            MixFormat::stereo(48_000),
+            doc,
+            graph,
+            evaluator(),
+            f.cache.clone(),
+        );
+        actual.render(start + 512, 4096, &mut a, &options).unwrap();
+        reference
+            .render(start + 512, 4096, &mut b, &options)
+            .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn immutable_head_identity_does_not_merge_different_signals() {
+        let f = Fixture::new();
+        let layers = (0..4).map(|i| format!(r#"{{"id":"v{i}","type":"audio","from":0,"dur":10,"on":true,"d":{{"asset":"s","gain":{},"fadeIn":{},"trim":{},"speed":{}}}}}"#,
+            0.2 + i as f64 * 0.1, i as f64 * 0.2, if i==2 {0.1} else {0.0}, if i==3 {1.6} else {1.5})).collect::<Vec<_>>();
+        let doc = Arc::new(Document::new(
+            Some(
+                parse(&format!(
+                    r#"{{"id":"P","compId":"C","fps":30,"dur":10,"layers":[{}],"comps":{{}}}}"#,
+                    layers.join(",")
+                ))
+                .unwrap(),
+            ),
+            1,
+        ));
+        let graph = Arc::new(
+            MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+                Some(f.dir.join("tone.wav"))
+            })
+            .unwrap(),
+        );
+        let mut mix = Mixer::new(
+            MixFormat::stereo(48_000),
+            doc.clone(),
+            graph.clone(),
+            Evaluator::new(),
+            f.cache.clone(),
+        );
+        mix.standard_content(true);
+        let start = 192_000;
+        let jobs = mix.preparation_work(start, start);
+        let h = &mix.prepared[&start].heads;
+        assert!(
+            Arc::ptr_eq(h[0].as_ref().unwrap(), h[1].as_ref().unwrap()),
+            "gain and fade apply after raw PCM"
+        );
+        for i in [2, 3] {
+            assert!(h[i].is_none(), "unique signals do not compute unused heads");
+        }
+        let mut jobs = jobs.into_iter();
+        assert!(
+            jobs.next()
+                .unwrap()
+                .run(&mut Evaluator::new(), true, || false)
+                .unwrap()
+        );
+        mix.prepared_voice(start, 0, true);
+        assert!(mix.begin_prepared(start));
+        assert_eq!(
+            mix.preparing_ids(),
+            ["v2".to_string(), "v3".to_string()].into(),
+            "A3 must retain complete heads beside an unrelated missing voice"
+        );
+        for job in jobs {
+            let vi = job.vi;
+            assert!(job.run(&mut Evaluator::new(), true, || false).unwrap());
+            mix.prepared_voice(start, vi, true);
+        }
+        mix.clear_preparing();
+        mix.use_prepared(start);
+        let mut reference = Mixer::new(
+            MixFormat::stereo(48_000),
+            doc,
+            graph,
+            Evaluator::new(),
+            f.cache.clone(),
+        );
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let mut actual = vec![vec![]; 2];
+        let mut expected = vec![vec![]; 2];
+        mix.render(start, 8192, &mut actual, &options).unwrap();
+        reference
+            .render(start, 8192, &mut expected, &options)
             .unwrap();
         assert_eq!(actual, expected);
     }

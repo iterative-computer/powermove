@@ -170,6 +170,10 @@ for (const native of modes) {
               return (Object.values(report.presenter.audio)[0] as any)?.startTiming;
             });
             if (timing && timing.requestedUs >= sample.requestedHostUs) {
+              if (timing.omittedPrefixFrames !== 0 || timing.startSpreadFrames !== 0 || timing.safetyNetFires !== 0 || timing.programUnderruns !== 0
+                || timing.voiceStartSamples.length !== voices) {
+                throw new Error(`ordinary start must be complete and simultaneous: ${JSON.stringify(timing)}`);
+              }
               Object.assign(sample, { timing });
               break;
             }

@@ -3223,7 +3223,20 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                 side.callback(&mut out, 2, host_now_us());
                 captured.extend_from_slice(&out);
             }
-            let gaps = playback.start_timing().unwrap().late_voice_frames;
+            let timing = playback.start_timing().unwrap();
+            assert_eq!(
+                timing.omitted_prefix_frames, 0,
+                "ordinary cold start must be complete"
+            );
+            assert_eq!(timing.start_spread_frames, 0, "every voice starts together");
+            assert_eq!(timing.safety_net_fires, 0, "A8 must not use A3");
+            assert_eq!(
+                timing.program_underruns, 0,
+                "complete PCM must reach the device without gaps"
+            );
+            assert_eq!(timing.voice_start_samples.len(), 16);
+            let gaps = timing.late_voice_frames;
+            assert!(gaps.is_empty(), "ordinary cold start omitted PCM: {gaps:?}");
             let max_gap = gaps.iter().map(|(_, n)| *n).max().unwrap_or(0) as usize;
             eprintln!(
                 "A8 CPU preparation late spans: {gaps:?}, longest {:.3} ms",
@@ -3233,8 +3246,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                 max_gap < 8192,
                 "every voice must join within the captured span"
             );
-            // Exact expected A4 mix: each voice is absent only until its
-            // recorded join sample, then continues the original offline phase.
+            // Exact full mix from the first sample, with no omitted voice.
             let one = project(
                 30.0,
                 8.0,
@@ -3412,4 +3424,181 @@ fn entering_the_loop_keeps_the_uninterrupted_stretch_history() {
     }
     assert_eq!(stats.underruns, 0);
     assert_eq!(stats.starved_renders, 0);
+}
+
+/// CPU priming must never use the missing-decoder safety net. A genuinely
+/// stuck stretched input keeps all voices complete until 120 ms of device
+/// time, regardless of wall time; only then may its own prefix be dropped.
+#[test]
+fn stretched_starts_are_complete_until_the_decoder_device_bound() {
+    let _load = stress_enabled().then(CpuContention::start);
+    for exceed in [false, true] {
+        let dir = temp_dir(&format!("a8-stretched-bound-{exceed}"));
+        let good_file = dir.join("good.wav");
+        let late_file = dir.join("late.wav");
+        let signal = tone(SR, 8.0, 719.0, 0.2);
+        write_wav(&good_file, SR, &[signal.clone(), vec![0.0; signal.len()]]);
+        write_wav(&late_file, SR, &[vec![0.0; signal.len()], signal]);
+        let cache = SourceCache::new(128 << 20, 2);
+        let good = cache.open(&good_file, None).unwrap();
+        for b in 0..6 {
+            cache.block(&good, b, true).unwrap();
+        }
+        let late = cache.open(&late_file, None).unwrap();
+        cache.set_decode_blocked(&late, true);
+        let (playback, mut side) = Playback::start_headless(
+            MixFormat::stereo(SR),
+            cache.clone(),
+            PlaybackConfig::default(),
+            SR,
+            2,
+            LATENCY_US,
+        )
+        .unwrap();
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(2.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let doc = project(
+            30.0,
+            8.0,
+            &[
+                audio("good", "g", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                audio("late0", "s", 0.0, 8.0, r#", "speed":1.5, "gain":0.5"#, ""),
+                audio("late1", "s", 0.0, 8.0, r#", "speed":1.5, "gain":0.5"#, ""),
+            ],
+            &[],
+            "",
+        );
+        let path = |id: &str| {
+            Some(if id == "g" {
+                good_file.clone()
+            } else {
+                late_file.clone()
+            })
+        };
+        playback
+            .set_project(Arc::new(doc.clone()), "C", &path)
+            .unwrap();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        until(|| cache.blocked_decoders() > 0);
+        let mut out = vec![0.0; 256 * 2];
+        // Three quarters of the bound, then a long wall pause: neither may
+        // release even the already primed voice.
+        for _ in 0..16 {
+            side.callback(&mut out, 2, host_now_us());
+        }
+        std::thread::sleep(Duration::from_millis(130));
+        assert_eq!(side.queued_frames(), 0);
+        assert_eq!(playback.stats().dropped_renders, 0);
+        if exceed {
+            for _ in 0..32 {
+                side.callback(&mut out, 2, host_now_us());
+            }
+            until(|| side.queued_frames() >= 512);
+        } else {
+            cache.set_decode_blocked(&late, false);
+            until(|| side.queued_frames() >= 512);
+        }
+        out.resize(512 * 2, 0.0);
+        side.callback(&mut out, 2, host_now_us());
+        let timing = playback.start_timing().unwrap();
+        assert_eq!(timing.safety_net_fires, u64::from(exceed));
+        assert_eq!(timing.omitted_prefix_frames > 0, exceed);
+        let rig = Rig::new(&[("g", good_file.as_path()), ("s", late_file.as_path())]);
+        let mut reference = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        let mut expected = vec![vec![]; 2];
+        reference
+            .render(
+                2 * SR as i64,
+                512,
+                &mut expected,
+                &pm_audio::RenderOptions {
+                    wait: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for i in 0..512 {
+            assert_eq!(out[2 * i], expected[0][i], "ready stretched voice {i}");
+            assert_eq!(
+                out[2 * i + 1],
+                if exceed { 0.0 } else { expected[1][i] },
+                "late stretched voice {i}"
+            );
+        }
+        if !exceed {
+            assert_eq!(timing.start_spread_frames, 0);
+            assert_eq!(timing.voice_start_samples.len(), 3);
+        }
+        cache.set_decode_blocked(&late, false);
+        if exceed {
+            let mut captured = out.clone();
+            for _ in 0..31 {
+                until(|| side.queued_frames() >= 512);
+                side.callback(&mut out, 2, host_now_us());
+                captured.extend_from_slice(&out);
+            }
+            let timing = playback.start_timing().unwrap();
+            assert_eq!(
+                timing.voice_start_samples.len(),
+                3,
+                "both gated voices must recover"
+            );
+            let mut reference = rig.mixer(
+                project(
+                    30.0,
+                    8.0,
+                    &[
+                        audio("good", "g", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                        audio("late", "s", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                    ],
+                    &[],
+                    "",
+                ),
+                "C",
+                MixFormat::stereo(SR),
+            );
+            reference
+                .render(
+                    2 * SR as i64,
+                    16384,
+                    &mut expected,
+                    &pm_audio::RenderOptions {
+                        wait: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            for i in 0..16384 {
+                let mut right = 0.0f32;
+                for id in ["late0", "late1"] {
+                    let omitted = timing
+                        .late_voice_frames
+                        .iter()
+                        .find(|(v, _)| v == id)
+                        .unwrap()
+                        .1 as usize;
+                    if i >= omitted {
+                        right += expected[1][i] * 0.5;
+                    }
+                }
+                assert_eq!(captured[2 * i], expected[0][i], "ready voice recovery {i}");
+                assert_eq!(
+                    captured[2 * i + 1],
+                    right,
+                    "gated voice recovery {i}, {:?}",
+                    timing.late_voice_frames
+                );
+            }
+        }
+        drop(playback);
+        cache.shutdown();
+    }
 }

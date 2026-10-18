@@ -9,7 +9,11 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 pub(crate) type Evaluators = Arc<dyn Fn() -> Evaluator + Send + Sync>;
-type Job = (usize, Box<dyn FnOnce() + Send>);
+type Job = (
+    usize,
+    Box<dyn Fn() -> bool + Send>,
+    Box<dyn FnOnce() + Send>,
+);
 struct Queue {
     jobs: Vec<Job>,
     background: usize,
@@ -61,11 +65,13 @@ impl Executor {
                                         .jobs
                                         .iter()
                                         .enumerate()
-                                        .filter(|(_, j)| j.0 == 0 || queue.background == 0)
+                                        .filter(|(_, j)| {
+                                            (j.0 == 0 || queue.background == 0) && (j.1)()
+                                        })
                                         .min_by_key(|(_, j)| j.0)
                                         .map(|(i, _)| i)
                                     {
-                                        let (priority, job) = queue.jobs.remove(at);
+                                        let (priority, _, job) = queue.jobs.remove(at);
                                         let background = priority != 0;
                                         if background {
                                             queue.background += 1;
@@ -75,11 +81,38 @@ impl Executor {
                                     queue = p.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
                                 }
                             };
+                            // Playhead preparation is latency-sensitive even at
+                            // edit time, before Play arrives. Boundary refill
+                            // keeps utility QoS and its single-job limit.
+                            #[cfg(target_os = "macos")]
+                            unsafe {
+                                unsafe extern "C" {
+                                    fn pthread_set_qos_class_self_np(
+                                        class: u32,
+                                        priority: i32,
+                                    ) -> i32;
+                                }
+                                if !background {
+                                    pthread_set_qos_class_self_np(0x21, 0);
+                                }
+                            }
                             job();
+                            #[cfg(target_os = "macos")]
+                            unsafe {
+                                unsafe extern "C" {
+                                    fn pthread_set_qos_class_self_np(
+                                        class: u32,
+                                        priority: i32,
+                                    ) -> i32;
+                                }
+                                pthread_set_qos_class_self_np(0x11, -5);
+                            }
                             if background {
                                 p.jobs.lock().unwrap_or_else(|e| e.into_inner()).background -= 1;
-                                p.wake.notify_all();
                             }
+                            // A foreground job may have published a shared
+                            // immutable head, releasing its dependent jobs.
+                            p.wake.notify_all();
                         }
                     })
                     .expect("audio preparation worker");
@@ -87,12 +120,17 @@ impl Executor {
             pool
         })
     }
-    fn submit(&self, priority: usize, job: impl FnOnce() + Send + 'static) {
+    fn submit(
+        &self,
+        priority: usize,
+        ready: impl Fn() -> bool + Send + 'static,
+        job: impl FnOnce() + Send + 'static,
+    ) {
         self.jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .jobs
-            .push((priority, Box::new(job)));
+            .push((priority, Box::new(ready), Box::new(job)));
         self.wake.notify_one();
     }
 }
@@ -134,6 +172,7 @@ impl Preparation {
     pub(crate) fn invalidate(&mut self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.pending.clear();
+        Executor::shared().wake.notify_all();
     }
     pub(crate) fn evaluators(&mut self, make: Evaluators, static_content: bool) {
         self.invalidate();
@@ -163,22 +202,31 @@ impl Preparation {
                 let make = self.make.clone();
                 let static_content = self.static_content;
                 let tx = self.tx.clone();
-                Executor::shared().submit(priority + usize::from(!urgent), move || {
-                    let cancelled = || current.load(Ordering::Relaxed) != generation;
-                    if cancelled() {
-                        return;
-                    }
-                    crate::profile::reset();
-                    let ready = work.run(&mut make(), static_content, cancelled);
-                    let _ = tx.send(Done {
-                        generation,
-                        start,
-                        voice,
-                        history,
-                        ready,
-                        profile: crate::profile::snapshot(),
-                    });
-                });
+                let gate = work.gate.clone();
+                let ready_generation = current.clone();
+                Executor::shared().submit(
+                    priority + usize::from(!urgent),
+                    move || {
+                        ready_generation.load(Ordering::Relaxed) != generation
+                            || gate.as_ref().is_none_or(|g| g.load(Ordering::Acquire))
+                    },
+                    move || {
+                        let cancelled = || current.load(Ordering::Relaxed) != generation;
+                        if cancelled() {
+                            return;
+                        }
+                        crate::profile::reset();
+                        let ready = work.run(&mut make(), static_content, cancelled);
+                        let _ = tx.send(Done {
+                            generation,
+                            start,
+                            voice,
+                            history,
+                            ready,
+                            profile: crate::profile::snapshot(),
+                        });
+                    },
+                );
             }
         }
     }
