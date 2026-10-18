@@ -477,3 +477,138 @@ pub fn video_bitmap(
         "Chromium I420 rgba8".into(),
     )?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// An opaque 8-bit RGB ramp (gray 0, 8, ..., 248 and 255) with
+    /// `chunks` inserted after IHDR.
+    fn ramp_png(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let values: Vec<u8> = (0..32).map(|i| (i * 8) as u8).chain([255]).collect();
+        let rgb: Vec<u8> = values.iter().flat_map(|&v| [v, v, v]).collect();
+        let mut base = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut base)
+            .write_image(&rgb, values.len() as u32, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // Signature (8) and IHDR (8 + 13 + 4).
+        let mut out = base[..33].to_vec();
+        for (ty, body) in chunks {
+            out.extend((body.len() as u32).to_be_bytes());
+            let mut typed = ty.to_vec();
+            typed.extend(body);
+            out.extend(&typed);
+            out.extend(crc32(&typed).to_be_bytes());
+        }
+        out.extend(&base[33..]);
+        out
+    }
+
+    fn gama(v: u32) -> (&'static [u8; 4], Vec<u8>) {
+        (b"gAMA", v.to_be_bytes().to_vec())
+    }
+
+    /// SkPngRustCodec: a `gAMA` alone selects a pure power curve unless it
+    /// is within 5% of 1/2.2; `sRGB`, `iCCP`, `cHRM` take precedence, and
+    /// a Display P3 `cICP` selects P3.
+    #[test]
+    fn png_color_selects_gamma_like_blink() {
+        let dir = std::env::temp_dir().join(format!("pm-compat-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let check = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| {
+            let path = dir.join(format!("{name}.png"));
+            std::fs::write(&path, ramp_png(chunks)).unwrap();
+            png_color(&path).unwrap()
+        };
+        assert!(check("none", &[]).is_none());
+        for (v, applied) in [
+            (43_181, true),
+            (43_190, false),
+            (45_455, false),
+            (47_720, false),
+            (47_730, true),
+            (70_000, true),
+            (100_000, true),
+            (0, false),
+        ] {
+            let got = check(&format!("g{v}"), &[gama(v)]);
+            match got {
+                Some(PngColor::Gamma(g)) => {
+                    assert!(applied, "{v}");
+                    assert_eq!(g, v as f32 / 100_000.0);
+                }
+                None => assert!(!applied, "{v}"),
+                Some(PngColor::DisplayP3) => panic!("{v}"),
+            }
+        }
+        assert!(check("srgb", &[(b"sRGB", vec![0]), gama(70_000)]).is_none());
+        assert!(check("chrm", &[(b"cHRM", vec![0; 32]), gama(70_000)]).is_none());
+        assert!(matches!(
+            check("p3", &[(b"cICP", vec![12, 13, 0, 1]), gama(70_000)]),
+            Some(PngColor::DisplayP3)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The level 1 bitmap of a gamma-only PNG decodes the stored samples
+    /// with the pure `1 / gamma` power and encodes them to sRGB bytes,
+    /// within skcms rounding (1 code value) of the exact curve; a neutral
+    /// gamma leaves the bytes unchanged.
+    #[test]
+    fn gamma_png_bitmap_applies_the_inverse_power() {
+        let dir = std::env::temp_dir().join(format!("pm-compat-gamma-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = FramePool::new(0);
+        let bytes = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| -> Vec<u8> {
+            let path = dir.join(format!("{name}.png"));
+            std::fs::write(&path, ramp_png(chunks)).unwrap();
+            let still = super::super::read(&path, &pool).unwrap();
+            let bitmap = bitmap_at(&path, &still, &pool).unwrap();
+            let w = bitmap.frame.format.width;
+            bitmap
+                .frame
+                .with_planes(|p| unsafe { std::slice::from_raw_parts(p[0].ptr, w * 4).to_vec() })
+                .unwrap()
+        };
+        let plain = bytes("plain", &[]);
+        assert_eq!(bytes("neutral", &[gama(45_455)]), plain);
+        let oetf = |l: f64| {
+            if l <= 0.003_130_8 {
+                12.92 * l
+            } else {
+                1.055 * l.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        for gamma in [70_000u32, 100_000, 30_000] {
+            let got = bytes(&format!("g{gamma}"), &[gama(gamma)]);
+            let mut changed = false;
+            for (px, stored) in got.chunks_exact(4).zip(plain.chunks_exact(4)) {
+                let v = f64::from(stored[0]) / 255.0;
+                let want = oetf(v.powf(100_000.0 / f64::from(gamma))) * 255.0;
+                for &c in &px[..3] {
+                    assert!((f64::from(c) - want).abs() <= 1.0, "{gamma}: {c} vs {want}");
+                }
+                assert_eq!(px[3], 255);
+                changed |= px[0] != stored[0];
+            }
+            assert!(changed, "{gamma}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

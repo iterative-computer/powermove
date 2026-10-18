@@ -691,3 +691,73 @@ fn svg_images_in_declared_encodings_are_not_failures() {
         );
     }
 }
+
+/// Level 1 SVGs that roxmltree rejects but Chromium's libxml2 paints (an
+/// external DTD subset with undeclared entities, a declared external
+/// entity, a parameter entity, nesting at Blink's 5,000-element limit) are
+/// an explicit unsupported SVG image, never an empty paint. Documents
+/// Chromium shows as a broken `<img>` (an undeclared entity without a DTD,
+/// nesting past the limit) draw nothing without a reason, as today.
+#[test]
+fn level1_svgs_libxml2_accepts_are_gated_not_blank() {
+    let mut renderer = Renderer::headless().unwrap();
+    let r = r#"<rect width="8" height="8" fill="red"/>"#;
+    let ns = r#"xmlns="http://www.w3.org/2000/svg" width="8" height="8""#;
+    let nest = |levels: usize| {
+        format!(
+            "<svg {ns}>{}{r}{}</svg>",
+            "<g>".repeat(levels - 1),
+            "</g>".repeat(levels - 1)
+        )
+    };
+    let painted = [
+        format!(
+            r#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg {ns}>{r}<text>&nbsp;&copy;</text></svg>"#
+        ),
+        format!(r#"<!DOCTYPE svg SYSTEM "svg.dtd"><svg {ns}>{r}<text>&foo;</text></svg>"#),
+        format!(r#"<!DOCTYPE svg [<!ENTITY e SYSTEM "e.xml">]><svg {ns}>{r}&e;</svg>"#),
+        format!(
+            r#"<!DOCTYPE svg [<!ENTITY % a "<!ENTITY b 'x'>"> %a;]><svg {ns}>{r}<text>&b;</text></svg>"#
+        ),
+        nest(4999),
+    ];
+    let broken = [
+        format!("<svg {ns}>{r}<text>&nbsp;</text></svg>"),
+        format!(
+            r#"<?xml version="1.0" standalone="yes"?><!DOCTYPE svg SYSTEM "svg.dtd"><svg {ns}>{r}<text>&foo;</text></svg>"#
+        ),
+        nest(5000),
+    ];
+    let d = json!({ "asset": "art", "fit": "stretch", "w": 64, "h": 64 });
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    for (i, svg) in painted.iter().chain(&broken).enumerate() {
+        let name = format!("libxml2-{i}.svg");
+        let (doc, resolver) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
+        let doc = load(&doc);
+        let u = unsupported_with_media(&doc, "Ptest-root", &resolver);
+        let result = renderer.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver);
+        if i < painted.len() {
+            assert_eq!(
+                u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
+                vec![Feature::SvgImage],
+                "{name}"
+            );
+            assert!(
+                matches!(result, Err(pm_render::RenderError::Unsupported(_))),
+                "{name}"
+            );
+        } else {
+            assert_eq!(u, vec![], "{name}");
+            let frame = result.unwrap();
+            assert!(frame.failures.is_empty(), "{name}");
+            assert!(
+                renderer
+                    .read_rgba(&frame)
+                    .unwrap()
+                    .iter()
+                    .all(|&v| v == 0.0),
+                "{name}"
+            );
+        }
+    }
+}

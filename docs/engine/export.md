@@ -582,6 +582,15 @@ unpremultiply. This boundary is byte-quantized and does not add dither.
 Linear output, 16-bit PNG, float rendering and other formats retain their
 existing conversions.
 
+Decision recorded for the orchestrator: the E1 conversion applies to every
+standard-encoding 8-bit straight-alpha PNG export, including documents whose
+layers are all compat level 2. That keeps one export conversion for mixed
+documents and is identical for existing projects, but new level-2-only
+content loses low-alpha color precision against a direct straight-alpha
+conversion of the float frame (the truncating divide of a quantized
+premultiplied value). Gating it on the document's compat level is a
+small change in `convert.rs` if the orchestrator prefers it.
+
 The hidden-app transparent-export regression passes all 58 drawn
 orientation/color-description cases at max 1 CV, no pixels above 1, with
 completed native export jobs and no fallback. The oriented PNG-alpha and

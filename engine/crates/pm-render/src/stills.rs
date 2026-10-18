@@ -452,8 +452,7 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
         return Err(malformed("no start of image"));
     }
     let mut header = Header::default();
-    let mut adobe_transform: Option<u8> = None;
-    let mut sof: Option<(u8, Vec<u8>)> = None;
+    let mut sof: Option<Vec<u8>> = None;
     loop {
         if array::<1, _>(r)?[0] != 0xFF {
             return Err(malformed("marker expected"));
@@ -473,16 +472,16 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
         }
         let body_len = len - 2;
         match marker {
-            0xEE | 0xE1 | 0xC0 | 0xC2 => {
+            // The Adobe APP14 transform and component ids are decoder facts
+            // libjpeg-turbo applies as Chromium does; only EXIF and the
+            // frame header decide the class.
+            0xE1 | 0xC0 | 0xC2 => {
                 let body = read_vec(r, body_len)?;
                 match marker {
-                    0xEE if body.len() >= 12 && body.starts_with(b"Adobe") => {
-                        adobe_transform = Some(body[11]);
-                    }
                     0xE1 if body.starts_with(b"Exif\0\0") => {
                         header.exif(exif_orientation(&body)?);
                     }
-                    0xC0 | 0xC2 => sof = Some((marker, body)),
+                    0xC0 | 0xC2 => sof = Some(body),
                     _ => {}
                 }
             }
@@ -495,12 +494,12 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             _ => r.seek_relative(body_len as i64)?,
         }
     }
-    let (marker, sof) = sof.ok_or_else(|| malformed("no frame header"))?;
-    Ok(jpeg_frame(marker, &sof, adobe_transform).map(|_| header))
+    let sof = sof.ok_or_else(|| malformed("no frame header"))?;
+    Ok(jpeg_frame(&sof).map(|_| header))
 }
 
-/// The class of a JPEG frame header (`marker` SOF0 or SOF2).
-fn jpeg_frame(_marker: u8, sof: &[u8], _adobe_transform: Option<u8>) -> Result<(), Feature> {
+/// The class of a baseline or progressive (SOF0 or SOF2) frame header.
+fn jpeg_frame(sof: &[u8]) -> Result<(), Feature> {
     if sof.len() < 6 {
         return unsupported("malformed JPEG headers");
     }
@@ -549,17 +548,21 @@ fn webp<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
 }
 
 /// TIFF, first IFD (the image FFmpeg converts for the legacy renderer and
-/// pm-media decodes), in the structure compared with the legacy renderer
-/// (`render/still-photo-tiff`, uncompressed, as FFmpeg writes it): chunky
-/// RGB in strips, three samples of 8-bit unsigned integers, fill order 1,
-/// no predictor other than horizontal differencing, compressed without
-/// loss by a scheme whose decode was shown identical to the uncompressed
-/// file (`tests/stills.rs`, `tiff_compressions_decode_alike`): none, LZW,
-/// Deflate (8 and 32946), PackBits. No ICC profile (tag 34675; pm-media's
-/// TIFF decoder does not report one, so the header decides) and no
-/// colorimetry tags (TransferFunction, WhitePoint, PrimaryChromaticities):
-/// tagged TIFF was not compared. Depth and alpha are also decided from the
-/// decoded still; the orientation tag (274) other than 1 is a transform.
+/// pm-media decodes), in the structures compared with the legacy renderer
+/// (`render/still-photo-tiff` and the app compositions in `media.md`):
+/// strips (not tiles), fill order 1, no predictor other than horizontal
+/// differencing, compressed without loss by a scheme whose decode was shown
+/// identical to the uncompressed file (`tests/stills.rs`,
+/// `tiff_compressions_decode_alike`): none, LZW, Deflate (8 and 32946),
+/// PackBits. Without the compatibility bitmap (`allow_icc` false) only
+/// chunky 8-bit RGB without an ICC profile is in the class. With it: RGB
+/// or RGBA in 8 or 16-bit unsigned integers or uncompressed/Deflate
+/// float32 samples, gray or gray-alpha in 8 or 16 bits, 8-bit palettes, and an
+/// ICC profile (tag 34675) converted by skcms. Colorimetry tags
+/// (TransferFunction, WhitePoint, PrimaryChromaticities), CMYK, Y'CbCr and
+/// planar layouts were not compared. Depth and alpha are also decided from
+/// the decoded still; the orientation tag (274) other than 1 is a
+/// transform.
 fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header, Feature>> {
     let entries = ifd0(r)?;
     let mut header = Header::default();
