@@ -1299,7 +1299,7 @@ impl RenderThread {
         }
     }
 
-    /// Renders until the ring holds `ahead_ms`.
+    /// Renders until the ring holds its callback-adapted look-ahead target.
     fn fill(&mut self) {
         let ahead = self.config.ahead_ms as usize * self.device_rate as usize / 1000;
         let reserve = self.ring.refill_reserve() as usize;

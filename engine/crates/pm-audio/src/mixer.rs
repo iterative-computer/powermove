@@ -133,8 +133,8 @@ pub struct RenderReport {
     /// IDs of voices that sounded with all their input on a strip the
     /// monitor solo lets through, in the current or an outgoing retune mix,
     /// each once. Unlike `voices - starved`, a glide's outgoing copies of the
-    /// same voices do not count twice: playback uses this to tell whether a
-    /// wait would silence anything heard (A4.1).
+    /// same voices do not count twice. These diagnostics describe what is
+    /// actually heard; A6 bounds every mid-run wait by the ring reserve.
     pub heard_whole: Vec<String>,
     /// Project output frames silenced for missing input, summed over
     /// voices. A voice a retune glide renders in several mixes counts once
