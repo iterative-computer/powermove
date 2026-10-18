@@ -706,7 +706,8 @@ impl Validate for CompatMessage {
                     || "compatibility origin and scale must be finite".into(),
                 )?;
                 ensure(
-                    p.size.is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
+                    p.size
+                        .is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
                         && p.uv.is_none_or(|u| u.iter().all(|v| v.is_finite())),
                     C,
                     || "compatibility size and uv must be finite".into(),
@@ -717,9 +718,11 @@ impl Validate for CompatMessage {
                     "invalid compatibility layer".into()
                 })
             }
-            CompatMessage::Producers { sources } => ensure(sources.len() <= MAX_COMPAT_SOURCES, C, || {
-                format!("{} compatibility producers", sources.len())
-            }),
+            CompatMessage::Producers { sources } => {
+                ensure(sources.len() <= MAX_COMPAT_SOURCES, C, || {
+                    format!("{} compatibility producers", sources.len())
+                })
+            }
             CompatMessage::Native(n) => {
                 ensure(n.composition.is_valid() && n.layer.is_valid(), C, || {
                     "invalid compatibility layer".into()
@@ -731,13 +734,17 @@ impl Validate for CompatMessage {
                 valid_scale(*scale)
             }
             CompatMessage::Needs { needs, .. } => {
-                ensure(!needs.is_empty() && needs.len() <= MAX_COMPAT_NEEDS, C, || {
-                    format!("{} compatibility needs", needs.len())
-                })?;
+                ensure(
+                    !needs.is_empty() && needs.len() <= MAX_COMPAT_NEEDS,
+                    C,
+                    || format!("{} compatibility needs", needs.len()),
+                )?;
                 for need in needs {
-                    ensure(need.composition.is_valid() && need.layer.is_valid(), C, || {
-                        "invalid compatibility layer".into()
-                    })?;
+                    ensure(
+                        need.composition.is_valid() && need.layer.is_valid(),
+                        C,
+                        || "invalid compatibility layer".into(),
+                    )?;
                     valid_scale(need.scale)?;
                 }
                 Ok(())
@@ -936,7 +943,10 @@ mod tests {
         // Blender waits: async and idle only, and bounded.
         let mut blender = request(8, 8);
         blender.blender_wait_ms = 60_000;
-        assert!(blender.validate().is_err(), "a sync snapshot never waits for Blender");
+        assert!(
+            blender.validate().is_err(),
+            "a sync snapshot never waits for Blender"
+        );
         blender.class = SnapshotClass::Async;
         assert!(blender.validate().is_ok());
         blender.blender_wait_ms = MAX_BLENDER_WAIT_MS + 1;

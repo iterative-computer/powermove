@@ -187,6 +187,8 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// The session's compatibility rasters (`crate::compat`).
+    compat: Option<Arc<dyn crate::compat::CompatRasters>>,
 }
 
 impl Renderer {
@@ -217,7 +219,16 @@ impl Renderer {
             effect_host: None,
             shaders: Default::default(),
             explicit_meshes: Default::default(),
+            compat: None,
         }
+    }
+
+    /// The compatibility rasters frames draw from (`crate::compat`): with a
+    /// producer for a source, the layers it draws ask it, and a frame whose
+    /// answers have not arrived fails with [`RenderError::CompatPending`].
+    /// `None` (the default): every layer is the engine's own.
+    pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
+        self.compat = compat;
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -761,6 +772,7 @@ impl Renderer {
             self.options3d.for_request(request),
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            self.compat.as_deref(),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -769,6 +781,9 @@ impl Renderer {
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
+        }
+        if !build.compat_missing.is_empty() {
+            return Err(RenderError::CompatPending(build.compat_missing));
         }
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -1181,6 +1196,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            self.compat.as_deref(),
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
     }
@@ -1220,6 +1236,7 @@ impl Renderer {
             self.options3d.for_request(request),
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            self.compat.as_deref(),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

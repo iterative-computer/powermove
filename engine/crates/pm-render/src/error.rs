@@ -29,6 +29,11 @@ pub enum RenderError {
     /// The targets are left untouched.
     #[error("waiting for the shader fallback runner ({} layer draws)", .0.len())]
     ShaderFallbackPending(Vec<crate::shader_layers::FallbackRequest>),
+    /// Layers a compatibility producer draws (`crate::compat`) whose answer
+    /// has not arrived: the caller asks the renderer and renders the frame
+    /// again. The targets are left untouched.
+    #[error("waiting for {} compatibility rasters", .0.len())]
+    CompatPending(Vec<crate::compat::CompatNeed>),
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,

@@ -109,6 +109,16 @@ pub struct Placed {
     pub level2: Option<crate::sampling::Sampling>,
 }
 
+/// A compatibility raster drawn as a source (identity: the raster itself).
+#[derive(Debug, Clone)]
+pub struct CompatDraw(pub std::sync::Arc<crate::compat::CompatRaster>);
+
+impl PartialEq for CompatDraw {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     Image {
@@ -147,6 +157,9 @@ pub enum Source {
     Shader(Box<crate::shader_layers::ShaderSource>),
     /// A text or captions raster (`crate::text`).
     Text(Box<crate::text::TextPlan>),
+    /// A raster the document's renderer drew for the layer (a `raster`
+    /// override's result; `crate::compat`).
+    Compat(CompatDraw),
     /// Motion-blur samples accumulated with additive blending into a
     /// transparent target in the parent's pixel space (`crate::motion`).
     Accumulate(Box<CompPlan>),
@@ -192,6 +205,10 @@ pub struct Build<'r> {
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
     passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+    /// The session's compatibility rasters (`crate::compat`): layers a
+    /// producer draws, and what the frame still needs from it.
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
+    pub compat_missing: Vec<crate::compat::CompatNeed>,
 }
 
 /// Facts of a composition's layer list a compositing pass reads.
@@ -265,6 +282,7 @@ pub fn build<'r>(
             video_end,
             ..BuildOptions::default()
         },
+        None,
     )
 }
 
@@ -295,6 +313,7 @@ pub fn build_with_effects<'r>(
         crate::scene3d::Options3d::default(),
         None,
         BuildOptions::default(),
+        None,
     )
 }
 
@@ -316,11 +335,12 @@ pub fn build_with<'r>(
     options3d: crate::scene3d::Options3d,
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
 ) -> (CompPlan, Build<'r>) {
     let blender = crate::blender::PlanState::new(options3d.blender.clone());
     build_blender(
         ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
-        options, blender,
+        options, blender, compat,
     )
 }
 
@@ -341,6 +361,7 @@ pub(crate) fn build_blender<'r>(
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
     blender: crate::blender::PlanState,
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
 ) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
@@ -361,6 +382,8 @@ pub(crate) fn build_blender<'r>(
         sampling: options.sampling,
         video_padding: video_padding(options.video_end, root_comp),
         passes: Vec::new(),
+        compat,
+        compat_missing: Vec::new(),
     };
     let mut scope = Scope::new(ev, root_comp, project);
     // One frame at one time: each layer's local matrix once per scope.
@@ -1075,6 +1098,9 @@ fn native_content_quad<'d>(
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
+    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
+        return Ok(quad);
+    }
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
@@ -1470,6 +1496,79 @@ fn native_content_quad<'d>(
                 Feature::LayerType(other.to_owned()),
             ));
             Ok(None)
+        }
+    }
+}
+
+/// A layer a compatibility producer draws (`crate::compat`): the layers
+/// today's compositor rasterizes through `PM.raster` (text, captions, and
+/// shapes, at `continuousRasterScale(scaledWorld(L, T, W, H))`), when the
+/// session has a `raster` override. `None`: drawn natively. `Some(None)`:
+/// nothing is drawn (between caption cues, or still missing: the frame
+/// then needs it).
+fn compat_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Option<Option<Quad>>> {
+    use crate::compat::{CompatAnswer, CompatSource};
+    let Some(compat) = b.compat else {
+        return Ok(None);
+    };
+    if !matches!(ty, "text" | "captions" | "shape")
+        || !compat.producing(CompatSource::RasterOverride)
+    {
+        return Ok(None);
+    }
+    // `compat` level 2 layers are the engine's own: no `PM.raster` today.
+    let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0
+        || (ty == "shape" && crate::vector::level2(layer));
+    if level2 {
+        return Ok(None);
+    }
+    if ty == "captions" && b.text.as_deref().is_some_and(|t| t.captions_hidden()) {
+        return Ok(Some(None));
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    let raster_scale = crate::text::continuous_raster_scale(&world);
+    let comp_id = scope.comp.id().to_string_lossy();
+    let id = js::layer_id(layer);
+    match compat.answer(
+        &comp_id,
+        &id,
+        time,
+        raster_scale,
+        CompatSource::RasterOverride,
+    ) {
+        CompatAnswer::Native => Ok(None),
+        CompatAnswer::Raster(raster) => {
+            let [w, h] = raster.size;
+            let [ax, ay] = raster.anchor;
+            let uv = raster.uv;
+            Ok(Some(Some(Quad::Texture {
+                source: Source::Compat(CompatDraw(raster)),
+                w,
+                h,
+                ax,
+                ay,
+                uv,
+            })))
+        }
+        CompatAnswer::Missing => {
+            let need = crate::compat::CompatNeed {
+                composition: comp_id.as_str().into(),
+                layer: id.as_str().into(),
+                time: crate::compat::ticks_of(time),
+                source: CompatSource::RasterOverride,
+                scale: raster_scale,
+            };
+            if !b.compat_missing.contains(&need) {
+                b.compat_missing.push(need);
+            }
+            Ok(Some(None))
         }
     }
 }
