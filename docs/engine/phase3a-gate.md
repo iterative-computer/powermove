@@ -11,7 +11,10 @@ and `feat/ne-text3a` (the stricter CSS number grammar). `feat/ne-composite`,
 `feat/ne-blender`, and `feat/ne-shaders` had nothing left to merge. No engine
 code was changed here; this lane added measurement code only (below).
 
-Measured 2026-10-17 between 20:55 and 23:57 on Jude's MacBook Pro (Apple M4
+Measured 2026-10-17 between 20:55 and 23:57 (the video class, the review
+rule's corpus rerun, the pm-wasm budget, png16 determinism, and the shader
+corpus recollection again on 2026-10-18 between 00:05 and 00:35, after review)
+on Jude's MacBook Pro (Apple M4
 Max, 128 GB, macOS 27.0), wgpu 30.0.1 on Metal, Electron 44.0.0, release builds
 in the worktree. The Mac was shared with other lanes: the 1-minute load average
 was 5.5 to 12.8 during the engine runs (each step's load is in its log). Every
@@ -34,12 +37,12 @@ counts the frame against the plan's tolerance and lists the pin.
 | Render parity, Standard color, whole corpus (`pm-cli parity render`) | 218 projects in 5 captures: 123 compared (454 frames), 92 routed to the legacy engine, 3 not comparable (the legacy frame is a playback proxy). 434 frames within their class, 14 fail, 6 WebGL-unstable for review | **fail** |
 | Every corpus project renders (section 2 parity bar) | 92 of 218 projects still route: SVG images 34, text without engine fonts 68 (32 of them for nothing else), stills outside the measured classes 15, 2.5D text 3, masks on 3D layers 3, motion blur on text and 3D 3, animated images 3, path masks 1 | **fail** |
 | Real-world project (the 884-layer Powermove ad) | Routed (2.5D text, text without fonts); with fonts it would still route for 2.5D text. Not compared; the 20% class rule not measurable | **fail** |
-| Video class | Against Chromium (natively decoded sources, patch interiors): 29 of 34 frames within 2 CV, 5 fail (max 3 to 255 CV). Against FFmpeg plus zimg (new): 10 fixture videos, 4 frames each, max 0.970 CV, including the 3 sources the capture shows as a proxy | **fail** (the Chromium line) |
+| Video class | Against Chromium (natively decoded sources, patch interiors): 29 of 34 frames within 2 CV, 5 fail (max 3 to 255 CV). Against FFmpeg plus zimg (new): the 10 e2e fixture videos are one flat colour per frame, so they check the matrix and range only (0.000 CV); the chroma path is measured on 12 generated sources with chroma edges and on every frame of the corpus's 2 H.264 sources. Sources FFmpeg decodes as the engine does: 0.000 CV with the engine's edge rule (zimg's own edges: up to 3.31 CV on the 2-pixel border; zimg's 16-bit resize clips chroma overshoot: up to 25.5 CV on 368 corpus pixels, 0.000 against an unclipped f64 reference). ProRes 422 HQ: 2.017 CV (VideoToolbox's decode differs from FFmpeg's; 0.000 against FFmpeg's VideoToolbox decode) | **fail**: the Chromium line; ProRes 422 HQ against FFmpeg's decoder |
 | Text class (level 1, whole frames) | 31 projects, 123 frames: text pixels SSIM min 0.989, every other pixel exact | pass |
 | Text class (level 1, rasters) | 495 cases: 80 pinned below SSIM 0.98 (text at 18 px and below, synthesized bold, emoji under 10 px) | **fail** |
 | Text class (level 1, line breaks and advances) | Native: 0 line-break differences, 0 advances over 0.25 px. Through pm-wasm: 1,260 `system-ui` layouts of the real project off by up to 18.2 px (Phase 1 T1, open) | **fail** (T1) |
 | Text review | Sheets regenerated at this tip: `~/Library/Application Support/Powermove Engine Corpus/review/text-1792297672/index.html` (420 cases) | needs Jude |
-| Alpha class | 157 of 165 transparent float frames within 1 CV; 8 fail (1.49 to 4.61 CV) | **fail** |
+| Alpha class | 157 of 165 transparent float frames within 1 CV; 5 fail (1.49 to 4.61 CV: `motion/blur-solids` 4, `composite/blend-modes-alpha` 1); 3 `render/fx-posterize` frames WebGL-unstable, for review (15.9 to 85.0 CV) | **fail** |
 | 3D class, corpus | 21 projects, 59 frames: 100% of 3D pixels within 2 CV, max 2 CV, outside MSAA edges max 1 CV, object SSIM min 0.99993 | pass |
 | 3D bar (three.js r180 sweeps) | 74 primitive-scene outputs and 165 glTF outputs (105 Khronos models): every output within the bar | pass |
 | Blender surfaces | Exact at 32-bit (max 6.8e-8, f32 rounding); 1.06e-3 at 16-bit | pass |
@@ -88,13 +91,18 @@ What stands between this tip and a pass, by owner:
    transition.
 4. **Media (`pm-media`, `pm-color`)**: still classes outside the measured
    ones route (15 projects: AVIF, 16-bit PNG, Display P3, Y′CbCr JPEG, WebP
-   with alpha, oriented); animated images route (3); decoded video differs
-   from Chromium by 3 to 9 CV at saturated chroma edges (3 frames). With
+   with alpha, oriented); animated images route (3); ProRes 422 HQ decoded by
+   VideoToolbox is 2.017 CV from the class's FFmpeg reference at saturated
+   chroma edges (the decoders differ; a plan decision or an FFmpeg ProRes
+   path). Decoded video differs from Chromium by 3 to 9 CV at saturated chroma
+   edges (3 frames), where the engine matches FFmpeg exactly. With
    Proxies and storage: linked UHD ProRes clips were offline to the engine
    once main's rendition finished (not investigated; below).
 5. **Plan owner (Jude)**: appendix A decisions for today's composite drift
    (`composite/blend-modes-alpha`) and today's stale blurred-video frame
-   (`motion/blur-video`), the WebGL-unstable review (Store
+   (`motion/blur-video`) and Chromium's chroma edges (`retime/speed`,
+   `space25d/precomps`), which ProRes decoder the video class's reference
+   uses (VideoToolbox, which the engine uses, or FFmpeg's), the WebGL-unstable review (Store
    `liquid-glass-ios27` 2.0.8; built-in Color, Levels, Posterize), how the
    energy line applies to `compat` level 1 effects, and the S5 per-window
    budget for `pm-wasm` (the real project's mirror holds 11.3 MB against the
@@ -122,19 +130,26 @@ patch interiors within 2 CV), alpha (transparent float frames within 1 CV), 3D
 (section 2's bar on 3D pixels and MSAA edges, Standard elsewhere). Summary:
 `phase3a-gate-measurements/parity-render.json`.
 
-| Class | Frames | Within | Fail |
-|---|---:|---:|---:|
-| Standard | 213 | 206 | 7 |
-| Standard with 3D pixels | 42 | 42 | 0 |
-| Alpha (float) | 165 | 157 | 8 |
-| Video | 34 | 29 | 5 |
-| WebGL-unstable (review) | 6 | — | — |
-| **All** | **460** | **434** | **20 (14 failed, 6 for review)** |
+| Class | Frames | Within | Fail | Review (WebGL-unstable) |
+|---|---:|---:|---:|---:|
+| Standard | 213 | 206 | 4 | 3 |
+| Standard with 3D pixels | 42 | 42 | 0 | 0 |
+| Alpha (float) | 165 | 157 | 5 | 3 |
+| Video | 34 | 29 | 5 | 0 |
+| **All** | **454** | **434** | **14** | **6** |
 
-The six review frames are `render/fx-posterize` (max 16 to 85 CV at isolated
-pixels, ≥ 99.90% exact): Posterize is WebGL-unstable at the shader level
-(`effects_webgl.rs`: its WebGL output moves by as much under a one-step input
-perturbation), judged by review under amendment 9.
+Every frame is counted once, in its class. Standard fails: `composition/metadata`
+3, `composite/blend-modes-alpha` 1; alpha fails: `motion/blur-solids` 4,
+`composite/blend-modes-alpha` 1 (1.49 to 4.61 CV). The six review frames are
+`render/fx-posterize` t = 0, 1, 2 in the Standard view (max 16, 27, 85 CV at
+isolated pixels, ≥ 99.90% exact) and the alpha view (15.9, 26.9, 85.0 CV):
+Posterize is WebGL-unstable at the shader level (`effects_webgl.rs`: its WebGL
+output moves by as much under a one-step input perturbation), judged by review
+under amendment 9. The runner moves a failing frame to review only when the
+difference is confined to the pixels the unstable effect changes: it renders
+the frame again without the WebGL-unstable effects and requires the frame to
+pass its class on every pixel they leave unchanged (rerun at this tip: the same
+6 frames, all confined; every other frame's result unchanged).
 
 Failures, triaged:
 
@@ -144,32 +159,111 @@ Failures, triaged:
 | `composite/blend-modes-alpha` t = 0 (alpha and Standard) | float max 4.61 CV; 8-bit max 5 CV, 99.944% within 1 | Today's composite drift: `FRAG_COMPOSITE` round-trips every pixel of the frame through unpremultiply and re-premultiply in RGBA16F for each of 48 blend layers; the engine passes uncovered pixels through exactly. Pinned as `COMPOSITE_DRIFT` | `pm-render` composite (`docs/engine/composite.md`); proposed appendix A item, a decision for Jude |
 | `motion/blur-solids` t = 0.2, 0.5, 1, 1.6 (alpha) | float max 1.49 to 1.62 CV | Each still sample differs from Chromium's by up to 2 f16 ulps and the RGBA16F accumulator rounds every partial sum over 20 samples. Pinned as a recorded deviation in `tests/motion.rs` | `pm-render` motion (`docs/engine/motion.md`): an f32 accumulator, or an appendix A decision |
 | `motion/blur-video` t = 0.5, 1.2 (video) | max 255 CV | Today's capture draws a stale, unseeked frame for blurred video (`renderToPixels` sets `useVideoPreviews = false`; no prepared frame exists per sample time); the engine draws the right frames. A legacy defect | Parity and QA: appendix A item, and the capture should not be the reference for this frame |
-| `retime/speed` t = 2.9; `space25d/precomps` t = 1.5, 2.6 (video) | max 3, 7, 9 CV on patch interiors (the frame one later differs by 200 to 249 CV, so the frame is right) | Chromium's decode and the engine's differ at saturated chroma edges (chroma upsampling and 8-bit clipping) | `pm-media` (decode and chroma path); the video class's FFmpeg plus zimg reference (not built) would decide which side is right |
+| `retime/speed` t = 2.9; `space25d/precomps` t = 1.5, 2.6 (video) | max 3, 7, 9 CV on patch interiors (the frame one later differs by 200 to 249 CV, so the frame is right) | Chromium's decode and the engine's differ at saturated chroma edges (chroma upsampling and 8-bit clipping). The engine's side is right: every frame of the two sources (`corpus-frames-24.mp4`, 96 frames; `corpus-frames-30.mp4`, 120) is within 0.000 CV of FFmpeg's decode upsampled with the plan's filter (below) | Parity and QA: the Chromium capture is not the reference for these frames (appendix A item); no engine change |
 
 Not comparable with the capture (3 projects): `media/converted-mkv`,
 `media/prores422-mov`, `media/prores4444-alpha-mov`: the legacy frame is the
 playback proxy (a VP9 transcode), not a decode of the original. Section 25
-compares such sources with an FFmpeg plus zimg reference within 1 CV, which
-was not built before this gate; `pm-cli` `tests/phase3a_video_class.rs` (new)
-measures it. Every e2e fixture video is drawn alone at its native size at
-32-bit (one source pixel per output pixel) and compared with frame n (0, 7,
-15, 23) decoded by FFmpeg and converted by zimg to 16-bit RGB with the matrix,
-range, and siting the engine reads from the file (all ten: BT.601, limited,
-left-sited):
+compares such sources with an FFmpeg plus zimg reference "using the same
+chroma filter" within 1 CV, which was not built before this gate;
+`pm-cli` `tests/phase3a_video_class.rs` (new) measures it. Each source is drawn
+alone at its native size at 32-bit (one source pixel per output pixel) and
+compared with frame n decoded by FFmpeg and converted by zimg to 32-bit float
+RGB (no clipping of the result) with the matrix, range, and siting the engine
+reads from the file and the engine's chroma filter: 4:2:2 linear across
+(zimg `bilinear`); 4:2:0 Catmull-Rom across and linear between rows
+(`pm-color` `chroma.rs`), which zimg cannot do in one pass, so the reference
+runs two zscale passes (4:2:0 to 4:2:2 at 16 bits with `bilinear`, then to
+RGB with `bicubic` b = 0, c = 0.5). Three readings of each frame:
 
-| Source | Chroma | Opaque pixels | Max | Over 1 CV |
-|---|---|---:|---:|---:|
-| `prores422.mov` | 4:2:2 10-bit | 57,600 | 0.970 CV | 0 |
-| `prores4444-alpha.mov` | 4:4:4 12-bit with alpha | 28,800 | 0.022 CV (alpha 0.000 CV everywhere) | 0 |
-| `converted.mkv`, `h264-aac.mov`, `h264-aac.mp4`, `hevc.mov`, `hevc.mp4`, `vp8-opus.webm`, `vp9-opus.webm`, `av1.mp4` | 4:2:0 8-bit | 57,600 each | 0.970 CV each | 0 |
+- **zimg's edges**: zimg as it is.
+- **The engine's edge rule** (judged): the decoded planes are first extended
+  by 8 repeated edge samples (`fillborders` `smear`) and cropped after, as
+  `chroma.rs` clamps taps to the plane.
+- **f64** (a diagnostic): FFmpeg's decoded planes upsampled and converted by
+  the test's own f64 implementation of the plan's filter, edges clamped,
+  nothing clipped. zimg's word-type resize clamps chroma overshoot at the
+  16-bit code floor and ceiling; this reading does not.
 
-zimg applies one filter to both axes. For 4:2:2 its `bilinear` is the
-engine's filter (linear across), so those rows are the class as written; the
-engine upsamples 4:2:0 with Catmull-Rom across and linear between rows
-(`pm-color` `chroma.rs`), so the 4:2:0 rows use zimg's Catmull-Rom on both
-axes and are reported, not judged (these fixtures have no vertical chroma
-edges that would show the difference). Pass for the sources the class
-judges.
+The e2e fixture videos are **flat**: every frame is one Y′CbCr triple (ffmpeg
+`signalstats` over 24 frames: `prores422.mov` Y = 324, U = 360, V = 960
+throughout; the 4:2:0 files Y = 81, U = 90, V = 240; `prores4444-alpha.mov`
+flat colour with an alpha edge). They check the matrix and range conversion
+only and never exercise chroma upsampling, siting, or the filter; that is all
+they settle for the three proxy-only corpus sources (which use these files).
+All ten: 0.000 CV in every reading (alpha 0.000 CV). The 0.970 CV this report
+gave before came from the old reference's 16-bit integer RGB, which clipped
+the fixtures' slightly out-of-gamut red (G and B decode to −0.19% and −0.38%);
+the engine's 32-bit output keeps them.
+
+The chroma path is measured on sources with chroma edges: 12 generated from
+`testsrc2` (saturated bars, a moving pattern, and text; chroma codes 16 to 240
+with edges both ways) with the pinned FFmpeg, frames 0, 7, 15, 23, and every
+frame of the corpus's own H.264 media (the motion capture's
+`corpus-frames-24.mp4` and `corpus-frames-30.mp4`, the sources of the
+`retime/speed` and `space25d/precomps` rows above):
+
+| Source | Chroma, siting | Decoded by the engine with | zimg's edges | Engine's edge rule | f64 |
+|---|---|---|---:|---:|---:|
+| ProRes 422 HQ (VideoToolbox encoder) | 4:2:2 10-bit, left | VideoToolbox | 2.017 (224 px over 1) | **2.017** (224 px) | 2.017 |
+| ProRes 4444 | 4:4:4 12-bit | VideoToolbox | 0.541 | 0.541 | 0.541 |
+| ProRes 4444 with alpha edges | 4:4:4 12-bit + alpha | VideoToolbox | 0.204 (alpha 0.012) | 0.204 | — |
+| FFV1 | 4:2:2 10-bit, left | FFmpeg | 0.000 | 0.000 | 0.000 |
+| FFV1 | 4:4:4 8-bit | FFmpeg | 0.000 | 0.000 | 0.000 |
+| FFV1 | 4:2:0 8-bit, left | FFmpeg | 1.009 (14 px, border) | 0.000 | 0.000 |
+| FFV1 | 4:2:0 8-bit, center | FFmpeg | 3.310 (146 px, border) | 0.000 | 0.000 |
+| FFV1 | 4:2:0 8-bit, top-left | FFmpeg | 1.009 (15 px, border) | 0.000 | 0.000 |
+| VP9 lossless | 4:2:0 8-bit, left | FFmpeg | 1.009 (14 px, border) | 0.000 | 0.000 |
+| AV1 (SVT, CRF 10) | 4:2:0 8-bit, left | dav1d | 1.135 (19 px, border) | 0.000 | 0.000 |
+| H.264 (VideoToolbox encoder) | 4:2:0 8-bit, left | VideoToolbox | 1.009 (14 px, border) | 0.000 | 0.000 |
+| HEVC Main 10 (VideoToolbox encoder) | 4:2:0 10-bit, left | VideoToolbox | 1.040 (8 px, border) | 0.000 | 0.000 |
+| `corpus-frames-24.mp4`, 96 frames | 4:2:0 8-bit, left | VideoToolbox | 23.167 (174 px) | 23.167 (174 px) | 0.000 |
+| `corpus-frames-30.mp4`, 120 frames | 4:2:0 8-bit, left | VideoToolbox | 25.499 (194 px) | 25.499 (194 px) | 0.000 |
+
+(Max CV over color; "px over 1" counts pixels above 1 CV over all frames
+measured. Interior figures, a 2-pixel border left out, equal the
+engine's-edge-rule column for every source.)
+
+What the rows show:
+
+- **The chroma filter and siting are exact.** Every source FFmpeg decodes the
+  way the engine's decoder does, 4:2:0, 4:2:2, and 4:4:4 with left, center,
+  and top-left siting, through FFmpeg, dav1d, and VideoToolbox (H.264 and HEVC
+  decoding is bit-exact), is within 0.000 CV of the reference that applies the
+  engine's edge rule.
+- **zimg's edge extension differs from the engine's** (up to 3.31 CV, only in
+  the 2-pixel border; 0.000 inside): a reference construction choice, not an
+  engine difference. Judged with the engine's edge rule.
+- **zimg clips chroma overshoot.** The corpus H.264 sources put chroma code 14
+  beside 240; Catmull-Rom overshoots below code 0 there and zimg's 16-bit
+  resize clamps it. At `corpus-frames-24.mp4` frame 15 (157, 94) the
+  upsampled Cb is −6.27 (8-bit code) by hand; the engine's B is −43.8 CV, the
+  zimg reference's −31.2 (12.6 CV = 6.27 × 2.018). The f64 reference, which
+  clips nothing, matches the engine to 0.000 CV on all 216 frames. Whether
+  the class's reference may clip is a reference choice; the engine follows the
+  plan's filter.
+- **ProRes 422 HQ fails the class as written: the decoder.** VideoToolbox's
+  ProRes decode and FFmpeg's differ by up to 4 10-bit chroma codes (768 V
+  samples over 1 code in 24 frames at 4:2:2; FFV1 at the same 4:2:2 10-bit is
+  exact). Against FFmpeg's VideoToolbox hwaccel decode with the same zimg
+  chain the engine is within 0.000 CV (4444: 0.006, with alpha 0.012). The
+  engine decodes ProRes with VideoToolbox only (`pm-media` `decode/mod.rs`,
+  amendment 6), so its ProRes 422 frames are 2 CV from an FFmpeg reference at
+  saturated chroma edges.
+
+Result: the matrix, range, siting, filter, and edge rule pass, on sources that
+exercise them; the class as written fails for ProRes 422 HQ by 2.017 CV
+because the reference decoder is FFmpeg's and the engine's is VideoToolbox.
+Owner: `pm-media` (the ProRes decoder) or a plan decision on which ProRes
+decoder the class's reference uses. The flat fixtures alone would have shown
+none of this.
+
+One observation while measuring, not part of the class: the source time is
+clamped to the asset's duration less the end padding (today's
+`videoPlaybackTime`, 0.04 s in the viewer; `pm_render::retime::playback_time`),
+so at 30 fps the last frame of a file is never drawn (it starts 0.033 s
+before the end); the measurement declares assets slightly longer for that
+reason. It matches today's viewer by design.
 
 The lanes' own corpus runs at this tip agree with the runner where they
 overlap and pin the same differences: `tests/corpus.rs` 256 frames, 0 failed
@@ -282,8 +376,10 @@ releases fetched without credentials, docs samples, cloud samples, scenes,
 unit-test and e2e literals, S3's 56 agent shaders, and 35 agent-generated
 answers to 37 contract prompts; WebGL2 references from Chromium on ANGLE Metal,
 and the fallback runner's pixels), rendered by this tip's production path.
-Collected again from this tip (`collect.ts` with the same Store fetch): the same
-144 cases and 522 variants, no case changed, so the WebGL references stand.
+Collected again from this tip (`collect.ts --out` with the same Store fetch,
+compared with `engine/crates/pm-cli/scripts/shader-corpus-same.py`; repeated
+2026-10-18 00:28): the same 144 cases and 522 variants, no case changed, the
+same 4 Store releases, so the WebGL references stand.
 
 | Group | Variants | Match WebGL | Via the runner | Both refuse | WebGL-unstable | Failures |
 |---|---:|---:|---:|---:|---:|---:|
@@ -332,7 +428,7 @@ CLI ran with the harness's instructions (`docs/engine/shaders.md`).
 | Antialiasing (`compat` level 2) | `tests/sampling.rs`: zone plate and Siemens star under scale 1.0 → 0.25 and rotation, against each path's declared kernel at 16×: final (Lanczos) PSNR min 70.78 dB (zone plate, 16-bit) and 80.57 dB (star); playback (trilinear) min 54.75 dB; flicker 0.996× to 1.000× (≤ 1.5×). Level 1 keeps today's sampling (corpus parity above) | pass |
 | 3D | See "3D and Blender classes" | pass, except the 23 Blender snapshots |
 | Determinism: two renders identical | `pm-cli parity render --determinism`: 289 corpus samples rendered a second time after dropping the renderer's caches (`trim(0)`), 0 differ bit for bit (including 21 3D projects, effects, motion blur, video); `tests/headless.rs` "every feature is supported and frames are deterministic" pass | pass |
-| Determinism: lossless outputs | `pm-cli render --format png16` of the first second of 9 corpus projects (`3d/primitives`, `3d/lights`, `3d/gltf`, `shapes/primitives`, `layers/solid`, `backgrounds/radial`, `animation/transforms`, `media/h264-aac-mp4`, `media/prores422-mov`), twice each: 270 16-bit PNG frames, every file byte-identical | pass |
+| Determinism: lossless outputs | `pm-cli render --format png16` of the first second of 9 corpus projects (`3d/primitives`, `3d/lights`, `3d/gltf`, `shapes/primitives`, `layers/solid`, `backgrounds/radial`, `animation/transforms`, `media/h264-aac-mp4`, `media/prores422-mov`), twice each: 270 16-bit PNG frames, every file byte-identical (`engine/crates/pm-cli/scripts/png16-determinism.sh`; repeated 2026-10-18 00:29 with the same result) | pass |
 | Determinism: native and WASM evaluation | `pm-cli parity eval --wasm`: 1,815,420 replies of pm-wasm compiled natively and the wasm32 module in Node, 0 differ | pass |
 
 ## Performance rows (section 25, Phase 3a)
@@ -352,7 +448,7 @@ does not change.
 | Layer drag, 884-layer project | p95 ≤ 33 ms, at most 1 frame worse than today | Not measured (display asleep, session locked; the harness skips such runs). The project routes to the legacy engine (2.5D text, text). Two harness runs are added for it (`p3a-drag-today-884-idle`, `p3a-drag-engine-884-idle`); the harness no longer built at this tip (`src/main/engine/blender.ts` imports `worker.py?raw`, which its esbuild had no loader for), fixed here | **not measured** | text and 2.5D routing first (`pm-render`, `pm-text`); then a run with the display awake |
 | 3D pick, 1M-vertex skinned model | ≤ 2 ms at an unchanged frame; ≤ 33 ms first pick after a time change | `pm-geom3d` `gltf_picks.rs` (release): load 51 ms, BVH 126 ms; first pick after a time change median 14.15, p95 15.08, max 15.48 ms; unchanged frame median 0.002, max 0.016 ms | pass for the engine's picker; the app still picks through three.js (`pm-eval`'s `LayerHost` hooks are wired in Phase 3c) | `pm-eval` and the hosts (3c) |
 | Canvas text typing | p95 ≤ 33 ms | Engine share (`examples/text_typing.rs`: layout, scene, coverage, paint, composite at 1920 × 1080, GPU finished, 71 keystrokes): 96 px title p95 1.70 ms, 48 px paragraph p95 3.50 ms, 36 px caption size p95 1.93 ms. In the app a text layer routes to the legacy engine ("text layers without the engine's fonts"), so typing is not drawn by the engine | **fail**: not drawn by the engine | `pm-node` and `pm-text` (fonts for the hosts' renderers) |
-| UHD ProRes 422 HQ, 3 layers with blur, Pro | Real time at 23.976, 29.97, 59.94; zero drops over 60 s; same with linear blending on | Three 3840 × 2160 ProRes 422 HQ layers (12 s clips from VideoToolbox's encoder with noise, 0.78, 0.97, and 1.94 Gbit/s; three different sections of the clip, so three decodes per frame), each with Blur at 24 and the upper two at 60% opacity, a composition of 96, 120, or 240 frames looping for 60 s, drawn by the engine, clips copied into the media store as an import does. 23.976: 1,438 frames shown, 0 skipped, 0 repeated, display interval p50 41.5 ms, max 51.6; 29.97: 1,799 shown, 0 skipped, 0 repeated, p50 33.2, max 41.5; presenter drops 0, engine late-skips 0, compose mean 1.7 to 1.8 ms. 59.94: the whole-frame run did not complete (the 2.9 GB clip's import timed out at 15 minutes with the disk at 4 GB free); the earlier run with a 4 s composition (239.8 frames) showed 3,597 frames with 4 skipped, every one frame 0 after a loop wrap (the loop length alone predicts 3.6 over 15 loops; the 23.976 and 29.97 runs of that form skipped 1 and 2 the same way, as predicted, and 0 with whole-frame loops), display interval p50 16.6, max 24.9 ms, 1 late-skipped by the engine. With "Blend in linear light" on, the project is stamped `requiresEngine: "native"` and routes to the legacy engine ("native-only features") at every rate | 23.976 and 29.97: pass with linear blending off. **Fail**: the linear-blending half is drawn by the legacy engine; 59.94 not cleanly measured (1 engine late-skip in the run that completed) | Linear: `pm-render` `capability.rs`. 59.94: a rerun with disk to spare (Parity and QA) |
+| UHD ProRes 422 HQ, 3 layers with blur, Pro | Real time at 23.976, 29.97, 59.94; zero drops over 60 s; same with linear blending on | Three 3840 × 2160 ProRes 422 HQ layers (12 s clips from VideoToolbox's encoder with noise, 0.78, 0.97, and 1.94 Gbit/s; three different sections of the clip, so three decodes per frame), each with Blur at 24 and the upper two at 60% opacity, a composition of 96, 120, or 240 frames looping for 60 s, drawn by the engine, clips copied into the media store as an import does. 23.976: 1,438 frames shown, 0 skipped, 0 repeated, display interval p50 41.5 ms, max 51.6; 29.97: 1,799 shown, 0 skipped, 0 repeated, p50 33.2, max 41.5; presenter drops 0, engine late-skips 0 (the counter covers the interactive engine's whole session, not only the 60 s window), compose mean 1.7 to 1.8 ms, compose max 197 to 212 ms in every run (the engine keeps only the maximum, so which frame it was is not recorded; probably the first frame with cold decoders and pipelines, not verified). 59.94: the whole-frame run did not complete (the 2.9 GB clip's import timed out at 15 minutes with the disk at 4 GB free); the earlier run with a 4 s composition (239.8 frames) showed 3,597 frames with 4 skipped, every one frame 0 after a loop wrap (the loop length alone predicts 3.6 over 15 loops; the 23.976 and 29.97 runs of that form skipped 1 and 2 the same way, as predicted, and 0 with whole-frame loops), display interval p50 16.6, max 24.9 ms, compose max 209 ms, 1 late-skipped by the engine (a session counter, so possibly outside the 60 s window). With "Blend in linear light" on, the project is stamped `requiresEngine: "native"` and routes to the legacy engine ("native-only features") at every rate | 23.976 and 29.97: pass with linear blending off. **Fail**: the linear-blending half is drawn by the legacy engine; 59.94 not cleanly measured (1 engine late-skip in the run that completed) | Linear: `pm-render` `capability.rs`. 59.94: a rerun with disk to spare (Parity and QA) |
 | UHD ProRes 422 HQ, 29.97 on base | Real time | Base machine | **deferred** | |
 | The 884-layer project: the five ceilings | The five ceilings that fail today pass | `editor-responsiveness.spec.ts:6`, `high-zoom-performance.spec.ts`, `region-pan-performance.spec.ts` with the perf project copy: Use New Engine on: random scrub render p95 5.1, max 14.7 ms (ceiling 100); high-zoom wheel 1 render (ceiling 15); region pan 3, 5, 5 renders (ceiling 25). Off: p95 5.6, max 14.9 ms; 1; 2, 5, 5. All five pass in both builds today (they failed when the plan was written; `apps/desktop/docs/memory-investigation.md`). The project routes to the legacy engine, so both runs measure today's compositor (`PM.GL.render`) | pass as measured, not an engine measurement | the specs read the legacy compositor; engine equivalents follow the routing |
 | Memory | Within leases; no growth over a 1-hour playback loop; `pm-wasm` budget with the 3D corpus | The spec's memory test (`PM_P3A_MEMORY_SECONDS=3600`): the synthetic 1,000-layer project (2 images) the engine draws, looping for 3,600 s; 107,965 document frames, 0 late-skipped, 0 render errors, 0 layer failures. Every 30 s: `app.getAppMetrics()` and each engine's last lease usage. Lease usage 623,423,488 bytes (frame cache 512 MiB, surface pool 82.5 MiB) against a 58.4 GB interactive lease at all 121 samples (the job engine 0 of 10.3 GB). Resident memory, interactive engine (the larger Node utility): 282 MiB at start, 357 at 5 min, 378 at 20, 384 from 30 to 60 min; job engine 72 → 81; editor page 377 → 566 at 5 min, 576 to 578 after; GPU process 138 flat; page JS heap 42 to 65 MB, no trend. `pm-wasm` (`wasm-budget-3d.mjs`): the 18 3D corpus projects (and the OBJ and Studio Cube layers) hold at most 0.21 MB live heap, 0.25 MB peak, 1.97 MB linear memory with every layer query at every sample time; the real 884-layer project 11.3 MB live, 14.1 MB peak, 25.5 MB linear | Leases: pass. Growth: the engine plateaus after 30 minutes (+27 MiB from minute 5 to 30, 0 after); pass by the last half hour, a rise to watch. `pm-wasm`: the 3D corpus is within S5's proposed budget (live ≤ 8 MB, linear ≤ 32 MB); the real project's live heap is over the proposal, which Jude has not confirmed. pm-wasm holds no 3D meshes or BVHs yet (3D queries stay on three.js until 3c), so the plan's 3D share is not measurable | `pm-wasm` (the real project's mirror heap); the 3D share with 3c |
@@ -387,14 +483,28 @@ corpus case per stamped feature.
   adds each capture's real-world project with its media unpacked from the file
   the capture opened (checked by SHA-256); `--determinism` renders every sample
   again after `Renderer::trim(0)` and requires bit-identical float buffers;
-  failing frames of WebGL-unstable effects (Posterize) are listed for review;
+  a failing frame of a project with a WebGL-unstable effect (Posterize) is
+  listed for review only when its difference is confined to the pixels the
+  effect changes (rendered again without it);
   a project routed for text also reports what would still route with fonts.
-  Unit tests: option parsing, real-project listing and naming.
+  Unit tests: option parsing, real-project listing and naming, the unstable
+  effect walk, stripping, and the confinement rule. Not unit tested:
+  `capture_definitions` and `routing_with_fonts` (they need a capture; the
+  corpus run exercises them).
 - `engine/crates/pm-cli/tests/phase3a_bars.rs`: the blurred-white-line energy
   line; `tests/phase3a_video_class.rs`: the video class against FFmpeg plus
-  zimg (both ignored by default; run with `--ignored`).
+  zimg, on the flat fixtures, generated chroma-edge sources, and the corpus
+  H.264 media (both ignored by default; run with `--ignored`).
 - `engine/crates/pm-cli/scripts/wasm-budget-3d.mjs`: the pm-wasm mirror's
-  heap and linear memory with each 3D corpus project and the real project.
+  heap and linear memory with each 3D corpus project and the real project;
+  every query's reply is read and error replies are counted (rerun: 0 errors
+  in 1,078,013 queries, the same figures).
+- `engine/crates/pm-cli/scripts/png16-determinism.sh`: the lossless-output
+  determinism row (nine projects exported twice, compared byte for byte).
+- `engine/crates/pm-cli/scripts/shader-corpus-same.py`: compares a shader
+  corpus collected again at the tip with the one the WebGL references came
+  from (rerun at this tip: 144 cases, 522 variants, none changed, same 4 Store
+  releases).
 - `engine/crates/pm-cli/scripts/phase3a-gate.sh`: runs every engine-side step
   of this report at low priority and writes logs outside the repository.
 - `apps/desktop/e2e/native-engine-p3a-measure.spec.ts` (outside the owned
@@ -411,6 +521,8 @@ corpus case per stamped feature.
 ```sh
 source engine/env.sh
 engine/crates/pm-cli/scripts/phase3a-gate.sh /tmp/phase3a-gate          # engine side, about 25 minutes
+#   it includes the png16 determinism row (png16-determinism.sh) and the shader corpus
+#   recollection (tools/shaders/collect.ts --out, then shader-corpus-same.py)
 engine/target/release/pm-cli parity render --help                         # the runner's options
 bun run --cwd apps/desktop build:engine && bun run --cwd apps/desktop build:wasm && bun run --cwd apps/desktop build
 # UHD clips (outside the repository; about 5.5 GB, and each import copies its clip
