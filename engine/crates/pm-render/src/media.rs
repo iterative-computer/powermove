@@ -777,7 +777,9 @@ pub(crate) fn convert(
 }
 
 /// An 8-bit RGBA still (Blink's compatibility bitmap) as an `Rgba8Unorm`
-/// texture, or `None` when its pixels are not one 8-bit RGBA plane.
+/// texture, or `None` when its pixels are not one 8-bit RGBA plane. The
+/// texture is for sampling (and copying out) only: it is not a working
+/// target of any precision (see [`MediaCache::image`]).
 fn rgba8_bitmap(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -831,6 +833,13 @@ fn rgba8_bitmap(
             height: h,
             depth_or_array_layers: 1,
         },
+    );
+    debug_assert!(
+        target.format() == wgpu::TextureFormat::Rgba8Unorm
+            && !target.texture.usage().intersects(
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING
+            ),
+        "the still bitmap is sample-only"
     );
     Some(target)
 }
@@ -945,6 +954,14 @@ impl MediaCache {
 
     /// The working texture of a still, read with the asset's Interpret
     /// Footage overrides when it has any.
+    ///
+    /// A `compat` level 1 still in the Standard encoding comes back as
+    /// today's 8-bit bitmap ([`rgba8_bitmap`]): an `Rgba8Unorm` texture
+    /// whatever `precision`, usable only as a sampled texture or a copy
+    /// source (no `RENDER_ATTACHMENT` or `STORAGE_BINDING`). Every consumer
+    /// samples it; one that copies it into a working target or renders into
+    /// it must convert it first (the formats and usages differ and wgpu
+    /// rejects it).
     #[allow(clippy::too_many_arguments)]
     pub fn image(
         &mut self,
