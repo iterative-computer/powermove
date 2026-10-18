@@ -302,6 +302,15 @@ impl Placement {
         ]
     }
 
+    /// The device scale a glyph strike is made for: Skia's descriptor
+    /// keeps the device matrix to 1/1024 (`sk_relax` in
+    /// `SkScalerContext::MakeRecAndEffects`), so glyph masks of a scaled
+    /// word are generated at `size × relax(scale)`, not at the exact scale.
+    fn strike_scale(&self) -> f32 {
+        let x = self.scale as f32;
+        (x * 1024.0 + 0.5).floor() / 1024.0
+    }
+
     fn of(m: Affine) -> Placement {
         let [a, b, c, d, _, _] = m.as_coeffs();
         let det = a * d - b * c;
@@ -502,12 +511,12 @@ impl Painter<'_> {
                         run.face,
                         coords,
                         g.id as u16,
-                        dsize,
+                        run.size * place.strike_scale(),
                         MaskStyle {
                             quarter: quarter as u8,
                             skew: skew as f32,
                         },
-                        place.scale as f32,
+                        place.strike_scale(),
                         super::skpath::Frame::fake_bold(run.size),
                     ) {
                         platform.push((ix as i64, y as i64, m, true));
@@ -533,7 +542,7 @@ impl Painter<'_> {
                         run.face,
                         coords,
                         g.id as u16,
-                        dsize,
+                        run.size * place.strike_scale(),
                         style,
                         bare.bounds.inflate(grow_x, 0.0),
                     ) {
@@ -876,12 +885,12 @@ impl Painter<'_> {
                     run.face,
                     coords,
                     g.id as u16,
-                    device_size as f32,
+                    run.size * place.strike_scale(),
                     MaskStyle {
                         quarter: quarter as u8,
                         skew: skew as f32,
                     },
-                    place.scale as f32,
+                    place.strike_scale(),
                     frame,
                 ) else {
                     continue;

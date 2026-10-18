@@ -1,34 +1,6 @@
 {
  "note": "Frames of text_corpus whose text pixels are not all within 2 code values of the capture: the most pixels beyond 2 code values (over2) and the largest difference (max) each may have, as measured 2026-10-18. Each is a gap in docs/engine/text-render.md. A pinned frame may not get worse; a pin whose frame becomes exact fails the test until it is removed. Keys are <project> t=<time>, iso:<project> t=<time> for text in isolation.",
  "pins": {
-  "captions/box-highlight-pop t=0.7": {
-   "over2": 3,
-   "max": 4
-  },
-  "captions/box-highlight-pop t=1.3": {
-   "over2": 1,
-   "max": 3
-  },
-  "captions/box-highlight-pop t=2.4": {
-   "over2": 9,
-   "max": 5
-  },
-  "captions/preset-pop t=0.5": {
-   "over2": 25,
-   "max": 17
-  },
-  "captions/preset-pop t=1.3": {
-   "over2": 2,
-   "max": 3
-  },
-  "captions/preset-spotlight t=0.5": {
-   "over2": 5,
-   "max": 3
-  },
-  "captions/preset-spotlight t=1.3": {
-   "over2": 1,
-   "max": 3
-  },
   "text/animator-blur t=0.1": {
    "over2": 1,
    "max": 3
@@ -36,38 +8,6 @@
   "text/animator-blur t=0.4": {
    "over2": 5,
    "max": 3
-  },
-  "text/animator-pop t=0.1": {
-   "over2": 1,
-   "max": 3
-  },
-  "text/animator-pop t=0.4": {
-   "over2": 129,
-   "max": 16
-  },
-  "text/animator-pop t=0.8": {
-   "over2": 150,
-   "max": 14
-  },
-  "text/animator-pulse t=0.1": {
-   "over2": 128,
-   "max": 18
-  },
-  "text/animator-pulse t=0.4": {
-   "over2": 107,
-   "max": 16
-  },
-  "text/animator-pulse t=0.8": {
-   "over2": 131,
-   "max": 20
-  },
-  "text/animator-pulse t=1.6": {
-   "over2": 134,
-   "max": 16
-  },
-  "text/animator-pulse t=2.5": {
-   "over2": 107,
-   "max": 15
   },
   "text/animator-tumble t=0.1": {
    "over2": 262,
