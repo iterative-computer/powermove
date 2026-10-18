@@ -146,9 +146,19 @@ impl Bands {
         None
     }
 
-    /// Forgets a request (the runner failed it).
+    /// Forgets a request (the runner failed it, or the session that asked
+    /// for it closed).
     pub fn forget(&mut self, key: &str) {
         self.partial.remove(key);
+    }
+
+    /// Requests with some bands held.
+    pub fn len(&self) -> usize {
+        self.partial.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.partial.is_empty()
     }
 }
 
@@ -303,5 +313,11 @@ mod tests {
         assert_eq!(px.rgba16f.len(), 24);
         assert_eq!(px.rgba16f[0], 0x0101);
         assert_eq!(px.rgba16f[16], 0x0303);
+        assert!(bands.is_empty());
+        // A request forgotten mid-transfer lets its bands go.
+        assert!(bands.add(&band(0, 1, 1)).is_none());
+        assert_eq!(bands.len(), 1);
+        bands.forget("k");
+        assert!(bands.is_empty());
     }
 }

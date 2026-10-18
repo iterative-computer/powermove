@@ -4,7 +4,9 @@
 //! (amendment 9: the bind check refuses it, WebGL draws it with
 //! (0, 0, 0, 1)) is not routed: the engine asks the viewer's renderer for
 //! its pixels (`ShaderFallbackMessage::Requests`), takes them back in row
-//! bands, and presents the frame; a runner failure routes the composition
+//! bands, and presents the frame, reporting the layer to the Shader panel
+//! as not headless-renderable (layer scope, at the frame's revision, before
+//! the frame) and logging it once; a runner failure routes the composition
 //! to the legacy viewer.
 #![cfg(target_os = "macos")]
 
@@ -26,7 +28,7 @@ use pm_protocol::common::{Bytes, ContentHash, RequestId, Revision, Seq, Size};
 use pm_protocol::envelope::{
     Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
 };
-use pm_protocol::error::{EngineProcess, ErrorCode};
+use pm_protocol::error::{EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::frame::{
     FrameDescriptor, FrameRelease, MediaPreference, PreviewResolution, ViewerState,
 };
@@ -92,6 +94,7 @@ fn programs_only_the_runner_draws_take_its_pixels_through_the_engine() {
 #[derive(Default)]
 struct Inbox {
     messages: Mutex<Vec<Envelope>>,
+    logs: Mutex<Vec<String>>,
     arrived: Condvar,
 }
 
@@ -103,7 +106,10 @@ impl Inbox {
                 Action::Send { port, bytes } if port == WINDOW => {
                     messages.push(codec::decode(&bytes).expect("engine output decodes"));
                 }
-                Action::Log { level, message } => eprintln!("engine {level:?}: {message}"),
+                Action::Log { level, message } => {
+                    eprintln!("engine {level:?}: {message}");
+                    self.logs.lock().unwrap().push(message);
+                }
                 _ => {}
             }
         }
@@ -334,8 +340,43 @@ fn child_engine() {
     };
     send(&mut host, band(100, 80, 0x3800));
     send(&mut host, band(0, 100, 0x3400));
+    // Reported (plan section 11: "reported and marked not
+    // headless-renderable"), at the frame's revision, before the frame.
+    let report = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::Failure(f),
+        } => Some(f.clone()),
+        Message::Event {
+            body: Event::Frame(_),
+        } => panic!("the frame came before the layer's report"),
+        _ => None,
+    });
+    assert_eq!(report.revision.get(), 1);
+    assert_eq!(report.error.code, ErrorCode::NotHeadlessRenderable);
+    assert_eq!(
+        report.error.scope,
+        ErrorScope::Layer {
+            layer: "sky".into()
+        }
+    );
+    assert!(
+        report.error.message.contains("WebGL fallback")
+            && report.error.message.contains("headless exports"),
+        "{}",
+        report.error.message
+    );
     let drawn = inbox.wait(Duration::from_secs(20), frame);
     assert_eq!(drawn.revision.get(), 1);
+    let logged: Vec<String> = inbox
+        .logs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.contains("fallback runner") && m.contains("not headless-renderable"))
+        .cloned()
+        .collect();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].starts_with("layer sky "), "{}", logged[0]);
     release(&mut host, &drawn);
     // A runner failure routes the composition (another program).
     let doc2 = project(shader(&code.replace("1.0)", "0.5)")));

@@ -239,4 +239,18 @@ describe('engine shader meta', () => {
     expect(meta.at(-2)).toEqual(['S', { missing: false, missingAsset: null }]);
     expect(meta.at(-1)).toEqual(['S', { shaderKey: 'engine:S', definition: null, missing: false }]);
   });
+
+  it('shows a shader layer the fallback runner draws as not headless-renderable until a frame stops repeating it', () => {
+    const meta: any[] = [];
+    const PM: any = { proj: { layers: [{ id: 'C', type: 'shader', d: {} }], comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
+    const m = new EngineShaderMeta(PM);
+    const message = 'Shader layer C is drawn by the WebGL fallback, so headless exports cannot render it (the native pipeline stops at bind: samplerCube uEnv is not a float sampler2D).';
+    m.failure({ revision: 2, error: { code: 'notHeadlessRenderable', scope: { kind: 'layer', layer: 'C' }, message, retry: { kind: 'afterUserAction' }, detail: { kind: 'shaderCompile', diagnostics: [] } } });
+    m.frame(2);
+    expect(m.compileError('engine:C')).toBe(message);
+    expect(meta).toEqual([['C', { shaderKey: 'engine:C', definition: null, missing: false }]]);
+    // The code changed and the native pipeline draws it: not repeated.
+    m.frame(3);
+    expect(m.compileError('engine:C')).toBeNull();
+  });
 });

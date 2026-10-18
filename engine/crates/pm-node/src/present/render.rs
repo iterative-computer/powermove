@@ -13,7 +13,7 @@
 //! the command buffer that wrote its surface completed, and a surface is
 //! never written while the viewer holds it (contract 2's `PoolLedger`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -420,6 +420,9 @@ struct Thread {
 struct Fallback {
     asked: BTreeMap<String, Key>,
     bands: pm_render::shader_layers::Bands,
+    /// Layers each view was told draw through the runner (logged once per
+    /// layer, not once per animated frame's request).
+    logged: BTreeSet<(Key, String)>,
 }
 
 fn now() -> i64 {
@@ -839,7 +842,15 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
-        self.fallback.asked.retain(|_, k| *k != key);
+        // Requests the session was asked for, with the bands that arrived.
+        let fallback = &mut self.fallback;
+        fallback.asked.retain(|request, k| {
+            if *k == key {
+                fallback.bands.forget(request);
+            }
+            *k != key
+        });
+        fallback.logged.retain(|(k, _)| *k != key);
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -2181,6 +2192,24 @@ impl Thread {
                     for chunk in fresh.chunks(pm_protocol::shader_fallback::MAX_REQUESTS) {
                         for r in chunk {
                             self.fallback.asked.insert(r.key.clone(), key);
+                            // The Shader panel hears it as the layer's
+                            // `NotHeadlessRenderable` report (reports.rs).
+                            if !self.fallback.logged.insert((key, r.layer.clone())) {
+                                continue;
+                            }
+                            (self.sink)(vec![Action::Log {
+                                level: LogLevel::Info,
+                                message: format!(
+                                    "layer {} draws through the shader fallback runner \
+                                     ({}x{}; native pipeline stopped at {}: {}); \
+                                     not headless-renderable",
+                                    r.layer,
+                                    r.width,
+                                    r.height,
+                                    r.stage,
+                                    r.message.lines().next().unwrap_or_default()
+                                ),
+                            }]);
                         }
                         let body = Event::ShaderFallback(
                             pm_protocol::shader_fallback::ShaderFallbackMessage::Requests {

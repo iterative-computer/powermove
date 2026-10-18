@@ -36,6 +36,7 @@ use pm_gpu::Target;
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Seq, Size, Ticks};
 use pm_protocol::definitions::{DefinitionSetSnapshot, DefinitionSnapshot};
+use pm_protocol::error::ErrorCode;
 use pm_render::effects::Status;
 use pm_render::effects::plan::{effect_step, transition_step};
 use pm_render::shader_layers::{FallbackPixels, FallbackRequest};
@@ -691,6 +692,18 @@ fn layers_needing_the_runner_are_not_headless_renderable() {
     let Outcome::Pending(requests) = render_layer(&mut renderer, &doc, &variant) else {
         panic!("expected a fallback request");
     };
+    // Reported, not only marked (plan section 11): the Shader panel hears
+    // that the layer draws through the runner and will not export headless.
+    let reports = renderer.layer_reports(&doc, "Pgate-root");
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
+    assert!(
+        reports[0].message.contains("WebGL fallback")
+            && reports[0].message.contains("headless exports")
+            && reports[0].message.contains("bind"),
+        "{}",
+        reports[0].message
+    );
     assert_eq!(requests.len(), 1);
     let r = &requests[0];
     assert_eq!((r.width, r.height), (64, 36));

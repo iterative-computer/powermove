@@ -11,6 +11,13 @@
 //! - a shader layer whose code WebGL refuses too (`Verdict::Refused`):
 //!   `ShaderCompile`, layer scope, with the diagnostics in the author's
 //!   lines (the header and the joining newline removed);
+//! - a shader layer only the decision 19 fallback runner draws
+//!   (`Verdict::NeedsFallback`: WebGL compiles it, a later native stage
+//!   refuses it): `NotHeadlessRenderable`, layer scope, worded as a
+//!   warning, with where the native pipeline stopped. Plan section 11: such
+//!   a program "is reported and marked not headless-renderable"; the
+//!   static check marks it, this reports it (the layer still draws, through
+//!   the runner, in the viewer);
 //! - an extension layer whose definition is marked missing (it draws the
 //!   checkerboard): `DefinitionMissing`, layer scope.
 //!
@@ -23,10 +30,11 @@
 //! the frame; the app treats a layer report older than the frame it is
 //! showing as cleared (`kernel/engine-definitions.ts`).
 //!
-//! Extension fragment programs that do not compile are definition failures
-//! (`DefinitionsApplied.failures`, definition scope), as the effects lane
-//! reports them; programs only the fallback runner draws compile in WebGL
-//! and are not errors for the Shader panel (the presenter logs them).
+//! Extension fragment programs are reported per definition instead
+//! (`DefinitionsApplied.failures`, definition scope, as the effects lane
+//! reports them): `ShaderCompile` when they do not compile and
+//! `NotHeadlessRenderable` when only the runner draws them
+//! (`effects::definition_error`).
 
 use std::collections::BTreeSet;
 
@@ -72,7 +80,7 @@ pub fn layer_reports(
                 continue;
             }
             let report = match js::layer_type(layer).as_str() {
-                "shader" => shader_compile(layer, &layer_id),
+                "shader" => shader_program(layer, &layer_id),
                 "extension" => definitions.and_then(|e| missing(layer, &layer_id, e, is_mesh)),
                 "precomp" => {
                     if let Some((nested, _)) = precomp_target(root, layer) {
@@ -98,27 +106,41 @@ fn name(layer: &Node, id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
-/// `ShaderCompile` for a shader layer whose code WebGL refuses too.
-fn shader_compile(layer: &Node, id: &str) -> Option<EngineError> {
+/// `ShaderCompile` for a shader layer whose code WebGL refuses too;
+/// `NotHeadlessRenderable` for one only the fallback runner draws.
+fn shader_program(layer: &Node, id: &str) -> Option<EngineError> {
     // `PM.SHADER_HEADER + '\n' + d.code`, as the plan wraps it (a missing
     // code is the text "undefined").
     let code = node::member(node::member(Some(layer), "d"), "code");
     let code = node::js_value_opt(code).to_js_string().to_string_lossy();
     let (source, line_offset) = super::shader_layer_program(&code);
-    let Verdict::Refused(failure) = translate::verdict(&source, line_offset).1 else {
-        return None;
+    let (code, failure, message) = match translate::verdict(&source, line_offset).1 {
+        Verdict::Ready(_) => return None,
+        Verdict::Refused(failure) => {
+            let message = format!(
+                "Shader layer {} does not compile ({}: {}).",
+                name(layer, id),
+                failure.stage.name(),
+                failure.message.lines().next().unwrap_or_default()
+            );
+            (ErrorCode::ShaderCompile, failure, message)
+        }
+        Verdict::NeedsFallback(failure) => {
+            let message = format!(
+                "Shader layer {} is drawn by the WebGL fallback, so headless exports cannot \
+                 render it (the native pipeline stops at {}: {}).",
+                name(layer, id),
+                failure.stage.name(),
+                failure.message.lines().next().unwrap_or_default()
+            );
+            (ErrorCode::NotHeadlessRenderable, failure, message)
+        }
     };
-    let message = crate::effects::truncate(format!(
-        "Shader layer {} does not compile ({}: {}).",
-        name(layer, id),
-        failure.stage.name(),
-        failure.message.lines().next().unwrap_or_default()
-    ));
     Some(
         EngineError::new(
-            ErrorCode::ShaderCompile,
+            code,
             ErrorScope::Layer { layer: id.into() },
-            message,
+            crate::effects::truncate(message),
         )
         .with_retry(Retry::AfterUserAction)
         .with_detail(ErrorDetail::ShaderCompile {
