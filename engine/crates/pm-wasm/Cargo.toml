@@ -18,6 +18,8 @@ pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }
 pm-edit = { path = "../pm-edit" }
 pm-expr = { path = "../pm-expr" }
+# 3D model assets (OBJ, glTF) for picks and bounds (`geometry`).
+pm-geom3d = { path = "../pm-geom3d" }
 # Level 1 text layout over registry answers and subsets from main (no
 # platform registry in WebAssembly).
 pm-text = { path = "../pm-text", default-features = false }

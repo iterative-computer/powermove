@@ -51,6 +51,7 @@ pub mod math;
 pub mod matte;
 pub mod node;
 pub mod parenting;
+pub mod query3d;
 pub mod retime;
 pub mod scene3d;
 pub mod scope;

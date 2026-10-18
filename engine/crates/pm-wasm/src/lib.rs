@@ -15,6 +15,8 @@
 //!   mirror's nodes in place).
 //! * [`reply`]: JSON replies with exact numbers.
 //! * [`edit`]: the `edit.*` requests, `pm-edit`'s kernels over the mirror.
+//! * [`geometry`]: model assets, caches, and the editor camera for 3D
+//!   picks and bounds (`pm_eval::query3d`).
 //! * `queries`: the remaining evaluation answers the parity corpus records
 //!   (`PM.textLayout`, `PM.captionBounds`, `sourceTime`, ...).
 //! * `abi` (wasm32 only): the module's C ABI exports.
@@ -22,6 +24,7 @@
 pub mod edit;
 pub mod engine;
 pub mod expr;
+pub mod geometry;
 mod queries;
 pub mod reply;
 

@@ -25,7 +25,7 @@ use pm_eval::space3d::Rect;
 use pm_model::ops::ops_to_value;
 use pm_model::{Document, JsString, Value};
 
-use crate::engine::{Fonts, InkProbe, QueryResult, RefuseHost, Unanswered, host_only};
+use crate::engine::{Fonts, InkProbe, QueryResult, Unanswered, host_only};
 use crate::expr::PmExpressions;
 use crate::reply::Reply;
 
@@ -121,6 +121,7 @@ fn moves_reply(out: &mut Reply, moves: &[align::Move]) {
 pub(crate) fn dispatch(
     doc: &Document,
     fonts: &mut Fonts,
+    models: &mut crate::geometry::Models,
     name: &str,
     request: &Value,
     out: &mut Reply,
@@ -149,7 +150,7 @@ pub(crate) fn dispatch(
         inner: &mut fonts.measure,
         ink: false,
     };
-    let mut host = RefuseHost;
+    let mut host = crate::geometry::GeomHost::new(models, request);
     // Members of the reply after `ops` and `next`, each starting with a comma.
     let mut extra = Reply::new();
     let result: Result<(), JsThrow> = (|| match name {
@@ -280,6 +281,9 @@ pub(crate) fn dispatch(
         other => Err(JsThrow::type_error(format!("unknown edit '{other}'"))),
     })();
     let ink = probe.ink;
+    if !host.wanted.is_empty() {
+        return Err(Unanswered::Models(std::mem::take(&mut host.wanted)));
+    }
     if let Err(e) = &result
         && host_only(e)
     {

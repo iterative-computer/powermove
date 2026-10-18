@@ -377,6 +377,59 @@ pub extern "C" fn pm_fonts_add(len: usize) -> u32 {
     })
 }
 
+/// Adds a 3D model asset from `input[..len]`: a u32 id length, the id, a u8
+/// kind (0 missing, 1 OBJ text, 2 glTF or GLB bytes), then the bytes. 0 on
+/// success; 1 for a malformed input; 2 when the model did not load (kept as
+/// missing; the reason is in the reply buffer).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_set(len: usize) -> u32 {
+    with(|s| {
+        let bytes = input(s, len).to_vec();
+        let Some(id_len) = bytes
+            .get(0..4)
+            .and_then(|b| b.try_into().ok())
+            .map(|b: [u8; 4]| u32::from_le_bytes(b) as usize)
+        else {
+            return 1;
+        };
+        let Some(id) = bytes
+            .get(4..4 + id_len)
+            .and_then(|k| std::str::from_utf8(k).ok())
+        else {
+            return 1;
+        };
+        let Some(kind) = bytes
+            .get(4 + id_len)
+            .and_then(|k| crate::geometry::ModelKind::from_u8(*k))
+        else {
+            return 1;
+        };
+        let id = id.to_owned();
+        match s.engine.set_model(&id, kind, &bytes[5 + id_len..]) {
+            Ok(()) => 0,
+            Err(e) => {
+                reply(s, &e, false);
+                2
+            }
+        }
+    })
+}
+
+/// Forgets the 3D model asset whose id is `input[..len]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_forget(len: usize) {
+    with(|s| {
+        if let Ok(id) = std::str::from_utf8(input(s, len)).map(str::to_owned) {
+            s.engine.forget_model(&id);
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_models_clear() {
+    with(|s| s.engine.clear_models())
+}
+
 /// `{misses, pending}` of the last text layout into the reply buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_fonts_report() -> usize {

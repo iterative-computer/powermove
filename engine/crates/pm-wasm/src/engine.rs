@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use pm_eval::bounds::{Bounds, HOST_ONLY, LayerHost, NoHost, PickOptions};
+use pm_eval::bounds::{Bounds, HOST_ONLY, NoHost, PickOptions};
 use pm_eval::node::{self, Got};
 use pm_eval::space3d::Rect;
 use pm_eval::text_anim::UnitKind;
@@ -171,6 +171,9 @@ pub(crate) enum Unanswered {
     Ink,
     /// An edit kernel left the edit to the legacy code (`pm_edit::LEGACY_ONLY`).
     Legacy,
+    /// 3D geometry met model assets the mirror does not have yet: the
+    /// renderer adds them ([`Engine::set_model`]) and asks again.
+    Models(Vec<String>),
 }
 
 /// Measures through [`CompatMeasure`] and notes whether anything asked for
@@ -217,6 +220,8 @@ pub struct Engine {
     ev: Evaluator,
     labels: Arc<Labels>,
     fonts: Fonts,
+    /// Model assets and 3D caches (picks and bounds).
+    models: crate::geometry::Models,
     /// The last `ev_id` answer when it was not a number (for `value_json`).
     last: JsValue,
     last_kind: ValueKind,
@@ -337,10 +342,6 @@ fn indexes(out: &mut Reply, layers: &[Node], nodes: &[&Node]) {
     out.nums(&all);
 }
 
-/// A [`LayerHost`] that refuses every 3D question, so the renderer falls back
-/// to today's three.js answer (section 26, Phase 1).
-pub(crate) struct RefuseHost;
-impl LayerHost for RefuseHost {}
 
 pub(crate) fn host_only(e: &JsThrow) -> bool {
     e.kind == HOST_ONLY
@@ -356,6 +357,7 @@ impl Engine {
                 .with_hooks(Arc::new(LabelsRef(labels.clone()))),
             labels,
             fonts: Fonts::new(),
+            models: crate::geometry::Models::default(),
             last: JsValue::Undefined,
             last_kind: ValueKind::Number,
             stats: Stats::default(),
@@ -366,6 +368,32 @@ impl Engine {
 
     pub fn revision(&self) -> u64 {
         self.doc.revision()
+    }
+
+    // ── 3D model assets ───────────────────────────────────────────────────
+
+    /// Adds or replaces model asset `id` for 3D picks and bounds
+    /// ([`crate::geometry::Models::set`]).
+    pub fn set_model(
+        &mut self,
+        id: &str,
+        kind: crate::geometry::ModelKind,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.models.set(id, kind, bytes)
+    }
+
+    pub fn forget_model(&mut self, id: &str) {
+        self.models.forget(id);
+    }
+
+    pub fn clear_models(&mut self) {
+        self.models.clear();
+    }
+
+    /// The model asset ids the mirror holds.
+    pub fn model_ids(&self) -> Vec<String> {
+        self.models.ids().into_iter().map(str::to_owned).collect()
     }
 
     pub fn document(&self) -> &Document {
@@ -628,6 +656,17 @@ impl Engine {
                 self.stats.unanswered += 1;
                 out.raw("{\"legacy\":true}");
             }
+            Err(Unanswered::Models(ids)) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"models\":[");
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                }
+                out.raw("]}");
+            }
         }
         out
     }
@@ -697,7 +736,14 @@ impl Engine {
 
         // The edit kernels (pm-edit): patches the renderer applies.
         if let Some(name) = op.strip_prefix("edit.") {
-            return crate::edit::dispatch(&self.doc, &mut self.fonts, name, request, out);
+            return crate::edit::dispatch(
+                &self.doc,
+                &mut self.fonts,
+                &mut self.models,
+                name,
+                request,
+                out,
+            );
         }
         let Some(root) = self.doc.root() else {
             out.raw("null");
@@ -739,6 +785,7 @@ impl Engine {
             }
         };
         let fonts = &mut self.fonts;
+        let models = &mut self.models;
         let mut scope = Scope::new(&mut self.ev, &comp, &open);
         macro_rules! layer {
             () => {
@@ -1063,7 +1110,7 @@ impl Engine {
             }
             "bounds" | "groupBounds" | "pick" | "textLayout" | "textRaster" => {
                 fonts.clear_reports();
-                let mut host = RefuseHost;
+                let mut host = crate::geometry::GeomHost::new(models, request);
                 let outlines = fonts.outlines;
                 let mut probe = InkProbe {
                     inner: &mut fonts.measure,
@@ -1072,7 +1119,11 @@ impl Engine {
                 match op {
                     "bounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.bounds(l, t, &mut probe, &mut host));
+                        let b = scope.bounds(l, t, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
+                        let b = try_js!(b);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1091,7 +1142,11 @@ impl Engine {
                     }
                     "groupBounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.group_bounds(l, t, &mut probe, &mut host));
+                        let b = scope.group_bounds(l, t, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
+                        let b = try_js!(b);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1118,7 +1173,11 @@ impl Engine {
                         };
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);
-                        let hit = try_js!(scope.pick(x, y, t, &options, &mut probe, &mut host));
+                        let hit = scope.pick(x, y, t, &options, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
+                        let hit = try_js!(hit);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
