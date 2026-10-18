@@ -456,18 +456,24 @@ impl Renderer {
     }
 
     /// The capability check for this renderer: `unsupported_with_media`,
-    /// with text and captions drawn when fonts are configured.
+    /// with text and captions drawn when fonts are configured, and effects,
+    /// transitions, and extension layers checked against the renderer's
+    /// own definitions when it holds them (contract 10: an export job's,
+    /// a still batch's, `pm-cli`'s; `capability::unsupported_for`).
     pub fn unsupported_with_media(
         &self,
         document: &Document,
         composition: &str,
         assets: &dyn AssetResolver,
     ) -> Vec<Unsupported> {
-        if self.text.has_fonts() {
-            capability::unsupported_with_fonts(document, composition, Some(assets))
-        } else {
-            capability::unsupported_with_media(document, composition, assets)
-        }
+        let effects = self.effect_host.is_none().then_some(&self.effects);
+        capability::unsupported_for(
+            document,
+            composition,
+            Some(assets),
+            effects,
+            self.text.has_fonts(),
+        )
     }
 
     /// The fonts text and captions layers lay out with (`None`: those
@@ -741,10 +747,15 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        // Overruns measured on earlier frames disable their effects now.
+        // Overruns measured on earlier frames disable their programs now.
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
+        // A job renderer stops after a runaway program: nothing is drawn
+        // without a program the project asks for (watchdog policy).
+        if let Some(why) = self.effects.watchdog.stopped() {
+            return Err(RenderError::Watchdog(why.to_owned()));
+        }
         let (mut plan, build) = plan::build_with(
             &mut self.evaluator,
             &comp,
@@ -790,12 +801,13 @@ impl Renderer {
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;
         self.media.scrub = scrub && !request.export;
-        // Only renderers drawing their own definitions time effects.
-        let timer = if self.effects.configured() && self.effect_host.is_none() {
-            self.effects.watchdog.frame_timer(&self.device)
-        } else {
-            None
-        };
+        // Renderers drawing their own definitions time effects,
+        // transitions, and shader and fragment layers (the budget and the
+        // hang guard; `effects::watchdog`).
+        let timer = self
+            .effect_host
+            .is_none()
+            .then(|| self.effects.watchdog.frame_timer(&self.device));
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             let mut exec = Exec {

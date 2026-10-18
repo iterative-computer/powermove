@@ -145,6 +145,10 @@ impl ShaderState {
 
 /// Why a source could not be drawn.
 pub(crate) enum Missed {
+    /// The watchdog turned the program off (an overrun or a runaway): the
+    /// layer draws nothing, as a program that does not compile, and the
+    /// watchdog's report names it.
+    Disabled,
     /// The program WebGL draws failed in the native pipeline at pipeline
     /// creation (the Metal compiler): it needs the fallback runner.
     NeedsFallback(String),
@@ -299,6 +303,36 @@ impl crate::exec::Exec<'_> {
                 None => Err(Missed::Pending(request.clone())),
             };
         }
+        // The watchdog's subject: the code's source key, or the fragment
+        // layer's definition.
+        let span = match &source.program {
+            ProgramRef::Code { key, .. } => {
+                crate::effects::watchdog::Span::code(*key, &source.layer)
+            }
+            ProgramRef::Definition { id, .. } => crate::effects::watchdog::Span::definition(
+                DefinitionKind::Layer,
+                id,
+                &source.layer,
+                None,
+                self.effects
+                    .get(DefinitionKind::Layer, id)
+                    .is_some_and(|d| {
+                        d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn
+                    }),
+            ),
+            ProgramRef::Fallback(_) => unreachable!("handled above"),
+        };
+        let disabled = match &span.subject {
+            crate::effects::watchdog::Subject::Code(key) => {
+                self.effects.watchdog.is_code_disabled(key)
+            }
+            crate::effects::watchdog::Subject::Definition { kind, id } => {
+                self.effects.watchdog.is_disabled(*kind, id.as_str())
+            }
+        };
+        if disabled {
+            return Err(Missed::Disabled);
+        }
         let out = self
             .pool
             .take_working(self.device, source.width, source.height, self.precision);
@@ -379,6 +413,10 @@ impl crate::exec::Exec<'_> {
                 .expect("built above"),
             ProgramRef::Fallback(_) => unreachable!("handled above"),
         };
+        let queries = self.timer.as_mut().and_then(|t| t.begin(span));
+        if let (Some(timer), Some((b, _))) = (self.timer.as_ref(), queries) {
+            timer.mark(device, encoder, &out.view, b);
+        }
         draw_program(
             device,
             queue,
@@ -390,6 +428,9 @@ impl crate::exec::Exec<'_> {
             linear,
             &out,
         );
+        if let (Some(timer), Some((_, e))) = (self.timer.as_ref(), queries) {
+            timer.mark(device, encoder, &out.view, e);
+        }
         Ok((out, true))
     }
 }

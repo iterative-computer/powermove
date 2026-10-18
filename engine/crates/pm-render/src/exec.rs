@@ -407,6 +407,9 @@ impl Exec<'_> {
                                 self.taken.push(target);
                             }
                         }
+                        // Turned off by the watchdog: nothing drawn; its
+                        // report names the layer.
+                        Err(crate::shader_layers::exec::Missed::Disabled) => {}
                         Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self.fail(
                             plan,
                             draw,

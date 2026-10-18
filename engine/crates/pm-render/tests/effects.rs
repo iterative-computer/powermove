@@ -16,6 +16,7 @@ use pm_protocol::definitions::{
     DefinitionsUpdate, UpdateError,
 };
 use pm_protocol::error::{ErrorCode, ErrorScope};
+use pm_render::effects::watchdog::{FnTiming, Span, Subject, TimingSource};
 use pm_render::{
     Feature, MapResolver, RenderError, RenderRequest, Renderer, builtin_definitions, unsupported,
     unsupported_with_definitions,
@@ -768,46 +769,51 @@ fn translated_programs_are_kept_in_the_program_cache_folder() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The watchdog's test hook (issue A2): the blur takes `blur_ms` of GPU
+/// time per frame, everything else 1 ms; frames take 16 ms of wall time.
+/// Every frame is judged at its completion, on any device, under any load.
+fn blur_takes(
+    ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> std::sync::Arc<dyn TimingSource> {
+    std::sync::Arc::new(FnTiming(
+        move |span: &Span| {
+            Some(match &span.subject {
+                Subject::Definition { id, .. } if id.as_str() == "blur" => {
+                    Duration::from_millis(ms.load(std::sync::atomic::Ordering::Relaxed))
+                }
+                _ => Duration::from_millis(1),
+            })
+        },
+        |_: &[Span]| Duration::from_millis(16),
+    ))
+}
+
 #[test]
 fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     let _gpu = gpu();
     let mut r = builtins();
-    if !r
-        .device()
-        .features()
-        .contains(wgpu::Features::TIMESTAMP_QUERY)
-    {
-        eprintln!("no TIMESTAMP_QUERY on this device; the watchdog times nothing");
-        return;
-    }
     let (doc, res) = document(
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
     );
     let (plain, _) = document(vec![], None);
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
-    // Metal can leave a pass-boundary sample empty while other devices are
-    // busy; such a frame is not judged, so allow a few frames.
-    let mut first = Vec::new();
-    let mut reports = Vec::new();
-    for _ in 0..20 {
-        first = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
-        reports = r.watchdog_reports(true);
-        if !reports.is_empty() {
-            break;
-        }
-    }
+    let blur_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(300));
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(blur_takes(blur_ms.clone())));
+    // Judged at the first frame's completion: 300 ms against 250.
+    let first = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::WatchdogTimeout);
     assert!(
         matches!(&reports[0].scope, ErrorScope::Effect { definition, .. } if definition.as_str() == "blur")
     );
-    assert!(
+    assert_eq!(
         r.effects()
             .watchdog
-            .measured_ms(DefinitionKind::Effect, "blur")
-            .unwrap()
-            > 0.0
+            .measured_ms(DefinitionKind::Effect, "blur"),
+        Some(300.0)
     );
     let next = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     let base = render(&mut r, &plain, &res, 0.5, &request()).unwrap();
@@ -820,7 +826,7 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     // second view's set) keep it off: its program and record are kept.
     let mut set: DefinitionSetSnapshot = builtin_definitions();
     assert!(r.set_definitions(&set).unwrap().is_empty());
-    r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    blur_ms.store(5, std::sync::atomic::Ordering::Relaxed);
     let kept = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert!(max_diff(&kept, &base) <= 1.0 / 1024.0, "still disabled");
     assert!(r.watchdog_reports(true).is_empty(), "not reported again");
@@ -840,22 +846,16 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     );
     let reloaded = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(reloaded, first, "a delta re-registration re-enables it");
+    assert!(r.watchdog_reports(true).is_empty(), "5 ms is within budget");
     // Over budget again: off again from the next frame.
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
-    let mut off = false;
-    for _ in 0..20 {
-        render(&mut r, &doc, &res, 0.5, &request()).unwrap();
-        if !r.watchdog_reports(true).is_empty() {
-            off = true;
-            break;
-        }
-    }
-    assert!(off, "overran again");
-    r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    blur_ms.store(300, std::sync::atomic::Ordering::Relaxed);
+    render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert_eq!(r.watchdog_reports(true).len(), 1, "overran again");
     let off_again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert!(max_diff(&off_again, &base) <= 1.0 / 1024.0);
     // A changed source in a full set (a hot reload, a new registration)
     // re-enables it too.
+    blur_ms.store(5, std::sync::atomic::Ordering::Relaxed);
     let blur = set
         .definitions
         .iter_mut()
@@ -869,6 +869,7 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     assert!(r.set_definitions(&set).unwrap().is_empty());
     let again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(again, first);
+    assert!(r.watchdog_reports(true).is_empty());
 }
 
 #[test]

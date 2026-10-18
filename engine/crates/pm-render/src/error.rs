@@ -29,6 +29,10 @@ pub enum RenderError {
     /// The targets are left untouched.
     #[error("waiting for the shader fallback runner ({} layer draws)", .0.len())]
     ShaderFallbackPending(Vec<crate::shader_layers::FallbackRequest>),
+    /// A job renderer's watchdog stopped after a runaway program
+    /// (`effects::watchdog::Policy::Job`): the message names it.
+    #[error("{0}")]
+    Watchdog(String),
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,

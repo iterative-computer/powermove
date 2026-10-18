@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use pm_gpu::{Target, TargetPool};
 use pm_protocol::color::{Precision, WorkingEncoding};
-use pm_protocol::common::{DefinitionId, EffectInstanceId, LayerId};
 use pm_protocol::definitions::DefinitionKind;
 
 use super::plan::{Binding, EffectStep, Param, TransitionStep};
@@ -112,6 +111,13 @@ impl<'c> Gpu<'c> {
             linear: native.linear,
             unsupported: &mut *native.unsupported,
         })
+    }
+
+    /// Whether a definition is a built-in's (the hang guard keeps those).
+    fn builtin(&self, kind: DefinitionKind, id: &str) -> bool {
+        self.effects
+            .get(kind, id)
+            .is_some_and(|d| d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn)
     }
 
     fn take(&mut self, w: u32, h: u32) -> Target {
@@ -215,13 +221,15 @@ impl<'c> Gpu<'c> {
             self.fallback(layer, &step.definition);
             return None;
         }
+        let builtin = self.builtin(DefinitionKind::Effect, &step.definition);
         let span = self.timer.as_deref_mut().and_then(|t| {
-            t.begin(Span {
-                kind: DefinitionKind::Effect,
-                definition: DefinitionId::from(step.definition.as_str()),
-                layer: LayerId::from(layer),
-                instance: Some(EffectInstanceId::from(step.instance.as_str())),
-            })
+            t.begin(Span::definition(
+                DefinitionKind::Effect,
+                &step.definition,
+                layer,
+                Some(&step.instance),
+                builtin,
+            ))
         });
         if let (Some(timer), Some((b, _))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &input.view, b);
@@ -303,13 +311,15 @@ impl<'c> Gpu<'c> {
             self.fallback(layer, &step.definition);
             return None;
         }
+        let builtin = self.builtin(DefinitionKind::Transition, &step.definition);
         let span = self.timer.as_deref_mut().and_then(|t| {
-            t.begin(Span {
-                kind: DefinitionKind::Transition,
-                definition: DefinitionId::from(step.definition.as_str()),
-                layer: LayerId::from(layer),
-                instance: None,
-            })
+            t.begin(Span::definition(
+                DefinitionKind::Transition,
+                &step.definition,
+                layer,
+                None,
+                builtin,
+            ))
         });
         let (from, to) = if step.edge_in {
             (before, with_layer)
