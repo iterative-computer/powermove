@@ -137,34 +137,45 @@ test.describe('Use New Engine: the render transport', () => {
     const before = await page.evaluate(() => (window as any).PM.EngineConnection.status().connections);
     // The legacy canvas never shows with the engine on.
     expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('hidden');
-    const killed = await session.app.evaluate(({ app }) => {
-      const engine = app.getAppMetrics().find((m: any) => String(m.serviceName ?? m.name ?? '').includes('Interactive Engine'));
-      if (!engine) throw new Error('no interactive engine process');
-      process.kill(engine.pid, 'SIGKILL');
-      return engine.pid;
-    });
-    expect(killed).toBeGreaterThan(0);
-    // While it restarts: the last frame stays, the state says so, the
-    // current engine's canvas stays hidden, and the transport stays with
-    // the engine (the current engine does not drive it).
-    await expect.poll(() => page.evaluate(() => document.querySelector('[data-engine-status]')?.textContent ?? null), { timeout: 20_000 }).toBe('Reconnecting to the engine…');
-    const during = await page.evaluate(() => {
-      const PM = (window as any).PM;
-      return {
-        presenting: document.getElementById('engine-present')?.style.visibility,
-        legacyCanvas: PM.Kernel.services.get('viewer').el.style.visibility,
-        engineDrives: PM.EngineConnection.transport.active()
+    // Watch every animation frame while the engine restarts: the state the
+    // viewer shows, whether the last frame stays, whether the current
+    // engine's canvas ever shows, and who drives the transport.
+    await page.evaluate(() => {
+      const w = window as any;
+      const PM = w.PM;
+      w.__restart = { statuses: [] as string[], presentingDropped: false, legacyShown: false, legacyDrove: false };
+      const watch = () => {
+        const r = w.__restart;
+        const text = document.querySelector('[data-engine-status]')?.textContent;
+        if (text && r.statuses.at(-1) !== text) r.statuses.push(text);
+        if (document.getElementById('engine-present')?.style.visibility !== 'visible') r.presentingDropped = true;
+        if (PM.Kernel.services.get('viewer').el.style.visibility !== 'hidden') r.legacyShown = true;
+        if (!PM.EngineConnection.transport.active()) r.legacyDrove = true;
+        if (!r.stop) requestAnimationFrame(watch);
       };
+      requestAnimationFrame(watch);
     });
-    expect(during).toEqual({ presenting: 'visible', legacyCanvas: 'hidden', engineDrives: true });
+    const pid = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.status().interactive.pid as number);
+    expect(pid).toBeGreaterThan(0);
+    process.kill(pid, 'SIGKILL');
     // The engine is back: a new session presents, the state clears, and
     // the synchronous path works again.
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     await expect.poll(() => page.evaluate(() => document.querySelector('[data-engine-status]') === null), { timeout: 20_000 }).toBe(true);
+    const restart = await page.evaluate(() => {
+      const r = (window as any).__restart;
+      r.stop = true;
+      return r;
+    });
+    // The last frame stayed, the state said so, and the current engine
+    // never drew or drove anything.
+    expect(restart.statuses).toContain('Reconnecting to the engine…');
+    expect(restart.presentingDropped).toBe(false);
+    expect(restart.legacyShown).toBe(false);
+    expect(restart.legacyDrove).toBe(false);
     const url = await page.evaluate(() => (window as any).PM.Kernel.api('transport-probe').render.snapshot(0.5, 160));
     expect(url.startsWith('data:image/jpeg')).toBe(true);
-    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('hidden');
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

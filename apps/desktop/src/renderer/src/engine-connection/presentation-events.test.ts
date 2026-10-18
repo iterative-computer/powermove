@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { RenderStats } from '../../../shared/engine-protocol';
-import { EngineStatsView, RevisionVersions, emitPresented } from './presentation-events';
+import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineTransport } from './transport';
 import type { DocumentSession } from './session';
 import type { HostClock } from './host-clock';
@@ -32,6 +32,23 @@ describe('frame events on presentation', () => {
     expect(v.at(9)).toBe(55);
     v.note(2, 20);
     expect(v.at(5)).toBe(20);
+  });
+});
+
+describe('presented frames are emitted once per animation frame', () => {
+  it('the newest frame of an animation frame wins', () => {
+    const frames: Array<() => void> = [];
+    const emitted: number[] = [];
+    const events = new PresentedEvents((frame) => emitted.push(frame.seq), (fn) => frames.push(fn));
+    events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 1 }, 1);
+    events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 2 }, 1);
+    expect(frames).toHaveLength(1);
+    frames.shift()!();
+    expect(emitted).toEqual([2]);
+    events.push({ pts: 0, revision: 2, viewSeq: 1, seq: 3 }, 1);
+    frames.shift()!();
+    expect(emitted).toEqual([2, 3]);
+    expect(events.emitted).toBe(2);
   });
 });
 

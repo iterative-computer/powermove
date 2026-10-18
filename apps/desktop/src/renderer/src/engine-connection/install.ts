@@ -34,7 +34,7 @@ import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream } from './session';
 import { EngineRenderTransport } from './render-transport';
-import { EngineStatsView, RevisionVersions, emitPresented } from './presentation-events';
+import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
@@ -130,9 +130,14 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     const barrier = PM.EngineDoc?.barrier;
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
   };
+  const presentedEvents = new PresentedEvents(
+    (frame, quality) => emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj }),
+    (fn) => target.requestAnimationFrame(fn)
+  );
   /** Engine stats for the status bar and the performance panel. */
   const stats = new EngineStatsView();
   (PM as any).EngineStats = stats;
+  (PM as any).EnginePresentedEvents = presentedEvents;
   PM.setTransportDriver?.(transport);
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
@@ -309,10 +314,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     trace,
     source,
     exclusive: true,
-    // Frame events on presentation (presentation-events.ts).
-    presented: (frame, quality) => {
-      emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
-    },
+    // Frame events on presentation (presentation-events.ts), at most once
+    // per animation frame for the newest frame on screen, as today's frame
+    // loop emits them once per frame it draws.
+    presented: (frame, quality) => presentedEvents.push(frame, quality),
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
     revision: () => {

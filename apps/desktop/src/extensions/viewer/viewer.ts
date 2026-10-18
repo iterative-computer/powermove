@@ -821,7 +821,9 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
-      schedulePresentation();
+      // The kernel's service emits `overlay` for each frame on screen (the
+      // overlay redraws then); a service without it needs the redraw here.
+      if (!engineService?.presented) schedulePresentation();
     });
     // The WebGL canvas shows again (the engine session ended): it takes the
     // size it skipped while the engine presented, and draws.
