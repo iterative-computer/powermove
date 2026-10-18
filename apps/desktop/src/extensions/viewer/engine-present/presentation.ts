@@ -315,10 +315,10 @@ export class ViewerPresentation {
   /** Hides the canvas; tells `onHidden` listeners when it was showing. An
    *  exclusive presentation never hands the stage back: what is under the
    *  canvas is not another engine's frame to show. */
-  private hide(canvas: HTMLCanvasElement, handBack = !this.exclusive): void {
+  private hide(canvas: HTMLCanvasElement, handBack = !this.exclusive, always = false): void {
     const was = canvas.style.visibility === 'visible';
     canvas.style.visibility = 'hidden';
-    if (was && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
+    if ((was || always) && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
   }
 
   /**
@@ -619,7 +619,9 @@ export class ViewerPresentation {
           // Capability routing is development scaffolding (amendment 21):
           // until it is removed it hands the stage back even when exclusive.
           this.setStatus(null);
-          this.hide(this.canvasElement, true);
+          // An exclusive viewer hid what is under the canvas from the
+          // start, so it hands back even before its first frame.
+          this.hide(this.canvasElement, true, this.exclusive);
           return;
         }
         if (this.presenter) this.presenter.receive(message, arrivedMs);

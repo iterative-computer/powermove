@@ -7,4 +7,4 @@ import type { SnapshotResult } from "./SnapshotResult";
 /**
  * The answer to a [`HostSnapshot`].
  */
-export type SnapshotOutcome = { "outcome": "rendered" } & SnapshotResult | { "outcome": "needsRenderer", revision: Revision, fallback: Array<ShaderFallbackRequest>, compat: Array<CompatNeed>, };
+export type SnapshotOutcome = { "outcome": "rendered" } & SnapshotResult | { "outcome": "needsRenderer", revision: Revision, fallback: Array<ShaderFallbackRequest>, compat: Array<CompatNeed>, } | { "outcome": "empty", revision: Revision, };

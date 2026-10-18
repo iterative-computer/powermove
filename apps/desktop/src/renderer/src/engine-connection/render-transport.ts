@@ -42,6 +42,9 @@ export const MAX_ROUNDS = 3;
 export const SYNC_WAIT_MS = 5_000;
 export const ASYNC_WAIT_MS = 30_000;
 export const IDLE_WAIT_MS = 120_000;
+/** Largest side of a layer raster asked for: 6,000² is under the engine's
+ *  40-million-pixel snapshot cap. */
+export const MAX_RASTER_EDGE = 6000;
 /** Largest compatibility band in one message (pm_protocol MAX_COMPAT_BAND_BYTES). */
 export const MAX_COMPAT_BAND_BYTES = 8 * 1024 * 1024;
 
@@ -75,6 +78,8 @@ export type EngineSnapshot = {
   revision: number;
   viewSeq: number | null;
   origin: [number, number];
+  /** A layer raster's box in layer pixels (`RasterSurface` w, h); null for frames. */
+  layerBox: [number, number] | null;
   quality: FrameQuality;
   /** Time spent in the engine waiting and rendering (µs), and in main (ms). */
   waitedUs: number;
@@ -189,7 +194,7 @@ export class EngineRenderTransport {
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
     const data = new Uint8ClampedArray(reply.data.buffer, reply.data.byteOffset, reply.data.byteLength);
-    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
+    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
   }
 
   private fail(error: unknown, where: string): EngineSnapshotError {
@@ -224,6 +229,7 @@ export class EngineRenderTransport {
           this.stats.slowestSyncMs = Math.max(this.stats.slowestSyncMs, performance.now() - started);
           return this.result(reply);
         }
+        if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
         this.stats.rounds++;
         const unmet = this.compatUnmet(reply.compat);
@@ -239,6 +245,7 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
   }
@@ -256,6 +263,7 @@ export class EngineRenderTransport {
           else this.stats.async++;
           return this.result(reply);
         }
+        if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
         this.stats.rounds++;
         const unmet = this.compatUnmet(reply.compat);
@@ -271,7 +279,33 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
+    }
+  }
+
+  /**
+   * A layer's raster (the base pixels of `render.raster()`): the raster
+   * of a text or captions layer at `scale`, cut to `crop`, premultiplied,
+   * with its anchor (`origin`) and box (`layerBox`) in layer pixels. Null
+   * when the layer draws nothing then (today's `raster()` returns null).
+   * At most `maxEdge` pixels a side (`MAX_RASTER_EDGE`).
+   */
+  rasterSync(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, maxEdge = MAX_RASTER_EDGE): EngineSnapshot | null {
+    try {
+      return this.snapshotSync({ time, width: maxEdge, height: maxEdge, pixels: 'premultiplied', layer: { id: layer, scale, crop } });
+    } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
+      throw error;
+    }
+  }
+
+  async raster(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, maxEdge = MAX_RASTER_EDGE): Promise<EngineSnapshot | null> {
+    try {
+      return await this.snapshot({ time, width: maxEdge, height: maxEdge, pixels: 'premultiplied', layer: { id: layer, scale, crop } });
+    } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
+      throw error;
     }
   }
 

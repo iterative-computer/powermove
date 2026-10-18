@@ -1099,6 +1099,7 @@ pub fn responses() -> Vec<Envelope> {
                         bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
                     },
                     origin: [0.0, 0.0],
+                    layer_box: None,
                     quality: FrameQuality {
                         resolution: PreviewResolution::Full,
                         representation: Representation::Original,

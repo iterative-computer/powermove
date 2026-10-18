@@ -112,6 +112,8 @@ describe('SnapshotService', () => {
     });
     const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
     expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [] });
+    answer = { type: 'snapshot', outcome: 'empty', revision: 41 } as unknown as Response;
+    expect(await service.snapshot(9, request())).toEqual({ status: 'empty', revision: 41 });
     answer = new RemoteError({ code: 'unsupported', scope: { kind: 'request', id: 1 }, message: 'The new engine cannot draw this frame: x.', retry: { kind: 'never' }, detail: null } as never);
     expect(await service.snapshot(9, request())).toMatchObject({ status: 'failed', code: 'unsupported', message: 'The new engine cannot draw this frame: x.' });
     answer = new Error('the interactive engine is not connected');

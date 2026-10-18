@@ -190,6 +190,10 @@ export class SnapshotService {
       return failed('invalidMessage', `The engine answered a snapshot with ${response.type}.`);
     }
     const outcome = response as unknown as SnapshotOutcome & { type: 'snapshot' };
+    if (outcome.outcome === 'empty') {
+      this.stats.served++;
+      return { status: 'empty', revision: outcome.revision };
+    }
     if (outcome.outcome === 'needsRenderer') {
       this.stats.needsRenderer++;
       return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat };
@@ -212,6 +216,7 @@ export class SnapshotService {
       pixels: outcome.pixels,
       data,
       origin: [outcome.origin[0], outcome.origin[1]],
+      layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
       quality: outcome.quality,
       waitedUs: outcome.waitedUs,
       renderUs: outcome.renderUs,

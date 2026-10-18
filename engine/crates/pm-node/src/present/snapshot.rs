@@ -309,35 +309,91 @@ impl SnapshotQueue {
 /// renderbuffer).
 pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     let mut out = Vec::with_capacity(half.len() / 2);
+    for px in half.chunks_exact(8) {
+        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
+        push_rgba8(&mut out, [c(0), c(2), c(4), c(6)], pixels);
+    }
+    out
+}
+
+/// [`encode_rgba8`] from premultiplied f32 RGBA (a text raster's readback).
+pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        push_rgba8(&mut out, [px[0], px[1], px[2], px[3]], pixels);
+    }
+    out
+}
+
+fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels) {
     let unorm = |v: f32| -> u8 {
         let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
         (v * 255.0).round_ties_even() as u8
     };
-    for px in half.chunks_exact(8) {
-        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
-        let (r, g, b, a) = (c(0), c(2), c(4), c(6));
-        match pixels {
-            SnapshotPixels::Opaque => out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), 255]),
-            SnapshotPixels::Premultiplied => {
-                out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), unorm(a)])
-            }
-            SnapshotPixels::Straight => {
-                // As a canvas's `getImageData` does: quantize the
-                // premultiplied value first, then divide by alpha.
-                let a8 = unorm(a);
-                if a8 == 0 {
-                    out.extend_from_slice(&[0, 0, 0, 0]);
-                } else {
-                    let un = |v: f32| -> u8 {
-                        let p = u32::from(unorm(v));
-                        ((p * 255 + u32::from(a8) / 2) / u32::from(a8)).min(255) as u8
-                    };
-                    out.extend_from_slice(&[un(r), un(g), un(b), a8]);
-                }
+    match pixels {
+        SnapshotPixels::Opaque => out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), 255]),
+        SnapshotPixels::Premultiplied => {
+            out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), unorm(a)])
+        }
+        SnapshotPixels::Straight => {
+            // As a canvas's `getImageData` does: quantize the premultiplied
+            // value first, then divide by alpha.
+            let a8 = unorm(a);
+            if a8 == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let un = |v: f32| -> u8 {
+                    let p = u32::from(unorm(v));
+                    ((p * 255 + u32::from(a8) / 2) / u32::from(a8)).min(255) as u8
+                };
+                out.extend_from_slice(&[un(r), un(g), un(b), a8]);
             }
         }
     }
-    out
+}
+
+/// A layer raster's pixels placed in its whole canvas (`crop` = the painted
+/// part, `[x, y, width, height]` in canvas pixels), then cut to `window`
+/// (today's `RasterWindow`, clamped to the canvas). RGBA8 rows top-down.
+/// Returns the pixels and their size, or `None` when the window is empty.
+pub fn place_raster(
+    painted: &[u8],
+    crop: [u32; 4],
+    canvas: (u32, u32),
+    window: Option<pm_protocol::common::PixelRect>,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
+    let (wx, wy, ww, wh) = match window {
+        Some(w) => {
+            let x = w.x.min(cw);
+            let y = w.y.min(ch);
+            (x, y, w.width.min(cw - x), w.height.min(ch - y))
+        }
+        None => (0, 0, cw, ch),
+    };
+    if ww == 0 || wh == 0 {
+        return None;
+    }
+    let mut out = vec![0u8; (ww as usize) * (wh as usize) * 4];
+    let [px, py, pw, ph] = crop;
+    for row in 0..ph {
+        let y = py + row;
+        if y < wy || y >= wy + wh {
+            continue;
+        }
+        for col in 0..pw {
+            let x = px + col;
+            if x < wx || x >= wx + ww {
+                continue;
+            }
+            let src = ((row * pw + col) * 4) as usize;
+            let dst = (((y - wy) * ww + (x - wx)) * 4) as usize;
+            if src + 4 <= painted.len() {
+                out[dst..dst + 4].copy_from_slice(&painted[src..src + 4]);
+            }
+        }
+    }
+    Some((out, ww, wh))
 }
 
 #[cfg(test)]
@@ -526,6 +582,33 @@ mod tests {
         v.iter()
             .flat_map(|c| pm_gpu::readback::f32_to_half(*c).to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn a_layer_raster_is_placed_in_its_canvas_and_cut_to_the_window() {
+        // A 2×1 painted part at (1, 1) of a 4×3 canvas.
+        let painted = [9u8; 8];
+        let (px, w, h) = place_raster(&painted, [1, 1, 2, 1], (4, 3), None).unwrap();
+        assert_eq!((w, h), (4, 3));
+        assert_eq!(&px[(4 + 1) * 4..(4 + 3) * 4], &[9; 8]);
+        assert_eq!(px.iter().filter(|&&b| b == 9).count(), 8);
+        let window = pm_protocol::common::PixelRect {
+            x: 2,
+            y: 1,
+            width: 5,
+            height: 5,
+        };
+        let (px, w, h) = place_raster(&painted, [1, 1, 2, 1], (4, 3), Some(window)).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(&px[..4], &[9; 4]);
+        assert_eq!(&px[4..8], &[0; 4]);
+        let outside = pm_protocol::common::PixelRect {
+            x: 9,
+            y: 9,
+            width: 2,
+            height: 2,
+        };
+        assert!(place_raster(&painted, [1, 1, 2, 1], (4, 3), Some(outside)).is_none());
     }
 
     #[test]

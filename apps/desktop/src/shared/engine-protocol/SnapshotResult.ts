@@ -18,11 +18,16 @@ revision: Revision,
  */
 viewSeq: Seq | null, width: number, height: number, pixels: SnapshotPixels, payload: PixelPayload, 
 /**
- * For a `Layer` target: where the raster's top-left sits in the
- * layer's own pixels (today's `RasterSurface` `x`/`y`, the anchor
- * offset), at scale 1. Zero for frames.
+ * For a `Layer` target: the anchor in the layer's own pixels (today's
+ * `RasterSurface` `anchorX`, `anchorY`). Zero for frames.
  */
-origin: [number, number], quality: FrameQuality, 
+origin: [number, number], 
+/**
+ * For a `Layer` target: the raster's box in layer pixels (today's
+ * `RasterSurface` `w`, `h`); the pixels are that box at the asked
+ * scale. `None` for frames.
+ */
+layerBox?: [number, number] | null, quality: FrameQuality, 
 /**
  * Time the request waited in the engine (revision and its turn), and
  * rendered, in microseconds.

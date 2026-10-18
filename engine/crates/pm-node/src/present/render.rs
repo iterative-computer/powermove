@@ -2902,7 +2902,7 @@ impl Thread {
     /// Renders one snapshot and answers it.
     fn run_snapshot(&mut self, job: super::snapshot::SnapshotJob) {
         use pm_protocol::snapshot::{
-            PixelPayload, SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
+            SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
         };
         let started = now();
         if self.gpu().is_none() {
@@ -2919,12 +2919,7 @@ impl Thread {
             SnapshotTarget::Layer { .. } => (true, 0, true, false),
         };
         if layer_target {
-            self.stats().snapshot_failures += 1;
-            self.snapshot_error(
-                &job,
-                ErrorCode::Unsupported,
-                "Layer raster pixels are not drawn by the new engine yet (pm-render has no single-layer raster pass).",
-            );
+            self.run_layer_snapshot(job, started);
             return;
         }
         let Some(gpu) = self.gpu.as_mut() else {
@@ -3063,37 +3058,8 @@ impl Thread {
         };
         let pixels = super::snapshot::encode_rgba8(&raw, job.request.pixels);
         drop(raw);
-        let length = pixels.len();
-        let payload = if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
-            PixelPayload::Inline {
-                bytes: pm_protocol::common::Bytes(pixels),
-            }
-        } else {
-            match pm_bridge::shm::publish(&pixels) {
-                Ok(name) => {
-                    self.segments.add(name.clone());
-                    self.snapshots.published(
-                        now(),
-                        length as u64,
-                        pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
-                    );
-                    self.stats().snapshot_shared += 1;
-                    PixelPayload::SharedMemory {
-                        name,
-                        length: pm_protocol::common::ByteSize::new(length as u64)
-                            .unwrap_or(pm_protocol::common::ByteSize::MAX),
-                    }
-                }
-                Err(error) => {
-                    self.stats().snapshot_failures += 1;
-                    self.snapshot_error(
-                        &job,
-                        ErrorCode::BudgetExceeded,
-                        &format!("The snapshot's pixels could not be shared: {error}"),
-                    );
-                    return;
-                }
-            }
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
         };
         let done = now();
         let render_us = (done - started).max(0);
@@ -3114,6 +3080,7 @@ impl Thread {
             pixels: job.request.pixels,
             payload,
             origin: [0.0, 0.0],
+            layer_box: None,
             quality: FrameQuality {
                 resolution: PreviewResolution::Full,
                 representation: Representation::Original,
@@ -3130,6 +3097,190 @@ impl Thread {
         });
         envelope.revision = Some(revision);
         self.send(job.host, envelope);
+    }
+
+    /// A layer's raster (the base pixels of today's `render.raster()`):
+    /// pm-render paints the raster of text and captions layers
+    /// (`Renderer::text_raster`, what `PM.raster(L, scale, T)` paints).
+    fn run_layer_snapshot(&mut self, job: super::snapshot::SnapshotJob, started: i64) {
+        use pm_protocol::snapshot::{SnapshotOutcome, SnapshotResult, SnapshotTarget};
+        let SnapshotTarget::Layer { layer, scale, crop } = &job.request.target else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(doc) = self.docs.get(&job.key) else {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session has no document.",
+            );
+            return;
+        };
+        let composer = gpu.composer.get_or_insert_with(|| {
+            composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+        });
+        let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let composition = job.request.composition.as_str();
+        let seconds = match pm_eval::Comp::resolve(doc.document(), composition) {
+            Ok(comp) => comp.seconds_at(job.request.time.get()),
+            Err(_) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::InvalidMessage,
+                    &format!("The document has no composition {composition:?}."),
+                );
+                return;
+            }
+        };
+        let painted = composer.renderer().text_raster(
+            doc.document(),
+            composition,
+            layer.as_str(),
+            seconds,
+            *scale,
+            pm_protocol::color::Precision::Float16,
+        );
+        let reply = |this: &Self, outcome: SnapshotOutcome| {
+            let mut envelope = Envelope::new(Message::Response {
+                id: job.id,
+                body: Response::Snapshot(Box::new(outcome)),
+            });
+            envelope.revision = Some(revision);
+            this.send(job.host, envelope);
+        };
+        let raster = match painted {
+            Ok(Some(raster)) => raster,
+            Ok(None) => {
+                self.stats().snapshots += 1;
+                reply(self, SnapshotOutcome::Empty { revision });
+                return;
+            }
+            Err(pm_render::RenderError::Request(why)) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Unsupported,
+                    &format!("The new engine draws layer rasters of text and captions layers only ({why})."),
+                );
+                return;
+            }
+            Err(pm_render::RenderError::Unsupported(list)) => {
+                let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+                self.stats().snapshot_failures += 1;
+                let mut message = format!(
+                    "The new engine cannot draw this layer: {}.",
+                    reasons.join("; ")
+                );
+                message.truncate(2_000);
+                self.snapshot_error(&job, ErrorCode::Unsupported, &message);
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The layer raster could not be painted: {error}"),
+                );
+                return;
+            }
+        };
+        let painted = super::snapshot::encode_rgba8_f32(&raster.pixels, job.request.pixels);
+        let Some((pixels, width, height)) =
+            super::snapshot::place_raster(&painted, raster.plan.crop, raster.canvas, *crop)
+        else {
+            self.stats().snapshots += 1;
+            reply(self, SnapshotOutcome::Empty { revision });
+            return;
+        };
+        if u64::from(width) * u64::from(height) > job.request.max_bytes() / 4 {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::BudgetExceeded,
+                &format!(
+                    "The layer raster is {width}×{height}, over the {}×{} asked for.",
+                    job.request.output_size.width, job.request.output_size.height
+                ),
+            );
+            return;
+        }
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
+        };
+        let render_us = (now() - started).max(0);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [raster.anchor.0, raster.anchor.1],
+            layer_box: Some([raster.box_size.0, raster.box_size.1]),
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d: false,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        reply(self, SnapshotOutcome::Rendered(result));
+    }
+
+    /// A snapshot's pixels as a payload: inline when small, otherwise a
+    /// shared-memory segment the engine unlinks if main never takes it.
+    /// `None` after answering the job with the error.
+    fn share_pixels(
+        &mut self,
+        job: &super::snapshot::SnapshotJob,
+        pixels: Vec<u8>,
+    ) -> Option<pm_protocol::snapshot::PixelPayload> {
+        use pm_protocol::snapshot::PixelPayload;
+        let length = pixels.len();
+        if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+            return Some(PixelPayload::Inline {
+                bytes: pm_protocol::common::Bytes(pixels),
+            });
+        }
+        match pm_bridge::shm::publish(&pixels) {
+            Ok(name) => {
+                self.segments.add(name.clone());
+                self.snapshots.published(
+                    now(),
+                    length as u64,
+                    pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
+                );
+                self.stats().snapshot_shared += 1;
+                Some(PixelPayload::SharedMemory {
+                    name,
+                    length: pm_protocol::common::ByteSize::new(length as u64)
+                        .unwrap_or(pm_protocol::common::ByteSize::MAX),
+                })
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    job,
+                    ErrorCode::BudgetExceeded,
+                    &format!("The snapshot's pixels could not be shared: {error}"),
+                );
+                None
+            }
+        }
     }
 
     fn shutdown(&mut self) {

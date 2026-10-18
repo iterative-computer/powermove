@@ -8,7 +8,7 @@ import { EngineRenderTransport, EngineSnapshotError, type TransportSession, unpr
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
 const rendered = (width: number, height: number, fill = 7, revision = 12): EngineSnapshotReply => ({
-  status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], quality, waitedUs: 1, renderUs: 2, mainMs: 3
+  status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], layerBox: null, quality, waitedUs: 1, renderUs: 2, mainMs: 3
 });
 
 const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '' });
@@ -143,6 +143,18 @@ describe('EngineRenderTransport', () => {
     const byAsk = (n: number) => answers.find((a) => (a as { ask: number }).ask === n);
     expect(byAsk(2)).toMatchObject({ status: 'pixels', key: 'k' });
     expect(byAsk(3)).toMatchObject({ status: 'unavailable' });
+  });
+
+  it('layer rasters: pixels with anchor and box, null when the layer draws nothing', () => {
+    const raster: EngineSnapshotReply = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
+    const { transport, asked } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
+    const surface = transport.rasterSync('T1', 2, 0.5, { x: 0, y: 0, width: 3, height: 2 });
+    expect(surface).toMatchObject({ width: 3, height: 2, origin: [4, 5], layerBox: [3, 2] });
+    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 6000, height: 6000 } });
+    expect(transport.rasterSync('T1', 1, 0.5)).toBeNull();
+    expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
+    // An empty raster is not a failure.
+    expect(transport.stats.failed).toBe(1);
   });
 
   it('unpremultiplies like a canvas', () => {

@@ -546,6 +546,25 @@ fn child_snapshots() {
         });
     assert_eq!(refused, ErrorCode::CapabilityRejected);
 
+    // Layer rasters: pm-render paints those of text and captions layers;
+    // any other layer is a named refusal, never another engine's pixels.
+    let mut layer = frame_request(
+        SnapshotClass::Sync,
+        small,
+        SnapshotPixels::Premultiplied,
+        500,
+    );
+    layer.target = SnapshotTarget::Layer {
+        layer: "box".into(),
+        scale: 1.0,
+        crop: None,
+    };
+    c.snapshot(19, layer, None, WINDOW, session);
+    assert_eq!(
+        c.inbox.wait(Duration::from_secs(5), answer(19)),
+        Err(ErrorCode::Unsupported)
+    );
+
     // A missing composition is a named failure, not a hang.
     let mut missing = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 500);
     missing.composition = "nope".into();

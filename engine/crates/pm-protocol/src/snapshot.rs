@@ -320,12 +320,18 @@ pub enum SnapshotOutcome {
         fallback: Vec<crate::shader_fallback::ShaderFallbackRequest>,
         compat: Vec<CompatNeed>,
     },
+    /// A `Layer` target that draws nothing at that time (no ink, no cue
+    /// showing): today's `render.raster()` returns `null`.
+    Empty {
+        revision: Revision,
+    },
 }
 
 impl Validate for SnapshotOutcome {
     fn validate(&self) -> Result<(), Violation> {
         match self {
             SnapshotOutcome::Rendered(result) => result.validate(),
+            SnapshotOutcome::Empty { .. } => Ok(()),
             SnapshotOutcome::NeedsRenderer {
                 fallback, compat, ..
             } => {
@@ -362,10 +368,15 @@ pub struct SnapshotResult {
     pub height: u32,
     pub pixels: SnapshotPixels,
     pub payload: PixelPayload,
-    /// For a `Layer` target: where the raster's top-left sits in the
-    /// layer's own pixels (today's `RasterSurface` `x`/`y`, the anchor
-    /// offset), at scale 1. Zero for frames.
+    /// For a `Layer` target: the anchor in the layer's own pixels (today's
+    /// `RasterSurface` `anchorX`, `anchorY`). Zero for frames.
     pub origin: [f64; 2],
+    /// For a `Layer` target: the raster's box in layer pixels (today's
+    /// `RasterSurface` `w`, `h`); the pixels are that box at the asked
+    /// scale. `None` for frames.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub layer_box: Option<[f64; 2]>,
     pub quality: FrameQuality,
     /// Time the request waited in the engine (revision and its turn), and
     /// rendered, in microseconds.
@@ -749,6 +760,7 @@ mod tests {
             pixels: SnapshotPixels::Opaque,
             payload,
             origin: [0.0, 0.0],
+            layer_box: None,
             quality: quality(),
             waited_us: 0,
             render_us: 0,

@@ -438,9 +438,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       if (!engine) return raster(layer, scale, time);
       const t = time ?? PM?.time ?? 0;
       const box = crop && Number.isFinite(crop.w) && Number.isFinite(crop.h) ? { x: Math.max(0, Math.round(Number(crop.x) || 0)), y: Math.max(0, Math.round(Number(crop.y) || 0)), width: Math.max(1, Math.round(crop.w as number)), height: Math.max(1, Math.round(crop.h as number)) } : null;
-      const project = PM?.proj ?? { w: 1, h: 1 };
-      const bound = Math.max(1, Math.ceil(Math.max(project.w, project.h) * scale * 4));
-      return engine.snapshot({ time: t, width: Math.min(16384, bound), height: Math.min(16384, bound), pixels: 'premultiplied', layer: { id: String(layer?.id ?? ''), scale, crop: box } });
+      return engine.raster(String(layer?.id ?? ''), scale, t, box);
     }
   } as RenderAPI;
 }

@@ -238,7 +238,8 @@ export type EngineSnapshotRequest = {
 };
 
 /** What a snapshot came back with. `data` is RGBA8, rows top-down, in
- *  `pixels`'s encoding. `needsRenderer`: draw these with the shader
+ *  `pixels`'s encoding. `empty`: a layer target that draws nothing then
+ *  (today's `render.raster()` returns null). `needsRenderer`: draw these with the shader
  *  fallback runner (and the compatibility producers), upload them on the
  *  session's port, and ask again. `failed`: `code` is the engine's error
  *  code (`timeout`, `unsupported`, `unknownSession`, …) or `unavailable`
@@ -253,6 +254,8 @@ export type EngineSnapshotReply =
       pixels: import('./engine-protocol').SnapshotPixels;
       data: Uint8Array;
       origin: [number, number];
+      /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
+      layerBox: [number, number] | null;
       quality: import('./engine-protocol').FrameQuality;
       waitedUs: number;
       renderUs: number;
@@ -265,6 +268,7 @@ export type EngineSnapshotReply =
       fallback: import('./engine-protocol').ShaderFallbackRequest[];
       compat: import('./engine-protocol').CompatNeed[];
     }
+  | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };
 
 /** main → renderer: compatibility pixels the job engine needs for an export
