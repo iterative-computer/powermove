@@ -110,3 +110,46 @@ impl M44 {
         *self == Self::IDENTITY
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn affine_round_trips_through_the_2d_part() {
+        let m = M44::affine(2.0, 0.5, -0.25, 3.0, 7.0, -4.0);
+        let t = m.to_mat();
+        assert_eq!((t.sx, t.ky, t.kx, t.sy, t.tx, t.ty), (2.0, 0.5, -0.25, 3.0, 7.0, -4.0));
+        assert_eq!(m.rc(0, 1), -0.25);
+        assert_eq!(m.rc(1, 0), 0.5);
+        assert!(M44::IDENTITY.is_identity() && !m.is_identity());
+    }
+
+    #[test]
+    fn concat_applies_the_right_operand_first() {
+        // translate(10, 0) ∘ scale(2): a point x maps to 2x + 10.
+        let mut m = M44::affine(1.0, 0.0, 0.0, 1.0, 10.0, 0.0);
+        m.pre_concat(&M44::affine(2.0, 0.0, 0.0, 2.0, 0.0, 0.0));
+        let t = m.to_mat();
+        assert_eq!((t.sx, t.tx), (2.0, 10.0));
+        // pre_translate and pre_scale are pre_concat of a translate / scale.
+        let mut a = M44::affine(2.0, 0.0, 0.0, 3.0, 1.0, 1.0);
+        let mut b = a;
+        a.pre_translate(5.0, -2.0);
+        b.pre_concat(&M44::affine(1.0, 0.0, 0.0, 1.0, 5.0, -2.0));
+        assert_eq!(a, b);
+        let mut a = M44::affine(2.0, 1.0, 0.0, 3.0, 1.0, 1.0);
+        let mut b = a;
+        a.pre_scale(0.5, 4.0);
+        b.pre_concat(&M44::affine(0.5, 0.0, 0.0, 4.0, 0.0, 0.0));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rect_to_rect_maps_corners_and_rejects_empty_rects() {
+        let m = M44::rect_to_rect([10.0, 20.0, 30.0, 60.0], [0.0, 0.0, 100.0, 50.0]).to_mat();
+        assert_eq!((m.sx, m.sy, m.tx, m.ty), (5.0, 1.25, -50.0, -25.0));
+        assert!(M44::rect_to_rect([0.0, 0.0, 0.0, 5.0], [0.0, 0.0, 1.0, 1.0]).is_identity());
+        assert_eq!(M44::rect_to_rect([0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]), M44([0.0; 16]));
+    }
+}

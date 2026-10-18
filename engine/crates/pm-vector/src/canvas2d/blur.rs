@@ -553,3 +553,21 @@ pub fn filter_layer(
     let rect = [final_bounds[0] as f32, final_bounds[1] as f32, final_bounds[2] as f32, final_bounds[3] as f32];
     Ok(vec![(rect, img)])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::skpath::Mat;
+    use super::*;
+
+    /// The layer a blur reads is the crop within the clip, outset by three
+    /// sigma (rounded up) in device space.
+    #[test]
+    fn input_bounds_outset_the_crop_by_three_sigma() {
+        let f = ImageFilter::GaussianBlur { sigma: [2.0, 1.0], crop: [-100.0, -100.0, 100.0, 100.0], linear: true };
+        let ltd = Transform::new(Mat { sx: 2.0, kx: 0.0, tx: 0.0, ky: 0.0, sy: 2.0, ty: 0.0 });
+        assert_eq!(input_layer_bounds(&f, &ltd, [10, 10, 50, 40]), [-2, 4, 62, 46]);
+        // A crop outside the clip reads nothing.
+        let f = ImageFilter::GaussianBlur { sigma: [2.0, 2.0], crop: [0.0, 0.0, 1.0, 1.0], linear: false };
+        assert_eq!(input_layer_bounds(&f, &ltd, [10, 10, 50, 40]), [0, 0, 0, 0]);
+    }
+}
