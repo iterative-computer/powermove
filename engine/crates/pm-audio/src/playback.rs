@@ -1358,10 +1358,11 @@ impl RenderThread {
         let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
             .max(CHUNK as i64);
         let mut ready = Vec::new();
-        // Forward starts first (the default transport), then the reverse
-        // look-behind: bounding a 6 s window behind every start before the
-        // playhead's own look-ahead tripled the time an edit leaves the
-        // playhead unprepared.
+        // Starts in priority order (the playhead first). The first start
+        // whose look-ahead is not yet bounded gets the turn's whole bounding
+        // budget, the six windows' worth the pass used to spread over every
+        // start; reverse look-behind windows follow once all are bounded.
+        let mut forward = true;
         for start in starts.iter().copied() {
             // Each start renders every voice (fresh stretch pre-roll after
             // an edit); a Play or seek must not wait for the remaining ones.
@@ -1370,19 +1371,27 @@ impl RenderThread {
             }
             // Read bounds include stretch's deterministic pre-roll. Do not
             // block commands evaluating a large work area all in one turn.
-            if !self
-                .mixer
-                .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS)
-            {
-                continue;
+            // In steps, so a control waits for at most one step.
+            let mut bounded = false;
+            for _ in 0..6 {
+                bounded = self
+                    .mixer
+                    .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS);
+                if bounded || self.preempted() {
+                    break;
+                }
+            }
+            if !bounded {
+                forward = false;
+                break;
             }
             let first = (self.config.preroll_ms as usize * rate as usize / 1000).max(CHUNK);
             if self.mixer.is_ready(start, first) && self.mixer.prepare_start(start) {
                 ready.push(start);
             }
         }
-        let mut behind = true;
-        for start in starts.iter().copied() {
+        let mut behind = forward;
+        for start in starts.iter().copied().filter(|_| forward) {
             if self.preempted() {
                 behind = false;
                 break;
