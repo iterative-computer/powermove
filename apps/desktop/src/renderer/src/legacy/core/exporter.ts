@@ -676,14 +676,12 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   let listener: ((s: any) => void) | null = null;
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
+    const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
+    await PM.HostMedia?.flushBindings(p);
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
-    const started = await engine.exportVideo({
-      project: JSON.stringify(p),
-      name: outputName(opts),
-      options: sheetOptions(opts)
-    });
+    const started = await engine.exportVideo(request);
     if (started.status === 'cancelled') return { cancelled: true };
     if (started.status === 'locate') { locateMedia(started.assets); return { cancelled: true }; }
     if (started.status !== 'accepted') return null;
@@ -747,16 +745,19 @@ X.addToQueue = async (rawOpts: any) => {
   const sidecars = (sidecarFormat === 'srt' || sidecarFormat === 'vtt') && isRenderFormat(opts.format) && opts.format !== 'png' && opts.format !== 'still'
     ? captionSidecars(PM.proj, sidecarFormat, { from: t0, to: t1 }).map((s) => ({ extension: sidecarFormat, text: s.text, ...(s.suffix ? { suffix: s.suffix } : {}) }))
     : [];
+  const project = PM.proj;
+  const request = {
+    project: JSON.stringify(project),
+    name: outputName(opts),
+    options: sheetOptions(opts),
+    ...(sidecars.length ? { sidecars } : {}),
+    ...(opts.preset ? { preset: String(opts.preset) } : {})
+  };
   try {
+    await PM.HostMedia?.flushBindings(project);
     // The queued job keeps this window's definitions as they are now.
     await PM.EngineDefinitions?.settle?.();
-    const result = await engine.queueAdd({
-      project: JSON.stringify(PM.proj),
-      name: outputName(opts),
-      options: sheetOptions(opts),
-      ...(sidecars.length ? { sidecars } : {}),
-      ...(opts.preset ? { preset: String(opts.preset) } : {})
-    });
+    const result = await engine.queueAdd(request);
     if (result?.status === 'added') PM.toast('Added to render queue');
     return result;
   } catch (error) {

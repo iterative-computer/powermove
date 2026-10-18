@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './exporter';
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
+
+afterEach(resetBridgeForTests);
 
 function exporter(overrides: any = {}): any {
   (globalThis as any).window = globalThis;
@@ -99,4 +102,22 @@ describe('export lifecycle', () => {
     expect(attempts).toBe(2);
     expect(X.busy).toBe(false);
   });
+});
+
+
+it('awaits the media binding acknowledgement before an export is submitted', async () => {
+  let acknowledge!: () => void;
+  const flushBindings = vi.fn(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+  const exportVideo = vi.fn(async () => ({ status: 'cancelled' }));
+  installBridgeForTests({ nativeEngine: {
+    status: async () => ({ enabled: true, processes: { job: { state: 'ready' } } }),
+    onExportStatus: () => () => {}, exportVideo
+  } } as any);
+  const X = exporter({ HostMedia: { flushBindings }, proj: { id: 'P1', name: 'test', fps: 30, w: 64, h: 64, dur: 1, work: [0, 1] } });
+  const exported = X.run({ format: 'still' });
+  await vi.waitFor(() => expect(flushBindings).toHaveBeenCalled());
+  expect(exportVideo).not.toHaveBeenCalled();
+  acknowledge();
+  expect(await exported).toEqual({ cancelled: true });
+  expect(exportVideo).toHaveBeenCalledOnce();
 });

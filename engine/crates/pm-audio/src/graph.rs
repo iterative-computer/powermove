@@ -893,7 +893,9 @@ mod tests {
     }
 
     fn layer(id: &str, ty: &str, extra: &str, d: &str) -> String {
-        format!(r#"{{"id":"{id}","type":"{ty}","from":0,"dur":4,"on":true,"p":{{}},"d":{{{d}}}{extra}}}"#)
+        format!(
+            r#"{{"id":"{id}","type":"{ty}","from":0,"dur":4,"on":true,"p":{{}},"d":{{{d}}}{extra}}}"#
+        )
     }
 
     fn audible_in(doc: &Document) -> bool {
@@ -908,10 +910,21 @@ mod tests {
         // off, a video without embedded audio or with it muted.
         assert!(!audible_in(&document(&solid, "")));
         assert!(!audible_in(&document(&layer("a", "audio", "", ""), "")));
-        assert!(!audible_in(&document(&layer("a", "audio", r#","on":false"#, r#""asset":"x""#), "")));
-        assert!(!audible_in(&document(&layer("v", "video", "", r#""asset":"x""#), "")));
         assert!(!audible_in(&document(
-            &layer("v", "video", "", r#""asset":"x","embeddedAudio":true,"audioMuted":true"#),
+            &layer("a", "audio", r#","on":false"#, r#""asset":"x""#),
+            ""
+        )));
+        assert!(!audible_in(&document(
+            &layer("v", "video", "", r#""asset":"x""#),
+            ""
+        )));
+        assert!(!audible_in(&document(
+            &layer(
+                "v",
+                "video",
+                "",
+                r#""asset":"x","embeddedAudio":true,"audioMuted":true"#
+            ),
             ""
         )));
         // An audio clip (resolvable or not: no media is opened) and a video's
@@ -925,8 +938,12 @@ mod tests {
         let soloed = layer("s", "solid", r#","solo":true"#, r##""color":"#ff0000""##);
         assert!(!audible_in(&document(&format!("{soloed},{audio}"), "")));
         // Through a precomp, unless the precomp is muted.
-        let nested = r#""N":{"id":"N","w":64,"h":64,"fps":30,"dur":4,"layers":[AUDIO]}"#.replace("AUDIO", &audio);
-        assert!(audible_in(&document(&layer("p", "precomp", "", r#""comp":"N""#), &nested)));
+        let nested = r#""N":{"id":"N","w":64,"h":64,"fps":30,"dur":4,"layers":[AUDIO]}"#
+            .replace("AUDIO", &audio);
+        assert!(audible_in(&document(
+            &layer("p", "precomp", "", r#""comp":"N""#),
+            &nested
+        )));
         assert!(!audible_in(&document(
             &layer("p", "precomp", "", r#""comp":"N","audioMuted":true"#),
             &nested
