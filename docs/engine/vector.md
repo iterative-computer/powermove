@@ -325,6 +325,21 @@ and 200²), and all 11 are inside the class. Routed, with what blocks them:
 | blur 64², 200², 333 × 150 | filter | max 2 CV; 14 / 3804 / 5008 pixels at 2 across the blurred interior | residual precision in the rescale and blur passes with the linear-RGB color filter |
 | text 64², 200², 333 × 150 | text | max 120–157 CV | pm-text draws the font at the layout size under the device matrix; Blink lays SVG text out with `CalculateScreenFontSizeScalingFactor` (the scaled font, `FixedAscent`, an integer `Ascent()` at paint, `context.Scale(1 / s)`), which the pm-text placement does not yet follow. |
 
+A lead for modeling the multisampled-pass behaviour, from the exp3 capture
+set (the 20 ellipse experiments at 333 × 150 with the replay's
+per-sample mesh ownership dumps; the analysis scripts and data are under
+`/tmp`, outside the repository), counting only straddling pixels where the
+per-sample and alternative predictions differ by more than 2.5 CV: every
+pixel whose aligned 2 × 2 quad is not fully covered by the draw's mesh
+follows the per-sample model (392 of 392). In quads fully covered by
+exactly two mesh triangles, pixels split one sample to three take the
+fragment of the triangle covering sample 0 for every sample (98 of 102),
+while two-to-two splits follow the per-sample model (65 of 69); in quads
+touched by three or more triangles most pixels follow the per-sample model
+(218 of 234). That points at a quad-level decision in the hardware's
+fragment generation for multisampled draws, not at the coverage shader.
+No rule found so far predicts every pixel, so it is not modeled.
+
 Not measured against Chromium and therefore routed: repeat and reflect
 spreads, focal radial gradients, more than four stops, `crispEdges`,
 arcs, `paint-order`, markers, `non-scaling-stroke`, miter joins,
@@ -337,8 +352,10 @@ All 34 corpus projects with SVG layers use the corpus asset
 `corpus-art.svg` (gradients, a round-rect clip, a tessellated curve under
 group opacity next to analytic rects and a circle, and a dashed stroke).
 The gate routes it (strokes; the pass mix would route it too), so every one
-of the 34 is skipped by `tests/corpus.rs` and `tests/text_corpus.rs` with
-the `SVG images` reason, and both tests pass on this branch. On the
+of the 34 is skipped with the `SVG images` reason: 2 by `tests/corpus.rs`
+(`layers/svg-scales`, `mattes/nested-and-animated`) and 32 by
+`tests/text_corpus.rs`. Both tests pass on this branch (2026-10-18: 271 and
+123 compared frames, none failed). On the
 previous round, with the gate open, `layers/svg-scales` measured max 7 CV
 on contiguous diagonal edge runs, `mattes/nested-and-animated` failed the
 transparent float check at 1.1–2.0 CV, `mattes/modes` max 6 CV and
