@@ -567,6 +567,14 @@ fn avif_container_transforms_follow_blink() {
         let (px, ..) = compat(&p);
         assert!(px == orient_rgba8(&base, w, h, exif), "imir {axis}");
     }
+    // Blink accepts AV1 items without `pixi` (libheif 1.11 and older): an
+    // unknown property in its place leaves the item without one.
+    let pixi = find(&bytes, 16, b"pixi");
+    let p = patch("no-pixi.avif", &|b| {
+        b[pixi..pixi + 4].copy_from_slice(b"xixi")
+    });
+    assert_eq!(probe_image(&p), Ok(()), "no pixi");
+    assert!(compat(&p).0 == base, "no pixi");
     // ImageIO writes a clap anchored at (0, 0) for odd sizes.
     assert_eq!(probe_image(&odd), Ok(()));
     let (_, cw, ch, _) = compat(&odd);
@@ -594,6 +602,105 @@ fn avif_container_transforms_follow_blink() {
         pm_media::image::avif_compat::unmeasured(&plain).unwrap(),
         None
     );
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// The level-1 AVIF bitmap, tightly packed.
+fn avif_compat_rgba8(path: &Path) -> Vec<u8> {
+    let pool = pm_media::pool::FramePool::new(0);
+    let original = pm_media::image::read(path, &pool).unwrap();
+    assert!(
+        pm_media::image::avif_compat::applies(&original),
+        "{}",
+        path.display()
+    );
+    let s = pm_media::image::avif_compat::read(path, &original, &pool)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    s.frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::new();
+            for y in 0..p.desc.height {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                });
+            }
+            out
+        })
+        .unwrap()
+}
+
+/// Blink gives an AVIF without an ICC profile the sRGB profile when its
+/// container's primaries are BT.709 (or unspecified) and its transfer is
+/// sRGB, BT.709, SMPTE 170M, either BT.2020 transfer, or unspecified
+/// (`gfx::ColorSpace` gives all of those the sRGB curve), so those draw the
+/// same bitmap as sRGB-tagged files; FFmpeg and many tools write transfer
+/// 1 for BT.709 sources. Chromium converts every other description, which
+/// stays a named unsupported class, never a layer failure (app comparison:
+/// `e2e/native-still-orientation-parity.spec.ts`).
+#[test]
+fn avif_color_descriptions_blink_reads_as_srgb_are_drawn() {
+    let d = dir().join("avif-cicp");
+    std::fs::create_dir_all(&d).unwrap();
+    let encode = |p: u8, t: u8, m: u8| {
+        let out = d.join(format!("cicp-{p}-{t}-{m}.avif"));
+        // `setparams` reaches the muxer's `colr` box (encoder options do
+        // not).
+        let vf = format!(
+            "setparams=color_primaries={p}:color_trc={t}:colorspace={m}:range=pc,format=yuv420p"
+        );
+        ffmpeg(
+            &out,
+            &[
+                "-vf",
+                &vf,
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                "8",
+                "-crf",
+                "30",
+            ],
+        );
+        out
+    };
+    let srgb = avif_compat_rgba8(&encode(1, 13, 1));
+    for t in [1, 6, 14, 15] {
+        let p = encode(1, t, 1);
+        assert_eq!(probe_image(&p), Ok(()), "{}", p.display());
+        assert!(avif_compat_rgba8(&p) == srgb, "{}", p.display());
+    }
+    // Unspecified primaries read as BT.709 (matrix 2 reads as BT.601 in
+    // both decoders, so compare with the unspecified file).
+    let unspecified = avif_compat_rgba8(&encode(2, 2, 2));
+    let p = encode(2, 1, 2);
+    assert_eq!(probe_image(&p), Ok(()));
+    assert!(avif_compat_rgba8(&p) == unspecified);
+    // Matrices are CrabbyAvif's in both decoders.
+    for (t, m) in [(6, 6), (14, 9)] {
+        let p = encode(1, t, m);
+        assert_eq!(probe_image(&p), Ok(()), "{}", p.display());
+    }
+    // Linear, gamma 2.2, SMPTE 240M, xvYCC, BT.1361, PQ and HLG transfers
+    // and BT.601, BT.470 and BT.2020 primaries are converted by Chromium:
+    // a named unsupported class whichever profile ImageIO reports.
+    for (p, t, m) in [
+        (1, 4, 1),
+        (1, 7, 1),
+        (1, 8, 1),
+        (1, 11, 1),
+        (1, 12, 1),
+        (1, 16, 1),
+        (1, 18, 1),
+        (6, 6, 6),
+        (5, 13, 5),
+        (9, 1, 9),
+    ] {
+        let f = encode(p, t, m);
+        let why = unsupported(&f);
+        eprintln!("{p}/{t}/{m}: {why}");
+        assert!(why.starts_with("AVIF stills "), "{}: {why}", f.display());
+    }
     std::fs::remove_dir_all(&d).ok();
 }
 

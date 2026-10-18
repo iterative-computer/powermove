@@ -42,8 +42,9 @@ unsafe fn parse(bytes: &[u8]) -> Result<Decoder> {
         (*decoder.0).maxThreads = 4;
         (*decoder.0).ignoreXMP = 1;
         (*decoder.0).ignoreExif = 1;
-        // Blink validates `clap` itself and ignores invalid ones.
-        (*decoder.0).strictFlags &= !a::AVIF_STRICT_CLAP_VALID;
+        // Blink validates `clap` itself and ignores invalid ones, and
+        // accepts AV1 items without `pixi` (libheif 1.11 and older).
+        (*decoder.0).strictFlags &= !(a::AVIF_STRICT_CLAP_VALID | a::AVIF_STRICT_PIXI_REQUIRED);
         let ok = a::crabby_avifDecoderSetIOMemory(decoder.0, bytes.as_ptr(), bytes.len());
         if ok != a::AVIF_RESULT_OK {
             return Err(MediaError::decode(format!("AVIF input {ok}")));
@@ -102,15 +103,43 @@ unsafe fn clean_aperture(image: &a::avifImage) -> Option<a::avifCropRect> {
     (valid != 0 && rect.x == 0 && rect.y == 0).then_some(rect)
 }
 
-/// Why an AVIF's structure is outside the class compared with Chromium
-/// (8-bit 4:2:0, full or limited range, opaque or with alpha, any
-/// `irot`/`imir`/`clap`; `tests/stills.rs` and
+/// Whether Blink gives an AVIF without an ICC profile the sRGB color
+/// profile. `AVIFImageDecoder::GetColorSpace` reads unspecified primaries
+/// as BT.709 and an unspecified transfer as sRGB, and
+/// `gfx::ColorSpace::GetTransferFunction` gives BT.709, SMPTE 170M (BT.601)
+/// and both BT.2020 transfers the sRGB curve, so with BT.709 primaries
+/// `SkColorSpace::MakeRGB` returns sRGB itself and no conversion runs.
+/// Matrix and range only steer the YUV conversion, which is CrabbyAvif's
+/// in both.
+pub fn srgb_cicp(primaries: u16, transfer: u16) -> bool {
+    matches!(primaries, 1 | 2) && matches!(transfer, 1 | 2 | 6 | 13 | 14 | 15)
+}
+
+/// Why the container's color description (what Blink's
+/// `AVIFImageDecoder` reads after `avifDecoderParse`) is outside the class
+/// this module reproduces.
+fn colorimetry(image: &a::avifImage) -> Option<String> {
+    if image.icc.size != 0 {
+        // Blink converts from the ICC profile instead of the CICP one.
+        return Some("AVIF stills with an ICC profile".into());
+    }
+    let (p, t) = (image.colorPrimaries, image.transferCharacteristics);
+    (!srgb_cicp(p, t)).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
+}
+
+/// Why an AVIF is outside the class compared with Chromium (8-bit 4:2:0,
+/// full or limited range, opaque or with alpha, any `irot`/`imir`/`clap`,
+/// no ICC profile, and a CICP color description Blink reads as sRGB
+/// ([`srgb_cicp`]); `tests/stills.rs` and
 /// `e2e/native-still-orientation-parity.spec.ts`). None inside it.
 pub fn unmeasured(path: &Path) -> Result<Option<String>> {
     let bytes = std::fs::read(path)?;
     unsafe {
         let decoder = parse(&bytes)?;
         let image = &*(*decoder.0).image;
+        if let Some(what) = colorimetry(image) {
+            return Ok(Some(what));
+        }
         Ok(match image.yuvFormat {
             a::AVIF_PIXEL_FORMAT_YUV420 if image.depth == 8 => None,
             a::AVIF_PIXEL_FORMAT_YUV420 => Some(format!("{}-bit AVIF stills", image.depth)),
@@ -127,18 +156,19 @@ pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<Stil
     // Decoder and its image own all allocations until after the pool copy.
     unsafe {
         let decoder = parse(&bytes)?;
+        // Blink reads the color description from the container, before any
+        // frame is decoded. Callers gate on `unmeasured`; this is an
+        // internal invariant, not a property of the file.
+        if let Some(what) = colorimetry(&*(*decoder.0).image) {
+            return Err(MediaError::decode(format!(
+                "AVIF compatibility bitmap outside its class: {what}"
+            )));
+        }
         let ok = a::crabby_avifDecoderNthImage(decoder.0, 0);
         if ok != a::AVIF_RESULT_OK {
             return Err(MediaError::decode(format!("AVIF first frame {ok}")));
         }
         let decoded = &*(*decoder.0).image;
-        if !matches!(decoded.colorPrimaries, 1 | 2)
-            || !matches!(decoded.transferCharacteristics, 2 | 13)
-        {
-            return Err(MediaError::invalid(
-                "AVIF compatibility bitmap needs sRGB colorimetry",
-            ));
-        }
         let o = orientation(
             decoded.transformFlags,
             decoded.irot.angle,
@@ -217,6 +247,24 @@ pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<Stil
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_descriptions_blink_reads_as_srgb() {
+        // `GetColorSpace` defaults (2 reads as BT.709 primaries and the sRGB
+        // transfer); `gfx::ColorSpace::GetTransferFunction` gives BT.709,
+        // SMPTE 170M and both BT.2020 transfers the sRGB curve.
+        for p in [1, 2] {
+            for t in [1, 2, 6, 13, 14, 15] {
+                assert!(srgb_cicp(p, t), "{p}/{t}");
+            }
+            for t in [0, 4, 5, 7, 8, 9, 10, 11, 12, 16, 17, 18] {
+                assert!(!srgb_cicp(p, t), "{p}/{t}");
+            }
+        }
+        for p in [0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 22] {
+            assert!(!srgb_cicp(p, 13), "{p}");
+        }
+    }
 
     #[test]
     fn blink_orientation_table() {
