@@ -579,3 +579,100 @@ fn a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program() {
         render(&mut fresh, &doc).unwrap()
     );
 }
+
+/// Answers every request with the same pixels at once: the engine's own
+/// cost of a fallback step (submit, readback, keying, upload) without a
+/// runner's draw.
+struct Instant0(Mutex<Option<FallbackPixels>>, Mutex<(u32, u32, usize)>);
+
+impl FallbackHost for Instant0 {
+    fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure> {
+        let r = &job.request;
+        *self.1.lock().unwrap() = (r.width, r.height, job.textures.len());
+        let mut cached = self.0.lock().unwrap();
+        if cached
+            .as_ref()
+            .is_none_or(|p| (p.width, p.height) != (r.width, r.height))
+        {
+            *cached = Some(FallbackPixels {
+                width: r.width,
+                height: r.height,
+                rgba16f: vec![0x3800; (r.width * r.height * 4) as usize],
+            });
+        }
+        Ok(cached.clone().unwrap())
+    }
+}
+
+/// The engine side of an animated fallback effect at full HD: every frame
+/// is a new request (its time differs), read back, keyed, and its pixels
+/// uploaded. Run: `cargo test -p pm-render --release --test
+/// effects_fallback fallback_step_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn fallback_step_cost_at_full_hd() {
+    let _gpu = gpu();
+    let mut r = renderer();
+    r.effects_mut().watchdog.set_policy(Policy::Job);
+    let host = Arc::new(Instant0(Mutex::new(None), Mutex::new((0, 0, 0))));
+    r.set_fallback_host(Some(host.clone()));
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let mut request = RenderRequest::sized(Size::new(1920, 1080), Precision::Float16);
+    request.background = true;
+    let mut times = Vec::new();
+    for frame in 0..30u64 {
+        let start = std::time::Instant::now();
+        let out = r
+            .render(
+                &doc,
+                "P-root",
+                Ticks::new(frame as i64 * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap(),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        r.wait_idle();
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        drop(out);
+    }
+    let mut native = Vec::new();
+    let plain = stack(
+        json!([{ "id": "f1", "type": "invert", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    for frame in 0..30u64 {
+        let start = std::time::Instant::now();
+        r.render(
+            &plain,
+            "P-root",
+            Ticks::new(frame as i64 * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap(),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+        r.wait_idle();
+        native.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    let stats = |v: &mut Vec<f64>| {
+        let warm = &mut v[5..];
+        warm.sort_by(f64::total_cmp);
+        (
+            warm[warm.len() / 2],
+            warm[warm.len() * 95 / 100],
+            warm[warm.len() - 1],
+        )
+    };
+    let (w, h, n) = *host.1.lock().unwrap();
+    eprintln!(
+        "request: {w}x{h}, {n} textures; {} requests",
+        r.effects().fallback.results()
+    );
+    eprintln!(
+        "fallback step frame ms p50/p95/max: {:?}",
+        stats(&mut times)
+    );
+    eprintln!(
+        "native Invert frame ms p50/p95/max: {:?}",
+        stats(&mut native)
+    );
+}

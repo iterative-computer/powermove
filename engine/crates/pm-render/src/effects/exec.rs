@@ -99,10 +99,7 @@ fn read_half(
     let raw =
         pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
     let rgba16f: Vec<u16> = match target.format() {
-        wgpu::TextureFormat::Rgba16Float => raw
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect(),
+        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw),
         wgpu::TextureFormat::Rgba32Float => raw
             .chunks_exact(4)
             .map(|c| pm_gpu::readback::f32_to_half(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
@@ -129,11 +126,7 @@ fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
             16,
         ),
         _ => (
-            pixels
-                .rgba16f
-                .iter()
-                .flat_map(|h| h.to_le_bytes())
-                .collect(),
+            crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
             8,
         ),
     };

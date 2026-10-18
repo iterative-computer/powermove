@@ -272,11 +272,7 @@ pub(crate) fn upload(
         wgpu::TextureFormat::Rgba16Float,
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
     );
-    let bytes: Vec<u8> = pixels
-        .rgba16f
-        .iter()
-        .flat_map(|h| h.to_le_bytes())
-        .collect();
+    let bytes = super::fallback::half_bytes(&pixels.rgba16f);
     queue.write_texture(
         target.texture.as_image_copy(),
         &bytes,

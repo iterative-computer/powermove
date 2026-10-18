@@ -108,11 +108,7 @@ impl<P: HostPort + ?Sized> HostFallback<P> {
 
 /// Raw binary16 bytes of pixels (the file format).
 fn bytes(pixels: &FallbackPixels) -> Vec<u8> {
-    pixels
-        .rgba16f
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect()
+    pm_render::shader_layers::fallback::half_bytes(&pixels.rgba16f)
 }
 
 /// The host's error as a runner failure.
@@ -174,10 +170,7 @@ impl<P: HostPort + ?Sized> FallbackHost for HostFallback<P> {
                     Ok(FallbackPixels {
                         width: r.width,
                         height: r.height,
-                        rgba16f: data
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                            .collect(),
+                        rgba16f: pm_render::shader_layers::fallback::halves(&data),
                     })
                 }
                 Ok(data) => Err(FallbackFailure {

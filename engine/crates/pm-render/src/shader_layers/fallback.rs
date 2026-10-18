@@ -102,6 +102,77 @@ pub fn request(
     }
 }
 
+/// Binary16 values as little-endian bytes (the wire and file format), in
+/// one pass without per-value allocation.
+pub fn half_bytes(values: &[u16]) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() * 2];
+    for (dst, v) in out.chunks_exact_mut(2).zip(values) {
+        dst.copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Little-endian bytes as binary16 values (a trailing odd byte is ignored).
+pub fn halves(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+/// Feeds binary16 values to a hash as their little-endian bytes, a block at
+/// a time (the digest of feeding them one by one).
+fn hash_halves(h: &mut blake3::Hasher, values: &[u16]) {
+    let mut block = [0u8; 64 * 1024];
+    for chunk in values.chunks(block.len() / 2) {
+        let bytes = &mut block[..chunk.len() * 2];
+        for (dst, v) in bytes.chunks_exact_mut(2).zip(chunk) {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+        h.update(&*bytes);
+    }
+}
+
+/// Values per part hashed on a thread of its own (a full-HD texture is
+/// four parts).
+const PART: usize = 2 << 20;
+
+/// A texture's digest: its values in parts of [`PART`] hashed side by side
+/// (at most four threads), and the parts' digests hashed in order.
+fn texture_digest(values: &[u16]) -> [u8; 32] {
+    let parts: Vec<&[u16]> = values.chunks(PART).collect();
+    let digests: Vec<[u8; 32]> = if parts.len() <= 1 {
+        parts
+            .iter()
+            .map(|p| {
+                let mut h = blake3::Hasher::new();
+                hash_halves(&mut h, p);
+                *h.finalize().as_bytes()
+            })
+            .collect()
+    } else {
+        let mut out = vec![[0u8; 32]; parts.len()];
+        for (group, slots) in parts.chunks(4).zip(out.chunks_mut(4)) {
+            std::thread::scope(|scope| {
+                for (part, slot) in group.iter().zip(slots.iter_mut()) {
+                    scope.spawn(move || {
+                        let mut h = blake3::Hasher::new();
+                        hash_halves(&mut h, part);
+                        *slot = *h.finalize().as_bytes();
+                    });
+                }
+            });
+        }
+        out
+    };
+    let mut h = blake3::Hasher::new();
+    h.update(&(values.len() as u64).to_le_bytes());
+    for d in &digests {
+        h.update(d);
+    }
+    *h.finalize().as_bytes()
+}
+
 /// The request for an effect's or a transition's program: one entry of
 /// `passes` per pass (its calls), `units` naming which of `textures` each
 /// texture unit samples, the textures the target's size. The key covers
@@ -118,34 +189,36 @@ pub fn request_with_textures(
     textures: &[&FallbackPixels],
     failure: &pm_glsl::Failure,
 ) -> FallbackRequest {
-    use sha2::{Digest, Sha256};
+    // BLAKE3 in parts on up to four threads: the key covers every texel of
+    // every texture (two full-HD textures are 33 MB), hashed twice for
+    // every frame of an animated step (asked for, then drawn); SHA-256 one
+    // value at a time took 58 ms per request at full HD.
     let vertex = pm_glsl::VERTEX.to_owned();
-    let mut h = Sha256::new();
-    h.update(b"pm-render shader fallback with textures 1\0");
+    let mut h = blake3::Hasher::new();
+    h.update(b"pm-render shader fallback with textures 3\0");
     h.update(vertex.as_bytes());
-    h.update([0]);
+    h.update(&[0]);
     h.update(fragment.as_bytes());
-    h.update([0]);
-    h.update(width.to_le_bytes());
-    h.update(height.to_le_bytes());
+    h.update(&[0]);
+    h.update(&width.to_le_bytes());
+    h.update(&height.to_le_bytes());
     for calls in passes {
-        h.update((calls.len() as u32).to_le_bytes());
-        h.update(super::plan::calls_bytes(calls));
+        h.update(&(calls.len() as u32).to_le_bytes());
+        h.update(&super::plan::calls_bytes(calls));
     }
     for u in &units {
-        h.update(u.unit.to_le_bytes());
-        h.update(u.texture.to_le_bytes());
-        h.update([u8::from(u.chain)]);
+        h.update(&u.unit.to_le_bytes());
+        h.update(&u.texture.to_le_bytes());
+        h.update(&[u8::from(u.chain)]);
     }
     for t in textures {
-        h.update(t.width.to_le_bytes());
-        h.update(t.height.to_le_bytes());
-        for v in &t.rgba16f {
-            h.update(v.to_le_bytes());
-        }
+        h.update(&t.width.to_le_bytes());
+        h.update(&t.height.to_le_bytes());
+        h.update(&texture_digest(&t.rgba16f));
     }
     let key = h
         .finalize()
+        .as_bytes()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
@@ -189,11 +262,7 @@ pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8
         let rows = per.min(pixels.height - row);
         let start = row as usize * pixels.width as usize * 4;
         let end = (row + rows) as usize * pixels.width as usize * 4;
-        let bytes = pixels.rgba16f[start..end]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        out.push((row, rows, bytes));
+        out.push((row, rows, half_bytes(&pixels.rgba16f[start..end])));
         row += rows;
     }
     out
@@ -409,6 +478,39 @@ impl FallbackStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn halves_are_hashed_and_converted_as_value_by_value() {
+        let values: Vec<u16> = (0..200_003u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 16) as u16)
+            .collect();
+        let mut one = blake3::Hasher::new();
+        for v in &values {
+            one.update(&v.to_le_bytes());
+        }
+        let mut block = blake3::Hasher::new();
+        hash_halves(&mut block, &values);
+        assert_eq!(one.finalize(), block.finalize());
+        let bytes = half_bytes(&values);
+        assert_eq!(
+            bytes,
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>()
+        );
+        assert_eq!(halves(&bytes), values);
+        // In parts: one value changed anywhere changes the digest.
+        let big: Vec<u16> = (0..(PART * 5 + 7) as u32).map(|i| i as u16).collect();
+        let d = texture_digest(&big);
+        assert_eq!(d, texture_digest(&big), "deterministic");
+        for at in [0, PART - 1, PART, PART * 4 + 3, big.len() - 1] {
+            let mut other = big.clone();
+            other[at] ^= 1;
+            assert_ne!(texture_digest(&other), d, "{at}");
+        }
+        assert_ne!(texture_digest(&big[..big.len() - 1]), d);
+    }
 
     fn pixels(n: u32) -> FallbackPixels {
         FallbackPixels {
