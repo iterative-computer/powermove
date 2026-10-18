@@ -289,6 +289,24 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
     let snap = snaps.snapshots[0].clone();
     assert_eq!(snap.size(), (W / 2, H / 2));
     assert!(snap.frame.preview);
+    // The preview frame is the composition's own size whatever the
+    // viewer's zoom (today's `comp.w × previewScale`): a zoomed viewer
+    // asks for the same snapshot.
+    let zoomed = r
+        .blender_snapshots(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &RenderRequest::sized(Size::new(W * 3, H * 3), Precision::Float16),
+            &assets,
+            true,
+            SnapshotOptions {
+                force_eevee: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(zoomed.snapshots[0].hash(), snap.hash());
     let s = snap.settings().unwrap();
     assert_eq!(s.get("samples").and_then(|v| v.as_f64()), Some(16.0));
     let half = Arc::new(decode_surface(&surface(W / 2, H / 2, 2, 2, 40, 30, 3)).unwrap());

@@ -1201,6 +1201,7 @@ fn native_content_quad<'d>(
                         time,
                         width,
                         height,
+                        b.video_center.is_some(),
                     )? {
                         Some(crate::blender::Planned::Draw(source, rect)) => {
                             return Ok(Some(Quad::Device {

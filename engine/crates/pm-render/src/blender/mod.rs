@@ -175,6 +175,21 @@ pub fn blender_enabled(comp: &pm_eval::Comp<'_>) -> bool {
     pm_eval::node::truthy(pm_eval::node::member(comp.member("render3d"), "enabled"))
 }
 
+/// The size of a preview frame: today's preview renders each composition at
+/// its own size (times the preview scale, in the snapshot), whatever the
+/// viewer's zoom, so zooming and panning reuse its surfaces.
+fn preview_size(comp: &pm_eval::Comp<'_>) -> (u32, u32) {
+    let px = |key: &str| {
+        let v = pm_eval::node::to_number(comp.member(key));
+        if v.is_finite() && v >= 1.0 {
+            v.round().min(f64::from(u32::MAX)) as u32
+        } else {
+            1
+        }
+    };
+    (px("w"), px("h"))
+}
+
 fn frame_of(
     state: &PlanState,
     comp_id: &str,
@@ -210,7 +225,11 @@ fn draw(layer: &str, surface: Arc<DecodedSurface>, width: u32, height: u32) -> P
 }
 
 /// The plan of a 3D object layer when Blender is involved; `None` lets the
-/// native 3D pass draw it.
+/// native 3D pass draw it. `in_samples`: the layer is drawn at a
+/// motion-blur sample time (exports render a surface per shutter sample;
+/// the paused viewer draws samples natively, as today, whose preview
+/// frames exist only at the frame's own time).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_object<'d>(
     scope: &mut Scope<'_, 'd>,
     state: &mut PlanState,
@@ -219,16 +238,22 @@ pub(crate) fn plan_object<'d>(
     time: f64,
     width: u32,
     height: u32,
+    in_samples: bool,
 ) -> JsResult<Option<Planned>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let enabled = blender_enabled(scope.comp);
     let id = js::layer_id(layer);
     if let Some(collect) = &state.collect {
         let preview = collect.preview;
-        if !(enabled || preview) {
+        if !(enabled || preview) || (preview && in_samples) {
             return Ok(None);
         }
-        let frame = frame_of(state, &comp_id, time, width, height, preview);
+        let (fw, fh) = if preview {
+            preview_size(scope.comp)
+        } else {
+            (width, height)
+        };
+        let frame = frame_of(state, &comp_id, time, fw, fh, preview);
         if state.seen.insert(frame.lookup()) {
             let options = collect.options.clone();
             let built = snapshot::build(scope, &frame, assets, &options)?;
@@ -253,7 +278,11 @@ pub(crate) fn plan_object<'d>(
             }))
         }
         BlenderRender::Preview(host) => {
-            let frame = frame_of(state, &comp_id, time, width, height, true);
+            if in_samples {
+                return Ok(None);
+            }
+            let (fw, fh) = preview_size(scope.comp);
+            let frame = frame_of(state, &comp_id, time, fw, fh, true);
             let key = frame.lookup();
             let snapshot = match state.previews.iter().find(|(k, _)| *k == key) {
                 Some((_, s)) => s.clone(),
