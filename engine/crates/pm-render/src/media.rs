@@ -164,6 +164,17 @@ fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), Probe
 /// ([`still_facts`]); each interpretation is then resolved from its facts.
 pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
     let (color, float) = still_facts(path)?;
+    // A PNG gamma is the file's transfer; only a transfer override replaces
+    // it. Interpretations of it are not implemented.
+    if interp.transfer.is_none()
+        && pm_media::image::png_gamma::imageio_gamma(path)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?
+            .is_some()
+    {
+        return Err(ProbeIssue::Unsupported(Feature::Media(
+            "PNG gamma (gAMA) with Interpret Footage overrides".into(),
+        )));
+    }
     interpreted_color(&color, float, interp).map(|_| ())
 }
 
@@ -887,6 +898,16 @@ impl MediaCache {
                 read.color
             }
             None => {
+                // Level 2 reads a gamma-only PNG as ImageIO does; level 1's
+                // bitmap above already applied Chromium's reading.
+                if !compat
+                    && still.format == pm_media::image::ImageFormat::Png
+                    && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
+                {
+                    still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
                 if still.color.icc_class == Some(IccClass::Other) {
                     still = pm_media::image::imageio::convert_to_linear_srgb(
                         &still,

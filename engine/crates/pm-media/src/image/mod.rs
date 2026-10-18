@@ -19,6 +19,7 @@ pub mod exr;
 pub mod icc;
 pub mod imageio;
 pub mod jpeg;
+pub mod png_gamma;
 pub mod raster;
 pub mod sequence;
 pub mod svg;
