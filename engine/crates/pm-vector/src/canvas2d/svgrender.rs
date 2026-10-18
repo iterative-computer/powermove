@@ -1783,6 +1783,13 @@ impl<'a> Canvas<'a> {
             {
                 return self.draw_shape(Shape::Rect(r), flags);
             }
+            // Filled nested rect contours become drawRect or drawDRRect
+            // (an analytic stroke, a rect, or a rect under a difference
+            // clip), which the replay does not emulate: drawn as a path
+            // here and refused by the level 1 gate.
+            if flags.stroke.is_none() && path.maybe_nested_fill_rects() && self.verdict.is_none() {
+                self.verdict = Some(SvgError("SVG paths of nested rects (Graphite drawDRRect) need compatibility support".into()));
+            }
         }
         self.draw_shape(Shape::Path(path.clone(), rule), flags)
     }

@@ -601,6 +601,38 @@ impl SkPath {
         is_rect_contour(&self.pts, &self.verbs)
     }
 
+    /// Whether `SkPathPriv::IsNestedFillRects` may accept the path, which
+    /// makes Graphite's `Device::drawPath` draw it as `drawRect` or
+    /// `drawDRRect` instead of a path. Conservative: true whenever the
+    /// first two contours are rect contours and one contains the other
+    /// (Skia also requires that nothing but empty contours follow, that the
+    /// path has only lines, and accepts an unclosed first contour exactly
+    /// as `is_rect` does).
+    pub fn maybe_nested_fill_rects(&self) -> bool {
+        let mut contours = Vec::new();
+        let (mut vstart, mut pstart, mut pi) = (0usize, 0usize, 0usize);
+        for (i, v) in self.verbs.iter().enumerate() {
+            if *v == Verb::Move && i > vstart {
+                contours.push((vstart..i, pstart..pi));
+                vstart = i;
+                pstart = pi;
+            }
+            pi += match v {
+                Verb::Move | Verb::Line => 1,
+                Verb::Quad | Verb::Conic(_) => 2,
+                Verb::Cubic => 3,
+                Verb::Close => 0,
+            };
+        }
+        contours.push((vstart..self.verbs.len(), pstart..pi));
+        let rect = |(v, p): &(std::ops::Range<usize>, std::ops::Range<usize>)| is_rect_contour(&self.pts[p.clone()], &self.verbs[v.clone()]).map(|r| r.0);
+        let (Some(a), Some(b)) = (contours.first().and_then(rect), contours.get(1).and_then(rect)) else {
+            return false;
+        };
+        let contains = |o: [f32; 4], i: [f32; 4]| o[0] <= i[0] && o[1] <= i[1] && o[2] >= i[2] && o[3] >= i[3];
+        contains(a, b) || contains(b, a)
+    }
+
     /// Bounds of the points (`computeBounds`), or `None` when empty.
     pub fn bounds(&self) -> Option<[f32; 4]> {
         let first = self.pts.first()?;
@@ -801,5 +833,24 @@ mod tests {
         tri.line_to([5.0, 5.0]);
         tri.close();
         assert_eq!(tri.is_rect(), None);
+        assert!(!tri.maybe_nested_fill_rects());
+        let mut nested = SkPath::new();
+        for r in [[5.0, 5.0, 95.0, 55.0], [25.0, 15.0, 75.0, 45.0]] {
+            nested.move_to([r[0], r[1]]);
+            nested.line_to([r[2], r[1]]);
+            nested.line_to([r[2], r[3]]);
+            nested.line_to([r[0], r[3]]);
+            nested.close();
+        }
+        assert!(nested.maybe_nested_fill_rects());
+        let mut apart = SkPath::new();
+        for r in [[0.0, 0.0, 10.0, 10.0], [20.0, 0.0, 30.0, 10.0]] {
+            apart.move_to([r[0], r[1]]);
+            apart.line_to([r[2], r[1]]);
+            apart.line_to([r[2], r[3]]);
+            apart.line_to([r[0], r[3]]);
+            apart.close();
+        }
+        assert!(!apart.maybe_nested_fill_rects());
     }
 }
