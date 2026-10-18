@@ -640,12 +640,16 @@ fn level2_svg_fallbacks_and_text() {
 #[test]
 fn svg_images_in_declared_encodings_are_not_failures() {
     let mut renderer = Renderer::headless().unwrap();
-    let utf8 = r##"<?xml version="1.0" encoding="ISO-8859-1"?>
+    let utf8 = r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><title>Café</title><rect x="10" y="10" width="80" height="30" fill="#FFFFFF"/></svg>"##;
-    let latin1: Vec<u8> = utf8.chars().map(|c| c as u32 as u8).collect();
+    let latin1: Vec<u8> = utf8
+        .replace("UTF-8", "ISO-8859-1")
+        .chars()
+        .map(|c| c as u32 as u8)
+        .collect();
     assert!(std::str::from_utf8(&latin1).is_err());
     let utf16 = {
-        let text = utf8.replace("ISO-8859-1", "UTF-16");
+        let text = utf8.replace("UTF-8", "UTF-16");
         let mut b = vec![0xFF, 0xFE];
         b.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
         b
