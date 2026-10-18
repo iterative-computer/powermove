@@ -887,8 +887,8 @@ fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
 }
 
 /// Gray JPEG is drawn only as baseline, the structure compared with the
-/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray is
-/// routed.
+/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray now
+/// also has a rotated/filtered comparison through the app.
 #[test]
 fn progressive_gray_jpeg_is_supported() {
     let d = dir().join("gray-jpeg");
