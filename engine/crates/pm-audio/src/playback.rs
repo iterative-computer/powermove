@@ -50,6 +50,8 @@ use crate::transport::{Effect, Transport};
 /// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
 /// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
+/// How often fully prepared paused starts are checked again.
+const PAUSED_REFRESH: Duration = Duration::from_secs(1);
 /// Maximum source wait, measured in callback frames at the device rate,
 /// independent of wall-clock scheduling, project rate, and shuttle speed.
 pub const SOURCE_WAIT_MS: u64 = 120;
@@ -93,6 +95,9 @@ impl DeviceSide {
     pub fn callback(&mut self, out: &mut [f32], channels: usize, host_us: u64) {
         let heard = self.consumer.fill(out, channels);
         if let Some(h) = heard {
+            self.shared
+                .start_timing
+                .heard(h.tag.epoch, host_us, out.len() / channels.max(1));
             let latency = self.shared.latency_us.load(Ordering::Relaxed);
             if self.shared.reanchor.swap(false, Ordering::Relaxed) {
                 self.core.invalidate();
@@ -126,7 +131,11 @@ impl DeviceSide {
 type DeviceWatch = Box<dyn FnMut() -> Option<(u32, u32)> + Send>;
 
 enum Control {
-    Command(TransportCommand, std::sync::mpsc::SyncSender<Result<()>>),
+    Command(
+        TransportCommand,
+        std::sync::mpsc::SyncSender<Result<()>>,
+        u64,
+    ),
     Project(
         Arc<Document>,
         Arc<MixGraph>,
@@ -151,6 +160,79 @@ struct Shared {
     dropped_renders: AtomicU64,
     dropped_voice_frames: AtomicU64,
     device_rate: u32,
+    prepared: Mutex<Vec<i64>>,
+    start_timing: StartTrace,
+}
+
+/// Times of a run's first buffer on the shared monotonic host clock.
+/// Separates control delivery, render preparation, callback phase and HAL lead.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTiming {
+    pub epoch: u32,
+    pub requested_us: u64,
+    pub applied_us: u64,
+    pub queued_us: u64,
+    pub callback_us: u64,
+    pub device_host_us: u64,
+    pub callback_frames: u64,
+}
+
+#[derive(Default)]
+struct StartTrace {
+    epoch: AtomicU32,
+    requested: AtomicU64,
+    applied: AtomicU64,
+    queued: AtomicU64,
+    callback: AtomicU64,
+    callback_epoch: AtomicU32,
+    device_host: AtomicU64,
+    callback_frames: AtomicU64,
+}
+
+impl StartTrace {
+    fn begin(&self, epoch: u32, requested: u64) {
+        self.epoch.store(0, Ordering::Release);
+        self.requested.store(requested, Ordering::Relaxed);
+        self.applied.store(host_now_us(), Ordering::Relaxed);
+        self.queued.store(0, Ordering::Relaxed);
+        self.epoch.store(epoch, Ordering::Release);
+    }
+
+    fn queued(&self) {
+        self.queued.store(host_now_us(), Ordering::Release);
+    }
+
+    fn heard(&self, epoch: u32, device_host: u64, frames: usize) {
+        if self.epoch.load(Ordering::Acquire) == epoch
+            && self.callback_epoch.load(Ordering::Relaxed) != epoch
+        {
+            self.device_host.store(device_host, Ordering::Relaxed);
+            self.callback_frames.store(frames as u64, Ordering::Relaxed);
+            self.callback.store(host_now_us(), Ordering::Relaxed);
+            self.callback_epoch.store(epoch, Ordering::Release);
+        }
+    }
+
+    fn latest(&self) -> Option<StartTiming> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let heard_epoch = self.callback_epoch.load(Ordering::Acquire);
+        let callback = self.callback.load(Ordering::Relaxed);
+        let s = StartTiming {
+            epoch,
+            requested_us: self.requested.load(Ordering::Relaxed),
+            applied_us: self.applied.load(Ordering::Relaxed),
+            queued_us: self.queued.load(Ordering::Acquire),
+            callback_us: callback,
+            device_host_us: self.device_host.load(Ordering::Relaxed),
+            callback_frames: self.callback_frames.load(Ordering::Relaxed),
+        };
+        (epoch != 0
+            && heard_epoch == epoch
+            && epoch == self.epoch.load(Ordering::Acquire)
+            && heard_epoch == self.callback_epoch.load(Ordering::Acquire))
+        .then_some(s)
+    }
 }
 
 /// Pending diagnostics, each reported once per episode however often the
@@ -235,6 +317,11 @@ pub struct PlaybackStats {
     pub dropped_renders: u64,
     /// Project output frames silenced for missing input (summed over voices).
     pub dropped_voice_frames: u64,
+    /// Output device I/O cycles that missed their real-time deadline
+    /// (CoreAudio processor overloads; 0 for a headless side).
+    pub device_overloads: u64,
+    /// Output device callbacks so far (0 for a headless side).
+    pub device_callbacks: u64,
 }
 
 impl Playback {
@@ -300,6 +387,8 @@ impl Playback {
             dropped_renders: AtomicU64::new(0),
             dropped_voice_frames: AtomicU64::new(0),
             device_rate,
+            prepared: Mutex::new(Vec::new()),
+            start_timing: StartTrace::default(),
         });
         let (tx, rx) = channel();
         let empty = Arc::new(Document::new(None, 0));
@@ -320,6 +409,8 @@ impl Playback {
         );
         let worker = RenderThread {
             rx,
+            deferred: None,
+            settled: None,
             shared: shared.clone(),
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
@@ -408,7 +499,7 @@ impl Playback {
     pub fn command(&self, command: TransportCommand) -> Result<()> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.tx
-            .send(Control::Command(command, reply))
+            .send(Control::Command(command, reply, host_now_us()))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         answer
             .recv_timeout(Duration::from_secs(5))
@@ -478,7 +569,23 @@ impl Playback {
             starve_retries: self.shared.starve_retries.load(Ordering::Relaxed),
             dropped_renders: self.shared.dropped_renders.load(Ordering::Relaxed),
             dropped_voice_frames: self.shared.dropped_voice_frames.load(Ordering::Relaxed),
+            device_overloads: self.stream.as_ref().map_or(0, OutputStream::overloads),
+            device_callbacks: self.stream.as_ref().map_or(0, OutputStream::callbacks),
         }
+    }
+
+    /// Diagnostic timing of the most recently started device epoch.
+    pub fn start_timing(&self) -> Option<StartTiming> {
+        self.shared.start_timing.latest()
+    }
+
+    /// Paused starts whose source and voice DSP pre-roll is ready (diagnostics).
+    pub fn prepared_starts(&self) -> Vec<i64> {
+        self.shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn device(&self) -> Option<&crate::device::DeviceInfo> {
@@ -827,12 +934,15 @@ impl Converter {
 }
 
 /// The ring depth `fill` keeps, in chunks: `ahead` frames, and at least
-/// half of that beyond the refill reserve (two of the largest device
-/// callbacks), so large callbacks (2,048-frame Bluetooth or AirPlay buffers
-/// against the 3,840-frame default) still leave a transient decode miss a
-/// wait before it drops. Bounded by the ring's capacity.
+/// one callback plus half of that beyond the refill reserve (two of the
+/// largest observed callbacks). The callback waking the producer has already
+/// spent one buffer; even then a newly missing voice keeps a wait budget.
+/// The producer grows the ring before computing this bounded target.
 fn fill_target(ahead: usize, reserve: usize, capacity: usize) -> usize {
-    let frames = ahead.max(reserve + ahead / 2);
+    // The callback that wakes the producer has already spent one buffer.
+    // Keep that buffer in addition to the two-buffer refill reserve, so
+    // every newly missing voice still gets a wait, regardless of alignment.
+    let frames = ahead.max(reserve + reserve / 2 + ahead / 2);
     (frames / CHUNK).max(2).min(capacity - 1)
 }
 
@@ -862,6 +972,12 @@ fn stall_message(id: &str, by_reserve: bool) -> String {
 
 struct RenderThread {
     rx: Receiver<Control>,
+    /// A control that interrupted paused preparation; handled first.
+    deferred: Option<Control>,
+    /// The paused starts of the last complete preparation pass and when it
+    /// ran: unchanged and still ready, they are re-checked only every
+    /// [`PAUSED_REFRESH`] rather than every idle turn.
+    settled: Option<(Vec<i64>, std::time::Instant)>,
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
@@ -871,7 +987,7 @@ struct RenderThread {
     /// Each voice owns its deadline and notification until it recovers.
     stalls: HashMap<String, VoiceStall>,
     /// The device frame a play or seek began pre-rolling, until its first
-    /// segment commits. Nothing of the run is queued yet, so holding for a
+    /// device output chunk is queued. Until then, holding for a
     /// cold voice is start latency, not a gap: every missing voice gets the
     /// whole A3 hold from here.
     startup: Option<u64>,
@@ -881,7 +997,7 @@ struct RenderThread {
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
     converter: Option<Converter>,
-    /// The 2× J/K/L stretch, made at the first 2× run.
+    /// The 2× J/K/L stretch, warmed during the first audible pause.
     shuttle: Option<Shuttle>,
     device_rate: u32,
     ring_channels: usize,
@@ -920,7 +1036,11 @@ impl RenderThread {
             } else {
                 Duration::from_millis(20)
             };
-            match self.rx.recv_timeout(wait) {
+            let next = match self.deferred.take() {
+                Some(c) => Ok(c),
+                None => self.rx.recv_timeout(wait),
+            };
+            match next {
                 Ok(Control::Shutdown) => return,
                 Ok(c) => {
                     if self.control(c) {
@@ -946,6 +1066,7 @@ impl RenderThread {
                     self.stop_pending = false;
                     self.publish_stopped();
                 }
+                self.prepare_paused();
                 continue;
             }
             if need_preroll {
@@ -1026,8 +1147,13 @@ impl RenderThread {
 
     /// Applies a control; returns whether playback must pre-roll.
     fn control(&mut self, c: Control) -> bool {
+        self.shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         match c {
-            Control::Command(cmd, reply) => {
+            Control::Command(cmd, reply, requested_us) => {
                 // A pause, a step, a play around, or a new J/K/L rate while
                 // running starts from what is heard.
                 if self.transport.is_running()
@@ -1045,6 +1171,9 @@ impl RenderThread {
                 let result = self.transport.apply(&cmd);
                 let restart = match &result {
                     Ok(Effect::Restart) => {
+                        self.shared
+                            .start_timing
+                            .begin(self.transport.epoch(), requested_us);
                         self.epoch_start =
                             Some((self.transport.epoch(), self.transport.position()));
                         self.ring.set_epoch(self.transport.epoch());
@@ -1167,6 +1296,132 @@ impl RenderThread {
         self.stopped_published = true;
     }
 
+    /// Idle work is cancellable between turns: decode around the playhead
+    /// first, then both work-area edges. Each target has its own vocoder.
+    fn prepare_paused(&mut self) {
+        if self.stop_pending {
+            return;
+        }
+        if self.shuttle.is_none() && !self.mixer.graph().voices.is_empty() {
+            // Master FFT plans/workspace need no project input. Allocate and
+            // exercise them off the Play path without advancing the mix.
+            match Shuttle::new(self.mixer.format().channels(), self.transport.rate()) {
+                Ok(mut shuttle) => {
+                    if let Err(error) = shuttle.warm() {
+                        self.error(error.to_string());
+                    }
+                    self.shuttle = Some(shuttle);
+                }
+                Err(error) => self.error(error.to_string()),
+            }
+        }
+        let rate = self.transport.rate() as i64;
+        let mut starts = vec![self.transport.position()];
+        if let Some(range) = self.transport.loop_range() {
+            starts.push(crate::offline::sample_of_ticks(
+                range.start.get(),
+                rate as u32,
+            ));
+            starts.push(
+                crate::offline::sample_of_ticks(range.end.get(), rate as u32)
+                    .saturating_sub(CHUNK as i64)
+                    .max(0),
+            );
+        }
+        if let Ok(comp) = pm_eval::Comp::resolve(self.mixer.document(), &self.mixer.graph().comp_id)
+            && let Some(work) = pm_eval::node::array(comp.member("work"))
+        {
+            for edge in work.iter().take(2) {
+                if let Some(seconds) = pm_eval::node::number(Some(edge)).filter(|t| t.is_finite()) {
+                    let at = (seconds * rate as f64).round() as i64;
+                    // Bound retained DSP histories to the playhead and
+                    // work-area boundaries, regardless of work-area length.
+                    if starts.len() < 3 && !starts.contains(&at) {
+                        starts.push(at.max(0));
+                    }
+                }
+            }
+        }
+        starts.dedup();
+        // Once everything is prepared, re-bounding every voice's spans each
+        // 20 ms turn cost 1-2% CPU with 16 stretched voices while idle.
+        // Recheck occasionally so evicted source blocks are queued again.
+        if let Some((last, at)) = &self.settled
+            && *last == starts
+            && at.elapsed() < PAUSED_REFRESH
+            && self.mixer.prepared_ready(&starts)
+        {
+            return;
+        }
+        self.settled = None;
+        self.mixer.retain_prepared(&starts);
+        let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
+            .max(CHUNK as i64);
+        let mut ready = Vec::new();
+        // Starts in priority order (the playhead first). The first start
+        // whose look-ahead is not yet bounded gets the turn's whole bounding
+        // budget, the six windows' worth the pass used to spread over every
+        // start; reverse look-behind windows follow once all are bounded.
+        let mut forward = true;
+        for start in starts.iter().copied() {
+            // Each start renders every voice (fresh stretch pre-roll after
+            // an edit); a Play or seek must not wait for the remaining ones.
+            if self.preempted() {
+                break;
+            }
+            // Read bounds include stretch's deterministic pre-roll. Do not
+            // block commands evaluating a large work area all in one turn.
+            // In steps, so a control waits for at most one step.
+            let mut bounded = false;
+            for _ in 0..6 {
+                bounded = self
+                    .mixer
+                    .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS);
+                if bounded || self.preempted() {
+                    break;
+                }
+            }
+            if !bounded {
+                forward = false;
+                break;
+            }
+            let first = (self.config.preroll_ms as usize * rate as usize / 1000).max(CHUNK);
+            if self.mixer.is_ready(start, first) && self.mixer.prepare_start(start) {
+                ready.push(start);
+            }
+        }
+        let mut behind = forward;
+        for start in starts.iter().copied().filter(|_| forward) {
+            if self.preempted() {
+                behind = false;
+                break;
+            }
+            behind &= self.mixer.prefetch_within(
+                start - 2 * ahead,
+                (2 * ahead) as usize,
+                LOOKAHEAD_GROUPS,
+            );
+        }
+        if behind && ready.len() == starts.len() {
+            self.settled = Some((starts, std::time::Instant::now()));
+        }
+        *self
+            .shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ready;
+    }
+
+    /// A control arrived during idle preparation: keep it for the loop.
+    fn preempted(&mut self) -> bool {
+        if self.deferred.is_none()
+            && let Ok(c) = self.rx.try_recv()
+        {
+            self.deferred = Some(c);
+        }
+        self.deferred.is_some()
+    }
+
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
@@ -1182,6 +1437,9 @@ impl RenderThread {
         self.mixer.end_glides();
         self.mixer.abandon_retries();
         let position = self.transport.position();
+        if self.transport.play_rate() == 1 {
+            self.mixer.use_prepared(position);
+        }
         let rate = self.transport.rate() as i64;
         let speed = self.transport.play_rate();
         let frames = self.config.preroll_ms as i64 * rate / 1000 * speed.abs().max(1);
@@ -1216,10 +1474,16 @@ impl RenderThread {
         }
     }
 
-    /// Renders until the ring holds `ahead_ms`.
+    /// Renders until the ring holds its callback-adapted look-ahead target.
     fn fill(&mut self) {
+        let ahead = self.config.ahead_ms as usize * self.device_rate as usize / 1000;
+        let reserve = self.ring.refill_reserve() as usize;
+        // Callback only observes its size. Allocation and growth stay on the
+        // producer, preserving queued audio across first observation/changes.
+        self.ring
+            .grow((ahead.max(reserve + reserve / 2 + ahead / 2)).div_ceil(CHUNK) + 2);
         let target = fill_target(
-            self.config.ahead_ms as usize * self.device_rate as usize / 1000,
+            ahead,
             self.ring.refill_reserve() as usize,
             self.ring.capacity(),
         );
@@ -1266,18 +1530,10 @@ impl RenderThread {
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
                 let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
-                // A4.1: the reserve bounds a wait only while it protects a
-                // voice that is heard. At a start nothing of the run plays
-                // yet, and with every heard voice missing nothing would be
-                // heard by dropping: both keep the A3 hold. Voices count by
-                // id, so a retune glide's outgoing copies of the missing
-                // voice cannot outnumber the ready ones, and a voice the
-                // monitor solo silences protects nothing.
-                let protects = self.startup.is_none()
-                    && report
-                        .heard_whole
-                        .iter()
-                        .any(|id| !report.starved_voices.contains(id));
+                // A6: every mid-run miss is bounded by the ring reserve,
+                // including an all-missing mix. Tagged silence advances the
+                // device clock and picture; only a cold start keeps its hold.
+                let protects = self.startup.is_none();
                 let reserve = self
                     .ring
                     .buffered_frames()
@@ -1370,8 +1626,6 @@ impl RenderThread {
                     }
                 }
             }
-            // The run's first segment commits: its start hold is over.
-            self.startup = None;
             if seg.rate < 0 {
                 for c in &mut planar {
                     c.reverse();
@@ -1494,9 +1748,15 @@ impl RenderThread {
                     den: 1,
                 },
             };
+            if self.startup.is_some() {
+                self.shared.start_timing.queued();
+            }
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            // Stateful DSP can consume many input segments before emitting
+            // a device frame. Keep the cold-start hold until output exists.
+            self.startup = None;
             done += n;
         }
     }
@@ -1527,11 +1787,15 @@ impl RenderThread {
         self.push_chunks(chunks);
     }
 
-    fn push_chunks(&self, chunks: Vec<(Tag, Vec<f32>)>) {
+    fn push_chunks(&mut self, chunks: Vec<(Tag, Vec<f32>)>) {
         for (tag, inter) in chunks {
+            if self.startup.is_some() {
+                self.shared.start_timing.queued();
+            }
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.startup = None;
         }
     }
 }
@@ -1539,6 +1803,30 @@ impl RenderThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_buffer_timing_ignores_other_epochs_and_later_callbacks() {
+        let trace = StartTrace::default();
+        trace.begin(3, host_now_us());
+        trace.queued();
+        assert!(trace.latest().is_none());
+        trace.heard(2, 10, 512);
+        assert!(trace.latest().is_none());
+        trace.heard(3, 20, 128);
+        let first = trace.latest().unwrap();
+        trace.heard(3, 30, 256);
+        assert_eq!(trace.latest().unwrap().device_host_us, 20);
+        assert_eq!(first.callback_frames, 128);
+        assert!(first.requested_us <= first.applied_us);
+        assert!(first.applied_us <= first.queued_us);
+        assert!(first.queued_us <= first.callback_us);
+        trace.begin(4, host_now_us());
+        trace.heard(3, 40, 512);
+        assert!(trace.latest().is_none());
+        trace.queued();
+        trace.heard(4, 50, 256);
+        assert_eq!(trace.latest().unwrap().device_host_us, 50);
+    }
 
     #[test]
     fn whole_mix_failures_are_reported_once_per_episode() {
@@ -1563,17 +1851,17 @@ mod tests {
 
     #[test]
     fn large_callbacks_keep_a_decode_wait_budget() {
-        // 48 kHz, 80 ms ahead (3,840 frames), a 30-chunk ring.
-        let (ahead, capacity) = (3_840, 30);
+        // 48 kHz, 80 ms ahead (3,840 frames), an expanded ring.
+        let (ahead, capacity) = (3_840, 128);
         // 512-frame callbacks: the target is unchanged.
         assert_eq!(fill_target(ahead, 1_024, capacity), 15);
         // 2,048-frame callbacks reserve 4,096 frames, more than the 80 ms
-        // target: the ring keeps 40 ms beyond the reserve instead.
+        // target: keep the wake-up callback plus 40 ms beyond the reserve.
         let target = fill_target(ahead, 4_096, capacity);
-        assert_eq!(target, 23);
+        assert_eq!(target, 31);
         assert!(target * CHUNK - 4_096 >= 1_664);
         // Never past the ring.
-        assert_eq!(fill_target(ahead, 16_384, capacity), 29);
+        assert_eq!(fill_target(ahead, 16_384, 30), 29);
         assert_eq!(fill_target(100, 0, capacity), 2);
     }
 }
