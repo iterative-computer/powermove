@@ -121,7 +121,7 @@ SPIR-V rewrite, the bind check (amendment 9: samplers other than a float
 
 | Host | What happens |
 |---|---|
-| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A runner failure routes the composition to the legacy viewer |
+| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure routes the composition to the legacy viewer |
 | Job engine, `pm-cli`, the hidden host | No runner: `Feature::ShaderFallback`, not headless-renderable (static check and render alike) |
 
 The runner (`ShaderFallbackRunner`): one WebGL2 context on an
@@ -138,10 +138,26 @@ Upload: the session sends the pixels in row bands of at most 8 MiB
 `Failed {reason}`; the presenter assembles bands (`shader_layers::Bands`) into
 the renderer's `FallbackStore` (1 GiB, least recently used first) keyed by the
 request's hash, and the layer draws them like any other `fromFbo` target, as
-the `raster` override's pixels would be. Pixels are per frame (the key covers
-every call, so an animated program asks once per frame shown); the cost is a
-WebGL draw plus a readback and a copy per frame, which is acceptable for a
-path that exists for programs nothing else can draw.
+the `raster` override's pixels would be. Their GPU copy is kept by request
+key (8 textures, least recently drawn first; `ShaderState::fallback_uploads`
+counts the copies), so a fallback layer that does not change, a still frame
+or a static layer during playback, is uploaded once, not on every render.
+Pixels are per frame (the key covers every call, so an animated program asks
+once per frame shown); the cost is a WebGL draw plus a readback and a copy
+per frame, which is acceptable for a path that exists for programs nothing
+else can draw. Bands that arrived for a session that closes mid-transfer are
+dropped with it.
+
+Reported and marked (plan section 11: such a program "is reported and
+marked not headless-renderable"): the static check lists
+`Feature::ShaderFallback` (marked), and `shader_layers::reports` sends the
+Shader panel a layer-scope `NotHeadlessRenderable` report worded as a
+warning ("Shader layer sky is drawn by the WebGL fallback, so headless
+exports cannot render it (the native pipeline stops at bind: ...)", with the
+diagnostics) at every revision presented, as the compile errors are. The
+presenter also logs it once per layer and session. Extension fragment
+definitions only the runner draws are reported per definition
+(`effects::definition_error`, `DefinitionsApplied`).
 
 Evidence:
 
@@ -149,8 +165,14 @@ Evidence:
   process, driven through the protocol): a `samplerCube` shader layer is not
   routed; the engine sends one request (stage `bind`, the 80 × 45 layer at the
   viewer's 4× scale: 320 × 180), presents no frame until both bands arrive out
-  of order, then presents the frame; a runner failure for the next program
-  routes the composition (`unsupported`).
+  of order, then reports the layer (`notHeadlessRenderable`, layer scope, at
+  the frame's revision, before the frame), logs it once, and presents the
+  frame; a runner failure for the next program routes the composition
+  (`unsupported`).
+- `shader_layers::exec` unit tests: a program the device refuses at pipeline
+  creation (injected) asks the runner in the same frame with a runner, is
+  reported, and its pixels are uploaded once for three frames; without a
+  runner it routes (`Feature::ShaderFallback`).
 - `engine-connection/shader-fallback.test.ts`: the session answers with bands
   under the limit (2,048 × 1,100: 512 + 512 + 76 rows), reports failures and a
   missing runner; the call replay and the binary16 conversion.
@@ -158,7 +180,8 @@ Evidence:
   `samplerCube` uniform) rendered through the app's runner in headless
   Chromium (`tools/shaders/fallback-runner.ts`), drawn by the engine, and
   compared with the compositor's WebGL output: within tolerance.
-- `tests/shader_gate.rs` `layers_needing_the_runner_are_not_headless_renderable`.
+- `tests/shader_gate.rs` `layers_needing_the_runner_are_not_headless_renderable`
+  (also: the layer report, and one upload for two frames).
 
 ## The shader gate
 
@@ -187,7 +210,7 @@ Sources and provenance:
 | e2e | e2e fixtures, `register(...)` literals and shader-layer code in e2e specs |
 | unit-tests | GLSL literals in kernel, legacy, and panel unit tests |
 | scenes | onboarding and www hero `scene.json` |
-| store | every public Store release, fetched without credentials through the desktop Store client's read-only routes (`tools/shaders/fetch-store.ts`): 4 releases of 4 extensions on 2026-10-17 (ascii-magic-effects 1.0.0, chrome 1.0.0, liquid-glass-ios27 2.0.1 and 2.0.8), all effects. Kept outside the repository; activated under `sandbox-exec` with network and file writes denied (`tools/shaders/activate.ts`) |
+| store | every public Store release, fetched without credentials through the desktop Store client's read-only routes (`tools/shaders/fetch-store.ts`): 4 releases of 4 extensions on 2026-10-17 (ascii-magic-effects 1.0.0, chrome 1.0.0, `zellzoi/liquid-glass-ios27` 2.0.1 and `mrsigma/liquid-glass-ios27` 2.0.8, two extensions of the same name), all effects. Kept outside the repository; activated under `sandbox-exec` with network and file writes denied (`tools/shaders/activate.ts`) |
 | generated-s3 | spike S3's 56 agent-style shaders (written by Opus 5.5 from the docs) |
 | generated-agent | 37 prompts covering every contract feature (`tools/shaders/prompts.ts`, `CONTRACT`; the script fails when a feature has no prompt), answered by `claude --print` (Claude Code 2.1.300, `claude-opus-5-5`) with the in-app agent's own system prompt (`agentInstructions()`, the adapter's schema suffix), the API pack readable with Read/Glob/Grep, and the shader-layer runtime the Shader panel shows. The in-app harness itself needs a running Powermove with its MCP tools, which cannot run headlessly here; differences: no render_frames or validate_effect loop, the deliverable returned as JSON. Outputs with provenance in `tools/shaders/generated/` |
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
@@ -197,7 +220,9 @@ Measured 2026-10-17 (M4 Max, macOS 27, wgpu 30.0.1 Metal; corpus
 2026-10-18 after merging `feat/native-engine` at `f3bf2478` from a fresh
 run of every step (the Store fetched again: the same 4 releases; corpus
 `shaders-20261018-022611`; WebGL and perturbed WebGL captured again, the
-3 runner requests answered again): the same table, cell for cell.
+3 runner requests answered again): the same table, cell for cell. Run
+again on the same corpus after the runner's layer reports, the first-contact
+pipeline path, and the upload cache landed (2026-10-18): the same table.
 
 | Group | Cases | Variants | Match WebGL | via the runner | Both refuse | WebGL-unstable | Failures |
 |---|---|---|---|---|---|---|---|
@@ -233,7 +258,8 @@ values scaled by max(1, |reference|).
   differ by up to 99 CV, and WebGL against itself with every input texel one
   binary16 step away from zero moves 26 to 33 pixels by up to 67 CV
   (`webgl.ts --perturb-input`; the class is decided per variant from the
-  perturbed runs). The 2.0.1 release of the same effect matches.
+  perturbed runs). `zellzoi/liquid-glass-ios27` 2.0.1, a separate Store
+  extension of the same name, matches.
 - **Through the runner**: `env-cubemap-sky` (a `samplerCube`), above.
 
 App level: the v1 corpus's shader and extension projects
@@ -266,14 +292,18 @@ routing to the legacy viewer resets it. The app
 clears it when a frame of a later revision did not repeat it, or when the
 definition a missing layer needs is pushed. This relies on the engine
 repeating every layer report that still holds; a future sender of layer-scope
-reports must repeat them the same way. Programs only the fallback runner
-draws compile in WebGL and are not reported as errors.
+reports must repeat them the same way. A shader layer only the fallback
+runner draws is reported the same way as `NotHeadlessRenderable` (a warning:
+it draws in the viewer; headless hosts cannot render it); the app shows it
+under the layer's shader key like a compile error.
 
 Evidence: `pm-node/tests/layer_reports.rs` (the interactive engine in a child
 process: a refused shader layer and a missing extension layer reach the view
 at the frame's revision, before the frame, and are repeated per revision and
-not within one), the unit test in `layer_reports.rs`, and the vitest
-`definition-snapshots.test.ts` ("holds layer reports for their revision").
+not within one), `pm-node/tests/shader_fallback.rs` (the runner's layer),
+the unit test in `layer_reports.rs`, and the vitests in
+`definition-snapshots.test.ts` ("holds layer reports for their revision",
+"shows a shader layer the fallback runner draws as not headless-renderable").
 
 Regression suite (`tests/shader_layers.rs`, no WebGL needed): the binding
 quirks, the time and resolution uniforms at the root rate, the cap, refused
@@ -325,7 +355,8 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **GPU time limits for shader layers:** the effects lane's watchdog times
   effect instances only; a runaway shader layer loop is not cut off.
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
-  readback, and upload per frame shown; there is no render-ahead for it.
+  readback, and upload per frame shown; there is no render-ahead for it (a
+  static one is uploaded once).
 - **Not run:** the full pm-render suite (targeted tests only, per the machine
   limits).
 - **Watchdog tests fail on the base too** (2026-10-18, base `f3bf2478` built
