@@ -95,8 +95,13 @@ pub struct AudioStatus {
     pub error: Option<String>,
     pub projects: u64,
     pub underruns: u64,
+    /// Output device cycles that overran their real-time deadline.
+    pub device_overloads: u64,
+    pub device_callbacks: u64,
     pub starved_renders: u64,
     pub problems: Vec<String>,
+    pub start_timing: Option<pm_audio::playback::StartTiming>,
+    pub prepared_starts: Vec<i64>,
 }
 
 pub struct AudioLink {
@@ -143,7 +148,7 @@ impl AudioLink {
                     watch_until: None,
                     warm: false,
                     warm_due: None,
-                    warmed: false,
+                    paused_at: 0,
                 }
                 .run()
             },
@@ -219,22 +224,27 @@ struct Control {
     warm: bool,
     /// When to check, once the controls rested ([`WARM_IDLE`]).
     warm_due: Option<Instant>,
-    /// The device opened ahead of Play and the mixer has no project yet.
-    warmed: bool,
+    /// Latest paused playhead, including seeks before the device opens.
+    paused_at: i64,
 }
 
 impl Control {
     fn run(mut self) {
         loop {
-            // A device opened ahead of Play gets the project at Play, with
-            // the media the engine has resolved by then (as before).
-            let feeding = self.playback.is_some() && !self.warmed;
+            // Feed warmed devices while paused too: their mixers decode and
+            // pre-roll at the playhead before the first Play arrives.
+            let feeding = self.playback.is_some();
             let timeout = match (feeding, self.dirty, self.last_project) {
                 (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
                 (true, true, None) => Duration::ZERO,
-                _ if self.playback.is_none() && self.warm_due.is_some() => self
-                    .warm_due
-                    .map_or(Duration::ZERO, |due| due.saturating_duration_since(Instant::now())),
+                _ if self.playback.is_none() && self.warm_due.is_some() => {
+                    self.warm_due.map_or(Duration::ZERO, |due| {
+                        due.saturating_duration_since(Instant::now())
+                    })
+                }
+                // Paused preparation and device health continue changing
+                // without controls or levels; keep diagnostics current too.
+                _ if feeding => LEVELS_INTERVAL,
                 _ => Duration::from_secs(3600),
             };
             // Levels while the device plays (or is about to).
@@ -274,7 +284,7 @@ impl Control {
             let due = self
                 .last_project
                 .is_none_or(|last| last.elapsed() >= PROJECT_INTERVAL);
-            if self.playback.is_some() && !self.warmed && self.dirty && due {
+            if self.playback.is_some() && self.dirty && due {
                 self.set_project();
             }
             self.send_levels();
@@ -351,12 +361,21 @@ impl Control {
             }
             AudioCtl::Pause => self.command(TransportCommand::Pause),
             AudioCtl::Warm => self.warm = true,
-            AudioCtl::Seek(at) => self.command(TransportCommand::Seek {
-                time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
-                mode: SeekMode::Exact,
-            }),
+            AudioCtl::Seek(at) => {
+                self.paused_at = at.max(0);
+                self.command(TransportCommand::Seek {
+                    time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                    mode: SeekMode::Exact,
+                });
+            }
             AudioCtl::Scrub(at) => {
+                self.paused_at = at.max(0);
                 if !self.audio_scrub {
+                    // Paused timeline moves must still reach the warm mixer.
+                    self.command(TransportCommand::Seek {
+                        time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
+                        mode: SeekMode::Exact,
+                    });
                     return true;
                 }
                 if self.playback.is_none() && !self.open() {
@@ -400,7 +419,7 @@ impl Control {
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
-                self.warmed = false;
+                self.paused_at = from.max(0);
                 if self.dirty {
                     self.set_project();
                 }
@@ -428,7 +447,14 @@ impl Control {
         if pm_audio::graph::audible(&self.doc, &self.composition, &mut ev).unwrap_or(false)
             && self.open()
         {
-            self.warmed = true;
+            self.set_project();
+            self.command(TransportCommand::SetLoop {
+                range: self.loop_range,
+            });
+            self.command(TransportCommand::Seek {
+                time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                mode: SeekMode::Exact,
+            });
         }
     }
 
@@ -537,7 +563,11 @@ fn report_playback(status: &Mutex<AudioStatus>, playback: &Playback) {
     let errors = playback.take_errors();
     let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
     status.underruns = stats.underruns;
+    status.device_overloads = stats.device_overloads;
+    status.device_callbacks = stats.device_callbacks;
     status.starved_renders = stats.starved_renders;
+    status.start_timing = playback.start_timing();
+    status.prepared_starts = playback.prepared_starts();
     for error in errors {
         if !status.problems.contains(&error) {
             status.problems.push(error);

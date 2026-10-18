@@ -70,7 +70,7 @@ export type NativeEngineOptions = {
   hostNow: () => number;
   /** Resolves an asset to the file the engine may read (the media store
    *  lane provides it); `null` when the asset is offline. */
-  resolveAsset?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   /** A generated proxy of an offline asset, for draft renders. */
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;

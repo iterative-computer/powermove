@@ -11,7 +11,7 @@ import path from 'node:path';
 
 import { mayNeedVideoProxy, mediaExtension, needsImageConversion } from '../../shared/media-formats';
 
-import type { ContentHash } from '../../shared/engine-protocol';
+import type { ContentHash, EngineProcess } from '../../shared/engine-protocol';
 import { HASH_HEX, validStorageKey, type ClassifyResult, type ConversionKind, type MediaBinding, type MediaConversion, type MediaLink, type MediaReadOpen } from '../../shared/media-store';
 import { ImportClassifier, type ClassifyOptions } from './classify';
 import { hashFile, type HashExecutor } from './hasher';
@@ -258,6 +258,50 @@ export class MediaStoreService {
     return await this.store.hasObject(hash, length) ? this.store.objectPath(hash) : null;
   }
 
+  /**
+   * A job snapshot's bindings, taken when it starts: they survive the window
+   * switching projects or closing. The frozen entry is tried first; when it is
+   * offline the job falls back to windows bound to the same project, so a
+   * relink (Locate Media) or media that comes back lets a waiting job resume.
+   */
+  private readonly jobBindings = new Map<number, { projectId: string | null; assets: Map<string, MediaBinding> }>();
+
+  async bindJob(session: number, project: Record<string, any> | null): Promise<void> {
+    if (!project) { this.jobBindings.delete(session); return; }
+    const projectId = typeof project['id'] === 'string' && project['id'] ? project['id'] : null;
+    this.jobBindings.set(session, { projectId, assets: await this.snapshotBindings(project) });
+  }
+
+  /** Persist content references when a queue entry is added, before its
+   * window closes or an old storage key is reused for different bytes. */
+  async snapshotProject(project: Record<string, any>): Promise<Record<string, any>> {
+    const bindings = await this.snapshotBindings(project);
+    return { ...project, assets: Object.fromEntries(Object.entries<any>(project['assets'] || {}).map(([key, meta]) => {
+      const hash = bindings.get(meta?.id)?.hash;
+      return [key, hash ? { ...meta, contentHash: hash } : meta];
+    })) };
+  }
+
+  private async snapshotBindings(project: Record<string, any>): Promise<Map<string, MediaBinding>> {
+    const assets = new Map<string, MediaBinding>();
+    for (const meta of Object.values<any>(project['assets'] || {})) {
+      if (!meta || typeof meta.id !== 'string') continue;
+      if (meta.storage === 'linked' && validLink(meta.link)) {
+        assets.set(meta.id, { link: { ...meta.link } });
+      } else {
+        const key = validStorageKey(meta.storageKey) ? meta.storageKey : meta.id;
+        const hash = typeof meta.contentHash === 'string' && HASH_HEX.test(meta.contentHash)
+          ? meta.contentHash : (await this.store.record(key))?.hash;
+        // Freeze the hash now: later key writes must not change this snapshot.
+        // The key stays as the window path's fallback for when that object is
+        // missing (offline at snapshot time, or put later).
+        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}) };
+        if (binding.key || binding.hash) assets.set(meta.id, binding);
+      }
+    }
+    return assets;
+  }
+
   bind(owner: number, projectId: string, assets: Record<string, MediaBinding>): void {
     const map = new Map<string, MediaBinding>();
     for (const [id, binding] of Object.entries(assets)) {
@@ -283,8 +327,19 @@ export class MediaStoreService {
    * bytes are in and its content hash, or null when the asset is offline,
    * unknown, or bound to different content in two windows.
    */
-  async resolveAsset(asset: string): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    const bound = [...this.bindings.values()].map((b) => b.assets.get(asset)).filter((b): b is MediaBinding => !!b);
+  async resolveAsset(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    const job = context?.process === 'job' ? this.jobBindings.get(context.session) : undefined;
+    if (job) {
+      const frozen = job.assets.get(asset);
+      const resolved = frozen ? await this.resolveBindings([frozen]) : null;
+      if (resolved || job.projectId === null) return resolved;
+      return this.resolveBindings([...this.bindings.values()].filter((b) => b.projectId === job.projectId).map((b) => b.assets.get(asset)));
+    }
+    return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
+  }
+
+  private async resolveBindings(candidates: (MediaBinding | undefined)[]): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    const bound = candidates.filter((b): b is MediaBinding => !!b);
     if (!bound.length) return null;
     const hashes = new Set(bound.map((b) => b.link?.hash ?? b.hash).filter(Boolean));
     if (hashes.size > 1) return null;

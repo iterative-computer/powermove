@@ -92,6 +92,29 @@ impl Shuttle {
         })
     }
 
+    /// Touch the master FFT/work buffers while paused, then restore a fresh
+    /// deterministic stream. Real input's output-seek still belongs to its
+    /// run; silence here must never become that run's pre-roll or output.
+    pub(crate) fn warm(&mut self) -> Result<()> {
+        let frames = self
+            .stretcher
+            .output_seek_length(SPEED as f64)
+            .max(self.lead() as usize + 2 * crate::ring::CHUNK);
+        let silence = vec![vec![0.0; frames]; self.channels];
+        let mut output = Vec::new();
+        let result = self.push(
+            &silence,
+            0,
+            1,
+            0,
+            TransportState::Shuttling,
+            None,
+            &mut output,
+        );
+        self.reset();
+        result
+    }
+
     /// The epoch of the stream in progress.
     pub fn epoch(&self) -> Option<u32> {
         self.epoch
@@ -250,6 +273,52 @@ impl Shuttle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_warmup_preserves_forward_and_reverse_pcm() {
+        for direction in [1, -1] {
+            let mut cold = Shuttle::new(2, 48_000).unwrap();
+            let mut warm = Shuttle::new(2, 48_000).unwrap();
+            warm.warm().unwrap();
+            let input: Vec<f32> = (0..24_000)
+                .map(|i| (i as f32 * 0.071).sin() * 0.25)
+                .collect();
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            for (i, chunk) in input.chunks(512).enumerate() {
+                let media = 40_000 + direction * (i * 512) as i64;
+                let planar = [chunk.to_vec(), chunk.to_vec()];
+                cold.push(
+                    &planar,
+                    media,
+                    direction,
+                    8,
+                    TransportState::Shuttling,
+                    None,
+                    &mut a,
+                )
+                .unwrap();
+                warm.push(
+                    &planar,
+                    media,
+                    direction,
+                    8,
+                    TransportState::Shuttling,
+                    None,
+                    &mut b,
+                )
+                .unwrap();
+            }
+            cold.finish(&mut a).unwrap();
+            warm.finish(&mut b).unwrap();
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.into_iter().zip(b) {
+                assert_eq!(a.start, b.start);
+                assert_eq!(a.rate, b.rate);
+                assert_eq!(a.planar, b.planar);
+            }
+        }
+    }
 
     /// A 440 Hz tone through the shuttle keeps its pitch, and the pieces
     /// tag the media they play: frame k plays stream sample 2k.

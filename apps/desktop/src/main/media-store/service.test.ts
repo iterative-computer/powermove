@@ -184,6 +184,77 @@ describe('MediaStoreService', () => {
     expect(await svc.resolveAsset('a1')).not.toBeNull();
   });
 
+  it('keeps snapshot media after a project switch and window close, scoped to its job session', async () => {
+    const svc = service();
+    const file = path.join(media, 'queued.png');
+    await settledFile(file, bytes(1000, 1));
+    const record = await svc.store.putFile(file, { key: 'media:v2:queued' });
+    const link = await svc.link(file);
+    const project = { id: 'queued-project', assets: {
+      copied: { id: 'copied', storageKey: record.key }, linked: { id: 'linked', storage: 'linked', link }
+    } };
+    svc.bind(1, project.id, { copied: { key: record.key }, linked: { link } });
+    const snapshot = await svc.snapshotProject(project);
+    expect(project.assets.copied).not.toHaveProperty('contentHash');
+    const replacement = path.join(media, 'replacement.png');
+    await settledFile(replacement, bytes(500, 2));
+    await svc.store.putFile(replacement, { key: record.key });
+    svc.bind(1, 'other-project', { copied: { hash: 'f'.repeat(64) } });
+    await svc.release(1);
+    await svc.bindJob(10, snapshot);
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(record.hash) });
+    expect(await svc.resolveAsset('linked', { process: 'job', session: 10 })).toMatchObject({ path: file });
+    const host = new HostServicesCore({ cacheDirectory: path.join(root, 'cache'), automaticOutputDirectory: path.join(root, 'out'),
+      physicalMemory: 8 * 1024 ** 3, resolveAsset: (asset, context) => svc.resolveAsset(asset, context) });
+    expect(await host.serve('job', 5, { type: 'mintHandle', kind: { kind: 'mediaRead', asset: 'copied' }, session: 10 }, 10))
+      .toMatchObject({ type: 'handle', contentHash: Uint8Array.from(Buffer.from(record.hash, 'hex')) });
+    // Interactive/session-number collisions and other jobs cannot borrow these bindings.
+    expect(await svc.resolveAsset('copied', { process: 'interactive', session: 10 })).toBeNull();
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 11 })).toBeNull();
+    await svc.bindJob(10, null);
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toBeNull();
+  });
+
+  it('lets a waiting job resume when its media is put, relinked in its project window, or found by key', async () => {
+    const svc = service();
+    const gone = path.join(media, 'gone.mov');
+    await settledFile(gone, bytes(2000, 3));
+    const offlineLink = await svc.link(gone);
+    await rm(gone);
+    const keyed = path.join(media, 'keyed.png');
+    await settledFile(keyed, bytes(800, 4));
+    const keyedRecord = await svc.store.putFile(keyed, { key: 'media:v2:keyed' });
+    const project = { id: 'waiting-project', assets: {
+      // Copied media that was offline (no store record) when the job started.
+      late: { id: 'late', storageKey: 'media:v2:late' },
+      linked: { id: 'linked', storage: 'linked', link: offlineLink },
+      // A saved content hash whose object is gone while its key still has bytes.
+      keyed: { id: 'keyed', storageKey: keyedRecord.key, contentHash: blake3Hex(bytes(9, 9)) },
+    } };
+    await svc.bindJob(20, project);
+    const job = { process: 'job' as const, session: 20 };
+    expect(await svc.resolveAsset('late', job)).toBeNull();
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+    expect(await svc.resolveAsset('keyed', job)).toMatchObject({ path: svc.store.objectPath(keyedRecord.hash) });
+
+    // wait_for_media re-mints every 2 s: the copy lands under the asset's key.
+    const late = path.join(media, 'late.png');
+    await settledFile(late, bytes(600, 5));
+    const lateRecord = await svc.store.putFile(late, { key: 'media:v2:late' });
+    expect(await svc.resolveAsset('late', job)).toMatchObject({ path: svc.store.objectPath(lateRecord.hash) });
+
+    // Locate Media in a window: only a window bound to the job's project counts.
+    const relinked = path.join(media, 'relinked.mov');
+    await settledFile(relinked, bytes(2000, 6));
+    const newLink = await svc.link(relinked);
+    svc.bind(1, 'other-project', { linked: { link: newLink } });
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+    svc.bind(2, project.id, { linked: { link: newLink } });
+    expect(await svc.resolveAsset('linked', job)).toMatchObject({ path: relinked });
+    await svc.release(2);
+    expect(await svc.resolveAsset('linked', job)).toBeNull();
+  });
+
   it('gives desktop Save the store object only at the expected length', async () => {
     const svc = service();
     const file = path.join(media, 'x.bin');

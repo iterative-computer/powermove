@@ -258,6 +258,12 @@ function hydrate(p: any) {
     });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
   };
+  /* A channel sanitized a second time (registered effect params: loose pass, then
+     the definition's pass) gives its own ids back first, so the shared duplicate
+     check below does not mistake them for another channel's and replace them. */
+  const releaseKeyIds = (prop: any) => {
+    (Array.isArray(prop?.kf) ? prop.kf : []).forEach((key: any) => { if (typeof key?.i === 'string') keyIds.delete(key.i); });
+  };
   const sanitizeLooseParams = (params: any, minTime = 0) => {
     const source = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
     Object.keys(source).forEach((key: any) => {
@@ -343,6 +349,7 @@ function hydrate(p: any) {
         const definition = PM.FX?.[f.type];
         for (const param of definition?.params || []) {
           if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
+          else releaseKeyIds(f.p[param.k]);
           sanitizeProp(f.p[param.k], { v: param.def }, -L.from);
         }
       });
