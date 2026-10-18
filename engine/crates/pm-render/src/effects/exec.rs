@@ -120,6 +120,17 @@ impl<'c> Gpu<'c> {
             .is_some_and(|d| d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn)
     }
 
+    /// A program the hang guard holds (a frame that drew it may be running
+    /// away): left out, and the frame is not presented.
+    fn held(&mut self, kind: DefinitionKind, id: &str) -> bool {
+        self.effects
+            .watchdog
+            .hold(&super::watchdog::Subject::Definition {
+                kind,
+                id: id.into(),
+            })
+    }
+
     fn take(&mut self, w: u32, h: u32) -> Target {
         self.pool.take_working(self.device, w, h, self.precision)
     }
@@ -222,6 +233,9 @@ impl<'c> Gpu<'c> {
             return None;
         }
         let builtin = self.builtin(DefinitionKind::Effect, &step.definition);
+        if !builtin && self.held(DefinitionKind::Effect, &step.definition) {
+            return None;
+        }
         let span = self.timer.as_deref_mut().and_then(|t| {
             t.begin(Span::definition(
                 DefinitionKind::Effect,
@@ -312,6 +326,9 @@ impl<'c> Gpu<'c> {
             return None;
         }
         let builtin = self.builtin(DefinitionKind::Transition, &step.definition);
+        if !builtin && self.held(DefinitionKind::Transition, &step.definition) {
+            return None;
+        }
         let span = self.timer.as_deref_mut().and_then(|t| {
             t.begin(Span::definition(
                 DefinitionKind::Transition,

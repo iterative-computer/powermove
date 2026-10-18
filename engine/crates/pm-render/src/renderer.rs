@@ -449,6 +449,51 @@ impl Renderer {
         self.effects.watchdog.take_reports()
     }
 
+    /// Looks at the frames the watchdog follows without waiting (a host
+    /// calls it between renders, every few tens of milliseconds while
+    /// frames are in flight): completions are seen promptly, a frame seen
+    /// running past the hang budget is suspected, and ended frames are
+    /// judged.
+    pub fn watchdog_watch(&mut self) {
+        if self.effects.watchdog.frames_in_flight() > 0 {
+            self.effects
+                .watchdog
+                .collect(&self.device, &self.queue, false);
+        }
+    }
+
+    /// Whether a frame the hang guard suspects has not been judged yet
+    /// (frames drawing its user programs fail with
+    /// [`RenderError::WatchdogPending`] until it is).
+    pub fn watchdog_holding(&self) -> bool {
+        self.effects.watchdog.holding()
+    }
+
+    /// Why a job renderer's watchdog stopped every frame, if it did.
+    pub fn watchdog_stopped(&self) -> Option<&str> {
+        self.effects.watchdog.stopped()
+    }
+
+    /// Waits until every submitted command has completed, looking at the
+    /// watchdog's frames every 100 ms meanwhile (so a frame that runs away
+    /// is seen running), then judges them. Job hosts wait here after each
+    /// frame, so a runaway is judged before its pixels are read.
+    pub fn wait_idle(&mut self) {
+        loop {
+            let done = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_millis(100)),
+            });
+            match done {
+                Err(wgpu::PollError::Timeout) => self.watchdog_watch(),
+                _ => break,
+            }
+        }
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, true);
+    }
+
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
@@ -808,6 +853,7 @@ impl Renderer {
             .effect_host
             .is_none()
             .then(|| self.effects.watchdog.frame_timer(&self.device));
+        self.effects.watchdog.take_held();
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             let mut exec = Exec {
@@ -848,7 +894,8 @@ impl Renderer {
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
             // so media caches filled by this encoder stay valid.
-            let complete = exec.unsupported.is_empty() && exec.fallback_pending.is_empty();
+            let held = exec.effects.watchdog.take_held();
+            let complete = exec.unsupported.is_empty() && exec.fallback_pending.is_empty() && !held;
             if complete {
                 exec.flip_color(&mut encoder, &gl_rows, target);
             }
@@ -880,9 +927,10 @@ impl Renderer {
                 exec.unsupported,
                 exec.failures,
                 timer,
-                pending,
+                (pending, held),
             )
         };
+        let (pending, held) = pending;
         if let Some(timer) = timer {
             self.effects.watchdog.finish(&mut encoder, timer);
         }
@@ -899,6 +947,9 @@ impl Renderer {
         failures.extend(exec_failures);
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
+        }
+        if held {
+            return Err(RenderError::WatchdogPending);
         }
         if !pending.is_empty() {
             return Err(RenderError::ShaderFallbackPending(

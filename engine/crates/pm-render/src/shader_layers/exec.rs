@@ -149,6 +149,9 @@ pub(crate) enum Missed {
     /// layer draws nothing, as a program that does not compile, and the
     /// watchdog's report names it.
     Disabled,
+    /// The hang guard holds the program (a frame that drew it may be
+    /// running away): the frame leaves it out and is not presented.
+    Held,
     /// The program WebGL draws failed in the native pipeline at pipeline
     /// creation (the Metal compiler): it needs the fallback runner.
     NeedsFallback(String),
@@ -332,6 +335,9 @@ impl crate::exec::Exec<'_> {
         };
         if disabled {
             return Err(Missed::Disabled);
+        }
+        if !span.builtin && self.effects.watchdog.hold(&span.subject) {
+            return Err(Missed::Held);
         }
         let out = self
             .pool

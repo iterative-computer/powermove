@@ -430,6 +430,9 @@ struct View {
     /// The frame on screen showed stand-ins: the media "landed" counter when
     /// it was drawn. A change draws the frame again.
     stand_in: Option<u64>,
+    /// The GPU watchdog held the last frame (`RenderError::WatchdogPending`):
+    /// it is drawn again once the watchdog has judged the suspect frame.
+    watchdog_held: bool,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -1369,6 +1372,7 @@ impl Thread {
             audio_version: 0,
             scrub: false,
             stand_in: None,
+            watchdog_held: false,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -1834,6 +1838,23 @@ impl Thread {
             .is_some_and(|g| g.lost.load(Ordering::Acquire))
         {
             self.recover_gpu();
+        }
+        // The GPU watchdog sees completions promptly and frames that run
+        // away while they run (a turn is at most 50 ms apart); a frame it
+        // held is drawn again once the suspect frame is judged.
+        let holding = match self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            Some(composer) => {
+                composer.renderer().watchdog_watch();
+                composer.renderer().watchdog_holding()
+            }
+            None => false,
+        };
+        if !holding {
+            for view in self.views.values_mut() {
+                if std::mem::take(&mut view.watchdog_held) {
+                    view.dirty = true;
+                }
+            }
         }
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
@@ -2393,6 +2414,13 @@ impl Thread {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }
                     }
+                    return None;
+                }
+                Err(pm_render::RenderError::WatchdogPending) => {
+                    // A frame drawing one of these programs was seen running
+                    // past the hang budget: nothing is submitted with them
+                    // until the watchdog judged it (`work`).
+                    view.watchdog_held = true;
                     return None;
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {

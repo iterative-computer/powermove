@@ -266,8 +266,10 @@ pub struct ReadFrame {
     pub failures: Vec<pm_render::LayerFailure>,
 }
 
-fn wait_idle(renderer: &Renderer) {
-    let _ = renderer.device().poll(wgpu::PollType::wait_indefinitely());
+/// Waits for the frame's commands, the watchdog looking on
+/// (`Renderer::wait_idle`).
+fn wait_idle(renderer: &mut Renderer) {
+    renderer.wait_idle();
 }
 
 /// Renders one frame through `gate`: the whole frame at once when the gate
@@ -366,6 +368,11 @@ fn render_bands(
         };
         let submitted = Instant::now();
         wait_idle(renderer);
+        // A program ran away in this frame: its pixels are not delivered.
+        if let Some(why) = renderer.watchdog_stopped() {
+            drop(admission);
+            return Err(pm_render::RenderError::Watchdog(why.to_owned()).into());
+        }
         let wall_us = submitted.elapsed().as_secs_f64() * 1e6;
         // The admitted command buffer's GPU time when timestamps are
         // available (the wall time also counts the wait behind other GPU

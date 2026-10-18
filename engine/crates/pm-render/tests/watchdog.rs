@@ -1,20 +1,26 @@
 //! The GPU watchdog's guards through `Renderer::render` with the
-//! deterministic test hook (`effects::watchdog::TimingSource`; issue A2):
-//! the per-program budget for shader layers, the hang guard for runaway
-//! programs (user programs off at once, built-ins kept), and the job
+//! deterministic test hooks (`effects::watchdog::TimingSource` and the
+//! clock; issue A2): the per-program budget for shader layers; the hang
+//! guard's suspicion (a frame seen running past the budget holds frames
+//! that draw its user programs) and attribution (only a program whose
+//! timestamps show it ran away, or that the frame stopped inside, is turned
+//! off; programs that finished, built-ins, and frames slowed by contention
+//! turn nothing off; without timestamps two such frames are needed); the job
 //! policy (no budget; a runaway stops the job with a named error until the
-//! watchdog is reset). The GPU timestamp path is `effects.rs`
-//! `the_watchdog_judges_every_timed_frame_not_only_the_first`.
+//! watchdog is reset); and the real completion path, where a frame whose
+//! completion is seen late is not a runaway. The GPU timestamp path is
+//! `effects.rs` `the_watchdog_judges_every_timed_frame_not_only_the_first`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::definitions::{DefinitionKind, DefinitionOrigin, DefinitionSnapshot};
 use pm_protocol::error::{ErrorCode, ErrorScope};
-use pm_render::effects::watchdog::{FnTiming, Policy, Span, TimingSource};
+use pm_render::effects::watchdog::{FnTiming, Policy, Span, SpanTime, Subject, TimingSource};
 use pm_render::{MapResolver, RenderError, RenderRequest, Renderer, builtin_definitions};
 use serde_json::{Value, json};
 
@@ -172,51 +178,202 @@ fn a_shader_layer_over_budget_is_turned_off_until_its_code_changes() {
     assert!(max_diff(&back, &drawn) <= 1.0 / 1024.0);
 }
 
+/// Per-program times from `times` (by definition id, or "sky" for the
+/// shader layer), every frame `frame_ms` of wall time, and still running
+/// while `running` is set and the frame drew `acme.invert`.
+struct Scripted {
+    times: Mutex<Vec<(&'static str, SpanTime)>>,
+    frame_ms: AtomicU64,
+    running: AtomicBool,
+}
+
+impl Scripted {
+    fn new(times: Vec<(&'static str, SpanTime)>, frame_ms: u64) -> Arc<Scripted> {
+        Arc::new(Scripted {
+            times: Mutex::new(times),
+            frame_ms: AtomicU64::new(frame_ms),
+            running: AtomicBool::new(false),
+        })
+    }
+
+    fn set(&self, times: Vec<(&'static str, SpanTime)>) {
+        *self.times.lock().unwrap() = times;
+    }
+}
+
+fn name(span: &Span) -> String {
+    match &span.subject {
+        Subject::Definition { id, .. } => id.as_str().to_owned(),
+        Subject::Code(_) => span.layer.as_str().to_owned(),
+    }
+}
+
+impl TimingSource for Scripted {
+    fn span(&self, span: &Span) -> SpanTime {
+        let n = name(span);
+        self.times
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| *k == n)
+            .map_or(SpanTime::Measured(Duration::from_millis(1)), |(_, t)| *t)
+    }
+
+    fn frame(&self, _: &[Span]) -> Duration {
+        Duration::from_millis(self.frame_ms.load(Ordering::Relaxed))
+    }
+
+    fn running(&self, spans: &[Span]) -> bool {
+        self.running.load(Ordering::Relaxed) && spans.iter().any(|s| name(s) == "acme.invert")
+    }
+}
+
+fn ms(v: u64) -> SpanTime {
+    SpanTime::Measured(Duration::from_millis(v))
+}
+
+fn disabled(r: &Renderer, id: &str) -> bool {
+    r.effects().watchdog.is_disabled(DefinitionKind::Effect, id)
+}
+
 #[test]
-fn a_runaway_frame_turns_off_its_user_programs_and_keeps_built_ins() {
+fn a_runaway_program_is_turned_off_and_programs_that_finished_are_not() {
     let _gpu = gpu();
     let mut r = Renderer::headless().unwrap();
     assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
-    // Each program within the budget, but the frame never finished in
-    // time: a runaway loop the GPU ran until the system aborted it.
-    let (span, frame) = (Arc::new(AtomicU64::new(1)), Arc::new(AtomicU64::new(5_000)));
+    // The frame never finished in time: the system aborted it inside
+    // acme.invert (its end never written). The built-in Invert and the
+    // shader layer finished in a few milliseconds.
+    let source = Scripted::new(
+        vec![
+            ("acme.invert", SpanTime::Unfinished),
+            ("invert", ms(1)),
+            ("sky", ms(3)),
+        ],
+        5_000,
+    );
     r.effects_mut()
         .watchdog
-        .set_timing_source(Some(timing(span, frame.clone())));
+        .set_timing_source(Some(source.clone()));
     let doc = document(vec![
         solid_with(&["invert", "acme.invert"]),
         shader_layer(SKY),
     ]);
     let first = render(&mut r, &doc).unwrap();
-    let mut reports = r.watchdog_reports(true);
-    reports.sort_by_key(|e| format!("{:?}", e.scope));
-    assert_eq!(reports.len(), 2, "{reports:?}");
-    assert!(reports.iter().all(|e| e.code == ErrorCode::WatchdogTimeout));
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::WatchdogTimeout);
     assert!(
-        reports.iter().any(|e| matches!(&e.scope,
-            ErrorScope::Effect { definition, .. } if definition.as_str() == "acme.invert")),
+        matches!(&reports[0].scope,
+            ErrorScope::Effect { definition, .. } if definition.as_str() == "acme.invert"),
         "{reports:?}"
     );
     assert!(
-        reports
-            .iter()
-            .any(|e| matches!(&e.scope, ErrorScope::Layer { layer } if layer.as_str() == "sky")),
-        "{reports:?}"
+        reports[0].message.contains("did not finish"),
+        "{}",
+        reports[0].message
     );
-    let watchdog = &r.effects().watchdog;
-    assert!(watchdog.is_disabled(DefinitionKind::Effect, "acme.invert"));
-    assert!(
-        !watchdog.is_disabled(DefinitionKind::Effect, "invert"),
-        "built-ins cannot run away"
-    );
-    // The next frame draws the built-in invert, skips the user's, and
-    // leaves the shader layer out.
-    frame.store(16, Ordering::Relaxed);
+    assert!(disabled(&r, "acme.invert"));
+    assert!(!disabled(&r, "invert"), "built-ins cannot run away");
+    // The next frame draws the built-in Invert and the shader layer and
+    // skips the user's effect.
+    source.frame_ms.store(16, Ordering::Relaxed);
     let next = render(&mut r, &doc).unwrap();
-    let expected = render(&mut r, &document(vec![solid_with(&["invert"])])).unwrap();
+    let expected = render(
+        &mut r,
+        &document(vec![solid_with(&["invert"]), shader_layer(SKY)]),
+    )
+    .unwrap();
     assert!(max_diff(&next, &expected) <= 1.0 / 1024.0);
     assert!(max_diff(&next, &first) > 0.1);
     assert!(r.watchdog_reports(true).is_empty());
+}
+
+#[test]
+fn a_program_measured_past_the_hang_budget_is_a_runaway() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let source = Scripted::new(vec![("sky", ms(2_500))], 2_600);
+    // The budget alone would also catch 2.5 s; take it out of the way.
+    r.effects_mut().watchdog.set_budget(Duration::from_secs(60));
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(source.clone()));
+    render(&mut r, &document(vec![shader_layer(SKY)])).unwrap();
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(
+        matches!(&reports[0].scope, ErrorScope::Layer { layer } if layer.as_str() == "sky"),
+        "{reports:?}"
+    );
+    assert!(
+        reports[0].message.contains("2.5 s"),
+        "{}",
+        reports[0].message
+    );
+}
+
+#[test]
+fn a_frame_slowed_by_contention_turns_nothing_off() {
+    // The frame took 5 s of wall time (another process, an export on the
+    // same GPU, a heavy frame of built-ins) but every program's timestamps
+    // show it finished in milliseconds: nothing is turned off.
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
+    let source = Scripted::new(vec![("acme.invert", ms(2)), ("sky", ms(4))], 5_000);
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(source.clone()));
+    let doc = document(vec![solid_with(&["acme.invert"]), shader_layer(SKY)]);
+    let first = render(&mut r, &doc).unwrap();
+    assert!(r.watchdog_reports(true).is_empty());
+    for _ in 0..3 {
+        assert_eq!(render(&mut r, &doc).unwrap(), first);
+    }
+    assert!(r.watchdog_reports(true).is_empty());
+    assert!(!disabled(&r, "acme.invert"));
+}
+
+#[test]
+fn without_timestamps_a_program_is_turned_off_after_two_frames_that_did_not_finish() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
+    let source = Scripted::new(vec![("acme.invert", SpanTime::Unknown)], 5_000);
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(source.clone()));
+    let doc = document(vec![solid_with(&["acme.invert"])]);
+    // Each frame is judged (with the source's times as they are now)
+    // before the source changes.
+    let step = |r: &mut Renderer| {
+        let pixels = render(r, &doc).unwrap();
+        r.wait_idle();
+        (pixels, r.watchdog_reports(true))
+    };
+    let (first, reports) = step(&mut r);
+    assert!(reports.is_empty(), "one unexplained hang");
+    // A frame in between where it finished forgives it.
+    source.frame_ms.store(16, Ordering::Relaxed);
+    source.set(vec![("acme.invert", ms(1))]);
+    assert_eq!(step(&mut r), (first.clone(), vec![]));
+    source.frame_ms.store(5_000, Ordering::Relaxed);
+    source.set(vec![("acme.invert", SpanTime::Unknown)]);
+    assert_eq!(
+        step(&mut r),
+        (first.clone(), vec![]),
+        "the count started over"
+    );
+    // Two unexplained hangs in a row: turned off.
+    let (_, reports) = step(&mut r);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(
+        reports[0].message.contains("2 frames"),
+        "{}",
+        reports[0].message
+    );
+    assert!(disabled(&r, "acme.invert"));
 }
 
 #[test]
@@ -228,14 +385,76 @@ fn a_frame_that_only_draws_built_ins_never_trips_the_hang_guard() {
             .unwrap()
             .is_empty()
     );
-    let (span, frame) = (Arc::new(AtomicU64::new(1)), Arc::new(AtomicU64::new(5_000)));
-    r.effects_mut()
-        .watchdog
-        .set_timing_source(Some(timing(span, frame)));
+    let source = Scripted::new(
+        vec![
+            ("invert", SpanTime::Unfinished),
+            ("blur", SpanTime::Unknown),
+        ],
+        5_000,
+    );
+    r.effects_mut().watchdog.set_timing_source(Some(source));
     let doc = document(vec![solid_with(&["invert", "blur"])]);
     let first = render(&mut r, &doc).unwrap();
     assert!(r.watchdog_reports(true).is_empty());
     assert_eq!(render(&mut r, &doc).unwrap(), first);
+    assert!(r.watchdog_reports(true).is_empty());
+}
+
+#[test]
+fn a_suspect_frame_holds_frames_drawing_its_user_programs_until_it_is_judged() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
+    let source = Scripted::new(vec![("acme.invert", ms(1))], 16);
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(source.clone()));
+    let doc = document(vec![solid_with(&["acme.invert"])]);
+    let other = document(vec![solid_with(&["invert"])]);
+    let drawn = render(&mut r, &doc).unwrap();
+    r.wait_idle();
+    assert!(r.watchdog_reports(true).is_empty());
+    // A frame drawing acme.invert is seen still running 3 s on.
+    source.running.store(true, Ordering::Relaxed);
+    source.frame_ms.store(3_000, Ordering::Relaxed);
+    render(&mut r, &doc).unwrap();
+    r.watchdog_watch();
+    assert!(r.watchdog_holding());
+    // Frames drawing it are held: nothing presented, no report, not off.
+    for _ in 0..2 {
+        match render(&mut r, &doc) {
+            Err(RenderError::WatchdogPending) => {}
+            other => panic!("expected a held frame, got {:?}", other.map(|_| ())),
+        }
+    }
+    assert!(r.watchdog_reports(false).is_empty());
+    assert!(!disabled(&r, "acme.invert"));
+    // A frame without it draws.
+    render(&mut r, &other).unwrap();
+    // The frame ends, and its timestamps show acme.invert finished: the
+    // hold ends and nothing is turned off.
+    source.running.store(false, Ordering::Relaxed);
+    r.watchdog_watch();
+    assert!(!r.watchdog_holding());
+    assert!(r.watchdog_reports(true).is_empty());
+    assert_eq!(render(&mut r, &doc).unwrap(), drawn);
+    r.wait_idle();
+    // Seen running again; this time the frame stopped inside it.
+    source.running.store(true, Ordering::Relaxed);
+    render(&mut r, &doc).unwrap();
+    r.watchdog_watch();
+    assert!(matches!(
+        render(&mut r, &doc),
+        Err(RenderError::WatchdogPending)
+    ));
+    source.set(vec![("acme.invert", SpanTime::Unfinished)]);
+    source.running.store(false, Ordering::Relaxed);
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(!r.watchdog_holding());
+    // Turned off: the frame draws without it.
+    let off = render(&mut r, &doc).unwrap();
+    assert!(max_diff(&off, &drawn) > 0.1);
 }
 
 #[test]
@@ -245,10 +464,10 @@ fn a_job_renderer_has_no_budget_and_stops_after_a_runaway() {
     assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
     r.effects_mut().watchdog.set_policy(Policy::Job);
     assert_eq!(r.effects().watchdog.hang(), Duration::from_secs(10));
-    let (span, frame) = (Arc::new(AtomicU64::new(900)), Arc::new(AtomicU64::new(950)));
+    let source = Scripted::new(vec![("acme.invert", ms(900)), ("sky", ms(900))], 950);
     r.effects_mut()
         .watchdog
-        .set_timing_source(Some(timing(span.clone(), frame.clone())));
+        .set_timing_source(Some(source.clone()));
     let doc = document(vec![solid_with(&["acme.invert"]), shader_layer(SKY)]);
     // 900 ms per program is slow, not a runaway: an export draws it, as
     // today's exporter does.
@@ -262,13 +481,25 @@ fn a_job_renderer_has_no_budget_and_stops_after_a_runaway() {
             .measured_ms(DefinitionKind::Effect, "acme.invert"),
         Some(900.0)
     );
-    // A frame past the job hang budget: the job stops with a named error,
-    // never a frame without the program.
-    frame.store(11_000, Ordering::Relaxed);
+    // A job never holds: a frame seen running is waited for.
+    source.running.store(true, Ordering::Relaxed);
+    source.frame_ms.store(11_000, Ordering::Relaxed);
     render(&mut r, &doc).unwrap();
+    r.watchdog_watch();
+    assert!(!r.watchdog_holding());
+    // That frame stopped inside acme.invert, and the shader ran 11 s: the
+    // job stops with a named error, never a frame without them.
+    source.set(vec![
+        ("acme.invert", SpanTime::Unfinished),
+        ("sky", ms(11_000)),
+    ]);
+    source.running.store(false, Ordering::Relaxed);
+    r.wait_idle();
     assert_eq!(r.watchdog_reports(true).len(), 2);
+    let stopped = r.watchdog_stopped().unwrap().to_owned();
     match render(&mut r, &doc) {
         Err(RenderError::Watchdog(message)) => {
+            assert_eq!(message, stopped);
             assert!(message.contains("acme.invert"), "{message}");
             assert!(message.contains("layer sky"), "{message}");
             assert!(message.contains("10 s"), "{message}");
@@ -279,30 +510,141 @@ fn a_job_renderer_has_no_budget_and_stops_after_a_runaway() {
         ),
     }
     // The next job starts over.
-    frame.store(16, Ordering::Relaxed);
+    source.set(vec![]);
+    source.frame_ms.store(16, Ordering::Relaxed);
     r.effects_mut().watchdog.reset();
     assert_eq!(render(&mut r, &doc).unwrap(), first);
 }
 
+/// A clock the test moves forward.
+fn movable_clock() -> (Arc<AtomicU64>, pm_render::effects::watchdog::Clock) {
+    let base = Instant::now();
+    let offset = Arc::new(AtomicU64::new(0));
+    let o = offset.clone();
+    (
+        offset,
+        Arc::new(move || base + Duration::from_millis(o.load(Ordering::Relaxed))),
+    )
+}
+
 #[test]
-fn a_frame_still_running_past_the_hang_budget_is_judged_before_it_finishes() {
-    // Without a test source: the wall clock. A 1 ns hang budget makes any
-    // frame not yet complete at the next collect a runaway; it is judged
-    // from the submission time, not when (if ever) it completes.
+fn a_frame_whose_completion_is_seen_late_is_not_a_runaway() {
+    // The real completion path (no timing source): the presenter submitted
+    // a frame and then waited 5 s for the renderer's WebGL runner without
+    // polling the device, so the completion callback fires 5 s after the
+    // submission. Before 2026-10-19 that read as a 5 s frame and turned
+    // every user program in it off.
     let _gpu = gpu();
     let mut r = Renderer::headless().unwrap();
     assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
-    r.effects_mut().watchdog.set_hang(Duration::from_nanos(1));
     r.effects_mut().watchdog.set_budget(Duration::from_secs(60));
-    let doc = document(vec![solid_with(&["acme.invert"])]);
-    render(&mut r, &doc).unwrap();
-    // Whether the frame completed or not, its wall time exceeds 1 ns.
-    let reports = r.watchdog_reports(true);
-    assert_eq!(reports.len(), 1, "{reports:?}");
-    assert!(
-        r.effects()
-            .watchdog
-            .is_disabled(DefinitionKind::Effect, "acme.invert")
-    );
+    let (offset, clock) = movable_clock();
+    r.effects_mut().watchdog.set_clock(Some(clock));
+    let doc = document(vec![solid_with(&["acme.invert"]), shader_layer(SKY)]);
+    let first = render(&mut r, &doc).unwrap();
+    for round in 1..=3u64 {
+        offset.store(round * 5_000, Ordering::Relaxed);
+        assert_eq!(render(&mut r, &doc).unwrap(), first);
+        assert!(r.watchdog_reports(false).is_empty(), "round {round}");
+        assert!(!r.watchdog_holding());
+    }
+    r.wait_idle();
+    assert!(r.watchdog_reports(true).is_empty());
+    assert!(!disabled(&r, "acme.invert"));
     assert_eq!(r.effects().watchdog.frames_in_flight(), 0);
+}
+
+/// A shader layer that takes tens of milliseconds at 1280 × 720.
+fn heavy_sky(iterations: u32) -> Value {
+    let code = format!(
+        "void main(){{ float a = uv.x; for (int i = 0; i < {iterations}; i++) {{ a = sin(a * 1.0001 + 0.37); }} fragColor = vec4(a, uv.y, 0.5, 1.0); }}"
+    );
+    layer(
+        "sky",
+        "shader",
+        json!({ "code": code, "uniforms": {}, "w": 1280, "h": 720 }),
+        json!([]),
+    )
+}
+
+#[test]
+fn a_frame_seen_running_past_the_hang_budget_is_cleared_by_its_timestamps() {
+    // The real path end to end: a frame is seen still running at a poll
+    // the clock places 3 s after its submission (contention), the viewer
+    // holds frames drawing its shader, and once it completes its GPU
+    // timestamps show the shader took milliseconds: nothing is turned off.
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    if !r
+        .device()
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
+        eprintln!("no TIMESTAMP_QUERY on this device");
+        return;
+    }
+    r.effects_mut().watchdog.set_budget(Duration::from_secs(60));
+    let (offset, clock) = movable_clock();
+    r.effects_mut().watchdog.set_clock(Some(clock));
+    let mut request = RenderRequest::sized(Size::new(1280, 720), Precision::Float16);
+    request.background = false;
+    let mut seen = false;
+    for (attempt, iterations) in [4_000u32, 16_000, 64_000].into_iter().enumerate() {
+        let doc = document(vec![heavy_sky(iterations)]);
+        // Warm: the program built, earlier frames judged.
+        r.render(
+            &doc,
+            "P-root",
+            Ticks::ZERO,
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+        r.wait_idle();
+        assert!(r.watchdog_reports(true).is_empty());
+        r.render(
+            &doc,
+            "P-root",
+            Ticks::ZERO,
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+        offset.fetch_add(3_000, Ordering::Relaxed);
+        r.watchdog_watch();
+        if !r.watchdog_holding() {
+            eprintln!("attempt {attempt}: the frame completed before the poll");
+            r.wait_idle();
+            assert!(r.watchdog_reports(true).is_empty());
+            continue;
+        }
+        seen = true;
+        assert!(matches!(
+            r.render(
+                &doc,
+                "P-root",
+                Ticks::ZERO,
+                &request,
+                &MapResolver::default()
+            ),
+            Err(RenderError::WatchdogPending)
+        ));
+        r.wait_idle();
+        assert!(!r.watchdog_holding(), "judged once it completed");
+        assert!(
+            r.watchdog_reports(true).is_empty(),
+            "cleared by its timestamps"
+        );
+        assert!(r.effects().watchdog.frames_in_flight() == 0);
+        r.render(
+            &doc,
+            "P-root",
+            Ticks::ZERO,
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+        break;
+    }
+    assert!(seen, "no frame was seen running");
 }

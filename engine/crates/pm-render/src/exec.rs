@@ -410,6 +410,8 @@ impl Exec<'_> {
                         // Turned off by the watchdog: nothing drawn; its
                         // report names the layer.
                         Err(crate::shader_layers::exec::Missed::Disabled) => {}
+                        // Held by the hang guard: the frame is not presented.
+                        Err(crate::shader_layers::exec::Missed::Held) => {}
                         Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self.fail(
                             plan,
                             draw,
