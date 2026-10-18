@@ -607,3 +607,14 @@ PNG channels can differ by 1 byte while premultiplied pixels are identical.
 The Rust regression pins alpha 0/low/128/255, RGB above alpha, and unchanged
 16-bit quantization. The separate legacy/native float accumulator comparison
 remains below 0.125 CV for all eight ICC compositions (`media.md`).
+
+
+## B1: export media binding lifetime (2026-10-18)
+
+Sheet, queue and agent exports wait for the renderer's host-media binding
+acknowledgement. Main's queued project snapshot records copied-media hashes at
+Add to Queue, and `AgentJobs` pins copied and linked bindings to each export's
+snapshot session before resync. Host-service resolution selects those bindings
+by process and session until the export ends, independently of open windows.
+See `media-store.md` for the lifetime and regression cases. The original
+capability-handle checks still grant paths only to the owning engine port.

@@ -55,17 +55,52 @@ for (const flag of ['0', '1']) {
       }, assets);
       expect(exported).toEqual({ cancelled: false });
       expect(await app.evaluate(() => (globalThis as any).__readinessOfflineMessages)).toEqual([]);
-      const pixels = await page.evaluate(async bytes => {
+      const readPixels = async (file: string) => page.evaluate(async bytes => {
         const image = await createImageBitmap(new Blob([Uint8Array.from(bytes)], { type: 'image/png' }));
         const canvas = new OffscreenCanvas(64, 64), g = canvas.getContext('2d')!;
         g.drawImage(image, 0, 0); image.close();
         return [16, 48].map(x => [...g.getImageData(x, 32, 1, 1).data]);
-      }, [...await readFile(output)]);
-      expect(pixels).toEqual([[255, 0, 0, 255], [0, 255, 0, 255]]);
+      }, [...await readFile(file)]);
+      expect(await readPixels(output)).toEqual([[255, 0, 0, 255], [0, 255, 0, 255]]);
       if (flag === '1') {
         await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation?.presenting)).toBe(true);
         const report = await app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
-        expect(report.presenter.layerFailures).toBe(0);
+        expect(report.presenter.layerFailures, JSON.stringify(session.diagnostics.console)).toBe(0);
+      }
+      // Reopen, then remove the live binding to make the debounce window deterministic.
+      // Export, rather than the earlier import, must establish this binding.
+      await page.evaluate(() => {
+        const PM = (window as any).PM;
+        PM.replaceProject(PM.hydrateProject(JSON.parse(JSON.stringify(PM.proj))));
+      });
+      if (flag === '1') await app.evaluate(async () => {
+        const store = (globalThis as any).__powermoveMediaStore;
+        for (const owner of store.bindings.keys()) await store.release(owner);
+      });
+      expect(await page.evaluate(() => (window as any).PM.Export.run({
+        format: 'still', w: 64, h: 64, mblur: false, audio: false
+      }))).toEqual({ cancelled: false });
+      expect(await app.evaluate(() => (globalThis as any).__readinessOfflineMessages)).toEqual([]);
+      expect(await readPixels(output)).toEqual([[255, 0, 0, 255], [0, 255, 0, 255]]);
+      if (flag === '1') {
+        // A queued snapshot owns its media even once its window has switched
+        // projects and released all live media bindings.
+        const queuedOutput = path.join(session.userData, 'queued.png');
+        await app.evaluate(({ dialog }, file) => {
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath: file });
+        }, queuedOutput);
+        expect(await page.evaluate(() => (window as any).PM.Export.addToQueue({
+          format: 'still', fps: 30, scale: 1, range: 'all', quality: 'high', mblur: false, audio: false
+        }))).toMatchObject({ status: 'added' });
+        await page.evaluate(() => { const PM = (window as any).PM; PM.replaceProject(PM.mkProject({ name: 'Other project' })); });
+        await app.evaluate(async () => {
+          const store = (globalThis as any).__powermoveMediaStore;
+          for (const owner of store.bindings.keys()) await store.release(owner);
+          await (globalThis as any).__powermoveNativeEngine.renderQueue.start();
+        });
+        await expect.poll(() => app.evaluate(() =>
+          (globalThis as any).__powermoveNativeEngine.renderQueue.state().jobs[0]?.state), { timeout: 30_000 }).toBe('done');
+        expect(await readPixels(queuedOutput)).toEqual([[255, 0, 0, 255], [0, 255, 0, 255]]);
       }
       expect(session.diagnostics.pageErrors).toEqual([]);
     });

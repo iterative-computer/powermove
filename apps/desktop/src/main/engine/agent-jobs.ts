@@ -328,6 +328,8 @@ type FrameSession = { session: number; revision: number; hash: string; generatio
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
+  /** Pins media for each export snapshot until its session closes. */
+  bindMediaSession?(session: number, project: Project | null): Promise<void>;
   /** Status of an export sheet job, for its window. */
   onUserStatus?(owner: number, status: UserExportStatus): void;
   /** Status of a render queue job (`exportQueued`). */
@@ -703,6 +705,7 @@ export class AgentJobs {
     const canonical = canonicalProject(project);
     const session = await this.openSession(document, 'jobSnapshot');
     try {
+      await this.options.bindMediaSession?.(session, project);
       await this.resync(session, document, canonical, canonicalHash(canonical), 1);
     } catch (error) {
       await this.closeSession(session);
@@ -727,6 +730,7 @@ export class AgentJobs {
   }
 
   private async closeSession(session: number): Promise<void> {
+    await this.options.bindMediaSession?.(session, null);
     await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
   }
 }
