@@ -319,10 +319,10 @@ impl OutputStream {
     }
 }
 
-/// Bound interactive callback phase to about 3 ms at common device rates.
+/// Bound 44.1/48 kHz callback phase to about 1.5 ms.
 /// The callback only copies already mixed PCM and publishes its clock; DSP
 /// stays on the producer with its callback-adapted reserve. Unlike today's
-/// WebAudio graph, it can request 128 frames through 48 kHz without putting
+/// WebAudio graph, it can request 64 frames through 48 kHz without putting
 /// mixing on that tighter deadline. Higher rates keep 256/512 frames.
 /// Clamp to the device's advertised range; unknown ranges use its default.
 fn interactive_buffer(supported: &cpal::SupportedBufferSize, sample_rate: u32) -> cpal::BufferSize {
@@ -331,7 +331,7 @@ fn interactive_buffer(supported: &cpal::SupportedBufferSize, sample_rate: u32) -
     } else if sample_rate > 48_000 {
         256
     } else {
-        128
+        64
     };
     match *supported {
         cpal::SupportedBufferSize::Range { min, max } => {
@@ -350,7 +350,7 @@ mod tests {
         use cpal::{BufferSize::*, SupportedBufferSize::Range};
         let wide = Range { min: 14, max: 4096 };
         for rate in [44_100, 48_000] {
-            assert_eq!(interactive_buffer(&wide, rate), Fixed(128), "{rate}");
+            assert_eq!(interactive_buffer(&wide, rate), Fixed(64), "{rate}");
         }
         for rate in [88_200, 96_000] {
             assert_eq!(interactive_buffer(&wide, rate), Fixed(256), "{rate}");

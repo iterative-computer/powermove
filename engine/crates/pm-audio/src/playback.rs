@@ -40,6 +40,8 @@ use crate::graph::{AssetResolver, MixGraph};
 use crate::kernel;
 use crate::meter::Meters;
 use crate::mixer::{MixFormat, Mixer, RenderOptions};
+#[doc(hidden)]
+pub use crate::priority::StartPriority;
 use crate::ring::{CHUNK, Consumer, Ring, Tag};
 use crate::shuttle::Shuttle;
 use crate::source::SourceCache;
@@ -190,6 +192,7 @@ pub struct StartTiming {
     pub applied_us: u64,
     pub queued_us: u64,
     pub ready_us: u64,
+    pub prefill_ready_us: u64,
     pub start_spread_frames: u64,
     pub omitted_prefix_frames: u64,
     pub safety_net_fires: u64,
@@ -209,6 +212,7 @@ struct StartTrace {
     applied: AtomicU64,
     queued: AtomicU64,
     ready: AtomicU64,
+    prefill_ready: AtomicU64,
     safety_net: AtomicU64,
     running: AtomicBool,
     program_underruns: AtomicU64,
@@ -230,6 +234,7 @@ impl StartTrace {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.ready.store(0, Ordering::Relaxed);
+        self.prefill_ready.store(0, Ordering::Relaxed);
         self.safety_net.store(0, Ordering::Relaxed);
         self.program_underruns.store(0, Ordering::Relaxed);
         self.running.store(true, Ordering::Relaxed);
@@ -292,6 +297,7 @@ impl StartTrace {
             applied_us: self.applied.load(Ordering::Relaxed),
             queued_us: self.queued.load(Ordering::Acquire),
             ready_us: self.ready.load(Ordering::Acquire),
+            prefill_ready_us: self.prefill_ready.load(Ordering::Acquire),
             start_spread_frames,
             omitted_prefix_frames,
             safety_net_fires: self.safety_net.load(Ordering::Relaxed),
@@ -1198,12 +1204,14 @@ impl RenderThread {
                 self.prepare_paused();
                 continue;
             }
+            let start_priority = need_preroll.then(StartPriority::new);
             if need_preroll {
                 need_preroll = false;
                 self.preroll();
                 last_prefetch = None;
             }
             self.fill();
+            drop(start_priority);
             if self.late_start.is_some() {
                 continue;
             }
@@ -1714,6 +1722,10 @@ impl RenderThread {
         {
             self.late_start = Some(position);
         }
+        self.shared.start_timing.prefill_ready.store(
+            self.mixer.prefill_ready_at(position).unwrap_or(0),
+            Ordering::Release,
+        );
         self.shared
             .start_timing
             .ready

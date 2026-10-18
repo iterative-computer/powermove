@@ -253,6 +253,7 @@ fn head_frames(rate: u32) -> usize {
 }
 struct Head {
     start: i64,
+    ready_us: u64,
     pcm: Vec<Vec<f32>>,
 }
 impl Head {
@@ -434,7 +435,11 @@ impl PrepareVoice {
                 }
                 let mut shared = head.lock().unwrap_or_else(|e| e.into_inner());
                 if shared.is_none() {
-                    *shared = Some(Arc::new(Head { start: a, pcm: out }));
+                    *shared = Some(Arc::new(Head {
+                        start: a,
+                        ready_us: crate::clock::host_now_us(),
+                        pcm: out,
+                    }));
                     head.available.store(true, Ordering::Release);
                 }
             }
@@ -800,6 +805,20 @@ impl Mixer {
             .and_then(|p| p.runs.get(vi))
             .and_then(|r| r.as_ref())
             .is_some_and(|r| Arc::as_ptr(r) as usize == run_id)
+    }
+
+    pub(crate) fn prefill_ready_at(&self, start: i64) -> Option<u64> {
+        let p = self.prepared.get(&start)?;
+        let mut ready = 0;
+        for (i, voice) in self.voices.iter().enumerate() {
+            if voice.stretch.is_none() {
+                continue;
+            }
+            let slot = p.heads[i].as_ref()?;
+            let head = slot.lock().unwrap_or_else(|e| e.into_inner());
+            ready = ready.max(head.as_ref()?.ready_us);
+        }
+        (ready != 0).then_some(ready)
     }
 
     pub(crate) fn stretches_ready(&self, start: i64) -> bool {

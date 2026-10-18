@@ -45,3 +45,5 @@ pub use error::{AudioError, Result};
 pub use graph::{AssetResolver, MixGraph};
 pub use mixer::{MixFormat, Mixer, RETUNE_GLIDE_MS, RenderOptions};
 pub use source::SourceCache;
+
+mod priority;

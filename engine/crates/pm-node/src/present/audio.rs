@@ -266,6 +266,10 @@ impl Control {
                 controls.push(ctl);
             }
             let rested = controls.is_empty();
+            let starting = controls
+                .iter()
+                .any(|c| matches!(c, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }));
+            let _priority = starting.then(pm_audio::playback::StartPriority::new);
             for ctl in controls {
                 if !self.apply(ctl) {
                     self.shutdown();
