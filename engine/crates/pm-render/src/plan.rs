@@ -1208,20 +1208,22 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                // Level 2 SVG images draw at output resolution
-                // (crate::vector::svg); level 1 and SVG text stay routed.
-                // A level 1 SVG is not parsed: Chromium's `<img>` accepts
-                // it, so a usvg error would not mean the file is corrupt.
+                // Valid level 1 paint records remain gated. A broken
+                // XML/image document paints nothing, as Chromium's <img>
+                // does. usvg paint support does not determine corruption.
                 if !crate::vector::level2(layer) {
-                    if let Err(e) = std::fs::metadata(&path) {
-                        b.failures.push(LayerFailure {
+                    match pm_media::image::svg::broken_image_file(&path) {
+                        Err(e) => b.failures.push(LayerFailure {
                             composition: comp_id,
                             layer: js::layer_id(layer),
                             message: format!("{}: {e}", path.display()),
-                        });
-                    } else {
-                        b.unsupported
-                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                        }),
+                        Ok(true) => {}
+                        Ok(false) => b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::SvgImage,
+                        )),
                     }
                     return Ok(None);
                 }

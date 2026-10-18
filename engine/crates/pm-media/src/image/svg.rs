@@ -189,6 +189,8 @@ pub fn sniff(head: &[u8]) -> bool {
         || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
 }
 
+pub use super::svg_broken::{MAX_ELEMENT_DEPTH, broken_image, broken_image_file};
+
 /// Rasterizes an SVG file at its intrinsic size (rounded up), the still
 /// [`super::read`] returns; renderers ask [`SvgDocument::render`] for the
 /// size they draw at.

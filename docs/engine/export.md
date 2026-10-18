@@ -569,3 +569,41 @@ folder's path.
 - **Audio "no length limit"** is not tested here.
 - **8-bit PNG** dithers by default, which enlarges files.
 - **Base-machine numbers**: everything is this Mac only.
+
+## Standard transparent PNG compatibility (E1)
+
+Today's `alphaFrame` reads the premultiplied accumulator into RGBA8,
+truncates `(RGB * 255 / alpha)`, then sends that ImageData through Canvas2D
+before PNG encoding. Directly dividing the float frame before quantization
+changed translucent stills by up to 1.97 premultiplied CV. `convert.rs`
+reproduces both byte boundaries for standard-color, straight-alpha RGBA8
+PNG output, including Canvas2D's rounded premultiply and PNG's reciprocal
+unpremultiply. This boundary is byte-quantized and does not add dither.
+Linear output, 16-bit PNG, float rendering and other formats retain their
+existing conversions.
+
+The E1 conversion is selected once from the frozen job document. A document
+containing any compat-level-1 layer (including a missing `compat` field) uses
+the legacy boundary. Every composition is considered, while the stored open
+composition wins over its stale `comps` copy. Documents whose layers are all
+level 2 use direct float unpremultiplication before byte quantization, so
+low-alpha color retains its precision. `Pipeline::new` (and so
+`pm_export::export`) defaults to the legacy boundary, so a caller that never
+calls `set_legacy_png` keeps today's level 1 bytes; the job renderer selects
+direct precision only for all-level-2 documents. Linear and 16-bit output
+retain their existing conversions.
+
+Unit tests pin both conversions and document selection, including mixed and
+nested compositions. `job_export::png_byte_compatibility_follows_the_frozen_document`
+checks the actual GPU-to-export pipeline: a 0.3%-opaque solid gives the
+legacy black RGB bytes at level 1 and preserves its #336699 color at level 2.
+
+The hidden-app transparent-export regression passes all 58 drawn
+orientation/color-description cases at max 1 CV, no pixels above 1, with
+completed native export jobs and no fallback. The oriented PNG-alpha and
+AVIF-alpha E1 examples both measure 0 CV. P3 and Adobe RGB PNG/TIFF alpha
+ramps also compare at 0 CV after Chromium decoding; the decoded straight
+PNG channels can differ by 1 byte while premultiplied pixels are identical.
+The Rust regression pins alpha 0/low/128/255, RGB above alpha, and unchanged
+16-bit quantization. The separate legacy/native float accumulator comparison
+remains below 0.125 CV for all eight ICC compositions (`media.md`).

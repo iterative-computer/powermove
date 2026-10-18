@@ -61,7 +61,6 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
     PM.GL.gl.readPixels(0, 0, 640, 360, PM.GL.gl.RGBA, PM.GL.gl.UNSIGNED_BYTE, editorPixels);
     const stored = await PM.MediaStore.get(asset);
     const beforeUndo = PM.proj.layers.length;
-    PM.hist.undo();
     return {
       asset: { kind: asset.kind, format: asset.format, width: asset.w, height: asset.h },
       layer: {
@@ -78,10 +77,17 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
       highZoom,
       files: [...web.files].map(([name, bytes]: [string, Uint8Array]) => [name, [...bytes]]),
       editorPixels: [...editorPixels],
-      undo: { before: beforeUndo, after: PM.proj.layers.length, assetPreserved: Boolean(PM.proj.assets[asset.id]) },
+      undoBefore: beforeUndo,
     };
   });
 
+  if (process.env.POWERMOVE_NEW_ENGINE === '1') {
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route)).toBe('engine');
+  }
+  const undo = await page.evaluate(() => {
+    const PM = (window as any).PM, source = PM.proj.layers[0].d.svgSourceAsset;
+    PM.hist.undo(); return { after: PM.proj.layers.length, assetPreserved: Boolean(PM.proj.assets[source]) };
+  });
   expect(proof.asset).toEqual({ kind: 'image', format: 'svg', width: 64, height: 32 });
   expect(proof.layer).toEqual({ type: 'shape', sourceAsset: expect.any(String), paths: 2, vertices: [8, 4] });
   expect(proof.vertexEdit.ok).toBe(true);
@@ -97,7 +103,7 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
   expect(proof.highZoom.viewportTextureBytes).toBe(
     proof.highZoom.canvas.width * proof.highZoom.canvas.height * 4,
   );
-  expect(proof.undo).toEqual({ before: 1, after: 0, assetPreserved: true });
+  expect({ before: proof.undoBefore, ...undo }).toEqual({ before: 1, after: 0, assetPreserved: true });
   expect(session.diagnostics.pageErrors).toEqual([]);
 
   const files = new Map<string, Buffer>(proof.files.map(([name, bytes]) => [name as string, Buffer.from(bytes as number[])]));

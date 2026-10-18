@@ -87,15 +87,11 @@ fn untested_still_classes_are_unsupported() {
     let d = dir().join("other");
     std::fs::create_dir_all(&d).unwrap();
     let cases: &[(&str, &[&str], &str)] = &[
-        ("a.bmp", &[], "BMP stills"),
-        ("a.gif", &[], "GIF stills"),
-        ("a.ico", &["-c:v", "bmp", "-f", "ico"], "ICO stills"),
         (
             "a.exr",
             &["-c:v", "exr", "-pix_fmt", "gbrpf32le"],
             "floating-point stills",
         ),
-        ("mono.png", &["-pix_fmt", "monob"], "1-bit PNG stills"),
         ("a.dpx", &["-pix_fmt", "gbrp10le"], ""),
     ];
     for (name, args, message) in cases {
@@ -105,15 +101,15 @@ fn untested_still_classes_are_unsupported() {
         assert!(got.contains(message), "{name}: {got}");
         eprintln!("{name:<12} unsupported: {got}");
     }
-    // PNG gamma and chromaticity chunks Chromium honors and pm-media does
-    // not: unsupported unless an sRGB chunk overrides them.
+    // Gamma-only PNG uses the measured compatibility transform; independent
+    // chromaticity/HDR metadata is still a distinct class.
     let plain = d.join("plain.png");
     ffmpeg(&plain, &["-pix_fmt", "rgb24"]);
     assert_eq!(probe_image(&plain), Ok(()));
     let bytes = std::fs::read(&plain).unwrap();
     let gama = d.join("gama.png");
     std::fs::write(&gama, with_chunk(&bytes, b"gAMA", &55555u32.to_be_bytes())).unwrap();
-    assert!(unsupported(&gama).contains("gAMA"));
+    assert_eq!(probe_image(&gama), Ok(()));
     let overridden = d.join("gama-srgb.png");
     let srgb = with_chunk(&bytes, b"sRGB", &[0]);
     std::fs::write(
@@ -124,7 +120,7 @@ fn untested_still_classes_are_unsupported() {
     assert_eq!(probe_image(&overridden), Ok(()));
     let cicp = d.join("cicp.png");
     std::fs::write(&cicp, with_chunk(&bytes, b"cICP", &[9, 16, 0, 1])).unwrap();
-    assert!(unsupported(&cicp).contains("CICP"));
+    assert_eq!(probe_image(&cicp), Ok(()));
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -328,10 +324,9 @@ fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
 /// The compatibility bitmap consumes the decoder's applied orientation
 /// where Chromium applies it (PNG eXIf before the image data, JPEG, TIFF,
 /// HEIF; compared in `e2e/native-still-orientation-parity.spec.ts`). WebP
-/// EXIF is ignored, as Blink ignores it. Late PNG eXIf is still gated when
-/// the decoder did not apply it.
+/// EXIF and post-IDAT PNG eXIf are ignored, as Blink ignores them.
 #[test]
-fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
+fn decoded_orientation_and_ignored_late_exif_match_blink() {
     let d = dir().join("oriented");
     std::fs::create_dir_all(&d).unwrap();
     let mut cases: Vec<PathBuf> = Vec::new();
@@ -433,9 +428,10 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
             _ => pm_media::image::ImageFormat::Heif,
         };
         let t = pm_render::stills::container_transform(p, format);
-        assert!(
-            matches!(t, Ok(Some(_))),
-            "{}: header parse found {t:?}",
+        assert_eq!(
+            t.unwrap().is_some(),
+            p.file_name().unwrap() != "exif6-late.png",
+            "{}: pre-IDAT transforms only",
             p.display()
         );
     }
@@ -448,15 +444,16 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
     }
 
     for p in &cases {
-        if p.file_name().unwrap() == "exif6-late.png" {
-            assert!(unsupported(p).contains("oriented stills"));
-        } else {
-            assert_eq!(probe_image(p), Ok(()), "{}", p.display());
-        }
+        assert_eq!(probe_image(p), Ok(()), "{}", p.display());
     }
     // Applied orientations are pixel permutations of the unoriented
     // bitmap (so is Chromium's oriented ImageBitmap; media.md).
     let plain_rgba = compat_rgba8(&plain);
+    assert_eq!(
+        compat_rgba8(&d.join("exif6-late.png")),
+        plain_rgba,
+        "late EXIF is ignored"
+    );
     for (name, o) in [("exif6.png", 6u8), ("exif2.png", 2)] {
         let expect = orient_rgba8(&plain_rgba, 96, 54, o);
         assert!(compat_rgba8(&d.join(name)) == expect, "{name}");
@@ -608,7 +605,9 @@ fn avif_container_transforms_follow_blink() {
 /// The level-1 AVIF bitmap, tightly packed.
 fn avif_compat_rgba8(path: &Path) -> Vec<u8> {
     let pool = pm_media::pool::FramePool::new(0);
-    let original = pm_media::image::read(path, &pool).unwrap();
+    let original = pm_media::image::read(path, &pool)
+        .or_else(|_| pm_media::image::avif_compat::read_bitmap(path, &pool))
+        .unwrap();
     assert!(
         pm_media::image::avif_compat::applies(&original),
         "{}",
@@ -690,11 +689,8 @@ fn avif_color_descriptions_blink_reads_as_srgb_are_drawn() {
         (1, 8, 1),
         (1, 11, 1),
         (1, 12, 1),
-        (1, 16, 1),
-        (1, 18, 1),
         (6, 6, 6),
         (5, 13, 5),
-        (9, 1, 9),
     ] {
         let f = encode(p, t, m);
         let why = unsupported(&f);
@@ -730,7 +726,7 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
 fn compat_rgba8(path: &Path) -> Vec<u8> {
     let pool = pm_media::pool::FramePool::new(0);
     let original = pm_media::image::read(path, &pool).unwrap();
-    let bitmap = pm_media::image::compat::bitmap(&original, &pool).unwrap();
+    let bitmap = pm_media::image::compat::bitmap_at(path, &original, &pool).unwrap();
     bitmap
         .frame
         .with_planes(|planes| {
@@ -751,10 +747,10 @@ fn compat_rgba8(path: &Path) -> Vec<u8> {
 /// compressions it also accepts (LZW with and without predictor 2, both
 /// Deflate tags, PackBits) decode, in pm-media, to the same pixels as the
 /// uncompressed file (and FFmpeg, the legacy converter, decodes them
-/// losslessly by definition), so they are the same class. Tiled and gray
-/// files are routed (palette, Y'CbCr, planar, fill order, sample format,
-/// and colorimetry tags are covered by `stills::tests::tiff_classes`;
-/// pm-media cannot read FFmpeg's palette or Y'CbCr TIFF at all).
+/// losslessly by definition), so they are the same class. Tiled layouts
+/// remain gated. Gray and palette strips have separate app comparisons;
+/// other photometric/sample/colorimetry boundaries are covered by
+/// `stills::tests::tiff_classes`.
 #[test]
 fn tiff_compressions_decode_alike() {
     let d = dir().join("tiff");
@@ -816,14 +812,18 @@ fn tiff_compressions_decode_alike() {
             ..Default::default()
         },
     );
-    let got = unsupported(&tiled);
-    assert!(got.contains("tiled"), "{got}");
-    eprintln!("imageio-tiled.tiff unsupported: {got}");
+    assert_eq!(probe_image(&tiled), Ok(()));
+    let bitmap =
+        pm_media::image::compat::read_tiff_source(&tiled, &pm_media::pool::FramePool::new(0))
+            .unwrap();
+    assert_eq!(bitmap.bit_depth, 8);
     let gray = d.join("gray.tiff");
     ffmpeg(&gray, &["-pix_fmt", "gray"]);
-    let got = unsupported(&gray);
-    assert!(got.contains("photometric interpretation 1"), "{got}");
-    eprintln!("gray.tiff    unsupported: {got}");
+    assert_eq!(
+        probe_image(&gray),
+        Ok(()),
+        "gray TIFF is compared through the app"
+    );
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -889,11 +889,11 @@ fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Gray JPEG is drawn only as baseline, the structure compared with the
-/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray is
-/// routed.
+/// Baseline gray JPEG is compared with the legacy renderer in
+/// `render/still-photo-gray-jpg`; progressive gray now
+/// also has a rotated/filtered comparison through the app.
 #[test]
-fn progressive_gray_jpeg_is_unsupported() {
+fn progressive_gray_jpeg_is_supported() {
     let d = dir().join("gray-jpeg");
     std::fs::create_dir_all(&d).unwrap();
     let gray_png = d.join("gray.png");
@@ -916,10 +916,73 @@ fn progressive_gray_jpeg_is_unsupported() {
         bytes.windows(2).any(|w| w == [0xFF, 0xC2]),
         "ImageIO wrote no progressive frame header"
     );
-    let got = unsupported(&progressive);
-    assert!(got.contains("progressive gray"), "{got}");
-    eprintln!("progressive gray JPEG unsupported: {got}");
+    assert_eq!(probe_image(&progressive), Ok(()));
     std::fs::remove_dir_all(&d).ok();
+}
+
+/// Full app comparisons of these classes live in the explicit
+/// svgstills-parity harness; keep the capability and source precision
+/// boundaries covered without depending on private fixtures.
+#[test]
+fn additional_integer_decoder_classes_are_drawn() {
+    let d = dir().join("integer-classes");
+    std::fs::create_dir_all(&d).unwrap();
+    for (name, args) in [
+        ("a.bmp", vec!["-pix_fmt", "bgr24"]),
+        ("a.ico", vec!["-vf", "scale=64:64"]),
+        ("a.gif", vec!["-pix_fmt", "pal8"]),
+    ] {
+        let path = d.join(name);
+        ffmpeg(&path, &args);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+    }
+    for bits in [png::BitDepth::One, png::BitDepth::Two, png::BitDepth::Four] {
+        let path = d.join(format!("gray-{}.png", bits as u8));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 8, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(bits);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![0x55; bits as usize * 2])
+            .unwrap();
+        assert_eq!(probe_image(&path), Ok(()));
+    }
+    let avif = d.join("ten-bit.avif");
+    ffmpeg(
+        &avif,
+        &[
+            "-vf",
+            "setparams=color_primaries=1:color_trc=13:colorspace=1,format=yuv420p10le",
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            "10",
+            "-crf",
+            "25",
+        ],
+    );
+    assert_eq!(probe_image(&avif), Ok(()));
+    let original = pm_media::image::read(&avif, &pm_media::pool::FramePool::new(0)).unwrap();
+    assert!(original.bit_depth > 8, "native precision is retained");
+    assert_eq!(avif_compat_rgba8(&avif).len(), 96 * 54 * 4);
+    let palette = d.join("palette.tiff");
+    ffmpeg(&palette, &["-pix_fmt", "pal8"]);
+    assert_eq!(probe_image(&palette), Ok(()));
+    let converted = d.join("palette.png");
+    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    assert!(
+        Command::new(bin)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&palette)
+            .args(["-frames:v", "1", "-c:v", "png"])
+            .arg(&converted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(compat_rgba8(&palette), compat_rgba8(&converted));
+    std::fs::remove_dir_all(d).unwrap();
 }
 
 #[test]
@@ -963,10 +1026,10 @@ fn integer_and_alpha_tiff_bitmaps_match_the_shipped_png_conversion() {
     std::fs::remove_dir_all(d).unwrap();
 }
 
-/// The extra alpha-ramp app capture fails the unchanged 2D bar. Keep that
-/// combination explicit without excluding opaque RGBA files from ICC support.
+/// The app alpha-ramp references are matched by quantizing source-space
+/// premultiplied pixels and delaying gamut clipping until the final store.
 #[test]
-fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
+fn wide_gamut_alpha_and_opaque_rgba_are_supported() {
     let d = dir().join("icc-alpha");
     std::fs::create_dir_all(&d).unwrap();
     for (label, alpha) in [("opaque", 255u8), ("translucent", 128)] {
@@ -977,7 +1040,7 @@ fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
         encoder
             .write_header()
             .unwrap()
-            .write_image_data(&[192, 96, 32, alpha].repeat(16))
+            .write_image_data(&[255, 0, 0, alpha].repeat(16))
             .unwrap();
         for space in ["p3", "adobe"] {
             for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
@@ -991,13 +1054,137 @@ fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
                         ..Default::default()
                     },
                 );
-                if alpha == 255 {
-                    assert_eq!(probe_image(&path), Ok(()));
-                } else {
-                    assert!(unsupported(&path).contains("wide-gamut ICC stills with alpha"));
+                assert_eq!(probe_image(&path), Ok(()));
+                if alpha != 255 {
+                    let px = compat_rgba8(&path);
+                    assert!(
+                        px.chunks_exact(4).all(|p| p[0] > p[3] && p[3] == alpha),
+                        "{}: gamut clips only after premultiplication",
+                        path.display()
+                    );
                 }
             }
         }
     }
     std::fs::remove_dir_all(d).unwrap();
+}
+
+/// SHA-256 references are Chromium 152 ImageBitmap uploads, captured through
+/// the app under the Electron lock. All 39 SDR AVIFs also pass transformed
+/// composition parity; these redistributable synthetic fixtures pin decoding.
+#[test]
+fn avif_sdr_chroma_depth_and_icc_match_chromium_uploads() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    for (name, expected) in [
+        (
+            "still-avif-400-full.avif",
+            "bad584762d7c9d8faba67b0eeeacc4d76e29ada8517af647df4ff1c832732ee7",
+        ),
+        (
+            "still-avif-422-full.avif",
+            "db4a34ff6a6b35bd140be7fa8c0b5dde82e1c6fd8bd90965f5a799612447b528",
+        ),
+        (
+            "still-avif-444-full.avif",
+            "97761dacec6a1eb2fc102a190c54831d9811df51f6221a0b61a93be3e7c95302",
+        ),
+        (
+            "still-avif-icc-adobe-alpha.avif",
+            "34520f1c8e1c576fc24ad32bfc7fa082dc2e4b30c33d0fbeef8307b724247e97",
+        ),
+        (
+            "still-avif-icc-p3-alpha.avif",
+            "d9131d331c26ea078e851a65426ee99f98a70d9e325b780ce5f380c921103416",
+        ),
+        (
+            "still-red-limited-range-420-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-422-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-444-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-with-alpha-12bpc.avif",
+            "efb2a3897a86e2b25d51f66e9bbeaf6f4329c82bd86a35d1718016bbbd5863a4",
+        ),
+        (
+            "still-red-with-profile-12bpc.avif",
+            "d7b8eab2c246b0cbc1e10701de7cc2412f7055bfa95967d023a7d101699340f4",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let rgba = avif_compat_rgba8(&path);
+        assert_eq!(format!("{:x}", Sha256::digest(&rgba)), expected, "{name}");
+        // ImageIO rejects the valid deep-alpha container; level 1 must
+        // decode it independently. Other native-depth sources stay deep.
+        if name.contains("12bpc") && name.contains("limited-range") {
+            let native = pm_media::image::read(&path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert!(native.bit_depth > 8, "{name}: level 2 source precision");
+        }
+    }
+}
+
+/// Native decoder bytes against app-uploaded, premultiplied Chromium RGBA8.
+#[test]
+fn rgb_jpeg_and_gray_tiff_match_chromium() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let pool = pm_media::pool::FramePool::new(0);
+    for (name, hash) in [
+        (
+            "still-tiff-gray8.tiff",
+            "e49788dbae66c0412fc14365211c0e2e51f37e23dd8b3152faceea788f8b0a00",
+        ),
+        (
+            "still-tiff-gray-alpha.tiff",
+            "2a0555044928c6b6f33fbe32c3ab1eac70f368ee2d316bcbdbc65297abdaf946",
+        ),
+        (
+            "still-jpeg-rgb-baseline.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-jpeg-rgb-progressive.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-tiff-white8.tiff",
+            "130c95b327eec004b30f2b7145629cf5402181f35360c7a3d827f2c2066aaed8",
+        ),
+        (
+            "still-tiff-gray16.tiff",
+            "1f165643c5578330fa32b729f3162845a089ae5eea791fb7b41c65b79f40890b",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let native = pm_media::image::read(&path, &pool).unwrap();
+        let bitmap = pm_media::image::compat::bitmap_at(&path, &native, &pool).unwrap();
+        let bytes = bitmap
+            .frame
+            .with_planes(|planes| {
+                let p = &planes[0];
+                let mut out = Vec::new();
+                for y in 0..p.desc.height {
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                    });
+                }
+                out
+            })
+            .unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), hash, "{name}");
+    }
+    let deflate = fixtures.join("still-tiff32f-deflate.tiff");
+    assert_eq!(probe_image(&deflate), Ok(()));
+    let native = pm_media::image::read(&deflate, &pool).unwrap();
+    assert!(native.float);
+    assert_eq!(native.bit_depth, 32, "float sources keep their precision");
 }

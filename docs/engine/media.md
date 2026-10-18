@@ -516,3 +516,343 @@ resolver (`raster_compat_with_text`). This remains a diagnostic API: only
 blurs and some non-square bucket edges still fail. Level-1 `SvgImage` stays
 gated, and no 34-project composition pass is claimed. `vector.md` records
 the source pipeline and measured failures. No tolerance changed.
+
+
+### SVG/still closure: decoded bitmaps and remaining classes
+
+The level-1 ICC bitmap now reproduces Chromium's source-space premultiply,
+color conversion, and final byte store for translucent Display P3 and Adobe
+RGB PNG/TIFF. The native-depth reader remains unchanged for level 2 and
+Interpret Footage. The compatibility conversion:
+
+1. Quantizes source-space premultiplied RGBA8 as ImageBitmap does.
+2. Selects PNG's higher-precedence SDR cICP profile where present; otherwise
+   parses ICC with Blink's A2B priority. Near-sRGB and gamma-2.2 curves are
+   canonicalized as `SkColorSpace::MakeRGB` canonicalizes them.
+3. Runs the pinned Skia raster pipeline's matrix/TRC transform, including
+   fused multiply-add and its power approximation. Standalone skcms's
+   arithmetic changes a byte at some gamut edges. CLUT profiles retain
+   the skcms transform.
+4. Keeps converted, premultiplied values in float until the final RGBA8
+   store. Clipping unpremultiplied RGB first is incorrect: today's valid
+   uploaded RGB can exceed alpha.
+
+`native-still-icc-parity.spec.ts` captures both opaque and translucent source
+ramps in PNG and TIFF, their opaque compositions, and the legacy transparent
+float accumulator. `icc_alpha_compare` compares that accumulator directly to
+native float output. Measured: the four translucent uploads are byte-exact
+(24,576 pixels each); all eight float compositions are below 0.125 CV,
+including alpha. The alpha-ICC gate is removed. Opaque compositions keep the
+unchanged 2D bar. The default app spec now also checks transparent PNG
+output. E1's encoded boundary is closed: standard-color RGBA8 PNG export
+quantizes the premultiplied accumulator, truncates the alpha division, then
+reproduces Canvas2D's N32 premultiply/PNG unpremultiply. The four translucent
+ICC outputs compare at 0 premultiplied CV after Chromium decoding. The full
+orientation/color-description run has 58 native exports at max 1 CV, no pixel
+above 1, including E1's oriented PNG-alpha and AVIF-alpha fixtures at 0 CV.
+Its one previously unmeasured BT.2020 CICP case remains explicit. Each drawn
+case must finish an actual native export job without fallback; a viewer route
+alone is not proof. Float rendering, linear output and 16-bit PNG keep their
+existing high-precision conversions. See `export.md`.
+
+The opt-in `playwright.svgstills.config.ts` harness captures through the real
+file picker (including Electron's real file path for TIFF conversion),
+records each import/upload outcome, and compares rotated, filtered native
+and legacy compositions. It requires the private format corpus and an
+external `PM_SVGSTILLS_EVIDENCE` directory. Capture success alone is not a
+parity pass. `still_compat_compare` consumes its raw premultiplied texture
+bytes and writes metrics and side-by-sides; `--expect-parity` fails on any
+unmatched or unusable reference.
+
+Newly drawn classes, each compared through the app:
+
+- BMP24/BMP32, ICO, and static GIF; baseline/progressive gray and
+  RGB-encoded JPEG. RGB uses the existing libjpeg-turbo decode path;
+  component ids and Adobe transform no longer cause a class gate.
+- PNG grayscale and indexed 1/2/4-bit samples (including palette alpha),
+  gamma-only color information, and post-IDAT EXIF. Gamma-only PNG follows
+  `SkPngRustCodec`'s profile and neutral-gamma threshold at level 1 (unit
+  tests pin the 0.95–1.05 window and the bitmap's inverse power within 1 CV);
+  late EXIF is ignored, matching the existing unrotated image.
+- Gamma-only PNG at level 2 (`image::png_gamma`) is read as ImageIO reads
+  it, measured on this Mac: a decoding exponent within 0.0005 of 2.2
+  (stored 45445–45464) is sRGB; every other gamma, 1.0 included, is the pure
+  `1/gamma` power with sRGB primaries, decoded to premultiplied linear float
+  like the ColorSync path. `tests/png_gamma.rs` renders gAMA 0.7, 1.0 and
+  0.55555 within 7e-6 of a 16-bit sRGB reference holding the same linear
+  light; ImageIO's own float output is within 0.0003 of the exact curve.
+  With Interpret Footage the gamma is an explicit unsupported reason unless
+  a transfer override replaces it, and 3D texture maps keep the gAMA gate.
+- 8-bit palette TIFF in strips: indices are decoded without ImageIO's
+  device-RGB conversion and expanded from the stored 16-bit ColorMap before
+  color conversion. Unsigned 8/16-bit gray, white-is-zero and gray-alpha
+  TIFFs now have upload and composition proof. ImageIO supplies the native
+  gray-alpha source when image's TIFF adapter cannot expand it. RGB float32
+  TIFF without a non-sRGB ICC profile reproduces the shipped PNG converter's
+  early integer quantization, for uncompressed and Deflate strips without
+  the floating-point predictor.
+- SDR AVIF at 8/10/12 bits in 4:2:0, 4:2:2, 4:4:4 and monochrome, plus
+  measured enhanced 16-bit 4:4:4 containers. Full/limited range, alpha,
+  identity matrix, embedded ICC, transforms and SDR-base gain maps are
+  covered. The bitmap comes from pinned CrabbyAvif/dav1d/libyuv rather than
+  ImageIO. Container ICC overrides CICP, is validated as Blink validates it,
+  and uses the same float ImageBitmap color conversion as PNG/TIFF;
+  clipping straight RGB early changes translucent P3/Adobe pixels by up to
+  24 CV. Valid AVIFs ImageIO rejects decode independently at level 1; the
+  original native-depth API is unchanged. Some deep-alpha/ICC containers
+  remain unreadable through ImageIO at level 2.
+
+The additional AVIF capture has 41 reachable app uploads: all 39 SDR cases
+are byte-exact, and their transformed 160×120 compositions have max 1 CV
+with no pixels above 1. All 39 exports finish in the native job engine,
+with no routed export. Ten small redistributable synthetic fixtures pin
+Chromium upload SHA-256 values in `tests/stills.rs`; their provenance is in
+`e2e/fixtures/README.md`. Public Chromium 152 decoder fixtures and the pinned
+CrabbyAvif test fixtures supply deep, grid, ICC and gain-map cases; private
+captures stay outside Git. HDR base images (including an HDR-base gain map)
+now use the independently measured transform described below; SDR base comparisons alone were not
+used to establish that support.
+
+The 20-case composition comparison has max 1 CV and no pixel above 1.
+Seven further RGB JPEG/gray TIFF/Deflate float TIFF compositions also pass
+at max 1 CV with no pixel above 1, and all seven finish native export jobs
+without fallback. Six integer uploads are exact; the Deflate float upload
+is within 1 CV. Synthetic fixtures pin their decoder and precision boundaries.
+The existing 21 detailed still corpus frames also pass unchanged.
+`tests/stills.rs` covers capability boundaries, source precision, ignored
+late EXIF, and palette equality with the shipped PNG conversion.
+
+The remaining still classes from this survey are closed below. The
+independent chromaticity, HDR, CMYK, tiled/planar/float TIFF and deep JPEG
+measurements there supersede these earlier gaps. Level 1 AVIF draws the
+32 CICP pairs listed under "Level 1 HDR and chromaticity stills", each
+compared with the app; other primaries/transfers remain named failures.
+
+OpenEXR and DPX are unreachable through today's importer: neither extension
+is in `media-formats.ts`, and both the ordinary picker import and forced
+`image/x-exr` / `image/x-dpx` MIME imports reject the captured originals.
+The original native decoding APIs remain available. No app import or
+persistence behavior changes in this lane.
+
+### Broken level-1 SVG documents
+
+A corrupt persisted SVG has the empty paint of Chromium's broken `<img>`.
+`image::svg::broken_image` (`image/svg_broken.rs`) classifies a document as
+broken only where Blink's libxml2 outcome was measured; everything else stays
+an explicit `Feature::SvgImage` gate, never an empty paint:
+
+- Any libxml2 error (well-formedness or namespace) makes Blink move the root
+  out of the document: broken. Warnings do not.
+- An undeclared entity is fatal only with `standalone="yes"` or with neither
+  an external subset nor a parameter-entity reference (XML "WFC: Entity
+  Declared"). The SVG 1.1 or a `SYSTEM` DOCTYPE with `&nbsp;`/`&copy;`, a
+  declared external entity, and parameter entities all paint in Chromium.
+  roxmltree rejects all of these, which the first version of this check
+  mistook for broken images.
+- Element nesting deeper than 5,000 (Blink's `kMaxXMLTreeDepth`) is broken;
+  a non-recursive pre-scan finds it, and roxmltree runs on a stack sized to
+  the document, so deep files cannot overflow engine threads.
+- A well-formed document whose root is not `svg` in the SVG namespace is
+  broken, unless the internal subset declares attribute defaults (a defaulted
+  `xmlns` paints).
+- Undecided: errors inside the DOCTYPE, entity depth and reference limits,
+  roxmltree resource limits, markup-bearing entities, SVGZ, and prologs the
+  scanner cannot read.
+
+89 probe documents were measured in Electron 44 (Blob `<img>` and Canvas2D
+`drawImage`): 80 agree, 9 Chromium-broken documents stay gated, and no
+document Chromium paints is classified broken (`svg_broken::tests` pins every
+case; `examples/svg_broken_compare.rs` replays a probe directory). Results are
+cached per path, size and modification time for plan builds.
+Missing/unreadable files keep named media failures. Valid SVG with text,
+unsupported paint, or other usvg limitations retains its original gate.
+The hidden-app regression reloads five persisted corrupt assets: truncated
+XML, wrong root, missing namespace, undefined entity and empty bytes. Each
+has no live Chromium image, exact empty native/legacy transparent output,
+and a completed native export job without fallback. Four documents roxmltree
+rejects but Chromium paints (SVG 1.1 DOCTYPE with `&nbsp;&copy;`, `SYSTEM`
+DOCTYPE with an undeclared entity, a declared external entity, a parameter
+entity) are loaded by today's `<img>`, report the `SVG images` reason in the
+native engine, and export today's red paint exactly (`tests/vector.rs`,
+`level1_svgs_libxml2_accepts_are_gated_not_blank`, checks the same at the
+renderer, plus nesting at and past the depth limit). The Rust media-error
+integration checks empty pixels and no layer failure for these corrupt
+level-1 documents. Valid declared-encoding SVGs remain separately gated.
+
+`import-svg.spec.ts:7` passed with the engine flag on at the reviewed tip.
+On 2026-10-18 it fails on this machine with the flag on at its legacy
+high-zoom viewport assertion (`previewViewport.width` 640, expected below
+640), identically with the engine built from the previous lane tip
+(d185f65a), so the failure is not from the broken-SVG or PNG gamma changes;
+it passes with the flag off. It now explicitly waits
+for the imported editable shape's native route before undoing the import,
+while keeping its original durable source, vertex edit, viewport allocation
+and exported-player pixel assertions.
+
+Additional explicit gaps: a Display P3 `cHRM`/`gAMA` PNG differs by up to
+117 CV when its chromaticities are ignored, and a Y'CbCr/JPEG-compressed
+TIFF differs by 255 CV against today's conversion. Neither gate is removed.
+A generated CIELab TIFF is rejected by today's importer because the shipped
+FFmpeg TIFF decoder does not implement that photometric model. This is a
+recorded rejected import, not a native parity claim. Compressed float TIFF
+with other predictors, planar layouts and other color models still lack
+complete app measurements.
+
+### Remaining still classes: level-1 decoder parity
+
+The compatibility reader now covers the remaining still classes from the
+SVG/still survey. Original/native-depth readers stay separate from these
+8-bit bitmaps; this change does not turn the compatibility bitmap into a
+level-2 source, and the classes it opens are level 1 only (see "Level 2
+layers and 3D maps keep the native reader's classes" below).
+
+- PQ and HLG PNG/AVIF use Skia's pinned transfer stages, HDR reference white
+  (203 nits), PQ scale (10,000 nits), HLG peak (1,000 nits), system gamma,
+  Rec.2020 luminance mixing, and gamut conversion before the final byte
+  store. The raster pipeline's power/exp approximations and fused operations
+  matter at byte boundaries. This reproduces the shipped clipping; it does
+  not substitute a different HDR appearance. HDR-base AVIF gain maps retain
+  the same base image Chromium uploads. Unspecified AVIF primaries use
+  BT.709; the supported SDR transfer aliases use Chromium's sRGB curve.
+- Independent PNG `cHRM` needs a valid `gAMA`, as in `SkPngRustCodec`.
+  Primaries are adapted to D50 through skcms. A cHRM without gAMA is
+  ignored; a cHRM whose primaries do not form a matrix discards the gAMA
+  too, so the image reads as sRGB (both measured); valid cHRM disables the
+  gamma-only neutral-gamma shortcut. CICP still takes precedence over
+  ICC/sRGB and these chunks.
+- CMYK/YCCK JPEG uses libjpeg-turbo's inverted CMYK samples and Chromium
+  152's integer RGB conversion. A valid CMYK ICC profile is applied in the
+  shipped decoder's order, after that RGB store. A direct colorimetric
+  conversion would change existing projects. ImageIO remains the
+  native-depth CMYK source reader.
+- TIFF level 1 now directly uses the linked LGPL FFmpeg decoder and
+  libswscale conversion that produce the shipped PNG rendition. Integer
+  samples are reduced at the PNG/Blink boundary, with alpha, orientation
+  and supported ICC information preserved. This covers CMYK/CMYK-alpha,
+  tiles, YCbCr/JPEG, planar samples, float16/float32, and floating-point
+  predictors with Deflate/LZW. Tiled images retain the decoder's actual
+  output, including a black rendition when that is what the app imports.
+  Formats FFmpeg cannot convert remain errors; ImageIO must not make them
+  visible at level 1. Native source previews and level-2 decoding retain
+  their original readers and their original header classes.
+- Extended-sequential 12-bit JPEG and lossless JPEG at 2–16 bits
+  now have app measurements. Lossless 2–8-bit images keep Chromium's stored
+  byte values. Higher-depth JPEGs import as float ImageBitmaps but fail the
+  existing RGBA8 WebGL upload; their completed legacy exports show an opaque
+  black sampler. Arithmetic JPEG at 8 and 12 bits (sequential/progressive)
+  also uses the failed float-upload path and retains that black sampler.
+  The level-1 bitmap reproduces that sampler. Native-depth
+  JPEG remains decoded, and chooses the correct TurboJPEG 8/12/16-bit API
+  for lossless input as well as lossy input.
+
+The original PQ/HLG PNG, independent-cHRM PNG, CMYK JPEG/TIFF, tiled and
+YCbCr/JPEG TIFF, HDR AVIF, and HDR-base gain-map references are byte-exact.
+A further 22 reachable TIFF variants (float layouts, predictors, planar,
+tiled, gray, CMYK and YCbCr) are also byte-exact. Thirty-two transformed
+160×120 compositions pass at max 1 CV, with no pixels above 1 CV. Every
+native export must report a completed job, with no routed fallback. The
+separate JPEG12/lossless16 comparison is exact, including the black layer.
+
+The small synthetic `tests/fixtures/stills2` set pins Chromium upload hashes,
+failed-import outcomes and incomplete-texture behavior in `tests/stills2.rs`.
+PQ/HLG/cHRM PNGs cover 8/16-bit and translucent samples; AVIF includes PQ and
+HLG. The lossless sweep covers every precision from 2 to 16 bits. The 24
+initial synthetic compositions and all 15 precision-sweep compositions pass
+through actual native export jobs. The four existing opaque/translucent ICC
+app regressions still pass, including transparent PNG output.
+
+Fourteen additional TIFF variants are rejected by today's importer: RGB
+float64, gray float32/64, the generated float32-alpha predictor files,
+12-bit JPEG-compressed TIFF, and Lab variants. The compatibility reader
+rejects those same originals. Paired engine-off/on app imports retain all 48
+outcomes, including the failure messages (temporary file names and FFmpeg
+context addresses vary). Rejected imports are not counted as pixel passes.
+
+The E1 encoded PNG boundary is now document-dependent: any level-1 content
+keeps the legacy byte conversion, while all-level-2 documents preserve
+low-alpha precision. Its CPU and actual GPU-to-export tests are described
+in `export.md`. `Pipeline::new` defaults to the level 1 conversion, so a
+caller that never selects the boundary keeps today's bytes. AVIF
+primaries/transfers outside the measured pairs and the existing
+native-depth ImageIO limitations are outside this closure; their support is
+not inferred from these compatibility measurements.
+
+Additional metadata tests cover PQ/HLG PNG with mastering-display and
+content-light-level chunks, metadata-only PNG, and BT.2020 SDR AVIF whose
+transfer aliases to sRGB. These four uploads are byte-exact and all four
+native compositions pass. Informational HDR chunks no longer cause a class
+gate. Arithmetic JPEG has four independent app captures; all four uploads
+fail as float ImageBitmaps, so its parity test requires completed black-layer
+exports rather than inventing decoded upload pixels.
+
+### Level 1 HDR and chromaticity stills: measured pairs
+
+Review round 5 found the level 1 color descriptions broader than the cases
+measured. Rather than narrow them, every pair the bitmap draws was captured
+through the app (`svgstills-capture.ts`, engine off, Electron 44 /
+Chromium 152) and compared with `still_compat_compare`: 126 cases, all
+byte-exact.
+
+- PNG cICP without an equivalent ICC profile: primaries {1 BT.709, 9
+  BT.2020, 12 P3-D65} × transfer {13 sRGB, 16 PQ, 18 HLG}, full-range RGB
+  (matrix 0, range 1), each at 8 bits opaque, 8 bits alpha, 16 bits opaque
+  and 16 bits alpha (36 cases). Other cICP values, limited range and
+  non-identity matrices stay named failures.
+- AVIF CICP: primaries {1, 2 unspecified, 9, 12} × transfer {1, 2, 6, 13,
+  14, 15, 16 PQ, 18 HLG}, at 8 and 10 bits (64 cases). These are exactly the
+  pairs `compat::cicp_supported` accepts; others stay named.
+- HLG outside BT.2020 (PNG 1/18 and 12/18, AVIF 1/18, 2/18 and 12/18) uses
+  Skia's luminance weights adapted to the source primaries. Disabling that
+  branch changes 14 of these cases by up to 6 CV, so the captures exercise
+  it.
+- AVIF with alpha: the ramp with translucent samples (libavif, matrix 6),
+  retagged to 1/13, 1/16, 1/18, 2/18, 9/16, 9/18, 12/16, 12/18 and 9/1, at
+  8 and 10 bits (18 further cases, also byte-exact).
+- cHRM/gAMA edge cases at 8 and 16 bits: all-zero cHRM with gAMA 0.7 and
+  P3 cHRM without gAMA (both read as sRGB), sRGB cHRM with gAMA 0.7, and P3
+  cHRM with gAMA 0.45455 (8 cases).
+
+`tests/fixtures/stills2` carries 73 of these as small synthetic fixtures
+with their Chromium hashes: the 9 PNG pairs at 8-bit opaque and 16-bit
+alpha, the 32 AVIF pairs at 10 bits, 8-bit HLG for each AVIF primaries, 11
+translucent AVIFs, and the 8 cHRM cases. Together with the earlier sets,
+264 source comparisons are byte-exact. Eighteen of the new cases (PNG and
+AVIF PQ/HLG across primaries, and the cHRM cases) also pass as transformed
+160×120 native export compositions at max 1 CV, no pixel above 1, every job
+completed in the engine.
+
+### Level 2 layers and 3D maps keep the native reader's classes
+
+Level 1 layers draw Chromium's compatibility bitmap; level 2 layers draw
+the native-depth source (`pm_media::image::read`), and 3D material maps
+upload the same native samples. That reader reads neither PNG cICP/cHRM
+nor PQ/HLG transfers, and ImageIO converts CMYK, Lab and indexed TIFF to
+sRGB. Round 5 found that the level 1 header changes above had also opened
+these classes for level 2, which would have drawn PQ/HLG code values and
+cHRM primaries as sRGB, and let CMYK TIFF pass preflight only to fail at
+execution.
+
+`media::probe_still(path, StillReader)` now takes the reader.
+`capability.rs` picks it from the layer's `compat` level, `MediaCache::image`
+from the draw's level, and 3D maps always use the native reader.
+`stills::check` applies the classes of that reader:
+
+- Native PNG: as before this lane, cICP only when equal to the ICC
+  profile's, no mDCv/cLLi/mDCV/cLLI, and cHRM only with sRGB or iCCP.
+- Native JPEG: baseline/progressive Huffman, 8-bit, gray/RGB/Y'CbCr.
+- Native TIFF: the strip/compression/photometric/sample classes listed in
+  `stills::tiff`.
+- Native AVIF: SDR sRGB CICP or a supported ICC profile
+  (`avif_compat::unmeasured_sdr`).
+- The native probe also checks the source's color reading as the renderer
+  draws it (`image_color`, with profiles other than sRGB/P3 converted by
+  ColorSync), so preflight and execution agree.
+
+These are the pre-lane level 2 classes, plus earlier failure for readings
+the level 2 renderer already refused at execution (for example an indexed
+TIFF that ImageIO converts). `tests/stills2.rs`
+(`level_two_keeps_the_native_reader_classes`) renders 20 of the new class
+fixtures at both levels: level 1 draws each with no failure; level 2 names
+each in the capability check and again at execution without the check.
+Giving level 2 its own cICP/cHRM/HDR and CMYK readings is future work;
+those level 2 classes stay named until they are compared.
