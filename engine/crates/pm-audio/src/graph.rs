@@ -737,6 +737,88 @@ impl MixGraph {
     }
 }
 
+/// Compiled constant content for detached preparation with the standard
+/// evaluator. Keep the exact sourceTime arithmetic at every ancestor; deriving
+/// an intercept from two points changes floating-point rounding and PCM.
+pub(crate) struct StaticMap {
+    levels: Vec<(f64, f64, f64, f64)>,
+    active: bool,
+    conform: f64,
+}
+impl StaticMap {
+    pub(crate) fn new(
+        plan: &VoicePlan,
+        comps: &[Comp<'_>],
+        ev: &mut Evaluator,
+        t: f64,
+    ) -> Result<Option<Self>> {
+        if plan.animated || plan.constant_rate.is_none() || plan.offset.is_some() {
+            return Ok(None);
+        }
+        let mut levels = Vec::new();
+        for level in &plan.levels {
+            let comp = &comps[level.comp];
+            let layer = &comp.layers()[level.layer];
+            let d = ev.resolve_content(comp, layer, t)?;
+            let speed = match d.get(&JsString::from("speed")) {
+                None | Some(JsValue::Undefined | JsValue::Null) => 1.0,
+                Some(v) => v.to_number(),
+            };
+            let trim = d
+                .get(&JsString::from("trim"))
+                .filter(|v| v.truthy())
+                .map_or(0.0, |v| v.to_number());
+            levels.push((
+                number(node::member(Some(layer), "from"), 0.0),
+                number(node::member(Some(layer), "dur"), 0.0).max(0.0),
+                speed,
+                trim,
+            ));
+        }
+        Ok(Some(Self {
+            levels,
+            active: plan.static_point.is_some_and(|p| p.active),
+            conform: plan.conform,
+        }))
+    }
+    fn position(&self, mut t: f64) -> (bool, f64, f64, f64) {
+        let mut on = true;
+        let mut local = 0.0;
+        let mut duration = 0.0;
+        for &(from, dur, speed, trim) in &self.levels {
+            on &= t >= from && t < from + dur;
+            local = t - from;
+            duration = dur;
+            t = local * speed + trim;
+        }
+        (on, t * self.conform, local, duration)
+    }
+    pub(crate) fn point(&self, t: f64, rate: f64) -> crate::stretch::MapPoint {
+        let (on, source, _, _) = self.position(t);
+        crate::stretch::MapPoint {
+            x: source * rate,
+            on: on && self.active,
+        }
+    }
+    pub(crate) fn evaluate(&self, plan: &VoicePlan, t: f64) -> Point {
+        let (on, source_time, local, duration) = self.position(t);
+        let mut out = plan.static_point.expect("compiled static point");
+        out.in_span = on;
+        out.source_time = source_time;
+        out.local = local;
+        out.audible = duration;
+        if let Some(len) = plan.source.info.duration() {
+            let speed = self.levels.last().unwrap().2;
+            if speed.is_finite() && speed > 0.0 {
+                let speed = speed * self.conform;
+                let start = source_time - local * speed;
+                out.audible = out.audible.min((len - start) / speed);
+            }
+        }
+        out
+    }
+}
+
 impl VoicePlan {
     /// Evaluates the voice at master time `t`.
     pub fn evaluate<'d>(

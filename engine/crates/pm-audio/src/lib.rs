@@ -32,6 +32,8 @@ pub mod meter;
 pub mod mixer;
 pub mod offline;
 pub mod playback;
+mod preparation;
+pub mod profile;
 pub mod ring;
 pub mod shuttle;
 pub mod source;

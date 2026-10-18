@@ -5,6 +5,8 @@
  * PM_AUDIO_START_EDIT=gain|speed|none, PM_AUDIO_LOOP_SECONDS (default 60),
  * PM_AUDIO_LOAD_THREADS (default 0), PM_AUDIO_START_VOICES (default 16).
  * PM_AUDIO_START_WAIT_MS=0 alternates 2 s / 3 s same-task cold seeks.
+ * Each run continues 120 ms after its first clock so late-voice omission
+ * spans include re-entry; PM_AUDIO_START_OBSERVE_MS overrides this window.
  * All load processes are joined on exit. Run under pm-electron-lock.
  * bun engine/crates/pm-audio/tools/playback-gates.ts <wav> <outside-repo.json> [runs]
  * Build the app and native addons first. The corpus Node bridge hosts
@@ -24,7 +26,8 @@ const edit = process.env.PM_AUDIO_START_EDIT ?? 'gain';
 const loopSeconds = Number(process.env.PM_AUDIO_LOOP_SECONDS ?? 60);
 const stressThreads = Number(process.env.PM_AUDIO_LOAD_THREADS ?? 0);
 const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
-const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, targets: waitMs === 0 ? [2, 3] : [4] };
+const observeMs = Number(process.env.PM_AUDIO_START_OBSERVE_MS ?? 120);
+const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, targets: waitMs === 0 ? [2, 3] : [4] };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
@@ -149,11 +152,13 @@ for (const native of modes) {
               const first = starts[0];
               if (!first.stamp.performanceTime || !first.stamp.contextTime) throw new Error('WebAudio output timestamp unavailable');
               return { target, outputMs: first.stamp.performanceTime + (first.when - first.stamp.contextTime) * 1000 - requested,
-                observedMs: first.called - requested, baseLatency: first.baseLatency, outputLatency: first.outputLatency };
+                observedMs: first.called - requested, baseLatency: first.baseLatency, outputLatency: first.outputLatency,
+                scheduledVoices: starts.length, voiceStartSpreadMs: (Math.max(...starts.map(s => s.when)) - Math.min(...starts.map(s => s.when))) * 1000 };
             }
             await new Promise(r => setTimeout(r, 1));
           }
         }, { native, target, inline: waitMs === 0, edit, run });
+        await page.waitForTimeout(observeMs);
         await page.evaluate(() => (window as any).PM.pause());
         if (native) {
           // The presenter and audio have independent epoch counters. Match

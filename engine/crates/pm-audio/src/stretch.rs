@@ -137,6 +137,8 @@ pub struct StretchRun {
     live: Option<Live>,
     /// A spare stretcher, reset, from the last run.
     spare: Option<Stretcher>,
+    #[cfg(test)]
+    test_preroll: Option<i64>,
     /// A missing read stopped the render of output samples `[a, end)`.
     /// Keep the valid history so the next request can catch up once the
     /// input has decoded, when it continues that render: a retry of it, or
@@ -174,6 +176,8 @@ impl StretchRun {
             pos: i64::MIN,
             live: None,
             spare: None,
+            #[cfg(test)]
+            test_preroll: None,
             pending: None,
             dropped_from: None,
             scratch_in: vec![Vec::new(); channels],
@@ -189,6 +193,37 @@ impl StretchRun {
 
     pub fn channels(&self) -> usize {
         self.channels
+    }
+
+    pub(crate) fn can_continue_at(&self, at: i64) -> bool {
+        self.pos != i64::MIN && at >= self.buf_start && at <= self.pos
+    }
+
+    /// A voice prepared off-thread joins a running start. Catch up with real
+    /// input through the deliberately silent prefix, preserving the original
+    /// phase history (the offline render from `start`), never a new seek.
+    pub(crate) fn prepare_join(
+        &mut self,
+        start: i64,
+        at: i64,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+        out: &mut [Vec<f32>],
+    ) -> Result<bool> {
+        if self.pos < start + crate::ring::CHUNK as i64
+            && !self.render(start, crate::ring::CHUNK, map, read, out)?
+        {
+            return Ok(false);
+        }
+        if at > start {
+            if !self.can_continue_at(at) {
+                self.pending = Some((self.buf_start, at));
+                self.dropped_from.get_or_insert(start);
+            }
+            self.render(at, crate::ring::CHUNK, map, read, out)
+        } else {
+            Ok(true)
+        }
     }
 
     /// Forgets a starved request, so the next render is judged by the
@@ -243,13 +278,19 @@ impl StretchRun {
         if self.points.is_empty() || c < self.points_from || c > end + 4096 {
             self.points.clear();
             self.points_from = c;
-            let p = map(c)?;
+            let p = {
+                let _timing = crate::profile::timer(crate::profile::Kind::Map);
+                map(c)?
+            };
             self.evaluated += 1;
             self.points.push_back(p);
             return Ok(p);
         }
         for k in end..=c {
-            let p = map(k)?;
+            let p = {
+                let _timing = crate::profile::timer(crate::profile::Kind::Map);
+                map(k)?
+            };
             self.evaluated += 1;
             self.points.push_back(p);
         }
@@ -348,7 +389,10 @@ impl StretchRun {
     /// Starts rendering at `a` without a usable history.
     fn fresh(&mut self, a: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<bool> {
         self.end_live();
-        let g = a.div_euclid(GRID) * GRID - preroll(self.rate);
+        let pre = preroll(self.rate);
+        #[cfg(test)]
+        let pre = self.test_preroll.unwrap_or(pre);
+        let g = a.div_euclid(GRID) * GRID - pre;
         let k0 = g.div_euclid(CONTROL);
         let ka = a.div_euclid(CONTROL);
         // The latest run start in [k0, ka]; a run already going at k0
@@ -398,12 +442,15 @@ impl StretchRun {
         read: &mut ReadFn<'_>,
     ) -> Result<bool> {
         self.end_live();
-        let mut stretcher = match self.spare.take() {
-            Some(mut st) => {
-                st.reset().map_err(stretch_error)?;
-                st
+        let mut stretcher = {
+            let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
+            match self.spare.take() {
+                Some(mut st) => {
+                    st.reset().map_err(stretch_error)?;
+                    st
+                }
+                None => Stretcher::new(self.channels, self.rate).map_err(stretch_error)?,
             }
-            None => Stretcher::new(self.channels, self.rate).map_err(stretch_error)?,
         };
         let k = s.div_euclid(CONTROL);
         let l = self.point(k, map)?.x;
@@ -417,6 +464,7 @@ impl StretchRun {
         }
         {
             let views: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
+            let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             stretcher.output_seek(&views).map_err(stretch_error)?;
         }
         self.live = Some(Live {
@@ -439,7 +487,11 @@ impl StretchRun {
             return Ok(true);
         }
         let lo = if dir > 0 { u0 } else { -(u0 + len as i64) + 1 };
-        if !read(lo, len, &mut self.scratch_in)? {
+        let complete = {
+            let _timing = crate::profile::timer(crate::profile::Kind::Read);
+            read(lo, len, &mut self.scratch_in)?
+        };
+        if !complete {
             return Ok(false);
         }
         if dir < 0 {
@@ -535,6 +587,7 @@ impl StretchRun {
             let input: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             let mut output: Vec<&mut [f32]> =
                 self.scratch_out.iter_mut().map(|c| &mut c[..m]).collect();
+            let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             live.stretcher
                 .process(if len == 0 { &[] } else { &input }, &mut output)
                 .map_err(stretch_error)?;
@@ -561,6 +614,65 @@ fn stretch_error(e: pm_stretch::StretchError) -> AudioError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortening_the_prefix_changes_the_existing_offline_pcm() {
+        let st = Stretcher::new(2, 48_000).unwrap();
+        eprintln!(
+            "A8 Signalsmith input/output latency: {}/{} samples; deterministic prefix {}",
+            st.input_latency(),
+            st.output_latency(),
+            preroll(48_000)
+        );
+        for speed in [0.75, 1.5] {
+            for start in [96_000, 144_000, 192_000] {
+                let mut map = |k: i64| {
+                    Ok(MapPoint {
+                        x: k as f64 * CONTROL as f64 * speed,
+                        on: true,
+                    })
+                };
+                let mut read = |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                    for (c, o) in out.iter_mut().enumerate() {
+                        *o = (lo..lo + n as i64)
+                            .map(|s| ((s as f64 * (0.057 + c as f64 * 0.013)).sin() * 0.2) as f32)
+                            .collect();
+                    }
+                    Ok(true)
+                };
+                let mut reference = vec![vec![]; 2];
+                StretchRun::new(2, 48_000, 0)
+                    .render(start, 4096, &mut map, &mut read, &mut reference)
+                    .unwrap();
+                for pre in [
+                    0,
+                    5760,
+                    5760 + st.output_latency() as i64,
+                    preroll(48_000) - CONTROL,
+                ] {
+                    let mut shorter = StretchRun::new(2, 48_000, 0);
+                    shorter.test_preroll = Some(pre);
+                    let mut actual = vec![vec![]; 2];
+                    shorter
+                        .render(start, 4096, &mut map, &mut read, &mut actual)
+                        .unwrap();
+                    let different = reference
+                        .iter()
+                        .flatten()
+                        .zip(actual.iter().flatten())
+                        .filter(|(a, b)| a.to_bits() != b.to_bits())
+                        .count();
+                    eprintln!(
+                        "A8 prefix {pre}, speed {speed}, start {start}: {different}/8192 changed values"
+                    );
+                    assert!(
+                        different > 0,
+                        "shortened prefix unexpectedly preserves existing PCM"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn missing_input_never_poison_stretch_history() {

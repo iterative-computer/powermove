@@ -3023,6 +3023,15 @@ fn play_preempts_paused_preparation_after_an_edit() {
 /// preserves every warmed voice, and the result is the edited offline PCM.
 #[test]
 fn edit_then_play_reuses_all_sixteen_stretched_voices() {
+    assert_sixteen_voice_edit_starts(false);
+}
+
+#[test]
+fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
+    assert_sixteen_voice_edit_starts(true);
+}
+
+fn assert_sixteen_voice_edit_starts(cold: bool) {
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir("a8-level-start");
     let file = dir.join("tone.wav");
@@ -3045,7 +3054,7 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
         LATENCY_US,
     )
     .unwrap();
-    let doc = |gain| {
+    let doc = |gain, speed| {
         let layers: Vec<String> = (0..16)
             .map(|i| {
                 audio(
@@ -3053,7 +3062,7 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
                     "s",
                     0.0,
                     8.0,
-                    &format!(r#", "speed":1.5, "gain":{gain}"#),
+                    &format!(r#", "speed":{speed}, "gain":{gain}"#),
                     "",
                 )
             })
@@ -3061,19 +3070,26 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
         Arc::new(project(30.0, 8.0, &layers, &[], ""))
     };
     let path = |_: &str| Some(file.clone());
-    playback.set_project(doc(1.0), "C", &path).unwrap();
+    playback.set_project(doc(1.0, 1.5), "C", &path).unwrap();
     let mut out = vec![0.0; 512 * 2];
-    for gain in [0.3, 0.7, 0.2, 1.0] {
+    for (trial, gain) in [0.3, 0.7, 0.2, 1.0].into_iter().enumerate() {
+        let target = if cold {
+            if trial % 2 == 0 { 2 } else { 3 }
+        } else {
+            4
+        };
         playback.command(TransportCommand::Pause).unwrap();
         side.callback(&mut out, 2, host_now_us());
         playback
             .command(TransportCommand::Seek {
-                time: ticks(4.0),
+                time: ticks(target as f64),
                 mode: SeekMode::Exact,
             })
             .unwrap();
-        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
-        let edited = doc(gain);
+        if !cold {
+            until(|| playback.prepared_starts().contains(&(target * SR as i64)));
+        }
+        let edited = doc(gain, if cold && trial % 2 == 0 { 1.6 } else { 1.5 });
         playback.set_project(edited.clone(), "C", &path).unwrap();
         let before = playback.stats();
         let at = std::time::Instant::now();
@@ -3081,7 +3097,7 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
             .commands([
                 TransportCommand::SetLoop { range: None },
                 TransportCommand::Seek {
-                    time: ticks(4.0),
+                    time: ticks(target as f64),
                     mode: SeekMode::Exact,
                 },
                 TransportCommand::Play {
@@ -3099,7 +3115,7 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
             at.elapsed()
         );
         eprintln!(
-            "A8 sixteen-voice level edit first buffer: {:.3} ms",
+            "A8 sixteen-voice edit cold={cold} first buffer: {:.3} ms",
             at.elapsed().as_secs_f64() * 1000.0
         );
         side.callback(&mut out, 2, host_now_us());
@@ -3108,7 +3124,7 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
         let mut expected = vec![vec![]; 2];
         reference
             .render(
-                4 * SR as i64,
+                target * SR as i64,
                 512,
                 &mut expected,
                 &pm_audio::RenderOptions {
@@ -3117,13 +3133,84 @@ fn edit_then_play_reuses_all_sixteen_stretched_voices() {
                 },
             )
             .unwrap();
-        for i in 0..512 {
-            for c in 0..2 {
-                assert_eq!(out[2 * i + c], expected[c][i]);
+        if cold {
+            let mut captured = out.clone();
+            for _ in 0..15 {
+                until(|| side.queued_frames() >= 512);
+                side.callback(&mut out, 2, host_now_us());
+                captured.extend_from_slice(&out);
             }
+            let gaps = playback.start_timing().unwrap().late_voice_frames;
+            let max_gap = gaps.iter().map(|(_, n)| *n).max().unwrap_or(0) as usize;
+            eprintln!(
+                "A8 CPU preparation late spans: {gaps:?}, longest {:.3} ms",
+                max_gap as f64 / 48.0
+            );
+            assert!(
+                max_gap < 8192,
+                "every voice must join within the captured span"
+            );
+            // Exact expected A4 mix: each voice is absent only until its
+            // recorded join sample, then continues the original offline phase.
+            let one = project(
+                30.0,
+                8.0,
+                &[audio(
+                    "v0",
+                    "s",
+                    0.0,
+                    8.0,
+                    &format!(
+                        r#", "speed":{}, "gain":{gain}"#,
+                        if trial % 2 == 0 { 1.6 } else { 1.5 }
+                    ),
+                    "",
+                )],
+                &[],
+                "",
+            );
+            let mut single = rig.mixer(one, "C", MixFormat::stereo(SR));
+            let mut pcm = vec![vec![]; 2];
+            single
+                .render(
+                    target * SR as i64,
+                    8192,
+                    &mut pcm,
+                    &pm_audio::RenderOptions {
+                        wait: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            for i in 0..8192 {
+                for c in 0..2 {
+                    let mut sum = 0.0f32;
+                    for voice in 0..16 {
+                        let id = format!("v{voice}");
+                        let gap = gaps
+                            .iter()
+                            .find(|(v, _)| *v == id)
+                            .map_or(0, |(_, n)| *n as usize);
+                        if i >= gap {
+                            sum += pcm[c][i];
+                        }
+                    }
+                    assert_eq!(
+                        captured[2 * i + c],
+                        sum,
+                        "cold trial {trial}, sample {i}, channel {c}, gaps {gaps:?}"
+                    );
+                }
+            }
+        } else {
+            for i in 0..512 {
+                for c in 0..2 {
+                    assert_eq!(out[2 * i + c], expected[c][i]);
+                }
+            }
+            assert_eq!(playback.stats().starved_renders, before.starved_renders);
+            assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
         }
-        assert_eq!(playback.stats().starved_renders, before.starved_renders);
-        assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
     }
     drop(playback);
     cache.shutdown();

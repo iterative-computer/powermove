@@ -496,7 +496,7 @@ impl Control {
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
         match Playback::start(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
             Ok(playback) => {
-                playback.set_evaluator(|| {
+                playback.set_standard_evaluator(|| {
                     pm_eval::Evaluator::new()
                         .with_expressions(Arc::new(pm_render::expr::PmExprEngine))
                 });
