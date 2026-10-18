@@ -47,7 +47,24 @@ pub struct CgMasks {
     fonts: CoreTextReference,
     masks: HashMap<MaskKey, Option<Arc<GlyphMask>>>,
     colors: HashMap<ColorKey, ColorGlyph>,
+    /// Masks Skia generates from paths (`skpath`).
+    paths: HashMap<PathKey, Option<Arc<GlyphMask>>>,
     bytes: usize,
+}
+
+/// A path-generated mask: font, glyph, size, variation, position, scale and
+/// frame.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PathKey {
+    face: u64,
+    index: u32,
+    glyph: u16,
+    size: u32,
+    coords: Vec<(u32, u32)>,
+    quarter: u8,
+    skew: u32,
+    scale: u32,
+    frame: (u32, bool, u8, u32),
 }
 
 /// Face buffer, face index, glyph, size bits, em bits, quarter offset.
@@ -75,6 +92,59 @@ impl super::scene::MaskSource for CgMasks {
 
     fn reset(&mut self) {
         CgMasks::reset(self);
+    }
+
+    fn path_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        style: MaskStyle,
+        scale: f32,
+        frame: super::skpath::Frame,
+    ) -> Option<Arc<GlyphMask>> {
+        let key = PathKey {
+            face: face.id,
+            index: face.index,
+            glyph,
+            size: size.to_bits(),
+            coords: coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+            quarter: style.quarter,
+            skew: style.skew.to_bits(),
+            scale: scale.to_bits(),
+            frame: (
+                frame.width.to_bits(),
+                frame.fill,
+                frame.join as u8,
+                frame.miter_limit.to_bits(),
+            ),
+        };
+        if let Some(m) = self.paths.get(&key) {
+            return m.clone();
+        }
+        let run = RefRun {
+            data: face.data,
+            index: face.index,
+            size,
+            coords,
+            glyphs: Vec::new(),
+            color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mask = self.fonts.font_of(face.id, &run).and_then(|font| {
+            let device = glyph_path(&font, glyph, style)?;
+            super::skpath::frame_mask(&device, scale, Some(frame))
+        });
+        if self.bytes > CACHE_BYTES {
+            self.clear();
+        }
+        self.bytes += mask.as_ref().map_or(0, |m| m.coverage.len() + 64);
+        self.paths.insert(key, mask.clone());
+        mask
+    }
+
+    fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
+        super::skpath::skia_mask_gamma(luminance_bucket(rgb))
     }
 
     fn preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
@@ -132,6 +202,7 @@ impl CgMasks {
     pub fn clear(&mut self) {
         self.masks.clear();
         self.colors.clear();
+        self.paths.clear();
         self.bytes = 0;
     }
 
@@ -185,6 +256,112 @@ impl CgMasks {
         self.masks.insert(key, mask.clone());
         mask
     }
+}
+
+/// The glyph's path as `SkScalerContext_Mac::generatePath` gets it from
+/// CoreText for subpixel-positioned horizontal text: the font's transform
+/// (the synthetic italic shear) times a 4× horizontal scale (no hinting in
+/// x), read into `f32` with y negated, scaled back by ¼ in x, then moved
+/// right by the quarter-pixel offset (`internalGetPath`).
+fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option<tiny_skia::Path> {
+    use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
+    struct Sink {
+        builder: tiny_skia::PathBuilder,
+        started: bool,
+        current: CGPoint,
+    }
+    impl Sink {
+        fn going_to(&mut self, pt: CGPoint) {
+            if !self.started {
+                self.started = true;
+                self.builder.move_to(self.current.x as f32, (-self.current.y) as f32);
+            }
+            self.current = pt;
+        }
+        fn current_is_not(&self, pt: CGPoint) -> bool {
+            self.current.x != pt.x || self.current.y != pt.y
+        }
+    }
+    unsafe extern "C-unwind" fn apply(info: *mut std::ffi::c_void, element: NonNull<CGPathElement>) {
+        // SAFETY: `info` is the `Sink` passed to `CGPathApply` below, and
+        // CoreGraphics passes each element with its points.
+        let sink = unsafe { &mut *(info as *mut Sink) };
+        let element = unsafe { element.as_ref() };
+        let p = |i: usize| unsafe { *element.points.as_ptr().add(i) };
+        let f = |v: f64| v as f32;
+        match element.r#type {
+            CGPathElementType::MoveToPoint => {
+                sink.started = false;
+                sink.current = p(0);
+            }
+            CGPathElementType::AddLineToPoint => {
+                let a = p(0);
+                if sink.current_is_not(a) {
+                    sink.going_to(a);
+                    sink.builder.line_to(f(a.x), f(-a.y));
+                }
+            }
+            CGPathElementType::AddQuadCurveToPoint => {
+                let (c, a) = (p(0), p(1));
+                if sink.current_is_not(c) || sink.current_is_not(a) {
+                    sink.going_to(a);
+                    sink.builder.quad_to(f(c.x), f(-c.y), f(a.x), f(-a.y));
+                }
+            }
+            CGPathElementType::AddCurveToPoint => {
+                let (c0, c1, a) = (p(0), p(1), p(2));
+                if sink.current_is_not(c0) || sink.current_is_not(c1) || sink.current_is_not(a) {
+                    sink.going_to(a);
+                    sink.builder.cubic_to(f(c0.x), f(-c0.y), f(c1.x), f(-c1.y), f(a.x), f(-a.y));
+                }
+            }
+            CGPathElementType::CloseSubpath if sink.started => sink.builder.close(),
+            _ => {}
+        }
+    }
+    let xform = objc2_core_foundation::CGAffineTransform {
+        a: 4.0,
+        b: 0.0,
+        c: 4.0 * -f64::from(style.skew),
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    let path: CFRetained<CGPath> = unsafe { font.path_for_glyph(glyph, &xform) }?;
+    let mut sink = Sink {
+        builder: tiny_skia::PathBuilder::new(),
+        started: false,
+        current: CGPoint { x: 0.0, y: 0.0 },
+    };
+    unsafe { CGPath::apply(Some(&path), (&mut sink as *mut Sink).cast(), Some(apply)) };
+    let built = sink.builder.finish()?;
+    let dx = f32::from(style.quarter) * 0.25;
+    // Scale x by ¼ (`SkMatrix::Scale(1/4, 1)`), then the subpixel offset.
+    let pts: Vec<(tiny_skia::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
+    let mut b = tiny_skia::PathBuilder::new();
+    let m = |q: tiny_skia::Point| (q.x * 0.25 + dx, q.y);
+    for (seg, _) in pts {
+        match seg {
+            tiny_skia::PathSegment::MoveTo(a) => {
+                let a = m(a);
+                b.move_to(a.0, a.1);
+            }
+            tiny_skia::PathSegment::LineTo(a) => {
+                let a = m(a);
+                b.line_to(a.0, a.1);
+            }
+            tiny_skia::PathSegment::QuadTo(c, a) => {
+                let (c, a) = (m(c), m(a));
+                b.quad_to(c.0, c.1, a.0, a.1);
+            }
+            tiny_skia::PathSegment::CubicTo(c0, c1, a) => {
+                let (c0, c1, a) = (m(c0), m(c1), m(a));
+                b.cubic_to(c0.0, c0.1, c1.0, c1.1, a.0, a.1);
+            }
+            tiny_skia::PathSegment::Close => b.close(),
+        }
+    }
+    b.finish()
 }
 
 /// A color glyph drawn by CoreGraphics into a premultiplied RGBA bitmap
@@ -305,6 +482,7 @@ fn draw(
     CGContext::set_allows_font_subpixel_positioning(c, true);
     CGContext::set_should_subpixel_position_fonts(c, true);
     CGContext::set_text_drawing_mode(c, objc2_core_graphics::CGTextDrawingMode::Fill);
+
     // The pen is the CTM's origin, so the text matrix (synthetic italic)
     // shears the glyph about its own origin.
     CGContext::translate_ctm(c, f64::from(-left) + sub_x, (h as i32 + top) as f64);

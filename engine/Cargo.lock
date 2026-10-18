@@ -2411,6 +2411,7 @@ dependencies = [
  "sha2",
  "skrifa",
  "thiserror 2.0.21",
+ "tiny-skia",
  "unicode-bidi",
  "vello_cpu",
 ]

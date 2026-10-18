@@ -177,6 +177,32 @@ pub trait MaskSource {
     ) -> Option<Arc<GlyphMask>>;
     /// The preblend table for straight E-encoded paint `rgb`.
     fn preblend(&self, rgb: [f64; 3]) -> [u8; 256];
+    /// The mask of a glyph Skia draws from its path (synthesized bold,
+    /// `strokeText`): `glyph` of `face` at `size` device px and variation
+    /// `coords` in `style` (quarter offset, skew), with `frame` applied in
+    /// user space (the device transform is a uniform `scale`). `None` when
+    /// the platform does not draw glyphs this way.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn path_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        style: MaskStyle,
+        scale: f32,
+        frame: super::skpath::Frame,
+    ) -> Option<Arc<GlyphMask>> {
+        let _ = (face, coords, glyph, size, style, scale, frame);
+        None
+    }
+    /// The mask gamma of path-generated masks for paint `rgb` (no
+    /// CoreGraphics linearization).
+    fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
+        let _ = rgb;
+        std::array::from_fn(|i| i as u8)
+    }
     /// A color glyph (`sbix` emoji) as the platform draws it at `size`
     /// device px, `quarter`/4 px right of a whole pixel: a premultiplied
     /// image and its top-left pixel relative to the whole-pixel origin.
@@ -288,8 +314,9 @@ impl Painter<'_> {
         let mut mask = (Vec::new(), None::<Rect>);
         let mut path = (Vec::new(), None::<Rect>);
         let mut images = Vec::new();
-        // Platform masks of this call, at whole device pixels.
-        let mut platform: Vec<(i64, i64, Arc<GlyphMask>)> = Vec::new();
+        // Platform masks of this call, at whole device pixels; `true` for
+        // masks Skia generates from paths (their own gamma table).
+        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
         // Glyphs drawn as multisampled paths (sample counts per pixel).
         let mut msaa_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
         let mut curve_size = 0.0f64;
@@ -411,9 +438,38 @@ impl Painter<'_> {
                     }
                     continue;
                 }
-                // Synthesized bold keeps the outline path: Skia's fake bold
-                // (a stroke-and-fill path) is not reproduced exactly yet
-                // (docs/engine/text-render.md, "Gaps").
+                // Synthesized bold: Skia draws the glyph image from its path
+                // with a stroke-and-fill frame (`skpath`).
+                #[cfg(feature = "cg-masks")]
+                if !as_path
+                    && !large
+                    && place.axis_aligned
+                    && run.synthetic_bold
+                    && let Some(masks) = self.masks.as_deref_mut()
+                {
+                    let (x, y) = self.profile.snap.apply(p.x, p.y);
+                    let ix = x.floor();
+                    let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
+                    let skew = skew_of(run);
+                    let Coords::User(coords) = run.coords else {
+                        continue;
+                    };
+                    if let Some(m) = masks.path_mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        dsize,
+                        MaskStyle {
+                            quarter: quarter as u8,
+                            skew: skew as f32,
+                        },
+                        place.scale as f32,
+                        super::skpath::Frame::fake_bold(run.size),
+                    ) {
+                        platform.push((ix as i64, y as i64, m, true));
+                    }
+                    continue;
+                }
                 if !as_path
                     && !large
                     && place.axis_aligned
@@ -437,7 +493,7 @@ impl Painter<'_> {
                         style,
                         bare.bounds.inflate(grow_x, 0.0),
                     ) {
-                        platform.push((ix as i64, y as i64, m));
+                        platform.push((ix as i64, y as i64, m, false));
                     }
                     continue;
                 }
@@ -487,9 +543,10 @@ impl Painter<'_> {
         if !platform.is_empty()
             && let Some(masks) = self.masks.as_deref_mut()
         {
+            let rgb = [color[0], color[1], color[2]];
             out.extend(mask_image(
                 &platform,
-                masks.preblend([color[0], color[1], color[2]]),
+                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
                 color,
                 opacity,
                 blur,
@@ -498,7 +555,7 @@ impl Painter<'_> {
         if !msaa_glyphs.is_empty() {
             // Coverage quarters as masks (a linear table), composited like
             // the glyph masks.
-            let quarters: Vec<(i64, i64, Arc<GlyphMask>)> = msaa_glyphs
+            let quarters: Vec<(i64, i64, Arc<GlyphMask>, bool)> = msaa_glyphs
                 .into_iter()
                 .map(|(x0, y0, w, h, counts)| {
                     (
@@ -514,12 +571,14 @@ impl Painter<'_> {
                                 .map(|&n| (u32::from(n) * 255 / 4) as u8)
                                 .collect(),
                         }),
+                        false,
                     )
                 })
                 .collect();
+            let linear: [u8; 256] = std::array::from_fn(|i| i as u8);
             out.extend(mask_image(
                 &quarters,
-                std::array::from_fn(|i| i as u8),
+                [&linear, &linear],
                 color,
                 opacity,
                 blur,
@@ -577,6 +636,13 @@ impl Painter<'_> {
     ) {
         let place = Placement::of(m);
         if place.scale == 0.0 || width <= 0.0 {
+            return;
+        }
+        #[cfg(feature = "cg-masks")]
+        if place.axis_aligned
+            && self.masks.is_some()
+            && self.stroke_masks(out, runs, origin, &place, width, color, opacity)
+        {
             return;
         }
         let device_width = width * place.scale + 2.0 * self.profile.stroke.widen;
@@ -637,18 +703,122 @@ impl Painter<'_> {
     }
 }
 
+impl Painter<'_> {
+    /// `strokeText` as Skia draws it on macOS: each glyph's image generated
+    /// from its path with a stroke frame (`skpath`), at the glyph's
+    /// quarter-pixel position, through the path mask gamma of the stroke
+    /// color, composited like `fillText`'s masks. `false` (nothing pushed)
+    /// when a glyph is beyond the atlas (Skia strokes such text as paths).
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_masks(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        place: &Placement,
+        width: f64,
+        color: Rgba,
+        opacity: f64,
+    ) -> bool {
+        let frame = super::skpath::Frame {
+            width: width as f32,
+            fill: false,
+            join: tiny_skia::LineJoin::Round,
+            miter_limit: 2.0,
+        };
+        // `SkStrikeSpec::ShouldDrawAsPath`: the text matrix's scale beyond
+        // 256 px draws paths, not glyph images.
+        if runs
+            .iter()
+            .any(|r| f64::from(r.size) * place.scale > 256.0)
+        {
+            return false;
+        }
+        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
+        for run in runs {
+            let device_size = f64::from(run.size) * place.scale;
+            let skew = skew_of(run);
+            let bitmap_face = has_bitmaps(run.face);
+            for g in run.glyphs {
+                let bsize = run.bitmap_size.unwrap_or(device_size as f32);
+                if bitmap_face
+                    && self
+                        .bitmaps
+                        .get(run.face, g.id, device_size as f32, bsize)
+                        .is_some()
+                {
+                    continue;
+                }
+                let Coords::User(coords) = run.coords else {
+                    return false;
+                };
+                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let (x, y) = self.profile.snap.apply(p.x, p.y);
+                let ix = x.floor();
+                let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
+                // A synthesized bold run strokes its emboldened path: the
+                // fake bold frame and the stroke add (Skia adds the widths).
+                let frame = if run.synthetic_bold {
+                    super::skpath::Frame {
+                        width: frame.width + super::skpath::Frame::fake_bold(run.size).width,
+                        ..frame
+                    }
+                } else {
+                    frame
+                };
+                let Some(masks) = self.masks.as_deref_mut() else {
+                    return false;
+                };
+                let Some(m) = masks.path_mask(
+                    run.face,
+                    coords,
+                    g.id as u16,
+                    device_size as f32,
+                    MaskStyle {
+                        quarter: quarter as u8,
+                        skew: skew as f32,
+                    },
+                    place.scale as f32,
+                    frame,
+                ) else {
+                    continue;
+                };
+                // Glyph images beyond the atlas are drawn as paths.
+                if m.width > 256 || m.height > 256 {
+                    return false;
+                }
+                platform.push((ix as i64, y as i64, m, true));
+            }
+        }
+        if !platform.is_empty()
+            && let Some(masks) = self.masks.as_deref_mut()
+        {
+            let rgb = [color[0], color[1], color[2]];
+            out.extend(mask_image(
+                &platform,
+                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
+                color,
+                opacity,
+                0.0,
+            ));
+        }
+        true
+    }
+}
+
 /// One image item holding the platform masks of a `fillText` call, each
 /// glyph composited over the earlier ones (Skia draws glyph quads one by
 /// one with source-over), in `color` through the preblend `table`.
 fn mask_image(
-    masks: &[(i64, i64, Arc<GlyphMask>)],
-    table: [u8; 256],
+    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
+    tables: [&[u8; 256]; 2],
     color: Rgba,
     opacity: f64,
     blur: f64,
 ) -> Option<Item> {
     let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    for (x, y, m) in masks {
+    for (x, y, m, _) in masks {
         x0 = x0.min(x + i64::from(m.left));
         y0 = y0.min(y + i64::from(m.top));
         x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
@@ -660,7 +830,8 @@ fn mask_image(
     }
     // Coverage composited source-over in float.
     let mut cov = vec![0.0f32; w * h];
-    for (x, y, m) in masks {
+    for (x, y, m, path) in masks {
+        let table = tables[usize::from(*path)];
         let ox = (x + i64::from(m.left) - x0) as usize;
         let oy = (y + i64::from(m.top) - y0) as usize;
         for row in 0..m.height as usize {

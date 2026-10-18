@@ -27,6 +27,10 @@ pub mod outline;
 pub mod paint;
 pub mod profile;
 pub mod scene;
+#[cfg(feature = "cg-masks")]
+pub mod skaaa;
+#[cfg(feature = "cg-masks")]
+pub mod skpath;
 
 use kurbo::Affine;
 
