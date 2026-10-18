@@ -377,13 +377,12 @@ fn check_composition(
                 }
             }
         }
-        // Parametric masks, track mattes, and blend modes are drawn
-        // (`crate::composite`); bezier path masks and masks that are not an
-        // array are not.
+        // Parametric masks (also on 3D object layers), track mattes, and
+        // blend modes are drawn (`crate::composite`); bezier path masks are
+        // not. Masks that are not an array fail the layer as today's
+        // `(L.masks || []).some(…)` does (a named layer failure, not a
+        // route).
         let masks = node::member(Some(layer), "masks");
-        if is_property(masks) || (node::truthy(masks) && node::array(masks).is_none()) {
-            add(layer, Feature::Masks);
-        }
         if node::array(masks).is_some_and(|m| {
             m.iter()
                 .any(|mask| node::truthy(node::member(Some(mask), "path")))
