@@ -6,7 +6,9 @@
  *   59.94 on Pro; zero drops over 60 s; same with linear blending on".
  *   Three 3840 × 2160 ProRes 422 HQ layers, each a different 4 s section of
  *   one 12 s clip (three decodes per frame), each with a Gaussian blur, in
- *   a 4 s composition at the clip's rate, played looping for 60 s. Every
+ *   a 4 s composition at the clip's rate, played looping for 60 s, then
+ *   again after turning on "Blend in linear light" (if the composition
+ *   still routes to the engine; its route is recorded either way). Every
  *   timed frame the presentation shows is counted: a composition frame
  *   skipped between two shown frames is a drop, and so is anything the
  *   presenter reports dropped (a frame replaced by a newer revision of
@@ -29,10 +31,11 @@
  * is linked, not copied, into the disposable profile.
  *
  * Opt in (heavy; one Electron at a time):
- *   PM_P3A_MEASURE=1 pm-electron-lock bunx playwright test e2e/native-engine-p3a-measure.spec.ts --workers=1
+ *   PM_P3A_MEASURE=1 pm-electron-lock bunx playwright test e2e/native-engine-p3a-measure.spec.ts --workers=1 --global-timeout=0
  * Results go to $PM_P3A_MEASURE_OUT (JSON lines; default
  * /tmp/powermove-p3a-measure.jsonl), never into the repository.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -55,6 +58,15 @@ async function record(row: string, value: unknown): Promise<void> {
   const line = JSON.stringify({ row, at: new Date().toISOString(), cpu: os.cpus()[0]?.model ?? null, load: os.loadavg(), value });
   await appendFile(OUT, `${line}\n`);
   console.log(`[measure] ${row}: ${JSON.stringify(value)}`);
+}
+
+/** Whether an FFmpeg process is converting this clip (main's rendition for the legacy viewer). */
+function converting(name: string): boolean {
+  try {
+    return execFileSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' }).split('\n').some((line) => /ffmpeg/i.test(line) && line.includes(name));
+  } catch {
+    return false;
+  }
 }
 
 const status = (page: Page): Promise<any> => page.evaluate(() => (window as any).PM.EngineConnection.status());
@@ -88,42 +100,60 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
   for (const rate of RATES) {
-    for (const linear of [false, true]) {
-      test(`UHD ProRes 422 HQ, 3 layers with blur, ${rate.name} fps${linear ? ', linear blending' : ''}`, async ({ session }) => {
-        test.setTimeout(SECONDS * 1000 + 360_000);
-        const file = path.join(MEDIA, rate.file);
-        test.skip(!existsSync(file), `generate ${file} first (see the header)`);
-        const { page } = session;
-        await session.openEditor();
-        await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
-        await page.evaluate(({ num, den }) => {
-          const PM = (window as any).PM;
-          PM.HostMedia?.setProjectStorage?.('link');
-          const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: 4, bg: '#000000' });
-          project.fpsRational = { num, den };
-          PM.replaceProject(project);
-          PM.setTime(0);
-        }, { num: rate.num, den: rate.den });
-        const chooser = page.waitForEvent('filechooser');
-        await page.evaluate(() => (window as any).PM.pickFiles());
-        await (await chooser).setFiles(file);
-        await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 180_000 });
-        const built = await page.evaluate(({ linear }) => {
-          const PM = (window as any).PM;
-          const first = PM.proj.layers.find((l: any) => l.type === 'video');
-          const asset = first.d.asset;
-          // Two more layers of the same clip, 4 s and 8 s into it.
-          for (const trim of [4, 8]) {
-            PM.Edit.apply({ type: 'add_layer', layerType: 'video', name: `UHD ${trim}`, content: { asset, fit: 'contain', w: 3840, h: 2160, trim, speed: 1 } }, { origin: 'panel', label: 'Add layer' });
-          }
-          const videos = PM.proj.layers.filter((l: any) => l.type === 'video');
-          for (const layer of videos) {
-            PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0, duration: 4 } }, { origin: 'panel', label: 'Timing' });
-            PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'blur', parameters: { amount: 24 } }, { origin: 'panel', label: 'Add effect' });
-          }
-          // Lower layers show through: each upper layer at 60% opacity.
-          videos.slice(1).forEach((layer: any) => PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 60 }, { origin: 'panel', label: 'Opacity' }));
-          if (linear) {
+    test(`UHD ProRes 422 HQ, 3 layers with blur, ${rate.name} fps, linear blending off and on`, async ({ session }) => {
+      test.setTimeout(2 * SECONDS * 1000 + 1_800_000);
+      const file = path.join(MEDIA, rate.file);
+      test.skip(!existsSync(file), `generate ${file} first (see the header)`);
+      const { page } = session;
+      await session.openEditor();
+      await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+      await page.evaluate(({ num, den }) => {
+        const PM = (window as any).PM;
+        PM.HostMedia?.setProjectStorage?.('link');
+        const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: 4, bg: '#000000' });
+        project.fpsRational = { num, den };
+        PM.replaceProject(project);
+        PM.setTime(0);
+      }, { num: rate.num, den: rate.den });
+      const importStart = Date.now();
+      const chooser = page.waitForEvent('filechooser');
+      await page.evaluate(() => (window as any).PM.pickFiles());
+      await (await chooser).setFiles(file);
+      await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 900_000 });
+      // Main converts a ProRes original into a rendition for the legacy
+      // viewer: let it finish so its encoder does not share the machine with
+      // the measurement.
+      const idle = Date.now() + 900_000;
+      while (Date.now() < idle && converting(rate.file)) await page.waitForTimeout(2000);
+      const importSeconds = (Date.now() - importStart) / 1000;
+      const built = await page.evaluate(() => {
+        const PM = (window as any).PM;
+        const first = PM.proj.layers.find((l: any) => l.type === 'video');
+        const asset = first.d.asset;
+        // Two more layers of the same clip, 4 s and 8 s into it.
+        for (const trim of [4, 8]) {
+          PM.Edit.apply({ type: 'add_layer', layerType: 'video', name: `UHD ${trim}`, content: { asset, fit: 'contain', w: 3840, h: 2160, trim, speed: 1 } }, { origin: 'panel', label: 'Add layer' });
+        }
+        const videos = PM.proj.layers.filter((l: any) => l.type === 'video');
+        for (const layer of videos) {
+          PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0, duration: 4 } }, { origin: 'panel', label: 'Timing' });
+          PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'blur', parameters: { amount: 24 } }, { origin: 'panel', label: 'Add effect' });
+        }
+        // Lower layers show through: each upper layer at 60% opacity.
+        videos.slice(1).forEach((layer: any) => PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 60 }, { origin: 'panel', label: 'Opacity' }));
+        return {
+          layers: PM.proj.layers.map((l: any) => ({ type: l.type, trim: l.d?.trim, from: l.from, dur: l.dur, fx: (l.fx ?? []).map((f: any) => f.type), asset: l.d?.asset })),
+          fps: PM.proj.fps,
+          asset: PM.assets?.get?.(asset) ? { storage: PM.assets.get(asset).storage ?? null, rendition: PM.assets.get(asset).rendition ?? null } : null
+        };
+      });
+      expect(built.layers.filter((l: any) => l.type === 'video')).toHaveLength(3);
+      for (const linear of [false, true]) {
+        const row = `uhd-prores-3-blur-${rate.name}${linear ? '-linear' : ''}`;
+        if (linear) {
+          // Settings › Project › Color › "Blend in linear light", as the switch applies it.
+          await page.evaluate(() => {
+            const PM = (window as any).PM;
             const next = { mode: 'standard', linearBlending: true, precision: 'float16', blendDomain: 'hdrSafe' };
             const apply = () => { PM.proj.color = next; };
             if (PM.hist?.do) PM.hist.do('Blend in linear light', apply);
@@ -131,18 +161,14 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
             PM.touch?.();
             PM.bus?.emit?.('project');
             PM.invalidate?.('render');
-          }
-          return {
-            layers: PM.proj.layers.map((l: any) => ({ type: l.type, trim: l.d?.trim, from: l.from, dur: l.dur, fx: (l.fx ?? []).map((f: any) => f.type), asset: l.d?.asset })),
-            color: PM.proj.color ?? null,
-            fps: PM.proj.fps
-          };
-        }, { linear });
-        expect(built.layers.filter((l: any) => l.type === 'video')).toHaveLength(3);
+          });
+          await page.waitForTimeout(3000);
+        }
         const routed = await settledRoute(page);
+        const project = await page.evaluate(() => ({ color: (window as any).PM.proj.color ?? null, requiresEngine: (window as any).PM.proj.requiresEngine ?? null }));
         if (routed?.route !== 'engine') {
-          await record(`uhd-prores-3-blur-${rate.name}${linear ? '-linear' : ''}`, { built, route: routed?.route ?? null, routeReason: routed?.routeReason ?? null, failures: routed?.failures ?? null });
-          throw new Error(`the composition routes to ${routed?.route}`);
+          await record(row, { built, importSeconds, project, route: routed?.route ?? null, routeReason: routed?.routeReason ?? null, failures: routed?.failures ?? null });
+          continue;
         }
         const result = await page.evaluate(async ({ seconds, ticks }) => {
           const PM = (window as any).PM;
@@ -160,6 +186,7 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
           let previous = -1;
           let skipped = 0;
           let repeats = 0;
+          const skips: number[] = [];
           const intervals: number[] = [];
           let lastDisplay: number | null = null;
           const off = presentation.onPresented((f: any) => {
@@ -169,7 +196,7 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
             if (previous >= 0) {
               const step = (k - previous + frames) % frames;
               if (step === 0) repeats++;
-              else if (step > 1) skipped += step - 1;
+              else if (step > 1) { skipped += step - 1; if (skips.length < 20) skips.push(k); }
             }
             previous = k;
             if (f.displayUs != null) {
@@ -185,18 +212,19 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
           PM.pause();
           const sorted = intervals.sort((a, b) => a - b);
           const at = (p: number) => sorted.length ? +sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!.toFixed(2) : null;
-          return { elapsed, expected: Math.round(elapsed * fps), shown, skipped, repeats, before, after, intervalMs: { n: sorted.length, p50: at(0.5), p99: at(0.99), max: at(1) } };
+          return { elapsed, expected: Math.round(elapsed * fps), frames, shown, skipped, skips, repeats, before, after, intervalMs: { n: sorted.length, p50: at(0.5), p99: at(0.99), max: at(1) } };
         }, { seconds: SECONDS, ticks: 705_600_000 });
         const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
         const dropped = (s: any) => Object.entries(s?.dropped ?? {}).filter(([reason]) => reason !== 'replaced').reduce((a: number, [, b]: [string, any]) => a + Number(b), 0);
-        const presenterDropped = dropped(result.after) - dropped(result.before);
-        await record(`uhd-prores-3-blur-${rate.name}${linear ? '-linear' : ''}`, {
+        await record(row, {
           seconds: result.elapsed,
           expectedFrames: result.expected,
+          compositionFrames: result.frames,
           shownFrames: result.shown,
           skippedFrames: result.skipped,
+          skippedAt: result.skips,
           repeatedFrames: result.repeats,
-          presenterDropped,
+          presenterDropped: dropped(result.after) - dropped(result.before),
           presenterDroppedByReason: result.after?.dropped ?? null,
           displayIntervalMs: result.intervalMs,
           engine: {
@@ -206,11 +234,13 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
             composeUsMax: report?.presenter?.composeUsMax ?? null,
             composeUsMean: report?.presenter?.documentFrames ? Math.round(report.presenter.composeUsTotal / report.presenter.documentFrames) : null
           },
+          importSeconds,
+          project,
           built
         });
         expect(result.shown).toBeGreaterThan(0);
-      });
-    }
+      }
+    });
   }
 
   test('routing: a canvas text layer', async ({ session }) => {
