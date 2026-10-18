@@ -131,6 +131,43 @@ test.describe('Use New Engine: the render transport', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('an interactive engine crash keeps the last frame with a visible state, never the current engine, and recovers', async ({ session }) => {
+    const { page } = session;
+    await openEngineViewer(session);
+    const before = await page.evaluate(() => (window as any).PM.EngineConnection.status().connections);
+    // The legacy canvas never shows with the engine on.
+    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('hidden');
+    const killed = await session.app.evaluate(({ app }) => {
+      const engine = app.getAppMetrics().find((m: any) => String(m.serviceName ?? m.name ?? '').includes('Interactive Engine'));
+      if (!engine) throw new Error('no interactive engine process');
+      process.kill(engine.pid, 'SIGKILL');
+      return engine.pid;
+    });
+    expect(killed).toBeGreaterThan(0);
+    // While it restarts: the last frame stays, the state says so, the
+    // current engine's canvas stays hidden, and the transport stays with
+    // the engine (the current engine does not drive it).
+    await expect.poll(() => page.evaluate(() => document.querySelector('[data-engine-status]')?.textContent ?? null), { timeout: 20_000 }).toBe('Reconnecting to the engine…');
+    const during = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return {
+        presenting: document.getElementById('engine-present')?.style.visibility,
+        legacyCanvas: PM.Kernel.services.get('viewer').el.style.visibility,
+        engineDrives: PM.EngineConnection.transport.active()
+      };
+    });
+    expect(during).toEqual({ presenting: 'visible', legacyCanvas: 'hidden', engineDrives: true });
+    // The engine is back: a new session presents, the state clears, and
+    // the synchronous path works again.
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => document.querySelector('[data-engine-status]') === null), { timeout: 20_000 }).toBe(true);
+    const url = await page.evaluate(() => (window as any).PM.Kernel.api('transport-probe').render.snapshot(0.5, 160));
+    expect(url.startsWith('data:image/jpeg')).toBe(true);
+    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('hidden');
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('frame events fire on presentation with the exact previewViewport object, and engine stats reach the status bar', async ({ session }) => {
     const { page } = session;
     await openEngineViewer(session);

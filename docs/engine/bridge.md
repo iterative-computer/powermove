@@ -1074,6 +1074,93 @@ user, flag or not, and are for their owning lanes to review:
   and `pm-node/tests/present.rs` (the presenter end to end, and a build
   without C′ asked for it); `engine/Cargo.lock` (C′'s crates).
 
+## The Phase 3c render transport (2026-10-18)
+
+Plan sections 18 to 20, amendments 4, 17, 18, 21 to 24; the contract is
+[RFC 16](rfcs/16-render-transport.md), whose TypeScript interfaces are
+frozen for the other Phase 3c lanes. Everything runs only with "Use New
+Engine" on; with it off nothing here is installed.
+
+| Item | Code | Tests |
+|---|---|---|
+| Synchronous pixels (`render.snapshot`, `renderFrameTo`; apiVersion 1 to 3) | renderer `engine-connection/render-transport.ts` → preload `snapshotSync` (`sendSync`) → main `engine/snapshots.ts` → host `snapshot` request → `pm-node/src/present/snapshot.rs` and `render.rs` (`run_snapshot`) → pixels inline or through `pm-bridge/src/shm.rs` | `pm-node/tests/snapshot.rs` (child engine), `pm-bridge` `shm` unit tests, `main/engine/snapshots.test.ts`, `render-transport.test.ts`, `e2e/engine-render-transport.spec.ts` |
+| Async siblings (`snapshotAsync`, `renderFrameToAsync`, `rasterAsync`) | `kernel/install.ts` `makeRender`; preload `snapshot` (`invoke`) | the same |
+| UI snapshots (composition thumbnails, project thumbnail, the Library's and the agent's captures) | `EngineThumbnails` (idle class, stale-rejecting); `panels/comp-thumbnails.svelte.ts`, `legacy/app.ts` `projectThumb`, `PM.Export.snapshot`/`snapshotAsync` routed in `engine-connection/install.ts` | `snapshot.rs` scheduling child, `render-transport.test.ts`, e2e |
+| Depth and object-id surface per presented frame | `ViewerState.depthId` → `pm-node` `plan_depth`/`configure_depth`, `Composer::compose_with_depth`; `FrameDescriptor.depthId`; viewer `presenter.ts`/`worker-presenter.ts` (`role: depthId` pools), `ViewerPresentation.depthFrame` | `snapshot.rs` `child_depth`, `presenter.test.ts` |
+| Presentation events and stats | `ViewerPresentation` → `EngineViewerService.presented` → `engine-connection/presentation-events.ts` (`preview:presented` → `frame:rendered`, then `overlay`); `pm-node/src/present/stats.rs` (`RenderStats`) → `PM.EngineStats` → `runtime/install-legacy.ts` | `stats.rs` unit, `child_scheduling`, `presentation-events.test.ts`, e2e |
+| Compatibility pixels (upload and export frames) | renderer `uploadCompat`/`provideCompat`; `pm-node/src/present/compat.rs` (store); main `engine/compat-frames.ts` (job engine `compatFrame` host service) | `compat.rs` unit, `child_snapshots`, `compat-frames.test.ts`, `render-transport.test.ts` |
+| Crash, GPU loss, cold start with the flag on | `EngineViewerService.exclusive`; `ViewerPresentation` status and no hand-back; `viewer.ts` hides the WebGL canvas; `EngineTransport` `exclusive` (holds and replays the playhead) | `presentation.test.ts`, `presentation-events.test.ts`, e2e crash test |
+| `render.gl.init`/`resize` bind presentation to the caller's canvas | `engine-connection/canvas-binding.ts` (`PM.EngineCanvas`), `kernel/install.ts`; viewer stages marked `data-engine-stage` | `canvas-binding.test.ts` |
+
+### How a synchronous snapshot works
+
+1. The renderer flushes pending edits to the engine (`PM.EngineDoc.barrier`)
+   and asks main with `sendSync`, naming its session, its engine launch, and
+   the revision it has.
+2. Main checks the request, names the window's own port to the interactive
+   engine (a window cannot name another's session), waits for a starting
+   engine within the request's wait, and sends a host `snapshot` request
+   with the revision as the envelope minimum. It sets the sync reply when
+   the engine answers, or after the request's wait plus 10 s.
+3. The engine routes it to the presenter's render thread after checking the
+   session belongs to the named renderer port. The render thread queues it
+   (sync before async before idle), waits for the revision (the patches are
+   already on the renderer's port), renders it between viewer frames with
+   the session's renderer, definitions, media, and fonts (`Renderer::render`
+   at Float16, today's scale derivation), reads it back, encodes RGBA8 like
+   today's capture (round half to even), and answers on main's port: inline
+   up to 1 MiB, otherwise a `/pm.<24 hex>` shared-memory segment.
+4. Main maps the segment once (`takePixels`, which unlinks it) and hands the
+   buffer to the renderer; the facade makes today's shape (a canvas, a JPEG
+   data URL at 0.74).
+
+A frame that needs the renderer's own pixels (a shader the native pipeline
+cannot translate, decision 19) is answered `needsRenderer`: the transport
+draws those programs on the calling thread
+(`ShaderFallbackRunner.renderSync`), posts them on the session's port, and
+asks again naming them in `uploaded`, and the engine waits for those bands
+instead of naming them again. Nothing waits for a renderer task, so a call
+from a `raster` wrapper or an animation-frame callback cannot deadlock (the
+e2e proves both).
+
+### Measured (2026-10-18, M4 Max, load average 30 to 35 from other lanes)
+
+- `child_scheduling`: a sync snapshot during playback answered in 8.4 to
+  9.1 ms (four runs); an idle snapshot waited until the transport stopped.
+- `e2e/engine-render-transport.spec.ts`: all tests pass (the first run three
+  of three; the crash test was added after and is in the run listed in the
+  lane report).
+
+### What remains
+
+- **Layer rasters.** `render.raster` stays on today's rasterizer: pm-render
+  has no single-layer raster pass, so the engine answers `layer` snapshot
+  targets `unsupported` (named). `rasterAsync` exists and fails with that
+  reason until pm-render draws them (lanes L1 and extcompat).
+- **Compatibility rasters in frames.** The interactive engine assembles and
+  holds uploaded compatibility rasters, and main serves the job engine's
+  `compatFrame`, but pm-render does not draw a layer from them yet and
+  pm-export does not ask for them yet; `needsRenderer.compat` is always
+  empty (lanes L1, L4, L6).
+- **Blender in snapshots** renders with native shading (`draft3d` is
+  reported as asked); the synchronous path cannot run a Blender job.
+- **Snapshots during boot**, before the window's first engine session, fail
+  with `noSession` (the standby session covers the time after it while no
+  viewer is open). A sync snapshot while a staged resync of a large
+  document is in flight times out: the resync's next step waits for the
+  blocked renderer.
+- **`FX passes`** in the performance panel reads 0 with the engine (the
+  engine counts no effect passes); the other fields come from
+  `RenderStats`.
+- **Depth and id consumers.** The 3D viewport chrome does not read
+  `depthFrame` yet (the 3D lane): the viewer asks with
+  `ViewParams.depthId`, which the 3D lane sets.
+- **Old custom viewers** are covered by unit tests of the binding; no e2e
+  loads a frozen viewer fork yet (the extcompat lane's fork corpus).
+- Capability routing (`routed`) still hands the stage, transport, and audio
+  back: it is development scaffolding the derouter lane removes; crashes,
+  GPU loss, and cold starts no longer do.
+
 ## Gaps and next steps
 
 - The kernel's engine connection (which registers `engine.viewer` and
