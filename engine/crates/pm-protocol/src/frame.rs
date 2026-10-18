@@ -397,13 +397,19 @@ pub struct OverlayGeometry {
     pub caret: Option<Caret>,
 }
 
-/// The depth and object-id surface (`rgbaf16`) for frames with 3D layers.
+/// The depth and object-id surface (`rgbaf16`: r depth, g and b the object
+/// id minus one, a coverage) of a viewer frame, in the depth pool
+/// (`SurfacePool::role` `depthId`) of `pool_generation`, at the frame's own
+/// size and placement. It holds this frame's surface while the frame is on
+/// screen: the engine reuses a depth slot only after `pool size − 2` newer
+/// frames were rendered, more than a viewer holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DepthIdSurface {
     pub pool_index: u32,
     pub seq: Seq,
+    pub pool_generation: Seq,
 }
 
 /// One presented frame. Sent after the command buffer completes.
@@ -519,6 +525,12 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub vsync: Option<VsyncHint>,
+    /// The 3D viewport chrome wants each frame's depth and object-id
+    /// surface (plan section 8; the Phase 3c render transport). Absent or
+    /// false: no depth pool. A change of it is a new view.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub depth_id: Option<bool>,
 }
 
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
@@ -704,6 +716,7 @@ mod tests {
                 host_time: HostMicros::new(1_000_000).unwrap(),
                 period_us: 8_333.333,
             }),
+            depth_id: Some(true),
         }
     }
 

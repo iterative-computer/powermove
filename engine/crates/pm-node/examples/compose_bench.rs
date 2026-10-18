@@ -76,6 +76,7 @@ fn main() {
         edr: false,
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
+        depth_id: None,
     };
     let gpu = pm_gpu::Gpu::new("compose bench").expect("a GPU");
     let working = WorkingTexture::new(&gpu.device, Size::new(width, height));

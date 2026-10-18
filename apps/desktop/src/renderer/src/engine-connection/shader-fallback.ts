@@ -124,6 +124,17 @@ export class ShaderFallbackRunner {
     return run;
   }
 
+  /**
+   * Renders one request on the calling thread (the synchronous snapshot
+   * path, render-transport.ts: the thread is blocked on a snapshot that
+   * needs these pixels, so nothing may wait for a task). Linking without
+   * `KHR_parallel_shader_compile` polling blocks until the program is
+   * ready, as WebGL's `LINK_STATUS` query does.
+   */
+  renderSync(request: ShaderFallbackRequest): ShaderFallbackPixels {
+    return this.draw(request, this.programSync(this.context(), request));
+  }
+
   dispose(): void {
     const gl = this.gl;
     if (gl && !gl.isContextLost()) {
@@ -155,7 +166,7 @@ export class ShaderFallbackRunner {
     return gl;
   }
 
-  private async program(gl: GL, request: ShaderFallbackRequest): Promise<Program> {
+  private cached(request: ShaderFallbackRequest): Program | null {
     const id = `${request.vertex}\u0000${request.fragment}`;
     const cached = this.programs.get(id);
     if (cached) {
@@ -165,10 +176,29 @@ export class ShaderFallbackRunner {
     }
     const failure = this.failed.get(id);
     if (failure) throw new ShaderFallbackError(request.key, failure.reason, failure.message);
+    return null;
+  }
+
+  private compile(gl: GL, request: ShaderFallbackRequest): { vs: WebGLShader; fs: WebGLShader; program: WebGLProgram } {
     const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
     gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
     gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
     gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
+    return { vs, fs, program };
+  }
+
+  private programSync(gl: GL, request: ShaderFallbackRequest): Program {
+    const cached = this.cached(request);
+    if (cached) return cached;
+    const { vs, fs, program } = this.compile(gl, request);
+    return this.linked(gl, request, vs, fs, program);
+  }
+
+  private async program(gl: GL, request: ShaderFallbackRequest): Promise<Program> {
+    const id = `${request.vertex}\u0000${request.fragment}`;
+    const cached = this.cached(request);
+    if (cached) return cached;
+    const { vs, fs, program } = this.compile(gl, request);
     if (this.parallel) {
       const deadline = performance.now() + (this.options.compileDeadlineMs ?? 10_000);
       while (!gl.getProgramParameter(program, this.parallel.COMPLETION_STATUS_KHR)) {
@@ -180,6 +210,11 @@ export class ShaderFallbackRunner {
         await new Promise((resolve) => setTimeout(resolve, POLL_MS));
       }
     }
+    return this.linked(gl, request, vs, fs, program);
+  }
+
+  private linked(gl: GL, request: ShaderFallbackRequest, vs: WebGLShader, fs: WebGLShader, program: WebGLProgram): Program {
+    const id = `${request.vertex}\u0000${request.fragment}`;
     const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
     const log = (gl.getShaderInfoLog(fs) || '') + (gl.getProgramInfoLog(program) || '');
     gl.deleteShader(vs); gl.deleteShader(fs);
@@ -203,14 +238,24 @@ export class ShaderFallbackRunner {
     return error;
   }
 
-  private async run(request: ShaderFallbackRequest): Promise<ShaderFallbackPixels> {
+  private checkSize(request: ShaderFallbackRequest): void {
     const max = this.options.maxSize ?? 4096;
     const { width, height } = request;
     if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1 && width <= max && height <= max)) {
       throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is outside 1..${max}`);
     }
+  }
+
+  private async run(request: ShaderFallbackRequest): Promise<ShaderFallbackPixels> {
+    this.checkSize(request);
     const gl = this.context();
-    const p = await this.program(gl, request);
+    return this.draw(request, await this.program(gl, request));
+  }
+
+  private draw(request: ShaderFallbackRequest, p: Program): ShaderFallbackPixels {
+    this.checkSize(request);
+    const gl = this.gl!;
+    const { width, height } = request;
     const texture = gl.createTexture()!;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);

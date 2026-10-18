@@ -137,6 +137,9 @@ pub enum Command {
         state: Box<ViewerState>,
         revision: Option<Revision>,
         pool: Option<PoolSpec>,
+        /// `Some(Some)`: a new depth and object-id pool; `Some(None)`:
+        /// retire it; `None`: unchanged.
+        depth: Option<Option<PoolSpec>>,
     },
     Release {
         key: Key,
@@ -195,13 +198,31 @@ pub enum Command {
     FrameCache {
         bytes: usize,
     },
+    /// A host snapshot of a session's document (the Phase 3c render
+    /// transport, [`super::snapshot`]).
+    Snapshot(Box<super::snapshot::SnapshotJob>),
+    /// Compatibility pixels the session's renderer uploaded
+    /// ([`super::compat`]).
+    Compat {
+        key: Key,
+        message: pm_protocol::snapshot::CompatMessage,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
+    /// The font service's generation moved (project fonts): views draw
+    /// again with fresh fonts.
+    FontsChanged,
     /// The paused viewer's Blender previews (sent once, at start).
     UseBlender(Arc<super::blender::PreviewBlender>),
     /// Preview surfaces of the view arrived: draw it again when paused.
     BlenderReady {
         key: Key,
+    },
+    /// A snapshot's Blender frames are prepared, or why not
+    /// ([`super::blender::PreviewBlender::capture`]).
+    BlenderCaptured {
+        token: u64,
+        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
     },
     Shutdown,
 }
@@ -241,7 +262,16 @@ pub struct ThreadConfig {
     pub host_clock: bool,
     /// The program cache folder (`SHADER_CACHE_ENV`).
     pub shader_cache: Option<PathBuf>,
+    /// The engine's render fonts (the host's font broker): text and
+    /// captions layers are drawn natively. `None`: no fonts, those layers
+    /// are refused.
+    pub fonts: Option<crate::fonts::render::RenderFonts>,
 }
+
+/// Today's capture error for a Blender composition whose frame was not
+/// rendered by Blender first (`legacy/gl/compositor.ts`), word for word.
+pub const BLENDER_NOT_PREPARED: &str =
+    "The Blender frame is not prepared. Render this frame before capturing it.";
 
 /// The device's composer, keeping translated programs in the configured
 /// cache folder.
@@ -366,6 +396,25 @@ pub struct Stats {
     pub frame_cache: u64,
     /// The display decode workers (scrubbing, look-ahead, cancellation).
     pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
+    /// Snapshots (the Phase 3c render transport): answered with pixels,
+    /// answered `needsRenderer`, failed (including timeouts and refusals),
+    /// the slowest render, and how many went through shared memory.
+    pub snapshots: u64,
+    pub snapshot_needs: u64,
+    pub snapshot_failures: u64,
+    /// Snapshots whose Blender frames were sent to the Blender worker
+    /// first (today's `prepareFrame` before an async capture).
+    pub snapshot_blender: u64,
+    pub snapshot_us_max: i64,
+    pub snapshot_shared: u64,
+    /// Compatibility rasters (the `raster` override, compatibility
+    /// contexts): complete ones received, held per view, and bytes held.
+    pub compat_rasters_received: u64,
+    /// Depth and object-id pools made, and frames that carried a surface.
+    pub depth_pools: u64,
+    pub depth_frames: u64,
+    pub compat_rasters: BTreeMap<String, usize>,
+    pub compat_bytes: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -384,8 +433,26 @@ struct Gpu {
     display: DisplayTransform,
     /// Draws documents (made with the first document frame).
     composer: Option<Composer>,
+    /// The font generation the composer's renderer lays text out with.
+    fonts_installed: Option<u64>,
     /// Set by the device-lost callback; the thread rebuilds the device.
     lost: Arc<AtomicBool>,
+}
+
+impl Gpu {
+    /// The device's composer (made on first use), its renderer holding
+    /// fonts of the broker's current generation (`crate::fonts::render`).
+    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize) -> &mut Composer {
+        if self.composer.is_none() {
+            self.composer = Some(composer(&self.device, &self.queue, config, frame_cache));
+            self.fonts_installed = None;
+        }
+        let composer = self.composer.as_mut().expect("made above");
+        if let Some(fonts) = &config.fonts {
+            fonts.sync(composer.renderer(), &mut self.fonts_installed);
+        }
+        composer
+    }
 }
 
 struct Live {
@@ -397,6 +464,15 @@ struct Live {
     source: Option<TestSource>,
     /// The C′ prototype's layer for this pool's size and format.
     remote: Option<RemoteLayer>,
+}
+
+/// A view's depth and object-id surfaces (plan section 8). Frame `seq`
+/// writes slot `seq % count`, so a slot is reused only after `count`
+/// newer frames: more than the frames in flight (ring + render-ahead), so
+/// the surface of the frame on screen is never overwritten.
+struct DepthPool {
+    spec: PoolSpec,
+    pool: SurfacePool,
 }
 
 struct View {
@@ -430,6 +506,10 @@ struct View {
     /// The frame on screen showed stand-ins: the media "landed" counter when
     /// it was drawn. A change draws the frame again.
     stand_in: Option<u64>,
+    /// What presenting this session costs (`RenderStats`).
+    costs: super::stats::ViewStats,
+    /// The depth and object-id pool, while the viewer asks for it.
+    depth: Option<DepthPool>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -472,12 +552,30 @@ struct Thread {
     generations: Generations,
     /// The paused viewer's Blender previews (document source).
     blender: Option<Arc<super::blender::PreviewBlender>>,
+    /// The last capture token handed to the Blender worker.
+    blender_token: u64,
     /// Shader fallback requests sent to each view's renderer and not yet
     /// answered (by request key), and the bands received so far.
     fallback: Fallback,
     /// The viewer's frame-cache share ([`Command::FrameCache`]).
     frame_cache: usize,
+    /// Host snapshots waiting for their revision or their turn.
+    snapshots: super::snapshot::SnapshotQueue,
+    /// Shared-memory segments published for main and not reaped yet.
+    segments: pm_bridge::shm::Segments,
+    /// Host µs of the newest frame drawn for a gesture, scrub, or edit
+    /// (idle snapshots wait for these to stop).
+    last_interactive: Option<i64>,
+    /// Snapshots served per session, and the slowest (µs).
+    snapshot_costs: BTreeMap<Key, (u64, i64)>,
+    /// Compatibility rasters the renderers uploaded.
+    compat: super::compat::CompatStore,
+    /// Waveform requests waiting for the host's media answer.
+    peaks_waiting: BTreeSet<(Key, String)>,
 }
+
+/// Most waveform requests that wait for media answers at once.
+const MAX_PEAKS_WAITING: usize = 4096;
 
 /// The decision 19 fallback runner's state on this thread.
 #[derive(Default)]
@@ -529,7 +627,14 @@ pub fn run(
         peaks,
         generations,
         blender: None,
+        blender_token: 0,
         fallback: Fallback::default(),
+        snapshots: super::snapshot::SnapshotQueue::default(),
+        segments: pm_bridge::shm::Segments::default(),
+        last_interactive: None,
+        snapshot_costs: BTreeMap::new(),
+        compat: super::compat::CompatStore::default(),
+        peaks_waiting: BTreeSet::new(),
     };
     thread.check_in();
     loop {
@@ -640,6 +745,7 @@ impl Thread {
                         queue,
                         display,
                         composer: None,
+                        fonts_installed: None,
                         lost,
                     });
                 }
@@ -666,7 +772,12 @@ impl Thread {
         self.stats().device_losses += 1;
         let keys: Vec<Key> = self.views.keys().copied().collect();
         let mut remake = Vec::new();
+        let mut remake_depth = Vec::new();
         for key in keys {
+            if let Some(depth) = self.views.get_mut(&key).and_then(|v| v.depth.take()) {
+                self.retire_generation(key, depth.spec.generation);
+                remake_depth.push((key, depth.spec));
+            }
             if let Some(live) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
                 let spec = live.spec;
                 self.retire_pool(key, live);
@@ -704,6 +815,13 @@ impl Thread {
             };
             self.make_pool(key, spec, 0, None);
         }
+        for (key, spec) in remake_depth {
+            let spec = PoolSpec {
+                generation: self.generations.next(),
+                ..spec
+            };
+            self.configure_depth(key, Some(spec));
+        }
     }
 
     /// Sends one envelope on a port.
@@ -737,7 +855,13 @@ impl Thread {
                 state,
                 revision,
                 pool,
-            } => self.configure(key, *state, revision, pool),
+                depth,
+            } => {
+                self.configure(key, *state, revision, pool);
+                if let Some(depth) = depth {
+                    self.configure_depth(key, depth);
+                }
+            }
             Command::Release { key, release } => {
                 let ok = self
                     .views
@@ -810,9 +934,7 @@ impl Thread {
                 if self.config.document
                     && let Some(gpu) = self.gpu.as_mut()
                 {
-                    let composer = gpu.composer.get_or_insert_with(|| {
-                        composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-                    });
+                    let composer = gpu.composer_with(&self.config, self.frame_cache);
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
@@ -829,6 +951,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
+                if self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks.request(key, asset.clone(), path.clone());
+                }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
                 let media = doc.media().clone();
@@ -847,12 +972,30 @@ impl Thread {
                     composer.renderer().apply_media_lease(media_lease(bytes));
                 }
             }
+            Command::Snapshot(job) => {
+                if let Err(refused) = self.snapshots.push(*job) {
+                    let (job, refused) = *refused;
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
+                }
+            }
+            Command::Compat { key, message } => {
+                let applied = self.compat.apply(key, message);
+                let (rasters, bytes) = self.compat.usage();
+                let mut stats = self.stats();
+                if applied == super::compat::Applied::Complete {
+                    stats.compat_rasters_received += 1;
+                }
+                stats.compat_rasters = rasters;
+                stats.compat_bytes = bytes;
+            }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
                     gpu.device.destroy();
                 }
             }
+            Command::FontsChanged => self.sync_font_generation(),
             Command::UseBlender(blender) => self.blender = Some(blender),
             Command::BlenderReady { key } => {
                 if let Some(view) = self.views.get_mut(&key)
@@ -861,6 +1004,7 @@ impl Thread {
                     view.dirty = true;
                 }
             }
+            Command::BlenderCaptured { token, result } => self.blender_captured(token, result),
         }
         true
     }
@@ -925,6 +1069,17 @@ impl Thread {
     fn forget_session(&mut self, key: Key) {
         if let Some(blender) = &self.blender {
             blender.forget(key);
+        }
+        self.snapshot_costs.remove(&key);
+        self.compat.forget_session(key);
+        self.peaks_waiting.retain(|(k, _)| *k != key);
+        for job in self.snapshots.take_session(key) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session closed.",
+            );
         }
         // Requests the session was asked for, with the bands that arrived.
         let fallback = &mut self.fallback;
@@ -1223,8 +1378,16 @@ impl Thread {
                 }
             }
             AudioMessage::PeaksWanted { asset } => {
-                let path = self.docs.get(&key).and_then(|d| d.media().path(&asset));
-                self.peaks.request(key, asset, path);
+                // Asked before the host answered for the asset (a file just
+                // imported): wait for the answer rather than call it offline.
+                match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
+                    Some(path) => self.peaks.request(key, asset, path),
+                    None => {
+                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
+                            self.peaks_waiting.insert((key, asset));
+                        }
+                    }
+                }
             }
             AudioMessage::Levels(_) | AudioMessage::Peaks(_) => self.log(
                 LogLevel::Warn,
@@ -1315,6 +1478,55 @@ impl Thread {
         if let Some(live) = view.pool.take() {
             self.retire_pool(view.key, live);
         }
+        if let Some(depth) = view.depth.take() {
+            self.retire_generation(view.key, depth.spec.generation);
+        }
+    }
+
+    /// Tells main to let go of a generation's surfaces.
+    fn retire_generation(&self, key: Key, generation: u32) {
+        if let Some(bridge) = &self.bridge
+            && let Err(error) = bridge.retire(key.0.0, generation)
+        {
+            self.log(
+                LogLevel::Warn,
+                format!("frame bridge: could not retire generation {generation}: {error}"),
+            );
+        }
+    }
+
+    /// Makes, hands off, and announces the view's depth pool, or retires it
+    /// (`spec` `None`). A pool that cannot be made is logged: frames go on
+    /// without depth (the chrome draws without occlusion), never stop.
+    fn configure_depth(&mut self, key: Key, spec: Option<PoolSpec>) {
+        if let Some(old) = self.views.get_mut(&key).and_then(|v| v.depth.take()) {
+            self.retire_generation(key, old.spec.generation);
+        }
+        let Some(spec) = spec else {
+            return;
+        };
+        match self.create_surfaces(key, spec) {
+            Ok(pool) => {
+                let mut descriptor = pool.descriptor();
+                descriptor.role = Some(pm_protocol::interop::PoolRole::DepthId);
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.depth = Some(DepthPool { spec, pool });
+                    view.dirty = true;
+                }
+                self.stats().depth_pools += 1;
+                self.event(key, Event::SurfacePool(descriptor), None);
+            }
+            Err(error) => {
+                self.stats().pool_failures += 1;
+                self.log(
+                    LogLevel::Error,
+                    format!(
+                        "frame bridge: depth pool generation {} ({}x{}) failed: {error}",
+                        spec.generation, spec.size.width, spec.size.height
+                    ),
+                );
+            }
+        }
     }
 
     /// Tells main to stop hosting the viewer's remote layer (C′ prototype).
@@ -1376,6 +1588,8 @@ impl Thread {
             audio_version: 0,
             scrub: false,
             stand_in: None,
+            costs: Default::default(),
+            depth: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -1503,6 +1717,59 @@ impl Thread {
             ..retry.spec
         };
         self.make_pool(key, spec, retry.failures, None);
+    }
+
+    /// Makes a pool's surfaces and sends each to main once (the depth pool;
+    /// the color pool adds its working texture and ledger).
+    fn create_surfaces(&mut self, key: Key, spec: PoolSpec) -> Result<SurfacePool, String> {
+        if self.bridge.is_none() {
+            return Err("the frame bridge did not check in with main".into());
+        }
+        let gpu = self.gpu().ok_or("no GPU device")?;
+        let pool = SurfacePool::new(
+            &gpu.device,
+            spec.generation,
+            spec.size,
+            spec.format,
+            spec.count,
+        )
+        .map_err(|e| e.to_string())?;
+        let bridge = self.bridge.as_ref().ok_or("no bridge")?;
+        let format = match spec.format {
+            SurfaceFormat::Bgra8Unorm => PixelFormat::Bgra8,
+            _ => PixelFormat::Rgba16F,
+        };
+        for (index, surface) in pool.surfaces.iter().enumerate() {
+            let port = surface
+                .iosurface
+                .mach_port()
+                .ok_or("IOSurfaceCreateMachPort failed")?;
+            let info = SurfaceInfo {
+                client_port: key.0.0,
+                generation: spec.generation,
+                pool_index: index as u32,
+                pool_size: spec.count,
+                width: spec.size.width,
+                height: spec.size.height,
+                format,
+                bytes_per_row: surface.iosurface.bytes_per_row(),
+            };
+            if let Err(e) = bridge.send_surface(SendRight::from_raw(port), &info) {
+                if index > 0
+                    && let Err(retire) = bridge.retire(key.0.0, spec.generation)
+                {
+                    return Err(format!(
+                        "sending surface {index}: {e}; retiring the {index} sent: {retire}"
+                    ));
+                }
+                return Err(format!("sending surface {index}: {e}"));
+            }
+        }
+        let mut stats = self.stats();
+        stats.pools += 1;
+        stats.surfaces_sent += u64::from(spec.count);
+        drop(stats);
+        Ok(pool)
     }
 
     fn create_pool(
@@ -1794,6 +2061,15 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if self.snapshots.waiting() {
+            // Jobs wait for patches (their commands wake the thread), for
+            // room between frames, or for a gesture to end: poll, and never
+            // past a deadline.
+            wake = wake.min(now + 4_000);
+            if let Some(deadline) = self.snapshots.earliest_deadline() {
+                wake = wake.min(deadline);
+            }
+        }
         for view in self.views.values() {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
@@ -1834,7 +2110,23 @@ impl Thread {
         Duration::from_micros((wake - now).max(0) as u64)
     }
 
+    /// Views draw again when the font generation moved (project fonts):
+    /// the composer installs fresh fonts at its next use.
+    fn sync_font_generation(&mut self) {
+        let Some(fonts) = &self.config.fonts else {
+            return;
+        };
+        let generation = fonts.broker.generation();
+        let installed = self.gpu.as_ref().and_then(|g| g.fonts_installed);
+        if installed.is_some_and(|g| g != generation) {
+            for view in self.views.values_mut() {
+                view.dirty = true;
+            }
+        }
+    }
+
     fn work(&mut self) {
+        self.sync_font_generation();
         if self
             .gpu
             .as_ref()
@@ -1846,6 +2138,7 @@ impl Thread {
         for key in keys {
             self.work_view(key);
         }
+        self.work_snapshots();
         #[cfg(feature = "remote-layer")]
         if self.config.remote_layer {
             self.collect_remote();
@@ -1958,7 +2251,10 @@ impl Thread {
             view.sample_due = true;
         }
         let composition = view.state.composition.as_str().to_owned();
-        let route = self.docs.entry(key).or_default().route(&composition);
+        let fonts = self.config.fonts.is_some();
+        let doc = self.docs.entry(key).or_default();
+        doc.set_fonts(fonts);
+        let route = doc.route(&composition);
         let view = self.views.get_mut(&key).expect("checked");
         let changed = view.reported.as_ref() != Some(&route);
         let mut stop = false;
@@ -2163,11 +2459,40 @@ impl Thread {
                     }
                 }
                 Next::Skip { .. } => {
+                    if let Some(view) = self.views.get_mut(&key) {
+                        view.costs.late();
+                    }
                     self.stats().late_skipped += 1;
                 }
-                Next::WaitUntil(_) | Next::Idle => return,
+                Next::WaitUntil(_) | Next::Idle => break,
             }
         }
+        self.send_stats(key);
+    }
+
+    /// The session's presentation stats, when a report is due.
+    fn send_stats(&mut self, key: Key) {
+        let now = now();
+        if !self.views.get(&key).is_some_and(|v| v.costs.due(now)) {
+            return;
+        }
+        let (programs, rasters) = self
+            .gpu
+            .as_mut()
+            .and_then(|g| g.composer.as_mut())
+            .map(|c| {
+                let r = c.renderer();
+                (r.shader_state().programs(), r.vector_cache_len())
+            })
+            .unwrap_or((0, 0));
+        let (snapshots, snapshot_us_max) = self.snapshot_costs.get(&key).copied().unwrap_or((0, 0));
+        let Some(view) = self.views.get_mut(&key) else {
+            return;
+        };
+        let report = view
+            .costs
+            .report(now, programs, rasters, snapshots, snapshot_us_max);
+        self.event(key, Event::RenderStats(report), None);
     }
 
     fn answer(
@@ -2249,13 +2574,14 @@ impl Thread {
         let seq = view.next_seq;
         let start = now();
         let overlay;
+        let mut depth_surface: Option<(u32, u32)> = None;
+        let mut cpu_us = 0i64;
+        let mut failures_n = 0usize;
         let mut stand_in = false;
         let mut stand_in_shown = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu.composer.get_or_insert_with(|| {
-                composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-            });
+            let composer = gpu.composer_with(&self.config, self.frame_cache);
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
@@ -2280,14 +2606,28 @@ impl Thread {
             let scrub = view.scrub && timing.is_none() && !view.clock.is_playing();
             composer.renderer().set_scrub(scrub);
             let landed_before = composer.renderer().media_landed();
-            let composed = composer.compose(
+            // The depth and object-id surface of this frame, when the
+            // viewer asks for it: slot `seq % count` of the depth pool.
+            let depth_slot = view.depth.as_ref().and_then(|d| {
+                let index = (seq % u64::from(d.spec.count.max(1))) as usize;
+                d.pool.surfaces.get(index).map(|s| {
+                    (
+                        index as u32,
+                        d.spec.generation,
+                        s.texture.create_view(&Default::default()),
+                    )
+                })
+            });
+            let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
                 doc.media(),
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &view.state,
                 &live.working,
+                depth_slot.as_ref().map(|(_, _, v)| v),
             );
+            depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a
             // frame that failed to render changes nothing.
@@ -2300,10 +2640,22 @@ impl Thread {
             }
             composer.renderer().set_scrub(false);
             let scrub_stats = composer.renderer().scrub_stats();
+            // Text laid out while the font service did not answer must not
+            // be shown: keep the frame on screen and draw again.
+            if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+                view.dirty = true;
+                (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!("viewer: a frame waited for fonts and is drawn again ({why})"),
+                }]);
+                return None;
+            }
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    cpu_us = composed.cpu_us;
+                    failures_n = composed.failures.len();
                     stand_in = !composed.stand_ins.is_empty();
                     view.stand_in = stand_in.then_some(landed_before);
                     stand_in_shown = composed.stand_ins.first().copied();
@@ -2477,6 +2829,7 @@ impl Thread {
             }]);
             return None;
         }
+        let overlay_layers = overlay.layers.len();
         let seq_value = Seq::new(seq).ok()?;
         if !live.ledger.present(index, seq_value) {
             return None;
@@ -2502,10 +2855,28 @@ impl Thread {
                 stand_in,
             },
             overlay: Some(overlay),
-            depth_id: None,
+            depth_id: depth_surface.map(|(index, generation)| pm_protocol::frame::DepthIdSurface {
+                pool_index: index,
+                seq: seq_value,
+                pool_generation: Seq::new(u64::from(generation)).unwrap_or(Seq::MAX),
+            }),
             view_seq: view.state.view_seq,
             duration,
         };
+        if depth_surface.is_some() {
+            self.stats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .depth_frames += 1;
+        }
+        view.costs.frame(
+            timing.is_some(),
+            cpu_us,
+            gpu_done - start - cpu_us.min(gpu_done - start),
+            overlay_layers,
+            failures_n,
+            view.revision.get(),
+        );
         let held = live.ledger.held_count() as u32;
         let generation = live.spec.generation;
         let view_seq = view.state.view_seq.get();
@@ -2517,6 +2888,11 @@ impl Thread {
         } else {
             stats.immediate_frames += 1;
         }
+        drop(stats);
+        if timing.is_none() {
+            self.last_interactive = Some(gpu_done);
+        }
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(shown) = stand_in_shown
             && self.config.stand_in_log
             && stats.stand_in_log.len() < STAND_IN_LOG_CAP
@@ -2546,6 +2922,624 @@ impl Thread {
         Some(descriptor)
     }
 
+    /// Answers a snapshot with an error on main's host port.
+    fn snapshot_error(&self, job: &super::snapshot::SnapshotJob, code: ErrorCode, message: &str) {
+        let error = EngineError::new(code, ErrorScope::Request { id: job.id }, message);
+        self.send(
+            job.host,
+            Envelope::new(Message::Error { id: job.id, error }),
+        );
+    }
+
+    /// The Blender worker answered a snapshot's capture: the job renders
+    /// with the prepared surfaces, or fails with Blender's reason (never
+    /// with native shading in their place).
+    fn blender_captured(
+        &mut self,
+        token: u64,
+        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
+    ) {
+        match result {
+            Ok(frames) => {
+                if let Some(job) = self.snapshots.preparing_mut(token) {
+                    job.blender_done(frames, now());
+                }
+            }
+            Err(error) => {
+                let Some(job) = self.snapshots.take_preparing(token) else {
+                    return;
+                };
+                let (code, message) = match error {
+                    pm_blender::BlenderError::Missing(m) => (ErrorCode::BlenderMissing, m),
+                    pm_blender::BlenderError::Failed(m) => (ErrorCode::BlenderFailed, m),
+                    pm_blender::BlenderError::Cancelled => (
+                        ErrorCode::Cancelled,
+                        "The Blender frame was cancelled.".to_owned(),
+                    ),
+                };
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(&job, code, &message);
+            }
+        }
+    }
+
+    /// What the views are doing, for the snapshot queue's scheduling.
+    fn pressure(&self) -> super::snapshot::Pressure {
+        let now = now();
+        let mut pressure = super::snapshot::Pressure {
+            last_interactive: self.last_interactive,
+            ..Default::default()
+        };
+        for view in self.views.values() {
+            if !(view.clock.is_playing() || view.awaiting.is_some()) {
+                continue;
+            }
+            pressure.playing = true;
+            let mut schedule = view.schedule.clone();
+            let phase = Self::phase(&self.config, &view.state);
+            let due = match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
+                Next::WaitUntil(at) => Some(at.ceil() as i64 - now),
+                Next::Render { .. } | Next::Skip { .. } => Some(0),
+                Next::Idle => None,
+            };
+            if let Some(due) = due {
+                pressure.due_in_us = Some(pressure.due_in_us.map_or(due, |d| d.min(due)));
+            }
+        }
+        pressure
+    }
+
+    /// Runs the snapshots that may run now: every `sync` and `async` job
+    /// that is ready, then at most one `idle` job (so a gesture that starts
+    /// is served after one).
+    fn work_snapshots(&mut self) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        let now = now();
+        for job in self.snapshots.take_expired(now) {
+            self.stats().snapshot_failures += 1;
+            if let Some(token) = job.preparing() {
+                // Blender did not finish within the snapshot's bound: stop it.
+                if let Some(blender) = &self.blender {
+                    blender.cancel_capture(token);
+                }
+                let message = format!(
+                    "Blender did not prepare the frame within {} s.",
+                    job.request.blender_wait_ms / 1_000
+                );
+                self.snapshot_error(&job, ErrorCode::Timeout, &message);
+                continue;
+            }
+            let have = self.docs.get(&job.key).map(|d| d.revision());
+            let message = match (job.min_revision, have) {
+                (Some(want), Some(have)) if have < want.get() => format!(
+                    "The engine did not reach revision {} (it has {have}) within {} ms.",
+                    want.get(),
+                    job.request.wait_ms
+                ),
+                _ => format!(
+                    "The snapshot did not render within {} ms.",
+                    job.request.wait_ms
+                ),
+            };
+            self.snapshot_error(&job, ErrorCode::Timeout, &message);
+        }
+        self.segments.reap(pm_bridge::shm::ORPHAN_AFTER);
+        let mut idle_done = false;
+        loop {
+            let pressure = self.pressure();
+            let docs = &self.docs;
+            // A document whose media the host has not answered yet is not
+            // ready: the snapshot waits (within its wait) rather than draw
+            // media missing that is on its way.
+            let revision = |key: Key| {
+                docs.get(&key)
+                    .filter(|d| d.has_document() && d.media_ready())
+                    .map(|d| d.revision())
+            };
+            let asked = &self.fallback.asked;
+            let outstanding = |k: &str| asked.contains_key(k);
+            let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
+                return;
+            };
+            let idle = job.request.class == pm_protocol::snapshot::SnapshotClass::Idle;
+            if idle && idle_done {
+                self.snapshots.requeue(job);
+                return;
+            }
+            idle_done |= idle;
+            self.run_snapshot(job);
+        }
+    }
+
+    /// Renders one snapshot and answers it.
+    fn run_snapshot(&mut self, job: super::snapshot::SnapshotJob) {
+        use pm_protocol::snapshot::{
+            SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
+        };
+        let started = now();
+        if self.gpu().is_none() {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(&job, ErrorCode::DeviceLost, "The engine has no GPU device.");
+            return;
+        }
+        let (layer_target, motion_blur, background, draft_3d) = match &job.request.target {
+            SnapshotTarget::Frame {
+                motion_blur_samples,
+                background,
+                draft_3d,
+            } => (false, *motion_blur_samples, *background, *draft_3d),
+            SnapshotTarget::Layer { .. } => (true, 0, true, false),
+        };
+        if layer_target {
+            self.run_layer_snapshot(job, started);
+            return;
+        }
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(doc) = self.docs.get(&job.key) else {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session has no document.",
+            );
+            return;
+        };
+        // Today's capture of a Blender composition draws Blender's surfaces
+        // for its frame, never native shading labelled final; native
+        // shading is only for `draft3d` captures (thumbnails, posters).
+        let needs_blender = !draft_3d
+            && pm_render::unsupported(doc.document(), job.request.composition.as_str())
+                .iter()
+                .any(|u| u.feature == pm_render::Feature::Blender);
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        // The session's definitions, without consuming the re-registrations
+        // its viewer's next frame applies.
+        let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
+        composer.set_blender(pm_render::blender::BlenderRender::Native);
+        composer.set_playing(false);
+        let renderer = composer.renderer();
+        renderer.set_scrub(false);
+        let purpose = match job.request.class {
+            SnapshotClass::Idle => pm_protocol::frame::FramePurpose::Thumbnail,
+            SnapshotClass::Sync | SnapshotClass::Async => pm_protocol::frame::FramePurpose::Export,
+        };
+        let mut request = pm_render::RenderRequest {
+            output_size: job.request.output_size,
+            // Today's capture derives the scale from the composition size
+            // (`W / comp.w`, `H / comp.h`).
+            scale: None,
+            region: None,
+            precision: pm_protocol::color::Precision::Float16,
+            depth_id: false,
+            background,
+            export: purpose == pm_protocol::frame::FramePurpose::Export,
+            view: None,
+            blender: pm_render::blender::BlenderRender::Native,
+            motion_blur: if motion_blur == 0 {
+                pm_render::motion::MotionBlur::Off
+            } else {
+                pm_render::motion::MotionBlur::Samples(motion_blur)
+            },
+            sampling: pm_render::sampling::Sampling::Final,
+            video_end: pm_render::VideoEnd::of(purpose),
+        };
+        if needs_blender {
+            match blender_frames(
+                renderer,
+                doc,
+                &job,
+                &request,
+                self.blender.as_deref(),
+            ) {
+                BlenderFrames::Draw(surfaces) => {
+                    request.blender = pm_render::blender::BlenderRender::Final(surfaces);
+                }
+                BlenderFrames::Prepare(snapshots) => {
+                    let Some(blender) = self.blender.clone() else {
+                        return;
+                    };
+                    self.blender_token += 1;
+                    let token = self.blender_token;
+                    let mut job = job;
+                    job.start_blender(token, now());
+                    blender.capture(token, job.key, snapshots);
+                    self.stats().snapshot_blender += 1;
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                BlenderFrames::Fail(code, message) => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(&job, code, &message);
+                    return;
+                }
+            }
+        }
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let rendered = renderer
+            .render(
+                doc.document(),
+                job.request.composition.as_str(),
+                job.request.time,
+                &request,
+                doc.media(),
+            )
+            .and_then(|frame| {
+                let raw = pm_gpu::readback::read_raw(
+                    renderer.device(),
+                    renderer.queue(),
+                    &frame.color.texture,
+                )?;
+                Ok((frame.color.width(), frame.color.height(), raw))
+            });
+        if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Timeout,
+                &format!("The engine's fonts did not answer for this frame ({why})."),
+            );
+            return;
+        }
+        let (width, height, raw) = match rendered {
+            Ok(done) => done,
+            Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
+                // Pixels the caller says it already posted are on their way
+                // (the session's port, ahead of this request): wait for
+                // them. Name the rest so the renderer draws them and asks
+                // again; their bands are accepted as for the viewer's asks.
+                let (posted, missing): (Vec<_>, Vec<_>) = requests
+                    .into_iter()
+                    .partition(|r| job.request.uploaded.contains(&r.key));
+                if missing.is_empty() {
+                    let mut job = job;
+                    job.waiting_for = posted.into_iter().map(|r| r.key).collect();
+                    for key in &job.waiting_for {
+                        self.fallback.asked.entry(key.clone()).or_insert(job.key);
+                    }
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                let fallback: Vec<_> = missing
+                    .into_iter()
+                    .take(pm_protocol::shader_fallback::MAX_REQUESTS)
+                    .collect();
+                for r in &fallback {
+                    self.fallback.asked.insert(r.key.clone(), job.key);
+                }
+                self.stats().snapshot_needs += 1;
+                let outcome = SnapshotOutcome::NeedsRenderer {
+                    revision,
+                    fallback,
+                    compat: Vec::new(),
+                };
+                let mut envelope = Envelope::new(Message::Response {
+                    id: job.id,
+                    body: Response::Snapshot(Box::new(outcome)),
+                });
+                envelope.revision = Some(revision);
+                self.send(job.host, envelope);
+                return;
+            }
+            Err(pm_render::RenderError::Unsupported(list)) => {
+                // A visible, named failure: never another engine's pixels.
+                let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+                self.stats().snapshot_failures += 1;
+                let mut message = format!(
+                    "The new engine cannot draw this frame: {}.",
+                    reasons.join("; ")
+                );
+                message.truncate(2_000);
+                self.snapshot_error(&job, ErrorCode::Unsupported, &message);
+                return;
+            }
+            Err(pm_render::RenderError::Composition(id)) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::InvalidMessage,
+                    &format!("The document has no composition {id:?}."),
+                );
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The snapshot could not be rendered: {error}"),
+                );
+                return;
+            }
+        };
+        let pixels = super::snapshot::encode_rgba8(&raw, job.request.pixels);
+        drop(raw);
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
+        };
+        let done = now();
+        let render_us = (done - started).max(0);
+        self.snapshots.observe(render_us as f64);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let costs = self.snapshot_costs.entry(job.key).or_default();
+        costs.0 += 1;
+        costs.1 = costs.1.max(render_us);
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [0.0, 0.0],
+            layer_box: None,
+            raster: None,
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        let mut envelope = Envelope::new(Message::Response {
+            id: job.id,
+            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+        });
+        envelope.revision = Some(revision);
+        self.send(job.host, envelope);
+    }
+
+    /// A layer's raster (the base pixels of today's `render.raster()`,
+    /// `Renderer::layer_raster`): text, captions, editable paths, and shape
+    /// content, with today's anchor, box, selection, and crop rules. The
+    /// layer is the document's, or the object the caller passed.
+    fn run_layer_snapshot(&mut self, job: super::snapshot::SnapshotJob, started: i64) {
+        use pm_protocol::snapshot::{
+            RasterGeometry, SnapshotOutcome, SnapshotResult, SnapshotTarget,
+        };
+        let SnapshotTarget::Layer {
+            layer,
+            scale,
+            crop,
+            content,
+        } = &job.request.target
+        else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(doc) = self.docs.get(&job.key) else {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session has no document.",
+            );
+            return;
+        };
+        // The caller's layer object, when it is not the document's.
+        let content = match content {
+            Some(bytes) => match pm_model::json::parse_bytes(&bytes.0) {
+                Ok(value) if value.as_object().is_some() => {
+                    Some(pm_model::Document::new(Some(value), doc.revision()))
+                }
+                _ => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &job,
+                        ErrorCode::InvalidMessage,
+                        "The layer object of a raster is not a JSON object.",
+                    );
+                    return;
+                }
+            },
+            None => None,
+        };
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let composition = job.request.composition.as_str();
+        let seconds = match pm_eval::Comp::resolve(doc.document(), composition) {
+            Ok(comp) => comp.seconds_at(job.request.time.get()),
+            Err(_) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::InvalidMessage,
+                    &format!("The document has no composition {composition:?}."),
+                );
+                return;
+            }
+        };
+        let painted = composer.renderer().layer_raster(
+            doc.document(),
+            composition,
+            layer.as_str(),
+            content.as_ref().and_then(|c| c.root()),
+            seconds,
+            *scale,
+            pm_protocol::color::Precision::Float16,
+        );
+        if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Timeout,
+                &format!("The engine's fonts did not answer for this layer ({why})."),
+            );
+            return;
+        }
+        let reply = |this: &Self, outcome: SnapshotOutcome| {
+            let mut envelope = Envelope::new(Message::Response {
+                id: job.id,
+                body: Response::Snapshot(Box::new(outcome)),
+            });
+            envelope.revision = Some(revision);
+            this.send(job.host, envelope);
+        };
+        let raster = match painted {
+            Ok(Some(raster)) => raster,
+            Ok(None) => {
+                self.stats().snapshots += 1;
+                reply(self, SnapshotOutcome::Empty { revision });
+                return;
+            }
+            Err(pm_render::RenderError::Request(why)) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::InvalidMessage,
+                    &format!("The layer raster could not be made: {why}."),
+                );
+                return;
+            }
+            Err(pm_render::RenderError::Unsupported(list)) => {
+                let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+                self.stats().snapshot_failures += 1;
+                let mut message = format!(
+                    "The new engine cannot draw this layer: {}.",
+                    reasons.join("; ")
+                );
+                message.truncate(2_000);
+                self.snapshot_error(&job, ErrorCode::Unsupported, &message);
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The layer raster could not be painted: {error}"),
+                );
+                return;
+            }
+        };
+        let (painted, painted_crop) = match &raster.pixels {
+            pm_render::LayerPixels::Float { pixels, crop } => (
+                super::snapshot::encode_rgba8_f32(pixels, job.request.pixels),
+                *crop,
+            ),
+            pm_render::LayerPixels::Rgba8(rgba) => (
+                super::snapshot::encode_rgba8_unorm(rgba, job.request.pixels),
+                [0, 0, raster.canvas.0, raster.canvas.1],
+            ),
+        };
+        // Today's raster crops plain text and shapes only; the others come
+        // back whole whatever the crop asked.
+        let window = if raster.crops { *crop } else { None };
+        let Some((pixels, width, height)) =
+            super::snapshot::place_raster(&painted, painted_crop, raster.canvas, window)
+        else {
+            self.stats().snapshots += 1;
+            reply(self, SnapshotOutcome::Empty { revision });
+            return;
+        };
+        if u64::from(width) * u64::from(height) > job.request.max_bytes() / 4 {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::BudgetExceeded,
+                &format!(
+                    "The layer raster is {width}×{height}, over the {}×{} asked for.",
+                    job.request.output_size.width, job.request.output_size.height
+                ),
+            );
+            return;
+        }
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
+        };
+        let render_us = (now() - started).max(0);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let origin_in_canvas = window.map_or([0, 0], |w| {
+            [w.x.min(raster.canvas.0), w.y.min(raster.canvas.1)]
+        });
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [raster.anchor.0, raster.anchor.1],
+            layer_box: Some([raster.box_size.0, raster.box_size.1]),
+            raster: Some(RasterGeometry {
+                canvas: [raster.canvas.0.max(1), raster.canvas.1.max(1)],
+                window: origin_in_canvas,
+                cropped: window.is_some(),
+                selection: raster.selection,
+                font_offset: raster.font_offset.map(|(x, y)| [x, y]),
+            }),
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d: false,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        reply(self, SnapshotOutcome::Rendered(result));
+    }
+
+    /// A snapshot's pixels as a payload: inline when small, otherwise a
+    /// shared-memory segment the engine unlinks if main never takes it.
+    /// `None` after answering the job with the error.
+    fn share_pixels(
+        &mut self,
+        job: &super::snapshot::SnapshotJob,
+        pixels: Vec<u8>,
+    ) -> Option<pm_protocol::snapshot::PixelPayload> {
+        use pm_protocol::snapshot::PixelPayload;
+        let length = pixels.len();
+        if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+            return Some(PixelPayload::Inline {
+                bytes: pm_protocol::common::Bytes(pixels),
+            });
+        }
+        match pm_bridge::shm::publish(&pixels) {
+            Ok(name) => {
+                self.segments.add(name.clone());
+                self.snapshots.published(
+                    now(),
+                    length as u64,
+                    pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
+                );
+                self.stats().snapshot_shared += 1;
+                Some(PixelPayload::SharedMemory {
+                    name,
+                    length: pm_protocol::common::ByteSize::new(length as u64)
+                        .unwrap_or(pm_protocol::common::ByteSize::MAX),
+                })
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    job,
+                    ErrorCode::BudgetExceeded,
+                    &format!("The snapshot's pixels could not be shared: {error}"),
+                );
+                None
+            }
+        }
+    }
+
     fn shutdown(&mut self) {
         let views: Vec<View> = std::mem::take(&mut self.views).into_values().collect();
         for view in views {
@@ -2555,6 +3549,127 @@ impl Thread {
             let _ = bridge.goodbye();
         }
     }
+}
+
+/// What a snapshot of a Blender composition draws.
+enum BlenderFrames {
+    /// The frame's surfaces, all prepared.
+    Draw(Arc<pm_blender::job::Surfaces>),
+    /// Blender renders these first (`blender_wait_ms` above 0).
+    Prepare(Vec<pm_blender::snapshot::Snapshot>),
+    Fail(ErrorCode, String),
+}
+
+/// Snapshot build failures the static check routes for exports
+/// (`pm_export::blender`): the engine cannot build these frames.
+fn blender_routed(why: &str) -> bool {
+    matches!(why, "imported models" | "model-group recipe parts")
+}
+
+/// The Blender frames a snapshot of `job` needs: planned exactly as the
+/// render plans them (sizes, times, shutter samples; today's
+/// `blenderFrameRequests`), with the composition's own settings, and drawn
+/// from this job's preparation or an earlier capture's (today's prepared
+/// frame). A synchronous capture (`blender_wait_ms` 0) of a frame nobody
+/// prepared fails with today's sentence.
+fn blender_frames(
+    renderer: &mut pm_render::Renderer,
+    doc: &super::document::ViewDocument,
+    job: &super::snapshot::SnapshotJob,
+    request: &pm_render::RenderRequest,
+    blender: Option<&super::blender::PreviewBlender>,
+) -> BlenderFrames {
+    use super::snapshot::BlenderPrep;
+    let composition = job.request.composition.as_str();
+    let snaps = match renderer.blender_snapshots(
+        doc.document(),
+        composition,
+        job.request.time,
+        request,
+        doc.media(),
+        false,
+        pm_render::blender::SnapshotOptions::default(),
+    ) {
+        Ok(snaps) => snaps,
+        Err(pm_render::RenderError::Unsupported(list)) => {
+            let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+            let mut message = format!(
+                "The new engine cannot draw this frame: {}.",
+                reasons.join("; ")
+            );
+            message.truncate(2_000);
+            return BlenderFrames::Fail(ErrorCode::Unsupported, message);
+        }
+        Err(e) => {
+            return BlenderFrames::Fail(
+                ErrorCode::Internal,
+                format!("The snapshot could not be rendered: {e}"),
+            );
+        }
+    };
+    if let Some((frame, why)) = snaps.errors.first() {
+        return if blender_routed(why) {
+            BlenderFrames::Fail(
+                ErrorCode::Unsupported,
+                format!("The new engine cannot draw this frame: Blender-rendered 3D: {why}."),
+            )
+        } else {
+            BlenderFrames::Fail(
+                ErrorCode::BlenderFailed,
+                format!(
+                    "The Blender frame of {} at {} s could not be prepared: {why}",
+                    frame.composition(),
+                    frame.time
+                ),
+            )
+        };
+    }
+    if snaps.snapshots.is_empty() {
+        // No 3D object is active then: nothing for Blender to draw.
+        return BlenderFrames::Draw(Arc::new(pm_blender::job::Surfaces::new()));
+    }
+    let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
+    let own = match &job.blender {
+        Some(BlenderPrep::Ready(frames))
+            if hashes.iter().all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
+        {
+            Some(frames.clone())
+        }
+        _ => None,
+    };
+    let prepared = own.or_else(|| {
+        blender
+            .and_then(|b| b.prepared(&snaps.snapshots))
+            .map(Arc::new)
+    });
+    if let Some(frames) = prepared {
+        let mut surfaces = pm_blender::job::Surfaces::new();
+        for (hash, frame, layers) in frames.iter() {
+            if hashes.contains(hash) {
+                surfaces.insert(frame.clone(), layers.clone());
+            }
+        }
+        return BlenderFrames::Draw(Arc::new(surfaces));
+    }
+    if job.request.blender_wait_ms == 0 {
+        return BlenderFrames::Fail(ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED.to_owned());
+    }
+    if blender.is_none() {
+        return BlenderFrames::Fail(
+            ErrorCode::BlenderFailed,
+            "This engine has no Blender worker for snapshots.".to_owned(),
+        );
+    }
+    if job.blender_attempts >= super::snapshot::MAX_BLENDER_ATTEMPTS {
+        return BlenderFrames::Fail(
+            ErrorCode::BlenderFailed,
+            format!(
+                "The Blender frame changed {} times while Blender rendered it.",
+                job.blender_attempts
+            ),
+        );
+    }
+    BlenderFrames::Prepare(snaps.snapshots)
 }
 
 #[cfg(test)]

@@ -821,7 +821,9 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
-      schedulePresentation();
+      // The kernel's service emits `overlay` for each frame on screen (the
+      // overlay redraws then); a service without it needs the redraw here.
+      if (!engineService?.presented) schedulePresentation();
     });
     // The WebGL canvas shows again (the engine session ended): it takes the
     // size it skipped while the engine presented, and draws.
@@ -832,6 +834,10 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     });
     enginePresentation = presentation;
     V.enginePresentation = presentation;
+    // "Use New Engine" on: the WebGL canvas never shows (not at a cold
+    // start, not while the engine restarts); the presentation shows its
+    // state until the engine's first frame.
+    if (presentation.exclusive && V.el) V.el.style.visibility = 'hidden';
   }
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
