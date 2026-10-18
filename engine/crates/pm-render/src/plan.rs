@@ -803,7 +803,11 @@ pub(crate) fn layer_draw<'d>(
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
-    let level2_type = crate::sampling::samples_layer_type(&ty);
+    // Level 2 raster content: images, video, precomps, and shader and
+    // extension layer output (`crate::shader_layers` renders it at the
+    // density it is drawn at).
+    let level2_type =
+        crate::sampling::samples_layer_type(&ty) || matches!(ty.as_str(), "shader" | "extension");
     let level2 = crate::sampling::is_level2(layer).then_some(b.sampling);
     let draw = match quad {
         Quad::Solid {

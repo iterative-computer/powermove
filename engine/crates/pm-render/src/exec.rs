@@ -403,6 +403,8 @@ impl Exec<'_> {
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
+                            // Level 2 shader output is resampled.
+                            self.prepare_level2(encoder, r, &target.texture, false);
                             // Legacy GLSL targets are in GL row order
                             // and hold E-encoded values.
                             r.view = Some(target.view.clone());
