@@ -1857,3 +1857,198 @@ four test threads, with the existing local `CARGO_PROFILE_RELEASE_LTO=off`
 setting for test/addon links. The normal production check uses the default
 release configuration; no successful thin-LTO test link is claimed. The
 30-iteration reproduction commands in the A4/A6 sections still apply.
+
+### A8 round 2: parallel preparation and measured late joins
+
+The serial cold path was CPU-bound. In an opt-in timing capture of sixteen
+stretched voices at 48 kHz, the eleven actual speed changes (the first of
+twelve samples did not change speed) averaged approximately:
+
+| Stage | Wall time (ms) |
+| --- | ---: |
+| Control building / delivery before application | 12.3 |
+| Source bounds, including their map evaluations | 36.0 |
+| Vocoder history map evaluations | 25.1 |
+| Signalsmith construction/reset, output seek and processing | 45.1 |
+| Cached source reads and copies | 0.3 |
+| Explicit no-loss source wait | 0.0 |
+| Other render work, allocation, scheduling and timer granularity | 2.8 |
+| Queue to scheduled device output | 25.1 |
+
+The applied-control-to-queue interval averaged 109.4 ms. These are timed
+wall scopes, not sampled CPU counters; scheduling inside a scope is charged
+to that scope. Reads were already cached in this edit scenario. The
+instrumented end-to-end p50 was 147.0 ms, close to the earlier uninstrumented
+143.9 ms capture. The source hold was not the cause of this regression.
+`PM_AUDIO_PROFILE=1` enables the counters in `StartTiming.preparation`;
+normal playback leaves timing disabled and the callback adds no profiling
+work.
+
+`preparation.rs` owns a process-wide worker pool capped at
+`max(1, available_parallelism - 2)` (fourteen on the measured machine).
+Workers use reduced thread priority: utility QoS with relative priority -5
+on macOS, and niceness 15 on Linux. Project edits and seeks submit work at
+control application, before Play's render turn. Batched transport commands
+submit only their final target; intermediate Pause/SetLoop positions do not
+launch obsolete histories. Playhead starts and the nearest sounding voices
+come first. Loop/work-area replenishment uses at most one background job
+at a time, preserving A7's render reserve. Stale document/seek generations
+cancel at map/read boundaries, and completed jobs must still match their
+original history allocation before installation.
+
+Each job receives an evaluator from the configured factory. The native
+presenter's one-line `set_standard_evaluator` opt-in identifies its standard
+evaluator with the expression engine and no custom hooks. Constant maps
+compile the original per-ancestor arithmetic, active/span tests, fades and
+source-end calculation; deriving a single intercept would change rounding.
+Those constant points also remove repeated content resolution from playback
+and source bounding. Expressions retain full evaluation. Custom evaluator
+factories retain their hooks and invalidate prepared histories on every
+project revision. The ordinary audible render still reports failed
+preparation's decode/evaluation errors.
+
+The deterministic prefix is unchanged. Signalsmith reports 2,880 input and
+2,880 output latency samples; the existing deterministic prefix is 11,520
+samples at 48 kHz. Trying 0, 5,760, 8,640 and 11,504 samples at 0.75x and
+1.5x, from 2, 3 and 4 seconds, changed every one of the 8,192 compared
+stereo values in each of 24 probes. Even the nearest shorter control-aligned
+candidate changes the existing offline PCM. The ordinary mapped playback
+comparisons continue against the unchanged offline algorithm.
+
+Parallel preparation with complete first buffers alone still measured
+35.464/37.962/37.962 ms for speed edits and 38.162/46.062/46.062 ms for
+unprepared seeks (p50/p95/max in twelve-start diagnostic captures). That
+miss enabled the requested A4 alternative: an actually ready audible voice
+starts the run, and late voices omit a counted prefix and join at the
+current project sample. Workers catch up through real input from the
+original start, retaining its offline vocoder phase. During this short
+join period the ring keeps two callbacks ahead instead of the whole normal
+look-ahead. A paused partial start discards its consumed prepared entry;
+an inactive/out-of-span prepared voice cannot release other cold voices.
+`StartTiming.lateVoiceFrames` records the omitted frames per voice, and the
+existing starvation/drop counters record this loss. Prepared starts retain
+complete PCM and have no such omission. Exports continue to wait.
+
+The added sixteen-voice cold test verifies every stereo sample: each voice
+is absent only for its recorded prefix and then equals the unchanged
+offline render from the original start. It preserves the one-callback
+first-buffer bound. Existing mapped comparisons and their patience,
+zero-starvation/underrun assertions and tolerances are unchanged.
+
+A subsequent prefetch fix queues all source blocks for the bounded canonical
+prefix before a preparation worker reads its first block. Constant maps
+use two exact endpoint evaluations and a conservative reader/latency pad;
+dynamic maps reuse the bounded span traversal. It does not require decoding
+an entire file. A gated AAC-source regression observed only one requested
+block before the fix and two concurrent requests after it. Its extended
+wall deadline isolates this queue observation; existing playback patience,
+PCM comparisons and underrun assertions remain unchanged. Completed tasks
+also pin their history allocation with a strong reference until accepted,
+preventing a recycled allocation address from accepting obsolete work.
+
+#### Latest completed paired captures
+
+Thirty starts per engine, sixteen stretched voices, 48 kHz, 256-frame
+callbacks. Native status and device-clock latency agreed at 15.625 ms;
+WebAudio output latency was 24 ms. These are scheduled device presentation
+times, not an acoustic loopback. Level-edit rows additionally looped
+[4 s, 6 s) for 60 seconds per engine; stress used four busy-loop processes.
+Each start continued for 120 ms after first onset to observe late joins.
+Unprepared cases alternated seeks to 2 and 3 seconds with seek/edit/Play in
+one renderer task; neither target was prepared before the edit.
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Every percentile passes |
+| --- | ---: | ---: | --- |
+| Prepared level edit, plain | 28.938/31.735/31.821 | 24.969/28.193/28.509 | Yes |
+| Speed edit, plain | 30.324/32.425/32.621 | 30.163/32.651/35.038 | No |
+| Unprepared seek/edit, plain | 30.010/32.415/32.515 | 29.453/31.390/31.859 | Yes |
+| Prepared level edit, stressed | 30.137/32.130/32.719 | 25.825/28.560/28.682 | Yes |
+
+The latest speed-edit p95 misses today by
+0.225667 ms and its maximum by
+2.416667 ms. These are raw failures, with no
+rounding or noise exemption. Both completed 60-second loop pairs have zero
+underruns in both engines, and native has zero loop-window source
+starvation and overloads. A8 is still open.
+
+| Cold case | Longest omitted voice prefix p50/p95/max (ms) | All voices at output p50/p95/max (ms) | Today node-start spread p50/p95/max (ms) |
+| --- | ---: | ---: | ---: |
+| Speed edit, plain | 32.000/48.000/48.000 | 62.270/77.988/79.424 | 0.000/0.000/0.000 |
+| Unprepared seek/edit, plain | 26.667/32.000/32.000 | 55.742/61.482/61.492 | 0.000/0.000/0.000 |
+
+All-voices output is first scheduled output plus the longest counted
+omission. This exposes the partial-mix cost beyond first onset; it is not
+a measurement of subjective audibility. Today scheduled all sixteen nodes.
+The plain prepared baseline did show a 5.333 ms maximum node-start spread;
+it is not assumed to be zero in every capture. Prepared native starts
+omitted no frames.
+
+#### Three paired stressed repeats and all-ready controls
+
+The following completed repeats precede the source-prefetch follow-up.
+Each row contains thirty starts per engine plus a 60-second loop per
+engine. They are evidence for the pool implementation, not final-revision
+qualification. Every loop had zero underruns; native had zero loop-window
+source starvation and overloads.
+
+| Earlier stressed repeat | Today p50/p95/max (ms) | Native p50/p95/max (ms) |
+| --- | ---: | ---: |
+| 1 | 29.933/32.325/32.433 | 25.370/28.084/28.333 |
+| 2 | 30.128/32.629/32.671 | 26.549/28.524/28.699 |
+| 3 | 30.035/32.336/32.770 | 25.127/28.048/28.405 |
+
+The maxima ranges do not overlap: 32.433–32.770 ms today and
+28.333–28.699 ms native. The revised engine was faster in all
+three repeats. This does not establish that the earlier 0.303 ms native
+excess was noise; no noise exemption is claimed. Only the first repeat
+completed after the prefetch follow-up. The remaining two final repeats
+and final stressed cold cases were stopped before completion.
+
+Earlier optimized all-ready controls temporarily removed only the
+first-ready exit from the join wait. Their source and addons were restored
+byte-for-byte afterward. They retained complete audio and still missed
+today, justifying the requested A4 experiment:
+
+| Earlier all-ready control | Today p50/p95/max (ms) | Native p50/p95/max (ms) |
+| --- | ---: | ---: |
+| Speed edit | 30.236/32.234/32.427 | 32.639/35.330/35.540 |
+| Unprepared seek/edit | 30.119/32.321/32.427 | 33.138/35.496/35.590 |
+
+The all-ready control was not repeated after the source-prefetch fix. A4's
+up-to-48 ms omitted prefix in the latest speed capture remains a measured
+loss relative to today's complete start, even where first onset passes.
+
+#### Validation status: incomplete repetition gate
+
+The last full playback smoke run passed all 37 tests. Targeted checks
+passed 56 library tests (one existing ignored measurement), 11 decode
+readiness tests, 14 mixer tests, 6 stretch tests and 37 presenter tests.
+The smoke and direct tests precede the final conservative reader-tap bound
+adjustment; the final revision rebuilt its test executable and production
+addon, and passed strict release clippy for pm-audio/pm-node all targets.
+The earlier default production-profile pm-node check without test hooks
+passed. Test/addon links used the existing local
+`CARGO_PROFILE_RELEASE_LTO=off` workaround; a new default thin-LTO runtime
+link is not claimed.
+
+The repetition history is retained rather than combined into a pass:
+
+- An initial interrupted campaign had passing runs, then cold/warm WAV
+  fixture paths were isolated to prevent concurrent tests sharing a file.
+- The next campaign passed eight plain and eight stressed suites, then
+  plain run nine failed the existing loaded-remap zero-underrun assertion
+  once. Its source-starvation count was zero and its 80,000-frame PCM
+  comparison was exact. This led to the concurrent-prefix-queue fix and
+  its deterministic gated-source regression; the failed log is preserved.
+- The final-revision 30/30 plain and 30/30 stressed campaign had **zero
+  completed runs** when the mandatory under-40-GiB disk guard stopped work.
+  The final all-ready diagnostic had not started. The build target was
+  deleted, but free disk remained below the guard. No final repetition
+  pass is claimed.
+
+Existing mapped comparisons remain against the unchanged offline PCM;
+no tolerance, source-starvation assertion or ring-underrun assertion was
+relaxed. Completing all final captures, the all-ready control and sixty
+repetition suites remains required before sign-off. Only one additional
+line changed pm-node's presenter in this round: its evaluator-factory
+opt-in. No render.rs change was needed.
