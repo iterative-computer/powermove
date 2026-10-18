@@ -735,4 +735,11 @@ fn layers_needing_the_runner_are_not_headless_renderable() {
     };
     assert_eq!(&frame[..4], &[0.5, 0.25, 0.125, 1.0]);
     assert!(frame.chunks_exact(4).all(|p| p == [0.5, 0.25, 0.125, 1.0]));
+    // A frame showing the same pixels again draws the copy already on the
+    // GPU.
+    let Outcome::Rendered(again) = render_layer(&mut renderer, &doc, &variant) else {
+        panic!("expected the frame again");
+    };
+    assert_eq!(again, frame);
+    assert_eq!(renderer.shader_state().fallback_uploads(), 1);
 }

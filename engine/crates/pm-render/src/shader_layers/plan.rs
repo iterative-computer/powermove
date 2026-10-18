@@ -23,8 +23,13 @@ use crate::js;
 #[derive(Debug, Clone)]
 pub enum ProgramRef {
     /// Shader-layer code or the missing-layer checkerboard, translated by
-    /// `pm_glsl` (cached by source).
-    Code { key: Key, prepared: Translated },
+    /// `pm_glsl` (cached by source). `source` is the wrapped program, for a
+    /// fallback request if the device refuses the translation.
+    Code {
+        key: Key,
+        prepared: Translated,
+        source: Arc<str>,
+    },
     /// An extension fragment layer's program in the renderer's definitions.
     Definition { id: String, key: Option<Key> },
     /// A program only the decision 19 fallback runner can draw.
@@ -224,7 +229,11 @@ fn program_plan(
 ) -> Planned {
     let (key, verdict) = translate::verdict(&source, line_offset);
     let program = match verdict {
-        Verdict::Ready(prepared) => ProgramRef::Code { key, prepared },
+        Verdict::Ready(prepared) => ProgramRef::Code {
+            key,
+            prepared,
+            source: source.into(),
+        },
         Verdict::Refused(failure) => {
             return Planned::Refused(format!(
                 "the {what} does not compile ({}: {})",

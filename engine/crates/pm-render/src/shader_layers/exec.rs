@@ -24,16 +24,80 @@ pub struct ShaderState {
     pub fallback_runner: bool,
     /// Pixels the runner uploaded.
     pub fallback: FallbackStore,
+    /// GPU copies of runner pixels by request key, with the pixels they
+    /// were made from and when they were last drawn: a fallback layer that
+    /// does not change (a still frame, a static layer during playback) is
+    /// not uploaded again for every frame.
+    uploads: HashMap<String, (Arc<FallbackPixels>, Target, u64)>,
+    uploaded: u64,
+    /// Tests: the device refuses every shader-layer pipeline, as Metal
+    /// would a translation it cannot compile.
+    #[cfg(test)]
+    pub(crate) refuse_pipelines: bool,
 }
 
 /// Programs kept before the least recently used is dropped (today's
 /// `shaderUniformDefs` bound).
 const PROGRAMS: usize = 256;
 
+/// Runner pixel textures kept on the GPU (several fallback layers in one
+/// frame stay resident; animated ones replace the oldest).
+const UPLOADS: usize = 8;
+
 impl ShaderState {
     /// Programs built.
     pub fn programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// Runner pixel uploads made so far (one per request drawn, not per
+    /// frame drawing it).
+    pub fn fallback_uploads(&self) -> u64 {
+        self.uploaded
+    }
+
+    /// Forgets the runner's pixels and their GPU copies (the runner was
+    /// detached).
+    pub fn clear_fallback(&mut self) {
+        self.fallback.clear();
+        self.uploads.clear();
+    }
+
+    /// The runner's pixels for `request` on the GPU, uploaded once per
+    /// pixels stored; `None` until they arrive.
+    fn fallback_target(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        request: &FallbackRequest,
+    ) -> Option<Target> {
+        let pixels = self.fallback.get(&request.key)?;
+        if !pixels.fits(request) {
+            return None;
+        }
+        self.tick += 1;
+        let tick = self.tick;
+        if let Some((held, target, t)) = self.uploads.get_mut(&request.key)
+            && Arc::ptr_eq(held, &pixels)
+        {
+            *t = tick;
+            return Some(target.clone());
+        }
+        let target = upload(device, queue, &pixels);
+        self.uploaded += 1;
+        self.uploads.remove(&request.key);
+        if self.uploads.len() >= UPLOADS {
+            let oldest = self
+                .uploads
+                .iter()
+                .min_by_key(|(_, (_, _, t))| *t)
+                .map(|(k, _)| k.clone())
+                .expect("not empty");
+            self.uploads.remove(&oldest);
+        }
+        self.uploads
+            .insert(request.key.clone(), (pixels, target.clone(), tick));
+        Some(target)
     }
 
     fn program(
@@ -63,6 +127,14 @@ impl ShaderState {
         }
         let entry = self.programs.get_mut(&key).expect("inserted above");
         entry.1 = tick;
+        #[cfg(test)]
+        if self.refuse_pipelines {
+            self.programs.remove(&key);
+            return Err(Failure::new(
+                pm_glsl::FailureStage::NagaValidate,
+                "the device refused the pipeline (test)",
+            ));
+        }
         if let Err(f) = entry.0.pipeline(device, format) {
             self.programs.remove(&key);
             return Err(f);
@@ -219,11 +291,12 @@ impl crate::exec::Exec<'_> {
         source: &ShaderSource,
     ) -> Result<(Target, bool), Missed> {
         if let ProgramRef::Fallback(request) = &source.program {
-            return match self.shaders.fallback.get(&request.key) {
-                Some(pixels) if pixels.fits(request) => {
-                    Ok((upload(self.device, self.queue, &pixels), false))
-                }
-                _ => Err(Missed::Pending(request.clone())),
+            return match self
+                .shaders
+                .fallback_target(self.device, self.queue, request)
+            {
+                Some(target) => Ok((target, false)),
+                None => Err(Missed::Pending(request.clone())),
             };
         }
         let out = self
@@ -234,30 +307,76 @@ impl crate::exec::Exec<'_> {
         let linear = &self.pipelines.linear;
         let device = self.device;
         let queue = self.queue;
-        let program = match &source.program {
-            ProgramRef::Code { key, prepared } => {
-                match self.shaders.program(device, *key, prepared, format) {
-                    Ok(p) => p,
-                    Err(f) => {
-                        super::translate::mark_failed(*key, f);
-                        self.pool.give(out);
-                        return Err(Missed::NeedsFallback("shader layer".into()));
-                    }
+        let built = match &source.program {
+            ProgramRef::Code {
+                key,
+                prepared,
+                source: code,
+            } => match self.shaders.program(device, *key, prepared, format) {
+                Ok(_) => Ok(()),
+                Err(f) => {
+                    // Later plans route it to the runner (or, without one,
+                    // to `Feature::ShaderFallback`).
+                    super::translate::mark_failed(*key, f.clone());
+                    Err((f, code.to_string(), "shader layer".to_owned()))
                 }
-            }
+            },
             ProgramRef::Definition { id, .. } => {
                 match self
                     .effects
                     .program(device, DefinitionKind::Layer, id, format)
                 {
-                    Ok(p) => p,
+                    Ok(_) => Ok(()),
                     // The definition is now `Status::NeedsFallback`.
-                    Err(_) => {
-                        self.pool.give(out);
-                        return Err(Missed::NeedsFallback(id.clone()));
+                    Err(f) => {
+                        let code = self
+                            .effects
+                            .get(DefinitionKind::Layer, id)
+                            .and_then(|d| d.glsl.as_ref())
+                            .map(|g| g.source.clone())
+                            .unwrap_or_default();
+                        Err((f, code, id.clone()))
                     }
                 }
             }
+            ProgramRef::Fallback(_) => unreachable!("handled above"),
+        };
+        // Built: fetched again below (a borrow returned from one match arm
+        // would hold `self` in the other).
+        if let Err((failure, code, what)) = built {
+            self.pool.give(out);
+            if !self.shaders.fallback_runner {
+                return Err(Missed::NeedsFallback(what));
+            }
+            // The device refused the translation on first contact: the
+            // runner draws it from this frame on, as the plan would
+            // have asked had the failure been known
+            // (`super::plan::program_plan`, the same request key).
+            let request = Arc::new(super::fallback::request(
+                source.layer.clone(),
+                code,
+                source.width,
+                source.height,
+                &source.calls,
+                &failure,
+            ));
+            return match self
+                .shaders
+                .fallback_target(self.device, self.queue, &request)
+            {
+                Some(target) => Ok((target, false)),
+                None => Err(Missed::Pending(request)),
+            };
+        }
+        let program = match &source.program {
+            ProgramRef::Code { key, prepared, .. } => self
+                .shaders
+                .program(device, *key, prepared, format)
+                .expect("built above"),
+            ProgramRef::Definition { id, .. } => self
+                .effects
+                .program(device, DefinitionKind::Layer, id, format)
+                .expect("built above"),
             ProgramRef::Fallback(_) => unreachable!("handled above"),
         };
         draw_program(
@@ -272,5 +391,134 @@ impl crate::exec::Exec<'_> {
             &out,
         );
         Ok((out, true))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pm_protocol::color::Precision;
+    use pm_protocol::common::{Size, Ticks};
+    use pm_protocol::error::ErrorCode;
+    use serde_json::json;
+
+    use super::super::FallbackPixels;
+    use crate::{MapResolver, RenderError, RenderRequest, Renderer};
+
+    fn document(code: &str) -> pm_model::Document {
+        let ch = |v: serde_json::Value| json!({ "v": v, "kf": [], "expr": null });
+        let layer = json!({
+            "id": "probe", "type": "shader", "name": "probe", "from": 0, "dur": 10, "on": true,
+            "lock": false, "threeD": false, "solo": false, "blend": "normal", "mblur": false,
+            "parent": null, "group": null, "matteSource": null,
+            "p": {
+                "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(0)),
+                "position.y": ch(json!(0)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+                "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+            },
+            "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+            "d": { "code": code, "uniforms": {}, "w": 16, "h": 8 }
+        });
+        let doc = json!({
+            "id": "P", "name": "p", "w": 16, "h": 8, "fps": 30, "dur": 10, "bg": "#000000",
+            "backgroundFill": { "type": "none", "angle": 0, "stops": [{ "id": "s1", "color": "#000000", "position": 0 }] },
+            "compId": "P-root", "compName": "p", "markers": [], "work": [0, 10], "params": {},
+            "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": [layer],
+            "assets": {}, "comps": {}
+        });
+        pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1)
+    }
+
+    fn render(r: &mut Renderer, doc: &pm_model::Document) -> Result<Vec<f32>, RenderError> {
+        let mut request = RenderRequest::sized(Size::new(16, 8), Precision::Float16);
+        request.background = false;
+        let frame = r.render(
+            doc,
+            "P-root",
+            Ticks::ZERO,
+            &request,
+            &MapResolver::default(),
+        )?;
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        Ok(r.read_rgba(&frame).unwrap())
+    }
+
+    /// Metal refusing a translated program at pipeline creation (first
+    /// contact, not known when the frame was planned): with a runner the
+    /// layer asks it for its pixels in the same frame instead of routing
+    /// the composition, is reported as not headless-renderable, and its
+    /// pixels are uploaded once however many frames draw them.
+    #[test]
+    fn a_pipeline_the_device_refuses_goes_to_the_runner_on_first_contact() {
+        // Unique code: the refusal is recorded for the process.
+        let code = "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0) + vec4(uv * 0.0, 0.0, 0.0); } // exec refusal probe";
+        let doc = document(code);
+        let mut r = Renderer::headless().unwrap();
+        r.set_shader_fallback_runner(true);
+        r.shaders_mut().refuse_pipelines = true;
+        assert!(
+            r.layer_reports(&doc, "P-root").is_empty(),
+            "compiles before the device sees it"
+        );
+        let requests = match render(&mut r, &doc) {
+            Err(RenderError::ShaderFallbackPending(requests)) => requests,
+            other => panic!("expected a fallback request, got {other:?}"),
+        };
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.layer, "probe");
+        assert_eq!(request.stage, "naga-validate");
+        assert_eq!((request.width, request.height), (16, 8));
+        // The plan asks for the same request from now on.
+        r.shaders_mut().refuse_pipelines = false;
+        let again = match render(&mut r, &doc) {
+            Err(RenderError::ShaderFallbackPending(requests)) => requests,
+            other => panic!("expected the same request, got {other:?}"),
+        };
+        assert_eq!(again[0].key, request.key);
+        // Reported for the Shader panel.
+        let reports = r.layer_reports(&doc, "P-root");
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
+        assert!(
+            reports[0].message.contains("headless"),
+            "{}",
+            reports[0].message
+        );
+        // The runner's pixels draw, uploaded once for every frame showing them.
+        let px: Vec<u16> = (0..16 * 8)
+            .flat_map(|_| [0x3800u16, 0x3400, 0x3000, 0x3c00])
+            .collect();
+        r.put_fallback_pixels(
+            request.key.clone(),
+            FallbackPixels {
+                width: 16,
+                height: 8,
+                rgba16f: px,
+            },
+        );
+        for _ in 0..3 {
+            let frame = render(&mut r, &doc).unwrap();
+            assert!(frame.chunks_exact(4).all(|p| p == [0.5, 0.25, 0.125, 1.0]));
+        }
+        assert_eq!(r.shader_state().fallback_uploads(), 1);
+    }
+
+    /// Without a runner (every headless host) the same refusal fails the
+    /// layer as `Feature::ShaderFallback`.
+    #[test]
+    fn a_pipeline_the_device_refuses_routes_without_a_runner() {
+        let doc = document(
+            "void main(){ fragColor = vec4(0.5) + vec4(uv * 0.0, 0.0, 0.0); } // headless refusal probe",
+        );
+        let mut r = Renderer::headless().unwrap();
+        r.shaders_mut().refuse_pipelines = true;
+        match render(&mut r, &doc) {
+            Err(RenderError::Unsupported(list)) => assert!(
+                list.iter()
+                    .any(|u| matches!(&u.feature, crate::capability::Feature::ShaderFallback(_))),
+                "{list:?}"
+            ),
+            other => panic!("expected routing, got {other:?}"),
+        }
     }
 }

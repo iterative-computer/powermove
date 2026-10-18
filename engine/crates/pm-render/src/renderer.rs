@@ -269,7 +269,7 @@ impl Renderer {
     pub fn set_shader_fallback_runner(&mut self, attached: bool) {
         self.shaders.fallback_runner = attached;
         if !attached {
-            self.shaders.fallback.clear();
+            self.shaders.clear_fallback();
         }
     }
 
@@ -304,6 +304,11 @@ impl Renderer {
     /// Shader-layer programs built and fallback pixels held.
     pub fn shader_state(&self) -> &crate::shader_layers::exec::ShaderState {
         &self.shaders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shaders_mut(&mut self) -> &mut crate::shader_layers::exec::ShaderState {
+        &mut self.shaders
     }
 
     /// The definitions in force (what an export job embeds).
