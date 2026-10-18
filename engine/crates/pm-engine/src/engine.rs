@@ -331,6 +331,8 @@ fn request_name(request: &Request) -> &'static str {
         Request::RegisterExtension(_) => "registerExtension",
         Request::ToolCall(_) => "toolCall",
         Request::ProbeMedia(_) => "probeMedia",
+        Request::Snapshot(_) => "snapshot",
+        Request::CompatFrame(_) => "compatFrame",
     }
 }
 
@@ -356,6 +358,8 @@ fn event_name(event: &Event) -> &'static str {
         Event::Fact(_) => "fact",
         Event::Audio(_) => "audio",
         Event::ShaderFallback(_) => "shaderFallback",
+        Event::Compat(_) => "compat",
+        Event::RenderStats(_) => "renderStats",
     }
 }
 
@@ -948,6 +952,9 @@ impl Engine {
                     self.send_error(port, id, *error, out);
                 }
             }
+            Request::Snapshot(snapshot) if kind == PeerKind::Host && self.presenter.is_some() => {
+                self.snapshot(port, id, snapshot, revision, out)
+            }
             Request::SubmitJob(job) if self.jobs.is_some() && kind == PeerKind::Host => {
                 self.submit_job(port, id, job, out)
             }
@@ -975,11 +982,20 @@ impl Engine {
                     self.send_error(port, id, *error, out);
                 }
             }
+            Request::Snapshot(_) if kind != PeerKind::Host => {
+                let error = request_error(
+                    id,
+                    ErrorCode::CapabilityRejected,
+                    "Snapshots are asked for by the host, which names the window's session.",
+                );
+                self.send_error(port, id, error, out);
+            }
             Request::RenderFrame(_)
             | Request::Evaluate(_)
             | Request::AgentFrames(_)
             | Request::SubmitJob(_)
             | Request::CancelJobs(_)
+            | Request::Snapshot(_)
             | Request::ProbeMedia(_) => {
                 let name = request_name(&body);
                 let error = request_error(
@@ -1003,6 +1019,43 @@ impl Engine {
                 );
                 self.send_error(port, id, error, out);
             }
+        }
+    }
+
+    /// A host snapshot of a renderer session (the Phase 3c render
+    /// transport): the session must exist and belong to the renderer port
+    /// the host names; the presenter answers on the host port.
+    fn snapshot(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        snapshot: pm_protocol::snapshot::HostSnapshot,
+        revision: Option<Revision>,
+        out: &mut Out,
+    ) {
+        let owned = self.sessions.get(&snapshot.session).is_some_and(|s| {
+            s.port == snapshot.renderer && s.role == SessionRole::Interactive
+        });
+        let renderer = self
+            .ports
+            .get(&snapshot.renderer)
+            .is_some_and(|c| c.kind == PeerKind::Renderer);
+        if !owned || !renderer {
+            let error = request_error(
+                id,
+                ErrorCode::UnknownSession,
+                "That window has no such session on this engine.",
+            );
+            self.send_error(port, id, error, out);
+            return;
+        }
+        let result = self
+            .with_presenter(out, |p, ctx| {
+                p.snapshot(ctx, port, id, snapshot.renderer, snapshot.session, snapshot.snapshot, revision)
+            })
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            self.send_error(port, id, *error, out);
         }
     }
 
@@ -1414,7 +1467,8 @@ impl Engine {
                 | Event::Viewer(_)
                 | Event::Transport(_)
                 | Event::Audio(_)
-                | Event::ShaderFallback(_)),
+                | Event::ShaderFallback(_)
+                | Event::Compat(_)),
                 PeerKind::Renderer,
             ) if self.presenter.is_some() => {
                 let Some(sid) =
@@ -1436,6 +1490,7 @@ impl Engine {
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
                     Event::Audio(message) => p.audio(ctx, port, sid, message),
                     Event::ShaderFallback(message) => p.shader_fallback(ctx, port, sid, message),
+                    Event::Compat(message) => p.compat(ctx, port, sid, message),
                     _ => {}
                 });
                 if let Some(command) = transport {
@@ -1460,7 +1515,8 @@ impl Engine {
                 | Event::Viewer(_)
                 | Event::Transport(_)
                 | Event::Audio(_)
-                | Event::ShaderFallback(_),
+                | Event::ShaderFallback(_)
+                | Event::Compat(_),
                 PeerKind::Renderer,
             )
             | (Event::BlenderProgress(_) | Event::BlenderSurface(_), PeerKind::Host) => self
