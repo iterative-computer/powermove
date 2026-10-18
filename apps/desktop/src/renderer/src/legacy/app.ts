@@ -258,13 +258,19 @@ function hydrate(p: any) {
     });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
   };
-  const sanitizeLooseParams = (params: any, minTime = 0, defaults: Record<string, any> = {}) => {
+  /* A channel sanitized a second time (registered effect params: loose pass, then
+     the definition's pass) gives its own ids back first, so the shared duplicate
+     check below does not mistake them for another channel's and replace them. */
+  const releaseKeyIds = (prop: any) => {
+    (Array.isArray(prop?.kf) ? prop.kf : []).forEach((key: any) => { if (typeof key?.i === 'string') keyIds.delete(key.i); });
+  };
+  const sanitizeLooseParams = (params: any, minTime = 0) => {
     const source = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
     Object.keys(source).forEach((key: any) => {
       const saved = source[key];
       const prop = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : { v: saved };
-      const fallback = Object.hasOwn(defaults, key) ? defaults[key] :
-        ((typeof prop.v === 'number' && Number.isFinite(prop.v)) || typeof prop.v === 'string' || typeof prop.v === 'boolean' ? prop.v : 0);
+      const fallback = (typeof prop.v === 'number' && Number.isFinite(prop.v)) ||
+        typeof prop.v === 'string' || typeof prop.v === 'boolean' ? prop.v : 0;
       sanitizeProp(prop, { v: fallback }, minTime);
       source[key] = prop;
     });
@@ -338,15 +344,14 @@ function hydrate(p: any) {
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
         .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => {
-        f.id = f.id || PM.uid('fx'); f.p = f.p && typeof f.p === 'object' && !Array.isArray(f.p) ? f.p : {}; f.on = isProperty(f.on) ? f.on : f.on !== false;
+        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = isProperty(f.on) ? f.on : f.on !== false;
         if (isProperty(f.on)) sanitizeProp(f.on, { v: true }, -L.from);
         const definition = PM.FX?.[f.type];
         for (const param of definition?.params || []) {
-          if (!Object.hasOwn(f.p, param.k)) f.p[param.k] = PM.P(param.def);
+          if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
+          else releaseKeyIds(f.p[param.k]);
+          sanitizeProp(f.p[param.k], { v: param.def }, -L.from);
         }
-        // Sanitize each channel once: the shared id set detects duplicate keys,
-        // so visiting a registered parameter twice would replace its own ids.
-        f.p = sanitizeLooseParams(f.p, -L.from, Object.fromEntries((definition?.params || []).map((param: any) => [param.k, param.def])));
       });
       L.transitionIn = sanitizeTransition(L.transitionIn, -L.from);
       L.transitionOut = sanitizeTransition(L.transitionOut, -L.from);

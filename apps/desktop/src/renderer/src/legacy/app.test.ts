@@ -751,6 +751,43 @@ it('keeps effect parameter key ids across repeated hydration, including unknown 
   expect(JSON.stringify(PM.hydrateProject(JSON.parse(before)))).toBe(before);
 });
 
+it('keeps the two-stage effect parameter hydration for null, missing and mismatched values', () => {
+  const { PM } = appRegistry();
+  PM.Ease = makePM('core/easing').Ease;
+  installAnim(PM);
+  PM.FX = { custom: { params: [{ k: 'nullValue', def: 2 }, { k: 'primitiveNull', def: 2 }, { k: 'missingColor', def: '#ffffff' },
+    { k: 'missingToggle', def: true }, { k: 'stringNumber', def: 2 }, { k: 'numberColor', def: '#ffffff' }, { k: 'animated', def: 2 }] } };
+  const keys = (a: any, b: any, ids?: [string, string]) => [{ ...(ids ? { i: ids[0] } : {}), t: 0, v: a }, { ...(ids ? { i: ids[1] } : {}), t: 1, v: b }];
+  const raw = PM.mkProject({ layers: [{ id: 'effect-layer', type: 'shape', from: 0, dur: 2, p: {}, d: {},
+    fx: [{ id: 'effect', type: 'custom', p: {
+      nullValue: { v: null, kf: [], expr: null },
+      primitiveNull: null,
+      missingColor: { kf: keys('#ff0000', '#00ff00') },
+      missingToggle: { kf: keys(true, false) },
+      stringNumber: { v: '5', kf: keys(1, 5) },
+      numberColor: { v: 3, kf: keys('#ff0000', '#00ff00') },
+      animated: { v: 4, kf: keys(1, 5, ['first-key', 'second-key']), expr: null },
+    } }] }] });
+  const hydrated = PM.hydrateProject(raw);
+  const params = hydrated.layers[0].fx[0].p;
+  const summary = Object.fromEntries(Object.entries<any>(params).map(([key, prop]) =>
+    [key, { v: prop.v, kf: prop.kf.map((frame: any) => frame.v) }]));
+  // Today's app: the loose pass types keys by the saved value (or 0), then the
+  // definition's pass types the value by def. Keys the loose pass drops stay dropped.
+  expect(summary).toEqual({
+    nullValue: { v: 0, kf: [] },
+    primitiveNull: { v: 0, kf: [] },
+    missingColor: { v: '#ffffff', kf: [] },
+    missingToggle: { v: true, kf: [] },
+    stringNumber: { v: 2, kf: [] },
+    numberColor: { v: '#ffffff', kf: [] },
+    animated: { v: 4, kf: [1, 5] },
+  });
+  expect(params.animated.kf.map((key: any) => key.i)).toEqual(['first-key', 'second-key']);
+  const before = JSON.stringify(hydrated);
+  expect(JSON.stringify(PM.hydrateProject(JSON.parse(before)))).toBe(before);
+});
+
 it('hydrates legacy scene animation before either engine evaluates it', () => {
   const { PM } = appRegistry();
   PM.Ease = makePM('core/easing').Ease;
