@@ -1172,9 +1172,13 @@ viewer to the current engine.
   is offline and never asked again (`native-engine-transport`'s audio
   scrub test failed 3 of 4 runs; 4 of 4 after); and the viewer announced a
   newly shown canvas's first frame before the page showed it, so for a
-  display frame the composition area showed the panel's background (the
-  tracer's first-frame pixel read 245, 245, 247 in 1 of 12 first-of-batch
-  runs).
+  display frame the composition area showed the panel's background where
+  the box was (`native-engine-tracer.spec.ts:144`'s first-frame pixel read
+  245, 245, 247: 1 of 12 first-of-batch probe runs, then 2 of 14 with a
+  two-frame wait alone and 2 of 24 with the canvas size as the signal).
+  The frame now counts two display frames after the drawing reports its
+  GPU work finished: 0 of 25 probe runs (see the lane report for the
+  tracer's own first-of-batch runs).
 
 ### What remains
 

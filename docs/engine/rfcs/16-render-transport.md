@@ -285,11 +285,12 @@ screen as a `VideoFrame` (close it after reading). Added service members:
 viewer never hands the stage, transport, or audio back to the current
 engine), `presented?(frame, quality)`, and `revealFrames?: number`
 (default 2; 0 for tests that run frames by hand). A canvas that was hidden
-counts its first frame as on screen (`latest`, `presenting`, frame events)
-only after `revealFrames` animation frames and, for a presentation
-worker's frame, once the canvas element took the frame's size (the frame
-reached the page's compositor), at most 30 frames. `PresentedFrame` gains
-`width` and `height`. `ViewerPresentation` gains
+shows when its first frame is drawn, but counts that frame as on screen
+(`latest`, `presenting`, frame events) only `revealFrames` animation
+frames after the drawing reported the frame's GPU work finished
+(`Presenter.onDone`; a presentation worker posts `done`), at most 30
+frames after it was drawn; a new presenter during the wait starts its
+own. `PresentedFrame` gains `width` and `height`. `ViewerPresentation` gains
 `exclusive`, `status`, `role` (`viewer` | `binding`), marks its stage
 `data-engine-stage`, and dispatches `powermove:engine-stage` when a viewer
 presents by itself.
