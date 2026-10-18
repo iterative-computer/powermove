@@ -551,23 +551,84 @@ fn child_snapshots() {
         });
     assert_eq!(refused, ErrorCode::CapabilityRejected);
 
-    // Layer rasters: pm-render paints those of text and captions layers;
-    // any other layer is a named refusal, never another engine's pixels.
-    let mut layer = frame_request(
-        SnapshotClass::Sync,
-        small,
-        SnapshotPixels::Premultiplied,
-        500,
+    // Layer rasters (`render.raster`'s base): a solid's raster is today's
+    // `rasterShape` of its content (a 40×20 box with today's 4 px pad), with
+    // today's anchor, box, and selection.
+    let raster_request = |crop, content| {
+        let mut layer = frame_request(
+            SnapshotClass::Sync,
+            small,
+            SnapshotPixels::Premultiplied,
+            2_000,
+        );
+        layer.target = SnapshotTarget::Layer {
+            layer: "box".into(),
+            scale: 1.0,
+            crop,
+            content,
+        };
+        layer
+    };
+    c.snapshot(19, raster_request(None, None), None, WINDOW, session);
+    let shape = rendered(c.inbox.wait(Duration::from_secs(10), answer(19)));
+    assert_eq!((shape.width, shape.height), (48, 28));
+    assert_eq!(shape.origin, [4.0, 4.0]);
+    assert_eq!(shape.layer_box, Some([48.0, 28.0]));
+    let geometry = shape.raster.clone().expect("raster geometry");
+    assert_eq!(geometry.canvas, [48, 28]);
+    assert_eq!(geometry.selection, Some([-20.0, -10.0, 20.0, 10.0]));
+    let px = pixels_of(&shape);
+    assert_eq!(at(&px, 48, 24, 14), BOX, "the box's color inside");
+    assert_eq!(at(&px, 48, 1, 1)[3], 0, "the pad is transparent");
+    // A crop window of a shape is cut from the same raster.
+    let window = pm_protocol::common::PixelRect {
+        x: 4,
+        y: 4,
+        width: 10,
+        height: 6,
+    };
+    c.snapshot(
+        23,
+        raster_request(Some(window), None),
+        None,
+        WINDOW,
+        session,
     );
-    layer.target = SnapshotTarget::Layer {
-        layer: "box".into(),
+    let cut = rendered(c.inbox.wait(Duration::from_secs(10), answer(23)));
+    assert_eq!((cut.width, cut.height), (10, 6));
+    let g = cut.raster.clone().unwrap();
+    assert_eq!((g.window, g.cropped, g.canvas), ([4, 4], true, [48, 28]));
+    let cut_px = pixels_of(&cut);
+    for y in 0..6 {
+        for x in 0..10 {
+            assert_eq!(at(&cut_px, 10, x, y), at(&px, 48, x + 4, y + 4));
+        }
+    }
+    // A layer object the caller passed (a wrapper's modified copy) is drawn
+    // instead of the document's: 80 units wide.
+    let mut wide = solid(100.0);
+    wide["d"]["w"] = json!(80);
+    c.snapshot(
+        24,
+        raster_request(None, Some(Bytes(wide.to_string().into_bytes()))),
+        None,
+        WINDOW,
+        session,
+    );
+    let wide = rendered(c.inbox.wait(Duration::from_secs(10), answer(24)));
+    assert_eq!((wide.width, wide.height), (88, 28));
+    // A layer the document does not have, without an object, is refused.
+    let mut missing_layer = raster_request(None, None);
+    missing_layer.target = SnapshotTarget::Layer {
+        layer: "nope".into(),
         scale: 1.0,
         crop: None,
+        content: None,
     };
-    c.snapshot(19, layer, None, WINDOW, session);
+    c.snapshot(25, missing_layer, None, WINDOW, session);
     assert_eq!(
-        c.inbox.wait(Duration::from_secs(5), answer(19)),
-        Err(ErrorCode::Unsupported)
+        c.inbox.wait(Duration::from_secs(5), answer(25)),
+        Err(ErrorCode::InvalidMessage)
     );
 
     // A missing composition is a named failure, not a hang.
@@ -630,7 +691,8 @@ fn child_snapshots() {
 
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     let presenter = &status["presenter"];
-    assert_eq!(presenter["snapshots"], 4, "{presenter}");
+    // Four frames and three layer rasters.
+    assert_eq!(presenter["snapshots"], 7, "{presenter}");
     assert_eq!(presenter["snapshotShared"], 1, "{presenter}");
     println!("CHILD-OK");
 }

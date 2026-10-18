@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-d719cae8121e1c1b";
+export const PROTOCOL_BUILD = "protocol-8f98892be6f97d9e";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -200,6 +200,7 @@ export type { ProxyFormat } from "./ProxyFormat";
 export type { ProxySize } from "./ProxySize";
 export type { QualityTier } from "./QualityTier";
 export type { QuickTimeTag } from "./QuickTimeTag";
+export type { RasterGeometry } from "./RasterGeometry";
 export type { Rect } from "./Rect";
 export type { RegisterExtension } from "./RegisterExtension";
 export type { RelinkReason } from "./RelinkReason";

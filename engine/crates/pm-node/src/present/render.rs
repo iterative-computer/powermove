@@ -3162,6 +3162,7 @@ impl Thread {
             payload,
             origin: [0.0, 0.0],
             layer_box: None,
+            raster: None,
             quality: FrameQuality {
                 resolution: PreviewResolution::Full,
                 representation: Representation::Original,
@@ -3180,12 +3181,21 @@ impl Thread {
         self.send(job.host, envelope);
     }
 
-    /// A layer's raster (the base pixels of today's `render.raster()`):
-    /// pm-render paints the raster of text and captions layers
-    /// (`Renderer::text_raster`, what `PM.raster(L, scale, T)` paints).
+    /// A layer's raster (the base pixels of today's `render.raster()`,
+    /// `Renderer::layer_raster`): text, captions, editable paths, and shape
+    /// content, with today's anchor, box, selection, and crop rules. The
+    /// layer is the document's, or the object the caller passed.
     fn run_layer_snapshot(&mut self, job: super::snapshot::SnapshotJob, started: i64) {
-        use pm_protocol::snapshot::{SnapshotOutcome, SnapshotResult, SnapshotTarget};
-        let SnapshotTarget::Layer { layer, scale, crop } = &job.request.target else {
+        use pm_protocol::snapshot::{
+            RasterGeometry, SnapshotOutcome, SnapshotResult, SnapshotTarget,
+        };
+        let SnapshotTarget::Layer {
+            layer,
+            scale,
+            crop,
+            content,
+        } = &job.request.target
+        else {
             return;
         };
         let Some(gpu) = self.gpu.as_mut() else {
@@ -3199,6 +3209,24 @@ impl Thread {
                 "The window's engine session has no document.",
             );
             return;
+        };
+        // The caller's layer object, when it is not the document's.
+        let content = match content {
+            Some(bytes) => match pm_model::json::parse_bytes(&bytes.0) {
+                Ok(value) if value.as_object().is_some() => {
+                    Some(pm_model::Document::new(Some(value), doc.revision()))
+                }
+                _ => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &job,
+                        ErrorCode::InvalidMessage,
+                        "The layer object of a raster is not a JSON object.",
+                    );
+                    return;
+                }
+            },
+            None => None,
         };
         let composer = gpu.composer_with(&self.config, self.frame_cache);
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -3216,10 +3244,11 @@ impl Thread {
                 return;
             }
         };
-        let painted = composer.renderer().text_raster(
+        let painted = composer.renderer().layer_raster(
             doc.document(),
             composition,
             layer.as_str(),
+            content.as_ref().and_then(|c| c.root()),
             seconds,
             *scale,
             pm_protocol::color::Precision::Float16,
@@ -3252,8 +3281,8 @@ impl Thread {
                 self.stats().snapshot_failures += 1;
                 self.snapshot_error(
                     &job,
-                    ErrorCode::Unsupported,
-                    &format!("The new engine draws layer rasters of text and captions layers only ({why})."),
+                    ErrorCode::InvalidMessage,
+                    &format!("The layer raster could not be made: {why}."),
                 );
                 return;
             }
@@ -3278,9 +3307,21 @@ impl Thread {
                 return;
             }
         };
-        let painted = super::snapshot::encode_rgba8_f32(&raster.pixels, job.request.pixels);
+        let (painted, painted_crop) = match &raster.pixels {
+            pm_render::LayerPixels::Float { pixels, crop } => (
+                super::snapshot::encode_rgba8_f32(pixels, job.request.pixels),
+                *crop,
+            ),
+            pm_render::LayerPixels::Rgba8(rgba) => (
+                super::snapshot::encode_rgba8_unorm(rgba, job.request.pixels),
+                [0, 0, raster.canvas.0, raster.canvas.1],
+            ),
+        };
+        // Today's raster crops plain text and shapes only; the others come
+        // back whole whatever the crop asked.
+        let window = if raster.crops { *crop } else { None };
         let Some((pixels, width, height)) =
-            super::snapshot::place_raster(&painted, raster.plan.crop, raster.canvas, *crop)
+            super::snapshot::place_raster(&painted, painted_crop, raster.canvas, window)
         else {
             self.stats().snapshots += 1;
             reply(self, SnapshotOutcome::Empty { revision });
@@ -3307,6 +3348,9 @@ impl Thread {
             stats.snapshots += 1;
             stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
         }
+        let origin_in_canvas = window.map_or([0, 0], |w| {
+            [w.x.min(raster.canvas.0), w.y.min(raster.canvas.1)]
+        });
         let result = SnapshotResult {
             revision,
             view_seq: job.request.view_seq,
@@ -3316,6 +3360,12 @@ impl Thread {
             payload,
             origin: [raster.anchor.0, raster.anchor.1],
             layer_box: Some([raster.box_size.0, raster.box_size.1]),
+            raster: Some(RasterGeometry {
+                canvas: [raster.canvas.0.max(1), raster.canvas.1.max(1)],
+                window: origin_in_canvas,
+                cropped: window.is_some(),
+                selection: raster.selection,
+            }),
             quality: FrameQuality {
                 resolution: PreviewResolution::Full,
                 representation: Representation::Original,

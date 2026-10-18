@@ -494,6 +494,7 @@ mod child {
                 layer: "title".into(),
                 scale: 1.0,
                 crop: None,
+                content: None,
             },
             Size::new(6000, 6000),
             SnapshotPixels::Premultiplied,

@@ -1100,6 +1100,7 @@ pub fn responses() -> Vec<Envelope> {
                     },
                     origin: [0.0, 0.0],
                     layer_box: None,
+                    raster: None,
                     quality: FrameQuality {
                         resolution: PreviewResolution::Full,
                         representation: Representation::Original,

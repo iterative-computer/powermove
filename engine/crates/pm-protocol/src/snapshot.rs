@@ -55,6 +55,8 @@ pub const MAX_COMPAT_BAND_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COMPAT_EDGE: u32 = 16384;
 /// Longest compatibility cache key (UTF-8 bytes).
 pub const MAX_COMPAT_KEY: usize = 512;
+/// Largest layer object a `Layer` snapshot may carry (canonical JSON).
+pub const MAX_LAYER_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// How a snapshot is scheduled against playback and gestures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,6 +120,12 @@ pub enum SnapshotTarget {
         layer: LayerId,
         scale: f64,
         crop: Option<PixelRect>,
+        /// The layer object the caller passed, as canonical JSON, when it is
+        /// not the document's own (a raster wrapper's modified copy): drawn
+        /// in the composition as the document's layer `layer` would be.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional = nullable))]
+        content: Option<Bytes>,
     },
 }
 
@@ -206,8 +214,20 @@ impl Validate for SnapshotRequest {
             } => ensure(*motion_blur_samples <= MAX_BLUR_SAMPLES, C, || {
                 format!("{motion_blur_samples} motion blur samples")
             }),
-            SnapshotTarget::Layer { layer, scale, crop } => {
+            SnapshotTarget::Layer {
+                layer,
+                scale,
+                crop,
+                content,
+            } => {
                 ensure(layer.is_valid(), C, || "invalid layer id".into())?;
+                ensure(
+                    content
+                        .as_ref()
+                        .is_none_or(|c| !c.0.is_empty() && c.0.len() <= MAX_LAYER_CONTENT_BYTES),
+                    C,
+                    || "layer content outside 1 byte..4 MiB".into(),
+                )?;
                 ensure(
                     scale.is_finite()
                         && (crate::frame::MIN_SCALE..=crate::frame::MAX_SCALE).contains(scale),
@@ -377,11 +397,35 @@ pub struct SnapshotResult {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub layer_box: Option<[f64; 2]>,
+    /// For a `Layer` target: the rest of today's raster geometry.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub raster: Option<RasterGeometry>,
     pub quality: FrameQuality,
     /// Time the request waited in the engine (revision and its turn), and
     /// rendered, in microseconds.
     pub waited_us: u32,
     pub render_us: u32,
+}
+
+/// A layer raster's geometry besides its anchor and box (today's
+/// `RasterSurface` fields the pixels alone do not give).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct RasterGeometry {
+    /// The raster's whole canvas in pixels.
+    pub canvas: [u32; 2],
+    /// Where the result's pixels sit in the canvas (a crop window's origin;
+    /// zero when the whole canvas came back).
+    pub window: [u32; 2],
+    /// Whether the asked crop was applied (today's raster crops plain text
+    /// and shapes only).
+    pub cropped: bool,
+    /// Today's `selection` (`x0`, `y0`, `x1`, `y1` in layer pixels).
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub selection: Option<[f64; 4]>,
 }
 
 impl Validate for SnapshotResult {
@@ -416,7 +460,17 @@ impl Validate for SnapshotResult {
         }?;
         ensure(self.origin.iter().all(|v| v.is_finite()), C, || {
             "raster origin must be finite".into()
-        })
+        })?;
+        ensure(
+            self.raster.as_ref().is_none_or(|r| {
+                r.canvas
+                    .iter()
+                    .all(|v| (1..=MAX_OUTPUT_DIMENSION).contains(v))
+                    && r.selection.is_none_or(|s| s.iter().all(|v| v.is_finite()))
+            }),
+            C,
+            || "raster geometry must be finite and within the output limits".into(),
+        )
     }
 }
 
@@ -746,6 +800,7 @@ mod tests {
             layer: "L".into(),
             scale: 0.0,
             crop: None,
+            content: None,
         };
         assert!(layer.validate().is_err());
     }
@@ -761,6 +816,7 @@ mod tests {
             payload,
             origin: [0.0, 0.0],
             layer_box: None,
+            raster: None,
             quality: quality(),
             waited_us: 0,
             render_us: 0,

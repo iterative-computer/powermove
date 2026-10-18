@@ -325,6 +325,22 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
+/// [`encode_rgba8`] from premultiplied RGBA8 (a Canvas2D raster's pixels).
+pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
+    match pixels {
+        // Already in the encoding: no round trip through floats.
+        SnapshotPixels::Premultiplied => rgba.to_vec(),
+        _ => {
+            let mut out = Vec::with_capacity(rgba.len());
+            for px in rgba.chunks_exact(4) {
+                let f = |v: u8| f32::from(v) / 255.0;
+                push_rgba8(&mut out, [f(px[0]), f(px[1]), f(px[2]), f(px[3])], pixels);
+            }
+            out
+        }
+    }
+}
+
 fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels) {
     let unorm = |v: f32| -> u8 {
         let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
