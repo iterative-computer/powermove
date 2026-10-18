@@ -1123,13 +1123,28 @@ instead of naming them again. Nothing waits for a renderer task, so a call
 from a `raster` wrapper or an animation-frame callback cannot deadlock (the
 e2e proves both).
 
-### Measured (2026-10-18, M4 Max, load average 30 to 35 from other lanes)
+### Measured (2026-10-18, M4 Max, load average 17 to 35 from other lanes)
 
 - `child_scheduling`: a sync snapshot during playback answered in 8.4 to
-  9.1 ms (four runs); an idle snapshot waited until the transport stopped.
-- `e2e/engine-render-transport.spec.ts`: all tests pass (the first run three
-  of three; the crash test was added after and is in the run listed in the
-  lane report).
+  9.1 ms (five runs); an idle snapshot waited until the transport stopped.
+- `e2e/engine-render-transport.spec.ts` (four tests): 12 of 12 with
+  `--repeat-each=3`.
+- The flag-on engine specs together (`engine-render-transport`,
+  `native-engine-tracer`, `native-engine-transport`,
+  `engine-present-recovery`, `native-engine`): 22 of 22 in the final run.
+- Two findings on the way, fixed: a standby snapshot session opened at
+  every boot made the tracer's effects frame and the J/K/L A/V sync check
+  fail 3 of 6 runs (6 of 6 pass without it, as on the base); it now opens
+  only on demand. Frame events emitted from the presentation's callback
+  for every frame are now coalesced to animation frames.
+- Still open, as measured: `native-engine-tracer.spec.ts:144` failed 2 of
+  23 runs on this branch (both the first test of a batch; the box's red
+  read 245 instead of 255) and 0 of 19 on the base (`ee14b2fa`); not
+  reproduced in a 36-sample probe of the first frames. The J/K/L A/V sync
+  check failed 1 of 6 runs on both this branch and the base under the
+  same load.
+- Frame-event listeners on the page's main thread: 88 emissions in 3 s of
+  30 fps playback took 2.2 ms in all (slowest 0.1 ms).
 
 ### What remains
 
