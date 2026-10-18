@@ -162,9 +162,40 @@ the others as app-writer violations and groups violations by writer.
 - **Not routed**: edits (`setKey`, `setKeyOn`, `removeKey`, `applyEaseTo`,
   `temporalKeys`, `enableTimeRemap`, factories) wait for `pm-edit`; `anim.version`
   and `touch` stay the renderer's.
-- **Fallbacks** (counted per operation and reason): the module not ready or dead,
-  three.js questions (3D objects, model groups, backgroundless extension scenes), and
-  text layout before fonts are served.
+- **Fallbacks** (counted per operation and reason): the module not ready, three.js
+  questions (3D objects, model groups, backgroundless extension scenes), text layout
+  before fonts are served, and ink without outlines. Detached channels, parents, and
+  paths are no longer fallbacks: they go to pm-wasm as JSON (below).
+
+## Named failures and exact answers ("Use New Engine" on)
+
+`installEngineDoc({ strict: true })` (the headless document host with the new engine
+on; docs/engine/document-host.md):
+
+- **Traps.** The compiled module is kept; a trapped instance is replaced
+  synchronously (`new WebAssembly.Instance`, far below Chromium's synchronous limit),
+  resynced from the document, and the question that trapped is asked again on it, so
+  the answer stays native (queries in `native.ts`, kernels in `edits.ts`). A second
+  trap on the same question is a `pm-wasm-trap` failure. The 1 s revive timer uses
+  the same synchronous path for traps outside a query.
+- **Detached inputs** are evaluated ad hoc: `hasKeyAt` takes the channel's JSON
+  (`prop`), `transformParentMatrix` and `parent3D` a parent layer's (`parent`),
+  `pathValues` and `groupMatrix` a path's (`pathJson`; `groupMatrix` appends it after
+  the layer's paths, so parent lookups and cycle closing match the legacy recursion).
+  A non-object where a channel or path belongs is `invalid-input`: the legacy code
+  throws reading it before any evaluation.
+- **Named failures** (`strict` only): a module that does not load
+  (`pm-wasm-unavailable`, `retry()` loads it again), a pm-wasm error reply
+  (`pm-wasm-error`), a trap twice (`pm-wasm-trap`), and a font provider given up
+  after three failures (`font-service-unavailable`). Each is reported once per code
+  and message: `engine:failure` on the bus, a `failure` report line, and
+  `PM.EngineDoc.failures()`.
+- **Font state per instance.** The loader keeps loaded faces per module instance, so
+  a replacement instance loads them again. `FontProvider.whole` (the fonts lane's
+  whole-face service) makes ink questions native.
+- **Development modes.** `audit`, `audit-proxy`, and `strict` come from the build
+  flag (or a development build's stored override); a production build's stored
+  override can only choose `on` or `off` (`profileOverride`).
 
 ## Text
 
@@ -242,10 +273,11 @@ tracer forwards the same batches to the interactive engine.
 
 ## The headless document host
 
-`apps/desktop/src/engine/main.ts` installs the mirror after history with the flag on
-by default. With no compositor, `PM.GL.bounds` and `PM.GL.pick` come from pm-wasm
-alone (2D; `null` where three.js would be needed), so geometry that used to be
-unavailable headlessly now answers.
+One worker process per open project (docs/engine/document-host.md): each installs
+the mirror after history (on by default; required with the new engine on). With no
+compositor, `PM.GL.bounds` and `PM.GL.pick` come from pm-wasm alone (2D; `null`
+where three.js would be needed), and dual answers skip them there (no legacy
+reference exists headlessly).
 
 ## The frame-rate validator (`apps/desktop/src/shared/frame-rate.ts`)
 
@@ -271,7 +303,8 @@ with its composition when another one opens.
 | Barrier, mirror, native API vs legacy | `vitest run src/renderer/src/engine-doc` | random projects: every routed query, zero dual mismatches; mirror hash equals the live document through 60 edits, undos, redos, and structural changes |
 | JSON diff vs `diffOps` | `json-diff.test.ts` | 2,000 random pairs identical; the allocation-free comparison of retained elements agrees with the full one on every exception (`toJSON`, wrappers, accessors, absent members) |
 | Frame rates vs pm-time | `frame-rate.test.ts` | 3,000+ inputs identical |
-| Headless host | `vitest run src/engine` | mirror and 2D geometry without a renderer |
+| Headless host | `vitest run src/engine` | mirror and 2D geometry without a renderer; per-project workers (docs/engine/document-host.md) |
+| Exact answers, named failures | `vitest run src/renderer/src/engine-doc/strict.test.ts` | detached inputs native with 0 dual mismatches; traps answered by a fresh instance; failures named |
 
 ## S5 targets in the app
 
