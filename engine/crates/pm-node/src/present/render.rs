@@ -2066,14 +2066,14 @@ impl Thread {
                 &live.working,
             );
             composer.set_blender(pm_render::blender::BlenderRender::Native);
-            if paused && let Some(blender) = &self.blender {
+            // What the paused frame lacked (nothing in a draft shading); a
+            // frame that failed to render changes nothing.
+            if paused
+                && composed.is_ok()
+                && let Some(blender) = &self.blender
+            {
                 let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-                blender.submit(
-                    key,
-                    shading.filter(|_| composed.is_ok()),
-                    revision,
-                    preview.as_deref(),
-                );
+                blender.submit(key, shading, revision, preview.as_deref());
             }
             match composed {
                 Ok(composed) => {
