@@ -42,7 +42,7 @@
    "max": 2
   },
   "density-0427": {
-   "over1": 16170,
+   "over1": 16169,
    "max": 126
   },
   "large-0428": {
@@ -64,30 +64,6 @@
   "caption-classic-0435": {
    "over1": 2,
    "max": 2
-  },
-  "caption-boxed-0436": {
-   "over1": 8,
-   "max": 92
-  },
-  "caption-boxed-0437": {
-   "over1": 8,
-   "max": 92
-  },
-  "caption-boxed-0438": {
-   "over1": 8,
-   "max": 92
-  },
-  "caption-boxed-0439": {
-   "over1": 4,
-   "max": 46
-  },
-  "caption-boxed-0440": {
-   "over1": 4,
-   "max": 46
-  },
-  "caption-boxed-0441": {
-   "over1": 4,
-   "max": 46
   },
   "caption-whisper-0442": {
    "over1": 1,
@@ -162,28 +138,16 @@
    "max": 64
   },
   "caption-paper-0460": {
-   "over1": 4,
-   "max": 60
+   "over1": 1,
+   "max": 2
   },
   "caption-paper-0461": {
-   "over1": 4,
-   "max": 60
+   "over1": 1,
+   "max": 2
   },
   "caption-paper-0462": {
-   "over1": 4,
-   "max": 60
-  },
-  "caption-paper-0463": {
-   "over1": 9,
-   "max": 120
-  },
-  "caption-paper-0464": {
-   "over1": 9,
-   "max": 120
-  },
-  "caption-paper-0465": {
-   "over1": 9,
-   "max": 120
+   "over1": 1,
+   "max": 2
   },
   "caption-stroke-0489": {
    "over1": 2,

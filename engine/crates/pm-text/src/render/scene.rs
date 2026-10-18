@@ -1015,16 +1015,96 @@ pub fn fill_rounded_rect_msaa(
     if b != 0.0 || c != 0.0 || a <= 0.0 || (a - d).abs() > 1e-12 * a {
         return fill_path_msaa(rounded_rect(x, y, w, h, r), m, color, opacity);
     }
-    let r = r.min(w / 2.0).min(h / 2.0).max(0.0) * a;
+    // `roundedRect` of `captions/render.ts`: `arcTo` corners, each a
+    // quarter conic (`SkPath::arcTo`), in user space as Skia gets them.
+    let radius = r.min(w / 2.0).min(h / 2.0).max(0.0) as f32;
+    let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
+    let weight = (0.5f32).sqrt();
+    let corners = [
+        (
+            (fx + fw, fy),
+            (fx + fw - radius, fy),
+            (fx + fw, fy + radius),
+        ),
+        (
+            (fx + fw, fy + fh),
+            (fx + fw, fy + fh - radius),
+            (fx + fw - radius, fy + fh),
+        ),
+        (
+            (fx, fy + fh),
+            (fx + radius, fy + fh),
+            (fx, fy + fh - radius),
+        ),
+        ((fx, fy), (fx, fy + radius), (fx + radius, fy)),
+    ];
+    let (a32, e32, f32_) = (a as f32, e as f32, f as f32);
+    // Graphite tessellates a conic at T = k / 2^L, L from Wang's formula for
+    // conics at precision 4 in device space, evaluated in local space.
+    let mut poly: Vec<(f64, f64)> = Vec::new();
+    for (p1, p0, p2) in corners {
+        let dev = |p: (f32, f32)| (p.0 * a32, p.1 * a32);
+        let (q0, q1, q2) = (dev(p0), dev(p1), dev(p2));
+        let cx = 0.5 * (q0.0.min(q1.0).min(q2.0) + q0.0.max(q1.0).max(q2.0));
+        let cy = 0.5 * (q0.1.min(q1.1).min(q2.1) + q0.1.max(q1.1).max(q2.1));
+        let c = |q: (f32, f32)| (q.0 - cx, q.1 - cy);
+        let (c0, c1, c2) = (c(q0), c(q1), c(q2));
+        let d = |q: (f32, f32)| q.0 * q.0 + q.1 * q.1;
+        let max_len = d(c0).max(d(c1)).max(d(c2)).sqrt();
+        let dp = (
+            -2.0 * weight * c1.0 + c0.0 + c2.0,
+            -2.0 * weight * c1.1 + c0.1 + c2.1,
+        );
+        let dw = (-2.0 * weight + 2.0).abs();
+        let rp = (max_len * 4.0 - 1.0).max(0.0);
+        let numer = d(dp).sqrt() * 4.0 + rp * dw;
+        let denom = 4.0 * weight.min(1.0);
+        let n2 = numer / denom;
+        let level = if n2 <= 1.0 {
+            0
+        } else {
+            ((n2.log2().ceil() as i32) + 1) >> 1
+        }
+        .clamp(0, 5);
+        let segments = 1 << level;
+        let p1w = (p1.0 * weight, p1.1 * weight);
+        let mix = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
+        for k in 0..=segments {
+            let t = (k << (5 - level)) as f32 / 32.0;
+            let (lx, ly) = if k == 0 {
+                p0
+            } else if k == segments {
+                p2
+            } else {
+                let ab = (mix(p0.0, p1w.0, t), mix(p0.1, p1w.1, t));
+                let bc = (mix(p1w.0, p2.0, t), mix(p1w.1, p2.1, t));
+                let abc = (mix(ab.0, bc.0, t), mix(ab.1, bc.1, t));
+                let u = mix(1.0, weight, t);
+                let v = weight + 1.0 - u;
+                let uv = mix(u, v, t);
+                (abc.0 / uv, abc.1 / uv)
+            };
+            // The rasterizer snaps vertices to 1/256 px.
+            let snap = |v: f32| f64::from((v * 256.0).round() / 256.0);
+            poly.push((snap(lx.mul_add(a32, e32)), snap(ly.mul_add(a32, f32_))));
+        }
+    }
     let (x0, y0, x1, y1) = (x * a + e, y * a + f, (x + w) * a + e, (y + h) * a + f);
     let inside = |p: kurbo::Point| {
-        if p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1 {
-            return false;
+        // Nonzero winding of the closed polygon.
+        let mut winding = 0i32;
+        for i in 0..poly.len() {
+            let (ax, ay) = poly[i];
+            let (bx, by) = poly[(i + 1) % poly.len()];
+            if ay <= p.y {
+                if by > p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) > 0.0 {
+                    winding += 1;
+                }
+            } else if by <= p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) < 0.0 {
+                winding -= 1;
+            }
         }
-        let cx = p.x.clamp(x0 + r, x1 - r);
-        let cy = p.y.clamp(y0 + r, y1 - r);
-        let (dx, dy) = (p.x - cx, p.y - cy);
-        dx * dx + dy * dy <= r * r
+        winding != 0
     };
     msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
 }

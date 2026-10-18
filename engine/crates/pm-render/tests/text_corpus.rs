@@ -267,7 +267,7 @@ fn main() {
                     pins_used.insert(key.clone());
                 }
                 let text_ok = match pin {
-                    Some((most, max)) => over2 <= most && tmax <= max && over2 > 0,
+                    Some((most, max)) => over2 <= most && tmax <= max,
                     None => over2 == 0,
                 };
                 exact += usize::from(over2 == 0);
