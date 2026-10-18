@@ -633,16 +633,23 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Level 1 SVG images (today's `<img>` buckets) are routed; level 2
-        // ones are drawn unless they have text (crate::vector::svg).
-        if !crate::vector::level2(layer) {
-            add(layer, Feature::SvgImage);
-        } else if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
-            match crate::vector::svg::document(&path) {
-                Ok((doc, _)) if doc.has_text() => add(layer, Feature::SvgImage),
-                Ok(_) => {}
-                Err(m) => add(layer, Feature::Media(m)),
+        // Validate resolved bytes first: unreadable SVGs are named layer
+        // failures at execution, even while valid level 1 SVGs retain
+        // their unresolved raster-parity gate.
+        let has_text = match assets {
+            Some(assets) => {
+                let Some(path) = assets.path(&asset_id, Some(record)) else {
+                    return;
+                };
+                match crate::vector::svg::document(&path) {
+                    Ok((doc, _)) => doc.has_text(),
+                    Err(_) => return,
+                }
             }
+            None => false,
+        };
+        if !crate::vector::level2(layer) || has_text {
+            add(layer, Feature::SvgImage);
         }
         return;
     }
@@ -650,7 +657,23 @@ fn check_media(
         && (node::member(Some(record), "imageSequence").is_some_and(|s| node::truthy(Some(s)))
             || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"))
     {
-        add(layer, Feature::ImageSequence);
+        // Both original animation containers and persisted WebM renditions
+        // retain the parity gate. Only unreadable media bypasses it, so
+        // execution can report a named error instead of routing.
+        match assets.and_then(|a| a.path(&asset_id, Some(record))) {
+            Some(path) => match crate::media::sequence_rendition(&path) {
+                Ok(_) => {
+                    add(layer, Feature::ImageSequence);
+                    return;
+                }
+                Err(_) => return, // Execution reports the unreadable media.
+            },
+            None if assets.is_some() => return, // Offline: named layer failure.
+            None => {
+                add(layer, Feature::ImageSequence);
+                return;
+            }
+        }
     }
     let Some(assets) = assets else {
         // Without media, the recorded container decides (the tested still
@@ -673,15 +696,17 @@ fn check_media(
         ) {
             Ok(()) => {}
             Err(crate::media::ProbeIssue::Unsupported(f)) => add(layer, f),
-            Err(crate::media::ProbeIssue::Unreadable(m)) => add(layer, Feature::Media(m)),
+            // Execution reports an unreadable source as a named layer
+            // failure. It is not an unsupported rendering capability.
+            Err(crate::media::ProbeIssue::Unreadable(_)) => {}
         },
         _ => {
             let probed = match crate::footage::interpretation(record) {
-                Some(i) => crate::media::probe_interpreted_video(&path, &i),
-                None => crate::media::probe_video(&path),
+                Some(i) => crate::media::probe_interpreted_video_issue(&path, &i),
+                None => crate::media::probe_video_issue(&path),
             };
-            if let Err(m) = probed {
-                add(layer, Feature::Media(m));
+            if let Err(crate::media::ProbeIssue::Unsupported(feature)) = probed {
+                add(layer, feature);
             }
         }
     }

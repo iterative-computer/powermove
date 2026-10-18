@@ -262,6 +262,56 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
 
+/// The shipped `sequencePlaybackTime`: select an available CFR slot,
+/// clamp to its ends, then seek one millisecond inside it. In particular,
+/// sequences do not use ordinary video's 40 ms end padding.
+pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64> {
+    use pm_eval::node;
+    let sequence = node::member(Some(record), "imageSequence")?;
+    let number =
+        |name| node::member(Some(sequence), name).map(|v| node::js_value_opt(Some(v)).to_number());
+    let (fps, frames) = (number("fps")?, number("frames")?);
+    if !fps.is_finite()
+        || !(1.0..=240.0).contains(&fps)
+        || !frames.is_finite()
+        || frames.fract() != 0.0
+        || !(2.0..=9_007_199_254_740_991.0).contains(&frames)
+    {
+        return None;
+    }
+    let index = crate::js::max(
+        0.0,
+        crate::js::min(frames - 1.0, ((time + 1e-7) * fps).floor()),
+    );
+    Some(index / fps + 0.001)
+}
+
+/// Numbered/animated imports today persist a WebM rendition, even when
+/// their document format is GIF or PNG. An EBML header identifies the
+/// rendition independently of path extensions and original metadata.
+/// The native video probe validates readability and indexability before
+/// a valid rendition retains its compatibility gate.
+pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
+    static CACHE: StampCache<Result<bool, String>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        use std::io::Read;
+        let mut magic = [0; 4];
+        std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if magic == [0x1a, 0x45, 0xdf, 0xa3] {
+            MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(true);
+        }
+        // A readable original animation retains its parity gate. Broken
+        // bytes are a named failure, not an unsupported sequence.
+        pm_media::image::read(path, &FramePool::new(0))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(false)
+    })
+    .unwrap_or_else(|| Err(offline(path)))
+}
+
 /// Whether a video file is drawn without routing: it opens and indexes,
 /// the renderer can draw it ([`video_drawable`]), and it shows nothing
 /// whose look the renderer has not matched with today's viewer (section 25:
@@ -284,28 +334,50 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 /// routing asks at every document revision, and opening a source indexes
 /// it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
-    static CACHE: StampCache<Result<(), String>> = OnceLock::new();
-    per_stamp(&CACHE, path, || {
-        MediaSource::open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|src| video_supported(&src))
+    probe_video_issue(path).map_err(|issue| match issue {
+        ProbeIssue::Unreadable(message) => message,
+        ProbeIssue::Unsupported(Feature::Media(message)) => message,
+        ProbeIssue::Unsupported(feature) => feature.to_string(),
     })
-    .unwrap_or_else(|| Err(offline(path)))
 }
 
-/// [`probe_video`] for an asset with Interpret Footage overrides: only what
-/// the renderer cannot draw at all is refused. The file is opened and
-/// indexed once per size and modification time; each interpretation is
-/// then resolved from its video probe.
+/// Typed video probe: corrupt/offline media is a media failure, not a
+/// capability reason that could send a project to another renderer.
+pub fn probe_video_issue(path: &Path) -> Result<(), ProbeIssue> {
+    static CACHE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        let src = MediaSource::open(path)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        video_supported(&src).map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
+    })
+    .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// [`probe_video`] for an asset with Interpret Footage overrides.
 pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(), String> {
+    probe_interpreted_video_issue(path, interp).map_err(|issue| match issue {
+        ProbeIssue::Unreadable(message) => message,
+        ProbeIssue::Unsupported(Feature::Media(message)) => message,
+        ProbeIssue::Unsupported(feature) => feature.to_string(),
+    })
+}
+
+/// Typed interpreted probe. Facts are kept per source stamp, independently
+/// of changing interpretation overrides.
+pub fn probe_interpreted_video_issue(
+    path: &Path,
+    interp: &Interpretation,
+) -> Result<(), ProbeIssue> {
     static CACHE: StampCache<Result<Option<VideoProbe>, String>> = OnceLock::new();
     let video = per_stamp(&CACHE, path, || {
         MediaSource::open(path)
             .map(|src| src.probe.video.clone())
             .map_err(|e| format!("{}: {e}", path.display()))
     })
-    .unwrap_or_else(|| Err(offline(path)))?;
+    .unwrap_or_else(|| Err(offline(path)))
+    .map_err(ProbeIssue::Unreadable)?;
     video_probe_drawable(video.as_ref(), interp)
+        .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
 }
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {

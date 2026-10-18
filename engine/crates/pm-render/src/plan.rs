@@ -1137,6 +1137,14 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
+                if let Err(message) = crate::vector::svg::document(&path) {
+                    b.failures.push(LayerFailure {
+                        composition: comp_id,
+                        layer: js::layer_id(layer),
+                        message,
+                    });
+                    return Ok(None);
+                }
                 // Level 2 SVG images draw at output resolution
                 // (crate::vector::svg); level 1 and SVG text stay routed.
                 if !crate::vector::level2(layer) {
@@ -1170,13 +1178,28 @@ fn native_content_quad<'d>(
                     }
                 };
             }
-            if ty == "video"
+            let sequence = ty == "video"
                 && (rec("imageSequence").truthy()
-                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"))
-            {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::ImageSequence));
-                return Ok(None);
+                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"));
+            if sequence {
+                match crate::media::sequence_rendition(&path) {
+                    Ok(_) => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::ImageSequence,
+                        ));
+                        return Ok(None);
+                    }
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        return Ok(None);
+                    }
+                }
             }
             let sw = js::or_number(&rec("w"), 1.0);
             let sh = js::or_number(&rec("h"), 1.0);
