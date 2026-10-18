@@ -49,14 +49,18 @@ async function project(session: LaunchedApp): Promise<boolean> {
     // Shadows: the environment's `shadows` and every model's and the sun's
     // `castShadow` default to true (core/scene3d/schema.ts).
     ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'ground', source: { primitive: 'box' }, p: { y: -0.75, sx: 8, sy: 0.1, sz: 6 }, material: { p: { color: '#B8B8B0', roughness: 0.8 } } } }));
-    ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'box', source: { primitive: 'box' }, p: { x: -1.8, ry: 30 }, material: { p: { color: '#FF7733' } } } }));
-    ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, p: { x: 0 }, material: { p: { color: '#3388FF', roughness: 0.2, metalness: 0.4 } } } }));
-    ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'ring', source: { primitive: 'torus' }, p: { x: 1.8, rx: 60 }, material: { p: { color: '#44CC88', roughness: 0.4 } } } }));
+    const layerOf = (r: any) => {
+      const id = r?.data?.result?.layerId;
+      if (!id) throw new Error('add_object returned no layer');
+      return id as string;
+    };
+    const box = layerOf(ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'box', source: { primitive: 'box' }, p: { x: -1.8, ry: 30 }, material: { p: { color: '#FF7733' } } } })));
+    const ball = layerOf(ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, p: { x: 0 }, material: { p: { color: '#3388FF', roughness: 0.2, metalness: 0.4 } } } })));
+    const ring = layerOf(ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'ring', source: { primitive: 'torus' }, p: { x: 1.8, rx: 60 }, material: { p: { color: '#44CC88', roughness: 0.4 } } } })));
     // Every model moves, so every frame is its own Blender frame.
-    for (const [id, path, from, to] of [['box', 'rotation.y', 30, 120], ['ring', 'rotation.y', 0, 90], ['ball', 'position.y', 0, 0.6]] as const) {
-      const layer = PM.proj.layers.find((l: any) => l.d?.data?.object?.id === id);
-      if (!layer) throw new Error(`no layer for ${id}`);
-      PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path, keyframes: [{ time: 0, value: from }, { time: SECONDS, value: to }] });
+    for (const [target, path, from, to] of [[box, 'rotation.y', 30, 120], [ring, 'rotation.y', 0, 90], [ball, 'position.y', 0, 0.6]] as const) {
+      const r = PM.Edit.apply({ type: 'replace_keyframes', target, path, keyframes: [{ time: 0, value: from }, { time: SECONDS, value: to }] });
+      if (r && r.ok === false) throw new Error(`${path}: ${r.message ?? JSON.stringify(r)}`);
     }
     ok(api.scene3d.setRendering({ enabled: true, engine: 'eevee', samples: SAMPLES, previewSamples: 4, previewScale: 0.5 }));
     PM.setTime(0);
