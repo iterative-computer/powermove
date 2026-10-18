@@ -167,7 +167,11 @@ function tracerRuns() {
     { name: 'tracer-edit-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, edits: { everyMs: 250 }, startS: 0, env: doc },
     { name: 'tracer-playback-engine-25', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
     { name: 'tracer-playback-engine-23976', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc },
-    { name: 'tracer-playback-engine-30-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0, env: doc }
+    { name: 'tracer-playback-engine-30-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0, env: doc },
+    // A/V sync and cadence at each rate, idle and under the gate load.
+    { name: 'tracer-playback-engine-30', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, dur: 90 }, startS: 0, env: doc },
+    { name: 'tracer-playback-engine-25-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
+    { name: 'tracer-playback-engine-23976-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc }
   ];
 }
 const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
@@ -255,6 +259,7 @@ function traceContext(tracePath, pingOffsetUs) {
   const begins = frames.map((f) => f.begin);
   const toTrace = (ms) => traceOffsetUs + ms * 1000;
   const hostToTrace = (us) => us - pingOffsetUs + traceOffsetUs;
+  const traceToHost = (us) => us - traceOffsetUs + pingOffsetUs;
   const frameAt = (rafMs) => {
     const t = toTrace(rafMs);
     let lo = 0;
@@ -353,7 +358,11 @@ function traceContext(tracePath, pingOffsetUs) {
     if (i + 1 < list.length && list[i + 1] <= swap.begin) return { begin: toTrace(rafMs), end: null, state: 'VIZ_SUPERSEDED' };
     return { begin: toTrace(rafMs), end: swap.end, received, swapBegin: swap.begin, state: 'STATE_PRESENTED_ALL' };
   };
-  return { frames: frames.length, toTrace, hostToTrace, frameAt, sinkFor, vizFrame };
+  // viz's BeginFrames (frame times, trace µs): which refresh drew and showed a frame.
+  const beginFrames = events.filter((e) => e.name === 'DisplayScheduler::BeginFrame' && e.args?.args?.frame_time_us != null).map((e) => e.args.args.frame_time_us).sort((a, b) => a - b);
+  /** The index of the BeginFrame whose interval contains trace µs `t`. */
+  const beginFrameAt = (t) => firstAtOrAfter(beginFrames, t + 1) - 1;
+  return { frames: frames.length, toTrace, hostToTrace, traceToHost, frameAt, sinkFor, vizFrame, beginFrames, beginFrameAt };
 }
 
 /**
@@ -455,7 +464,7 @@ function analyzePlayback(raw) {
       per.push(null);
       continue;
     }
-    per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfK(k)), rafToPresentUs: pf.end - ctx.toTrace(rafMs) });
+    per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfK(k)), rafToPresentUs: pf.end - ctx.toTrace(rafMs), pf, rafUs: ctx.toTrace(rafMs), submitUs: submitOf?.(k) != null ? ctx.toTrace(submitOf(k)) : null });
   }
   const missing = [];
   for (let k = kFirst, i = 0; k <= kLast; k++, i++) {
@@ -506,6 +515,14 @@ function analyzePlayback(raw) {
     // Presentation minus due time on the clock line (the A/V offset the
     // jitter numbers remove; section 15 keeps A/V sync within ±10 ms).
     dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
+    // A/V sync (section 15): each frame's presentation against the audio
+    // clock's line in effect at that instant (the newest clock sample made
+    // before it), rather than the run's last sample: the engine re-anchors
+    // its line to the audio device every 100 ms, and an output glitch moves
+    // it, so one line for the whole run charges such a jump to every frame
+    // before it.
+    ...(line && page.clocks?.length && line.hostTime != null ? { avSync: avSync(raw, presented, ctx, fps) } : {}),
+    ...(offMain ? { vizHopsByDepth: vizHopsByDepth(presented, periodUs), vizLags: vizLags(per, ctx, fps, periodUs) } : {}),
     ...(page.edits?.length ? { edits: analyzeEdits(page, ctx, sink, offMain) } : {}),
     ...(engineLike
       ? (() => {
@@ -530,6 +547,122 @@ function analyzePlayback(raw) {
     presenter: page.presenter,
     receiver: page.receiver
   };
+}
+
+/**
+ * Presentation minus the frame's start on the audio clock's line in effect
+ * at the presentation (ms): signed, absolute, and the share within ±10 ms.
+ */
+function avSync(raw, presented, ctx, fps) {
+  const samples = raw.page.clocks.filter((c) => c.state === 'playing' && c.rate.num !== 0).sort((a, b) => a.hostTime - b.hostTime);
+  const frameTicks = TICKS / fps;
+  const out = [];
+  /** Frames outside ±10 ms, by the main-process load event near them. */
+  const outsideNear = {};
+  for (const p of presented) {
+    const host = ctx.traceToHost(p.presentUs);
+    let lo = 0;
+    let hi = samples.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (samples[mid].hostTime <= host) lo = mid + 1;
+      else hi = mid;
+    }
+    const sample = samples[Math.max(0, lo - 1)];
+    const offset = (host - hostOfMedia(sample, p.k * frameTicks)) / 1000;
+    out.push(offset);
+    if (Math.abs(offset) > 10) {
+      const near = nearLoad(raw, host);
+      outsideNear[near] = (outsideNear[near] ?? 0) + 1;
+    }
+  }
+  return {
+    outsideNear,
+    offsetMs: dist(out, 2),
+    absOffsetMs: dist(out.map(Math.abs), 2),
+    p5Ms: out.length ? +pct(out, 0.05).toFixed(2) : null,
+    within10Ms: out.filter((o) => Math.abs(o) <= 10).length,
+    n: out.length
+  };
+}
+
+/**
+ * Where a worker canvas's timed frames spend the time from their animation
+ * frame to the panel, grouped by how many refreshes that took (ms after the
+ * animation frame's timestamp): the draw's submit (page clock), viz receiving the
+ * canvas's compositor frame, the start and end of viz's DrawAndSwap that
+ * showed it.
+ */
+function vizHopsByDepth(presented, periodUs) {
+  const groups = {};
+  for (const p of presented) {
+    if (p.pf?.received == null) continue;
+    const depth = Math.round(p.rafToPresentUs / periodUs);
+    (groups[depth] ??= []).push(p);
+  }
+  return Object.fromEntries(
+    Object.entries(groups).map(([depth, ps]) => [
+      depth,
+      {
+        n: ps.length,
+        submitted: dist(ps.filter((p) => p.submitUs != null).map((p) => (p.submitUs - p.rafUs) / 1000), 2),
+        received: dist(ps.map((p) => (p.pf.received - p.rafUs) / 1000), 2),
+        drawBegin: dist(ps.map((p) => (p.pf.swapBegin - p.rafUs) / 1000), 2),
+        presented: dist(ps.map((p) => (p.pf.end - p.rafUs) / 1000), 2)
+      }
+    ])
+  );
+}
+
+/**
+ * Why a worker canvas's frames reach the panel at different refreshes,
+ * counted on viz's BeginFrames: `draw` is how many BeginFrames after the
+ * animation frame that picked it viz drew the frame (0: the canvas's
+ * compositor frame arrived before viz drew for that BeginFrame; 1: just
+ * after, so it waited a refresh), `present` how many BeginFrames after that
+ * draw it was presented. An irregular interval is attributed to the lag
+ * that changed between its two frames.
+ */
+function vizLags(per, ctx, fps, periodUs) {
+  if (!ctx.beginFrames.length) return null;
+  const lag = (p) => {
+    if (!p?.pf?.swapBegin) return null;
+    const picked = firstAtOrAfterSorted(ctx.beginFrames, p.rafUs - 2000);
+    const drawn = ctx.beginFrameAt(p.pf.swapBegin);
+    const shown = ctx.beginFrameAt(p.pf.end);
+    return { draw: drawn - picked, present: shown - drawn };
+  };
+  const counts = { draw: {}, present: {} };
+  const irregular = { drawChanged: 0, presentChanged: 0, both: 0, neither: 0 };
+  let prev = null;
+  for (const p of per) {
+    const l = p ? lag(p) : null;
+    if (l) {
+      counts.draw[l.draw] = (counts.draw[l.draw] ?? 0) + 1;
+      counts.present[l.present] = (counts.present[l.present] ?? 0) + 1;
+    }
+    if (l && prev?.l && p.k === prev.p.k + 1) {
+      const err = (p.presentUs - prev.p.presentUs) / 1000 - 1000 / fps;
+      if (Math.abs(err) > periodUs / 2000) {
+        const d = l.draw !== prev.l.draw;
+        const q = l.present !== prev.l.present;
+        irregular[d && q ? 'both' : d ? 'drawChanged' : q ? 'presentChanged' : 'neither']++;
+      }
+    }
+    prev = l ? { p, l } : null;
+  }
+  return { counts, irregular };
+}
+
+function firstAtOrAfterSorted(xs, t) {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /**
@@ -658,7 +791,7 @@ function analyzeLatency(raw) {
     // Engine frames echo the view sequence (pans) or, on the tracer, the
     // document revision (layer drags).
     const engineLike = page.mode === 'engine' || page.mode === 'tracer';
-    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: page.mode === 'tracer' ? d[2] : d[6], submitMs: d[5], arrivedMs: d[4] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: page.mode === 'tracer' ? d[2] : d[6], submitMs: d[5], arrivedMs: d[4], seq: d[1] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
     // When the page handled each input (ms, page clock): the first dispatch
     // that carried it.
     const handledOf = new Map();
@@ -679,7 +812,10 @@ function analyzeLatency(raw) {
     // showed it ended (presentation), split at the start of viz's
     // DrawAndSwap that drew it; for today, handled → the animation
     // frame that drew it, and that frame → presentation.
-    const hops = { inputToHandled: [], handledToArrival: [], arrivalToSubmit: [], submitToReceived: [], receivedToPresent: [], receivedToDraw: [], drawToPresent: [], handledToRaf: [], rafToPresent: [] };
+    const hops = { inputToHandled: [], handledToArrival: [], arrivalToSubmit: [], submitToReceived: [], receivedToPresent: [], receivedToDraw: [], drawToPresent: [], handledToRaf: [], rafToPresent: [], handledToRenderStart: [], renderStartToGpuDone: [], gpuDoneToSent: [], sentToArrival: [] };
+    // The engine's side of handled → arrival, by descriptor seq (host µs → page ms).
+    const engineBySeq = new Map((run.engineFrames ?? []).map((f) => [f.seq, f]));
+    const hostMs = (us) => (us - raw.clock.offsetUs) / 1000;
     let unmatched = 0;
     let unpresented = 0;
     const presentedOf = (d) => {
@@ -705,6 +841,13 @@ function analyzeLatency(raw) {
           if (engineLike && d.arrivedMs != null) {
             hops.handledToArrival.push(d.arrivedMs - handled);
             hops.arrivalToSubmit.push(d.submitMs - d.arrivedMs);
+            const e = engineBySeq.get(d.seq);
+            if (e) {
+              hops.handledToRenderStart.push(hostMs(e.start) - handled);
+              hops.renderStartToGpuDone.push((e.gpu_done - e.start) / 1000);
+              hops.gpuDoneToSent.push((e.sent - e.gpu_done) / 1000);
+              hops.sentToArrival.push(d.arrivedMs - hostMs(e.sent));
+            }
             if (pf.received != null) {
               hops.submitToReceived.push((pf.received - ctx.toTrace(d.submitMs)) / 1000);
               hops.receivedToPresent.push((pf.end - pf.received) / 1000);
@@ -769,6 +912,9 @@ try {
         POWERMOVE_USER_DATA: profile,
         POWERMOVE_DEVTOOLS: '0',
         POWERMOVE_NEW_ENGINE: run.mode === 'engine' || run.mode === 'tracer' ? '1' : '0',
+        // The engine's per-frame trace (render start, GPU done, sent), for
+        // the hops (PM_MEASURE_ENGINE_TRACE=0 leaves it off).
+        POWERMOVE_BRIDGE_TRACE: process.env.PM_MEASURE_ENGINE_TRACE === '0' ? '0' : '1',
         // The engine's test source at the project's rate (the Powermove ad is 30 fps).
         POWERMOVE_BRIDGE_TEST_FPS: String(run.fps ?? 30),
         CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),

@@ -29,6 +29,12 @@ export type FrameBridgeStats = {
   released: number;
   videoFrames: number;
   misses: number;
+  /** Deliveries of an import already held (main retried a send that timed
+   *  out but landed); each is let go without a second notice to main. */
+  duplicates: number;
+  /** Release notices main no longer had an import for (harmless: the
+   *  renderer's own reference is gone either way). */
+  lateReleases: number;
   errors: string[];
 };
 

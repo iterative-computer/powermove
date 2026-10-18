@@ -18,10 +18,10 @@ import { app, MessageChannelMain, utilityProcess } from 'electron';
 
 import { canonicalHash, canonicalStringify } from '../../../shared/canonical-json';
 import type { CrashReport, EngineProcess, ProjectColor } from '../../../shared/engine-protocol';
-import { hostNowUs } from '../index';
 import { NativeEngine } from '../native-engine';
 import type { ChildLike, ClientPortInfo, PortLike } from '../ports';
 import { TestClient } from './client';
+import { mainHostClock } from './main-clock';
 
 type Step = { name: string; ms: number; detail?: unknown };
 const steps: Step[] = [];
@@ -66,6 +66,8 @@ async function main(): Promise<void> {
   const enginePath = process.env['PM_IT_ENGINE_PROCESS'];
   const addon = process.env['POWERMOVE_ENGINE_ADDON'];
   check(enginePath && addon, 'PM_IT_ENGINE_PROCESS and POWERMOVE_ENGINE_ADDON are set');
+  const clock = mainHostClock();
+  step('main reads the engines\' host clock through pm-bridge', { libuvMinusEngineUs: clock.libuvMinusEngineUs });
   const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-engine-it-'));
   const logs: string[] = [];
   const pids: Record<EngineProcess, number[]> = { interactive: [], job: [] };
@@ -85,7 +87,7 @@ async function main(): Promise<void> {
     cacheDirectory: path.join(dir, 'Engine Cache'),
     automaticOutputDirectory: path.join(dir, 'Powermove'),
     physicalMemory: os.totalmem(),
-    hostNow: hostNowUs,
+    hostNow: clock.now,
     log: (level, message) => logs.push(`${level}: ${message}`)
   });
 

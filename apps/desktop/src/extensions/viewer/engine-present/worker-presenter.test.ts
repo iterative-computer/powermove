@@ -55,6 +55,12 @@ class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   disposed = false;
   private pending: (() => void)[] = [];
+  private loseDevice: (reason: string) => void = () => {};
+  readonly lost = new Promise<string>((resolve) => (this.loseDevice = resolve));
+  /** The device goes away (the GPU process restarted). */
+  lose(reason: string): void {
+    this.loseDevice(reason);
+  }
   configure(): void {}
   draw(frame: VideoFrame): void {
     const fake = frame as unknown as FakeFrame;
@@ -194,14 +200,15 @@ const settle = async (): Promise<void> => {
 function setup(options: { failPainter?: boolean; trace?: boolean } = {}) {
   const pair = new Pair(options.failPainter);
   const failures: string[] = [];
-  const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0, onFailed: (m) => failures.push(m) });
+  const losses: string[] = [];
+  const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0, onFailed: (m) => failures.push(m), onLost: (m) => losses.push(m) });
   const source = new Source();
   const link = new Link();
   const hints: VsyncHint[] = [];
   const presenter = host.open({ link, source, trace: options.trace, displayHz: 120, onVsync: (h) => hints.push(h) });
   const presented: PresentedFrame[] = [];
   presenter.onPresented((f) => presented.push(f));
-  return { pair, host, source, link, presenter, presented, failures, hints };
+  return { pair, host, source, link, presenter, presented, failures, hints, losses };
 }
 
 describe('WorkerPresenter and the presentation worker', () => {
@@ -283,18 +290,20 @@ describe('WorkerPresenter and the presentation worker', () => {
     // Worker frames every 8.33 ms from page 1000 ms (worker 0 ms).
     for (let i = 0; i < 8; i++) pair.frame(i * (1000 / 120));
     await settle();
-    // Picked for two refreshes after each animation frame (a worker
-    // canvas's measured depth): frame 10 (0 to 16.7 ms) was already
-    // passing at the first one, so it is dropped as late.
-    expect(presented.map((f) => f.seq)).toEqual([11, 12, 13]);
-    expect(presenter.stats.dropped['late']).toBe(1);
+    // Picked for the instant a worker canvas's frame reaches the panel
+    // (1.5 refreshes and 3.2 ms after its animation frame, rounded to the
+    // nearest refresh; 60 Hz until the refresh grid is fitted): at the
+    // first animation frame that is media 36.5 ms, so frames 10 (0 to
+    // 16.7 ms) and 11 (16.7 to 33.3 ms) are dropped as late.
+    expect(presented.map((f) => f.seq)).toEqual([12, 13]);
+    expect(presenter.stats.dropped['late']).toBe(2);
     pair.painter.finishGpu();
     await settle();
     expect(link.releases.map((r) => r.seq)).toEqual([10, 11, 12, 13]);
     const trace = await presenter.takeTrace();
     expect(trace!.arrivals.map((a) => a[2])).toEqual([1000, 1000, 1000, 1000]);
     expect(trace!.rafs[0]).toBe(1000);
-    expect(trace!.draws).toHaveLength(3);
+    expect(trace!.draws).toHaveLength(2);
   });
 
   it('hands queued frames back to the engine when the session ends, and forgets the session once the worker closed it', async () => {
@@ -373,5 +382,28 @@ describe('WorkerPresenter and the presentation worker', () => {
     presenter.receive({ type: 'frame', frame: desc(4) }, 0);
     host.dispose();
     expect(pair.posted).toHaveLength(posted);
+  });
+
+  it('a lost device ends the worker presenting: every frame it held goes back to the engine, later ones too, and the page is told', async () => {
+    const { pair, source, link, presenter, losses } = setup();
+    for (const k of ['1:1', '1:2', '1:3']) source.imports.add(k);
+    presenter.receive({ type: 'clock', sample: clock({}) }, 0);
+    // Frame 1 is drawn (its GPU work never finishes: the device is gone);
+    // frame 2 waits a minute ahead in the jitter buffer.
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    presenter.receive({ type: 'frame', frame: desc(2, { pts: 3600 * F, duration: F }) }, 0);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    pair.painter.lose('A valid external Instance reference no longer exists.');
+    await settle();
+    expect(losses).toEqual(['A valid external Instance reference no longer exists.']);
+    // Both came back: the queued one from the worker, the drawn one when the worker closed the session.
+    expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2]);
+    expect(source.frames.every((f) => f.closed)).toBe(true);
+    // A frame that arrives afterwards is handed back undrawn.
+    presenter.receive({ type: 'frame', frame: desc(3) }, 0);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2, 3]);
   });
 });

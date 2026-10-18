@@ -1,0 +1,469 @@
+{
+  "run": "app-playback-today-load-bf7",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      6.83251953125,
+      6.71044921875,
+      7.53466796875
+    ],
+    "after": [
+      8.66162109375,
+      7.40771484375,
+      7.669921875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 46,
+    "offsetUs": 334854905007
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00037500000326,
+        "max": 50.030375000002095
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1158,
+      "replies": 1158,
+      "replyBytes": 91125432,
+      "mainMsP50": 0.09216600000218023
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14036
+    },
+    "presentation": {
+      "thread": "main",
+      "timing": "PipelineReporter"
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 80847.89999997616,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1786,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 14,
+      "notPresented": 42,
+      "drops": 56,
+      "presented": 1737,
+      "offSlot": 679
+    },
+    "jitterAbsMs": {
+      "n": 1737,
+      "p50": 0.329,
+      "p95": 41.779,
+      "p99": 58.348,
+      "max": 133.443
+    },
+    "intervalErrorAbsMs": {
+      "n": 1694,
+      "p50": 0,
+      "p95": 25,
+      "p99": 33.333,
+      "max": 116.664
+    },
+    "irregularIntervals": 664,
+    "rafToPresentMs": {
+      "n": 1737,
+      "p50": 19.14,
+      "p95": 60.68,
+      "p99": 77.4,
+      "max": 152.39
+    },
+    "dueToPresentMs": {
+      "n": 1737,
+      "p50": 25.82,
+      "p95": 67.59,
+      "p99": 84.16,
+      "max": 159.26
+    },
+    "rafGapMs": {
+      "n": 6150,
+      "p50": 8.3,
+      "p95": 24.5,
+      "p99": 41.6,
+      "max": 125
+    },
+    "rafGapsOver25Ms": 233,
+    "missing": [
+      {
+        "k": 107,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 109,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 113,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 122,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 123,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 127,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 129,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 139,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 141,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 260,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 268,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 269,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 270,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 271,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 287,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 435,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 439,
+        "state": "not-drawn",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 556,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 558,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 565,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 567,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 568,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 569,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 570,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 571,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 572,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 573,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 574,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 576,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 579,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 588,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 706,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 719,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 721,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 724,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 856,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 860,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1006,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1007,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1011,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1022,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1023,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1024,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1156,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1158,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1306,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1326,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1331,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1456,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1607,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1628,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1636,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1641,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1643,
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 1764,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1777,
+        "state": "not-drawn",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 13,
+      "2": 1058,
+      "3": 283,
+      "4": 162,
+      "5": 96,
+      "6": 29,
+      "7": 36,
+      "8": 34,
+      "9": 21,
+      "10": 3,
+      "17": 1,
+      "18": 1
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}
