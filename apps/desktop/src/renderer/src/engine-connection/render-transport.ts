@@ -212,6 +212,7 @@ export class EngineRenderTransport {
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
   readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0 };
+  private answering = 0;
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -265,16 +266,22 @@ export class EngineRenderTransport {
   /** Draws one need with its producer and posts the answer; false when there was none. */
   private answerNeed(need: CompatNeed, session: TransportSession): boolean {
     const answerer = this.answerers.get(need.source);
-    if (!answerer) return false;
+    // A producer that asks for a frame from inside its own answer (an
+    // override calling `render.snapshot`) gets none: that frame would need
+    // the answer being made.
+    if (!answerer || this.answering > 0) return false;
     this.compatStats.needs++;
     const revision = this.options.revision() ?? 0;
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}`;
     let answer: CompatAnswerResult;
+    this.answering++;
     try {
       answer = answerer(need, revision);
     } catch (error) {
       this.options.log('warn', `the ${need.source} producer failed for layer ${need.layer}: ${error instanceof Error ? error.message : String(error)}`);
       answer = null;
+    } finally {
+      this.answering--;
     }
     if (answer?.kind === 'reuse' && this.reused.has(`${tag}\u0000${revision}`)) answer = null;
     if (!answer) {

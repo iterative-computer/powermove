@@ -180,3 +180,24 @@ describe('the render transport\'s compatibility answers', () => {
     expect(() => t.snapshotSync({ time: 0, width: 1, height: 1 })).toThrow(/No raster override in this window answered for layer title/);
   });
 });
+
+describe('a raster override that asks for a frame from inside its answer', () => {
+  it('gets a named failure instead of recursing', () => {
+    const need: CompatNeed = { composition: 'P-root', layer: 'title', time: 0, source: 'rasterOverride', scale: 1 };
+    const posted: any[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const snapshotSync = vi.fn(() => ({ status: 'needsRenderer', revision: 5, fallback: [], compat: [need] }));
+    const t = new EngineRenderTransport({
+      native: { snapshotSync }, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {}
+    } as any);
+    let inner = 'unset';
+    t.answerCompat('rasterOverride', () => {
+      inner = t.snapshotDataUrlSync(0, 160, { w: 320, h: 180 });
+      return { kind: 'native' };
+    });
+    t.receiveCompat({ compat: 'needs', needs: [need] }, session);
+    expect(inner).toBe('');
+    expect(posted.at(-1)).toMatchObject({ compat: 'native' });
+    expect(snapshotSync).toHaveBeenCalledTimes(1);
+  });
+});
