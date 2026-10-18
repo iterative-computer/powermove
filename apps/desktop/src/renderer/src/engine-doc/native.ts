@@ -21,7 +21,7 @@ import type { PathPart } from '../../../shared/patch';
 import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
-import { layer3DRole } from '../core/scene3d/layers';
+import { geometryRequest, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
 import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
@@ -296,7 +296,12 @@ export class NativeApi {
     const wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
     let reply: any;
-    try { reply = wasm.query({ op, ...request }); } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
+    try {
+      refreshModels(this.PM, wasm);
+      reply = wasm.query({ op, ...request });
+      // 3D geometry met model assets the mirror lacks: add them and ask again.
+      if (reply?.models) reply = resolveModels(this.PM, wasm, () => wasm.query({ op, ...request }), reply);
+    } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
     if (reply?.fonts && this.fonts) {
       // Text layout met fonts the mirror lacks: load them (at once from a
       // synchronous registry, in the background otherwise) and ask again.
@@ -694,7 +699,7 @@ export class NativeApi {
   // ── groups ────────────────────────────────────────────────────────────
 
   groupBounds(group: any, time: number): any {
-    return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time }),
+    return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time, ...geometryRequest(this.PM) }),
       () => this.legacy.groupBounds(group, time), () => ({ layer: group?.id, t: time }),
       this.dual ? timePerturbations(time, t => this.legacy.groupBounds(group, t)) : undefined,
       this.dual ? () => this.illConditioned(group, time) : undefined);
@@ -805,7 +810,7 @@ export class NativeApi {
   // ── render ────────────────────────────────────────────────────────────
 
   bounds(L: any, T: any): any {
-    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
+    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T, ...geometryRequest(this.PM) }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
       this.dual ? timePerturbations(T, t => this.legacy.bounds(L, t)) : undefined,
       this.dual ? () => this.illConditioned(L, T) : undefined);
   }
@@ -846,12 +851,10 @@ export class NativeApi {
     return this.answer('gl.pick', () => {
       const c = this.comps();
       if (!c) return { fallback: 'context' };
-      const proj = this.unwrap(this.PM.proj);
-      // With 3D layers the order follows the editor's view camera, which is
-      // not in the document: three.js answers until Phase 3c.
-      if ((proj.layers || []).some((layer: any) => layer3DRole(this.unwrap(layer)))) return { fallback: '3d' };
+      // 3D layers are picked on the engine's geometry with the editor's view
+      // camera and Local View (core/scene3d/engine-geometry.ts).
       const live = this.PM.proj.layers;
-      return this.query('pick', { comp: c.open, open: c.open, x, y, t: T, includeLocked: !!options?.includeLocked, localView: null },
+      return this.query('pick', { comp: c.open, open: c.open, x, y, t: T, includeLocked: !!options?.includeLocked, localView: null, ...geometryRequest(this.PM) },
         (hit: number[] | null) => hit == null ? null : live[hit[0]!] ?? null);
     }, () => this.legacy.pick(x, y, T, options), () => ({ x, y, t: T }),
       this.dual ? [

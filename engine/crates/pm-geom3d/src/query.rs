@@ -162,7 +162,12 @@ fn make_orthographic(left: f64, right: f64, top: f64, bottom: f64, near: f64, fa
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Lens {
     /// `PerspectiveCamera` (`fov` in degrees).
-    Perspective { fov: f64, zoom: f64, near: f64, far: f64 },
+    Perspective {
+        fov: f64,
+        zoom: f64,
+        near: f64,
+        far: f64,
+    },
     /// `OrthographicCamera` with `resizeCamera`'s frustum (±3 × aspect, ±3).
     Orthographic { zoom: f64, near: f64, far: f64 },
 }
@@ -315,18 +320,14 @@ impl Box3 {
 
     /// `Box3.expandByPoint`.
     pub fn expand(&mut self, p: Vec3) {
-        for k in 0..3 {
-            self.min[k] = js_min(self.min[k], p[k]);
-            self.max[k] = js_max(self.max[k], p[k]);
-        }
+        self.min = std::array::from_fn(|k| js_min(self.min[k], p[k]));
+        self.max = std::array::from_fn(|k| js_max(self.max[k], p[k]));
     }
 
     /// `Box3.union`.
     pub fn union(&mut self, b: &Box3) {
-        for k in 0..3 {
-            self.min[k] = js_min(self.min[k], b.min[k]);
-            self.max[k] = js_max(self.max[k], b.max[k]);
-        }
+        self.min = std::array::from_fn(|k| js_min(self.min[k], b.min[k]));
+        self.max = std::array::from_fn(|k| js_max(self.max[k], b.max[k]));
     }
 
     /// `Box3.applyMatrix4`: the box of the eight transformed corners (an
@@ -353,10 +354,7 @@ impl Box3 {
     }
 
     fn from_pair(b: (Vec3, Vec3)) -> Box3 {
-        Box3 {
-            min: b.0,
-            max: b.1,
-        }
+        Box3 { min: b.0, max: b.1 }
     }
 }
 
@@ -741,7 +739,13 @@ impl Scene {
             let wanted = o.visible && ids.is_none_or(|ids| ids.contains(&o.id.as_str()));
             // Every object is raycast (three.js raycasts before filtering),
             // so a missing group material throws whatever the filter says.
-            let can_throw = matches!(&o.shape, Shape::Mesh { materials: Materials::Slots(_), .. });
+            let can_throw = matches!(
+                &o.shape,
+                Shape::Mesh {
+                    materials: Materials::Slots(_),
+                    ..
+                }
+            );
             if !wanted && !can_throw {
                 continue;
             }
@@ -787,13 +791,7 @@ impl Scene {
 
     /// `runtime.bounds(w, h, ids, camera)`: the projected corners of the
     /// world box in front of the camera, clipped to the canvas.
-    pub fn bounds(
-        &self,
-        w: f64,
-        h: f64,
-        ids: Option<&[&str]>,
-        camera: &Camera,
-    ) -> Option<Rect> {
+    pub fn bounds(&self, w: f64, h: f64, ids: Option<&[&str]>, camera: &Camera) -> Option<Rect> {
         let camera = camera.resized(w, h);
         let b = self.world_bounds(ids);
         if b.is_empty() {
@@ -923,8 +921,20 @@ mod tests {
     fn the_nearest_object_in_the_set_wins() {
         let scene = Scene {
             objects: vec![
-                object("back", primitive("box"), 0.0, -2.0, Materials::Single(Facing::DEFAULT)),
-                object("front", primitive("sphere"), 0.0, 0.0, Materials::Single(Facing::DEFAULT)),
+                object(
+                    "back",
+                    primitive("box"),
+                    0.0,
+                    -2.0,
+                    Materials::Single(Facing::DEFAULT),
+                ),
+                object(
+                    "front",
+                    primitive("sphere"),
+                    0.0,
+                    0.0,
+                    Materials::Single(Facing::DEFAULT),
+                ),
             ],
         };
         let c = camera();
@@ -935,7 +945,13 @@ mod tests {
 
     #[test]
     fn invisible_and_transparent_objects_are_skipped() {
-        let mut hidden = object("a", primitive("box"), 0.0, 0.0, Materials::Single(Facing::DEFAULT));
+        let mut hidden = object(
+            "a",
+            primitive("box"),
+            0.0,
+            0.0,
+            Materials::Single(Facing::DEFAULT),
+        );
         hidden.visible = false;
         let clear = object(
             "b",
@@ -947,7 +963,13 @@ mod tests {
                 opacity: 0.0,
             }),
         );
-        let behind = object("c", primitive("box"), 0.0, -4.0, Materials::Single(Facing::DEFAULT));
+        let behind = object(
+            "c",
+            primitive("box"),
+            0.0,
+            -4.0,
+            Materials::Single(Facing::DEFAULT),
+        );
         let scene = Scene {
             objects: vec![hidden, clear, behind],
         };
@@ -989,7 +1011,11 @@ mod tests {
             far: 1000.0,
         };
         let c = Camera::new(lens, behind, 1.0);
-        for (side, hit) in [(Side::Front, false), (Side::Double, true), (Side::Back, true)] {
+        for (side, hit) in [
+            (Side::Front, false),
+            (Side::Double, true),
+            (Side::Back, true),
+        ] {
             let scene = Scene {
                 objects: vec![object(
                     "p",
@@ -999,21 +1025,36 @@ mod tests {
                     Materials::Single(Facing { side, opacity: 1.0 }),
                 )],
             };
-            assert_eq!(scene.pick(&c, 0.0, 0.0, None).unwrap().is_some(), hit, "{side:?}");
+            assert_eq!(
+                scene.pick(&c, 0.0, 0.0, None).unwrap().is_some(),
+                hit,
+                "{side:?}"
+            );
         }
     }
 
     #[test]
     fn bounds_project_the_world_box() {
         let scene = Scene {
-            objects: vec![object("box", primitive("box"), 0.0, 0.0, Materials::Single(Facing::DEFAULT))],
+            objects: vec![object(
+                "box",
+                primitive("box"),
+                0.0,
+                0.0,
+                Materials::Single(Facing::DEFAULT),
+            )],
         };
-        let r = scene.bounds(1920.0, 1080.0, Some(&["box"]), &camera()).unwrap();
+        let r = scene
+            .bounds(1920.0, 1080.0, Some(&["box"]), &camera())
+            .unwrap();
         // Symmetric about the center.
         assert!((r.x0 + r.x1 - 1920.0).abs() < 1e-9);
         assert!((r.y0 + r.y1 - 1080.0).abs() < 1e-9);
         assert!(r.x1 > r.x0 && r.y1 > r.y0);
-        assert_eq!(scene.bounds(1920.0, 1080.0, Some(&["nothing"]), &camera()), None);
+        assert_eq!(
+            scene.bounds(1920.0, 1080.0, Some(&["nothing"]), &camera()),
+            None
+        );
         let b = scene.object_box("box").unwrap();
         assert_eq!(b.min, [-0.5; 3]);
         assert_eq!(b.max, [0.5; 3]);

@@ -34,6 +34,7 @@ import type { DocumentBarrier } from './barrier';
 import type { FontLoader } from './fonts';
 import { atan2BranchCut, differs, type DualAnswers } from './dual';
 import type { PmWasm } from './wasm';
+import { geometryRequest, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
 
 type Legacy = Record<string, any>;
 
@@ -254,9 +255,14 @@ export class NativeEdits {
     // from every id `PM.uid` makes (`prefix + random`, or a counter in tests).
     const uid = { base: `${String(this.PM.uid?.('') ?? Math.random().toString(36).slice(2, 9))}_`, start: 1 };
     let reply: any;
-    const run = () => wasm.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...request });
+    // 3D bounds (alignment, group placement) use the engine's geometry with
+    // the editor camera (core/scene3d/engine-geometry.ts).
+    const geometry = geometryRequest(this.PM);
+    const run = () => wasm.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...geometry, ...request });
     try {
+      refreshModels(this.PM, wasm);
       reply = run();
+      if (reply?.models) reply = resolveModels(this.PM, wasm, run, reply);
       // Text layout met fonts the mirror lacks: load them (at once from a
       // synchronous registry; in the background otherwise, and this edit
       // runs the legacy code) and ask again.

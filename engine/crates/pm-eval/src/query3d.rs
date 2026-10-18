@@ -71,7 +71,11 @@ pub trait Geometry3d {
     /// its current projection), or `None` for the render camera.
     fn view_camera(&self) -> Option<Camera>;
     /// Built source geometry by content key (shared across questions).
-    fn source_mesh(&mut self, key: u64, build: &mut dyn FnMut() -> TriangleMesh) -> Arc<TriangleMesh> {
+    fn source_mesh(
+        &mut self,
+        key: u64,
+        build: &mut dyn FnMut() -> TriangleMesh,
+    ) -> Arc<TriangleMesh> {
         let _ = key;
         Arc::new(build())
     }
@@ -424,6 +428,20 @@ fn objects<'d>(
         let slot_nodes = node::array(node::member(onode, "slots")).unwrap_or(&[]);
         let use_source = truthy(o.get("useSourceMaterials")) && slots.is_empty();
         let mprefix = format!("o.{id}.m");
+        // `materialPreview(undefined)` reads `undefined.p` for a missing
+        // material (a missing model keeps its own material).
+        let missing_model =
+            text(&source, "assetId").is_some_and(|a| matches!(g.model(&a), ModelAsset::Missing));
+        let undefined_material = if slots.is_empty() {
+            obj(o, "material").is_none()
+        } else {
+            slots.iter().any(|s| obj(s, "material").is_none())
+        };
+        if !use_source && !missing_model && undefined_material {
+            return Err(JsThrow::type_error(
+                "Cannot read properties of undefined (reading 'p')",
+            ));
+        }
         let materials = if use_source {
             None
         } else if slots.is_empty() {
@@ -503,7 +521,11 @@ fn place(
     mixer: &dyn Fn(&str) -> f64,
     g: &mut dyn Geometry3d,
 ) -> JsResult<Scene> {
-    let index: HashMap<&str, usize> = specs.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
     let mut worlds: Vec<Option<(Mat4, bool)>> = vec![None; specs.len()];
     fn resolve(
         i: usize,
@@ -572,7 +594,11 @@ fn place(
                 },
                 ModelAsset::Gltf(picker) => {
                     let time = mixer(&s.id);
-                    let time = if time.is_nan() || time < 0.0 { 0.0 } else { time };
+                    let time = if time.is_nan() || time < 0.0 {
+                        0.0
+                    } else {
+                        time
+                    };
                     Shape::Model {
                         posed: g.posed(picker, &world, time),
                         picker: picker.clone(),
@@ -601,14 +627,25 @@ fn lens<'d>(
 ) -> JsResult<(Lens, Vec3, Vec3)> {
     let p = camera.and_then(|c| obj(c, "p"));
     let pnode = node::member(cnode, "p");
-    let mut get = |k: &str, d: f64| -> JsResult<f64> { Ok(num_or(&channel(ch, p, pnode, k, "camera")?, d)) };
-    let position = [get("x", f64::NAN)?, get("y", f64::NAN)?, get("z", f64::NAN)?];
+    let mut get =
+        |k: &str, d: f64| -> JsResult<f64> { Ok(num_or(&channel(ch, p, pnode, k, "camera")?, d)) };
+    let position = [
+        get("x", f64::NAN)?,
+        get("y", f64::NAN)?,
+        get("z", f64::NAN)?,
+    ];
     let target = [
         get("targetX", f64::NAN)?,
         get("targetY", f64::NAN)?,
         get("targetZ", f64::NAN)?,
     ];
-    let jmax = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) };
+    let jmax = |a: f64, b: f64| {
+        if a.is_nan() || b.is_nan() {
+            f64::NAN
+        } else {
+            a.max(b)
+        }
+    };
     let near = jmax(0.0001, get("near", f64::NAN)?);
     let far = jmax(near + 0.01, get("far", f64::NAN)?);
     let zoom = jmax(0.001, get("zoom", f64::NAN)?);
@@ -618,7 +655,14 @@ fn lens<'d>(
     } else {
         let fov = get("fov", f64::NAN)?;
         // `MathUtils.clamp`: `Math.max(min, Math.min(max, value))`.
-        let fov = jmax(1.0, if fov.is_nan() { f64::NAN } else { fov.min(150.0) });
+        let fov = jmax(
+            1.0,
+            if fov.is_nan() {
+                f64::NAN
+            } else {
+                fov.min(150.0)
+            },
+        );
         Lens::Perspective {
             fov,
             zoom,
@@ -679,11 +723,15 @@ fn recipe_base(kind: &str, params: &HashMap<String, JsValue>, part: &str) -> Opt
             let count = n("steps", 12.0).floor();
             let (radius, rise, turn) = (n("radius", 1.5), n("rise", 0.22), n("turn", 30.0));
             let i: f64 = part.strip_prefix("step_")?.parse().ok()?;
-            if !(i < count) || format!("step_{:03}", i as u32) != part {
+            if i >= count || count.is_nan() || format!("step_{:03}", i as u32) != part {
                 return None;
             }
             let angle = (i * turn * std::f64::consts::PI) / 180.0;
-            Some([radius * libm::cos(angle), i * rise, radius * libm::sin(angle)])
+            Some([
+                radius * libm::cos(angle),
+                i * rise,
+                radius * libm::sin(angle),
+            ])
         }
         "lathe" | "extrude" => (part == "model").then_some([0.0; 3]),
         _ => None,
@@ -694,7 +742,10 @@ impl<'d> Scope<'_, 'd> {
     /// `animatedPart`'s offset for a generated recipe part, in world units
     /// (`parent3D` applied), or `None` when the recipe is not animated.
     fn recipe_offset(&mut self, layer: &'d Node, time: f64) -> JsResult<Option<Vec3>> {
-        let object = node::member(node::member(node::member(Some(layer), "d"), "data"), "object");
+        let object = node::member(
+            node::member(node::member(Some(layer), "d"), "data"),
+            "object",
+        );
         let Some(generation) = node::member(object, "generation").filter(|g| node::truthy(Some(g)))
         else {
             return Ok(None);
@@ -748,8 +799,12 @@ impl<'d> Scope<'_, 'd> {
         if !changed {
             return Ok(None);
         }
-        let part_id = node::to_js_string(node::member(Some(generation), "partId")).to_string_lossy();
-        let prior = node::member(node::member(node::member(modeling, "parts"), &part_id), "base");
+        let part_id =
+            node::to_js_string(node::member(Some(generation), "partId")).to_string_lossy();
+        let prior = node::member(
+            node::member(node::member(modeling, "parts"), &part_id),
+            "base",
+        );
         if prior.is_none() {
             return Ok(None);
         }
@@ -796,7 +851,14 @@ impl<'d> Scope<'_, 'd> {
                     worlds.insert(id.clone(), world);
                     // `time - (starts.get(id) || 0)`.
                     let from = node::to_number(node::member(Some(l), "from"));
-                    starts.insert(id, if from == 0.0 || from.is_nan() { time } else { time - from });
+                    starts.insert(
+                        id,
+                        if from == 0.0 || from.is_nan() {
+                            time
+                        } else {
+                            time - from
+                        },
+                    );
                 }
                 Some(Role3d::Camera) if camera_layer.is_none() && self.active(l, time)? => {
                     camera_layer = Some(*l);
@@ -847,7 +909,10 @@ impl<'d> Scope<'_, 'd> {
             let Some(role) = Role3d::of(l) else {
                 return Ok(false);
             };
-            if role == Role3d::Object && (!solo || flag(l, "solo")) && s.world_opacity(l, time)? > 0.001 {
+            if role == Role3d::Object
+                && (!solo || flag(l, "solo"))
+                && s.world_opacity(l, time)? > 0.001
+            {
                 ids.push(node::to_js_string(node::member(Some(l), "id")).to_string_lossy());
             }
             Ok(true)
@@ -884,7 +949,10 @@ impl<'d> Scope<'_, 'd> {
         let ids = self.depth_ids3d(layer, time)?;
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         let camera = self.view3d(&scene, g);
-        let hit = scene.scene.pick(&camera, x, y, Some(&ids)).map_err(query_error)?;
+        let hit = scene
+            .scene
+            .pick(&camera, x, y, Some(&ids))
+            .map_err(query_error)?;
         let id = node::to_js_string(node::member(Some(layer), "id"));
         Ok(hit.is_some_and(|h| id.as_str() == Some(h)))
     }
@@ -910,7 +978,7 @@ impl<'d> Scope<'_, 'd> {
     }
 
     /// `modelGroupBounds(PM, group, time)` (the caller checked
-    /// `isModelGroup`), without `z0` and `z1`.
+    /// `isModelGroup`), with its depth extent (`z0`, `z1`).
     pub fn model_group_bounds3d(
         &mut self,
         group: &'d Node,
@@ -935,9 +1003,8 @@ impl<'d> Scope<'_, 'd> {
             match Role3d::of(child) {
                 Some(Role3d::Object) => {
                     let id = node::to_js_string(node::member(Some(child), "id")).to_string_lossy();
-                    match scene.scene.object_box(&id) {
-                        Some(o) => b.union(&o.transformed(&inverse)),
-                        None => {}
+                    if let Some(o) = scene.scene.object_box(&id) {
+                        b.union(&o.transformed(&inverse));
                     }
                 }
                 Some(_) => {
@@ -950,7 +1017,10 @@ impl<'d> Scope<'_, 'd> {
         if b.is_empty() {
             return Ok(None);
         }
-        Ok(Some(rect_bounds(b.min[0], b.min[1], b.max[0], b.max[1])))
+        Ok(Some(Bounds {
+            z: Some((b.min[2], b.max[2])),
+            ..rect_bounds(b.min[0], b.min[1], b.max[0], b.max[1])
+        }))
     }
 
     /// `sceneRuntime(PM, L, T)` for an extension layer (a legacy scene or a
@@ -980,8 +1050,11 @@ impl<'d> Scope<'_, 'd> {
             };
             let specs = objects(&scene, Some(scene_node), &mut ch, g)?;
             let placed = place(specs, None, &|_| mixer_time, g)?;
-            let (lens, position, target) =
-                lens(obj(&scene, "camera"), node::member(Some(scene_node), "camera"), &mut ch)?;
+            let (lens, position, target) = lens(
+                obj(&scene, "camera"),
+                node::member(Some(scene_node), "camera"),
+                &mut ch,
+            )?;
             let world = query::camera_world(position, target, [0.0, 1.0, 0.0]);
             return Ok(Some((placed, lens, world)));
         }
@@ -992,7 +1065,9 @@ impl<'d> Scope<'_, 'd> {
         let params = node::member(d, "params");
         let get = |s: &mut Self, key: &str, fallback: JsValue| -> JsResult<JsValue> {
             match node::member(params, key) {
-                Some(prop) if node::truthy(Some(prop)) => s.channel_p(layer, Some(prop), time, &format!("x.{key}")),
+                Some(prop) if node::truthy(Some(prop)) => {
+                    s.channel_p(layer, Some(prop), time, &format!("x.{key}"))
+                }
                 _ => Ok(fallback),
             }
         };
@@ -1014,6 +1089,22 @@ impl<'d> Scope<'_, 'd> {
         if !asset.truthy() {
             return Ok(None);
         }
+        validate_mesh_scene(
+            &node::js_value_opt(node::member(Some(layer), "name")),
+            &asset,
+            &[&rx, &ry, &rz],
+            &size,
+            &[
+                get(self, "objectColor", JsValue::from("#C7C4FF"))?,
+                get(self, "lightColor", JsValue::from("#FFB36B"))?,
+                get(self, "background", JsValue::from("#0C0D12"))?,
+            ],
+            &[
+                get(self, "roughness", JsValue::Number(0.25))?,
+                get(self, "metalness", JsValue::Number(0.7))?,
+            ],
+            [yaw, pitch, distance],
+        )?;
         let asset_id = asset.to_js_string().to_string_lossy();
         let rad = |d: f64| d * (std::f64::consts::PI / 180.0);
         let local = m3::compose(
@@ -1064,7 +1155,11 @@ impl<'d> Scope<'_, 'd> {
         let (pw, ph) = self.project_size();
         let pick = |k: &str, p: f64| {
             let v = node::member(d, k);
-            if node::truthy(v) { node::to_number(v) } else { p }
+            if node::truthy(v) {
+                node::to_number(v)
+            } else {
+                p
+            }
         };
         (pick("w", pw), pick("h", ph))
     }
@@ -1116,6 +1211,76 @@ impl<'d> Scope<'_, 'd> {
     }
 }
 
+/// `parseScene`'s checks on `sceneForLayer`'s scene for a mesh definition
+/// layer (a `ZodError` today): the object name, asset id, rotation and
+/// size, the colors (the background may be `null`), roughness and
+/// metalness, and the camera position from yaw, pitch, and distance.
+fn validate_mesh_scene(
+    name: &JsValue,
+    asset: &JsValue,
+    rotation: &[&JsValue; 3],
+    size: &JsValue,
+    colors: &[JsValue; 3],
+    unit: &[JsValue; 2],
+    camera: [f64; 3],
+) -> JsResult<()> {
+    let zod = |what: &str| {
+        Err(JsThrow {
+            kind: "ZodError",
+            message: format!("Invalid 3D scene: {what}"),
+        })
+    };
+    let finite_in = |v: &JsValue, lo: f64, hi: f64| matches!(v, JsValue::Number(n) if n.is_finite() && *n >= lo && *n <= hi);
+    let len = |v: &JsValue| v.to_js_string().utf16_units().count();
+    if !matches!(name, JsValue::String(_)) || len(name) < 1 || len(name) > 160 {
+        return zod("object name");
+    }
+    if !matches!(asset, JsValue::String(_)) || len(asset) < 1 || len(asset) > 160 {
+        return zod("asset id");
+    }
+    if rotation
+        .iter()
+        .any(|r| !finite_in(r, -360_000.0, 360_000.0))
+    {
+        return zod("rotation");
+    }
+    if !finite_in(size, -10_000.0, 10_000.0) {
+        return zod("size");
+    }
+    let is_color = |v: &JsValue| match v {
+        JsValue::String(s) => s.as_str().is_some_and(|s| {
+            s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        }),
+        _ => false,
+    };
+    if !is_color(&colors[0]) || !is_color(&colors[1]) {
+        return zod("color");
+    }
+    if !(matches!(colors[2], JsValue::Null) || is_color(&colors[2])) {
+        return zod("background");
+    }
+    if unit.iter().any(|v| !finite_in(v, 0.0, 1.0)) {
+        return zod("roughness or metalness");
+    }
+    let [yaw, pitch, distance] = camera;
+    let (yaw, pitch) = (
+        yaw * std::f64::consts::PI / 180.0,
+        pitch * std::f64::consts::PI / 180.0,
+    );
+    let position = [
+        distance * libm::cos(pitch) * libm::sin(yaw),
+        distance * libm::sin(pitch),
+        distance * libm::cos(pitch) * libm::cos(yaw),
+    ];
+    if position
+        .iter()
+        .any(|v| !(v.is_finite() && (-100_000.0..=100_000.0).contains(v)))
+    {
+        return zod("camera position");
+    }
+    Ok(())
+}
+
 fn mesh_field(layer: &Node, host: &dyn LayerHost) -> Option<String> {
     let definition = node::member(node::member(Some(layer), "d"), "definition");
     node::string(definition).and_then(|id: &JsString| host.mesh_asset_field(id))
@@ -1131,5 +1296,6 @@ fn rect_bounds(x0: f64, y0: f64, x1: f64, y1: f64) -> Bounds {
         h: y1 - y0,
         ax: 0.0,
         ay: 0.0,
+        z: None,
     }
 }

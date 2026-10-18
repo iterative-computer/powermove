@@ -103,6 +103,14 @@ function configure(entry:ViewState):ViewCamera {
   camera.quaternion.copy(pose.rotation);camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
   return camera;
 }
+/**
+ * The editor camera when the editor view is active (as `viewportCamera`
+ * returns it), without building the composition's three.js runtime: the
+ * engine answers picks and bounds with it (core/scene3d/engine-geometry.ts).
+ */
+export function editorCamera(PM:any):ViewCamera|null {
+  const entry=state(PM);return entry.mode==='editor'&&entry.initialized?configure(entry):null;
+}
 /** The editor camera is transient. Render/export callers keep the runtime camera. */
 export function viewportCamera(PM:any,renderCamera:ViewCamera):ViewCamera {
   const entry=state(PM);return entry.mode==='editor'&&entry.initialized?configure(entry):renderCamera;

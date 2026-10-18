@@ -312,18 +312,27 @@ fn at_path<'a>(root: &'a Node, path: &[Value]) -> Option<&'a Node> {
 
 fn bounds_reply(out: &mut Reply, b: &Bounds) {
     let mut first = true;
+    // A model group's bounds carry `z0` and `z1` in `modelGroupBounds`' order.
+    let (z0, z1) = match b.z {
+        Some((z0, z1)) => (Some(z0), Some(z1)),
+        None => (None, None),
+    };
     for (k, v) in [
-        ("x0", b.x0),
-        ("y0", b.y0),
-        ("x1", b.x1),
-        ("y1", b.y1),
-        ("w", b.w),
-        ("h", b.h),
-        ("ax", b.ax),
-        ("ay", b.ay),
+        ("x0", Some(b.x0)),
+        ("y0", Some(b.y0)),
+        ("z0", z0),
+        ("x1", Some(b.x1)),
+        ("y1", Some(b.y1)),
+        ("z1", z1),
+        ("w", Some(b.w)),
+        ("h", Some(b.h)),
+        ("ax", Some(b.ax)),
+        ("ay", Some(b.ay)),
     ] {
-        out.key(&mut first, k);
-        out.num(v);
+        if let Some(v) = v {
+            out.key(&mut first, k);
+            out.num(v);
+        }
     }
 }
 
@@ -341,7 +350,6 @@ fn indexes(out: &mut Reply, layers: &[Node], nodes: &[&Node]) {
         .collect();
     out.nums(&all);
 }
-
 
 pub(crate) fn host_only(e: &JsThrow) -> bool {
     e.kind == HOST_ONLY

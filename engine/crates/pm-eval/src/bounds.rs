@@ -34,6 +34,8 @@ pub struct Bounds {
     /// The anchor origin inside the raster box.
     pub ax: f64,
     pub ay: f64,
+    /// A model group's depth extent (`modelGroupBounds`' `z0` and `z1`).
+    pub z: Option<(f64, f64)>,
 }
 
 impl Bounds {
@@ -56,6 +58,7 @@ impl Bounds {
             h: y1 - y0,
             ax,
             ay,
+            z: None,
         }
     }
 }
@@ -80,7 +83,6 @@ pub trait LayerHost {
         (definition.as_str() == Some("powermove.3d.obj-model")).then(|| "assetId".to_owned())
     }
 }
-
 
 /// A host that answers nothing beyond the defaults.
 pub struct NoHost;
@@ -351,6 +353,7 @@ impl<'d> Scope<'_, 'd> {
                 h: s.h,
                 ax: r.anchor_x,
                 ay: r.anchor_y,
+                z: None,
             }));
         }
         if !matches!(
@@ -371,6 +374,7 @@ impl<'d> Scope<'_, 'd> {
                 h: b.h,
                 ax: -b.x0,
                 ay: -b.y0,
+                z: None,
             }));
         }
         let d = self.ev.resolve_content(self.comp, layer, time)?;
@@ -399,6 +403,7 @@ impl<'d> Scope<'_, 'd> {
                     h: s.h,
                     ax: g.w / 2.0,
                     ay: g.h / 2.0,
+                    z: None,
                 }));
             }
             "null" => {
@@ -430,6 +435,7 @@ impl<'d> Scope<'_, 'd> {
             h,
             ax,
             ay,
+            z: None,
         }))
     }
 
@@ -552,7 +558,13 @@ impl<'d> Scope<'_, 'd> {
             }
             match Role3d::of(layer) {
                 Some(Role3d::Object) => {
-                    if self.pick_object3d(layer, x / w * 2.0 - 1.0, 1.0 - y / h * 2.0, time, host)? {
+                    if self.pick_object3d(
+                        layer,
+                        x / w * 2.0 - 1.0,
+                        1.0 - y / h * 2.0,
+                        time,
+                        host,
+                    )? {
                         return Ok(Some(layer));
                     }
                     continue;

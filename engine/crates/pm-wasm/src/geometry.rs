@@ -45,13 +45,16 @@ impl ModelKind {
 const MAX_SOURCE_MESHES: usize = 512;
 const MAX_POSES: usize = 16;
 
+/// A pose's key: the picker, the world matrix's bits, the time's bits.
+type PoseKey = (usize, [u64; 16], u64);
+
 /// The model assets and caches the mirror keeps across questions.
 #[derive(Default)]
 pub struct Models {
     assets: HashMap<String, ModelAsset>,
     meshes: HashMap<u64, Arc<TriangleMesh>>,
     /// Recent poses: (picker, world matrix bits, time bits).
-    poses: Vec<((usize, [u64; 16], u64), Arc<Posed>)>,
+    poses: Vec<(PoseKey, Arc<Posed>)>,
 }
 
 impl Models {
@@ -82,8 +85,14 @@ impl Models {
                 Err(e) => (ModelAsset::Missing, Some(format!("OBJ model {id}: {e}"))),
             },
             ModelKind::Gltf => match pm_geom3d::gltf::load(bytes) {
-                Ok(model) => (ModelAsset::Gltf(Arc::new(Picker::new(Arc::new(model)))), None),
-                Err(e) => (ModelAsset::Missing, Some(format!("glTF model {id}: {}", e.0))),
+                Ok(model) => (
+                    ModelAsset::Gltf(Arc::new(Picker::new(Arc::new(model)))),
+                    None,
+                ),
+                Err(e) => (
+                    ModelAsset::Missing,
+                    Some(format!("glTF model {id}: {}", e.0)),
+                ),
             },
         };
         self.forget(id);
@@ -154,7 +163,11 @@ impl Geometry3d for GeomHost<'_> {
         self.camera
     }
 
-    fn source_mesh(&mut self, key: u64, build: &mut dyn FnMut() -> TriangleMesh) -> Arc<TriangleMesh> {
+    fn source_mesh(
+        &mut self,
+        key: u64,
+        build: &mut dyn FnMut() -> TriangleMesh,
+    ) -> Arc<TriangleMesh> {
         if let Some(m) = self.models.meshes.get(&key) {
             return m.clone();
         }

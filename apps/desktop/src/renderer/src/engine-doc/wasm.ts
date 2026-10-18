@@ -41,6 +41,9 @@ export interface PmWasmExports {
   pm_fonts_report(): number;
   pm_fonts_clear(): void;
   pm_fonts_outlines(outlines: number): void;
+  pm_model_set?(len: number): number;
+  pm_model_forget?(len: number): void;
+  pm_models_clear?(): void;
   pm_heap_live(): number;
   pm_heap_peak(): number;
   pm_heap_reset_peak(): void;
@@ -255,6 +258,34 @@ export class PmWasm {
       bytes.set(data, 8 + key.length);
       if (this.x.pm_fonts_add(this.writeBytes(bytes)) !== 0) throw new Error('pm-wasm: malformed font');
     });
+  }
+
+  /**
+   * Adds 3D model asset `id` for picks and bounds: `missing` (no geometry,
+   * the orange box), OBJ text, or glTF/GLB bytes. Returns the reason when the
+   * engine did not load the model (it is kept as missing).
+   */
+  setModel(id: string, kind: 'missing' | 'obj' | 'gltf', data: Uint8Array = new Uint8Array()): string | null {
+    return this.call(() => {
+      if (!this.x.pm_model_set) throw new Error('pm-wasm: this module has no 3D models');
+      const key = encoder.encode(id);
+      const bytes = new Uint8Array(5 + key.length + data.length);
+      new DataView(bytes.buffer).setUint32(0, key.length, true);
+      bytes.set(key, 4);
+      bytes[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : 0;
+      bytes.set(data, 5 + key.length);
+      const status = this.x.pm_model_set(this.writeBytes(bytes));
+      if (status === 1) throw new Error('pm-wasm: malformed model');
+      return status === 2 ? this.readOut() : null;
+    });
+  }
+
+  forgetModel(id: string): void {
+    this.call(() => this.x.pm_model_forget?.(this.writeString(id)));
+  }
+
+  clearModels(): void {
+    this.call(() => this.x.pm_models_clear?.());
   }
 
   fontReport(): { misses: unknown[]; pending: Array<[string, number]> } {
