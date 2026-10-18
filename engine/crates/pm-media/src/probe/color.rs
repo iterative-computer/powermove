@@ -239,7 +239,8 @@ pub fn interpret(
         match tagged.matrix {
             Some(1) => MatrixCoefficients::Bt709,
             Some(5) | Some(6) => MatrixCoefficients::Bt601,
-            Some(9) | Some(10) => MatrixCoefficients::Bt2020Ncl,
+            Some(9) => MatrixCoefficients::Bt2020Ncl,
+            Some(10) => MatrixCoefficients::Bt2020Cl,
             _ => {
                 let m = if sd {
                     MatrixCoefficients::Bt601

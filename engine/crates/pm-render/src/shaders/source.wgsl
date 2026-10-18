@@ -157,6 +157,31 @@ fn transform_premultiplied(c: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(to_working(s) * c.a, c.a);
 }
 
+// BT.2020 constant luminance, H.273 matrix 10 (BT.2020-2, table 4).
+// Recover G in linear light, then return R'G'B' to the source transfer
+// reading. The piecewise chroma scale cannot be expressed by P.m0..m2.
+fn bt2020_cl_decode(v: f32) -> f32 {
+    let m = abs(v);
+    var l: f32;
+    if (m < 0.0812428582986315) { l = m / 4.5; }
+    else { l = pow((m + 0.09929682680944) / 1.09929682680944, 1.0 / 0.45); }
+    return select(l, -l, v < 0.0);
+}
+fn bt2020_cl_encode(v: f32) -> f32 {
+    let m = abs(v);
+    var e: f32;
+    if (m < 0.018053968510807) { e = 4.5 * m; }
+    else { e = 1.09929682680944 * pow(m, 0.45) - 0.09929682680944; }
+    return select(e, -e, v < 0.0);
+}
+fn bt2020_cl_rgb(ycc: vec3<f32>) -> vec3<f32> {
+    let b = ycc.x + ycc.y * select(1.5816, 1.9404, ycc.y < 0.0);
+    let r = ycc.x + ycc.z * select(0.9936, 1.7184, ycc.z < 0.0);
+    let g = (bt2020_cl_decode(ycc.x) - 0.2627 * bt2020_cl_decode(r)
+        - 0.0593 * bt2020_cl_decode(b)) / 0.6780;
+    return vec3<f32>(r, bt2020_cl_encode(g), b);
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(out);
@@ -169,7 +194,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (P.a.x == 1u) {
         let cbcr = chroma_sample(id.x, id.y);
         let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
-        stored = vec4<f32>(m * vec3<f32>(v.r, cbcr.x, cbcr.y), v.a);
+        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
+        if (P.hdr.y == 1.0) { stored = vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
+        else { stored = vec4<f32>(m * ycc, v.a); }
     } else {
         stored = v;
     }

@@ -471,7 +471,16 @@ fn source_uniform(
             u32::from(convert_primaries),
         ],
         matte,
-        hdr: [tone.map_or(0.0, |t| t.peak_nits as f32), 0.0, 0.0, 0.0],
+        hdr: [
+            tone.map_or(0.0, |t| t.peak_nits as f32),
+            if color.matrix == MatrixCoefficients::Bt2020Cl {
+                1.0
+            } else {
+                0.0
+            },
+            0.0,
+            0.0,
+        ],
         ..Default::default()
     };
     // Primaries columns (the matrix is row-major).
