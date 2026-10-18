@@ -909,7 +909,8 @@ impl Engine {
                 match self.lease.grant(lease, now, self.evict.as_mut()) {
                     Ok(usage) => {
                         self.overdue_logged = None;
-                        self.respond(port, id, Response::LeaseUsage(usage), None, None, out)
+                        self.respond(port, id, Response::LeaseUsage(usage), None, None, out);
+                        self.with_presenter(out, |p, ctx| p.lease_changed(ctx));
                     }
                     Err(error) => {
                         let error =
@@ -1726,6 +1727,7 @@ impl Engine {
                             });
                             self.send_raw(host, envelope, out);
                         }
+                        self.with_presenter(out, |p, ctx| p.lease_changed(ctx));
                     }
                     Err(error) => out.log(LogLevel::Warn, format!("lease answer refused: {error}")),
                 }

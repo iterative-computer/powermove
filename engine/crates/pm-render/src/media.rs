@@ -17,7 +17,9 @@ use pm_color::ycbcr::Matrix;
 use pm_gpu::decode_in::{DecodeImporter, Normalized};
 use pm_gpu::{Target, working_format};
 use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
-use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
+use pm_media::decode::service::{
+    DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
+};
 use pm_media::image::icc::IccClass;
 use pm_media::pool::FramePool;
 use pm_media::probe::FieldOrder;
@@ -403,6 +405,10 @@ struct FrameKey {
     linear: bool,
 }
 
+/// The frame cache of a renderer without a lease share: export jobs,
+/// headless renders, and the viewer before the host grants a lease.
+pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
+
 /// Media state kept across frames: decoded and converted stills, video
 /// sources and sessions, and the last converted frame of each source.
 pub struct MediaCache {
@@ -444,10 +450,12 @@ pub enum MediaFailure {
 
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
-        // The frame cache holds the GOP neighbourhoods scrubbing decodes
-        // (docs/engine/scrub.md): about 40 UHD 4:2:0 frames.
+        // Every renderer starts with a small frame cache (export jobs and
+        // headless renders read their frames once). The viewer's renderer
+        // takes its share of the engine's lease through
+        // [`MediaCache::apply_lease`] (docs/engine/scrub.md, "Memory").
         let service = Arc::new(DecodeService::new(ServiceConfig {
-            cache_bytes: 512 << 20,
+            cache_bytes: DEFAULT_FRAME_CACHE,
             ..ServiceConfig::default()
         }));
         MediaCache {
@@ -758,6 +766,19 @@ impl MediaCache {
     /// The display decode workers' counters.
     pub fn scrub_stats(&self) -> ScrubStats {
         self.viewer.stats()
+    }
+
+    /// Applies the renderer's shares of the engine's lease to its decode
+    /// service: the frame cache evicts down to `lease.frame_cache` at once
+    /// and idle decoders close past `lease.decoders`. Returns what the
+    /// service holds afterwards.
+    pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+        self.service.apply_lease(lease)
+    }
+
+    /// What the decode service holds (frame cache, decoders, sessions).
+    pub fn media_usage(&self) -> MediaUsage {
+        self.service.usage()
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture

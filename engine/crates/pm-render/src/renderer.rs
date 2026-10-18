@@ -489,6 +489,22 @@ impl Renderer {
         self.media.scrub_stats()
     }
 
+    /// Applies this renderer's shares of the engine's lease to its decode
+    /// service (the viewer's renderer: docs/engine/scrub.md, "Memory").
+    /// Renderers that never get a share keep
+    /// [`crate::media::DEFAULT_FRAME_CACHE`].
+    pub fn apply_media_lease(
+        &self,
+        lease: pm_media::decode::service::MediaLease,
+    ) -> pm_media::decode::service::MediaUsage {
+        self.media.apply_lease(lease)
+    }
+
+    /// What the decode service holds.
+    pub fn media_usage(&self) -> pm_media::decode::service::MediaUsage {
+        self.media.media_usage()
+    }
+
     /// Frees idle intermediate targets and cached vector textures so that
     /// together they hold at most `bytes` (lease pressure): the pool trims
     /// first, and the vector cache gets what the pool leaves. The text

@@ -185,6 +185,11 @@ pub enum Command {
         key: Key,
         message: AudioMessage,
     },
+    /// The viewer's frame-cache share of the lease (bytes): the composer's
+    /// decode service evicts down to it at once.
+    FrameCache {
+        bytes: usize,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     Shutdown,
@@ -227,12 +232,30 @@ pub struct ThreadConfig {
 
 /// The device's composer, keeping translated programs in the configured
 /// cache folder.
-fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -> Composer {
+fn composer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    config: &ThreadConfig,
+    frame_cache: usize,
+) -> Composer {
     let mut composer = Composer::new(device, queue);
     composer
         .renderer()
         .set_program_cache_dir(config.shader_cache.clone());
     composer
+        .renderer()
+        .apply_media_lease(media_lease(frame_cache));
+    composer
+}
+
+/// The composer's decode-service shares: the frame cache follows the
+/// presenter's lease share; decoders are not leased yet
+/// (docs/engine/scrub.md, "Memory").
+fn media_lease(frame_cache: usize) -> pm_media::decode::service::MediaLease {
+    pm_media::decode::service::MediaLease {
+        frame_cache,
+        decoders: usize::MAX,
+    }
 }
 
 /// One frame's record for the S1 harness.
@@ -417,6 +440,8 @@ struct Thread {
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
     generations: Generations,
+    /// The viewer's frame-cache share ([`Command::FrameCache`]).
+    frame_cache: usize,
 }
 
 fn now() -> i64 {
@@ -446,6 +471,7 @@ pub fn run(
     let peaks = super::peaks::PeakWorker::new(sink.clone());
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
+        frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
         config,
         sink,
         stats,
@@ -737,9 +763,9 @@ impl Thread {
                 if self.config.document
                     && let Some(gpu) = self.gpu.as_mut()
                 {
-                    let composer = gpu
-                        .composer
-                        .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+                    let composer = gpu.composer.get_or_insert_with(|| {
+                        composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+                    });
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
@@ -764,6 +790,12 @@ impl Thread {
                 }
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
+                }
+            }
+            Command::FrameCache { bytes } => {
+                self.frame_cache = bytes;
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.renderer().apply_media_lease(media_lease(bytes));
                 }
             }
             Command::LoseDevice => {
@@ -2031,9 +2063,9 @@ impl Thread {
         let mut stand_in_shown = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu
-                .composer
-                .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+            let composer = gpu.composer.get_or_insert_with(|| {
+                composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+            });
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).

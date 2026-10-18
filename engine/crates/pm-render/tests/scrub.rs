@@ -5,6 +5,7 @@
 
 mod support;
 
+use pm_media::decode::service::MediaLease;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_render::{MapResolver, RenderRequest, Renderer};
@@ -158,6 +159,34 @@ fn reused_frame_textures_never_change_what_a_render_reads() {
     }
 }
 
+/// Renderers start with the small frame cache (export jobs and headless
+/// renders read each frame once); only a lease share makes it larger, and
+/// a smaller share evicts at once.
+#[test]
+fn the_frame_cache_follows_the_lease_share() {
+    let (doc, resolver) = clip();
+    let mut r = Renderer::headless().unwrap();
+    assert_eq!(
+        r.media_usage().cache.budget,
+        pm_render::media::DEFAULT_FRAME_CACHE
+    );
+    let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
+    let (_, stand_ins) = draw(&mut r, &doc, 0.5, &request, &resolver);
+    assert_eq!(stand_ins, 0);
+    assert!(r.media_usage().frame_cache > 0);
+    let usage = r.apply_media_lease(MediaLease {
+        frame_cache: 512 << 20,
+        decoders: usize::MAX,
+    });
+    assert_eq!(usage.cache.budget, 512 << 20);
+    let usage = r.apply_media_lease(MediaLease {
+        frame_cache: 0,
+        decoders: usize::MAX,
+    });
+    assert_eq!(usage.cache.budget, 0);
+    assert_eq!(usage.frame_cache, 0);
+}
+
 /// The cost of drawing one decoded UHD frame into a 1080p viewer frame
 /// (import, normalization, the source pass, compositing, GPU wait), with
 /// the frames already decoded: what a drag through cached frames pays per
@@ -183,6 +212,11 @@ fn drawing_cached_uhd_frames() {
     resolver.paths.insert("clip".into(), path.into());
     let request = RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16);
     let mut r = Renderer::headless().unwrap();
+    // The viewer's frame-cache share (pm-node's presenter applies it).
+    r.apply_media_lease(MediaLease {
+        frame_cache: 512 << 20,
+        decoders: usize::MAX,
+    });
     let target = pm_gpu::Target::new(
         r.device(),
         "scrub bench",
