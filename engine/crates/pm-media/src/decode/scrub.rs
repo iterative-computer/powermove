@@ -30,7 +30,7 @@ use crate::error::{MediaError, Result};
 use crate::frame::DecodedFrame;
 use crate::vt::DecodePurpose;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -84,7 +84,8 @@ const AHEAD: usize = 8;
 /// While scrubbing backward, one seek from the GOP start serves the
 /// reverse steps of up to this many presented frames before its target:
 /// every reference picture on the way and the unreferenced ones at the
-/// drag's stride are kept (within three quarters of the frame cache).
+/// drag's stride are kept (within three quarters of the worker's part of
+/// the frame cache).
 const KEEP_BEFORE: usize = 32;
 /// Moves of more frames than this are jumps (a click on the ruler, a
 /// random seek), not drags: nothing is decoded ahead of them.
@@ -99,6 +100,8 @@ pub struct ViewerDecode {
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
     idle_exit: Duration,
+    /// Workers running: they share the frame cache's look-ahead room.
+    live: Arc<AtomicUsize>,
 }
 
 struct Worker {
@@ -121,6 +124,7 @@ struct Shared {
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
     idle_exit: Duration,
+    live: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -173,6 +177,7 @@ impl ViewerDecode {
             landed: Arc::new(AtomicU64::new(0)),
             stats: Arc::new(Mutex::new(ScrubStats::default())),
             idle_exit: IDLE_EXIT,
+            live: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -195,6 +200,12 @@ impl ViewerDecode {
 
     pub fn stats(&self) -> ScrubStats {
         *self.stats.lock().unwrap()
+    }
+
+    /// Workers running; each looks ahead within an equal part of the
+    /// frame cache.
+    pub fn live_workers(&self) -> usize {
+        self.live.load(Ordering::Acquire)
     }
 
     /// Whether any scrub target is still waiting or decoding.
@@ -378,7 +389,9 @@ impl ViewerDecode {
             landed: self.landed.clone(),
             stats: self.stats.clone(),
             idle_exit: self.idle_exit,
+            live: self.live.clone(),
         });
+        self.live.fetch_add(1, Ordering::AcqRel);
         let run = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-media scrub".into())
@@ -524,6 +537,7 @@ impl Shared {
             self.done.notify_all();
         }
         self.alive.store(false, Ordering::Release);
+        self.live.fetch_sub(1, Ordering::AcqRel);
         self.done.notify_all();
     }
 
@@ -560,7 +574,7 @@ impl Shared {
 
     /// The next frame to decode ahead of the last target, a stride at a
     /// time in the direction of motion: [`AHEAD`] steps forward within half
-    /// the frame cache, or one reverse neighbourhood
+    /// its part of the frame cache, or one reverse neighbourhood
     /// ([`ViewerDecode`]'s reverse reach). Nothing after a jump.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
@@ -592,18 +606,24 @@ impl Shared {
         None
     }
 
-    /// Frames that fit in half the frame cache (the rest keeps what the
-    /// viewer showed recently).
-    fn cache_frames(&self, st: &State) -> usize {
+    /// This worker's part of the frame cache: an equal share among the
+    /// running workers (sources scrubbed or played together share one
+    /// cache).
+    fn cache_share(&self) -> usize {
         let budget = self.service.cache().stats().budget;
-        budget / 2 / st.frame_bytes.max(1)
+        budget / self.live.load(Ordering::Acquire).max(1)
+    }
+
+    /// Frames that fit in half this worker's part of the frame cache (the
+    /// rest keeps what the viewer showed recently).
+    fn cache_frames(&self, st: &State) -> usize {
+        self.cache_share() / 2 / st.frame_bytes.max(1)
     }
 
     /// How far before a target a reverse scrub keeps frames: [`KEEP_BEFORE`]
-    /// within three quarters of the frame cache.
+    /// within three quarters of this worker's part of the frame cache.
     fn reverse_reach(&self, st: &State) -> usize {
-        let budget = self.service.cache().stats().budget;
-        KEEP_BEFORE.min(budget / 4 * 3 / st.frame_bytes.max(1))
+        KEEP_BEFORE.min(self.cache_share() / 4 * 3 / st.frame_bytes.max(1))
     }
 
     /// Whether a newer request should stop the job in flight. A request

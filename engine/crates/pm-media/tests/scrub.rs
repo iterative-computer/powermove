@@ -154,10 +154,14 @@ fn released_sources_stop_their_workers() {
     viewer.fetch(&src, 1, 3, Want::Exact).unwrap();
     viewer.fetch(&src, 2, 3, Want::Exact).unwrap();
     assert_eq!(viewer.stats().workers, 2);
+    // Two running workers share the frame cache's look-ahead room.
+    assert_eq!(viewer.live_workers(), 2);
     viewer.release(Some(src.id));
+    assert_eq!(viewer.live_workers(), 0);
     // A new request starts a new worker.
     viewer.fetch(&src, 1, 4, Want::Exact).unwrap();
     assert_eq!(viewer.stats().workers, 3);
+    assert_eq!(viewer.live_workers(), 1);
     assert!(!viewer.pending());
 }
 
