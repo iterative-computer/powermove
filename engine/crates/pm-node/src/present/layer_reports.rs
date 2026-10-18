@@ -89,8 +89,16 @@ impl LayerReports {
         failures: &[pm_render::LayerFailure],
     ) -> Vec<EngineError> {
         use pm_protocol::error::{ErrorCode, MAX_ERROR_MESSAGE_BYTES, Retry};
+        // A layer the static reports already name (a shader that does not
+        // compile, a missing extension definition) is said once, there.
+        let covered = |f: &pm_render::LayerFailure| {
+            self.told.as_ref().is_some_and(|told| {
+                told.composition == f.composition && told.reports.contains_key(&f.layer)
+            })
+        };
         let current: BTreeMap<_, _> = failures
             .iter()
+            .filter(|f| !covered(f))
             .map(|f| {
                 (
                     (f.composition.clone(), f.layer.clone()),
