@@ -463,18 +463,31 @@ normative equations and smooth transfer constants are in
 This fix does not establish legacy parity for un-interpreted wide-gamut
 video or remove that gate.
 
-The still compatibility work is not closed. Diagnostic corpus comparisons
-of the native as-file reading (reached with an explicit neutral straight-alpha
-interpretation, without changing the original class gate) found maxima of
-83 CV for P3 PNG and 94 CV for AVIF. Deep PNG and alpha WebP each reached
-2 CV in opaque exports. These are failures, not permitted differences.
-A single orientation-6 JPEG stayed within 1 CV; the other orientations,
-containers, transparent outputs, and scales have not been proved, so the
-oriented class remains gated. Y′CbCr JPEG uses the integration branch's
-libjpeg-turbo fix; it is not a new decoder change from this closure work.
-ICC TIFF and other ICC/model classes retain their existing gates pending
-Chromium parity. Existing P3 projects must keep today's decode-time clipping;
-keeping out-of-gamut samples is a level-2 decision, not a level-1 exception.
+The 15-project still gate classes are now drawn through a level-1
+compatibility bitmap: early PNG16 reduction, pinned skcms ICC conversion and
+clipping, libwebp's fixed-point premultiplication, and pinned Chromium
+CrabbyAvif/dav1d/libyuv AVIF conversion. All 21 detailed still corpus projects
+are within 1 CV at every opaque pixel and below 1 CV in transparent output.
+P3 PNG/JPEG/HEIC, alpha WebP, AVIF and orientation-6 JPEG no longer route.
+RGB TIFF ICC extraction handles the UNDEFINED tag type; Adobe RGB, P3 and
+sRGB TIFF compatibility bitmaps match their shipped PNG conversion exactly.
+Unsigned RGB/RGBA TIFF at 8/16 bits also matches its shipped PNG bitmap.
+Native-depth readers and level 2 retain source precision and ICC interpretation.
+An additional opaque P3/Adobe RGB PNG/TIFF app comparison covers ICC clipping.
+Translucent wide-gamut ICC stills fail that extra capture's unchanged 2D bar
+and retain their gate; their side-by-sides are in the external lane report.
+The remaining structural gates (for example float/tiled or other-model
+TIFF, progressive gray JPEG and HDR/gamma-only PNG) are listed in `stills.rs`;
+decoder breadth beyond these proven classes is still an open deliverable.
+
+Existing animated and numbered imports render their persisted WebM through
+the video path. The three animated corpus sources pass Chromium's video
+class in hidden app exports and all nine frames of their saved 2× corpus
+compositions (interiors and alpha exact). Level 1 uses Chromium's libyuv
+RGBA8 upload; level 2 passes the native same-filter FFmpeg + zimg reference.
+The level-1 bitmap is up to 2 CV from nearest-filter zimg on saturated blue;
+that independent ≤1 CV gate remains open, with side-by-sides in the report. Original-decoding timing APIs remain
+available; this round does not change the import persistence policy.
 
 The lane report retains the diagnostic comparisons and their side-by-side
 artifacts outside the public repository. No corpus image, app trace, or

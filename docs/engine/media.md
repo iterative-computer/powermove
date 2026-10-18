@@ -281,21 +281,122 @@ resolve through their link; a generated rendition does not replace that
 binding. A hidden app regression covers UHD ProRes rendition creation and
 asset restore while preserving the original hash and modification time.
 
-### Compatibility work still required
+### Level-1 still bitmaps and persisted animations
 
-Level-1 SVG images, including SVG text, retain their gate. `resvg` coverage,
-filters, and system-font text do not equal Chromium's SVG raster; SVG text
-has not been connected to `pm-text`. The output-resolution level-2 path is
-unchanged.
+`image::compat::bitmap` builds the 8-bit premultiplied surface before texture
+filtering. PNG16 drops the low byte first; ICC converts and clips to sRGB
+with Chromium 152's pinned skcms; PNG/JPEG use Blink's rounded premultiply.
+WebP uses libwebp's exact `(channel * alpha * 32897) >> 23` with the opaque
+fast path. This distinction matters at products exactly divisible by 255.
+RGB TIFF retains its ICC, including UNDEFINED-type tag 34675, and its
+compatibility bitmap equals the shipped FFmpeg-to-PNG bitmap byte for byte.
+The same check covers unsigned RGB/RGBA TIFF at 8 and 16 bits. Associated
+TIFF alpha is retained as premultiplied. SDR PNG cICP matching its P3 or
+sRGB ICC profile is accepted; conflicting or HDR cICP remains gated.
 
-Sequences and animations retain their gate too. An attempted native WebM
-rendition path corrected the shipped slot timing and the converter's
-untagged BT.601 reading, but complete app exports still differed at chroma
-edges and in integer conversion. It was not enabled. Passing import, seek,
-portable-save, or selected-pixel tests alone does not establish full-frame
-parity. Original animated containers are available to source preview callers,
-not yet to the composition renderer.
+SDR AVIF uses the Chromium 152 revisions of CrabbyAvif and libyuv, with the
+existing pinned dav1d, into an 8-bit premultiplied BGRA surface. Sources,
+checksums, licenses and the transitive Rust lock are in `pm-media/native`.
+The [Chromium AVIF decoder](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/third_party/blink/renderer/platform/image-decoders/avif/avif_image_decoder.cc)
+and [DEPS](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/DEPS)
+identify this pipeline. Level 2 and Interpret Footage keep the native-depth
+reading; the still texture cache includes the compatibility choice. A
+1 → 2 → 1 render regression checks that the old bitmap never contaminates
+the high-precision cache.
 
-Still class gates remain as described in `formats.md` and `pm-render.md`.
-Decoder breadth alone does not establish the old viewer's color management,
-alpha rounding, clipping, or resampling. No pixel tolerance was changed.
+All 21 detailed `render/still-*` corpus projects now draw, including the
+15-project still gate classes. Each opaque comparison is within 1 CV at
+every pixel; transparent outputs are below 1 CV. `tests/still_compat.rs`,
+`tests/corpus.rs` and `tests/stills.rs` enforce the existing bars. Other
+unmeasured container structures remain explicit in `stills.rs`. An additional
+opaque P3/Adobe RGB PNG/TIFF app capture checks the ICC-to-sRGB boundary.
+
+An additional translucent P3/Adobe RGB PNG/TIFF capture fails the unchanged
+2D threshold: quantization around ImageBitmap premultiplication/color
+conversion still differs. Those combinations retain their explicit gate;
+opaque RGBA containers remain supported by inspecting actual coverage.
+The failing capture and side-by-sides are recorded outside Git in the lane
+report. Chromium's `createImageBitmap(blob)` decodes a premultiplied source
+bitmap, then WebGL's `TexImageStaticBitmapImage` converts its color space;
+it is not the HTMLImageElement extractor's unpremultiplied re-decode. See
+[ImageBitmap](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc)
+and [WebGL upload](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc).
+The opaque skcms match does not prove this alpha conversion order.
+
+Existing GIF/APNG/WebP/AVIF and numbered-sequence imports store a WebM.
+The composition renderer identifies the actual EBML bytes, validates the
+video source and renders that rendition through its ordinary video path.
+It uses `sequencePlaybackTime`'s CFR slots, 1e-7 boundary epsilon, 1 ms seek
+inset and final-slot hold, rather than ordinary video's 40 ms end padding.
+An untagged rendition keeps the converter's BT.601 matrix even at HD sizes;
+explicit file and Interpret Footage matrices take precedence. This source
+reading is part of the converted-frame cache key and disables YUV pass-through
+whose generic file interpretation would differ.
+
+Existing level-1 renditions also reproduce Chromium's software video upload:
+pinned libyuv I420 → clipped/premultiplied RGBA8 with nearest chroma before
+texture filtering. The generic native chroma filter alone smeared color
+into pixels counted as patch interiors at the historical projects' 2×
+scale. The RGBA8 path makes all nine historical frames exact on their
+55,892 video-class interior pixels and exact in alpha. The capture manifest
+binds import hashes to original GIF/APNG/WebP files, so the test resolves
+those unchanged asset IDs to the actual app-persisted rendition, leaving the
+historical documents, transforms and sample times unchanged. Hidden app
+comparisons also cover all three sources through import, seek and export.
+[Chromium's video conversion](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.cc)
+and its [default nearest filter](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.h)
+define that software upload.
+
+Level 2 keeps the native chroma conversion; it compares to FFmpeg + zimg
+with the same filter within 1 CV, including chroma edges. The level-1
+libyuv bitmap itself differs from nearest-filter zimg by up to 2 CV in
+saturated blue: that independent ≤1 CV line is still a gap, not a relaxed
+threshold. Its failed measurement and side-by-sides are in the lane report.
+The oracle strips alpha before zimg and compares alpha separately; zimg
+has no `yuva422p16le`, which would silently insert swscale chroma conversion.
+Original animation APIs remain available for new-import work. Today's conversion and storage policy
+is unchanged; preserving originals for new imports is outside this round.
+
+### Poster and filmstrip consumer call surface
+
+The consumers lane can resolve its authorized asset handle to the stored
+source path, then call these existing Rust methods on a worker:
+
+```rust
+let mut reader = PreviewReader::open_with_service(path, decode_service.clone())?;
+let duration_seconds = reader.duration()?;
+let video_facts = reader.video_probe()?;
+let poster: PreviewFrame = reader.poster()?;
+reader.filmstrip(&source_times, |index, seconds, frame| {
+    // Apply the asset's interpretation, geometry, color, resize and encoding;
+    // stream one completed thumbnail, or return an error to cancel the job.
+    consume(index, seconds, frame)
+})?;
+```
+
+`PreviewFrame::Image(StillImage)` carries applied orientation, native-depth
+RGBA and ICC/transfer/alpha facts. `PreviewFrame::Video { frame, color }`
+carries native planes and the resolved color description; `video_probe`
+adds display geometry, interlace and HDR facts. `decoded()` borrows either
+frame without copying. Caller order is retained, duplicate times are legal,
+and all 1..64 times must be finite and nonnegative before decoding starts.
+The callback owns each frame; retaining it retains the decode allocation.
+Dropping the reader releases sessions. `image_bytes()` includes still frames
+held by the consumer across source replacement. `open_sequence` takes the
+exact selected paths and rate when a source is an original numbered sequence.
+
+No new IPC method is implied by this snippet. Capability resolution, job and
+cancellation transport, thumbnail encoding and UI consumers belong to the
+consumers lane; deprecated browser APIs remain available at apiVersion 1–3.
+
+### SVG compatibility gap
+
+`pm_vector::canvas2d::svg` now replays resolved usvg paths through the vector
+lane's Skia emulation, with original SkPath geometry, even-odd fill, strokes,
+dashes, opacity layers, gradient shaders, clip unions and linear-RGB Gaussian
+layers. Horizontal SVG text shapes and paints through the caller's `pm-text`
+resolver (`raster_compat_with_text`). This remains a diagnostic API: only
+15 of the 27 canvas SVG cases satisfy the 2D class. Text, gradients, larger
+blurs and some non-square bucket edges still fail. Level-1 `SvgImage` stays
+gated, and no 34-project composition pass is claimed. `vector.md` records
+the source pipeline and measured failures. No tolerance changed.
