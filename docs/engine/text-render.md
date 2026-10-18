@@ -322,7 +322,8 @@ same (`render::sdf`, `MaskSource::sdf_glyph`):
   7.96875 (texel − 128/255)` in half precision (the one half operation the
   captures show rounding), derivatives over 2×2 quads, `afw = 0.65
   |J·n|`, `smoothstep(−afw, afw, dist)` (no gamma adjustment on Mac),
-  stored to 8 bits and blended glyph by glyph like the masks. Fitted on the
+  each glyph blended source-over into the 8-bit target with that
+  unquantized coverage, quantized after every glyph. Fitted on the
   three main-capture cases: snapping to 1/128 or 1/512 px, truncated, 9-bit
   or exact weights, and the whole fragment in half each leave pixels 2 code
   values off; this model leaves none (and 4,400 to 2,300 pixels 1 off per
@@ -374,7 +375,7 @@ at the pass's head without LTO (see Gaps).
 | Capture | Cases | Exact (within 1 code value) | Pinned | Refused |
 |---|---:|---:|---:|---:|
 | main (`text-raster-20261016-061928`) | 495 | 462 (second pass: 459) | 33 | 0 |
-| closure (`text-closure-20261018-205749`) | 78 | 61 | 5 | 12 (`COLR`) |
+| closure (`text-closure-20261018-205749`) | 78 | 62 | 4 | 12 (`COLR`) |
 
 - The three 162 to 256 px main cases are exact (were 31,975, 30,632 and
   16,169 pixels off, max Δ 148, 147, 126).
@@ -382,9 +383,7 @@ at the pass's head without LTO (see Gaps).
   256 and 257 px, five families, densities 2, 0.5 and 2.75, colors,
   scripts, tracking, a paragraph, synthetic italic: exact except
   `sdf-sizes-0004` (210 px: 4 pixels by 2), `sdf-synthetic-0016`
-  (synthesized bold at 200 px: 16 pixels by up to 6), `sdf-scripts-0023`
-  (Arabic at 200 px: 41 pixels by 2, one row where joined glyphs
-  overlap), `sdf-caption-0027` (a 6 px stroke at 180 px: 12 pixels by up
+  (synthesized bold at 200 px: 16 pixels by up to 6), `sdf-caption-0027` (a 6 px stroke at 180 px: 12 pixels by up
   to 21) and `sdf-caption-0028` (`pop` at 160 px: 3 pixels by up to 5).
   All 36 CSS Color 4 and 5 colors are exact; the 12 `COLR` cases are
   refused (Gaps).
@@ -396,20 +395,24 @@ at the pass's head without LTO (see Gaps).
 - `text_level2`: 400 cases and 20 layers, 0 below their gate. `text_gpu`:
   GPU paint pass vs CPU reference max |Δ| 0. `text_colors`: pass (CSS Color
   4 colors draw; `light-dark()` and unmeasured system colors refuse).
-- E2E with `POWERMOVE_NEW_ENGINE=1` under the lock, `--workers=1`, every
-  test checking afterwards that the viewer routed to the engine with no
-  refused layer, no presenter layer failure and no render error
-  (`e2e/helpers/engine-drew.ts`): `canvas-text` 6/6, `captions` 2/2
-  (subtitles import, edit, burn into frames, export), `font-anchor` 1/1,
-  `split-text` 4/4, `text-animators` 1/1, `text-layout-resize` 2/2. The
-  first run failed `font-anchor` because the check judged a session still
+- E2E with `POWERMOVE_NEW_ENGINE=1` under the lock, `--workers=1`, addon
+  and app built at `3e679840`, every test checking afterwards that the
+  viewer routed to the engine with no refused layer, no presenter layer
+  failure and no render error (`e2e/helpers/engine-drew.ts`): 19 of 19
+  passed: `canvas-text` 6, `captions` 2 (subtitles import, edit, burn into
+  frames, export), `font-anchor` 1, `split-text` 4, `text-animators` 1,
+  `text-layout-resize` 2, and the three typing measurements. An earlier
+  run failed `font-anchor` because the check judged a session still
   `pending` after the test replaced the project; the check now waits for
-  the session to settle, and the rerun passed.
+  the session to settle.
 - Canvas text typing in the app with the engine drawing
   (`native-engine-text-typing.spec.ts`, 60 keys each, 0 missed, route
-  `engine`, 0 layer failures): title 96 px p95 17.4 ms (p50 11.8, max
-  18.1); paragraph 48 px in a 1,400 px box p95 15.7 ms; `system-ui` 24 px
-  p95 13.2 ms. Target ≤ 33 ms.
+  `engine`, 0 layer failures, 0 render errors): title 96 px p95 18.5 ms
+  (p50 11.7, max 19.5); paragraph 48 px in a 1,400 px box p95 21.6 ms (p50
+  18.8, max 23.8); `system-ui` 24 px p95 18.1 ms (p50 11.6, max 24.2).
+  Target ≤ 33 ms. (A run an hour earlier, same code but the
+  distance-field blend: 18.8, 19.8, 12.9 ms.) Other lanes' builds were
+  running on the machine (load 8 to 9).
 
 **2026-10-18 (second pass: glyph frames, blending, exactness gates)**, Apple
 M4 Max, macOS 27, references from Electron 44 / Chromium 152.
@@ -650,11 +653,13 @@ Updated 2026-10-18 (third pass).
   likely path is Skia's Fontations typeface for `COLR` web fonts (its own
   layer bounds, paths filled by Skia's rasterizer, gradients by its
   shaders). References: `text-closure-20261018-205749`, cases `colr-0030`
-  to `colr-0041` (`v0` layered and `v1` gradient fonts at 14 to 200 px).
+  to `colr-0041` (`v0` layered and `v1` gradient fonts at 14 to 200 px;
+  `review/text-colr-references-20261018/index.html` shows them).
 - **Distance-field residuals** (closure capture): synthesized bold at 200
   px 16 pixels by up to 6; a 6 px stroke at 180 px 12 pixels by up to 21;
-  Arabic at 200 px 41 pixels by 2 (overlapping joined glyphs); 210 px 4
-  pixels by 2; `pop` at 160 px 3 pixels by up to 5.
+  210 px 4 pixels by 2; `pop` at 160 px 3 pixels by up to 5. (Arabic at
+  200 px, 41 pixels by 2 where joined glyphs overlap, became exact once
+  the glyphs blend with their unquantized coverage, as the GPU does.)
 - **Caption pop at density 1** (`caption-pop-0455`, `-0456`, `-0458`,
   `-0459`): 2 to 75 pixels by 2 to 13 in `text_raster`, all in the black
   stroke of the scaled word (the corpus's pop frames are exact).
