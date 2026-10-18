@@ -394,6 +394,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     failures.push(failure);
     reporter.emit({ type: 'failure', code, message, retry });
     PM.bus?.emit?.('engine:failure', failure);
+    // Visible, never silent (amendment 21): the editor's own toast, with
+    // Retry where reloading the module can help.
+    PM.toast?.(message, 8000, { error: true, key: `engine-failure-${code}`,
+      ...(code === 'pm-wasm-unavailable' ? { action: { label: 'Retry', run: () => { void state.retry(); } } } : {}) });
   }
 
   const subscribers = new Set<(batch: PatchBatch) => void>();

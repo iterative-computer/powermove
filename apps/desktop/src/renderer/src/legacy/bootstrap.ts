@@ -104,7 +104,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The native evaluator's document mirror and write barrier (behind the
      "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
      PM.touch and PM.proj, so it follows anim and history. */
-  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), newEngineOn()) })],
+  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), newEngineOn()), strict: newEngineOn() })],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
