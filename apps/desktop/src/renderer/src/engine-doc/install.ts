@@ -128,6 +128,8 @@ export interface EngineDoc {
   failures(): EngineFailure[];
   /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
   retry(): Promise<boolean>;
+  /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
+  warmFonts(): Promise<void>;
 }
 
 const noopDoc: DocApi = {
@@ -146,7 +148,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
-      failures: () => [], retry: () => Promise.resolve(false),
+      failures: () => [], retry: () => Promise.resolve(false), warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -359,7 +361,9 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
-  if (options.headless) for (const op of ['gl.bounds', 'gl.pick']) api.noReference.add(op);
+  if (options.headless) for (const op of ['gl.bounds', 'gl.pick', 'glyphLayout']) api.noReference.add(op);
+  // The glyph layout get_project_state reports for selected text (gl/raster.ts on the desktop).
+  if (options.headless && !PM.textLayout) PM.textLayout = (L: any, T: number = PM.time) => api.glyphLayout(L, T);
   /* A trap leaves the instance dead. The compiled module is kept, so a fresh
      instance is made synchronously (the module is far below Chromium's
      synchronous-instantiation limit) and resynced from the shadow, and the
@@ -373,6 +377,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
   const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual, () => api.fonts);
+  if (options.headless) for (const kernel of ['captureFontAnchor', 'anchorReference']) edits.noReference.add(kernel);
   edits.revive = () => reviveNow();
   edits.onFailure = (code, message) => fail(code, message, code === 'font-service-unavailable');
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
@@ -437,6 +442,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       failed.clear();
       return start().then((ok) => { if (ok) afterReady(); return ok; });
     },
+    warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
   };
   PM.EngineDoc = state;
 
@@ -591,6 +597,8 @@ function legacyImplementations(PM: PMRegistry): Record<string, any> {
     bounds: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.bounds(...a)),
     pick: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.pick(...a)),
     textLayout: (...a: any[]) => (PM.textCaretLayout ? PM.textCaretLayout(...a) : null),
+    // Only a host without a raster asks (its PM.textLayout is the native one): nothing to fall back to.
+    glyphLayout: () => null,
     local3D: (L: any, T: number) => local3D(PM, L, T),
     parent3D: (L: any, T: number, ...rest: any[]) => (parent3D as any)(PM, L, T, ...rest),
     world3D: (L: any, T: number, positioning?: boolean) => world3D(PM, L, T, positioning),

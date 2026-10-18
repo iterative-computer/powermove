@@ -77,9 +77,14 @@ export function headlessFonts(log: (line: string) => void, required = false): Fo
   if (!required && process.env['POWERMOVE_ENGINE_FONTS'] !== '1') return null;
   const addon = pmBridgePath();
   try {
-    const { FontRegistry } = createRequire(import.meta.url)(addon) as { FontRegistry: new () => { answer(q: string): string; subset(blob: string, index: number): Uint8Array } };
+    const { FontRegistry } = createRequire(import.meta.url)(addon) as { FontRegistry: new () => { answer(q: string): string; subset(blob: string, index: number): Uint8Array; whole?(blob: string, index: number): Uint8Array } };
     const registry = new FontRegistry();
-    return { sync: true, answer: (queries) => registry.answer(queries), subset: (blob, index) => registry.subset(blob, index) };
+    // Whole faces, outlines included, when the registry has them: answers
+    // that need glyph ink (font-anchor bounds, text bounds, picks over text)
+    // are then native here, as everything else is, instead of `{ink}`.
+    const whole = typeof registry.whole === 'function' ? (blob: string, index: number) => registry.whole!(blob, index) : undefined;
+    if (!whole && required) throw new DocumentHostError('font-service-unavailable', `The native font service (${addon}) has no whole faces (FontRegistry.whole), which text ink needs. Rebuild pm-bridge.`, true);
+    return { sync: true, answer: (queries) => registry.answer(queries), subset: (blob, index) => registry.subset(blob, index), ...(whole ? { whole } : {}) };
   } catch (error) {
     const message = `The native font service is unavailable (${addon}): ${(error as Error).message}`;
     if (required) throw new DocumentHostError('font-service-unavailable', message, true);

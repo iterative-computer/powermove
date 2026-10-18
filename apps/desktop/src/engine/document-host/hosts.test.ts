@@ -125,10 +125,12 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
       { type: 'reorder_layer', target: 'Lshape', index: 0 },
     ]);
     await apply([{ type: 'group_layers', targets: ['Lsolid', 'Lshape'], name: 'Group' }]);
-    // Text content and anchor edits that need no glyph ink.
+    // Text edits, those that need glyph ink included (font-anchor capture).
     await apply([{ type: 'add_layer', id: 'Ltext', layerType: 'text', name: 'Title', content: { text: 'Hello' } }]);
     await apply([
       { type: 'set_content', target: 'Ltext', patch: { text: 'Hello, world' } },
+      { type: 'set_content', target: 'Ltext', patch: { size: 72, weight: 500 } },
+      { type: 'set_content', target: 'Ltext', patch: { tracking: 6, font: 'Helvetica Neue' } },
       { type: 'set_property', target: 'Ltext', path: 'anchor.x', value: 40, time: 0 },
     ]);
     expect((await ask(pool, 'Pedit', run, 'get_project_state', {})).ok).toBe(true);
@@ -148,24 +150,26 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
     expect(stats.dual!.mismatched).toBe(0);
   }, 120_000);
 
-  it('measures the one remaining headless fallback: font-anchor capture needs glyph ink', async () => {
-    // A size edit on a text layer records its ink bounds (font-anchor.ts
-    // captureFontAnchor). pm-wasm holds metrics-and-shaping subsets without
-    // outlines here, so the kernel answers {ink} and the legacy edit runs;
-    // the headless legacy raster has no pixels, so no bounds are recorded,
-    // unlike the desktop. It closes when the fonts lane's whole-face service
-    // (FontProvider.whole, docs/engine/document-host.md) lands: this test
-    // then fails and its expectation becomes {} and a recorded anchor.
+  it('records font-anchor bounds natively: text edits that need glyph ink have no fallback', async () => {
+    // A size, font, weight, tracking or box edit on a text layer records its
+    // ink bounds (font-anchor.ts captureFontAnchor). The worker loads whole
+    // faces (pm-bridge FontRegistry.whole), so the kernel measures the ink
+    // natively; nothing falls back to the legacy edit.
     revisions.clear();
     const host = hostServices();
     host.seed('Ptext', 'Text');
     const pool = newPool(host.services);
     await ask(pool, 'Ptext', 'run-t', 'apply_commands', { commands: [{ type: 'add_layer', id: 'Ltext', layerType: 'text', name: 'Title', content: { text: 'Hello' } }], label: 'text' });
-    const sized = await ask(pool, 'Ptext', 'run-t', 'apply_commands', { commands: [{ type: 'set_content', target: 'Ltext', patch: { size: 96 } }], label: 'size' });
-    expect(sized.ok).toBe(true);
-    expect((await pool.stats('Ptext')).fallbacks).toEqual({ 'edit.captureFontAnchor:ink': 1 });
+    for (const patch of [{ size: 96 }, { weight: 400 }, { tracking: 4 }, { font: 'Helvetica Neue' }, { boxWidth: 600 }]) {
+      const edited = await ask(pool, 'Ptext', 'run-t', 'apply_commands', { commands: [{ type: 'set_content', target: 'Ltext', patch }], label: 'type' });
+      expect(edited.error ?? null, JSON.stringify(patch)).toBeNull();
+    }
+    const stats = await pool.stats('Ptext');
+    expect(stats.fallbacks).toEqual({});
+    expect(stats.failures).toEqual([]);
     const layer = (host.sessions.document('Ptext') as any).layers.find((l: any) => l.id === 'Ltext');
-    expect(layer.d.fontAnchorBounds).toBeUndefined();
+    expect(layer.d.fontAnchorBounds).toMatchObject({ x0: expect.any(Number), y0: expect.any(Number), x1: expect.any(Number), y1: expect.any(Number) });
+    expect(layer.d.fontAnchorBounds.x1).toBeGreaterThan(layer.d.fontAnchorBounds.x0);
   }, 60_000);
 
   it("loads the user's extensions as the editor does: overrides, forks, dependencies, disabled records, live changes", async () => {

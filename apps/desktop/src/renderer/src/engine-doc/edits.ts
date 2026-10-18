@@ -201,6 +201,12 @@ export function realizeOps(ops: readonly PatchOp[], open: string): PatchOp[] {
 
 export class NativeEdits {
   readonly stats: NativeEditStats = { calls: {}, applied: {}, ops: 0, fallbacks: {} };
+  /**
+   * Kernels with no legacy answer to compare with: the headless document
+   * host has no raster, so the legacy font-anchor capture and anchor
+   * reference measure nothing there. Dual modes apply the native answer.
+   */
+  readonly noReference = new Set<string>();
   /** Re-instantiates a trapped module synchronously (install.ts), as for queries. */
   revive: (() => boolean) | null = null;
   onFailure: ((code: 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable', message: string) => void) | null = null;
@@ -299,7 +305,7 @@ export class NativeEdits {
   apply(ops: readonly PatchOp[]): void {
     const s = this.scope();
     if (!s || !ops.length) return;
-    const live = realizeOps(ops, s.open);
+    const live = realizeOps(ops, s.open).map((op: any) => ('value' in op ? { ...op, value: legacyKeyOrder(op.value) } : op));
     const paths = live.map(op => [...op.path]);
     const write = () => { this.PM.proj = applyOps(this.PM.proj, live); };
     if (this.PM.doc?.write) this.PM.doc.write(paths, write);
@@ -329,7 +335,7 @@ export class NativeEdits {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
     if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); return legacy(); }
-    if (this.dual) return this.compare(name, got, legacy, options.where ?? (() => request), options.compareWith);
+    if (this.dual && !this.noReference.has(name)) return this.compare(name, got, legacy, options.where ?? (() => request), options.compareWith);
     if ('threw' in got) throw got.threw;
     this.apply(got.reply.ops);
     this.count(this.stats.applied, name);
@@ -348,7 +354,7 @@ export class NativeEdits {
     const got = this.ask(name, request, options.wide);
     if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); return legacy(); }
     const value = 'threw' in got ? undefined : native(got.reply);
-    if (this.dual) {
+    if (this.dual && !this.noReference.has(name)) {
       let expected: { value?: T; threw?: unknown };
       try { expected = { value: legacy() }; } catch (error) { expected = { threw: error }; }
       const nativeAnswer = 'threw' in got ? { threw: got.threw } : { value };
@@ -477,4 +483,24 @@ function pick(value: any, path: string): unknown {
   let v = value;
   for (const p of parts.slice(0, 8)) { if (v == null || typeof v !== 'object' || !(p in v)) break; v = v[p]; }
   return v;
+}
+
+/**
+ * Anchor bounds (`fontAnchorBounds`, `sizeAnchorBounds`) in the key order the
+ * legacy edits write (x0, y0, x1, y1): pm-edit's JSON objects come out with
+ * sorted keys, and the document's bytes (and every answer that serializes the
+ * live document) must not depend on which side measured.
+ */
+const BOUNDS_KEYS = ['x0', 'y0', 'x1', 'y1'];
+export function legacyKeyOrder(value: any): any {
+  if (Array.isArray(value)) return value.map(legacyKeyOrder);
+  if (!value || typeof value !== 'object') return value;
+  const keys = Object.keys(value);
+  if (keys.length === 4 && BOUNDS_KEYS.every((k) => keys.includes(k))) return { x0: value.x0, y0: value.y0, x1: value.x1, y1: value.y1 };
+  let out: any = null;
+  for (const key of keys) {
+    const next = legacyKeyOrder(value[key]);
+    if (next !== value[key]) (out ??= { ...value })[key] = next;
+  }
+  return out ?? value;
 }

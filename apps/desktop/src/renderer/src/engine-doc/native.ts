@@ -896,6 +896,39 @@ export class NativeApi {
       this.dual ? () => this.onLayerEdge(x, y, T) : undefined);
   }
 
+  /**
+   * Loads the faces the open composition's text layers need before anything
+   * asks, so with an asynchronous provider (the editor, through main) the
+   * first question about them is answered natively too. Asks pm-wasm
+   * directly: nothing here is counted or answered.
+   */
+  async warmFonts(): Promise<void> {
+    const loader = this.fonts;
+    if (!loader || loader.provider.sync || loader.disabled) return;
+    const c = this.comps();
+    const layers: any[] = Array.isArray(c?.cur?.layers) ? c!.cur.layers : [];
+    for (let index = 0; index < layers.length; index++) {
+      const L = layers[index];
+      if (L?.type !== 'text') continue;
+      for (let round = 0; round < 6; round++) {
+        const wasm = this.ready();
+        const now = this.comps();
+        if (!wasm || !now || this.unwrap(now.cur?.layers?.[index]) !== this.unwrap(L)) return;
+        let reply: any;
+        try { reply = wasm.query({ op: 'textLayout', comp: now.comp, open: now.open, layer: index, t: Number(L.from) || 0 }); } catch { return; }
+        if (!reply?.fonts) break;
+        loader.resolve(wasm, () => reply, (r: any) => !!r?.fonts);
+        await loader.whenIdle();
+        if (loader.disabled) return;
+      }
+    }
+  }
+
+  /** `PM.textLayout` (the glyph layout: characters, words, lines) for a host without a raster. */
+  glyphLayout(L: any, T: number): any {
+    return this.answer('glyphLayout', () => this.layerQuery('glyphLayout', L, { t: T }), () => this.legacy.glyphLayout(L, T), () => ({ layer: L?.id, t: T }));
+  }
+
   textLayout(L: any, T: number): any {
     return this.answer('textLayout', () => this.layerQuery('textLayout', L, { t: T }), () => this.legacy.textLayout(L, T), () => ({ layer: L?.id, t: T }));
   }
