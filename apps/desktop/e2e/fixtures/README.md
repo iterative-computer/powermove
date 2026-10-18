@@ -90,3 +90,12 @@ some deep ICC/alpha containers; their level-1 bitmap decodes independently.
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+`still-jpeg-rgb-{baseline,progressive}.jpg`, `still-tiff-{gray8,white8,gray16,gray-alpha}.tiff`
+and `still-tiff32f-deflate.tiff` are synthetic decoder regressions. JPEG
+uses Pillow 12.3 `keep_rgb`, quality 90. Integer TIFF uses LZW, with stored
+white-is-zero metadata for the inverse-gray case. Float TIFF is a generated
+RGB float32 ramp in one Deflate strip without a floating-point predictor.
+The tests pin Chromium upload hashes for the six exact integer cases and
+retain native 32-bit float precision; app composition measurements cover all
+seven, including the float case's ≤1 CV decoder rounding difference.

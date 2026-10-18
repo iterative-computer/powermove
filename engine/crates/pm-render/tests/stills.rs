@@ -750,10 +750,10 @@ fn compat_rgba8(path: &Path) -> Vec<u8> {
 /// compressions it also accepts (LZW with and without predictor 2, both
 /// Deflate tags, PackBits) decode, in pm-media, to the same pixels as the
 /// uncompressed file (and FFmpeg, the legacy converter, decodes them
-/// losslessly by definition), so they are the same class. Tiled and gray
-/// files are routed (palette, Y'CbCr, planar, fill order, sample format,
-/// and colorimetry tags are covered by `stills::tests::tiff_classes`;
-/// pm-media cannot read FFmpeg's palette or Y'CbCr TIFF at all).
+/// losslessly by definition), so they are the same class. Tiled layouts
+/// remain gated. Gray and palette strips have separate app comparisons;
+/// other photometric/sample/colorimetry boundaries are covered by
+/// `stills::tests::tiff_classes`.
 #[test]
 fn tiff_compressions_decode_alike() {
     let d = dir().join("tiff");
@@ -820,9 +820,11 @@ fn tiff_compressions_decode_alike() {
     eprintln!("imageio-tiled.tiff unsupported: {got}");
     let gray = d.join("gray.tiff");
     ffmpeg(&gray, &["-pix_fmt", "gray"]);
-    let got = unsupported(&gray);
-    assert!(got.contains("photometric interpretation 1"), "{got}");
-    eprintln!("gray.tiff    unsupported: {got}");
+    assert_eq!(
+        probe_image(&gray),
+        Ok(()),
+        "gray TIFF is compared through the app"
+    );
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -1128,4 +1130,62 @@ fn avif_sdr_chroma_depth_and_icc_match_chromium_uploads() {
             assert!(native.bit_depth > 8, "{name}: level 2 source precision");
         }
     }
+}
+
+/// Native decoder bytes against app-uploaded, premultiplied Chromium RGBA8.
+#[test]
+fn rgb_jpeg_and_gray_tiff_match_chromium() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let pool = pm_media::pool::FramePool::new(0);
+    for (name, hash) in [
+        (
+            "still-tiff-gray8.tiff",
+            "e49788dbae66c0412fc14365211c0e2e51f37e23dd8b3152faceea788f8b0a00",
+        ),
+        (
+            "still-tiff-gray-alpha.tiff",
+            "2a0555044928c6b6f33fbe32c3ab1eac70f368ee2d316bcbdbc65297abdaf946",
+        ),
+        (
+            "still-jpeg-rgb-baseline.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-jpeg-rgb-progressive.jpg",
+            "39eca1cbab5cbf94c8665962e4a1e828a045751cc7c96ec0f64d47849d12a8d3",
+        ),
+        (
+            "still-tiff-white8.tiff",
+            "130c95b327eec004b30f2b7145629cf5402181f35360c7a3d827f2c2066aaed8",
+        ),
+        (
+            "still-tiff-gray16.tiff",
+            "1f165643c5578330fa32b729f3162845a089ae5eea791fb7b41c65b79f40890b",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let native = pm_media::image::read(&path, &pool).unwrap();
+        let bitmap = pm_media::image::compat::bitmap_at(&path, &native, &pool).unwrap();
+        let bytes = bitmap
+            .frame
+            .with_planes(|planes| {
+                let p = &planes[0];
+                let mut out = Vec::new();
+                for y in 0..p.desc.height {
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), p.desc.width * 4)
+                    });
+                }
+                out
+            })
+            .unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), hash, "{name}");
+    }
+    let deflate = fixtures.join("still-tiff32f-deflate.tiff");
+    assert_eq!(probe_image(&deflate), Ok(()));
+    let native = pm_media::image::read(&deflate, &pool).unwrap();
+    assert!(native.float);
+    assert_eq!(native.bit_depth, 32, "float sources keep their precision");
 }

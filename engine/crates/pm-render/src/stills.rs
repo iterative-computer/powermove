@@ -8,8 +8,8 @@
 //! remain available to level 2 and Interpret Footage.
 //!
 //! All 21 detailed still corpus cases pass the 2D/alpha classes. Container
-//! checks keep other structures explicit (HDR/chromaticity-only PNG, RGB/CMYK
-//! JPEG, TIFF tiles/compressed float/other models, and AVIF outside the
+//! checks keep other structures explicit (HDR/chromaticity-only PNG, CMYK
+//! JPEG, TIFF tiles/unmeasured float/other models, and AVIF outside the
 //! measured SDR classes).
 //!
 //! Container transforms are drawn only as Chromium shows them, each
@@ -445,8 +445,8 @@ fn png<R: Read + Seek>(
     Ok(Ok(header))
 }
 
-/// JPEG: baseline/progressive Huffman, 8-bit gray or Y'CbCr, and APP1 EXIF.
-/// RGB, CMYK, arithmetic, lossless and 12-bit classes remain unmeasured.
+/// JPEG: baseline/progressive Huffman, 8-bit gray, RGB or Y'CbCr, and APP1
+/// EXIF. CMYK, arithmetic, lossless and 12-bit remain unmeasured.
 fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     if array::<2, _>(r)? != [0xFF, 0xD8] {
         return Err(malformed("no start of image"));
@@ -500,7 +500,7 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
 }
 
 /// The class of a JPEG frame header (`marker` SOF0 or SOF2).
-fn jpeg_frame(_marker: u8, sof: &[u8], adobe_transform: Option<u8>) -> Result<(), Feature> {
+fn jpeg_frame(_marker: u8, sof: &[u8], _adobe_transform: Option<u8>) -> Result<(), Feature> {
     if sof.len() < 6 {
         return unsupported("malformed JPEG headers");
     }
@@ -513,12 +513,9 @@ fn jpeg_frame(_marker: u8, sof: &[u8], adobe_transform: Option<u8>) -> Result<()
         return unsupported("malformed JPEG headers");
     }
     match n {
-        1 => Ok(()),
-        3 if adobe_transform == Some(0) || comps.iter().map(|c| c[0]).eq(*b"RGB") => {
-            unsupported("RGB-encoded JPEG stills")
-        }
-        // Y'CbCr: libjpeg-turbo in pm-media, as in Chromium.
-        3 => Ok(()),
+        // libjpeg-turbo performs both RGB and Y'CbCr conversion as in
+        // Chromium; component ids and Adobe transform are decoder facts.
+        1 | 3 => Ok(()),
         _ => unsupported("CMYK and other JPEG stills with neither 1 nor 3 components"),
     }
 }
@@ -589,10 +586,10 @@ fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header,
         if !matches!(compression, 1 | 5 | 8 | 32946 | 32773) {
             return Err(format!("TIFF stills with compression {compression}"));
         }
-        // RGB and 8-bit palette indices were compared through the app;
-        // gray, CMYK and Y'CbCr remain separate unmeasured classes.
+        // RGB, gray and 8-bit palette indices were compared through the
+        // app. CMYK and Y'CbCr remain separate unmeasured classes.
         let photometric = scalar(262, u32::MAX).map_err(|_| "TIFF photometric tag".to_string())?;
-        if photometric != 2 && !(allow_icc && photometric == 3) {
+        if photometric != 2 && !(allow_icc && matches!(photometric, 0 | 1 | 3)) {
             return Err(format!(
                 "TIFF stills with photometric interpretation {}",
                 if photometric == u32::MAX {
@@ -608,6 +605,10 @@ fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header,
             if samples != Ok(1) || bits != Ok(8) {
                 return Err("TIFF palettes outside the tested 8-bit index class".into());
             }
+        } else if matches!(photometric, 0 | 1) {
+            if !matches!(samples, Ok(1 | 2)) || !matches!(bits, Ok(8 | 16)) {
+                return Err("gray TIFF outside unsigned 8/16-bit gray/alpha samples".into());
+            }
         } else {
             if !(samples == Ok(3) || (allow_icc && samples == Ok(4))) {
                 return Err("TIFF stills with other than three samples per pixel".into());
@@ -616,7 +617,7 @@ fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header,
                 || (allow_icc && bits == Ok(16))
                 || (allow_icc
                     && bits == Ok(32)
-                    && compression == 1
+                    && matches!(compression, 1 | 8)
                     && ifd_per_sample(&entries, 339, 1) == Ok(3)))
             {
                 return Err("TIFF stills with other than 8 bits in every sample".into());
@@ -626,11 +627,11 @@ fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header,
             || (allow_icc
                 && photometric == 2
                 && bits == Ok(32)
-                && compression == 1
+                && matches!(compression, 1 | 8)
                 && ifd_per_sample(&entries, 339, 1) == Ok(3)))
         {
             return Err(
-                "TIFF stills outside unsigned integer or uncompressed RGB float32 samples".into(),
+                "TIFF stills outside unsigned integer or measured RGB float32 samples".into(),
             );
         }
         if scalar(284, 1) != Ok(1) {
@@ -931,18 +932,17 @@ mod tests {
             assert!(jpeg(jpeg_with(0xC2, 8, &ycc(y), None)).is_ok());
         }
         assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_ok());
-        // 12-bit, arithmetic, lossless, CMYK, RGB, malformed.
+        // 12-bit, arithmetic, lossless, CMYK and malformed stay gated.
         assert!(jpeg(jpeg_with(0xC1, 12, &gray, None)).is_err());
         assert!(jpeg(jpeg_with(0xC0, 12, &gray, None)).is_err());
         assert!(jpeg(jpeg_with(0xC9, 8, &gray, None)).is_err());
         assert!(jpeg(jpeg_with(0xC3, 8, &gray, None)).is_err());
         let cmyk = [(1, 0x11), (2, 0x11), (3, 0x11), (4, 0x11)];
         assert!(jpeg(jpeg_with(0xC0, 8, &cmyk, Some(2))).is_err());
-        let e = jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(0))).unwrap_err();
-        assert!(e.to_string().contains("RGB"), "{e}");
+        assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(0))).is_ok());
         let rgb = [(b'R', 0x11), (b'G', 0x11), (b'B', 0x11)];
-        let e = jpeg(jpeg_with(0xC0, 8, &rgb, None)).unwrap_err();
-        assert!(e.to_string().contains("RGB"), "{e}");
+        assert!(jpeg(jpeg_with(0xC0, 8, &rgb, None)).is_ok());
+        assert!(jpeg(jpeg_with(0xC2, 8, &rgb, Some(0))).is_ok());
         assert!(jpeg(vec![0xFF, 0xD8, 0x00]).is_err());
         assert!(jpeg(vec![0xFF, 0xD8, 0xFF, 0xDA, 0, 2]).is_err());
     }

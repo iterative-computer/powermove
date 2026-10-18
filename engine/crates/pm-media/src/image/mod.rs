@@ -179,6 +179,11 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         ImageFormat::Tiff if !matches!(raster::tiff_photometric(path)?, Some(0..=2)) => {
             imageio::read_frame(path, 0, pool, format)
         }
+        // Gray+alpha TIFF is a valid app import that image's TIFF adapter
+        // cannot expand. ImageIO preserves its source precision and alpha.
+        ImageFormat::Tiff => {
+            raster::read(path, pool, format).or_else(|_| imageio::read_frame(path, 0, pool, format))
+        }
         _ => raster::read(path, pool, format),
     }
 }
