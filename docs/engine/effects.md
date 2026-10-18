@@ -190,15 +190,23 @@ Issue A2 (2026-10-18) rebuilt it around two guards, judged when a frame's
 commands have completed (nothing waits during rendering: `Watchdog::collect`
 runs at the start of later frames), and a deterministic test hook.
 
-- **The budget** (interactive renderers): each effect instance, transition,
+- **The budget records only** (review fix, 2026-10-19, amendment 22):
+  today's compositor (`legacy/gl/gpu-timing.ts`, `compositor.ts:1264`)
+  times programs and never turns one off, so a slow but finite user
+  program that draws today must draw here. `Watchdog::measured_ms` keeps
+  the longest time per program; no production renderer enforces a budget.
+  Enforcing it is an opt-in (`Watchdog::set_budget`, tests only) and never
+  applies to built-ins (`Span::builtin`), so a built-in such as Gaussian
+  Blur on a large composition and a slow GPU is never turned off. What
+  follows describes the enforced budget. Each effect instance, transition,
   shader layer, and extension fragment layer of a timed frame is timed
   between two marker dispatches (one-workgroup compute passes whose
   end-of-pass sample is the timestamp, as `pm-export`'s `GpuSpan`: the first
   reads a texel of the program's input, the second of its output). The
   timestamps are resolved in a submission of their own once the frame's
   command buffer has completed (resolved in the frame's own command buffer,
-  Metal returned the previous frame's end sample; found 2026-10-17). A
-  program over the budget (default 250 ms per program per frame) is
+  Metal returned the previous frame's end sample; found 2026-10-17). With
+  an enforced budget, a user program over it is
   disabled from the next frame, skipped with its data kept, and reported
   (`WatchdogTimeout`; effect scope for an instance, definition scope for a
   transition, layer scope for a shader or fragment layer) until it is
@@ -216,9 +224,10 @@ runs at the start of later frames), and a deterministic test hook.
   timed on the GPU), in two steps (review fix, 2026-10-18):
   1. *Suspicion.* Every frame drawing a user program is followed from when
      it could start (its submission, or the completion of the frame before
-     it). It is suspected only when a poll made after the hang budget (2 s
-     interactive; 10 s for jobs, Chromium's own GPU watchdog) saw it still
-     running. A completion seen late is not suspicion: wgpu fires
+     it). It is suspected only when a poll made after the hang budget (10
+     s, Chromium's own GPU watchdog, in the viewer as in jobs since
+     2026-10-19; it was 2 s in the viewer, which turned off user programs
+     today's WebGL still finishes) saw it still running. A completion seen late is not suspicion: wgpu fires
      `on_submitted_work_done` at the next poll or submit, so a frame that
      finished while nobody polled (the presenter waiting for the WebGL
      runner, a busy render thread) is not a runaway. Hosts poll between
@@ -249,7 +258,8 @@ runs at the start of later frames), and a deterministic test hook.
   fails with `watchdog`; the program is never run again until its source
   changes. The engine turns it off like a runaway native program
   (`WatchdogTimeout`, viewer) or stops the job naming it. Compiles have their
-  own 10 s deadline (`KHR_parallel_shader_compile`).
+  own 10 s deadline (`KHR_parallel_shader_compile`), which is transient
+  (below), not a judgment of the program.
 - **Trusted samples.** A timestamp sample is judged only when both samples
   are after the newest trusted sample, it ends after it begins, and it is no
   longer than the frame's own submission-to-completion wall time (+50 ms);
@@ -259,8 +269,9 @@ runs at the start of later frames), and a deterministic test hook.
   process. Metal leaving a sample unwritten (seen with eleven test
   renderers busy in one process: 4 of 10 spans) still leaves that frame
   unjudged; the hang guard does not depend on samples.
-- **Policies.** `Policy::Interactive` (the viewer): the budget and the hang
-  guard, a disabled program is skipped. `Policy::Job` (export jobs and agent
+- **Policies.** `Policy::Interactive` (the viewer): the hang guard (and an
+  enforced budget, which no production renderer sets), a disabled program
+  is skipped. `Policy::Job` (export jobs and agent
   stills; pm-node's job lanes set it and `reset` the watchdog per work item):
   no per-program budget (today's exporter renders a slow effect slowly, and
   a job never skips a program) and, after a runaway, every later frame fails
@@ -273,8 +284,11 @@ runs at the start of later frames), and a deterministic test hook.
   gives (`FnTiming` for closures). The budget, the hang guard, both
   policies, and every re-enable rule are tested this way on any device and
   under any load: `tests/effects.rs`
-  `the_watchdog_disables_an_overrunning_effect_from_the_next_frame`,
-  `tests/watchdog.rs` (shader layers, the hang guard with user and built-in
+  `an_enforced_watchdog_budget_disables_an_overrunning_user_effect_from_the_next_frame`,
+  `tests/watchdog.rs` (`slow_programs_are_recorded_and_never_turned_off_in_the_viewer`:
+  a user effect, a shader layer and a built-in at 3 s of GPU time a frame
+  draw on every frame; `an_enforced_budget_never_turns_a_built_in_off`;
+  shader layers, the hang guard with user and built-in
   programs, the job policy, a frame judged while still running),
   `pm-node/tests/definitions.rs`
   `a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views`.
@@ -287,6 +301,10 @@ runs at the start of later frames), and a deterministic test hook.
   `a_suspect_frame_holds_frames_drawing_its_user_programs_until_it_is_judged`.
   Production renderers set neither. The GPU path keeps its own test,
   `the_watchdog_judges_every_timed_frame_not_only_the_first`.
+
+Measured 2026-10-19 (M4 Max), after the budget became record-only and the
+viewer's hang budget 10 s: `tests/watchdog.rs` 12 of 12 tests passing in
+each of 10 runs; `pm-node/tests/definitions.rs` passing in 20 of 20 runs.
 
 Measured 2026-10-18 (M4 Max): `tests/watchdog.rs` 5 of 5 tests passing in
 each of 10 runs before the review fix; 10 of 10 tests passing in each of 10 runs after it; `pm-node/tests/definitions.rs` passing in 20 of 20 runs
@@ -329,6 +347,7 @@ machine) runs in the renderer's own WebGL2 runner
    back as bands. A runner failure marks the program instead of routing:
    `compile` (WebGL refuses it too) is skipped and reported as today's
    `runEffects` skips it; `watchdog` turns it off (`WatchdogTimeout`).
+   Every other failure is transient and retried (below).
 3. **Jobs** (pm-node `jobs/fallback.rs`, contract 14). A job renderer waits
    on a `FallbackHost`: the lane writes the textures into the session's
    scratch cache area, sends `Request::ShaderFallback`, and main
@@ -337,11 +356,51 @@ machine) runs in the renderer's own WebGL2 runner
    queue jobs and jobs whose window closed use any window with the new
    engine), and writes the pixels back. The runner is stateless, so any
    window draws the same pixels. `compile` skips the program as today's
-   exporter does, `watchdogTimeout` stops the job, no window fails the job
-   naming the program. A renderer with a host does not list
+   exporter does, `watchdogTimeout` stops the job; a transient failure is
+   tried again in place, three attempts per frame, and if it persists the
+   job stops with an error naming the program (never a frame without it).
+   Each window acknowledges a request as soon as its preload listener has
+   it; main passes over a window that does not within 10 s (reloading, its
+   runner not installed yet) for the next one, so a job does not wait the
+   110 s answer timeout on a window that never heard it. A renderer with a host does not list
    `Feature::ShaderFallback` (`Renderer::unsupported_with_media`).
 4. **`pm-cli`** has no runner: such a program is a named, deterministic
    "not headless-renderable" failure (exit 4).
+
+**Transient failures** (review fix, 2026-10-19). Only two failures say
+something about a program and are kept until its source changes
+(`FallbackFailure::is_final`): WebGL refusing it (`compile`) and a draw
+past the runner's deadline (`watchdog`). A lost context (a GPU-process
+restart, another context's loss), the compile deadline, no runner
+answering, and a wrong size are transient, as today's compositor treats a
+context loss: `compositor.ts:746-760` clears `GL.errors` and `GL.progs` on
+`webglcontextrestored` and draws again.
+- The runner makes a new context and draws the request once more; if that
+  context is lost too it fails with `contextLost`. Before the fix a context
+  lost under a draw or a readback was reported as `compile` and kept in a
+  map that survived context recreation, so the window never drew that
+  program again, and a job skipped it as if WebGL refused it. A link status
+  read from a lost context (null) is no longer taken for a refusal either.
+- The engine (`effects::fallback::Retries`, shared by effects,
+  transitions, and shader layers) asks for the program again at once after
+  the first transient failure, then after 250 ms, 1 s, 4 s, and 8 s from
+  then on; meanwhile the viewer draws the frame without the program (a
+  shader layer draws nothing), reports it once as `NotHeadlessRenderable`,
+  and the presenter wakes to draw the view again when the retry is due
+  (`Renderer::put_fallback_failure` returns the delay). The streak ends when
+  the runner draws the program. Nothing is turned off or routed.
+- Tests: `tests/effects_fallback.rs`
+  `a_lost_context_is_not_blamed_on_the_program_and_it_draws_again`,
+  `a_job_tries_a_lost_context_again_and_draws_the_program`,
+  `a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program`;
+  `shader_layers::exec` `a_lost_runner_context_is_retried_and_the_layer_draws_again`;
+  `effects::fallback` unit tests (backoff, which reasons are final);
+  `shader-fallback.test.ts` "the runner after a lost context" (a new
+  context draws again; contextLost when that is lost too, then drawn once
+  the GPU is back; a lost link status; a refusal kept);
+  `shader-fallback-relay.test.ts` "acknowledgements". The session keeps at
+  most 32 requests waiting for their textures (the engine's own bound),
+  failing the oldest as transient.
 
 The runner (`ShaderFallbackRunner.render(request, textures)`) uploads each
 texture as RGBA16F (linear, clamp to edge, as the compositor's `grab`
@@ -660,8 +719,18 @@ contraction that depend on the exact MSL text). Two translations of the same
 program then round differently, and where the program is discontinuous (a
 threshold or branch on a computed value in its highlight) a rounding
 difference flips the side; WebGL itself moves by up to 67 CV there when its
-input moves one binary16 step. Whether ANGLE also compiles with fast math on
-Apple GPUs was not verified here. Matching it bit for bit would need the
+input moves one binary16 step.
+
+Fast math is not the cause (checked 2026-10-19): with wgpu-hal patched to
+compile every Metal library with fast math off (a temporary
+`[patch.crates-io]` copy outside the repository, separate target folder,
+reverted after), the shader gate on `shaders-20261018-022611` got further
+from WebGL, not closer: defaults 48 px over 1 CV (max 99 CV), coerced 49
+(max 72), hdr 53 (max 45), and the alt variant, which matches with fast
+math, failed at 2 px (max 10 CV); with fast math on (production) the
+counts are 43, 45, and 49 px and alt matches. So ANGLE's MSL behaves like
+fast-math MSL for this program, and the residual is the two translations'
+different MSL text. Matching it bit for bit would need the
 engine to emit ANGLE's MSL for that program; running it in the fallback
 runner would match the arithmetic but not in-app inputs (the layer buffer is
 within 1 CV, not bit-identical) and would read the frame back every frame.
@@ -680,6 +749,39 @@ the program for its 64 KiB private-variable rule, the engine routes it. Compile 
 of the mutants with WebGL (S3's `webgl-compile.ts`) was not rerun here. `cargo test -p
 pm-glsl` runs 300 mutants in process and the probes' verdicts on every build
 (`tests/probes.rs`; the fixture is rewritten by `tools/effects/expectations.ts`).
+
+## Shared files this lane changed
+
+For the owners of these files (derouter, device, bridge, dochost, jobs):
+
+- **pm-render outside `effects/`, `glsl/`, `shader_layers/`**: `renderer.rs`
+  (the fallback host loop in `render` and `render_into`, `set_fallback_host`,
+  `put_fallback_pixels`, `put_fallback_failure` returning the retry delay,
+  `fallback_retry_at`, `fallback_textures`, `watchdog_watch`,
+  `watchdog_holding`, `wait_idle`, `watchdog_reports`), `capability.rs`
+  (`unsupported_for`), `error.rs` (three `RenderError` variants:
+  `WatchdogPending`, `Fallback(String)`, `Watchdog(String)`; outside
+  pm-render they reach generic error arms, and pm-node's presenter handles
+  `WatchdogPending` itself), `exec.rs`, `lib.rs`.
+- **pm-engine**: `engine.rs`, `jobs.rs` (`job_definitions`;
+  `JobService::definitions_pushed` defers the push's acknowledgement until
+  the job engine holds the set).
+- **pm-protocol**: `envelope.rs` (`Request::ShaderFallback`,
+  `Event::ShaderFallback` with `Input`), `samples.rs`, `shader_fallback.rs`,
+  wire fixtures; the generated `shared/engine-protocol/` types.
+- **pm-node**: `present/render.rs` (texture bands, failures without
+  routing, transient retry wake-ups), `jobs/{fallback,definitions,compile,mod}.rs`,
+  `tests/document.rs`.
+- **pm-export** `render.rs`, **pm-cli** `main.rs`, `render.rs`,
+  `render_parity.rs`.
+- **Desktop**: `preload/index.ts` (bridge's: the `onShaderFallback`
+  listener and its acknowledgement), `shared/engine-ipc.ts`,
+  `main/engine/{index,native-engine,protocol,definitions,agent-jobs,render-queue}.ts`,
+  `main/agent-tools/{bridge,spec}.ts`, `engine-connection/{install,session}.ts`,
+  `legacy/assistant/harness.ts` and `legacy/core/exporter.ts` (a
+  `PM.EngineDefinitions.settle()` call before a render or export).
+  `kernel/api.ts`, `main/index.ts`, `legacy/core/editing.ts`, and
+  `legacy/gl/raster.ts` are untouched.
 
 ## Commands
 
@@ -704,15 +806,25 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 
 ## Gaps
 
-- **The shader-layer and effect budget is a behavior change** (needs Jude's
-  call): the interactive watchdog turns off a user effect, transition,
-  shader layer, or fragment extension layer measured over 250 ms of GPU time
-  in one frame, until it is registered again (a shader layer: until its code
-  changes). Today's compositor (`legacy/gl/gpu-timing.ts`) only records GPU
-  time and never turns anything off, so a slow but finite user shader that
-  today draws slowly is left out of the viewer here (exports are not
-  budgeted: `Policy::Job`). Plan section 8 and issue A2 ask for the budget;
-  amendment 22 forbids visible differences on existing projects.
+- **The per-program budget records only** (2026-10-19): plan section 8 and
+  issue A2 ask for a budget that turns an overrunning program off, but
+  today's compositor (`legacy/gl/gpu-timing.ts`) only records GPU time, and
+  amendment 22 forbids the visible difference. The engine now records
+  (`Watchdog::measured_ms`) and enforces nothing; the hang guard's 10 s
+  (Chromium's) is the only thing that turns a program off. Enforcing a
+  budget (`Watchdog::set_budget`, user programs only) needs Jude's call
+  before any renderer sets it.
+- **Uniform metadata (`udefs`) is not written by the engine**, by design:
+  today's compositor never writes `shaderMeta.udefs`; the built-in
+  Inspector extension does (`extensions/inspector/shader.ts:43`,
+  `syncShaderUniforms`, from its own `parseUniforms`), and section 11 lists
+  the meta the engine fills (`shaderKey`, `missing`, `missingAsset`,
+  `sceneWarnings`, `sceneError`) without it. An engine write would clobber a
+  forked Inspector's own `udefs` and would change the Shader panel's "N
+  uniforms" for a user who disabled the Inspector (today 0), both visible
+  differences. The engine binds uniforms from its own exact port of
+  `parseUniforms` (`shader_layers::uniforms`, `parse_uniforms_matches_the_app`).
+  `sceneWarnings` and `sceneError` for 3D scene layers are the 3D lane's.
 - **Fallback runner throughput.** Each fallback step reads its textures back
   and sends them to the renderer and the pixels back (binary16: 8 bytes per
   pixel each way, about 16 MB per full-HD texture); results are cached by
@@ -746,7 +858,10 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   escalated to Jude with side-by-sides. Not matched.
 - **Not run**: the full pm-render suite and clippy (targeted tests only).
 - The generated corpus was written by an agent from the docs, not produced through the
-  in-app agent harness (S3 provenance gap); Store has 3 public extensions, not in this
-  corpus (their sources stay outside the repository); one machine and one GPU family.
+  in-app agent harness (S3 provenance gap); the Store's 4 public releases (figuate
+  chrome 1.0.0, zellzoi ascii-magic-effects 1.0.0 and liquid-glass-ios27 2.0.1, mrsigma
+  liquid-glass-ios27 2.0.8; 5 effects) are not in this corpus but in the shader gate's
+  (`docs/engine/shaders.md`; their sources stay outside the repository); one machine
+  and one GPU family.
 - WebGL's "Expression too complex" rule and ternaries on structs and arrays are not
   reproduced (S3).

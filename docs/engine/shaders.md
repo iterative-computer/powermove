@@ -276,7 +276,10 @@ values scaled by max(1, |reference|).
   region (the refracted highlight of the small square near the top right),
   where the program's output changes discontinuously with its arithmetic (a
   one-step input change moves WebGL's own output there); naga's MSL and
-  ANGLE's MSL round a few operations differently, which is enough. Under
+  ANGLE's MSL round a few operations differently, which is enough. Metal fast
+  math is not the cause: with it off in the engine the gate moved further
+  from WebGL (48 to 53 px, and the alt variant failed too; effects.md,
+  Parity, 2026-10-19). Under
   amendment 22 this is a visible difference for a user with this effect:
   escalated to Jude with side-by-sides (`PM_SHADER_GATE_DIFFS=<dir>` writes
   the engine's output, WebGL's, and the differing pixels for every
@@ -361,7 +364,9 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **The in-app agent harness** did not generate the agent corpus: it needs a
   running Powermove with its MCP tools. The same model and CLI ran with the
   harness's instructions instead (provenance above and in every output).
-- **Store:** 4 public releases, all effects; no Store extension registers a
+- **Store:** 4 public releases (figuate chrome 1.0.0, zellzoi ascii-magic-effects
+  1.0.0 and liquid-glass-ios27 2.0.1, mrsigma liquid-glass-ios27 2.0.8), 5 effects,
+  all effects; no Store extension registers a
   shader layer or a fragment layer yet. Local projects (`--local`) were not
   collected for this run.
 - **WebGL-unstable class** (one Store shader): a visible difference,
@@ -371,11 +376,13 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   covered by the vitest and the pm-node test, the WebGL path by the gate).
 - **Effects and transitions in the runner** were built 2026-10-18 (effects.md,
   "The fallback runner"), and the runner has its own draw deadline (above).
-  Shader and fragment layers the engine draws are timed, disabled, and
-  guarded against runaways like effects (effects.md, "The watchdog";
-  `tests/watchdog.rs`); the 250 ms interactive budget on them is a behavior
-  change against today's compositor, which never turns a shader off
-  (effects.md, Gaps: needs Jude's call).
+  Shader and fragment layers the engine draws are timed and guarded against
+  runaways like effects (effects.md, "The watchdog"; `tests/watchdog.rs`).
+  Since 2026-10-19 the budget records only, as today's compositor does
+  (`gpu-timing.ts` never turns a shader off), and the viewer's hang budget
+  is Chromium's 10 s, so a slow but finite shader that draws today draws.
+  A transient runner failure (a lost context) is retried, never kept
+  (effects.md, "Transient failures").
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
   readback, and upload per frame shown; there is no render-ahead for it (a
   static one is uploaded once).
