@@ -401,7 +401,7 @@ impl Mixer {
         out: &mut [Vec<f32>],
         options: &RenderOptions,
     ) -> Result<RenderReport> {
-        let report = self.render_current(
+        let mut report = self.render_current(
             start,
             frames,
             out,
@@ -410,7 +410,7 @@ impl Mixer {
             options.meters,
         )?;
         if !self.outgoing.is_empty() && frames > 0 {
-            self.render_glides(start, frames, out, options);
+            self.render_glides(start, frames, out, options, &mut report);
         }
         if options.meters {
             self.master_tap.push(out, frames);
@@ -426,6 +426,7 @@ impl Mixer {
         frames: usize,
         out: &mut [Vec<f32>],
         options: &RenderOptions,
+        report: &mut RenderReport,
     ) {
         let channels = self.format.channels();
         let len = self.glide_len as f32;
@@ -440,13 +441,17 @@ impl Mixer {
             self.swap_state(&mut outgoing[j]);
             let solo = outgoing[j].solo.clone();
             // An outgoing mix that fails renders silence under the fade.
-            if self
-                .render_current(start, frames, target, options, solo.as_ref(), false)
-                .is_err()
-            {
-                for c in target.iter_mut() {
-                    c.clear();
-                    c.resize(frames, 0.0);
+            match self.render_current(start, frames, target, options, solo.as_ref(), false) {
+                Ok(outgoing_report) => {
+                    report.starved += outgoing_report.starved;
+                    report.errors.extend(outgoing_report.errors);
+                }
+                Err(e) => {
+                    report.errors.push(("retune".into(), e.to_string()));
+                    for c in target.iter_mut() {
+                        c.clear();
+                        c.resize(frames, 0.0);
+                    }
                 }
             }
             self.swap_state(&mut outgoing[j]);
@@ -464,7 +469,11 @@ impl Mixer {
             }
         }
         for g in &mut outgoing {
-            g.done += frames;
+            // Playback retries a segment whose source was missing. Its
+            // retune envelope must stay at the same rendered position.
+            if report.starved == 0 {
+                g.done += frames;
+            }
         }
         // A finished glide leaves the mixes before it unheard.
         if let Some(last) = outgoing.iter().rposition(|g| g.done >= self.glide_len) {
@@ -1023,7 +1032,7 @@ fn group_spans(
     let rate = plan.source.sample_rate() as f64;
     let first = g * READ_GROUP * CONTROL;
     // As `render_voice`: a time-mapped voice sounds where it is in its span.
-    let on = |pt: &Point| pt.active && pt.in_span && pt.gain != 0.0;
+    let on = |pt: &Point| pt.active && pt.in_span && (stretch_block.is_some() || pt.gain != 0.0);
     let mut spans: Vec<(i64, i64)> = Vec::new();
     let mut prev: Option<Point> = None;
     for k in 0..=READ_GROUP {

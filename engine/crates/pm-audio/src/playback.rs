@@ -257,6 +257,7 @@ impl Playback {
             shared: shared.clone(),
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
+            pending_segment: None,
             mixer,
             config,
             solo: None,
@@ -752,6 +753,9 @@ struct RenderThread {
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
+    /// An undecoded segment is retried before advancing the transport.
+    /// Never feed its zero-filled samples into the shuttle or converter.
+    pending_segment: Option<crate::transport::Segment>,
     mixer: Mixer,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
@@ -1017,6 +1021,7 @@ impl RenderThread {
 
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
+        self.pending_segment = None;
         // A seek or a new run starts on the current mix.
         self.mixer.end_glides();
         let position = self.transport.position();
@@ -1051,7 +1056,11 @@ impl RenderThread {
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
         while self.ring.queued() < target {
-            let Some(seg) = self.transport.next(CHUNK) else {
+            let Some(seg) = self
+                .pending_segment
+                .take()
+                .or_else(|| self.transport.next(CHUNK))
+            else {
                 if self.transport.take_stop() == Effect::Stopped {
                     // The shuttle's and the converter's tails belong to the run.
                     self.finish_shuttle();
@@ -1078,6 +1087,16 @@ impl RenderThread {
                 Ok(report) => {
                     if report.starved > 0 {
                         self.shared.starved.fetch_add(1, Ordering::Relaxed);
+                        // SourceCache queued the missing blocks. Preserve
+                        // this segment and all valid DSP history until a
+                        // later turn can render it completely. A real-time
+                        // device may underrun (counted by the ring), but no
+                        // downstream filter consumes undecoded silence.
+                        self.pending_segment = Some(seg);
+                        for (id, e) in report.errors {
+                            self.error(format!("{id}: {e}"));
+                        }
+                        return;
                     }
                     for (id, e) in report.errors {
                         self.error(format!("{id}: {e}"));

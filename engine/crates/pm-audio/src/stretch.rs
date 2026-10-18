@@ -121,9 +121,9 @@ pub struct StretchRun {
     live: Option<Live>,
     /// A spare stretcher, reset, from the last run.
     spare: Option<Stretcher>,
-    /// Whether every source read so far since the last fresh start was
-    /// complete (decoded).
-    complete: bool,
+    /// A missing read stopped production. Keep the valid history so the
+    /// next render can catch up once that input has decoded.
+    pending: bool,
     scratch_in: Vec<Vec<f32>>,
     scratch_out: Vec<Vec<f32>>,
     /// Map points evaluated (diagnostics).
@@ -151,7 +151,7 @@ impl StretchRun {
             pos: i64::MIN,
             live: None,
             spare: None,
-            complete: true,
+            pending: false,
             scratch_in: vec![Vec::new(); channels],
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
@@ -240,13 +240,25 @@ impl StretchRun {
         out: &mut [Vec<f32>],
     ) -> Result<bool> {
         let end = a + n as i64;
-        let continues = self.pos != i64::MIN && a >= self.buf_start && a <= self.pos;
+        for o in out.iter_mut() {
+            o.clear();
+            o.resize(n, 0.0);
+        }
+        let continues =
+            self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || self.pending);
         if !continues {
-            self.fresh(a, map, read)?;
+            self.pending = false;
             self.fresh_starts += 1;
+            if !self.fresh(a, map, read)? {
+                self.pending = true;
+                return Ok(false);
+            }
         }
         while self.pos < end {
-            self.produce(end, map, read)?;
+            if !self.produce(end, map, read)? {
+                self.pending = true;
+                return Ok(false);
+            }
         }
         for (o, b) in out.iter_mut().zip(&self.buf) {
             o.clear();
@@ -268,11 +280,12 @@ impl StretchRun {
             self.points.pop_front();
             self.points_from += 1;
         }
-        Ok(std::mem::replace(&mut self.complete, true))
+        self.pending = false;
+        Ok(true)
     }
 
     /// Starts rendering at `a` without a usable history.
-    fn fresh(&mut self, a: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn fresh(&mut self, a: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<bool> {
         self.end_live();
         let g = a.div_euclid(GRID) * GRID - preroll(self.rate);
         let k0 = g.div_euclid(CONTROL);
@@ -299,14 +312,14 @@ impl StretchRun {
                 let s = k * CONTROL;
                 self.buf_start = s;
                 self.pos = s;
-                self.begin(s, dir, map, read)?;
+                return self.begin(s, dir, map, read);
             }
             None => {
                 self.buf_start = a;
                 self.pos = a;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn end_live(&mut self) {
@@ -316,7 +329,13 @@ impl StretchRun {
     }
 
     /// Starts a run at output sample `s` (a control point) reading in `dir`.
-    fn begin(&mut self, s: i64, dir: i8, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn begin(
+        &mut self,
+        s: i64,
+        dir: i8,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+    ) -> Result<bool> {
         self.end_live();
         let mut stretcher = match self.spare.take() {
             Some(mut st) => {
@@ -331,7 +350,10 @@ impl StretchRun {
         let rate = ((r - l).abs() / CONTROL as f64).clamp(HOLD_RATE, CUT_RATE);
         let u0 = (dir as f64 * l).round() as i64;
         let len = stretcher.output_seek_length(rate).max(1);
-        self.stream(u0, len, dir, read)?;
+        if !self.stream(u0, len, dir, read)? {
+            self.spare = Some(stretcher);
+            return Ok(false);
+        }
         {
             let views: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             stretcher.output_seek(&views).map_err(stretch_error)?;
@@ -342,27 +364,29 @@ impl StretchRun {
             start: s,
             fed: u0 + len as i64,
         });
-        Ok(())
+        Ok(true)
     }
 
     /// Reads stream samples `[u0, u0 + len)` (stream index `u = dir × x`)
     /// into `scratch_in`.
-    fn stream(&mut self, u0: i64, len: usize, dir: i8, read: &mut ReadFn<'_>) -> Result<()> {
+    fn stream(&mut self, u0: i64, len: usize, dir: i8, read: &mut ReadFn<'_>) -> Result<bool> {
         for c in &mut self.scratch_in {
             c.clear();
             c.resize(len, 0.0);
         }
         if len == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let lo = if dir > 0 { u0 } else { -(u0 + len as i64) + 1 };
-        self.complete &= read(lo, len, &mut self.scratch_in)?;
+        if !read(lo, len, &mut self.scratch_in)? {
+            return Ok(false);
+        }
         if dir < 0 {
             for c in &mut self.scratch_in {
                 c[..len].reverse();
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The first control index in `[from, to]` whose interval does not
@@ -378,7 +402,7 @@ impl StretchRun {
 
     /// Produces output from `pos` up to the next call boundary, class
     /// change, or (when dormant) control point.
-    fn produce(&mut self, end: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn produce(&mut self, end: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<bool> {
         let Some(live) = self.live.as_ref() else {
             let k = self.pos.div_euclid(CONTROL);
             if self.pos.rem_euclid(CONTROL) == 0
@@ -397,7 +421,7 @@ impl StretchRun {
                 b.resize(b.len() + n, 0.0);
             }
             self.pos = stop;
-            return Ok(());
+            return Ok(true);
         };
         let (dir, start) = (live.dir, live.start);
         let interval = live.stretcher.interval_samples() as i64;
@@ -436,7 +460,11 @@ impl StretchRun {
         let fed = self.live.as_ref().expect("live").fed;
         let to = (target.round() as i64 + in_lat).max(fed);
         let len = (to - fed) as usize;
-        self.stream(fed, len, dir, read)?;
+        // Never feed zero-filled, undecoded input to the vocoder: it
+        // changes every later analysis even after the cache catches up.
+        if !self.stream(fed, len, dir, read)? {
+            return Ok(false);
+        }
         for c in &mut self.scratch_out {
             c.clear();
             c.resize(m, 0.0);
@@ -458,13 +486,83 @@ impl StretchRun {
         if let Some(k) = change {
             self.end_live();
             if let Class::Run(next) = self.class(k, map)? {
-                self.begin(stop, next, map, read)?;
+                return self.begin(stop, next, map, read);
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 
 fn stretch_error(e: pm_stretch::StretchError) -> AudioError {
     AudioError::Device(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_input_never_poison_stretch_history() {
+        for dir in [1.0, -1.0] {
+            // A miss during output_seek, and one after analysis has begun.
+            for missing_read in [0, 4, 22] {
+                let mut expected = StretchRun::new(2, 48_000, 0);
+                let mut actual = StretchRun::new(2, 48_000, 0);
+                let mut map = |k: i64| {
+                    Ok(MapPoint {
+                        x: 200_000.0 + dir * k as f64 * CONTROL as f64 * 1.5,
+                        on: true,
+                    })
+                };
+                let signal =
+                    |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                        for (c, channel) in out.iter_mut().enumerate() {
+                            channel.clear();
+                            channel.extend((lo..lo + n as i64).map(|s| {
+                                ((s as f64 * (0.057 + c as f64 * 0.013)).sin() * 0.2) as f32
+                            }));
+                        }
+                        Ok(true)
+                    };
+                let mut reads = 0;
+                let mut delayed = |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                    let missing = reads == missing_read;
+                    reads += 1;
+                    if missing {
+                        for channel in out.iter_mut() {
+                            channel.clear();
+                            channel.resize(n, 0.0);
+                        }
+                        Ok(false)
+                    } else {
+                        signal(lo, n, out)
+                    }
+                };
+                let mut reference = vec![Vec::new(); 2];
+                let mut played = vec![Vec::new(); 2];
+                let mut misses = 0;
+                for start in (48_000..60_000).step_by(256) {
+                    expected
+                        .render(start, 256, &mut map, &mut { signal }, &mut reference)
+                        .unwrap();
+                    let complete = actual
+                        .render(start, 256, &mut map, &mut delayed, &mut played)
+                        .unwrap();
+                    if complete {
+                        assert_eq!(
+                            played, reference,
+                            "direction {dir}, missing read {missing_read}, at {start}"
+                        );
+                    } else {
+                        misses += 1;
+                        assert!(
+                            played.iter().flatten().all(|&v| v == 0.0),
+                            "incomplete stretch must be silent"
+                        );
+                    }
+                }
+                assert_eq!(misses, 1, "the missing input is reported, then recovered");
+            }
+        }
+    }
 }
