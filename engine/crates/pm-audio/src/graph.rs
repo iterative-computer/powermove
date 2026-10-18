@@ -624,9 +624,14 @@ impl Walk<'_, '_> {
                 continue;
             };
             digest(&mut h, node::member(Some(layer), "id"));
-            digest(&mut h, node::member(Some(layer), "from"));
+            for key in ["from", "dur", "on"] {
+                digest(&mut h, node::member(Some(layer), key));
+            }
+            for &g in &level.groups {
+                digest(&mut h, node::member(comp.layers().get(g), "on"));
+            }
             let d = node::member(Some(layer), "d");
-            for key in ["trim", "speed", "timeRemap", "sourceTime"] {
+            for key in ["trim", "speed", "timeRemap", "sourceTime", "audioMuted"] {
                 digest(&mut h, node::member(d, key));
             }
         }

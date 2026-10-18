@@ -3018,3 +3018,228 @@ fn play_preempts_paused_preparation_after_an_edit() {
     drop(playback);
     cache.shutdown();
 }
+
+/// A8: a paused level edit followed by Play in the same control batch
+/// preserves every warmed voice, and the result is the edited offline PCM.
+#[test]
+fn edit_then_play_reuses_all_sixteen_stretched_voices() {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir("a8-level-start");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 12.0, 997.0, 0.01), tone(SR, 12.0, 631.0, 0.005)],
+    );
+    let cache = SourceCache::new(128 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    for b in 0..9 {
+        cache.block(&source, b, true).unwrap();
+    }
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = |gain| {
+        let layers: Vec<String> = (0..16)
+            .map(|i| {
+                audio(
+                    &format!("v{i}"),
+                    "s",
+                    0.0,
+                    8.0,
+                    &format!(r#", "speed":1.5, "gain":{gain}"#),
+                    "",
+                )
+            })
+            .collect();
+        Arc::new(project(30.0, 8.0, &layers, &[], ""))
+    };
+    let path = |_: &str| Some(file.clone());
+    playback.set_project(doc(1.0), "C", &path).unwrap();
+    let mut out = vec![0.0; 512 * 2];
+    for gain in [0.3, 0.7, 0.2, 1.0] {
+        playback.command(TransportCommand::Pause).unwrap();
+        side.callback(&mut out, 2, host_now_us());
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(4.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        let edited = doc(gain);
+        playback.set_project(edited.clone(), "C", &path).unwrap();
+        let before = playback.stats();
+        let at = std::time::Instant::now();
+        playback
+            .commands([
+                TransportCommand::SetLoop { range: None },
+                TransportCommand::Seek {
+                    time: ticks(4.0),
+                    mode: SeekMode::Exact,
+                },
+                TransportCommand::Play {
+                    rate: PlaybackRate::NORMAL,
+                },
+            ])
+            .unwrap();
+        let bound = Duration::from_secs_f64(512.0 / SR as f64);
+        while side.queued_frames() < 512 && at.elapsed() < bound {
+            std::thread::yield_now();
+        }
+        assert!(
+            side.queued_frames() >= 512,
+            "edited first buffer: {:?}",
+            at.elapsed()
+        );
+        eprintln!(
+            "A8 sixteen-voice level edit first buffer: {:.3} ms",
+            at.elapsed().as_secs_f64() * 1000.0
+        );
+        side.callback(&mut out, 2, host_now_us());
+        let rig = Rig::new(&[("s", file.as_path())]);
+        let mut reference = rig.mixer((*edited).clone(), "C", MixFormat::stereo(SR));
+        let mut expected = vec![vec![]; 2];
+        reference
+            .render(
+                4 * SR as i64,
+                512,
+                &mut expected,
+                &pm_audio::RenderOptions {
+                    wait: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for i in 0..512 {
+            for c in 0..2 {
+                assert_eq!(out[2 * i + c], expected[c][i]);
+            }
+        }
+        assert_eq!(playback.stats().starved_renders, before.starved_renders);
+        assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
+    }
+    drop(playback);
+    cache.shutdown();
+}
+
+/// A first callback is submitted before its presentation time. Pausing in
+/// that interval must keep the seek target, including a loop's first frame.
+#[test]
+fn pausing_before_the_first_buffer_is_presented_keeps_the_prepared_target() {
+    let dir = temp_dir("a8-first-presentation");
+    let file = ramp_file(&dir, 8);
+    for looping in [false, true] {
+        let (playback, mut dev, _rig) = setup(&file, 8.0, SR, 0.0);
+        if looping {
+            playback
+                .command(TransportCommand::SetLoop {
+                    range: Some(TickRange {
+                        start: ticks(4.0),
+                        end: ticks(6.0),
+                    }),
+                })
+                .unwrap();
+        }
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(4.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        until(|| dev.side.queued_frames() >= BUFFER);
+        dev.side.callback(&mut dev.out, 2, host_now_us() + 100_000);
+        assert_eq!(playback.clock().unwrap().state, TransportState::Playing);
+        playback.command(TransportCommand::Pause).unwrap();
+        assert_eq!(playback.clock().unwrap().media_time, ticks(4.0));
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(4.005),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        // A raw seek still prepares the displayed frame as well as its
+        // sample-exact target; the app's next normal Play uses that frame.
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64 + 240)));
+    }
+}
+
+/// Prepared loop starts apply at a wrap. Straight entry from before the
+/// work area must keep the running vocoder's phase history.
+#[test]
+fn entering_the_loop_keeps_the_uninterrupted_stretch_history() {
+    let dir = temp_dir("a7-loop-entry");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 4.0, 997.0, 0.2), tone(SR, 4.0, 631.0, 0.1)],
+    );
+    let doc = || {
+        project(
+            30.0,
+            3.0,
+            &[audio("A", "s", 0.0, 3.0, r#", "speed":1.5"#, "")],
+            &[],
+            "",
+        )
+    };
+    let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(1.0),
+                end: ticks(1.5),
+            }),
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(0.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    until(|| playback.prepared_starts().contains(&(SR as i64)));
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(70);
+    let stats = playback.stats();
+    drop(playback);
+    let mut reference = rig.mixer(doc(), "C", MixFormat::stereo(SR));
+    let expected = rig.render(&mut reference, SR as i64 / 2, SR as i64 / 2 + 32_000, 4096);
+    let played: Vec<Vec<f32>> = (0..2)
+        .map(|c| {
+            dev.log
+                .iter()
+                .flat_map(|(_, b)| b.iter().skip(c).step_by(2).copied())
+                .collect()
+        })
+        .collect();
+    let start = played[0].iter().position(|v| *v != 0.0).unwrap();
+    let lead = expected[0].iter().position(|v| *v != 0.0).unwrap();
+    for c in 0..2 {
+        assert_eq!(
+            &played[c][start - lead..start - lead + 32_000],
+            &expected[c]
+        );
+    }
+    assert_eq!(stats.underruns, 0);
+    assert_eq!(stats.starved_renders, 0);
+}

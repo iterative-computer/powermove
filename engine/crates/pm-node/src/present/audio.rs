@@ -423,14 +423,16 @@ impl Control {
                 if self.dirty {
                     self.set_project();
                 }
-                self.command(TransportCommand::SetLoop {
-                    range: self.loop_range,
-                });
-                self.command(TransportCommand::Seek {
-                    time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
-                    mode: SeekMode::Exact,
-                });
-                self.command(TransportCommand::Play { rate });
+                self.commands(&[
+                    TransportCommand::SetLoop {
+                        range: self.loop_range,
+                    },
+                    TransportCommand::Seek {
+                        time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
+                        mode: SeekMode::Exact,
+                    },
+                    TransportCommand::Play { rate },
+                ]);
             }
         }
         true
@@ -459,21 +461,27 @@ impl Control {
     }
 
     fn command(&mut self, command: TransportCommand) {
+        self.commands(&[command]);
+    }
+
+    fn commands(&mut self, commands: &[TransportCommand]) {
         let Some(playback) = &self.playback else {
             return;
         };
-        if matches!(
-            command,
-            TransportCommand::Play { .. }
-                | TransportCommand::PlayAround { .. }
-                | TransportCommand::Seek {
-                    mode: SeekMode::Scrub,
-                    ..
-                }
-        ) {
+        if commands.iter().any(|command| {
+            matches!(
+                command,
+                TransportCommand::Play { .. }
+                    | TransportCommand::PlayAround { .. }
+                    | TransportCommand::Seek {
+                        mode: SeekMode::Scrub,
+                        ..
+                    }
+            )
+        }) {
             self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
         }
-        if let Err(error) = playback.command(command) {
+        if let Err(error) = playback.commands(commands.iter().copied()) {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             status.problems.push(format!("transport: {error}"));
             if status.problems.len() > 16 {

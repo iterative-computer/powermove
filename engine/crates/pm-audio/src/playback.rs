@@ -131,6 +131,11 @@ impl DeviceSide {
 type DeviceWatch = Box<dyn FnMut() -> Option<(u32, u32)> + Send>;
 
 enum Control {
+    Commands(
+        Vec<TransportCommand>,
+        std::sync::mpsc::SyncSender<Result<()>>,
+        u64,
+    ),
     Command(
         TransportCommand,
         std::sync::mpsc::SyncSender<Result<()>>,
@@ -415,6 +420,7 @@ impl Playback {
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
             pending_segment: None,
+            last_segment_end: None,
             stalls: HashMap::new(),
             startup: None,
             render_failure: None,
@@ -500,6 +506,22 @@ impl Playback {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.tx
             .send(Control::Command(command, reply, host_now_us()))
+            .map_err(|_| AudioError::Device("playback stopped".into()))?;
+        answer
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| AudioError::Device("the render thread did not answer".into()))?
+    }
+
+    /// Applies related controls in order, without idle preparation between
+    /// them. Earlier controls remain applied if a later one is invalid.
+    pub fn commands(&self, commands: impl IntoIterator<Item = TransportCommand>) -> Result<()> {
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(Control::Commands(
+                commands.into_iter().collect(),
+                reply,
+                host_now_us(),
+            ))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         answer
             .recv_timeout(Duration::from_secs(5))
@@ -984,6 +1006,9 @@ struct RenderThread {
     /// An undecoded segment is retried before advancing the transport.
     /// Never feed its zero-filled samples into the shuttle or converter.
     pending_segment: Option<crate::transport::Segment>,
+    /// End of the last committed segment, to distinguish a wrap from
+    /// continuous entry into the work area.
+    last_segment_end: Option<i64>,
     /// Each voice owns its deadline and notification until it recovers.
     stalls: HashMap<String, VoiceStall>,
     /// The device frame a play or seek began pre-rolling, until its first
@@ -1031,7 +1056,7 @@ impl RenderThread {
         let mut lookahead_pending = false;
         loop {
             // Controls.
-            let wait = if self.transport.is_running() {
+            let wait = if self.transport.is_running() || self.settled.is_none() {
                 Duration::from_millis(2)
             } else {
                 Duration::from_millis(20)
@@ -1075,6 +1100,11 @@ impl RenderThread {
                 last_prefetch = None;
             }
             self.fill();
+            // Replenish one loop/work-area voice between fills, while the
+            // ring is full. Never put sixteen fresh pre-rolls on a wrap.
+            if self.pending_segment.is_none() && !self.preempted() {
+                self.prepare_boundaries();
+            }
             // Keep the sources decoding ahead of the playhead. Bounding a
             // time-mapped voice's reads evaluates its control points, so a
             // long look-ahead is spread over the loop's turns (the ring stays
@@ -1128,7 +1158,18 @@ impl RenderThread {
     /// is at the epoch's start, not on the old line.
     fn heard_sample(&self) -> Option<i64> {
         let clock = self.shared.clock.latest()?;
-        if clock.epoch != self.transport.epoch() {
+        let now_us = host_now_us();
+        // The callback publishes a line for a future device presentation.
+        // Before the epoch's first frame is audible, extrapolating that line
+        // backwards moves Pause before its seek target (or around the loop).
+        let before_first_output = self.shared.start_timing.latest().is_some_and(|first| {
+            first.epoch == self.transport.epoch()
+                && now_us
+                    < first
+                        .device_host_us
+                        .saturating_add(self.shared.latency_us.load(Ordering::Relaxed) as u64)
+        });
+        if clock.epoch != self.transport.epoch() || before_first_output {
             return self
                 .epoch_start
                 .filter(|(e, _)| *e == self.transport.epoch())
@@ -1137,7 +1178,7 @@ impl RenderThread {
         if clock.state == TransportState::Stopped {
             return None;
         }
-        let now = pm_protocol::common::HostMicros::new(host_now_us()).ok()?;
+        let now = pm_protocol::common::HostMicros::new(now_us).ok()?;
         let ticks = clock.media_time_at(now).get();
         Some(crate::offline::sample_of_ticks(
             ticks,
@@ -1153,6 +1194,19 @@ impl RenderThread {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         match c {
+            Control::Commands(commands, reply, requested_us) => {
+                let mut restart = false;
+                for command in commands {
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                    restart |= self.control(Control::Command(command, tx, requested_us));
+                    if let Ok(Err(error)) = rx.try_recv() {
+                        let _ = reply.send(Err(error));
+                        return restart;
+                    }
+                }
+                let _ = reply.send(Ok(()));
+                restart
+            }
             Control::Command(cmd, reply, requested_us) => {
                 // A pause, a step, a play around, or a new J/K/L rate while
                 // running starts from what is heard.
@@ -1206,6 +1260,7 @@ impl RenderThread {
                 restart
             }
             Control::Project(doc, graph, rate, end) => {
+                self.settled = None;
                 // A live edit glides into the new mix (a retune); paused, the
                 // next run starts on it.
                 if self.transport.is_running() {
@@ -1316,30 +1371,28 @@ impl RenderThread {
             }
         }
         let rate = self.transport.rate() as i64;
-        let mut starts = vec![self.transport.position()];
-        if let Some(range) = self.transport.loop_range() {
-            starts.push(crate::offline::sample_of_ticks(
-                range.start.get(),
-                rate as u32,
-            ));
-            starts.push(
-                crate::offline::sample_of_ticks(range.end.get(), rate as u32)
-                    .saturating_sub(CHUNK as i64)
-                    .max(0),
-            );
+        let position = self.transport.position();
+        // The app pauses on the displayed composition frame, while the
+        // audio line can stop a fraction of a frame beyond it. Warm that
+        // exact frame first, then the unsnapped position for raw API seeks.
+        let frame_start =
+            pm_eval::Comp::resolve(self.mixer.document(), &self.mixer.graph().comp_id)
+                .ok()
+                .and_then(|comp| comp.rate())
+                .and_then(|fps| {
+                    let frame = fps.rate.frame_of(self.transport.ticks_of(position));
+                    fps.rate.frame_start(frame).ok()
+                })
+                .map(|ticks| crate::offline::sample_of_ticks(ticks, rate as u32))
+                .unwrap_or(position)
+                .max(0);
+        let mut starts = vec![frame_start];
+        if position != frame_start {
+            starts.push(position);
         }
-        if let Ok(comp) = pm_eval::Comp::resolve(self.mixer.document(), &self.mixer.graph().comp_id)
-            && let Some(work) = pm_eval::node::array(comp.member("work"))
-        {
-            for edge in work.iter().take(2) {
-                if let Some(seconds) = pm_eval::node::number(Some(edge)).filter(|t| t.is_finite()) {
-                    let at = (seconds * rate as f64).round() as i64;
-                    // Bound retained DSP histories to the playhead and
-                    // work-area boundaries, regardless of work-area length.
-                    if starts.len() < 3 && !starts.contains(&at) {
-                        starts.push(at.max(0));
-                    }
-                }
+        for at in self.boundary_starts() {
+            if starts.len() < 3 && !starts.contains(&at) {
+                starts.push(at);
             }
         }
         starts.dedup();
@@ -1358,36 +1411,29 @@ impl RenderThread {
         let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
             .max(CHUNK as i64);
         let mut ready = Vec::new();
-        // Starts in priority order (the playhead first). The first start
-        // whose look-ahead is not yet bounded gets the turn's whole bounding
-        // budget, the six windows' worth the pass used to spread over every
-        // start; reverse look-behind windows follow once all are bounded.
         let mut forward = true;
         for start in starts.iter().copied() {
-            // Each start renders every voice (fresh stretch pre-roll after
-            // an edit); a Play or seek must not wait for the remaining ones.
             if self.preempted() {
-                break;
-            }
-            // Read bounds include stretch's deterministic pre-roll. Do not
-            // block commands evaluating a large work area all in one turn.
-            // In steps, so a control waits for at most one step.
-            let mut bounded = false;
-            for _ in 0..6 {
-                bounded = self
-                    .mixer
-                    .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS);
-                if bounded || self.preempted() {
-                    break;
-                }
-            }
-            if !bounded {
                 forward = false;
                 break;
             }
-            let first = (self.config.preroll_ms as usize * rate as usize / 1000).max(CHUNK);
-            if self.mixer.is_ready(start, first) && self.mixer.prepare_start(start) {
-                ready.push(start);
+            // The first chunk's pre-roll comes before the optional three
+            // seconds of read-ahead. Otherwise edits spend hundreds of ms
+            // bounding audio that Play does not yet need.
+            if !self.mixer.prepared_ready(&[start]) {
+                self.mixer.prefetch_within(start, CHUNK, LOOKAHEAD_GROUPS);
+                if !self.mixer.prepare_start(start) {
+                    forward = false;
+                    break;
+                }
+            }
+            ready.push(start);
+            if !self
+                .mixer
+                .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS)
+            {
+                forward = false;
+                break;
             }
         }
         let mut behind = forward;
@@ -1412,6 +1458,48 @@ impl RenderThread {
             .unwrap_or_else(|e| e.into_inner()) = ready;
     }
 
+    /// Work-area and loop boundaries, independent of the moving playhead.
+    fn boundary_starts(&self) -> Vec<i64> {
+        let rate = self.transport.rate();
+        let mut starts = Vec::new();
+        if let Some(range) = self.transport.loop_range() {
+            starts.push(crate::offline::sample_of_ticks(range.start.get(), rate));
+            starts.push(
+                crate::offline::sample_of_ticks(range.end.get(), rate)
+                    .saturating_sub(CHUNK as i64)
+                    .max(0),
+            );
+        }
+        if let Ok(comp) = pm_eval::Comp::resolve(self.mixer.document(), &self.mixer.graph().comp_id)
+            && let Some(work) = pm_eval::node::array(comp.member("work"))
+        {
+            for edge in work.iter().take(2) {
+                if let Some(t) = pm_eval::node::number(Some(edge)).filter(|t| t.is_finite()) {
+                    let at = ((t * rate as f64).round() as i64).max(0);
+                    if starts.len() < 3 && !starts.contains(&at) {
+                        starts.push(at);
+                    }
+                }
+            }
+        }
+        starts
+    }
+
+    fn prepare_boundaries(&mut self) {
+        if self.transport.play_rate() < 0 {
+            return;
+        }
+        let starts = self.boundary_starts();
+        self.mixer.retain_prepared(&starts);
+        for start in starts {
+            if !self.mixer.prepared_ready(&[start]) {
+                self.mixer.prefetch_within(start, CHUNK, LOOKAHEAD_GROUPS);
+                self.mixer.prepare_start(start);
+                break;
+            }
+        }
+    }
+
     /// A control arrived during idle preparation: keep it for the loop.
     fn preempted(&mut self) -> bool {
         if self.deferred.is_none()
@@ -1425,6 +1513,7 @@ impl RenderThread {
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
+        self.last_segment_end = None;
         self.stalls.clear();
         self.render_failure = None;
         self.shared
@@ -1437,19 +1526,24 @@ impl RenderThread {
         self.mixer.end_glides();
         self.mixer.abandon_retries();
         let position = self.transport.position();
+        let prepared = self.transport.play_rate() == 1 && self.mixer.prepared_ready(&[position]);
         if self.transport.play_rate() == 1 {
             self.mixer.use_prepared(position);
         }
-        let rate = self.transport.rate() as i64;
         let speed = self.transport.play_rate();
-        let frames = self.config.preroll_ms as i64 * rate / 1000 * speed.abs().max(1);
+        // Only the first input chunk gates Play. The ordinary bounded
+        // look-ahead fills the rest after output is queued; evaluating a
+        // quarter-second of every edited map here delayed the first sample.
+        let frames = CHUNK as i64 * speed.abs().max(1);
         let from = if speed < 0 {
             position - frames
         } else {
             position
         };
         let frames = frames as usize;
-        self.mixer.prefetch(from, frames);
+        if !prepared {
+            self.mixer.prefetch(from, frames);
+        }
         // The A3 start hold: wait for every voice's pre-roll, for at most
         // `preroll_wait_ms` of wall time and SOURCE_WAIT_MS of device time.
         // Nothing of this run is queued, so no ready voice goes silent while
@@ -1459,7 +1553,8 @@ impl RenderThread {
         self.startup = Some(device_start);
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
-        while !self.mixer.is_ready(from, frames)
+        while !prepared
+            && !self.mixer.is_ready(from, frames)
             && std::time::Instant::now() < deadline
             && self.ring.played_frames().saturating_sub(device_start)
                 < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
@@ -1526,6 +1621,15 @@ impl RenderThread {
                 no_stretch: seg.rate < 0,
             };
             let n = (hi - lo) as usize;
+            if !retry
+                && seg.rate > 0
+                && self.last_segment_end.is_some_and(|end| lo < end)
+                && seg.loop_range.is_some_and(|range| {
+                    lo == crate::offline::sample_of_ticks(range.start.get(), self.transport.rate())
+                })
+            {
+                self.mixer.use_prepared(lo);
+            }
             let mut result = self.mixer.render(lo, n, &mut planar, &options);
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
@@ -1626,6 +1730,7 @@ impl RenderThread {
                     }
                 }
             }
+            self.last_segment_end = Some(hi);
             if seg.rate < 0 {
                 for c in &mut planar {
                     c.reverse();

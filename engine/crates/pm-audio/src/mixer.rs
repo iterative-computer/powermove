@@ -239,7 +239,7 @@ pub struct Mixer {
 
 struct Prepared {
     runs: Vec<Option<Arc<std::sync::Mutex<StretchRun>>>>,
-    ready: bool,
+    ready: Vec<bool>,
 }
 
 impl Mixer {
@@ -368,47 +368,77 @@ impl Mixer {
         }
     }
 
-    /// Prepare one paused start without touching the live vocoder histories,
-    /// meters, transport, or device. Missing input never blocks this worker.
+    /// Prepare at most one voice per turn. Separate histories never advance
+    /// the audible mix; keeping the unit small lets controls and ring fills
+    /// run between fresh vocoder pre-rolls.
     pub(crate) fn prepare_start(&mut self, start: i64) -> bool {
-        if self.prepared.get(&start).is_some_and(|p| p.ready) {
-            return true;
-        }
         let mut prepared = self.prepared.remove(&start).unwrap_or_else(|| Prepared {
-            runs: self
-                .voices
-                .iter()
-                .map(|v| {
-                    v.stretch.as_ref().map(|run| {
-                        let run = run.lock().unwrap_or_else(|e| e.into_inner());
-                        Arc::new(std::sync::Mutex::new(StretchRun::new(
-                            run.channels(),
-                            self.format.sample_rate,
-                            run.key(),
-                        )))
-                    })
-                })
-                .collect(),
-            ready: false,
+            runs: self.voices.iter().map(|_| None).collect(),
+            ready: vec![false; self.voices.len()],
         });
-        for (v, run) in self.voices.iter_mut().zip(&mut prepared.runs) {
-            std::mem::swap(&mut v.stretch, run);
+        if let Some(vi) = prepared.ready.iter().position(|ready| !ready) {
+            if let Some(live) = &self.voices[vi].stretch {
+                let run = prepared.runs[vi].get_or_insert_with(|| {
+                    let live = live.lock().unwrap_or_else(|e| e.into_inner());
+                    Arc::new(std::sync::Mutex::new(StretchRun::new(
+                        live.channels(),
+                        self.format.sample_rate,
+                        live.key(),
+                    )))
+                });
+                let doc = self.doc.clone();
+                let graph = self.graph.clone();
+                let result = (|| -> Result<bool> {
+                    let comps = graph.resolve(&doc)?;
+                    let plan = &graph.voices[vi];
+                    let p = self.format.sample_rate as f64;
+                    let (first, last) = voice_bounds(&self.voices[vi].reader, plan, p);
+                    let a = start.max(first);
+                    let b = (start + crate::ring::CHUNK as i64).min(last);
+                    if b <= a {
+                        return Ok(true);
+                    }
+                    let (ev, retime) = (&mut self.ev, &mut self.retime);
+                    let mut map = |c: i64| -> Result<MapPoint> {
+                        let pt =
+                            plan.evaluate(ev, &comps, &comps[0], (c * CONTROL) as f64 / p, retime)?;
+                        Ok(MapPoint {
+                            x: pt.source_time * p,
+                            on: pt.active && pt.in_span,
+                        })
+                    };
+                    let cache = self.cache.clone();
+                    let reader = self.voices[vi].project_reader.as_ref().unwrap();
+                    let source = &plan.source;
+                    let mut src = Vec::new();
+                    let mut read = |lo, len, out: &mut [Vec<f32>]| {
+                        read_linear(
+                            &cache,
+                            source,
+                            self.format.sample_rate,
+                            reader,
+                            lo,
+                            len,
+                            out,
+                            &mut src,
+                            false,
+                        )
+                    };
+                    let mut out = vec![Vec::new(); source.channels()];
+                    run.lock().unwrap_or_else(|e| e.into_inner()).render(
+                        a,
+                        (b - a) as usize,
+                        &mut map,
+                        &mut read,
+                        &mut out,
+                    )
+                })();
+                prepared.ready[vi] = result.unwrap_or(false);
+            } else {
+                prepared.ready[vi] = self.is_ready(start, crate::ring::CHUNK);
+            }
         }
-        let mut out = vec![Vec::new(); self.format.channels()];
-        // Outgoing glides belong to the previous audible run. Preparing
-        // a new start must neither advance them nor touch their vocoders.
-        let result = self.render_current(
-            start,
-            crate::ring::CHUNK,
-            &mut out,
-            &RenderOptions::default(),
-            None,
-        );
-        for (v, run) in self.voices.iter_mut().zip(&mut prepared.runs) {
-            std::mem::swap(&mut v.stretch, run);
-        }
-        prepared.ready = result.is_ok_and(|r| r.starved == 0 && r.errors.is_empty());
-        let ready = prepared.ready;
+        let ready = prepared.ready.iter().all(|r| *r);
         if self.prepared.len() >= 3 {
             self.prepared.clear();
         }
@@ -418,23 +448,33 @@ impl Mixer {
 
     /// Every start in `starts` holds a ready prepared history.
     pub(crate) fn prepared_ready(&self, starts: &[i64]) -> bool {
-        starts
-            .iter()
-            .all(|s| self.prepared.get(s).is_some_and(|p| p.ready))
+        starts.iter().all(|s| {
+            self.prepared
+                .get(s)
+                .is_some_and(|p| p.ready.iter().all(|r| *r))
+        })
     }
 
     pub(crate) fn retain_prepared(&mut self, starts: &[i64]) {
         self.prepared.retain(|start, _| starts.contains(start));
     }
 
-    /// Install the exact pre-rolled history for this paused start, if ready.
+    /// Install every ready voice at this start. Partial preparation still
+    /// saves work on an immediate Play; unprepared voices use ordinary pre-roll.
+    /// Other starts survive Play and are replenished after a loop consumes one.
     pub(crate) fn use_prepared(&mut self, start: i64) {
-        if let Some(prepared) = self.prepared.remove(&start).filter(|p| p.ready) {
-            for (v, run) in self.voices.iter_mut().zip(prepared.runs) {
-                v.stretch = run;
+        if let Some(prepared) = self.prepared.remove(&start) {
+            for ((v, run), ready) in self
+                .voices
+                .iter_mut()
+                .zip(prepared.runs)
+                .zip(prepared.ready)
+            {
+                if ready && run.is_some() {
+                    v.stretch = run;
+                }
             }
         }
-        self.prepared.clear();
     }
 
     /// Whether a retune glide is in progress.
@@ -443,7 +483,27 @@ impl Mixer {
     }
 
     fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
-        self.prepared.clear();
+        // A level/fade edit does not change the signal entering a vocoder.
+        // Dynamic plans can depend on other properties: invalidate those.
+        let old = &self.graph.voices;
+        for prepared in self.prepared.values_mut() {
+            let mut runs = Vec::with_capacity(graph.voices.len());
+            let mut ready = Vec::with_capacity(graph.voices.len());
+            for plan in &graph.voices {
+                let previous = old.iter().position(|p| {
+                    !p.animated
+                        && !plan.animated
+                        && p.constant_rate.is_some()
+                        && plan.constant_rate.is_some()
+                        && p.id == plan.id
+                        && p.map_key == plan.map_key
+                });
+                runs.push(previous.and_then(|i| prepared.runs[i].take()));
+                ready.push(previous.is_some_and(|i| prepared.ready[i]));
+            }
+            prepared.runs = runs;
+            prepared.ready = ready;
+        }
         let p = self.format.sample_rate;
         // Stretches in progress carry over to voices whose map did not
         // change (a fader drag during playback must not restart them).
@@ -1491,5 +1551,181 @@ fn reader_for(plan: &VoicePlan, project: u32) -> Reader {
             }
         }
         None => Reader::Free,
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    use crate::offline::{PcmFormat, WavWriter};
+    use pm_model::json::parse;
+
+    struct Fixture {
+        dir: std::path::PathBuf,
+        cache: Arc<SourceCache>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "pm-audio-prepared-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut w = WavWriter::new(
+                std::fs::File::create(dir.join("tone.wav")).unwrap(),
+                PcmFormat::F32,
+                2,
+                48_000,
+            )
+            .unwrap();
+            let pcm: Vec<f32> = (0..48_000 * 12)
+                .flat_map(|i| {
+                    let t = i as f64 / 48_000.0;
+                    [
+                        (0.2 * (t * 997.0 * std::f64::consts::TAU).sin()) as f32,
+                        (0.1 * (t * 631.0 * std::f64::consts::TAU).sin()) as f32,
+                    ]
+                })
+                .collect();
+            w.write(0, &pcm).unwrap();
+            w.finish().unwrap();
+            let cache = SourceCache::new(64 << 20, 0);
+            let source = cache.open(&dir.join("tone.wav"), None).unwrap();
+            for b in 0..9 {
+                cache.block(&source, b, true).unwrap();
+            }
+            Self { dir, cache }
+        }
+        fn graph(&self, gain: f64, speed: f64, dur: f64) -> (Arc<Document>, Arc<MixGraph>) {
+            self.mapped_graph(gain, &speed.to_string(), dur)
+        }
+        fn mapped_graph(&self, gain: f64, speed: &str, dur: f64) -> (Arc<Document>, Arc<MixGraph>) {
+            let layers: Vec<String> = (0..4).map(|i| format!(r#"{{"id":"v{i}","type":"audio","from":0,"dur":{dur},"on":true,"d":{{"asset":"s","gain":{gain},"trim":0,"fadeIn":0,"fadeOut":0,"speed":{speed}}}}}"#)).collect();
+            let doc = Arc::new(Document::new(
+                Some(
+                    parse(&format!(
+                        r#"{{"id":"P","compId":"C","fps":30,"dur":10,"layers":[{}],"comps":{{}}}}"#,
+                        layers.join(",")
+                    ))
+                    .unwrap(),
+                ),
+                1,
+            ));
+            let graph = Arc::new(
+                MixGraph::build(&doc, "C", &mut Evaluator::new(), &self.cache, &|_: &str| {
+                    Some(self.dir.join("tone.wav"))
+                })
+                .unwrap(),
+            );
+            (doc, graph)
+        }
+        fn mixer(&self, gain: f64, speed: f64, dur: f64) -> Mixer {
+            let (doc, graph) = self.graph(gain, speed, dur);
+            Mixer::new(
+                MixFormat::stereo(48_000),
+                doc,
+                graph,
+                Evaluator::new(),
+                self.cache.clone(),
+            )
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.cache.shutdown();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    fn prepare(m: &mut Mixer, start: i64) {
+        for _ in 0..m.voices.len() {
+            m.prepare_start(start);
+        }
+        assert!(m.prepared_ready(&[start]));
+    }
+    #[test]
+    fn play_retains_and_replenishes_exact_loop_histories() {
+        let f = Fixture::new();
+        let mut m = f.mixer(1.0, 1.5, 8.0);
+        let loop_start = 4 * 48_000;
+        for s in [0, loop_start, 6 * 48_000 - 256] {
+            prepare(&mut m, s);
+        }
+        m.use_prepared(0);
+        assert!(m.prepared_ready(&[loop_start, 6 * 48_000 - 256]));
+        let mut expected = f.mixer(1.0, 1.5, 8.0);
+        let mut a = vec![vec![]; 2];
+        let mut b = a.clone();
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        expected.render(loop_start, 4096, &mut b, &options).unwrap();
+        for _ in 0..5 {
+            m.use_prepared(loop_start);
+            for start in (loop_start..loop_start + 4096).step_by(256) {
+                m.render(start, 256, &mut a, &options).unwrap();
+                let offset = (start - loop_start) as usize;
+                for c in 0..2 {
+                    assert_eq!(a[c], b[c][offset..offset + 256]);
+                }
+            }
+            for v in &m.voices {
+                assert_eq!(v.stretch.as_ref().unwrap().lock().unwrap().fresh_starts, 1);
+            }
+            prepare(&mut m, loop_start);
+        }
+    }
+    #[test]
+    fn level_edits_reuse_histories_but_map_and_span_edits_invalidate() {
+        let f = Fixture::new();
+        let start = 4 * 48_000;
+        let mut m = f.mixer(1.0, 1.5, 8.0);
+        prepare(&mut m, start);
+        let (doc, graph) = f.graph(0.3, 1.5, 8.0);
+        m.set_graph(doc, graph);
+        assert!(m.prepared_ready(&[start]));
+        m.use_prepared(start);
+        let mut reference = f.mixer(0.3, 1.5, 8.0);
+        let mut a = vec![vec![]; 2];
+        let mut b = a.clone();
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        m.render(start, 512, &mut a, &options).unwrap();
+        reference.render(start, 512, &mut b, &options).unwrap();
+        assert_eq!(a, b);
+        prepare(&mut m, start);
+        let (doc, graph) = f.graph(0.3, 1.6, 8.0);
+        m.set_graph(doc, graph);
+        assert!(!m.prepared_ready(&[start]));
+        prepare(&mut m, start);
+        let (doc, graph) = f.graph(0.3, 1.6, 7.0);
+        m.set_graph(doc, graph);
+        assert!(!m.prepared_ready(&[start]));
+    }
+
+    #[test]
+    fn an_animated_map_is_not_reused_across_a_level_edit() {
+        let f = Fixture::new();
+        // Gain is static, but the speed channel can depend on other edited
+        // properties. VoicePlan::animated describes levels, not this map.
+        let speed =
+            r#"{"v":1.5,"kf":[{"t":0,"v":1.5,"i":"s0"},{"t":8,"v":1.6,"i":"s1"}],"expr":null}"#;
+        let (doc, graph) = f.mapped_graph(1.0, speed, 8.0);
+        assert!(!graph.voices[0].animated);
+        assert!(graph.voices[0].constant_rate.is_none());
+        let mut m = Mixer::new(
+            MixFormat::stereo(48_000),
+            doc,
+            graph,
+            Evaluator::new(),
+            f.cache.clone(),
+        );
+        prepare(&mut m, 4 * 48_000);
+        let (doc, graph) = f.mapped_graph(0.3, speed, 8.0);
+        m.set_graph(doc, graph);
+        assert!(!m.prepared_ready(&[4 * 48_000]));
     }
 }
