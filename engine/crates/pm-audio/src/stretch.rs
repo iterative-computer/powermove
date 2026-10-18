@@ -121,9 +121,14 @@ pub struct StretchRun {
     live: Option<Live>,
     /// A spare stretcher, reset, from the last run.
     spare: Option<Stretcher>,
-    /// Whether every source read so far since the last fresh start was
-    /// complete (decoded).
-    complete: bool,
+    /// A missing read stopped the render of output samples `[a, end)`.
+    /// Keep the valid history so the next request can catch up once the
+    /// input has decoded, when it continues that render: a retry of it, or
+    /// a request starting inside it or where it ended (the continuation
+    /// rule, for a caller that moves on past the miss). Any other request
+    /// (a seek, a loop wrap, a direction change) starts fresh by the
+    /// pre-roll rules, so it never walks the run over the gap.
+    pending: Option<(i64, i64)>,
     scratch_in: Vec<Vec<f32>>,
     scratch_out: Vec<Vec<f32>>,
     /// Map points evaluated (diagnostics).
@@ -151,7 +156,7 @@ impl StretchRun {
             pos: i64::MIN,
             live: None,
             spare: None,
-            complete: true,
+            pending: None,
             scratch_in: vec![Vec::new(); channels],
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
@@ -165,6 +170,18 @@ impl StretchRun {
 
     pub fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// Forgets a starved request, so the next render is judged by the
+    /// pre-roll rules alone (playback calls this when it seeks or starts a
+    /// run: what it renders next is a new request, not a retry).
+    pub fn abandon_retry(&mut self) {
+        self.pending = None;
+    }
+
+    /// The output range of a starved render the next request may continue.
+    pub fn pending_retry(&self) -> Option<(i64, i64)> {
+        self.pending
     }
 
     /// Offers map points the mixer already evaluated (control indexes from
@@ -240,13 +257,27 @@ impl StretchRun {
         out: &mut [Vec<f32>],
     ) -> Result<bool> {
         let end = a + n as i64;
-        let continues = self.pos != i64::MIN && a >= self.buf_start && a <= self.pos;
+        for o in out.iter_mut() {
+            o.clear();
+            o.resize(n, 0.0);
+        }
+        let resumes = self
+            .pending
+            .take()
+            .is_some_and(|(from, to)| (from..=to).contains(&a));
+        let continues = self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || resumes);
         if !continues {
-            self.fresh(a, map, read)?;
             self.fresh_starts += 1;
+            if !self.fresh(a, map, read)? {
+                self.pending = Some((a, end));
+                return Ok(false);
+            }
         }
         while self.pos < end {
-            self.produce(end, map, read)?;
+            if !self.produce(end, map, read)? {
+                self.pending = Some((a, end));
+                return Ok(false);
+            }
         }
         for (o, b) in out.iter_mut().zip(&self.buf) {
             o.clear();
@@ -268,11 +299,11 @@ impl StretchRun {
             self.points.pop_front();
             self.points_from += 1;
         }
-        Ok(std::mem::replace(&mut self.complete, true))
+        Ok(true)
     }
 
     /// Starts rendering at `a` without a usable history.
-    fn fresh(&mut self, a: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn fresh(&mut self, a: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<bool> {
         self.end_live();
         let g = a.div_euclid(GRID) * GRID - preroll(self.rate);
         let k0 = g.div_euclid(CONTROL);
@@ -299,14 +330,14 @@ impl StretchRun {
                 let s = k * CONTROL;
                 self.buf_start = s;
                 self.pos = s;
-                self.begin(s, dir, map, read)?;
+                return self.begin(s, dir, map, read);
             }
             None => {
                 self.buf_start = a;
                 self.pos = a;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn end_live(&mut self) {
@@ -316,7 +347,13 @@ impl StretchRun {
     }
 
     /// Starts a run at output sample `s` (a control point) reading in `dir`.
-    fn begin(&mut self, s: i64, dir: i8, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn begin(
+        &mut self,
+        s: i64,
+        dir: i8,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+    ) -> Result<bool> {
         self.end_live();
         let mut stretcher = match self.spare.take() {
             Some(mut st) => {
@@ -331,7 +368,10 @@ impl StretchRun {
         let rate = ((r - l).abs() / CONTROL as f64).clamp(HOLD_RATE, CUT_RATE);
         let u0 = (dir as f64 * l).round() as i64;
         let len = stretcher.output_seek_length(rate).max(1);
-        self.stream(u0, len, dir, read)?;
+        if !self.stream(u0, len, dir, read)? {
+            self.spare = Some(stretcher);
+            return Ok(false);
+        }
         {
             let views: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             stretcher.output_seek(&views).map_err(stretch_error)?;
@@ -342,27 +382,29 @@ impl StretchRun {
             start: s,
             fed: u0 + len as i64,
         });
-        Ok(())
+        Ok(true)
     }
 
     /// Reads stream samples `[u0, u0 + len)` (stream index `u = dir × x`)
     /// into `scratch_in`.
-    fn stream(&mut self, u0: i64, len: usize, dir: i8, read: &mut ReadFn<'_>) -> Result<()> {
+    fn stream(&mut self, u0: i64, len: usize, dir: i8, read: &mut ReadFn<'_>) -> Result<bool> {
         for c in &mut self.scratch_in {
             c.clear();
             c.resize(len, 0.0);
         }
         if len == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let lo = if dir > 0 { u0 } else { -(u0 + len as i64) + 1 };
-        self.complete &= read(lo, len, &mut self.scratch_in)?;
+        if !read(lo, len, &mut self.scratch_in)? {
+            return Ok(false);
+        }
         if dir < 0 {
             for c in &mut self.scratch_in {
                 c[..len].reverse();
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The first control index in `[from, to]` whose interval does not
@@ -378,7 +420,7 @@ impl StretchRun {
 
     /// Produces output from `pos` up to the next call boundary, class
     /// change, or (when dormant) control point.
-    fn produce(&mut self, end: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<()> {
+    fn produce(&mut self, end: i64, map: &mut MapFn<'_>, read: &mut ReadFn<'_>) -> Result<bool> {
         let Some(live) = self.live.as_ref() else {
             let k = self.pos.div_euclid(CONTROL);
             if self.pos.rem_euclid(CONTROL) == 0
@@ -397,7 +439,7 @@ impl StretchRun {
                 b.resize(b.len() + n, 0.0);
             }
             self.pos = stop;
-            return Ok(());
+            return Ok(true);
         };
         let (dir, start) = (live.dir, live.start);
         let interval = live.stretcher.interval_samples() as i64;
@@ -436,7 +478,11 @@ impl StretchRun {
         let fed = self.live.as_ref().expect("live").fed;
         let to = (target.round() as i64 + in_lat).max(fed);
         let len = (to - fed) as usize;
-        self.stream(fed, len, dir, read)?;
+        // Never feed zero-filled, undecoded input to the vocoder: it
+        // changes every later analysis even after the cache catches up.
+        if !self.stream(fed, len, dir, read)? {
+            return Ok(false);
+        }
         for c in &mut self.scratch_out {
             c.clear();
             c.resize(m, 0.0);
@@ -458,13 +504,235 @@ impl StretchRun {
         if let Some(k) = change {
             self.end_live();
             if let Class::Run(next) = self.class(k, map)? {
-                self.begin(stop, next, map, read)?;
+                return self.begin(stop, next, map, read);
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 
 fn stretch_error(e: pm_stretch::StretchError) -> AudioError {
     AudioError::Device(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_input_never_poison_stretch_history() {
+        for dir in [1.0, -1.0] {
+            // A miss during output_seek, and one after analysis has begun.
+            for missing_read in [0, 4, 22] {
+                let mut expected = StretchRun::new(2, 48_000, 0);
+                let mut actual = StretchRun::new(2, 48_000, 0);
+                let mut map = |k: i64| {
+                    Ok(MapPoint {
+                        x: 200_000.0 + dir * k as f64 * CONTROL as f64 * 1.5,
+                        on: true,
+                    })
+                };
+                let signal =
+                    |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                        for (c, channel) in out.iter_mut().enumerate() {
+                            channel.clear();
+                            channel.extend((lo..lo + n as i64).map(|s| {
+                                ((s as f64 * (0.057 + c as f64 * 0.013)).sin() * 0.2) as f32
+                            }));
+                        }
+                        Ok(true)
+                    };
+                let mut reads = 0;
+                let mut delayed = |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                    let missing = reads == missing_read;
+                    reads += 1;
+                    if missing {
+                        for channel in out.iter_mut() {
+                            channel.clear();
+                            channel.resize(n, 0.0);
+                        }
+                        Ok(false)
+                    } else {
+                        signal(lo, n, out)
+                    }
+                };
+                let mut reference = vec![Vec::new(); 2];
+                let mut played = vec![Vec::new(); 2];
+                let mut misses = 0;
+                for start in (48_000..60_000).step_by(256) {
+                    expected
+                        .render(start, 256, &mut map, &mut { signal }, &mut reference)
+                        .unwrap();
+                    let complete = actual
+                        .render(start, 256, &mut map, &mut delayed, &mut played)
+                        .unwrap();
+                    if complete {
+                        assert_eq!(
+                            played, reference,
+                            "direction {dir}, missing read {missing_read}, at {start}"
+                        );
+                    } else {
+                        misses += 1;
+                        assert!(
+                            played.iter().flatten().all(|&v| v == 0.0),
+                            "incomplete stretch must be silent"
+                        );
+                    }
+                }
+                assert_eq!(misses, 1, "the missing input is reported, then recovered");
+            }
+        }
+    }
+
+    fn sine(lo: i64, n: usize, out: &mut [Vec<f32>]) {
+        for (c, channel) in out.iter_mut().enumerate() {
+            channel.clear();
+            channel.extend(
+                (lo..lo + n as i64)
+                    .map(|s| ((s as f64 * (0.057 + c as f64 * 0.013)).sin() * 0.2) as f32),
+            );
+        }
+    }
+
+    /// A render that does not continue a starved one is a new request: it
+    /// starts by the pre-roll rules (as an offline render from there does)
+    /// and reads only that pre-roll, never the gap since the starve.
+    #[test]
+    fn a_seek_after_a_starve_starts_fresh() {
+        let rate = 48_000;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let starve_at = 48_000;
+        let n = 512;
+        // Past wherever the run's read-ahead lets the starve land.
+        let past = starve_at + 2 * GRID;
+        for target in [
+            // 60 s forward (the reviewer's probe), just past the starved
+            // request, a grid step forward, and backward.
+            starve_at + 60 * rate as i64,
+            past + CONTROL,
+            past + GRID,
+            starve_at - GRID,
+        ] {
+            for abandoned in [false, true] {
+                let reads = std::cell::Cell::new(0usize);
+                let mut counted = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+                    reads.set(reads.get() + len);
+                    sine(lo, len, out);
+                    Ok(true)
+                };
+                let mut fresh = StretchRun::new(2, rate, 0);
+                let mut reference = vec![Vec::new(); 2];
+                assert!(
+                    fresh
+                        .render(target, n, &mut map, &mut counted, &mut reference)
+                        .unwrap()
+                );
+                let fresh_reads = reads.replace(0);
+
+                let mut run = StretchRun::new(2, rate, 0);
+                let mut out = vec![Vec::new(); 2];
+                // Play a while, then starve.
+                for start in (starve_at - 4 * n as i64..starve_at).step_by(n) {
+                    assert!(
+                        run.render(start, n, &mut map, &mut counted, &mut out)
+                            .unwrap()
+                    );
+                }
+                // Nothing new decodes during the starved render.
+                let mut missing = |_: i64, len: usize, out: &mut [Vec<f32>]| {
+                    for channel in out.iter_mut() {
+                        channel.clear();
+                        channel.resize(len, 0.0);
+                    }
+                    Ok(false)
+                };
+                // Play on (from what was produced ahead) until a render
+                // needs new input.
+                let mut at = starve_at;
+                while run.render(at, n, &mut map, &mut missing, &mut out).unwrap() {
+                    at += n as i64;
+                    assert!(at < starve_at + 4 * GRID);
+                }
+                assert_eq!(run.pending_retry(), Some((at, at + n as i64)));
+                assert!(target < at || target > at + n as i64);
+                if abandoned {
+                    run.abandon_retry();
+                }
+                reads.set(0);
+                let starts = run.fresh_starts;
+                assert!(
+                    run.render(target, n, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+                assert_eq!(
+                    run.fresh_starts,
+                    starts + 1,
+                    "{target}: a new request starts fresh"
+                );
+                assert_eq!(
+                    reads.get(),
+                    fresh_reads,
+                    "{target}: reads only the pre-roll, not the gap"
+                );
+                assert_eq!(out, reference, "{target}: equals a render from the target");
+            }
+        }
+    }
+
+    /// Playback retries a starved request (or a caller moves on to where it
+    /// ended): either continues the run and equals an unstarved render.
+    #[test]
+    fn a_retry_after_a_starve_continues_the_run() {
+        let rate = 48_000;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let n = 512;
+        let starve_at = 48_000 + 3 * n as i64;
+        let mut expected = StretchRun::new(2, rate, 0);
+        let mut run = StretchRun::new(2, rate, 0);
+        let mut reference = vec![Vec::new(); 2];
+        let mut out = vec![Vec::new(); 2];
+        let mut whole = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+            sine(lo, len, out);
+            Ok(true)
+        };
+        let mut missed = false;
+        let mut once = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+            if !missed && lo + len as i64 > starve_at + CONTROL {
+                missed = true;
+                for channel in out.iter_mut() {
+                    channel.clear();
+                    channel.resize(len, 0.0);
+                }
+                return Ok(false);
+            }
+            sine(lo, len, out);
+            Ok(true)
+        };
+        let mut start = 48_000;
+        let mut retries = 0;
+        while start < 48_000 + 12 * n as i64 {
+            if run.render(start, n, &mut map, &mut once, &mut out).unwrap() {
+                expected
+                    .render(start, n, &mut map, &mut whole, &mut reference)
+                    .unwrap();
+                assert_eq!(out, reference, "at {start}");
+                start += n as i64;
+            } else {
+                retries += 1;
+                assert!(retries < 3, "a retry with the input decoded completes");
+            }
+        }
+        assert_eq!(retries, 1);
+        assert_eq!(run.fresh_starts, 1, "the retry continued the run");
+    }
 }
