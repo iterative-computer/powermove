@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-3c8d9585ad8909f9";
+export const PROTOCOL_BUILD = "protocol-68bcacdab24efea2";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -54,6 +54,7 @@ export type { CompatFrame } from "./CompatFrame";
 export type { CompatFrameRequest } from "./CompatFrameRequest";
 export type { CompatKey } from "./CompatKey";
 export type { CompatMessage } from "./CompatMessage";
+export type { CompatNative } from "./CompatNative";
 export type { CompatNeed } from "./CompatNeed";
 export type { CompatPixels } from "./CompatPixels";
 export type { CompatSource } from "./CompatSource";

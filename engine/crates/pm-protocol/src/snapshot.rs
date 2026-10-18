@@ -588,9 +588,38 @@ pub struct CompatPixels {
     pub row: u32,
     pub rows: u32,
     pub data: Bytes,
+    /// The raster's size in layer pixels (today's `RasterSurface` `w`,
+    /// `h`, the quad the compositor draws it on). Absent: the pixel size
+    /// over `scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub size: Option<[f64; 2]>,
+    /// The part of the raster the quad samples (today's `uv`: offset and
+    /// scale, 0..1). Absent: the whole raster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub uv: Option<[f64; 4]>,
 }
 
-/// Renderer → interactive engine (session-bound, the viewer's port).
+/// A layer at one frame that a producer passed through: the engine draws it
+/// natively (a `raster` override that returned the base raster unchanged).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CompatNative {
+    pub composition: CompositionId,
+    pub layer: LayerId,
+    pub time: Ticks,
+    pub source: CompatSource,
+    /// Output pixels per layer pixel the producer was asked at.
+    pub scale: f64,
+    /// The document revision the producer decided at.
+    pub revision: Revision,
+}
+
+/// Renderer ↔ interactive engine (session-bound, the viewer's port):
+/// `Pixels`, `Forget`, `Producers`, `Native`, and `Reuse` go to the engine,
+/// `Needs` to the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -607,7 +636,36 @@ pub enum CompatMessage {
         composition: CompositionId,
         layer: LayerId,
     },
+    /// Renderer → engine: the producers the session has now (a registered
+    /// `raster` override, a drawing compatibility context), replacing the
+    /// previous list. Without a producer for a source the engine never asks
+    /// for it; a change drops every answer of the sources that went.
+    Producers { sources: Vec<CompatSource> },
+    /// Renderer → engine: the producer passed the layer through at this
+    /// frame; the engine draws it itself.
+    Native(CompatNative),
+    /// Renderer → engine: the raster stored under `id` (already uploaded)
+    /// is the producer's answer at `revision` and `scale` too (its cache
+    /// key did not change), so no pixels are sent again.
+    Reuse {
+        id: CompatKey,
+        scale: f64,
+        revision: Revision,
+    },
+    /// Engine → renderer: what a viewer frame at `revision` needs before it
+    /// can be drawn. The renderer answers each need with `Pixels`,
+    /// `Native`, or `Reuse`; the engine draws the frame once every answer
+    /// arrived (the shader fallback runner's pattern, decision 19).
+    Needs {
+        revision: Revision,
+        needs: Vec<CompatNeed>,
+    },
 }
+
+/// Most needs in one [`CompatMessage::Needs`].
+pub const MAX_COMPAT_NEEDS: usize = 256;
+/// Most producers a session names.
+pub const MAX_COMPAT_SOURCES: usize = 4;
 
 impl Validate for CompatMessage {
     fn validate(&self) -> Result<(), Violation> {
@@ -646,6 +704,12 @@ impl Validate for CompatMessage {
                         && p.scale <= crate::frame::MAX_SCALE,
                     C,
                     || "compatibility origin and scale must be finite".into(),
+                )?;
+                ensure(
+                    p.size.is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
+                        && p.uv.is_none_or(|u| u.iter().all(|v| v.is_finite())),
+                    C,
+                    || "compatibility size and uv must be finite".into(),
                 )
             }
             CompatMessage::Forget { composition, layer } => {
@@ -653,8 +717,41 @@ impl Validate for CompatMessage {
                     "invalid compatibility layer".into()
                 })
             }
+            CompatMessage::Producers { sources } => ensure(sources.len() <= MAX_COMPAT_SOURCES, C, || {
+                format!("{} compatibility producers", sources.len())
+            }),
+            CompatMessage::Native(n) => {
+                ensure(n.composition.is_valid() && n.layer.is_valid(), C, || {
+                    "invalid compatibility layer".into()
+                })?;
+                valid_scale(n.scale)
+            }
+            CompatMessage::Reuse { id, scale, .. } => {
+                id.validate()?;
+                valid_scale(*scale)
+            }
+            CompatMessage::Needs { needs, .. } => {
+                ensure(!needs.is_empty() && needs.len() <= MAX_COMPAT_NEEDS, C, || {
+                    format!("{} compatibility needs", needs.len())
+                })?;
+                for need in needs {
+                    ensure(need.composition.is_valid() && need.layer.is_valid(), C, || {
+                        "invalid compatibility layer".into()
+                    })?;
+                    valid_scale(need.scale)?;
+                }
+                Ok(())
+            }
         }
     }
+}
+
+fn valid_scale(scale: f64) -> Result<(), Violation> {
+    ensure(
+        scale.is_finite() && scale > 0.0 && scale <= crate::frame::MAX_SCALE,
+        ContractId::Frame,
+        || format!("compatibility scale {scale}"),
+    )
 }
 
 /// Job engine → host (contract 14): the compatibility pixels of one layer at
@@ -928,6 +1025,8 @@ mod tests {
                 row,
                 rows,
                 data: Bytes(vec![0; len]),
+                size: None,
+                uv: None,
             })
         };
         assert!(

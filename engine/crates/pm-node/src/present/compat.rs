@@ -285,6 +285,8 @@ mod tests {
             row,
             rows,
             data: Bytes(vec![fill; (w * rows * 4) as usize]),
+            size: None,
+            uv: None,
         })
     }
 

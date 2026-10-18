@@ -16,4 +16,15 @@ revision: Revision, width: number, height: number, format: CompatFormat,
  * Where the raster's top-left sits in the layer's own pixels, and its
  * pixels per layer pixel (today's `RasterSurface` `x`, `y`, and scale).
  */
-origin: [number, number], scale: number, row: number, rows: number, data: Bytes, };
+origin: [number, number], scale: number, row: number, rows: number, data: Bytes, 
+/**
+ * The raster's size in layer pixels (today's `RasterSurface` `w`,
+ * `h`, the quad the compositor draws it on). Absent: the pixel size
+ * over `scale`.
+ */
+size?: [number, number], 
+/**
+ * The part of the raster the quad samples (today's `uv`: offset and
+ * scale, 0..1). Absent: the whole raster.
+ */
+uv?: [number, number, number, number], };

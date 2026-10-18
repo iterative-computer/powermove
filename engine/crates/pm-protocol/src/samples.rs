@@ -1283,11 +1283,47 @@ pub fn events() -> Vec<Envelope> {
                 row: 1,
                 rows: 1,
                 data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+                size: None,
+                uv: None,
             },
         ))),
         event(Event::Compat(crate::snapshot::CompatMessage::Forget {
             composition: "comp-1".into(),
             layer: "L7".into(),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Producers {
+            sources: vec![crate::snapshot::CompatSource::RasterOverride],
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Native(
+            crate::snapshot::CompatNative {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                revision: rev(42),
+            },
+        ))),
+        event(Event::Compat(crate::snapshot::CompatMessage::Reuse {
+            id: crate::snapshot::CompatKey {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                key: "[\"typewriter-3\",\"title\",7]".into(),
+            },
+            scale: 2.0,
+            revision: rev(43),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Needs {
+            revision: rev(43),
+            needs: vec![crate::snapshot::CompatNeed {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+            }],
         })),
         event(Event::RenderStats(crate::snapshot::RenderStats {
             frames: Count::new(1_800).expect("count"),

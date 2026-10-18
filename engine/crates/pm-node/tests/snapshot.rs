@@ -683,6 +683,8 @@ fn child_snapshots() {
             row,
             rows,
             data: Bytes(vec![200; (4 * rows * 4) as usize]),
+            size: None,
+            uv: None,
         })));
     }
     let deadline = Instant::now() + Duration::from_secs(5);
