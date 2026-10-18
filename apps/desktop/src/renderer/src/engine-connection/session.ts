@@ -56,6 +56,8 @@ export interface DefinitionsSource {
   session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
   applied(applied: DefinitionsApplied): void;
   failure(report: FailureReport): void;
+  /** A frame at this revision is shown: layer reports it did not repeat are cleared. */
+  frame?(revision: number): void;
 }
 
 /** One session's definition stream (`SessionDefinitions`). */
@@ -337,6 +339,8 @@ export class DocumentSession {
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
+        // Layer reports the engine did not repeat at this revision are cleared.
+        this.options.definitions?.()?.frame?.(revision);
         this.options.handlers.message({ type: 'frame', frame: this.lastFrame }, arrivedMs);
         return;
       }

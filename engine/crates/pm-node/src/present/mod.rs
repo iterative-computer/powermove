@@ -21,6 +21,7 @@ pub mod audio;
 pub mod clock;
 pub mod compose;
 pub mod document;
+mod layer_reports;
 pub mod peaks;
 pub mod render;
 pub mod schedule;

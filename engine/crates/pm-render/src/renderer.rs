@@ -280,6 +280,24 @@ impl Renderer {
         self.shaders.fallback.insert(key, pixels);
     }
 
+    /// What the shader UI is told about the shader and extension layers of
+    /// `composition` and the compositions it nests, at the document's
+    /// revision (`crate::shader_layers::reports`): shader layers whose code
+    /// does not compile and extension layers whose definition is missing.
+    pub fn layer_reports(
+        &self,
+        document: &pm_model::Document,
+        composition: &str,
+    ) -> Vec<pm_protocol::error::EngineError> {
+        let meshes = self.options3d.mesh_definitions.clone();
+        crate::shader_layers::layer_reports(
+            document,
+            composition,
+            effect_host(&self.effect_host, &self.effects).and_then(|e| e.layer_definitions()),
+            &|id| meshes.contains_key(id),
+        )
+    }
+
     /// Shader-layer programs built and fallback pixels held.
     pub fn shader_state(&self) -> &crate::shader_layers::exec::ShaderState {
         &self.shaders

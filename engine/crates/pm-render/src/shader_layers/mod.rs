@@ -29,6 +29,7 @@
 pub mod exec;
 pub mod fallback;
 pub mod plan;
+pub mod reports;
 pub mod translate;
 pub mod uniforms;
 
@@ -38,6 +39,7 @@ use pm_protocol::definitions::DefinitionSnapshot;
 
 pub use fallback::{Bands, FallbackBand, FallbackPixels, FallbackRequest, FallbackStore};
 pub use plan::{ProgramRef, ShaderSource};
+pub use reports::layer_reports;
 pub use uniforms::{Control, UniformDef, UniformType, parse_float, parse_uniforms};
 
 /// What the engine embeds of the app's shader-layer runtime

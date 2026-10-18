@@ -356,6 +356,8 @@ struct View {
     retry: Option<PoolRetry>,
     /// The route last reported to the viewer (document source).
     reported: Option<Route>,
+    /// What the shader UI was last told about this view's layers.
+    layer_reports: super::layer_reports::LayerReports,
     /// A Play waits for the audio clock's first playing sample: the host
     /// µs after which it starts on the host clock instead, and the audio
     /// epoch that was current when it was asked (not the answer).
@@ -1197,6 +1199,7 @@ impl Thread {
             requests: VecDeque::new(),
             retry: None,
             reported: None,
+            layer_reports: Default::default(),
             awaiting: None,
             audio_version: 0,
             #[cfg(feature = "remote-layer")]
@@ -2074,6 +2077,29 @@ impl Thread {
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
                     drop(stats);
+                    // Shader compile errors and missing extension layers at
+                    // this frame's revision, before the frame (section 11).
+                    let renderer = composer.renderer();
+                    let reports = view.layer_reports.due(
+                        view.revision,
+                        renderer.effects().generation(),
+                        &composition,
+                        || renderer.layer_reports(doc.document(), &composition),
+                    );
+                    for error in reports {
+                        let report = FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let mut envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        envelope.revision = Some(view.revision);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                     // Effects the GPU watchdog turned off (measured on an
                     // earlier frame): reported at this frame's revision.
                     for error in composer.renderer().watchdog_reports(false) {
@@ -2119,6 +2145,9 @@ impl Thread {
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
                     doc.force_legacy(&composition, reasons);
+                    // The legacy compositor fills the shader meta while it
+                    // draws; frames the engine presents again repeat it all.
+                    view.layer_reports.reset();
                     // The next turn reports the route and stops a run.
                     view.dirty = true;
                     return None;

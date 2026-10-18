@@ -12,7 +12,10 @@
  *   with `PM.EngineDefinitions.session(send)`.
  * - `DefinitionsApplied` failures (per definition) and `FailureReport`
  *   events (per layer or effect, at a revision) are applied with
- *   `PM.EngineDefinitions.applied(...)` and `.failure(...)`.
+ *   `PM.EngineDefinitions.applied(...)` and `.failure(...)`. Layer reports
+ *   hold for their revision: the engine repeats each that still holds at
+ *   every revision it presents, before the frame, and `.frame(revision)`
+ *   clears the ones a shown frame did not repeat.
  *
  * With the flag off nothing is installed.
  */
@@ -26,6 +29,13 @@ export class EngineShaderMeta {
   private errors = new Map<string, string>();
   /** The revision each layer's meta came from. */
   private revisions = new Map<string, number>();
+  /**
+   * Layer reports in force, by layer: what they set and their revision. A
+   * layer report holds for its revision; the engine repeats every report
+   * that still holds at each revision it presents, before the frame, so one
+   * older than a frame shown is cleared (`frame`).
+   */
+  private layerReports = new Map<string, { revision: number; kind: 'compile' | 'missing' | 'scene' }>();
 
   constructor(private readonly PM: any) {}
 
@@ -44,6 +54,35 @@ export class EngineShaderMeta {
     const ids = [...update.upserts.map((d) => d.id), ...update.removals.map((r) => r.id)];
     if (update.full) this.errors.clear();
     for (const id of ids) for (const prefix of ['fx:', 'tr:', 'extension:']) this.errors.delete(prefix + id);
+    // An extension layer whose definition arrives is no longer missing (the
+    // engine reports it again at the same revision if it still is).
+    const upserted = new Set(update.upserts.map((d) => d.id as string));
+    for (const [id, report] of this.layerReports) {
+      if (report.kind !== 'missing') continue;
+      const layer = this.layer(id);
+      if (!layer || upserted.has(layer.d?.definition)) this.clearLayer(id);
+    }
+  }
+
+  /**
+   * A frame at `revision` is shown: layer reports from older revisions that
+   * the engine did not repeat no longer hold (the code compiles again, the
+   * definition was found, the layer is gone).
+   */
+  frame(revision: number): void {
+    for (const [id, report] of [...this.layerReports]) if (report.revision < revision) this.clearLayer(id);
+  }
+
+  private clearLayer(id: string): void {
+    const report = this.layerReports.get(id);
+    if (!report) return;
+    this.layerReports.delete(id);
+    const layer = this.layer(id);
+    if (report.kind === 'compile') {
+      this.errors.delete('engine:' + id);
+    } else if (layer) {
+      this.PM.UIState?.setShaderMeta?.(layer, report.kind === 'missing' ? { missing: false, missingAsset: null } : { missing: false, sceneError: null });
+    }
   }
 
   /** An isolated failure at a revision (`failure` event). Older reports for a layer than one already applied are ignored. */
@@ -64,6 +103,12 @@ export class EngineShaderMeta {
       return;
     }
     const definition = layer.d?.definition ?? null;
+    const kind = error.code === 'shaderCompile' || error.code === 'notHeadlessRenderable' ? 'compile'
+      : error.code === 'definitionMissing' || error.code === 'mediaOffline' ? 'missing' : 'scene';
+    // A report of another kind for the layer replaces the one in force.
+    const previous = this.layerReports.get(scope.layer);
+    if (previous && previous.kind !== kind) this.clearLayer(scope.layer);
+    this.layerReports.set(scope.layer, { revision, kind });
     if (error.code === 'shaderCompile' || error.code === 'notHeadlessRenderable') {
       const shaderKey = 'engine:' + scope.layer;
       this.errors.set(shaderKey, text);
@@ -121,6 +166,8 @@ export interface EngineDefinitions {
   session(send: (update: DefinitionsUpdate) => boolean | void): SessionDefinitions;
   applied(applied: DefinitionsApplied): void;
   failure(report: FailureReport): void;
+  /** A frame at this revision is shown (clears layer reports it did not repeat). */
+  frame(revision: number): void;
   /** The open session streams. */
   sessionCount(): number;
   dispose(): void;
@@ -155,6 +202,7 @@ export function createEngineDefinitions(PM: any, registries: DefinitionRegistrie
     },
     applied: (applied) => meta.applied(applied),
     failure: (report) => meta.failure(report),
+    frame: (revision) => meta.frame(revision),
     sessionCount: () => sessions.length,
     dispose() {
       for (const s of [...sessions]) s.dispose();
