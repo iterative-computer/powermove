@@ -5,10 +5,13 @@
  * Measures scheduled device presentation, not acoustic loopback.
  */
 import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { launchLegacyApp } from '../../../corpus/src/app';
 
 const [file, output, count = '30'] = process.argv.slice(2);
 if (!file || !output) throw new Error('wav and outside-repository output required');
+// Use the packaged copy so the harness also works after build-target cleanup.
+process.env.POWERMOVE_PM_BRIDGE ??= resolve(import.meta.dir, '../../../../apps/desktop/native/pm_bridge.node');
 const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback' };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
 for (const native of modes) {

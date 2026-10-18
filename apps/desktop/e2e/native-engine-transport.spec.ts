@@ -213,7 +213,7 @@ test.describe('Use New Engine: J/K/L, play around, and audio scrub', () => {
       PM.setAudioScrub(enabled);
       let peak = 0;
       const off = PM.EngineConnection.audio.onLevels((l: any) => { peak = Math.max(peak, ...l.master.peak); });
-      PM.EngineConnection.transport.seek(time, true);
+      PM.setTime(time);
       await new Promise(r => setTimeout(r, 300));
       off();
       return peak;
