@@ -278,11 +278,15 @@ describe('ViewerPresentation', () => {
     expect(presentation.presenting).toBe(false);
     expect(presentation.latest).toBeNull();
     expect(presented).toEqual([]);
-    // A newer frame drawn meanwhile is the one that counts.
+    // The GPU finishes it; a newer frame drawn meanwhile is the one that
+    // counts, two display frames after the finish.
+    await settle();
     channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
     runFrames(rafs, performance.now() + 16);
     expect(presented).toEqual([]);
     runFrames(rafs, performance.now() + 33);
+    expect(presented).toEqual([]);
+    runFrames(rafs, performance.now() + 50);
     expect(presented).toEqual([2]);
     expect(presentation.presenting).toBe(true);
     expect(presentation.latest).toMatchObject({ seq: 2 });
@@ -293,16 +297,17 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
   });
 
-  it('a worker’s first frame counts once the canvas took its size (the frame reached the page)', async () => {
+  it('a worker’s first frame counts once its GPU work finished and the display took it', async () => {
     const service = new Service();
     service.revealFrames = 2;
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);
-    const canvases = offscreenCanvases(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
     const painter = new Painter();
+    let finish: () => void = () => {};
+    painter.workDone = () => new Promise<void>((resolve) => { finish = resolve; });
     const worker = inProcessWorker(painter);
     const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter(), createWorker: () => worker });
     await settleLong();
-    expect(canvases.transferred).toEqual([presentation.canvas]);
     presentation.update(PARAMS);
     const channel = service.channels[0]!;
     const presented: number[] = [];
@@ -311,16 +316,17 @@ describe('ViewerPresentation', () => {
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     await settleLong();
     expect(painter.draws).toBe(1);
-    // Two animation frames pass, but the canvas has not taken the frame's size.
-    runFrames(rafs, 100);
-    runFrames(rafs, 116);
-    runFrames(rafs, 133);
+    // Animation frames pass while the GPU has not finished the frame.
+    for (let i = 0; i < 4; i++) runFrames(rafs, 100 + i * 16);
     expect(presented).toEqual([]);
     expect(presentation.presenting).toBe(false);
-    // The frame lands (the canvas takes its size): it counts at the next one.
-    Object.defineProperty(presentation.canvas, 'width', { configurable: true, value: 1280 });
-    Object.defineProperty(presentation.canvas, 'height', { configurable: true, value: 720 });
-    runFrames(rafs, 150);
+    // It finishes: two display frames later it counts.
+    finish();
+    await settleLong();
+    runFrames(rafs, 200);
+    expect(presented).toEqual([]);
+    runFrames(rafs, 216);
+    runFrames(rafs, 233);
     expect(presented).toEqual([1]);
     expect(presentation.presenting).toBe(true);
     presentation.dispose();

@@ -254,6 +254,13 @@ export class WorkerPresenter implements Presenter {
     return () => this.listeners.delete(listener);
   }
 
+  private readonly doneListeners = new Set<(seq: number) => void>();
+
+  onDone(listener: (seq: number) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
   receive(message: EngineFrameMessage, arrivedMs = this.now()): void {
     if (this.disposed) return;
     const session = this.options.session;
@@ -379,6 +386,10 @@ export class WorkerPresenter implements Presenter {
         this.remote = message.stats;
         if (this.disposed) return;
         for (const listener of this.listeners) listener(message.frame);
+        return;
+      case 'done':
+        if (this.disposed) return;
+        for (const listener of this.doneListeners) listener(message.seq);
         return;
       case 'vsync':
         if (!this.disposed) this.options.onVsync?.(message.hint);

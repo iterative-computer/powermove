@@ -160,6 +160,8 @@ export interface Presenter {
   setViewerState(state: ViewerState): void;
   receive(message: EngineFrameMessage, arrivedMs?: number): void;
   onPresented(listener: (frame: PresentedFrame) => void): () => void;
+  /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
+  onDone?(listener: (seq: number) => void): () => void;
   /** Moves the loop to another window's animation frames (main thread only). */
   retarget(requestFrame: (cb: (t: number) => void) => number, cancelFrame: (id: number) => void, displayHz?: number | null): void;
   start(): void;
@@ -256,7 +258,19 @@ export class EnginePresenter implements Presenter {
     return () => this.listeners.delete(listener);
   }
 
-  /** Sends a viewer state (the caller numbers it, see `ViewSequencer`). */
+  private readonly doneListeners = new Set<(seq: number) => void>();
+
+  onDone(listener: (seq: number) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
+  private done(seq: number): void {
+    if (this.disposed) return;
+    for (const listener of this.doneListeners) listener(seq);
+  }
+
+  /** Sends a viewer state (the caller numbers it, see `ViewerSequencer`). */
   setViewerState(state: ViewerState): void {
     this.options.link.sendViewerState(state);
   }
@@ -479,8 +493,12 @@ export class EnginePresenter implements Presenter {
       () => {
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
+        this.done(desc.seq);
       },
-      () => this.release(desc)
+      () => {
+        this.release(desc);
+        this.done(desc.seq);
+      }
     );
     const presented: PresentedFrame = {
       seq: desc.seq,

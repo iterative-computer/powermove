@@ -325,8 +325,15 @@ export class ViewerPresentation {
   private revealing: PresentedFrame | null = null;
   private revealToken = 0;
 
-  /** Two animation frames after the canvas became visible its first frame
-   *  is on screen: the newest frame drawn since is shown (announced). */
+  /**
+   * A canvas that became visible shows its first frame only once the GPU
+   * finished drawing it (at a cold start the drawing's pipelines compile
+   * first) and the display took it: the frame counts as on screen
+   * (`latest`, `presenting`, frame events) `revealFrames` animation frames
+   * after the drawing said its GPU work finished, at most
+   * `MAX_REVEAL_FRAMES` after it was drawn. The newest frame drawn by then
+   * is the one shown.
+   */
   private reveal(presenter: Presenter): void {
     const token = ++this.revealToken;
     const view = this.options.stage.ownerDocument.defaultView;
@@ -336,20 +343,22 @@ export class ViewerPresentation {
       this.revealing = null;
       if (frame && this.canvasElement.style.visibility === 'visible') this.show(frame);
     };
-    // The canvas element takes the size of a frame from a presentation
-    // worker only when that frame reached the page's compositor: until
-    // then it still shows nothing. Wait for that too (at most `MAX_REVEAL_FRAMES`).
-    const landed = (): boolean => {
-      const frame = this.revealing;
-      if (!frame?.width || !frame.height || !this.worker) return true;
-      return this.canvasElement.width === frame.width && this.canvasElement.height === frame.height;
-    };
     const least = Math.max(0, Math.floor(this.options.service.revealFrames ?? 2));
     // 0: frames run by hand (tests): a shown frame counts at once.
     if (least === 0) return done();
+    const revealed = this.revealing?.seq ?? 0;
+    let finished = typeof presenter.onDone !== 'function';
+    const offDone = presenter.onDone?.((seq) => {
+      if (seq >= revealed) finished = true;
+    }) ?? (() => {});
+    let since = -1;
     const wait = (count: number): void => {
-      if (token !== this.revealToken) return;
-      if ((count >= least && landed()) || count >= MAX_REVEAL_FRAMES) return done();
+      if (token !== this.revealToken) return offDone();
+      if (finished && since < 0) since = count;
+      if ((since >= 0 && count - since >= least) || count >= MAX_REVEAL_FRAMES) {
+        offDone();
+        return done();
+      }
       if (view?.requestAnimationFrame) view.requestAnimationFrame(() => wait(count + 1));
       else setTimeout(() => wait(count + 1), 16);
     };
