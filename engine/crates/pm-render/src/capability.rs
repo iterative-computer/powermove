@@ -724,7 +724,12 @@ fn check_media(
     };
     match ty {
         "image" => match crate::footage::interpretation(record).map_or_else(
-            || crate::media::probe_image(&path),
+            || {
+                crate::media::probe_still(
+                    &path,
+                    crate::media::still_reader(!crate::sampling::is_level2(layer)),
+                )
+            },
             |i| crate::media::probe_interpreted_image(&path, &i),
         ) {
             Ok(()) => {}

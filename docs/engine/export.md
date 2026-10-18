@@ -582,14 +582,21 @@ unpremultiply. This boundary is byte-quantized and does not add dither.
 Linear output, 16-bit PNG, float rendering and other formats retain their
 existing conversions.
 
-Decision recorded for the orchestrator: the E1 conversion applies to every
-standard-encoding 8-bit straight-alpha PNG export, including documents whose
-layers are all compat level 2. That keeps one export conversion for mixed
-documents and is identical for existing projects, but new level-2-only
-content loses low-alpha color precision against a direct straight-alpha
-conversion of the float frame (the truncating divide of a quantized
-premultiplied value). Gating it on the document's compat level is a
-small change in `convert.rs` if the orchestrator prefers it.
+The E1 conversion is selected once from the frozen job document. A document
+containing any compat-level-1 layer (including a missing `compat` field) uses
+the legacy boundary. Every composition is considered, while the stored open
+composition wins over its stale `comps` copy. Documents whose layers are all
+level 2 use direct float unpremultiplication before byte quantization, so
+low-alpha color retains its precision. `Pipeline::new` (and so
+`pm_export::export`) defaults to the legacy boundary, so a caller that never
+calls `set_legacy_png` keeps today's level 1 bytes; the job renderer selects
+direct precision only for all-level-2 documents. Linear and 16-bit output
+retain their existing conversions.
+
+Unit tests pin both conversions and document selection, including mixed and
+nested compositions. `job_export::png_byte_compatibility_follows_the_frozen_document`
+checks the actual GPU-to-export pipeline: a 0.3%-opaque solid gives the
+legacy black RGB bytes at level 1 and preserves its #336699 color at level 2.
 
 The hidden-app transparent-export regression passes all 58 drawn
 orientation/color-description cases at max 1 CV, no pixels above 1, with

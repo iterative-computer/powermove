@@ -138,7 +138,7 @@ fn main() {
         }
     }
     println!("cargo:rustc-link-search=native={}", ff_lib.display());
-    for lib in ["avformat", "avcodec", "avutil"] {
+    for lib in ["avformat", "avcodec", "avutil", "swscale"] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
     // Test and example binaries of this package find the dylibs without the
@@ -156,7 +156,7 @@ fn main() {
          #include <libavutil/frame.h>\n#include <libavutil/dict.h>\n#include <libavutil/opt.h>\n\
          #include <libavutil/mastering_display_metadata.h>\n#include <libavutil/display.h>\n\
          #include <libavutil/channel_layout.h>\n#include <libavutil/samplefmt.h>\n#include <libavutil/error.h>\n\
-         #include <libavutil/log.h>\n#include <libavutil/timecode.h>\n",
+         #include <libavutil/log.h>\n#include <libavutil/timecode.h>\n#include <libswscale/swscale.h>\n",
         &[&ff_inc],
         &[
             "av_.*",
@@ -166,6 +166,9 @@ fn main() {
             "AV.*",
             "FF_.*",
             "LIBAV.*",
+            "sws_.*",
+            "Sws.*",
+            "SWS_.*",
         ],
         &out,
     );

@@ -28,7 +28,7 @@ pub(crate) fn tiff_photometric(path: &Path) -> Result<Option<u16>> {
     tiff_short(path, 262)
 }
 
-fn tiff_short(path: &Path, tag: u16) -> Result<Option<u16>> {
+pub(crate) fn tiff_short(path: &Path, tag: u16) -> Result<Option<u16>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let mut head = [0u8; 16];
