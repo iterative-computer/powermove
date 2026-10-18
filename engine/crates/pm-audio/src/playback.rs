@@ -19,7 +19,7 @@
 //! When the device does not run at the project rate, `rubato::Async` (sinc,
 //! the section 16 filter) converts the master to the device rate.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -60,7 +60,8 @@ pub struct PlaybackConfig {
     pub ahead_ms: u32,
     /// Audio decoded before a play or seek starts.
     pub preroll_ms: u32,
-    /// The longest a start waits for that pre-roll.
+    /// Wall-time ceiling for an entirely cold startup pre-roll. Zero leaves
+    /// only the device-time source budget. Ready voices never wait here.
     pub preroll_wait_ms: u32,
     /// Source decoded ahead of the playhead.
     pub lookahead_ms: u32,
@@ -151,16 +152,13 @@ struct Shared {
     device_rate: u32,
 }
 
-/// The render errors of one playback. A failure recurs on every segment
-/// that meets it (a bad block's decode error is memoized, a broken clip
-/// fails each evaluation), so each distinct message is handed out by
-/// [`Playback::take_errors`] once for the life of the playback, however
-/// often it is drained. The counters in [`PlaybackStats`] keep counting
-/// every occurrence.
+/// Pending diagnostics. Render failures and decode stalls are reported once
+/// per episode, independently of how often the host drains this log.
 #[derive(Default)]
 struct ErrorLog {
     pending: Vec<String>,
     reported: HashSet<String>,
+    render_active: HashSet<String>,
 }
 
 impl ErrorLog {
@@ -308,7 +306,8 @@ impl Playback {
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
             pending_segment: None,
-            stalled_since: None,
+            stalls: HashMap::new(),
+            startup: None,
             mixer,
             config,
             solo: None,
@@ -442,8 +441,8 @@ impl Playback {
     }
 
     /// Errors met while rendering (decode or evaluation) since the last
-    /// call. Each distinct message comes out once for the life of the
-    /// playback, so polling this never repeats a recurring failure.
+    /// call. Ongoing failures are deduplicated per episode; a recovered
+    /// voice can report the same problem again in a later episode.
     pub fn take_errors(&self) -> Vec<String> {
         self.shared
             .errors
@@ -808,6 +807,11 @@ impl Converter {
     }
 }
 
+struct VoiceStall {
+    deadline: u64,
+    reported: bool,
+}
+
 struct RenderThread {
     rx: Receiver<Control>,
     shared: Arc<Shared>,
@@ -816,10 +820,11 @@ struct RenderThread {
     /// An undecoded segment is retried before advancing the transport.
     /// Never feed its zero-filled samples into the shuttle or converter.
     pending_segment: Option<crate::transport::Segment>,
-    /// Device frame when this missing-input episode began, and whether
-    /// crossing its bound was reported. Persists across dropped segments
-    /// until every voice has recovered.
-    stalled_since: Option<(u64, bool)>,
+    /// Each voice owns its deadline and notification until it recovers.
+    stalls: HashMap<String, VoiceStall>,
+    /// Before the first callback, an entirely cold mix may decode without
+    /// spending device time or delaying any ready voice.
+    startup: Option<(u64, std::time::Instant)>,
     mixer: Mixer,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
@@ -931,6 +936,20 @@ impl RenderThread {
             .push(e);
     }
 
+    fn report_render_errors(&self, errors: Vec<(String, String)>) {
+        let mut log = self.shared.errors.lock().unwrap_or_else(|e| e.into_inner());
+        let active: HashSet<_> = errors
+            .into_iter()
+            .map(|(id, e)| format!("{id}: {e}"))
+            .collect();
+        for message in &active {
+            if !log.render_active.contains(message) {
+                log.pending.push(message.clone());
+            }
+        }
+        log.render_active = active;
+    }
+
     /// The media position heard now, from the published clock. Until the
     /// device presents the current epoch (a seek's pre-roll), the listener
     /// is at the epoch's start, not on the old line.
@@ -985,7 +1004,14 @@ impl RenderThread {
                         // A stop drops the run's starved segment: the next
                         // run renders from its own position.
                         self.pending_segment = None;
-                        self.stalled_since = None;
+                        self.stalls.clear();
+                        self.startup = None;
+                        self.shared
+                            .errors
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .render_active
+                            .clear();
                         self.mixer.abandon_retries();
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
@@ -1092,7 +1118,13 @@ impl RenderThread {
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
-        self.stalled_since = None;
+        self.stalls.clear();
+        self.shared
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .render_active
+            .clear();
         // A seek or a new run starts on the current mix, and its first
         // render is a new request, not a retry of a starved one.
         self.mixer.end_glides();
@@ -1108,17 +1140,19 @@ impl RenderThread {
         };
         let frames = frames as usize;
         self.mixer.prefetch(from, frames);
-        let device_start = self.ring.played_frames();
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
-        while !self.mixer.is_ready(from, frames)
-            && std::time::Instant::now() < deadline
-            && self.ring.played_frames().saturating_sub(device_start)
-                < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
+        let started = self.ring.played_frames();
+        let wall = std::time::Instant::now();
+        self.startup = Some((started, wall));
+        // Pre-roll only an entirely cold start. As soon as any input is
+        // ready, fill decides per voice rather than holding that voice
+        // behind an unrelated decoder. Callback time also ends this poll.
+        while wall.elapsed() < Duration::from_millis(self.config.preroll_wait_ms as u64)
+            && self.ring.played_frames() == started
+            && !self.mixer.is_ready(from, frames)
+            && !self.mixer.has_ready_source(from, frames)
         {
             std::thread::sleep(Duration::from_millis(1));
         }
-        self.stalled_since = Some((device_start, false));
         if let Some(c) = &mut self.converter {
             c.reset();
         }
@@ -1156,20 +1190,67 @@ impl RenderThread {
             // play them backwards. Reverse renders each chunk on its own,
             // so stretched voices resample there (see RenderOptions).
             let (lo, hi) = seg.media_span();
-            let drop_starved = self.stalled_since.is_some_and(|(start, _)| {
-                self.ring.played_frames().saturating_sub(start)
-                    >= self.device_rate as u64 * SOURCE_WAIT_MS / 1000
-            });
-            let options = RenderOptions {
+            let now = self.ring.played_frames();
+            let mut options = RenderOptions {
                 wait: false,
-                drop_starved,
+                drop_starved: false,
+                drop_voices: self
+                    .stalls
+                    .iter()
+                    .filter(|(_, stall)| now >= stall.deadline)
+                    .map(|(id, _)| id.clone())
+                    .collect(),
                 monitor_solo: self.solo.clone(),
                 meters: true,
                 no_stretch: seg.rate < 0,
             };
             let n = (hi - lo) as usize;
-            match self.mixer.render(lo, n, &mut planar, &options) {
+            let mut result = self.mixer.render(lo, n, &mut planar, &options);
+            if let Ok(report) = &result {
+                let now = self.ring.played_frames();
+                let reserve = self
+                    .ring
+                    .buffered_frames()
+                    .saturating_sub(self.ring.refill_reserve());
+                let cold_start = report.voices == report.starved
+                    && self.startup.is_some_and(|(at, wall)| {
+                        at == now
+                            && (self.config.preroll_wait_ms == 0
+                                || wall.elapsed()
+                                    < Duration::from_millis(self.config.preroll_wait_ms as u64))
+                    });
+                let budget = if cold_start {
+                    self.device_rate as u64 * SOURCE_WAIT_MS / 1000
+                } else {
+                    reserve.min(self.device_rate as u64 * SOURCE_WAIT_MS / 1000)
+                };
+                self.stalls
+                    .retain(|id, _| report.starved_voices.contains(id));
+                for id in &report.starved_voices {
+                    let stall = self.stalls.entry(id.clone()).or_insert(VoiceStall {
+                        deadline: now.saturating_add(budget),
+                        reported: false,
+                    });
+                    // The device reserve can shrink faster than the initial
+                    // estimate (large callbacks / downstream DSP latency).
+                    stall.deadline = stall.deadline.min(now.saturating_add(budget));
+                    if now >= stall.deadline {
+                        options.drop_voices.insert(id.clone());
+                    }
+                }
+                // A newly expired voice must render with sample-validity
+                // masking. Do not commit its speculative incomplete output.
+                if report
+                    .waiting_voices
+                    .iter()
+                    .any(|id| options.drop_voices.contains(id))
+                {
+                    result = self.mixer.render(lo, n, &mut planar, &options);
+                }
+            }
+            match result {
                 Ok(report) => {
+                    self.report_render_errors(report.errors);
                     if report.starved > 0 {
                         let counter = if retry {
                             &self.shared.starve_retries
@@ -1177,36 +1258,34 @@ impl RenderThread {
                             &self.shared.starved
                         };
                         counter.fetch_add(1, Ordering::Relaxed);
-                        let device_now = self.ring.played_frames();
-                        let (_, reported) = self.stalled_since.get_or_insert((device_now, false));
-                        if !drop_starved {
+                        if !report.waiting_voices.is_empty() {
                             self.pending_segment = Some(seg);
-                            for (id, e) in report.errors {
-                                self.error(format!("{id}: {e}"));
-                            }
                             return;
                         }
-                        let notify = !*reported;
-                        *reported = true;
-                        if notify {
-                            self.error(format!(
-                                "Audio decode exceeded {SOURCE_WAIT_MS} ms; missing voices play as silence: {}",
-                                report.starved_voices.join(", ")
-                            ));
+                        let mut notifications = Vec::new();
+                        for id in &report.starved_voices {
+                            if let Some(stall) = self.stalls.get_mut(id)
+                                && !stall.reported
+                            {
+                                stall.reported = true;
+                                notifications.push(format!(
+                                    "Audio decode wait exhausted (up to {SOURCE_WAIT_MS} ms, bounded by device reserve); missing voice plays as silence: {id}"
+                                ));
+                            }
                         }
+                        let mut errors =
+                            self.shared.errors.lock().unwrap_or_else(|e| e.into_inner());
+                        errors.pending.extend(notifications);
                         self.shared.dropped_renders.fetch_add(1, Ordering::Relaxed);
                         self.shared
                             .dropped_voice_frames
                             .fetch_add(report.dropped_voice_frames, Ordering::Relaxed);
                     } else {
-                        self.stalled_since = None;
-                    }
-                    for (id, e) in report.errors {
-                        self.error(format!("{id}: {e}"));
+                        self.stalls.clear();
                     }
                 }
                 Err(e) => {
-                    self.stalled_since = None;
+                    self.stalls.clear();
                     self.error(e.to_string());
                     for c in &mut planar {
                         c.clear();

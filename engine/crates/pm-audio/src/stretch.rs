@@ -129,6 +129,8 @@ pub struct StretchRun {
     /// (a seek, a loop wrap, a direction change) starts fresh by the
     /// pre-roll rules, so it never walks the run over the gap.
     pending: Option<(i64, i64)>,
+    /// First committed silent request since this run stopped producing.
+    dropped_from: Option<i64>,
     scratch_in: Vec<Vec<f32>>,
     scratch_out: Vec<Vec<f32>>,
     /// Map points evaluated (diagnostics).
@@ -157,6 +159,7 @@ impl StretchRun {
             live: None,
             spare: None,
             pending: None,
+            dropped_from: None,
             scratch_in: vec![Vec::new(); channels],
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
@@ -177,6 +180,14 @@ impl StretchRun {
     /// run: what it renders next is a new request, not a retry).
     pub fn abandon_retry(&mut self) {
         self.pending = None;
+        self.dropped_from = None;
+    }
+
+    /// The caller advanced past an incomplete request as intentional silence.
+    /// Preserve phase history for short gaps; ordinary retries remain unbounded
+    /// in output distance (their device-time budget belongs to playback).
+    pub fn commit_drop(&mut self, start: i64) {
+        self.dropped_from.get_or_insert(start);
     }
 
     /// The output range of a starved render the next request may continue.
@@ -265,8 +276,15 @@ impl StretchRun {
             .pending
             .take()
             .is_some_and(|(from, to)| (from..=to).contains(&a));
+        // Retain uninterrupted phase history through a short committed drop,
+        // but never replay an unbounded outage on the audio render thread.
+        let resumes = resumes
+            && self
+                .dropped_from
+                .is_none_or(|from| a.saturating_sub(from) <= self.rate as i64 * 120 / 1000);
         let continues = self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || resumes);
         if !continues {
+            self.dropped_from = None;
             self.fresh_starts += 1;
             if !self.fresh(a, map, read)? {
                 self.pending = Some((a, end));
@@ -284,6 +302,7 @@ impl StretchRun {
             let from = (a - self.buf_start) as usize;
             o.extend_from_slice(&b[from..from + n]);
         }
+        self.dropped_from = None;
         // Keep this render's range (a glide's outgoing mix renders it
         // again) and nothing before it.
         let drop = (a - self.buf_start) as usize;
@@ -734,5 +753,55 @@ mod tests {
         }
         assert_eq!(retries, 1);
         assert_eq!(run.fresh_starts, 1, "the retry continued the run");
+    }
+    #[test]
+    fn short_committed_drops_reenter_with_uninterrupted_phase_history() {
+        for direction in [-1.0, 1.0] {
+            let mut map = |k: i64| {
+                Ok(MapPoint {
+                    x: 200_000.0 + direction * k as f64 * CONTROL as f64 * 1.5,
+                    on: true,
+                })
+            };
+            let mut whole = |lo, len, out: &mut [Vec<f32>]| {
+                sine(lo, len, out);
+                Ok(true)
+            };
+            let mut missing = |_lo, len, out: &mut [Vec<f32>]| {
+                for c in out {
+                    c.clear();
+                    c.resize(len, 0.0);
+                }
+                Ok(false)
+            };
+            let mut run = StretchRun::new(2, 48_000, 0);
+            let mut reference = StretchRun::new(2, 48_000, 0);
+            let mut out = vec![vec![]; 2];
+            let mut expected = vec![vec![]; 2];
+            let mut drops = 0;
+            for a in (48_000..68_000).step_by(256) {
+                reference
+                    .render(a, 256, &mut map, &mut whole, &mut expected)
+                    .unwrap();
+                let complete = if (52_000..56_000).contains(&a) {
+                    run.render(a, 256, &mut map, &mut missing, &mut out)
+                        .unwrap()
+                } else {
+                    run.render(a, 256, &mut map, &mut whole, &mut out).unwrap()
+                };
+                if complete {
+                    assert_eq!(out, expected, "{direction} at {a}");
+                } else {
+                    drops += 1;
+                    run.commit_drop(a);
+                    assert!(out.iter().flatten().all(|&v| v == 0.0));
+                }
+            }
+            assert!(drops > 0);
+            assert_eq!(
+                run.fresh_starts, 1,
+                "a dropped span keeps valid phase state"
+            );
+        }
     }
 }

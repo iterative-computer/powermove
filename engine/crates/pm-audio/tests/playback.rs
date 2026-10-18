@@ -1745,20 +1745,21 @@ fn until(mut ready: impl FnMut() -> bool) {
 
 fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
     let _load = stress_enabled().then(CpuContention::start);
-    let dir = temp_dir(&format!("bounded-{exceed}-{device_rate}"));
+    let dir = temp_dir(&format!("reserve-{exceed}-{device_rate}"));
     let good_file = dir.join("good.wav");
     let late_file = dir.join("late.wav");
-    // Project == device isolates dropped input from the master converter;
-    // existing starvation tests exercise bit equality through conversion/2x.
-    let n = device_rate as usize;
+    let n = 3 * pm_audio::source::BLOCK;
     let good: Vec<f32> = (0..n).map(|i| 0.1 + (i % 997) as f32 / 10_000.0).collect();
     let late: Vec<f32> = (0..n).map(|i| 0.2 + (i % 991) as f32 / 10_000.0).collect();
     write_wav(&good_file, device_rate, &[good.clone(), vec![0.0; n]]);
     write_wav(&late_file, device_rate, &[vec![0.0; n], late.clone()]);
     let cache = SourceCache::new(64 << 20, workers);
     let good_source = cache.open(&good_file, None).unwrap();
-    cache.block(&good_source, 0, true).unwrap();
+    for block in 0..3 {
+        cache.block(&good_source, block, true).unwrap();
+    }
     let late_source = cache.open(&late_file, None).unwrap();
+    cache.block(&late_source, 0, true).unwrap();
     cache.set_decode_blocked(&late_source, true);
     let (playback, mut side) = Playback::start_headless(
         MixFormat::stereo(device_rate),
@@ -1766,6 +1767,7 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
         PlaybackConfig {
             preroll_ms: 0,
             preroll_wait_ms: 0,
+            lookahead_ms: 0,
             ..PlaybackConfig::default()
         },
         device_rate,
@@ -1775,10 +1777,10 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
     .unwrap();
     let doc = project(
         30.0,
-        1.0,
+        n as f64 / device_rate as f64,
         &[
-            audio("good", "g", 0.0, 1.0, "", ""),
-            audio("late", "s", 0.0, 1.0, "", ""),
+            audio("good", "g", 0.0, n as f64 / device_rate as f64, "", ""),
+            audio("late", "s", 0.0, n as f64 / device_rate as f64, "", ""),
         ],
         &[],
         "",
@@ -1796,104 +1798,106 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
             .unwrap()
             .is_empty()
     );
+    let from = pm_audio::source::BLOCK - 8192;
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(from as f64 / device_rate as f64),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
     playback
         .command(TransportCommand::Play {
             rate: PlaybackRate::NORMAL,
         })
         .unwrap();
-    until(|| playback.stats().starved_renders > 0 && cache.blocked_decoders() > 0);
-    let bound = device_rate as u64 * pm_audio::playback::SOURCE_WAIT_MS / 1000;
-    let mut held = 0u64;
-    let mut out = vec![0.0; 64 * 2];
+    until(|| side.queued_frames() >= 3072);
     let host_start = host_now_us();
-    // Stop one callback before the bound: elapsed wall time cannot trigger
-    // a drop. The decoder remains blocked throughout.
-    while held + 64 < bound {
+    let mut out = vec![0.0; 256 * 2];
+    let mut played = Vec::new();
+    let mut released = false;
+    let mut crossed = false;
+    let mut held_at = 0;
+    let mut first_drop = None;
+    for turn in 0..80 {
+        // No patient-device wait: the source policy must keep the ready
+        // voice in the ring even with the other worker stuck indefinitely.
+        assert!(
+            side.queued_frames() >= 256,
+            "reserve exhausted: {:?}",
+            playback.stats()
+        );
         side.callback(
             &mut out,
             2,
-            host_start + held * 1_000_000 / device_rate as u64,
+            host_start + turn * 256 * 1_000_000 / device_rate as u64,
         );
-        held += 64;
-        assert!(out.iter().all(|&v| v == 0.0));
-    }
-    std::thread::sleep(Duration::from_millis(130));
-    assert_eq!(playback.stats().dropped_renders, 0);
-    assert_eq!(side.queued_frames(), 0);
-    assert!(playback.take_errors().is_empty());
-    if exceed {
-        while held < bound {
-            side.callback(
-                &mut out,
-                2,
-                host_start + held * 1_000_000 / device_rate as u64,
-            );
-            held += 64;
-        }
-        until(|| side.queued_frames() >= 512);
-        assert!(
-            cache.blocked_decoders() > 0,
-            "playback continues with a stuck worker"
-        );
-        let errors = playback.take_errors();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("120 ms") && errors[0].contains("late"));
-    } else {
-        cache.set_decode_blocked(&late_source, false);
-        until(|| cache.is_ready(&late_source, 0, n));
-        until(|| side.queued_frames() >= 512);
-    }
-    let mut played = Vec::new();
-    let mut frame = 0usize;
-    out.resize(512 * 2, 0.0);
-    for turn in 0..20 {
-        until(|| side.queued_frames() >= 512);
-        let host = host_start + (held + frame as u64) * 1_000_000 / device_rate as u64;
-        side.callback(&mut out, 2, host);
         played.extend_from_slice(&out);
-        if exceed && turn == 3 {
-            // Consuming multiple buffers while stuck proves the clock and
-            // the good voice do not wait for the decoder again.
-            cache.set_decode_blocked(&late_source, false);
-            until(|| cache.is_ready(&late_source, 0, n));
-        }
         let clock = playback.clock().unwrap();
+        let host = host_start + turn * 256 * 1_000_000 / device_rate as u64;
         let actual = clock
             .media_time_at(HostMicros::new(host + LATENCY_US as u64).unwrap())
             .get();
-        let expected = frame as i64 * TICKS_PER_SECOND / device_rate as i64;
+        let expected = (from as i64 + turn as i64 * 256) * TICKS_PER_SECOND / device_rate as i64;
         assert!(
             (actual - expected).abs() <= TICKS_PER_SECOND / 500_000,
             "device clock: {actual} vs {expected}"
         );
-        frame += 512;
-    }
-    let mut resumed = !exceed;
-    let mut missing = 0;
-    for (i, pair) in played.chunks_exact(2).enumerate() {
-        assert_eq!(pair[0], good[i], "other voice at {i}");
-        if pair[1] == 0.0 {
-            assert!(!resumed, "no second missing span after re-entry at {i}");
-            missing += 1;
-        } else {
-            resumed = true;
-            assert_eq!(pair[1], late[i], "sample-accurate re-entry at {i}");
+        std::thread::sleep(Duration::from_secs_f64(256.0 / device_rate as f64));
+        if !crossed && playback.stats().starved_renders > 0 {
+            crossed = true;
+            held_at = turn;
+            assert!(cache.blocked_decoders() > 0);
+            if !exceed {
+                // Wall time alone cannot spend the buffered device frames.
+                std::thread::sleep(Duration::from_millis(130));
+                assert_eq!(playback.stats().dropped_renders, 0);
+                cache.set_decode_blocked(&late_source, false);
+                until(|| cache.is_ready(&late_source, pm_audio::source::BLOCK as i64, 256));
+                released = true;
+            }
+        }
+        if playback.stats().dropped_renders > 0 {
+            first_drop.get_or_insert(turn);
+        }
+        if exceed && !released && playback.stats().dropped_renders > 0 && turn > held_at + 12 {
+            // The default 80 ms ring forces a drop sooner than 120 ms.
+            assert!((first_drop.unwrap() - held_at) * 256 < device_rate as u64 * 120 / 1000);
+            let errors = playback.take_errors();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(errors[0].contains("device reserve") && errors[0].ends_with(": late"));
+            cache.set_decode_blocked(&late_source, false);
+            until(|| cache.is_ready(&late_source, pm_audio::source::BLOCK as i64, 256));
+            released = true;
         }
     }
-    assert!(resumed);
-    let stats = playback.stats();
-    if exceed {
-        assert!(missing >= 2_048);
-        assert_eq!(stats.dropped_voice_frames, missing as u64);
-        assert!(stats.dropped_renders > 0);
-    } else {
-        assert_eq!(stats.dropped_renders, 0);
-        assert_eq!(missing, 0);
+    assert!(crossed && released);
+    let mut missing = 0;
+    let mut resumed = false;
+    for (i, pair) in played.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0], good[from + i], "ready voice at {i}");
+        if pair[1] == 0.0 {
+            assert!(!resumed);
+            missing += 1;
+        } else {
+            if missing > 0 {
+                resumed = true;
+            }
+            assert_eq!(pair[1], late[from + i], "late voice at {i}");
+        }
     }
-    assert!(
-        playback.take_errors().is_empty(),
-        "reported only once after draining"
+    let stats = playback.stats();
+    assert_eq!(
+        stats.underruns, 0,
+        "a stuck voice must never silence ready voices"
     );
+    if exceed {
+        assert!(missing > 0 && resumed);
+        assert_eq!(stats.dropped_voice_frames, missing);
+    } else {
+        assert_eq!(stats.dropped_voice_frames, 0);
+        assert_eq!(missing, 0, "briefly late voice remains bit-exact");
+    }
+    assert!(playback.take_errors().is_empty());
     drop(playback);
     cache.shutdown();
 }
@@ -1920,6 +1924,7 @@ fn recurring_errors_are_taken_once() {
     cache.block(&good_source, 0, true).unwrap();
     let bad_source = cache.open(&bad_file, None).unwrap();
     cache.set_decode_failing(&bad_source, true);
+    assert!(cache.block(&bad_source, 0, true).is_err());
     let late_source = cache.open(&late_file, None).unwrap();
     cache.set_decode_blocked(&late_source, true);
     let (playback, mut side) = Playback::start_headless(
@@ -2002,6 +2007,135 @@ fn recurring_errors_are_taken_once() {
     );
     assert_eq!(taken.len(), 2, "{taken:?}");
     cache.set_decode_blocked(&late_source, false);
+    drop(playback);
+    cache.shutdown();
+}
+
+/// A keeps dropping while B arrives late. B owns the reserve still in the
+/// ring, so it can recover bit-exactly; A then recovers and starts a second
+/// episode at its next source block, with the same diagnostic emitted again.
+#[test]
+fn voices_own_their_waits_and_notifications() {
+    let _load = stress_enabled().then(CpuContention::start);
+    let rate = 48_000;
+    let dir = temp_dir("voice-episodes");
+    let files = [dir.join("good.wav"), dir.join("a.wav"), dir.join("b.wav")];
+    let n = 3 * pm_audio::source::BLOCK;
+    write_wav(&files[0], rate, &[vec![0.1; n], vec![0.0; n]]);
+    write_wav(&files[1], rate, &[vec![0.0; n], vec![0.2; n]]);
+    write_wav(&files[2], rate, &[vec![0.0; n], vec![0.3; n]]);
+    let cache = SourceCache::new(64 << 20, 2);
+    let good = cache.open(&files[0], None).unwrap();
+    for block in 0..3 {
+        cache.block(&good, block, true).unwrap();
+    }
+    let a = cache.open(&files[1], None).unwrap();
+    let b = cache.open(&files[2], None).unwrap();
+    cache.set_decode_blocked(&a, true);
+    cache.set_decode_blocked(&b, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(rate),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_ms: 0,
+            preroll_wait_ms: 0,
+            lookahead_ms: 0,
+            ..PlaybackConfig::default()
+        },
+        rate,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(
+        30.0,
+        4.0,
+        &[
+            audio("good", "g", 0.0, 4.0, "", ""),
+            audio("A", "a", 0.0, 4.0, "", ""),
+            audio("B", "b", 0.25, 0.5, "", ""),
+        ],
+        &[],
+        "",
+    );
+    let resolver = |id: &str| {
+        Some(
+            files[match id {
+                "g" => 0,
+                "a" => 1,
+                _ => 2,
+            }]
+            .clone(),
+        )
+    };
+    playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    until(|| side.queued_frames() >= 3072 && cache.blocked_decoders() > 0);
+    let mut messages = playback.take_errors();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].ends_with(": A"));
+    let mut b_released = false;
+    let mut a_released = false;
+    let mut second_released = false;
+    let mut second_at = None;
+    let mut b_samples = 0;
+    let mut out = vec![0.0; 512 * 2];
+    let host = host_now_us();
+    for turn in 0..170u64 {
+        assert!(side.queued_frames() >= 512, "{:?}", playback.stats());
+        side.callback(&mut out, 2, host + turn * 512 * 1_000_000 / rate as u64);
+        for (i, pair) in out.chunks_exact(2).enumerate() {
+            assert_eq!(pair[0], 0.1, "ready voice never goes silent");
+            let at = turn as usize * 512 + i;
+            if (12_000..36_000).contains(&at) {
+                // A has not yet been released while B sounds. Any lost B
+                // sample would be 0, exposing a stolen per-voice budget.
+                assert_eq!(pair[1], 0.3, "briefly late B at {at}");
+                b_samples += 1;
+            }
+        }
+        std::thread::sleep(Duration::from_secs_f64(512.0 / rate as f64));
+        if !b_released && cache.blocked_decoders() == 2 {
+            assert!(playback.take_errors().is_empty(), "B must get its own wait");
+            cache.set_decode_blocked(&b, false);
+            until(|| cache.is_ready(&b, 0, 256));
+            b_released = true;
+        }
+        if b_released && !a_released && turn * 512 > 38_000 {
+            cache.set_decode_blocked(&a, false);
+            until(|| cache.is_ready(&a, 0, 256));
+            // Block the next source block, after A's successful recovery.
+            cache.set_decode_blocked(&a, true);
+            a_released = true;
+        }
+        let new = playback.take_errors();
+        if !new.is_empty() {
+            assert!(
+                a_released,
+                "no extra message during the first episode: {new:?}"
+            );
+            second_at = Some(turn);
+            messages.extend(new);
+        }
+        if second_at.is_some_and(|at| turn > at + 3) && !second_released {
+            cache.set_decode_blocked(&a, false);
+            until(|| cache.is_ready(&a, pm_audio::source::BLOCK as i64, 256));
+            second_released = true;
+        }
+    }
+    assert!(b_released && a_released && second_released);
+    assert_eq!(b_samples, 24_000);
+    assert_eq!(
+        messages.len(),
+        2,
+        "one notification per A episode: {messages:?}"
+    );
+    assert_eq!(messages[0], messages[1]);
+    assert_eq!(playback.stats().underruns, 0);
     drop(playback);
     cache.shutdown();
 }

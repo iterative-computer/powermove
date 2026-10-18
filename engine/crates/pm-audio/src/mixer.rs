@@ -103,6 +103,9 @@ pub struct RenderOptions {
     /// Commit missing playback input as silence instead of retrying it.
     /// Offline renders leave this false and wait for all input.
     pub drop_starved: bool,
+    /// Per-voice playback deadlines that have expired. Other missing voices
+    /// still retry; a dropped voice never spends another voice's budget.
+    pub drop_voices: HashSet<String>,
     /// Strips heard (the mixer's monitor solo; never part of an export).
     /// `None` or empty: every strip.
     pub monitor_solo: Option<HashSet<String>>,
@@ -124,6 +127,9 @@ pub struct RenderReport {
     /// IDs of voices missing input, including outgoing retune voices, each
     /// once.
     pub starved_voices: Vec<String>,
+    /// Missing voices whose own deadline has not expired. No PCM or meter /
+    /// retune progress may commit until this is empty.
+    pub waiting_voices: Vec<String>,
     /// Project output frames silenced for missing input, summed over voices.
     pub dropped_voice_frames: u64,
     /// Errors decoding or evaluating, one per voice.
@@ -443,7 +449,7 @@ impl Mixer {
         }
         // A starved render is retried (playback) or not heard as rendered:
         // the meters take only complete renders, once each.
-        if options.meters && (report.starved == 0 || options.drop_starved) {
+        if options.meters && report.waiting_voices.is_empty() {
             for (tap, strip) in self.taps.iter_mut().zip(&self.strips) {
                 tap.push(strip, frames);
             }
@@ -483,6 +489,11 @@ impl Mixer {
                             report.starved_voices.push(id);
                         }
                     }
+                    for id in outgoing_report.waiting_voices {
+                        if !report.waiting_voices.contains(&id) {
+                            report.waiting_voices.push(id);
+                        }
+                    }
                     report.dropped_voice_frames += outgoing_report.dropped_voice_frames;
                     report.errors.extend(outgoing_report.errors);
                 }
@@ -511,7 +522,7 @@ impl Mixer {
         for g in &mut outgoing {
             // Playback retries a segment whose source was missing. Its
             // retune envelope must stay at the same rendered position.
-            if report.starved == 0 || options.drop_starved {
+            if report.waiting_voices.is_empty() {
                 g.done += frames;
             }
         }
@@ -566,11 +577,22 @@ impl Mixer {
         let open = comps[0].clone();
         for (vi, plan) in graph.voices.iter().enumerate() {
             self.voice_dropped_frames = 0;
+            let mut voice_options;
+            let options = if options.drop_voices.contains(&plan.id) && !options.wait {
+                voice_options = options.clone();
+                voice_options.drop_starved = true;
+                &voice_options
+            } else {
+                options
+            };
             match self.render_voice(vi, plan, &comps, &open, start, frames, options) {
                 Ok(Some(starved)) => {
                     report.voices += 1;
                     report.starved += starved as usize;
                     if starved {
+                        if !options.drop_starved && !report.waiting_voices.contains(&plan.id) {
+                            report.waiting_voices.push(plan.id.clone());
+                        }
                         if !report.starved_voices.contains(&plan.id) {
                             report.starved_voices.push(plan.id.clone());
                         }
@@ -948,9 +970,9 @@ impl Mixer {
         let complete = complete?;
         if !complete && options.drop_starved {
             self.voice_dropped_frames += n as u64;
-            // The next segment is a new request, not a catch-up through an
-            // arbitrarily long missing span. Never feed missing PCM to DSP.
-            run.abandon_retry();
+            // Keep valid vocoder history through short dropped spans. The
+            // run bounds catch-up work itself; missing PCM never enters DSP.
+            run.commit_drop(a);
         }
         drop(run);
         let voice = &self.voices[vi];
@@ -993,6 +1015,22 @@ impl Mixer {
         frames: usize,
         budget: usize,
     ) -> (Vec<(Arc<Source>, i64, i64)>, bool) {
+        let (spans, complete) = self.voice_source_spans_within(start, frames, budget);
+        (
+            spans
+                .into_iter()
+                .map(|(_, source, lo, hi)| (source, lo, hi))
+                .collect(),
+            complete,
+        )
+    }
+
+    fn voice_source_spans_within(
+        &mut self,
+        start: i64,
+        frames: usize,
+        budget: usize,
+    ) -> (Vec<(usize, Arc<Source>, i64, i64)>, bool) {
         let p = self.format.sample_rate as f64;
         let graph = self.graph.clone();
         let doc = self.doc.clone();
@@ -1018,7 +1056,7 @@ impl Mixer {
             };
             let s0 = ((a as f64 / p - o) * rate).floor() as i64 - pad;
             let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + pad;
-            out.push((plan.source.clone(), s0, s1));
+            out.push((vi, plan.source.clone(), s0, s1));
         }
         if mapped.is_empty() || frames == 0 {
             return (out, true);
@@ -1085,7 +1123,11 @@ impl Mixer {
                         s
                     }
                 };
-                out.extend(spans.iter().map(|&(lo, hi)| (plan.source.clone(), lo, hi)));
+                out.extend(
+                    spans
+                        .iter()
+                        .map(|&(lo, hi)| (vi, plan.source.clone(), lo, hi)),
+                );
             }
         }
         (out, complete)
@@ -1108,8 +1150,22 @@ impl Mixer {
         complete
     }
 
-    /// Whether the source blocks for `[start, start + frames)` of every voice
-    /// are decoded (playback waits for this before it starts).
+    /// Whether startup has a voice whose complete read support is ready.
+    /// Keep spans keyed by voice, even when two clips share one source.
+    pub fn has_ready_source(&mut self, start: i64, frames: usize) -> bool {
+        let (spans, _) = self.voice_source_spans_within(start, frames, usize::MAX);
+        if spans.is_empty() {
+            return true;
+        }
+        let mut ready = HashMap::new();
+        for (vi, source, lo, hi) in spans {
+            *ready.entry(vi).or_insert(true) &=
+                self.cache.is_ready(&source, lo, (hi - lo).max(0) as usize);
+        }
+        ready.into_values().any(|ready| ready)
+    }
+
+    /// Whether every source span in the range is decoded.
     pub fn is_ready(&mut self, start: i64, frames: usize) -> bool {
         self.source_spans(start, frames)
             .iter()
