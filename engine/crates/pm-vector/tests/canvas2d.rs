@@ -18,21 +18,23 @@
 mod canvas_cases;
 
 /// Cases with a pixel off by more than 1 code value, as measured on
-/// `canvas-20261016-075306-cbd1dcfd` (Electron 44, Chromium 152, Apple M-series):
+/// `canvas-20261018-220349-9a95e00c` (Electron 44, Chromium 152, Apple M-series)
+/// with the viewport round trip (`tess::Viewport`):
 /// (id, pixels off by more than 1, largest difference).
 const KNOWN: &[(&str, usize, i32)] = &[
     ("shape-ellipse-big-s2.75", 3, 64),
     ("shape-random153-s3.75", 1, 45),
     ("paths-badge-rotated-scaled-s3", 2, 57),
     ("diag-ellipse-380", 2, 64),
-    // The parity corpus's composition/metadata rectangle (radius 24).
-    ("shape-corpus-rect-r24-s1", 2, 64),
-    // The cards of the corpus's space/groups-25d (130 × 140, radius 24),
-    // which a 3D group's plane magnifies (pm-render routes level 1 shapes
-    // on 2.5D planes for this; docs/engine/composite.md).
-    ("shape-groups25d-card-ff6040-s1", 2, 64),
-    ("shape-groups25d-card-4060ff-s1", 2, 64),
 ];
+
+/// Cases that were known exceptions until the viewport round trip and must
+/// now be bit-exact: the parity corpus's composition/metadata rectangle
+/// (radius 24) and the cards of space/groups-25d (130 × 140, radius 24),
+/// which a 3D group's plane magnifies (docs/engine/vector.md, "Viewport
+/// round trip"). Every `viewport-*` case (the sweep that tested the model)
+/// must be bit-exact too.
+const EXACT: &[&str] = &["shape-corpus-rect-r24-s1", "shape-groups25d-card-ff6040-s1", "shape-groups25d-card-4060ff-s1"];
 
 #[test]
 fn rasters_match_chromium_canvas2d() {
@@ -60,12 +62,16 @@ fn rasters_match_chromium_canvas2d() {
         }
         compared += 1;
         let (mut over1, mut max) = (0usize, 0i32);
+        let must_be_exact = EXACT.contains(&id) || id.starts_with("viewport-");
         for (a, b) in ours.chunks(4).zip(reference.chunks(4)) {
             let e = a.iter().zip(b).map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs()).max().unwrap();
             over1 += usize::from(e > 1);
             max = max.max(e);
         }
         let pixels = (w * h) as usize;
+        if must_be_exact && max != 0 {
+            failures.push(format!("{id}: must be bit-exact; {over1} pixels off by more than 1, max {max}"));
+        }
         if over1 * 1000 > pixels {
             failures.push(format!("{id}: {over1} of {pixels} pixels off by more than 1"));
         }
