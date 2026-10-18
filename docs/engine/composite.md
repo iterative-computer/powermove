@@ -239,6 +239,16 @@ matte passes render over the pass rectangle.
   `feat/native-engine` 9263858a routed the linear row to the legacy engine.
   (A first run of this branch found the display asleep: 0 frames presented;
   rerun with the display awake as above.)
+  The 29.97 and 59.94 rows (`-g "29.97|59.94"`, 2026-10-18, clips generated as
+  the spec describes, other lanes' jobs running: load average 7 to 16):
+  29.97 off 1,799 shown of 1,798, 0 skipped, 0 repeated, p50 33.2 ms, max
+  41.5 ms; **29.97 linear on, drawn by the engine: 1,799 shown, 0 skipped, 0
+  repeated, p50 33.2 ms, max 43.4 ms**; 59.94 off 3,597 shown, 0 skipped, p50
+  16.6 ms, max 24.9 ms; **59.94 linear on: 3,499 shown of 3,596, 98 skipped,
+  79 presenter drops (late), max 268 ms** (engine compose mean 1.6 ms, 25
+  late-skipped). The 59.94 linear row fails real time on this loaded run; it
+  needs the clean rerun phase3a-gate item 6 already asks for before it can be
+  read either way. Results: `/tmp/ne-compclose/evidence/r2/uhd-2997-5994.jsonl`.
 
 ## Tests
 
