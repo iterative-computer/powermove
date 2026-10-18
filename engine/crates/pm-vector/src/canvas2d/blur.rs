@@ -95,12 +95,21 @@ struct Img {
 
 impl Img {
     fn texel(&self, x: i32, y: i32) -> [f32; 4] {
-        // Clamp sampling (the HW sampler on the padded image).
+        // Clamp sampling (the HW sampler on the padded image), as the blur
+        // passes read it: half precision.
+        self.texel_f32(x, y).map(f16_round)
+    }
+
+    /// The texel at full precision (the image shader with a color filter
+    /// reads the 8-bit texture as float: measured on the linearRGB blur
+    /// ladder, 107/255 linearizes to 37.49/255 and stores 37, where the
+    /// half-rounded 0.419678 would store 38).
+    fn texel_f32(&self, x: i32, y: i32) -> [f32; 4] {
         let xi = (x + 1).clamp(0, self.w as i32 - 1) as usize;
         let yi = (y + 1).clamp(0, self.h as i32 - 1) as usize;
         let i = (yi * self.w + xi) * 4;
         let s = &self.rgba[i..i + 4];
-        [f16_round(f32::from(s[0]) / 255.0), f16_round(f32::from(s[1]) / 255.0), f16_round(f32::from(s[2]) / 255.0), f16_round(f32::from(s[3]) / 255.0)]
+        [f32::from(s[0]) / 255.0, f32::from(s[1]) / 255.0, f32::from(s[2]) / 255.0, f32::from(s[3]) / 255.0]
     }
 
     /// Bilinear sample at a subset-relative position (pixel centers at
@@ -375,8 +384,11 @@ fn rescale(src: &Img, src_rect: [i32; 4], scale: [f32; 2], linear: bool) -> (Img
     let mut y_steps = downscale_step_count(scale[1]);
     let src_rect_f = [src_rect[0] as f32, src_rect[1] as f32, src_rect[2] as f32, src_rect[3] as f32];
     let mut step_bounds = src_rect_f;
-    let final_scale_x = if x_steps > 0 { 1.0 / (1 << x_steps) as f32 } else { 1.0 };
-    let final_scale_y = if y_steps > 0 { 1.0 / (1 << y_steps) as f32 } else { 1.0 };
+    // Decal images never defer periodic tiling, so `allowOverscaling` is
+    // false: the last step scales the requisite amount, not to the next
+    // power of two.
+    let final_scale_x = if x_steps > 0 { scale[0] } else { 1.0 };
+    let final_scale_y = if y_steps > 0 { scale[1] } else { 1.0 };
     let mut image = src.clone();
     let mut first = true;
     loop {
@@ -407,7 +419,7 @@ fn rescale(src: &Img, src_rect: [i32; 4], scale: [f32; 2], linear: bool) -> (Img
                 let px = lx - image.origin[0] as f32;
                 let py = ly - image.origin[1] as f32;
                 let mut c = if first && sx == 1.0 && sy == 1.0 {
-                    image.texel(libm::floorf(px) as i32, libm::floorf(py) as i32)
+                    image.texel_f32(libm::floorf(px) as i32, libm::floorf(py) as i32)
                 } else {
                     image.sample_linear(px, py)
                 };
@@ -521,7 +533,7 @@ pub fn filter_layer(
             let px = low_bounds_f[0] + (lx - visible[0] as f32) * inv_scale_x - blurred.origin[0] as f32;
             let py = low_bounds_f[1] + (ly - visible[1] as f32) * inv_scale_y - blurred.origin[1] as f32;
             let mut c = if pixel_aligned {
-                blurred.texel(libm::floorf(px) as i32, libm::floorf(py) as i32)
+                blurred.texel_f32(libm::floorf(px) as i32, libm::floorf(py) as i32)
             } else {
                 blurred.sample_linear(px, py)
             };
