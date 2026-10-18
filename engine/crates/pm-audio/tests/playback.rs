@@ -1735,6 +1735,7 @@ fn a_decode_wait_below_the_bound_is_bit_exact() {
     bounded_decode_wait(false, 44_100, 0);
 }
 
+#[track_caller]
 fn until(mut ready: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !ready() {
@@ -2019,10 +2020,35 @@ fn cold_start_decode_wait(
             })
             .unwrap();
     }
-    until(|| playback.stats().starved_renders > 0 && cache.blocked_decoders() > 0);
     let bound = device_rate as u64 * pm_audio::playback::SOURCE_WAIT_MS / 1000;
+    // Device frames since the play or seek command.
     let mut held = 0u64;
     out.resize(64 * 2, 0.0);
+    // A seek's old chunks fill the ring until a callback retires them, as a
+    // real device's next callback does, so the seek case keeps calling back
+    // (that time counts toward the hold) until the new run's first render
+    // is waiting. The hold began at or after the command and before `pre`.
+    let t = std::time::Instant::now();
+    while !(playback.stats().starved_renders > 0 && cache.blocked_decoders() > 0) {
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "{case}: the run never waited: {:?}, {} blocked decoders, {} queued",
+            playback.stats(),
+            cache.blocked_decoders(),
+            side.queued_frames()
+        );
+        if seek {
+            side.callback(&mut out, 2, host(device));
+            held += 64;
+            device += 64;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let pre = held;
+    assert!(
+        pre + 64 < bound,
+        "{case}: {pre} frames before the run waited"
+    );
     // Stop one callback before the bound: elapsed wall time cannot trigger
     // a drop. The decoder remains blocked throughout.
     while held + 64 < bound {
@@ -2039,7 +2065,8 @@ fn cold_start_decode_wait(
     assert_eq!(side.queued_frames(), 0, "{case}");
     assert!(playback.take_errors().is_empty(), "{case}");
     if exceed {
-        while held < bound {
+        // The hold ends between `bound` and `pre + bound`.
+        while held < pre + bound {
             side.callback(&mut out, 2, host(device));
             held += 64;
             device += 64;
