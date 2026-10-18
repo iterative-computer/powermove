@@ -822,7 +822,7 @@ impl ClipStack {
         };
         match simplify(&save, &draw.tshape()) {
             Influence::ClipsOut => return None,
-            Influence::None => return Some(draw.to_clip(None, FIRST_ORDER)),
+            Influence::None => return Some(draw.make_clip(None, FIRST_ORDER)),
             Influence::Replaces => draw.reset_to_flood_fill(),
             Influence::Complex => {}
         }
@@ -836,7 +836,7 @@ impl ClipStack {
             if self.elements[i].invalid {
                 continue;
             }
-            let (influence, intersect_result) = {
+            let influence = {
                 let e = &self.elements[i];
                 let es = TShape {
                     shape: &e.shape,
@@ -846,9 +846,8 @@ impl ClipStack {
                     intersect: e.intersect,
                     bounds_only: false,
                 };
-                (simplify(&es, &draw.tshape()), ())
+                simplify(&es, &draw.tshape())
             };
-            let _ = intersect_result;
             match influence {
                 Influence::ClipsOut => return None,
                 Influence::None => continue,
@@ -879,7 +878,7 @@ impl ClipStack {
                 }
             }
         }
-        let mut clip = draw.to_clip(analytic, FIRST_ORDER);
+        let mut clip = draw.make_clip(analytic, FIRST_ORDER);
         if !effective.is_empty() {
             // `RawElement::updateForDraw` for every element drawn into the
             // depth attachment: the first use fixes the clip draw's order
@@ -963,8 +962,7 @@ fn can_apply_analytic_clip(shape: &Shape, ltd: &Transform, intersect: bool) -> O
     let mut circular_radius = 0.0f32;
     let mut edge_flags = 0u32;
     let mut square = 0;
-    for corner in 0..4 {
-        let radii = rr.radii[corner];
+    for (radii, flags) in rr.radii.iter().zip(CORNER_FLAGS) {
         if !SkRRect::is_relatively_circular(radii[0], radii[1], PIXEL_TOLERANCE) {
             return None;
         }
@@ -977,7 +975,7 @@ fn can_apply_analytic_clip(shape: &Shape, ltd: &Transform, intersect: bool) -> O
         } else if !SkRRect::is_relatively_circular(radii[0], circular_radius, PIXEL_TOLERANCE) {
             return None;
         }
-        edge_flags |= CORNER_FLAGS[corner];
+        edge_flags |= flags;
     }
     if edge_flags == 0 {
         Some(AnalyticClip { rect: rr.rect, radius: RADIUS_MIN, edge_flags, inverted })
@@ -1250,7 +1248,7 @@ impl DrawShape {
         self.modified = true;
     }
 
-    fn to_clip(&mut self, analytic: Option<AnalyticClip>, clip_order: u32) -> DrawClip {
+    fn make_clip(&mut self, analytic: Option<AnalyticClip>, clip_order: u32) -> DrawClip {
         if self.modified {
             self.transformed_bounds = self.local_to_device.map_rect(self.shape.bounds());
             self.outer = rect_intersect(self.transformed_bounds, self.scissor);
@@ -1320,29 +1318,29 @@ fn conservative_intersect(a: &SkRRect, b: &SkRRect) -> Option<SkRRect> {
         _ => p[0] >= q[0] && p[1] <= q[1],
     };
     let mut radii = [[0.0f32; 2]; 4];
-    for corner in 0..4 {
+    for (corner, out) in radii.iter_mut().enumerate() {
         let test = rrect_corner(r, corner);
         let ac = rrect_corner(a.rect, corner);
         let bc = rrect_corner(b.rect, corner);
         let (ar, br) = (a.radii[corner], b.radii[corner]);
         let ok = if test == ac && test == bc {
             if ar[0] >= br[0] && ar[1] >= br[1] {
-                radii[corner] = ar;
+                *out = ar;
                 true
             } else if br[0] >= ar[0] && br[1] >= ar[1] {
-                radii[corner] = br;
+                *out = br;
                 true
             } else {
                 false
             }
         } else if test == ac {
-            radii[corner] = ar;
+            *out = ar;
             if ar == br { inside_corner(corner, ac, bc) } else { check_corner_containment(b, ac[0], ac[1]) }
         } else if test == bc {
-            radii[corner] = br;
+            *out = br;
             if br == ar { inside_corner(corner, bc, ac) } else { check_corner_containment(a, bc[0], bc[1]) }
         } else {
-            radii[corner] = [0.0, 0.0];
+            *out = [0.0, 0.0];
             check_corner_containment(a, test[0], test[1]) && check_corner_containment(b, test[0], test[1])
         };
         if !ok {
@@ -1466,8 +1464,12 @@ pub struct Canvas<'a> {
     devices: Vec<Device>,
     clip: ClipStack,
     clip_saves: Vec<ClipStack>,
-    pub text: Option<Box<dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Vec<u8>, SvgError> + 'a>>,
+    pub text: Option<Box<TextDrawFn<'a>>>,
 }
+
+/// The host's SVG text raster: the text element, its local-to-device
+/// matrix and the device size, to premultiplied RGBA8.
+pub type TextDrawFn<'a> = dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Vec<u8>, SvgError> + 'a;
 
 impl<'a> Canvas<'a> {
     pub fn new(width: u32, height: u32) -> Self {
@@ -1746,7 +1748,7 @@ impl<'a> Canvas<'a> {
             shape = Shape::Path(dashed, rule);
         }
         let paint = self.paint_of(flags, ltd);
-        let stroke = flags.stroke.as_ref().map(|s| stroke_style(s));
+        let stroke = flags.stroke.as_ref().map(stroke_style);
         // Stroke outset for the clip query (SkStrokeRec::GetInflationRadius).
         let outset = stroke.as_ref().map_or(0.0, |(p, cap, miter)| {
             let is_path = matches!(shape, Shape::Path(..));
@@ -1796,8 +1798,9 @@ impl<'a> Canvas<'a> {
             (_, Paint::Image(_)) => true,
         };
         let dev = self.devices.last_mut().unwrap();
-        let mut order = FIRST_ORDER.max(clip.clip_order + u32::from(clip.clip_order > FIRST_ORDER || true) - 1);
-        order = order.max(clip.clip_order);
+        // `DrawOrder order(depth)` starts at First; `dependsOnPaintersOrder`
+        // takes the next order after each dependency.
+        let mut order = FIRST_ORDER.max(clip.clip_order);
         if depends_on_dst {
             order = order.max(dev.bm.most_recent(clip.draw_bounds) + 1);
         }

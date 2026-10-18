@@ -296,7 +296,7 @@ impl SkRRect {
     /// `SkPathPriv::SimplifyRRect` applies).
     pub fn to_path(&self, cw: bool, index: u32) -> SkPath {
         if self.is_rect() || self.is_empty() {
-            return rect_path(self.rect, cw, (index + 1) / 2);
+            return rect_path(self.rect, cw, index.div_ceil(2));
         }
         if self.is_oval() {
             return oval_path(self.rect, cw, index / 2);
