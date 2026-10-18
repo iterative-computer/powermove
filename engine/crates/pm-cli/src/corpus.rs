@@ -128,6 +128,20 @@ pub fn projects(capture: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The real-world projects of a capture (`real/<slug>/`, decision 13), sorted.
+pub fn real_projects(capture: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(capture.join("real"))
+        .map(|list| {
+            list.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join("loaded.json").exists())
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
 pub fn load_project(capture: &Path, dir: &Path) -> Result<Project, String> {
     let loaded = read_json(&dir.join("loaded.json"))?;
     let record = read_json(&dir.join("project.json"))?;
@@ -183,11 +197,16 @@ pub fn load_project(capture: &Path, dir: &Path) -> Result<Project, String> {
         }
     }
     Ok(Project {
-        name: dir
-            .strip_prefix(capture.join("projects"))
-            .map_err(|_| "a project outside its capture")?
-            .display()
-            .to_string(),
+        // `<group>/<name>` for synthetic projects, `real/<slug>` for real ones.
+        name: {
+            let rel = dir
+                .strip_prefix(capture)
+                .map_err(|_| "a project outside its capture")?;
+            rel.strip_prefix("projects")
+                .unwrap_or(rel)
+                .display()
+                .to_string()
+        },
         document: Document::new(Some(loaded), 1),
         composition,
         samples,
@@ -285,4 +304,47 @@ pub fn video_assets(document: &Document) -> Vec<(String, bool)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    #[test]
+    fn real_projects_are_listed_and_named_by_their_capture_path() {
+        let capture = std::env::temp_dir().join(format!("pm-cli-corpus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&capture);
+        let loaded = r#"{"compId":"c1","layers":[],"assets":{}}"#;
+        let record = r#"{"media":{},"samples":[{"time":0,"width":4,"height":2,"png":{"file":"real/ad/frames/t0.000000.png"}}]}"#;
+        for dir in [
+            capture.join("projects/layers/solid"),
+            capture.join("real/ad"),
+        ] {
+            write(&dir, "loaded.json", loaded);
+            write(&dir, "project.json", record);
+        }
+        // A folder without a loaded document is not a project.
+        std::fs::create_dir_all(capture.join("real/empty")).unwrap();
+        assert_eq!(
+            projects(&capture),
+            vec![capture.join("projects/layers/solid")]
+        );
+        assert_eq!(real_projects(&capture), vec![capture.join("real/ad")]);
+        let synthetic = load_project(&capture, &capture.join("projects/layers/solid")).unwrap();
+        assert_eq!(synthetic.name, "layers/solid");
+        let real = load_project(&capture, &capture.join("real/ad")).unwrap();
+        assert_eq!(real.name, "real/ad");
+        assert_eq!(real.composition, "c1");
+        assert_eq!(real.samples.len(), 1);
+        assert_eq!(
+            real.samples[0].png,
+            capture.join("real/ad/frames/t0.000000.png")
+        );
+        let _ = std::fs::remove_dir_all(&capture);
+    }
 }
