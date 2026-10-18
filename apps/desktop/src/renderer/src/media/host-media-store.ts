@@ -501,6 +501,12 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
   PM.HostMedia = {
     enabled,
     store,
+    /** Imports await the host's binding before exposing a playable asset:
+     * immediate exports must not mistake the debounce window for offline media. */
+    async flushBindings(project = PM.proj): Promise<void> {
+      if (!enabled || !project?.id || !/^[A-Za-z0-9_-]{1,120}$/.test(project.id)) return;
+      await host.bind(project.id, bindingsFor(project, store.recordFor));
+    },
     decide: (input: Parameters<typeof decideImport>[1]) => decideImport(host, { ...input, enabled }),
     /** BLAKE3 of a Blob (the same digest as the store's and pm-media's). */
     hash: (blob: Blob) => hashBlob(blob),
