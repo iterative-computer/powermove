@@ -9,8 +9,8 @@
 //! (an underrun, counted).
 
 use std::cell::UnsafeCell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pm_protocol::clock::TransportState;
 use pm_protocol::common::{PlaybackRate, TickRange};
@@ -51,13 +51,20 @@ impl Default for Tag {
 }
 
 struct Slot {
+    next: AtomicPtr<Slot>,
     tag: UnsafeCell<Tag>,
     data: UnsafeCell<[f32; CHUNK * MAX_CHANNELS]>,
 }
 
 /// Shared state. `head` counts chunks written, `tail` chunks consumed.
 pub struct Ring {
-    slots: Box<[Slot]>,
+    // Stable addresses: the producer splices new empty nodes at its sentinel.
+    // Only grow() locks/allocates; the callback follows published nodes only.
+    #[allow(clippy::vec_box)]
+    slots: Mutex<Vec<Box<Slot>>>,
+    capacity: AtomicUsize,
+    producer: AtomicPtr<Slot>,
+    consumer: AtomicPtr<Slot>,
     channels: usize,
     head: AtomicUsize,
     tail: AtomicUsize,
@@ -72,8 +79,11 @@ pub struct Ring {
     callback_frames: AtomicUsize,
 }
 
-// The producer and the consumer touch disjoint slots, ordered by the
-// acquire/release pairs on `head` and `tail`.
+// The single producer and single consumer touch disjoint nodes, ordered by
+// acquire/release on head/tail. Growth splices at the unfilled producer node
+// (the extra sentinel ensures it is empty even when the ring is full).
+// Node addresses remain stable until Ring drops; only the producer accesses
+// the allocations vector. The callback never locks or allocates.
 unsafe impl Sync for Ring {}
 unsafe impl Send for Ring {}
 
@@ -84,14 +94,28 @@ impl Ring {
             (1..=MAX_CHANNELS).contains(&channels),
             "1 to {MAX_CHANNELS} channels"
         );
-        let slots = (0..chunks.max(2))
-            .map(|_| Slot {
-                tag: UnsafeCell::new(Tag::default()),
-                data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+        let count = chunks.max(2);
+        // An extra, always-empty sentinel lets the producer grow even at full.
+        let mut slots: Vec<_> = (0..=count)
+            .map(|_| {
+                Box::new(Slot {
+                    next: AtomicPtr::new(std::ptr::null_mut()),
+                    tag: UnsafeCell::new(Tag::default()),
+                    data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+                })
             })
             .collect();
+        for i in 0..slots.len() {
+            let next = (i + 1) % slots.len();
+            let ptr = &mut *slots[next] as *mut Slot;
+            slots[i].next.store(ptr, Ordering::Relaxed);
+        }
+        let first = &mut *slots[0] as *mut Slot;
         Arc::new(Ring {
-            slots,
+            slots: Mutex::new(slots),
+            capacity: AtomicUsize::new(count),
+            producer: AtomicPtr::new(first),
+            consumer: AtomicPtr::new(first),
             channels,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
@@ -110,12 +134,44 @@ impl Ring {
     }
 
     pub fn capacity(&self) -> usize {
-        self.slots.len()
+        self.capacity.load(Ordering::Acquire)
+    }
+
+    /// Producer only: grow to fit an observed callback plus its wait budget.
+    /// Queued nodes never move, and no memory is freed until both sides drop.
+    pub fn grow(&self, chunks: usize) {
+        let old = self.capacity();
+        if chunks <= old {
+            return;
+        }
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let head = self.producer.load(Ordering::Relaxed);
+        // SAFETY: head is the producer's empty sentinel. The consumer cannot
+        // visit it until a push publishes it, after this entire splice.
+        let after = unsafe { (*head).next.load(Ordering::Relaxed) };
+        let base = slots.len();
+        for _ in old..chunks {
+            slots.push(Box::new(Slot {
+                next: AtomicPtr::new(after),
+                tag: UnsafeCell::new(Tag::default()),
+                data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+            }));
+        }
+        for i in base..slots.len() - 1 {
+            let next = &mut *slots[i + 1] as *mut Slot;
+            slots[i].next.store(next, Ordering::Relaxed);
+        }
+        let first = &mut *slots[base] as *mut Slot;
+        unsafe {
+            (*head).next.store(first, Ordering::Release);
+        }
+        self.capacity.store(chunks, Ordering::Release);
     }
 
     /// Chunks written and not yet consumed.
     pub fn queued(&self) -> usize {
-        self.head.load(Ordering::Acquire) - self.tail.load(Ordering::Acquire)
+        let tail = self.tail.load(Ordering::Acquire);
+        self.head.load(Ordering::Acquire) - tail
     }
 
     pub fn epoch(&self) -> u32 {
@@ -157,11 +213,12 @@ impl Ring {
     pub fn push(&self, tag: Tag, interleaved: &[f32]) -> bool {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
-        if head - tail >= self.slots.len() {
+        if head - tail >= self.capacity() {
             return false;
         }
         let frames = (tag.frames as usize).min(CHUNK);
-        let slot = &self.slots[head % self.slots.len()];
+        // SAFETY: producer points at its exclusively owned empty node.
+        let slot = unsafe { &*self.producer.load(Ordering::Relaxed) };
         // SAFETY: the consumer reads this slot only after `head` passes it,
         // and the producer is the only writer.
         unsafe {
@@ -173,6 +230,8 @@ impl Ring {
             };
         }
         self.written.fetch_add(frames as u64, Ordering::Relaxed);
+        self.producer
+            .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
         self.head.store(head + 1, Ordering::Release);
         true
     }
@@ -210,8 +269,11 @@ impl Consumer {
         let tail = ring.tail.load(Ordering::Relaxed);
         let head = ring.head.load(Ordering::Acquire);
         let mut frames = 0;
-        for (i, at) in (tail..head).enumerate() {
-            let slot = &ring.slots[at % ring.slots.len()];
+        let mut ptr = ring.consumer.load(Ordering::Relaxed);
+        for i in 0..head - tail {
+            // SAFETY: all nodes before the acquired head are published.
+            let slot = unsafe { &*ptr };
+            ptr = slot.next.load(Ordering::Acquire);
             // SAFETY: as in `fill`: `head` (acquired) is past this slot, and
             // only this side moves `tail`.
             let tag = unsafe { *slot.tag.get() };
@@ -243,7 +305,8 @@ impl Consumer {
                 ring.underruns.fetch_add(1, Ordering::Relaxed);
                 break;
             }
-            let slot = &ring.slots[tail % ring.slots.len()];
+            // SAFETY: tail is published and owned by this consumer.
+            let slot = unsafe { &*ring.consumer.load(Ordering::Relaxed) };
             // SAFETY: `head` (acquired) is past this slot, so the producer
             // finished writing it and will not touch it until `tail` passes.
             let (tag, data) = unsafe { (*slot.tag.get(), &*slot.data.get()) };
@@ -253,6 +316,8 @@ impl Consumer {
                     Ordering::Release,
                 );
                 self.offset = 0;
+                ring.consumer
+                    .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
                 ring.tail.store(tail + 1, Ordering::Release);
                 continue;
             }
@@ -275,6 +340,8 @@ impl Consumer {
             self.offset += take;
             if self.offset >= tag.frames as usize {
                 self.offset = 0;
+                ring.consumer
+                    .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
                 ring.tail.store(tail + 1, Ordering::Release);
             }
         }
@@ -364,6 +431,38 @@ mod tests {
     }
 
     #[test]
+    fn growing_a_full_partially_played_ring_preserves_epochs_and_samples() {
+        let ring = Ring::new(2, 1);
+        let mut consumer = Consumer::new(ring.clone());
+        let a: Vec<f32> = (0..CHUNK).map(|i| i as f32).collect();
+        assert!(ring.push(tag(0, 0, CHUNK as u32), &a));
+        assert!(ring.push(tag(256, 0, CHUNK as u32), &a));
+        let mut out = vec![0.0; 17];
+        consumer.fill(&mut out, 1);
+        ring.grow(80);
+        assert_eq!(ring.capacity(), 80);
+        assert_eq!(consumer.queued_frames(), 2 * CHUNK - 17);
+        assert_eq!(ring.buffered_frames(), (2 * CHUNK - 17) as u64);
+        for i in 2..80 {
+            assert!(ring.push(tag(i * 256, 0, CHUNK as u32), &a));
+        }
+        let mut out = vec![0.0; 80 * CHUNK - 17];
+        consumer.fill(&mut out, 1);
+        for (i, sample) in out.iter().enumerate() {
+            assert_eq!(*sample, a[(i + 17) % CHUNK]);
+        }
+        assert_eq!(ring.underruns(), 0);
+        assert!(ring.push(tag(0, 0, CHUNK as u32), &a));
+        ring.set_epoch(1);
+        ring.grow(160);
+        assert!(ring.push(tag(1234, 1, CHUNK as u32), &a));
+        let mut out = vec![0.0; CHUNK];
+        assert_eq!(consumer.fill(&mut out, 1).unwrap().tag.media_ticks, 1234);
+        assert_eq!(out, a);
+        assert_eq!(ring.underruns(), 0);
+    }
+
+    #[test]
     fn threads() {
         let ring = Ring::new(8, 1);
         let producer = ring.clone();
@@ -372,6 +471,12 @@ mod tests {
             let mut n = 0;
             while n < total {
                 let chunk: Vec<f32> = (0..CHUNK).map(|i| (n * CHUNK + i) as f32).collect();
+                if n == 10 {
+                    producer.grow(32);
+                }
+                if n == 150 {
+                    producer.grow(128);
+                }
                 if producer.push(tag((n * CHUNK) as i64, 0, CHUNK as u32), &chunk) {
                     n += 1;
                 } else {
