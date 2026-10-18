@@ -43,3 +43,7 @@ outside BT.2020 exercise Skia's primaries-adapted luminance weights.
 `png-chrm-*.png` are cHRM/gAMA edge cases: an all-zero (invalid) cHRM with
 gAMA 0.7, P3 cHRM without gAMA, sRGB cHRM with gAMA 0.7, and P3 cHRM with
 gAMA 0.45455; Chromium reads the first two as sRGB.
+`avif-alpha-P-T-B.avif` are the 32×24 ramp with its alpha, encoded by
+imagecodecs/libavif 1.4.2 (B = 8 or 10 bits, matrix 6, full range) and
+retagged in the `colr` nclx box to P/T, covering PQ/HLG/wide primaries
+with translucent samples.

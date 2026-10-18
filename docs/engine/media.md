@@ -790,7 +790,7 @@ exports rather than inventing decoded upload pixels.
 Review round 5 found the level 1 color descriptions broader than the cases
 measured. Rather than narrow them, every pair the bitmap draws was captured
 through the app (`svgstills-capture.ts`, engine off, Electron 44 /
-Chromium 152) and compared with `still_compat_compare`: 108 cases, all
+Chromium 152) and compared with `still_compat_compare`: 126 cases, all
 byte-exact.
 
 - PNG cICP without an equivalent ICC profile: primaries {1 BT.709, 9
@@ -805,15 +805,21 @@ byte-exact.
   Skia's luminance weights adapted to the source primaries. Disabling that
   branch changes 14 of these cases by up to 6 CV, so the captures exercise
   it.
+- AVIF with alpha: the ramp with translucent samples (libavif, matrix 6),
+  retagged to 1/13, 1/16, 1/18, 2/18, 9/16, 9/18, 12/16, 12/18 and 9/1, at
+  8 and 10 bits (18 further cases, also byte-exact).
 - cHRM/gAMA edge cases at 8 and 16 bits: all-zero cHRM with gAMA 0.7 and
   P3 cHRM without gAMA (both read as sRGB), sRGB cHRM with gAMA 0.7, and P3
   cHRM with gAMA 0.45455 (8 cases).
 
-`tests/fixtures/stills2` carries 62 of these as small synthetic fixtures
+`tests/fixtures/stills2` carries 73 of these as small synthetic fixtures
 with their Chromium hashes: the 9 PNG pairs at 8-bit opaque and 16-bit
-alpha, the 32 AVIF pairs at 10 bits, 8-bit HLG for each AVIF primaries, and
-the 8 cHRM cases. Together with the earlier sets, 246 source comparisons
-are byte-exact.
+alpha, the 32 AVIF pairs at 10 bits, 8-bit HLG for each AVIF primaries, 11
+translucent AVIFs, and the 8 cHRM cases. Together with the earlier sets,
+264 source comparisons are byte-exact. Eighteen of the new cases (PNG and
+AVIF PQ/HLG across primaries, and the cHRM cases) also pass as transformed
+160×120 native export compositions at max 1 CV, no pixel above 1, every job
+completed in the engine.
 
 ### Level 2 layers and 3D maps keep the native reader's classes
 

@@ -537,5 +537,60 @@
     "file": "png-chrm-p3-gama45455-16.png",
     "outcome": "upload",
     "sha256": "38d1b63a9b458b5b0261cd1e227fc6e73cb743db1092169857ca968f52a10508"
+  },
+  {
+    "file": "avif-alpha-1-13-10.avif",
+    "outcome": "upload",
+    "sha256": "300bdd028bd5c7006a954f75289a63e3550b87446f52e922e3f7ba52da8963a4"
+  },
+  {
+    "file": "avif-alpha-1-16-10.avif",
+    "outcome": "upload",
+    "sha256": "0afc5ec5d7af8c5f62dd2804d93a6e3f1c0bf7728fad22fb9446c81e2a7f85c6"
+  },
+  {
+    "file": "avif-alpha-1-18-10.avif",
+    "outcome": "upload",
+    "sha256": "0b67dd4fb31d35a233d4d57822ea0e1543da91506dc94a432793dd75069d4f83"
+  },
+  {
+    "file": "avif-alpha-2-18-10.avif",
+    "outcome": "upload",
+    "sha256": "0b67dd4fb31d35a233d4d57822ea0e1543da91506dc94a432793dd75069d4f83"
+  },
+  {
+    "file": "avif-alpha-9-16-10.avif",
+    "outcome": "upload",
+    "sha256": "b3adaf0071f6c0a7a3e3aef7aedbe1e51db70605def40659bdb5d91b6049db28"
+  },
+  {
+    "file": "avif-alpha-9-18-10.avif",
+    "outcome": "upload",
+    "sha256": "013a22aa77be00560a23cfdb5c0359fa3fcf3f9f636de831eb167f145448487a"
+  },
+  {
+    "file": "avif-alpha-12-16-10.avif",
+    "outcome": "upload",
+    "sha256": "72697700747aeb4288f08a4bdb402ae82120358d18fee46fe5c40c89851f4bb7"
+  },
+  {
+    "file": "avif-alpha-12-18-10.avif",
+    "outcome": "upload",
+    "sha256": "0a1f1d14a6fcde25e6ef3be045273924427aae3f5e147500245b3a1f4838f4bd"
+  },
+  {
+    "file": "avif-alpha-9-1-10.avif",
+    "outcome": "upload",
+    "sha256": "6dac5707dca00cb1842c2e407d93baad77df23bc8956cd1dc28ff7e50d04c6d1"
+  },
+  {
+    "file": "avif-alpha-1-18-8.avif",
+    "outcome": "upload",
+    "sha256": "7dc7c1dfc636511192b1b99c63e8f2a3a99efa608b4642b5ceaf15ab81b24e3c"
+  },
+  {
+    "file": "avif-alpha-12-16-8.avif",
+    "outcome": "upload",
+    "sha256": "bd93af14047ccaf7790ece07a591d5d8d8316dcce5d9fb983b1f9a736afc4d2d"
   }
 ]
