@@ -16,11 +16,13 @@
  *   hold for their revision: the engine repeats each that still holds at
  *   every revision it presents, before the frame, and `.frame(revision)`
  *   clears the ones a shown frame did not repeat.
- * - Compile errors are the engine's: `GL.compileError` answers every
- *   engine key (`fx:`, `tr:`, `extension:`, `engine:`, and a shader layer's
- *   `sh:` key) from the engine's reports alone, so a program the engine
- *   compiles shows no error and an error the legacy compositor recorded
- *   before is never shown again. A definition failure the engine reports
+ * - Compile errors follow the route: while the engine presents the
+ *   composition, `GL.compileError` answers every engine key (`fx:`, `tr:`,
+ *   `extension:`, `engine:`, and a shader layer's `sh:` key) from the
+ *   engine's reports alone, so a program the engine compiles shows no error
+ *   and an error the legacy compositor recorded before is never shown
+ *   again; while the legacy compositor draws it (no viewer session, or the
+ *   composition routed), its own record answers the keys it sets. A definition failure the engine reports
  *   for an older definitions generation than the session's latest push of
  *   that id is stale and ignored (the translation of a set already
  *   replaced).
@@ -59,9 +61,32 @@ export class EngineShaderMeta {
 
   constructor(private readonly PM: any) {}
 
-  /** Whether the engine answers `GL.compileError(key)` (no legacy fallback). */
+  /**
+   * Who draws the open composition now: the engine (its viewer session
+   * presents frames) or the legacy compositor (no session yet, a session
+   * closed, or the engine routed the composition). Compile errors follow
+   * the route: while the legacy compositor draws, its own record is current.
+   */
+  private route: 'engine' | 'legacy' = 'legacy';
+
+  /** The viewer session's route (`DocumentSession.onRoute`); `pending` is not the engine's. */
+  setRoute(route: string): void {
+    this.route = route === 'engine' ? 'engine' : 'legacy';
+  }
+
+  /**
+   * Whether the engine answers `GL.compileError(key)` (no legacy fallback).
+   * `engine:<layer>` keys exist only in engine reports; the keys both
+   * compositors use (`fx:`, `tr:`, `extension:`, a shader layer's `sh:`)
+   * are the engine's while it presents and the legacy compositor's while
+   * it draws, so a shader layer the legacy viewer draws shows the error the
+   * legacy compile recorded, and one the engine draws never shows a stale
+   * legacy error.
+   */
   owns(key: unknown): boolean {
-    return typeof key === 'string' && /^(fx|tr|extension|engine|sh):/.test(key);
+    if (typeof key !== 'string') return false;
+    if (key.startsWith('engine:')) return true;
+    return this.route === 'engine' && /^(fx|tr|extension|sh):/.test(key);
   }
 
   /** `GL.compileError(key)` for engine-rendered programs. A shader layer's

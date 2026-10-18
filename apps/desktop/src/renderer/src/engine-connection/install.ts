@@ -262,6 +262,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         onLoaded: () => PM.bus?.emit?.('layout'),
         onRoute: (route, reason) => {
           if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
+          // Compile errors follow whoever draws (kernel/engine-definitions.ts).
+          (PM as any).EngineDefinitions?.meta?.setRoute?.(route);
           transport.refresh();
           if (route === 'engine') audio.sync();
           PM.bus?.emit?.('draw');

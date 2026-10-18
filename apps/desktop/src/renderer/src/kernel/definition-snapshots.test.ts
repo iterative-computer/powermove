@@ -259,6 +259,7 @@ describe('engine shader meta', () => {
     const PM: any = { proj: { layers: [{ id: 'S', type: 'shader', d: { code: 'x' } }], comps: {} }, UIState: {} };
     const m = new EngineShaderMeta(PM);
     const compileError = (key: string) => (m.owns(key) ? m.compileError(key) : legacyErrors.get(key) ?? null);
+    m.setRoute('engine');
     // The engine compiled `wave` (no failure): no error, not the legacy one.
     m.pushed({ generation: 1, full: true, upserts: [{ id: 'wave', kind: 'effect' } as any], removals: [] });
     expect(compileError('fx:wave')).toBeNull();
@@ -271,6 +272,32 @@ describe('engine shader meta', () => {
     expect(compileError('sh:S:abc123')).toBeNull();
     // Keys the engine never draws keep the legacy answer.
     expect(compileError('other:key')).toBe('legacy only');
+  });
+
+  it('gives the legacy compositor its keys while it draws the composition', () => {
+    const legacyErrors = new Map([['fx:wave', 'legacy: line 1: broken'], ['sh:S:abc123', 'legacy: S broke']]);
+    const PM: any = { proj: { layers: [{ id: 'S', type: 'shader', d: { code: 'x' } }], comps: {} }, UIState: {} };
+    const m = new EngineShaderMeta(PM);
+    const compileError = (key: string) => (m.owns(key) ? m.compileError(key) : legacyErrors.get(key) ?? null);
+    // No viewer session yet: the legacy compositor draws and its compile
+    // records answer (a shader layer with broken GLSL shows its error).
+    expect(compileError('sh:S:abc123')).toBe('legacy: S broke');
+    expect(compileError('fx:wave')).toBe('legacy: line 1: broken');
+    // The engine presents: its reports alone.
+    m.setRoute('engine');
+    expect(compileError('sh:S:abc123')).toBeNull();
+    expect(compileError('fx:wave')).toBeNull();
+    // The engine routed the composition to the legacy viewer (or the
+    // session closed: `pending`): the legacy compositor's record again.
+    m.setRoute('legacy');
+    expect(compileError('sh:S:abc123')).toBe('legacy: S broke');
+    m.setRoute('engine');
+    m.setRoute('pending');
+    expect(compileError('fx:wave')).toBe('legacy: line 1: broken');
+    // `engine:` keys exist only in engine reports, whoever draws.
+    m.failure({ revision: 4, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: null } });
+    expect(m.owns('engine:S')).toBe(true);
+    expect(compileError('engine:S')).toBe('Shader layer S does not compile.');
   });
 
   it('ignores a definition failure from a set the session already replaced', () => {
