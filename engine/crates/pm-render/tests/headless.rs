@@ -501,9 +501,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         assert!(!blurred_in(&listed, "in-img") && !blurred_in(&listed, "in-solid"));
         assert!(!blurred_in(&listed, "pre"), "{listed:?}");
     }
-    // 3D object, light, and camera layers inside a 3D group or a blurred
-    // group are listed (their scene pass is built at the center time, and
-    // their placement in a 3D group has no parity case).
+    // 3D object, light, and camera layers inside a blurred group are listed
+    // (their scene pass is built at the center time); inside a 3D group they
+    // draw.
     for (three_d, blur) in [(true, false), (false, true)] {
         let (mut doc, _) = everything();
         let mut g = layer("g", "group", json!({}), 0.0, 0.0, 2.0);
@@ -518,7 +518,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
                 .iter()
                 .any(|u| u.layer.as_deref() == Some(id) && u.feature == feature)
         };
-        assert_eq!(has("obj", Feature::TwoAndAHalfD), three_d, "{listed:?}");
+        // A 3D group places its 3D objects through `world3D` (model
+        // groups; corpus `3d/model-group`).
+        assert!(!has("obj", Feature::TwoAndAHalfD), "{listed:?}");
         assert_eq!(has("obj", Feature::MotionBlur), blur, "{listed:?}");
         assert!(!has("cam", Feature::TwoAndAHalfD) && !has("cam", Feature::MotionBlur));
     }

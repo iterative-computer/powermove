@@ -335,7 +335,10 @@ impl<'d> Scope<'_, 'd> {
     /// `animatedPart(PM, layer, time)`: the part's evaluated recipe geometry
     /// and base when its group's recipe is animated, else `None`.
     pub fn animated_part(&mut self, layer: &'d Node, time: f64) -> JsResult<Option<AnimatedPart>> {
-        let object = node::member(node::member(node::member(Some(layer), "d"), "data"), "object");
+        let object = node::member(
+            node::member(node::member(Some(layer), "d"), "data"),
+            "object",
+        );
         let Some(generation) = node::member(object, "generation").filter(|g| node::truthy(Some(g)))
         else {
             return Ok(None);
@@ -390,23 +393,24 @@ impl<'d> Scope<'_, 'd> {
         if !changed {
             return Ok(None);
         }
-        let profile: Option<Vec<[f64; 2]>> = node::array(node::member(recipe, "profile")).map(|a| {
-            a.iter()
-                .map(|p| {
-                    let xy = node::array(Some(p)).unwrap_or(&[]);
-                    [node::to_number(xy.first()), node::to_number(xy.get(1))]
-                })
-                .collect()
-        });
+        let profile: Option<Vec<[f64; 2]>> =
+            node::array(node::member(recipe, "profile")).map(|a| {
+                a.iter()
+                    .map(|p| {
+                        let xy = node::array(Some(p)).unwrap_or(&[]);
+                        [node::to_number(xy.first()), node::to_number(xy.get(1))]
+                    })
+                    .collect()
+            });
         let part_id =
             node::to_js_string(node::member(Some(generation), "partId")).to_string_lossy();
-        let Some(prior) =
-            node::member(node::member(node::member(modeling, "parts"), &part_id), "base")
-        else {
+        let Some(prior) = node::member(
+            node::member(node::member(modeling, "parts"), &part_id),
+            "base",
+        ) else {
             return Ok(None);
         };
-        let Some((source, base)) = recipe_part(&kind, &params, profile.as_deref(), &part_id)
-        else {
+        let Some((source, base)) = recipe_part(&kind, &params, profile.as_deref(), &part_id) else {
             return Ok(None);
         };
         let prior =
