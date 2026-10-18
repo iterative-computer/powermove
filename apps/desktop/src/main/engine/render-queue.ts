@@ -313,10 +313,21 @@ export class RenderQueue {
     }
     // Jobs queued before definitions were captured have none (their
     // effects are reported as the engine cannot draw them, never drawn
-    // from another set).
+    // from another set). A file that cannot be read is logged: the job's
+    // effects are then reported, not drawn.
     const definitions: DefinitionsUpdate[] = await readFile(this.definitionsFile(job.id), 'utf8')
-      .then((text) => JSON.parse(text) as DefinitionsUpdate[])
-      .catch(() => []);
+      .then((text) => {
+        const parsed: unknown = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error('it is not a list of definition updates');
+        return parsed as DefinitionsUpdate[];
+      })
+      .catch((error: unknown) => {
+        const missing = (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+        this.options.platform.log?.(missing ? 'info' : 'warn', missing
+          ? `${job.name} was queued without definitions: its effects, transitions, and extension layers are reported as missing`
+          : `the definitions of ${job.name} could not be read (${error instanceof Error ? error.message : String(error)}): its effects, transitions, and extension layers are reported as missing`);
+        return [];
+      });
     const finished = new Promise<void>((resolve) => { this.waiters.set(job.id, resolve); });
     try {
       const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], definitions);

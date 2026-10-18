@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -155,6 +155,27 @@ describe('render queue', () => {
     expect(engine2.submitted[1]!.definitions).toEqual([]);
     await again.act({ kind: 'clearFinished' });
     await vi.waitFor(async () => expect((await readdir(dir)).filter((f) => f.endsWith('.definitions.json'))).toEqual([]));
+  });
+
+  it('logs a queued job whose definitions cannot be read and reports its effects instead of drawing another set', async () => {
+    const { dir, queue } = await setup();
+    const logs: string[] = [];
+    const a = await queue.add({ name: 'A.mov', project: project(), options: options(), destination: '/out/A.mov', definitions: [] as any });
+    await queue.add({ name: 'B.mov', project: project(), options: options(), destination: '/out/B.mov' });
+    await writeFile(path.join(dir, `${a}.definitions.json`), '{ not json');
+    await queue.dispose();
+    const engine2 = new FakeEngine();
+    const p2 = { ...platform(), log: (level: string, message: string) => { logs.push(`${level}: ${message}`); } };
+    const again = new RenderQueue({ directory: dir, engine: engine2, platform: p2 });
+    queues.push(again);
+    await again.start();
+    await settle();
+    expect(engine2.submitted[0]!.definitions).toEqual([]);
+    expect(logs.filter((l) => l.startsWith('warn: the definitions of A.mov could not be read'))).toHaveLength(1);
+    again.status('engine-1', { jobId: 'engine-1', state: 'done', progress: 1, path: '/out/A.mov' });
+    await settle();
+    expect(engine2.submitted[1]!.definitions).toEqual([]);
+    expect(logs.filter((l) => l.startsWith('info: B.mov was queued without definitions'))).toHaveLength(1);
   });
 
   it('cancels, retries, reorders, removes, and reveals', async () => {
