@@ -3,15 +3,13 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_render::{RenderRequest, Renderer};
 #[test]
+#[ignore = "needs the private render-* corpus capture (docs/engine/media.md)"]
 fn compatibility_still_corpus() {
     let out = std::env::var_os("PM_MEDIA_EVIDENCE").map(std::path::PathBuf::from);
     if let Some(p) = &out {
         std::fs::create_dir_all(p).unwrap();
     }
-    let Some(capture) = support::newest_capture("render-") else {
-        eprintln!("render corpus required");
-        return;
-    };
+    let capture = support::newest_capture("render-").expect("a render-* corpus capture");
     let mut r = Renderer::headless().unwrap();
     let mut rows = Vec::new();
     for dir in support::projects(&capture) {

@@ -154,7 +154,7 @@ fn level_two_animation_frames_match_ffmpeg_zimg() {
     let mut rows = Vec::new();
     let mut renderer = Renderer::headless().unwrap();
     for name in ["animated.gif", "animated-apng.png", "animated.webp"] {
-        let path = persisted_rendition(&dir, name);
+        let path = rendition_or_reencode(&dir, name);
         let mut value = project(
             160,
             90,
@@ -315,9 +315,10 @@ fn level_two_animation_frames_match_ffmpeg_zimg() {
     }
 }
 
-/// Prefer actual stored bytes from the hidden-app capture; otherwise use
-/// the current converter's exact settings with the same fixture.
-fn persisted_rendition(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+/// A WebM of fixture `name` for comparisons computed from the file itself:
+/// the persisted bytes when they are available, otherwise the current
+/// converter's exact settings with the same fixture.
+fn rendition_or_reencode(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::process::Command;
     let bin = std::path::PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
     let evidence = std::env::var_os("PM_MEDIA_RENDITIONS").map(std::path::PathBuf::from);
@@ -366,14 +367,34 @@ fn persisted_rendition(dir: &std::path::Path, name: &str) -> std::path::PathBuf 
     }
 }
 
+/// The WebM today's import persisted for fixture `name`: the bytes the
+/// hidden app stored (`PM_MEDIA_RENDITIONS`, or the private corpus's
+/// `animation-renditions/<name>/native-source.webm`). A re-encode with the
+/// current FFmpeg is not those bytes (its frames differ by 1 to 2 CV), so
+/// there is no fallback.
+fn persisted_rendition(name: &str) -> std::path::PathBuf {
+    let base = std::env::var_os("PM_MEDIA_RENDITIONS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Application Support/Powermove Engine Corpus/animation-renditions")
+        });
+    let path = base.join(name).join("native-source.webm");
+    assert!(
+        path.is_file(),
+        "{} is missing: capture the app-persisted rendition first",
+        path.display()
+    );
+    path
+}
+
 /// The capture's import hash identifies the original, but its loaded document
 /// and Chromium frames use the persisted WebM. Resolve that asset to the
 /// stored rendition without changing the composition, transforms or times.
 #[test]
+#[ignore = "needs the private v1 corpus capture and persisted renditions (docs/engine/media.md)"]
 fn animated_corpus_projects_use_stored_renditions_within_the_video_class() {
-    let Some(capture) = support::newest_capture("v1-") else {
-        return;
-    };
+    let capture = support::newest_capture("v1-").expect("a v1-* corpus capture");
     let dir = std::env::temp_dir().join(format!("pm-animation-corpus-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let evidence = std::env::var_os("PM_MEDIA_EVIDENCE").map(std::path::PathBuf::from);
@@ -387,7 +408,7 @@ fn animated_corpus_projects_use_stored_renditions_within_the_video_class() {
         let mut p = support::load_project(&capture, &capture.join("projects/media").join(project));
         assert!(p.missing_media.is_empty());
         assert_eq!(p.resolver.paths.len(), 1);
-        *p.resolver.paths.values_mut().next().unwrap() = persisted_rendition(&dir, source);
+        *p.resolver.paths.values_mut().next().unwrap() = persisted_rendition(source);
         assert!(
             renderer
                 .unsupported_with_media(&p.document, &p.composition, &p.resolver)
