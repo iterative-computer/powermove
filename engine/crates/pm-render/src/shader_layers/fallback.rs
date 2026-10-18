@@ -209,6 +209,17 @@ pub struct FallbackFailure {
     pub message: String,
 }
 
+impl FallbackFailure {
+    /// Whether the failure says something about the program, so it is not
+    /// asked for again until its source changes: WebGL refused it
+    /// (`compile`), or its draw passed the runner's deadline (`watchdog`).
+    /// Anything else (`contextLost`, the compile `deadline`, `unavailable`,
+    /// `size`) is transient and retried.
+    pub fn is_final(&self) -> bool {
+        matches!(self.reason.as_str(), "compile" | "watchdog")
+    }
+}
+
 /// A request with the textures it samples, for a host that runs it
 /// synchronously ([`FallbackHost`]).
 #[derive(Debug, Clone)]

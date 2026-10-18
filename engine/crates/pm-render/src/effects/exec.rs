@@ -657,6 +657,34 @@ impl<'c> Gpu<'c> {
             self.runner_failed(&span, &program, &why);
             return None;
         }
+        // Its last request failed for a transient reason (the runner's
+        // context was lost): asked for again once the backoff passed, drawn
+        // without it until then and reported once.
+        // A job's host already tried it again in place: the job stops.
+        if self.effects.watchdog.policy() == super::watchdog::Policy::Job
+            && let Some(retry) = self.effects.fallback.retries.last(&program)
+        {
+            let why = retry.failure.clone();
+            self.runner_failed(&span, &program, &why);
+            return None;
+        }
+        let now = self.effects.watchdog.now();
+        if let Some(super::fallback::RetryState::Wait { failure, report }) =
+            self.effects.fallback.retries.state(&program, now)
+        {
+            if report {
+                let name = span_name(&span);
+                self.effects.watchdog.report(EngineError::new(
+                    ErrorCode::NotHeadlessRenderable,
+                    span_scope(&span),
+                    crate::effects::truncate(format!(
+                        "{name} could not be drawn by the WebGL fallback runner for now ({}: {}); it is skipped until the runner draws it again.",
+                        failure.reason, failure.message
+                    )),
+                ));
+            }
+            return None;
+        }
         // A request already waits in this frame: what this step reads may
         // depend on it, so it is asked for once that one is answered.
         if self.effects.fallback.blocked {

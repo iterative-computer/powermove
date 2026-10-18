@@ -4,6 +4,7 @@
 //! evaluator's caches across frames.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
@@ -26,6 +27,9 @@ use crate::request::RenderRequest;
 /// Rounds of a frame through a fallback host: one per chained runner step
 /// (a step's request covers the previous step's output).
 const HOST_ROUNDS: usize = 16;
+
+/// Attempts a fallback host gets at a request that fails transiently.
+const HOST_ATTEMPTS: u32 = 3;
 use crate::scene3d::Scene3dRenderer;
 
 /// A rendered frame.
@@ -306,26 +310,52 @@ impl Renderer {
         if self.effects.fallback.expects(&key) {
             self.effects.fallback.put_pixels(key, pixels);
         } else {
-            self.shaders.waiting.remove(&key);
+            if let Some(program) = self.shaders.waiting.remove(&key) {
+                self.effects.fallback.retries.succeeded(&program);
+            }
             self.shaders.fallback.insert(key, pixels);
         }
     }
 
-    /// The runner could not draw a request: its program draws nothing (a
-    /// shader layer) or is skipped (an effect or transition) and is
-    /// reported; it is not asked for again until its source changes. A
-    /// draw past the runner's deadline (`watchdog`) is turned off by the
-    /// watchdog.
+    /// The runner could not draw a request.
+    ///
+    /// A final failure ([`FallbackFailure::is_final`]: WebGL refused the
+    /// program, or its draw passed the runner's deadline) is kept until the
+    /// program's source changes: it draws nothing (a shader layer) or is
+    /// skipped (an effect or transition) and is reported, and a draw past
+    /// the deadline is turned off by the watchdog. Any other failure is
+    /// transient (the runner's context was lost, its compile deadline
+    /// passed, no runner answered): the program is asked for again after
+    /// the returned delay (`Some(ZERO)` at the next frame), as today's
+    /// compositor draws again once its context is restored. A host draws
+    /// the view again then.
+    ///
+    /// [`FallbackFailure::is_final`]: crate::shader_layers::FallbackFailure::is_final
     pub fn put_fallback_failure(
         &mut self,
         key: &str,
         failure: crate::shader_layers::FallbackFailure,
-    ) {
+    ) -> Option<std::time::Duration> {
+        let now = self.effects.watchdog.now();
         if self.effects.fallback.expects(key) {
-            self.effects.fallback.put_failure(key, failure);
+            self.effects.fallback.put_failure(key, failure, now)
         } else if let Some(program) = self.shaders.waiting.remove(key) {
-            self.shaders.failed.insert(program, (failure, false));
+            if failure.is_final() {
+                self.effects.fallback.retries.succeeded(&program);
+                self.shaders.failed.insert(program, (failure, false));
+                None
+            } else {
+                Some(self.effects.fallback.retries.failed(&program, failure, now))
+            }
+        } else {
+            None
         }
+    }
+
+    /// When the earliest program whose request failed transiently is asked
+    /// for again (a host draws its views again then).
+    pub fn fallback_retry_at(&self) -> Option<Instant> {
+        self.effects.fallback.retries.next_at()
     }
 
     /// The textures a waiting effect or transition request samples (sent to
@@ -478,6 +508,9 @@ impl Renderer {
         &mut self,
         mut draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
     ) -> Result<Target, RenderError> {
+        if self.fallback_host.is_some() {
+            self.effects.fallback.retries.clear();
+        }
         let mut rounds = 0;
         loop {
             self.effects.fallback.pending.clear();
@@ -514,6 +547,13 @@ impl Renderer {
     }
 
     /// Runs requests through a fallback host and stores what it answers.
+    /// A transient failure (the runner's context was lost, its compile
+    /// deadline passed, no runner answered) is tried again in place, up to
+    /// [`HOST_ATTEMPTS`] times, before it is stored
+    /// ([`Renderer::put_fallback_failure`]); the frame drawn again then
+    /// stops a job with an error naming the program, so nothing is
+    /// delivered without a program WebGL draws today. Each frame of a job
+    /// starts with fresh attempts.
     fn run_host(
         &mut self,
         host: &dyn crate::shader_layers::FallbackHost,
@@ -526,19 +566,32 @@ impl Renderer {
                 request: r,
                 textures,
             };
-            match host.run(&job) {
-                Ok(pixels) if pixels.fits(&job.request) => self.put_fallback_pixels(key, pixels),
-                Ok(pixels) => self.put_fallback_failure(
-                    &key,
-                    crate::shader_layers::FallbackFailure {
+            let mut attempt = 0;
+            let failure = loop {
+                attempt += 1;
+                let failure = match host.run(&job) {
+                    Ok(pixels) if pixels.fits(&job.request) => {
+                        self.put_fallback_pixels(key.clone(), pixels);
+                        break None;
+                    }
+                    Ok(pixels) => crate::shader_layers::FallbackFailure {
                         reason: "size".into(),
                         message: format!(
                             "the runner answered {}×{} for a {}×{} target",
                             pixels.width, pixels.height, job.request.width, job.request.height
                         ),
                     },
-                ),
-                Err(failure) => self.put_fallback_failure(&key, failure),
+                    Err(failure) => failure,
+                };
+                if failure.is_final() || attempt >= HOST_ATTEMPTS {
+                    break Some(failure);
+                }
+            };
+            if let Some(mut failure) = failure {
+                if !failure.is_final() {
+                    failure.message = format!("{} (after {attempt} attempts)", failure.message);
+                }
+                self.put_fallback_failure(&key, failure);
             }
         }
     }
@@ -891,6 +944,9 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
+        if self.fallback_host.is_some() {
+            self.effects.fallback.retries.clear();
+        }
         let mut rounds = 0;
         loop {
             let result = self.render_into_once(

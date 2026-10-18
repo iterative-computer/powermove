@@ -558,7 +558,9 @@ impl Watchdog {
         self.clock = clock;
     }
 
-    fn now(&self) -> Instant {
+    /// The wall clock ([`Watchdog::set_clock`] replaces it), also the
+    /// fallback runner's retry clock.
+    pub(crate) fn now(&self) -> Instant {
         self.clock.as_ref().map_or_else(Instant::now, |c| c())
     }
 

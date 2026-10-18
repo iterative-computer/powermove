@@ -490,6 +490,9 @@ struct Fallback {
     /// Layers each view was told draw through the runner (logged once per
     /// layer, not once per animated frame's request).
     logged: BTreeSet<(Key, String)>,
+    /// Views to draw again when a program whose request failed transiently
+    /// (the runner's context was lost) is asked for again (host µs).
+    retry_at: BTreeMap<Key, i64>,
 }
 
 fn now() -> i64 {
@@ -918,11 +921,22 @@ impl Thread {
                         "viewer: the shader fallback runner could not draw a program ({reason}: {message})"
                     ),
                 }]);
-                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
-                    composer.renderer().put_fallback_failure(
-                        &request,
-                        pm_render::shader_layers::FallbackFailure { reason, message },
-                    );
+                // A transient failure (a lost context) is asked for again
+                // after a backoff: the view is drawn again then.
+                let retry = self
+                    .gpu
+                    .as_mut()
+                    .and_then(|g| g.composer.as_mut())
+                    .and_then(|composer| {
+                        composer.renderer().put_fallback_failure(
+                            &request,
+                            pm_render::shader_layers::FallbackFailure { reason, message },
+                        )
+                    });
+                if let Some(delay) = retry.filter(|d| !d.is_zero()) {
+                    let at = now() + delay.as_micros() as i64;
+                    let slot = self.fallback.retry_at.entry(key).or_insert(at);
+                    *slot = (*slot).min(at);
                 }
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
@@ -946,6 +960,7 @@ impl Thread {
             *k != key
         });
         fallback.logged.retain(|(k, _)| *k != key);
+        fallback.retry_at.remove(&key);
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -1806,6 +1821,9 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if let Some(at) = self.fallback.retry_at.values().min() {
+            wake = wake.min(*at);
+        }
         for view in self.views.values() {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
@@ -1871,6 +1889,19 @@ impl Thread {
                 }
             }
         }
+        // Programs whose runner request failed transiently are asked for
+        // again once their backoff passed.
+        let t = now();
+        let views = &mut self.views;
+        self.fallback.retry_at.retain(|key, at| {
+            if *at > t {
+                return true;
+            }
+            if let Some(view) = views.get_mut(key) {
+                view.dirty = true;
+            }
+            false
+        });
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);

@@ -4,7 +4,8 @@
 //! which unit samples which, every pass's calls with `setParam`'s aliases;
 //! the runner's pixels continue the chain; a job renderer waits on a
 //! fallback host; failures skip (WebGL refuses), turn off (the runner's
-//! deadline), or stop a job (no runner). The runner here is a CPU stand-in
+//! deadline), or stop a job (no runner); transient failures (a lost
+//! context) are retried, never kept, and the program draws again. The runner here is a CPU stand-in
 //! that checks what it is sent; WebGL itself is `effects_webgl.rs`
 //! `fallback_effects_match_webgl` with the app's runner in Chromium.
 
@@ -111,12 +112,26 @@ fn definitions() -> DefinitionSetSnapshot {
 struct Cpu {
     seen: Mutex<Vec<FallbackJob>>,
     fail: Mutex<Option<FallbackFailure>>,
+    /// With `fail`: only this many calls fail (`None`: every call).
+    fail_times: Mutex<Option<u32>>,
 }
 
 impl FallbackHost for Cpu {
     fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure> {
         self.seen.lock().unwrap().push(job.clone());
-        if let Some(f) = self.fail.lock().unwrap().clone() {
+        let mut times = self.fail_times.lock().unwrap();
+        let failing = match times.as_mut() {
+            None => true,
+            Some(0) => false,
+            Some(n) => {
+                *n -= 1;
+                true
+            }
+        };
+        drop(times);
+        if let Some(f) = self.fail.lock().unwrap().clone()
+            && failing
+        {
             return Err(f);
         }
         let r = &job.request;
@@ -406,4 +421,154 @@ fn a_job_without_a_runner_fails_naming_the_program_instead_of_skipping_it() {
         }
         other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
     }
+}
+
+fn lost() -> FallbackFailure {
+    FallbackFailure {
+        reason: "contextLost".into(),
+        message: "the WebGL context was lost while the program was drawn".into(),
+    }
+}
+
+/// A clock the test moves forward (the watchdog's, also the runner's retry
+/// clock).
+fn movable_clock() -> (
+    Arc<std::sync::atomic::AtomicU64>,
+    pm_render::effects::watchdog::Clock,
+) {
+    let base = std::time::Instant::now();
+    let offset = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let o = offset.clone();
+    (
+        offset,
+        Arc::new(move || {
+            base + std::time::Duration::from_millis(o.load(std::sync::atomic::Ordering::Relaxed))
+        }),
+    )
+}
+
+/// Answers the viewer's pending requests with the CPU stand-in.
+fn answer(r: &mut Renderer, requests: Vec<pm_render::shader_layers::FallbackRequest>) {
+    let cpu = Cpu::default();
+    for q in requests {
+        let textures = r.fallback_textures(&q.key).unwrap_or_default();
+        let px = cpu
+            .run(&FallbackJob {
+                request: q.clone(),
+                textures,
+            })
+            .unwrap();
+        r.put_fallback_pixels(q.key, px);
+    }
+}
+
+#[test]
+fn a_lost_context_is_not_blamed_on_the_program_and_it_draws_again() {
+    // Today's compositor clears its errors and programs when its context is
+    // restored and draws again (`compositor.ts`, `webglcontextrestored`):
+    // a GPU-process restart or an unrelated context loss never turns a
+    // program off.
+    let _gpu = gpu();
+    let mut r = renderer();
+    r.set_shader_fallback_runner(true);
+    let (offset, clock) = movable_clock();
+    r.effects_mut().watchdog.set_clock(Some(clock));
+    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("expected a request")
+    };
+    // The first loss: asked for again at once (the runner made a new
+    // context), nothing skipped, nothing reported.
+    assert_eq!(
+        r.put_fallback_failure(&q[0].key, lost()),
+        Some(std::time::Duration::ZERO)
+    );
+    let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
+        panic!("expected the program to be asked for again")
+    };
+    assert_eq!(again[0].key, q[0].key);
+    assert!(r.watchdog_reports(true).is_empty());
+    // A second loss in a row: the frame draws without it while the runner
+    // recovers (as today's canvas is blank until its context is restored),
+    // reported once, and asked for again after the backoff.
+    let delay = r.put_fallback_failure(&again[0].key, lost()).unwrap();
+    assert_eq!(delay, std::time::Duration::from_millis(250));
+    assert_eq!(render(&mut r, &doc).unwrap(), without);
+    assert_eq!(render(&mut r, &doc).unwrap(), without);
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
+    assert!(reports[0].message.contains("contextLost"), "{}", reports[0].message);
+    assert!(
+        !r.effects()
+            .watchdog
+            .is_disabled(DefinitionKind::Effect, "acme.cube-invert"),
+        "never turned off"
+    );
+    assert!(r.fallback_retry_at().is_some());
+    offset.store(250, std::sync::atomic::Ordering::Relaxed);
+    let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
+        panic!("expected the program to be asked for again after the backoff")
+    };
+    // The runner draws it: the streak is over and the frame has it.
+    answer(&mut r, third);
+    let drawn = loop {
+        match render(&mut r, &doc) {
+            Ok(px) => break px,
+            Err(RenderError::ShaderFallbackPending(q)) => answer(&mut r, q),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_ne!(drawn, without, "drawn again");
+    assert!(r.fallback_retry_at().is_none());
+    assert!(r.watchdog_reports(true).is_empty());
+}
+
+#[test]
+fn a_job_tries_a_lost_context_again_and_draws_the_program() {
+    let _gpu = gpu();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let mut expected_r = renderer();
+    expected_r.effects_mut().watchdog.set_policy(Policy::Job);
+    expected_r.set_fallback_host(Some(Arc::new(Cpu::default())));
+    let expected = render(&mut expected_r, &doc).unwrap();
+    let mut job = renderer();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(lost());
+    *host.fail_times.lock().unwrap() = Some(2);
+    job.set_fallback_host(Some(host.clone()));
+    assert_eq!(
+        render(&mut job, &doc).unwrap(),
+        expected,
+        "drawn after two lost contexts, never skipped"
+    );
+    assert_eq!(host.seen.lock().unwrap().len(), 3);
+    assert!(job.watchdog_reports(true).is_empty());
+}
+
+#[test]
+fn a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program() {
+    let _gpu = gpu();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let mut job = renderer();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(lost());
+    job.set_fallback_host(Some(host.clone()));
+    match render(&mut job, &doc) {
+        Err(RenderError::Fallback(m)) => assert!(
+            m.contains("acme.cube-invert") && m.contains("contextLost") && m.contains("3 attempts"),
+            "{m}"
+        ),
+        other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(host.seen.lock().unwrap().len(), 3);
+    // The next frame tries again from scratch: the runner is back.
+    *host.fail.lock().unwrap() = None;
+    let mut fresh = renderer();
+    fresh.effects_mut().watchdog.set_policy(Policy::Job);
+    fresh.set_fallback_host(Some(Arc::new(Cpu::default())));
+    assert_eq!(render(&mut job, &doc).unwrap(), render(&mut fresh, &doc).unwrap());
 }
