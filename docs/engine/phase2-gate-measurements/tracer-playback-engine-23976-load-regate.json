@@ -1,0 +1,435 @@
+{
+  "run": "tracer-playback-engine-23976-load-regate",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "env": {
+      "POWERMOVE_ENGINE_FRAME_SOURCE": "document"
+    },
+    "mode": "tracer",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "offMainThread": true,
+    "fps": 23.976023976023978,
+    "lead": 4,
+    "durationMs": 60000,
+    "synthetic": {
+      "layers": 500,
+      "images": 2,
+      "fpsRational": [
+        24000,
+        1001
+      ],
+      "dur": 90
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 23.976023976023978,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      3.9755859375,
+      5.49951171875,
+      5.0966796875
+    ],
+    "after": [
+      5.0625,
+      5.56640625,
+      5.15625
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 23.976023976023978,
+    "dur": 90,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 48,
+    "offsetUs": 478358700304
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.000332999999955,
+        "max": 50.02770800000053
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1192,
+      "replies": 1192,
+      "replyBytes": 93801028,
+      "mainMsP50": 0.07141699999920093
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.12bb945fbfee96c5177746a5f1bdad5e",
+    "accepted": {
+      "pid": 40936,
+      "pidversion": 7632580
+    },
+    "rejections": 0,
+    "surfaces": 24,
+    "imports": 24,
+    "sends": 24,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 16,
+    "allReleased": 8,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 16,
+      "bytes": 398655488
+    },
+    "live": 8
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 23.976023976023978,
+      "reporterFrames": 14261
+    },
+    "presentation": {
+      "thread": "worker",
+      "timing": "viz",
+      "sink": "7:2147483650"
+    },
+    "app": {
+      "project": {
+        "name": "Synthetic 500 layers",
+        "w": 1920,
+        "h": 1080,
+        "fps": 23.976023976023978,
+        "layers": 450
+      },
+      "stage": {
+        "width": 1228,
+        "height": 632,
+        "dpr": 2
+      },
+      "quality": 1
+    },
+    "frames": {
+      "expected": 1433,
+      "notDrawn": 0,
+      "notPresented": 0,
+      "drops": 0,
+      "presented": 1433,
+      "offSlot": 206
+    },
+    "jitterAbsMs": {
+      "n": 1433,
+      "p50": 2.358,
+      "p95": 9.794,
+      "p99": 12.634,
+      "max": 17.311
+    },
+    "intervalErrorAbsMs": {
+      "n": 1432,
+      "p50": 0.042,
+      "p95": 8.375,
+      "p99": 19.846,
+      "max": 22.013
+    },
+    "irregularIntervals": 302,
+    "rafToPresentMs": {
+      "n": 1433,
+      "p50": 19.75,
+      "p95": 28.05,
+      "p99": 28.15,
+      "max": 37.25
+    },
+    "dueToPresentMs": {
+      "n": 1433,
+      "p50": 3.88,
+      "p95": 9.91,
+      "p99": 15.15,
+      "max": 21.19
+    },
+    "avSync": {
+      "outsideNear": {
+        "resize": 65,
+        "longTask+resize": 6,
+        "none": 4
+      },
+      "offsetMs": {
+        "n": 1433,
+        "p50": 3.88,
+        "p95": 9.91,
+        "p99": 15.15,
+        "max": 21.19
+      },
+      "absOffsetMs": {
+        "n": 1433,
+        "p50": 4.25,
+        "p95": 10.07,
+        "p99": 15.15,
+        "max": 21.19
+      },
+      "p5Ms": -1.69,
+      "within10Ms": 1358,
+      "n": 1433
+    },
+    "vizHopsByDepth": {
+      "1": {
+        "n": 89,
+        "submitted": {
+          "n": 89,
+          "p50": 0.3,
+          "p95": 0.4,
+          "p99": 0.5,
+          "max": 0.6
+        },
+        "received": {
+          "n": 89,
+          "p50": 0.33,
+          "p95": 0.51,
+          "p99": 0.6,
+          "max": 0.62
+        },
+        "drawBegin": {
+          "n": 89,
+          "p50": 0.52,
+          "p95": 8.34,
+          "p99": 8.74,
+          "max": 9.07
+        },
+        "presented": {
+          "n": 89,
+          "p50": 11.4,
+          "p95": 11.58,
+          "p99": 11.75,
+          "max": 12.33
+        }
+      },
+      "2": {
+        "n": 1257,
+        "submitted": {
+          "n": 1257,
+          "p50": 0.3,
+          "p95": 0.4,
+          "p99": 0.5,
+          "max": 0.7
+        },
+        "received": {
+          "n": 1257,
+          "p50": 0.36,
+          "p95": 0.57,
+          "p99": 0.65,
+          "max": 1.06
+        },
+        "drawBegin": {
+          "n": 1257,
+          "p50": 8.51,
+          "p95": 8.9,
+          "p99": 9.51,
+          "max": 16.65
+        },
+        "presented": {
+          "n": 1257,
+          "p50": 19.75,
+          "p95": 20.31,
+          "p99": 20.67,
+          "max": 20.76
+        }
+      },
+      "3": {
+        "n": 85,
+        "submitted": {
+          "n": 85,
+          "p50": 0.3,
+          "p95": 0.5,
+          "p99": 0.8,
+          "max": 0.8
+        },
+        "received": {
+          "n": 85,
+          "p50": 0.32,
+          "p95": 0.69,
+          "p99": 0.78,
+          "max": 0.78
+        },
+        "drawBegin": {
+          "n": 85,
+          "p50": 5.06,
+          "p95": 14.23,
+          "p99": 14.49,
+          "max": 14.53
+        },
+        "presented": {
+          "n": 85,
+          "p50": 28.1,
+          "p95": 28.3,
+          "p99": 28.62,
+          "max": 28.7
+        }
+      },
+      "4": {
+        "n": 2,
+        "submitted": {
+          "n": 2,
+          "p50": 0.3,
+          "p95": 0.3,
+          "p99": 0.3,
+          "max": 0.3
+        },
+        "received": {
+          "n": 2,
+          "p50": 0.28,
+          "p95": 0.28,
+          "p99": 0.28,
+          "max": 0.32
+        },
+        "drawBegin": {
+          "n": 2,
+          "p50": 11.83,
+          "p95": 11.83,
+          "p99": 11.83,
+          "max": 13.31
+        },
+        "presented": {
+          "n": 2,
+          "p50": 36.38,
+          "p95": 36.38,
+          "p99": 36.38,
+          "max": 37.25
+        }
+      }
+    },
+    "vizLags": {
+      "counts": {
+        "draw": {
+          "0": 341,
+          "1": 1071,
+          "2": 21
+        },
+        "present": {
+          "0": 34,
+          "1": 1074,
+          "2": 226,
+          "3": 79,
+          "4": 20
+        }
+      },
+      "irregular": {
+        "drawChanged": 116,
+        "presentChanged": 94,
+        "both": 69,
+        "neither": 23
+      }
+    },
+    "drawMainThreadMs": {
+      "n": 1440,
+      "p50": 0.3,
+      "p95": 0.4,
+      "p99": 0.5,
+      "max": 0.8
+    },
+    "arrivalLeadMs": {
+      "n": 1440,
+      "p50": -152.03,
+      "p95": -135.28,
+      "p99": -128.9,
+      "max": -121.18
+    },
+    "rafGapMs": {
+      "n": 7207,
+      "p50": 8.3,
+      "p95": 8.9,
+      "p99": 9.3,
+      "max": 10.5
+    },
+    "rafGapsOver25Ms": 0,
+    "missing": [],
+    "pipelineDepthRefreshes": {
+      "1": 89,
+      "2": 1257,
+      "3": 85,
+      "4": 2
+    },
+    "presenter": {
+      "received": 1482,
+      "drawn": 1479,
+      "dropped": {},
+      "released": 1479,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 4,
+      "generation": 3,
+      "sessions": 1,
+      "viewSeq": 517,
+      "offMainThread": true
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 16,
+      "received": 24,
+      "released": 8,
+      "videoFrames": 1491,
+      "misses": 0,
+      "duplicates": 0,
+      "lateReleases": 0,
+      "errors": []
+    }
+  }
+}

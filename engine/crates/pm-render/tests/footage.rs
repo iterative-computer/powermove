@@ -988,8 +988,9 @@ fn stored_rgba(path: &Path) -> (Vec<[f64; 4]>, pm_media::image::StillImage) {
 /// profile once, so with Interpret Footage overrides the renderer draws
 /// those samples and never applies the profile again (pm-media's
 /// `converted_stills_are_srgb_once` compares the samples with ColorSync's
-/// conversion); without overrides they route to the legacy renderer, which
-/// converts CMYK itself. A straight-alpha CMYK TIFF keeps its alpha reading.
+/// conversion); without overrides level 1 draws them through Chromium's
+/// own CMYK conversion (stills2). A straight-alpha CMYK TIFF keeps its
+/// alpha reading.
 #[test]
 fn interpreted_cmyk_stills_draw_their_converted_samples() {
     let (Some(jpg), Some(tiffa)) = (formats("image/cmyk.jpg"), formats("image/cmyka.tiff")) else {
@@ -1010,8 +1011,8 @@ fn interpreted_cmyk_stills_draw_their_converted_samples() {
         let (doc, res) = still_document(path, (w, h), None);
         assert!(
             r.render(&load(&doc), "Ptest-root", ticks(0.0), &request(w, h), &res)
-                .is_err(),
-            "{name}: CMYK stills are routed without an interpretation"
+                .is_ok(),
+            "{name}: level 1 draws CMYK stills without an interpretation"
         );
         let (stored, still) = stored_rgba(path);
         assert_eq!(

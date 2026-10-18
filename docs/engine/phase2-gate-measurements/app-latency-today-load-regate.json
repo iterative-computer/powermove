@@ -1,0 +1,190 @@
+{
+  "run": "app-latency-today-load-regate",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      7.0595703125,
+      8.29443359375,
+      7.77001953125
+    ],
+    "after": [
+      12.8466796875,
+      9.7353515625,
+      8.38037109375
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 33,
+    "offsetUs": 479159047913.5
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 46,
+      "ms": {
+        "n": 46,
+        "p50": 50.00037500000326,
+        "max": 50.02208399999654
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 872,
+      "replies": 871,
+      "replyBytes": 68540512,
+      "mainMsP50": 0.06612499999755528
+    },
+    "resizes": {
+      "n": 9,
+      "steps": 549
+    },
+    "eventCount": 55
+  },
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 1868,
+      "draws": 2665,
+      "unmatched": 0,
+      "unpresented": 87,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2314,
+        "p50": 20.92,
+        "p95": 45.94,
+        "p99": 70.38,
+        "max": 96.66
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 20.95,
+        "p95": 54.21,
+        "p99": 70.9,
+        "max": 103.93
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2314,
+          "p50": 6.02,
+          "p95": 25.89,
+          "p99": 48.48,
+          "max": 72.78
+        },
+        "handledToRaf": {
+          "n": 2314,
+          "p50": -4.2,
+          "p95": -3.8,
+          "p99": -3.6,
+          "max": -3.4
+        },
+        "rafToPresent": {
+          "n": 2314,
+          "p50": 19.18,
+          "p95": 35.83,
+          "p99": 44.63,
+          "max": 54.04
+        }
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 1934,
+      "draws": 2009,
+      "unmatched": 0,
+      "unpresented": 55,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2346,
+        "p50": 30.3,
+        "p95": 64.07,
+        "p99": 96.76,
+        "max": 130.43
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 30.31,
+        "p95": 72.01,
+        "p99": 97.16,
+        "max": 130.43
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2346,
+          "p50": 3.55,
+          "p95": 33.16,
+          "p99": 54.51,
+          "max": 81.01
+        },
+        "handledToRaf": {
+          "n": 2346,
+          "p50": -0.7,
+          "p95": -0.4,
+          "p99": -0.3,
+          "max": -0.2
+        },
+        "rafToPresent": {
+          "n": 2346,
+          "p50": 27.46,
+          "p95": 52.41,
+          "p99": 60.83,
+          "max": 69.36
+        }
+      }
+    }
+  }
+}
