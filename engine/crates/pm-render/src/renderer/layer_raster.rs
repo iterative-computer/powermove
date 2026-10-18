@@ -139,11 +139,14 @@ impl Renderer {
             // Today's placement (`PM.raster`'s anchor, selection, and font
             // offset): pm-eval's, as pm-wasm answers it; captions have no
             // selection or font offset.
+            let mut whole: Option<((f64, f64), (f64, f64))> = None;
             let (selection, font_offset) = if ty == "text" {
                 let fonts = self.text.fonts.as_deref_mut().expect("checked above");
                 let placed = scope
                     .text_raster(node, seconds, fonts.measure())
                     .map_err(|e| RenderError::Request(e.to_string()))?;
+                // Today's raster box and anchor: the whole canvas's.
+                whole = Some(((placed.w, placed.h), (placed.anchor_x, placed.anchor_y)));
                 let s = placed.selection;
                 // `L.d.fontAnchorBounds`, as `PM.raster` tests it.
                 let anchored = pm_eval::node::truthy(pm_eval::node::member(
@@ -216,14 +219,32 @@ impl Renderer {
                 self.pool.give(t);
             }
             let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+            // The pixels are placed in the whole canvas (only its inked part
+            // is painted, and the quad shrinks to it for compositing), so
+            // the surface's box and anchor are the whole canvas's, as
+            // today's `RasterSurface` has them: a wrapper drawing `cv` at
+            // `w` × `h` from `-anchorX, -anchorY` must not squeeze it.
+            let crop = quad.plan.crop;
+            let canvas = (quad.plan.scene.width, quad.plan.scene.height);
+            let (box_size, anchor) = whole.unwrap_or_else(|| {
+                // The quad is the ink crop `[x0, y0, x1, y1]` of a canvas
+                // stretched over its box (`TextContext::quad`): undo it.
+                let [x0, y0, x1, y1] = crop.map(f64::from);
+                let sx = if x1 > x0 { quad.w / (x1 - x0) } else { 1.0 / scale };
+                let sy = if y1 > y0 { quad.h / (y1 - y0) } else { 1.0 / scale };
+                (
+                    (f64::from(canvas.0) * sx, f64::from(canvas.1) * sy),
+                    (quad.ax + x0 * sx, quad.ay + y0 * sy),
+                )
+            });
             return Ok(Some(LayerRaster {
                 pixels: LayerPixels::Float {
                     pixels,
-                    crop: quad.plan.crop,
+                    crop,
                 },
-                canvas: (quad.plan.scene.width, quad.plan.scene.height),
-                box_size: (quad.w, quad.h),
-                anchor: (quad.ax, quad.ay),
+                canvas,
+                box_size,
+                anchor,
                 selection,
                 font_offset,
                 crops: ty == "text" && !animated,
