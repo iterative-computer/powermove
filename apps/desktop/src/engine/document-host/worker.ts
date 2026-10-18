@@ -1,0 +1,331 @@
+/*
+ * One document host worker: one project in a process of its own
+ * (docs/engine/document-host.md). It boots the editor's document chain
+ * (chain.ts), loads the project from the session, resumes the undo history
+ * it persisted, answers tool calls, and sends its edits back to the session
+ * before each reply, so the host's copy is never behind an answer the agent
+ * holds (contract 15, invariant 3).
+ *
+ * The pool talks to it over child-process IPC (protocol.ts `ToWorker` /
+ * `FromWorker`); every host service it needs is a `service` request.
+ */
+import type { AgentToolRequestEvent, AgentToolResponseEvent, PowermoveBridge } from '../../shared/ipc';
+import { diffPatches, applyPatch, type Patch } from '../../shared/patch';
+import { canonicalProjectHash } from '../../shared/canonical-json';
+import type { ExtensionRecord } from '../../shared/extensions';
+import type { PersistReason } from '../../shared/engine-protocol';
+import type { TranscribeProgress } from '../../shared/transcription';
+import { bootChain, memoryStore, type Chain, type EnginePolicy } from './chain';
+import {
+  DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
+  type DocumentHostFailure, type FromWorker, type InstanceOpened, type InstancePersisted, type InstanceStats,
+  type ExtensionRegistration, type ServiceName, type SessionPatch, type ToWorker,
+} from './protocol';
+
+/** What a worker persists per instance (`documentHost.<projectId>` in the profile store). */
+export interface InstanceState {
+  v: 1;
+  projectId: string;
+  /** The document's canonical hash when the history was saved. */
+  hash: string;
+  revision: number;
+  /** `PM.hist.export()`. */
+  history: unknown;
+  savedAt: number;
+}
+
+/** A transport to the pool: `process` in a forked child, a pair of functions in tests. */
+export interface WorkerPort {
+  send(message: FromWorker): void;
+  onMessage(listener: (message: ToWorker) => void): void;
+}
+
+export class DocumentWorker {
+  private chain: Chain | null = null;
+  private projectId: string | null = null;
+  private instance = 0;
+  private synced = '';
+  private seq = 0;
+  private definitionsGeneration = 0;
+  private nextService = 1;
+  private services = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
+  private progress = new Set<(p: TranscribeProgress) => void>();
+  private toolResponses = new Map<string, (response: AgentToolResponseEvent) => void>();
+  private onRequest: ((request: AgentToolRequestEvent) => void) | null = null;
+  private extensions = { active: [] as string[], failed: [] as Array<{ id: string; error: string }> };
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly port: WorkerPort, private readonly policy: EnginePolicy) {
+    port.onMessage((message) => this.receive(message));
+  }
+
+  start(): void {
+    this.port.send({ t: 'ready', protocol: DOCUMENT_HOST_PROTOCOL, pid: process.pid });
+  }
+
+  private log(line: string): void { this.port.send({ t: 'log', line }); }
+
+  private service<T>(name: ServiceName, ...args: unknown[]): Promise<T> {
+    const id = this.nextService++;
+    return new Promise<T>((resolve, reject) => {
+      this.services.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.port.send({ t: 'service', id, name, args });
+    });
+  }
+
+  private receive(message: ToWorker): void {
+    switch (message.t) {
+      case 'serviceReply': {
+        const pending = this.services.get(message.id);
+        if (!pending) return;
+        this.services.delete(message.id);
+        if (message.ok) pending.resolve(message.value); else pending.reject(new Error(message.error ?? 'host service failed'));
+        return;
+      }
+      case 'progress':
+        for (const listener of this.progress) listener(message.progress);
+        return;
+      case 'remote':
+        this.applyRemote(message.patch);
+        return;
+      case 'tool':
+        // Tool calls run concurrently (the harness keeps one transaction per run).
+        void this.answer(message.id, () => this.tool(message.request));
+        return;
+      default:
+        // Lifecycle requests run one at a time, in order.
+        this.queue = this.queue.then(() => this.answer(message.id, () => this.lifecycle(message)));
+    }
+  }
+
+  private async answer(id: number, run: () => Promise<unknown>): Promise<void> {
+    try {
+      const value = await run();
+      this.port.send({ t: 'reply', id, ok: true, value });
+    } catch (error) {
+      const failure: DocumentHostFailure = error instanceof DocumentHostError ? error.toJSON()
+        : isFailure(error) ? error : { code: 'worker-error', message: error instanceof Error ? error.message : String(error), retry: false };
+      this.port.send({ t: 'reply', id, ok: false, failure });
+    }
+  }
+
+  private lifecycle(message: Exclude<ToWorker, { t: 'tool' | 'remote' | 'serviceReply' | 'progress' }>): Promise<unknown> {
+    switch (message.t) {
+      case 'open': return this.open(message.projectId, message.instance);
+      case 'persist': return this.persist(message.reason);
+      case 'register': return this.register(message.record);
+      case 'stats': return Promise.resolve(this.stats());
+      case 'close': return this.close();
+    }
+  }
+
+  /* ── the bridge the editor's modules see ─────────────────────────────── */
+
+  private bridge(): Partial<PowermoveBridge> {
+    const agentTools: PowermoveBridge['agentTools'] = {
+      onRequest: (cb) => { this.onRequest = cb; return () => { if (this.onRequest === cb) this.onRequest = null; }; },
+      respond: (response) => {
+        const key = `${response.runId}\u0000${response.callId}`;
+        const done = this.toolResponses.get(key);
+        if (done) { this.toolResponses.delete(key); done(response); }
+      },
+    };
+    const unavailable = (what: string) => () => Promise.reject(new Error(`${what} is not available in the document host.`));
+    return {
+      agentTools,
+      remote: true,
+      versions: { electron: '', chrome: '', node: process.versions.node },
+      log: (level: string, text: string) => this.log(`[engine:${level}] ${text}`),
+      mediaPath: { lookup: (request) => this.service('mediaPath.lookup', request) },
+      transcription: {
+        status: () => this.service('transcription.status'),
+        transcribe: (request) => this.service('transcription.transcribe', request),
+        cancelTranscribe: (requestId) => this.service('transcription.cancelTranscribe', requestId),
+        onProgress: (callback) => { this.progress.add(callback); return () => { this.progress.delete(callback); }; },
+        onStatus: () => () => {},
+        onModelRequested: () => () => {},
+        download: unavailable('Downloading speech models'),
+        cancelDownload: unavailable('Downloading speech models'),
+        remove: unavailable('Removing speech models'),
+        setActive: unavailable('Choosing a speech model'),
+        setLanguage: unavailable('Choosing a transcription language'),
+        reveal: unavailable('Showing the models folder'),
+      },
+    } as Partial<PowermoveBridge>;
+  }
+
+  /* ── lifecycle ───────────────────────────────────────────────────────── */
+
+  private async open(projectId: string, instance: number): Promise<InstanceOpened> {
+    if (this.projectId && this.projectId !== projectId) throw new DocumentHostError('worker-error', `This worker holds project ${this.projectId}.`);
+    if (this.chain && this.projectId === projectId) return this.opened(0);
+    const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
+    if (!joined?.doc) throw new DocumentHostError('project-missing', `The host has no document for project ${projectId}.`);
+    const saved = await this.service<InstanceState | null>('store.read', INSTANCE_STATE_KEY(projectId)).catch(() => null);
+    this.chain = await bootChain({ bridge: this.bridge(), store: memoryStore(), log: (line) => this.log(line), policy: this.policy });
+    const PM = this.chain.PM;
+    if (!this.onRequest) throw new DocumentHostError('worker-error', 'The agent tool harness did not register.');
+    this.projectId = projectId;
+    this.instance = instance;
+    this.seq = joined.seq;
+    PM['isHomeProject'] = () => !PM['proj']?.id;
+    PM['replaceProject'](joined.doc, {});
+    PM['bus']?.emit('projects:open');
+    this.synced = JSON.stringify(PM['proj']);
+    // The undo history this instance had: never cleared by another project,
+    // resumed after a restart (amendment: appendix A item 16).
+    let restored = 0;
+    if (saved && saved.v === 1 && saved.projectId === projectId && saved.history) {
+      if (PM['hist'].import(saved.history)) restored = PM['hist'].export({ copy: false }).entries.length;
+      if (saved.hash !== canonicalProjectHash(PM['proj'])) this.log(`[engine] ${projectId}: the document changed since its history was saved (another member edited it); undo applies on top`);
+    }
+    this.extensions = await this.chain.bootExtensions();
+    this.log(`[engine] opened ${projectId} (seq ${joined.seq}, ${restored} undo entries, extensions ${this.extensions.active.length} active)`);
+    return this.opened(restored);
+  }
+
+  private opened(restored: number): InstanceOpened {
+    const PM = this.chain!.PM;
+    return {
+      instance: this.instance,
+      projectId: this.projectId!,
+      document: this.projectId!,
+      revision: Number(PM['proj']?.revision) || 0,
+      restoredHistory: restored,
+      engine: { evaluator: 'pm-wasm', mode: this.chain!.engine.mode, fonts: this.chain!.engine.fonts },
+    };
+  }
+
+  private requireChain(): Chain {
+    if (!this.chain || !this.projectId) throw new DocumentHostError('closed', 'The document host instance is not open.');
+    return this.chain;
+  }
+
+  private async persist(reason: PersistReason): Promise<InstancePersisted> {
+    const PM = this.requireChain().PM;
+    await this.syncUp();
+    const state: InstanceState = {
+      v: 1,
+      projectId: this.projectId!,
+      hash: canonicalProjectHash(PM['proj']),
+      revision: Number(PM['proj']?.revision) || 0,
+      history: PM['hist'].export({ copy: false }),
+      savedAt: Date.now(),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(state));
+    await this.service('store.write', INSTANCE_STATE_KEY(this.projectId!), state);
+    return { instance: this.instance, projectId: this.projectId!, revision: state.revision, bytes, reason };
+  }
+
+  private async close(): Promise<null> {
+    if (!this.chain) return null;
+    await this.persist('close');
+    await this.service('session.leave', this.projectId);
+    await this.chain.loader()?.dispose();
+    return null;
+  }
+
+  private async register(record: ExtensionRecord): Promise<ExtensionRegistration> {
+    const chain = this.requireChain();
+    const loader = chain.loader();
+    if (!loader) throw new DocumentHostError('worker-error', 'The extension loader has not booted.');
+    if (record.trust === 'store') {
+      throw new DocumentHostError('sandbox-unavailable', `"${record.manifest?.name ?? record.id}" is a Store extension; the document host has no contained sandbox for it yet, so it was not loaded.`);
+    }
+    if (loader.activeIds().includes(record.id)) await loader.deactivate(record.id);
+    const active = await loader.activate(record);
+    const health = loader.records().find((r) => r.id === record.id)?.health ?? recordHealth(record.id, chain);
+    if (!active) throw new DocumentHostError('worker-error', `Extension ${record.id} failed to activate: ${health && 'error' in health ? String((health as { error?: unknown }).error) : 'unknown error'}`);
+    // The kernel's registries changed synchronously during activation, so the
+    // next tool call in this instance sees them (contract 15, invariant 4).
+    this.definitionsGeneration += 1;
+    this.extensions = { active: loader.activeIds(), failed: this.extensions.failed.filter((f) => f.id !== record.id) };
+    return { instance: this.instance, extension: record.id, definitionsGeneration: this.definitionsGeneration, active };
+  }
+
+  private stats(): InstanceStats {
+    const PM = this.requireChain().PM;
+    const engine = PM['EngineDoc']?.stats?.() ?? {};
+    const fallbacks: Record<string, number> = {};
+    for (const [k, v] of Object.entries(engine.native?.fallbacks ?? {})) fallbacks[k] = (fallbacks[k] ?? 0) + Number(v);
+    for (const [k, v] of Object.entries(engine.edits?.fallbacks ?? {})) fallbacks[`edit.${k}`] = (fallbacks[`edit.${k}`] ?? 0) + Number(v);
+    const calls = Object.values(engine.native?.calls ?? {}).reduce((a: number, b) => a + Number(b), 0) + Object.values(engine.edits?.calls ?? {}).reduce((a: number, b) => a + Number(b), 0);
+    return {
+      instance: this.instance,
+      projectId: this.projectId!,
+      revision: Number(PM['proj']?.revision) || 0,
+      historyDepth: PM['hist'].export({ copy: false }).entries.length,
+      fallbacks,
+      calls,
+      auditor: engine.audit ? { audits: engine.audit.audits, failures: engine.audit.failures } : null,
+      consistency: { checks: Number(engine.barrier?.checks ?? 0), mismatches: Number(engine.barrier?.mismatches ?? 0) },
+      extensions: this.extensions,
+    };
+  }
+
+  /* ── tools ───────────────────────────────────────────────────────────── */
+
+  private async tool(request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> {
+    const PM = this.requireChain().PM;
+    const handle = this.onRequest;
+    if (!handle) throw new DocumentHostError('worker-error', 'The agent tool harness is not registered.');
+    const key = `${request.runId}\u0000${request.callId}`;
+    if (this.toolResponses.has(key)) throw new DocumentHostError('worker-error', `Tool call ${request.callId} of run ${request.runId} is already running.`);
+    const response = await new Promise<AgentToolResponseEvent>((resolve) => {
+      this.toolResponses.set(key, resolve);
+      handle(request);
+    });
+    // Read-your-writes across the hop: the session has this call's edits
+    // before the agent sees the answer.
+    await this.syncUp();
+    if (response.changed || Number(PM['proj']?.revision) !== request.baseRevision) await this.persist('toolCall').catch((error) => this.log(`[engine] persist after ${request.tool} failed: ${(error as Error).message}`));
+    return response;
+  }
+
+  /* ── the session ─────────────────────────────────────────────────────── */
+
+  private sending: Promise<void> = Promise.resolve();
+
+  /** Sends what changed since the last sync; resolves once the host applied it. */
+  private syncUp(): Promise<void> {
+    this.sending = this.sending.then(async () => {
+      if (!this.chain || !this.projectId) return;
+      const after = JSON.stringify(this.chain.PM['proj']);
+      if (after === this.synced) return;
+      const patches: Patch[] = diffPatches(JSON.parse(this.synced), JSON.parse(after)).forward;
+      this.synced = after;
+      if (!patches.length) return;
+      this.seq = await this.service<number>('session.patch', this.projectId, patches);
+    });
+    return this.sending;
+  }
+
+  private applyRemote(patch: SessionPatch): void {
+    if (!this.chain || patch.projectId !== this.projectId) return;
+    const PM = this.chain.PM;
+    // Our own unsent edits go first, so the remote patch lands on the base the
+    // host applied it to (as remote-sync does in a tab).
+    void this.syncUp().then(() => {
+      PM['replaceProject'](applyPatch(PM['proj'], patch.patches), { selection: PM['sel'] });
+      this.synced = JSON.stringify(PM['proj']);
+      this.seq = patch.seq;
+    });
+  }
+}
+
+function recordHealth(id: string, chain: Chain) {
+  return chain.loader()?.records().find((r) => r.id === id)?.health;
+}
+
+/* child-process entry: forked by the pool with `--document-worker` */
+export function runWorkerProcess(): void {
+  if (typeof process.send !== 'function') throw new Error('The document worker must be forked with an IPC channel.');
+  const policy: EnginePolicy = { newEngine: process.env['POWERMOVE_DOCUMENT_HOST_NEW_ENGINE'] === '1', evaluator: process.env['POWERMOVE_NATIVE_EVALUATOR'] };
+  const port: WorkerPort = {
+    send: (message) => { process.send!(message); },
+    onMessage: (listener) => { process.on('message', (message) => listener(message as ToWorker)); },
+  };
+  // The pool owns this process: when its channel closes, the project is gone.
+  process.on('disconnect', () => process.exit(0));
+  new DocumentWorker(port, policy).start();
+}

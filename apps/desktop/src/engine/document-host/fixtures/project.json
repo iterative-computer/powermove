@@ -1,0 +1,60 @@
+{
+  "id": "Pfixture",
+  "name": "Fixture",
+  "w": 640,
+  "h": 360,
+  "fps": 30,
+  "dur": 10,
+  "fpsRational": [
+    30,
+    1
+  ],
+  "bg": "#000000",
+  "backgroundFill": {
+    "type": "solid",
+    "angle": 0,
+    "stops": [
+      {
+        "id": "stop-1",
+        "color": "#000000",
+        "position": 0
+      }
+    ]
+  },
+  "compId": "Cfixture",
+  "compName": "Fixture",
+  "layers": [],
+  "comps": {},
+  "assets": {},
+  "markers": [],
+  "work": [
+    0,
+    10
+  ],
+  "exportDefaults": {
+    "format": "h264",
+    "scale": 1,
+    "fps": 30,
+    "range": "work",
+    "quality": "high",
+    "mblur": true,
+    "audio": true,
+    "alpha": false,
+    "delivery": {
+      "highDepth": false,
+      "container": "mp4",
+      "alphaMode": "straight",
+      "audioCoding": "auto",
+      "videoColor": "quicktime",
+      "imageColor": "srgb",
+      "timecode": "",
+      "reel": "",
+      "fileName": "{project}",
+      "overwrite": "keep-both"
+    }
+  },
+  "params": {},
+  "revision": 0,
+  "edits": [],
+  "created": 1760000000000
+}

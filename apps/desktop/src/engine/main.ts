@@ -1,23 +1,36 @@
 /*
  * The document engine: the editor's own core (model, animation, history,
- * editing, the agent tool harness) running in Node against a DOM shim, with
- * no browser and no GPU. It connects to the host like a tab, joins project
- * sessions, and answers the agent's document tools, so a run keeps going
- * after every browser tab has gone.
+ * editing, the agent tool harness, captions, the extension registry) running
+ * in Node against a DOM shim, with no browser and no GPU. It connects to the
+ * host like a tab and answers the agent's document tools, so a run keeps
+ * going after every browser tab has gone.
+ *
+ * This process is the supervisor: it owns a `DocumentHostPool` (one worker
+ * process per open project, docs/engine/document-host.md) and gives it the
+ * host's services over the link (the profile store, project sessions, media
+ * paths). Each project keeps its own pm-wasm mirror, kernel, history, and
+ * extension registry; opening another project never clears one.
  *
  * Panel and capture tools need pixels and a real UI; the host routes those
  * to a live tab and this engine never sees them.
+ *
+ *   node engine.mjs <url> <token>         the supervisor (serve's child)
+ *   node engine.mjs --document-worker     one project's worker (the pool forks it)
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { Window } from 'happy-dom';
 import { WebSocket } from 'ws';
 
-import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent, type PowermoveBridge } from '../shared/ipc';
+import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent } from '../shared/ipc';
 import { Connection } from '../shared/link';
 import { WEB } from '../shared/wire';
 import { MEDIA_PATH_IPC, type MediaPathResult } from '../shared/media-tools';
+import { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from '../main/engine/flag';
+import type { Patch } from '../shared/patch';
+import { DocumentHostPool } from './document-host/pool';
+import { DocumentHostError, type DocumentHostServices, type SessionPatch } from './document-host/protocol';
+import { runWorkerProcess } from './document-host/worker';
+
+export { installHeadlessEngineDoc, pmWasmPath, headlessFonts } from './document-host/chain';
 
 export interface EngineOptions {
   /** wss://127.0.0.1:<port>/__powermove/ws */
@@ -29,162 +42,87 @@ export interface EngineOptions {
 /** A tool request the host forwards to the engine, tagged with its project. */
 export interface EngineToolRequest extends AgentToolRequestEvent { projectId: string }
 
-function installDom(): Window {
-  const window = new Window({ url: 'https://engine.powermove.local/' });
-  const globals = globalThis as Record<string, unknown>;
-  globals['window'] = window;
-  for (const key of ['document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'CustomEvent', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'matchMedia', 'localStorage', 'sessionStorage', 'Image', 'Blob', 'File', 'FileReader', 'DOMParser', 'XMLSerializer', 'MutationObserver', 'ResizeObserver', 'IntersectionObserver']) {
-    const value = (window as unknown as Record<string, unknown>)[key];
-    if (value !== undefined && globals[key] === undefined) globals[key] = typeof value === 'function' && !/^[A-Z]/.test(key) ? (value as (...a: unknown[]) => unknown).bind(window) : value;
-  }
-  return window;
-}
-
-/** Everything the renderer's core needs from the bridge; the rest is absent. */
-function bridgeStub(agentTools: PowermoveBridge['agentTools']): Partial<PowermoveBridge> {
-  return {
-    agentTools,
-    remote: true,
-    versions: { electron: '', chrome: '', node: process.versions.node },
-    log: (level, text) => console.log(`[engine:${level}] ${text}`)
-  };
-}
-
-function memoryStore(): Record<string, unknown> {
-  const values = new Map<string, unknown>();
-  return {
-    get: (key: string, fallback: unknown) => values.has(key) ? JSON.parse(JSON.stringify(values.get(key))) : fallback,
-    set: (key: string, value: unknown) => { values.set(key, JSON.parse(JSON.stringify(value ?? null))); return true; },
-    setAsync: (key: string, value: unknown) => { values.set(key, JSON.parse(JSON.stringify(value ?? null))); return Promise.resolve(true); },
-    del: (key: string) => { values.delete(key); },
-    flush: async () => {}
-  };
-}
-
-/** Where the headless host finds pm-wasm: POWERMOVE_PM_WASM, else the
- *  renderer build next to this bundle (out/renderer/engine/pm_wasm.wasm). */
-export function pmWasmPath(): string {
-  return process.env['POWERMOVE_PM_WASM'] ?? fileURLToPath(new URL('../renderer/engine/pm_wasm.wasm', import.meta.url));
-}
-
-/** The native font registry (pm-bridge) in this process, behind
- *  POWERMOVE_ENGINE_FONTS=1 as in main (docs/engine/text.md): text layout in
- *  pm-wasm then resolves fonts synchronously. */
-export function headlessFonts(log: (line: string) => void): import('../renderer/src/engine-doc/fonts').FontProvider | null {
-  if (process.env['POWERMOVE_ENGINE_FONTS'] !== '1') return null;
-  const addon = process.env['POWERMOVE_PM_BRIDGE'] ?? fileURLToPath(new URL('../../../../engine/target/pm-bridge/pm_bridge.node', import.meta.url));
-  try {
-    const { FontRegistry } = createRequire(import.meta.url)(addon) as { FontRegistry: new () => { answer(q: string): string; subset(blob: string, index: number): Uint8Array } };
-    const registry = new FontRegistry();
-    return { sync: true, answer: (queries) => registry.answer(queries), subset: (blob, index) => registry.subset(blob, index) };
-  } catch (error) {
-    log(`[engine] font registry unavailable (${addon}): ${(error as Error).message}`);
-    return null;
-  }
-}
-
-/** Installs the document mirror and native evaluator for the headless host. */
-export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (line: string) => void): Promise<{ ready: boolean; mode: string }> {
-  const { installEngineDoc } = await import('../renderer/src/engine-doc/install');
-  const { parseMode } = await import('../renderer/src/engine-doc/flags');
-  const mode = parseMode(process.env['POWERMOVE_NATIVE_EVALUATOR'] ?? 'on');
-  const path = pmWasmPath();
-  if (mode.evaluator && !existsSync(path)) log(`[engine] pm-wasm not found at ${path}; the legacy evaluator answers`);
-  const doc = installEngineDoc(PM, {
-    mode: mode.evaluator && existsSync(path) ? mode : parseMode('off'),
-    loadModule: () => WebAssembly.compile(readFileSync(path)),
-    sink: (line) => log(`[engine] ${line}`),
-    headless: true,
-    fonts: headlessFonts(log),
+/** The host's services over the link to the serve host. */
+export function linkServices(link: Connection, log: (line: string) => void): DocumentHostServices {
+  const patchListeners = new Set<(patch: SessionPatch) => void>();
+  link.on(WEB.syncPatch, (payload) => {
+    const message = payload as { projectId?: unknown; seq?: unknown; patches?: unknown };
+    if (!message || typeof message.projectId !== 'string' || !Array.isArray(message.patches)) return;
+    const patch: SessionPatch = { projectId: message.projectId, seq: Number(message.seq) || 0, patches: message.patches as Patch[] };
+    for (const listener of patchListeners) listener(patch);
   });
-  const ready = await doc.whenReady;
-  log(`[engine] document mirror: ${ready ? `pm-wasm (${mode.name})` : 'legacy evaluator'}`);
-  return { ready, mode: mode.name };
+  return {
+    store: {
+      read: async (key) => {
+        const raw = await link.sync<string | null>(IPC.storeGetSync, { key });
+        return raw == null ? null : JSON.parse(raw);
+      },
+      write: async (key, value) => { link.send(IPC.storeSet, { key, value }); },
+      remove: async (key) => { link.send(IPC.storeDelete, { key }); },
+    },
+    session: {
+      join: (projectId) => link.invoke<{ seq: number; doc: unknown | null }>(WEB.syncJoin, { projectId, doc: null }),
+      patch: (projectId, patches) => link.invoke<number>(WEB.syncPatch, { projectId, patches }),
+      leave: (projectId) => link.send(WEB.syncLeave, projectId),
+      onPatch: (listener) => { patchListeners.add(listener); return () => { patchListeners.delete(listener); }; },
+    },
+    /* Agent media tools and captions find a project's media in the host's own
+       store by key; the engine has no bytes of its own to stage. */
+    mediaPath: { lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request) },
+    log,
+  };
 }
 
-export async function startEngine(options: EngineOptions): Promise<{ close(): void }> {
+/** The built bundle this module is part of (engine.mjs), which the pool forks. */
+function bundlePath(): string | undefined {
+  const self = fileURLToPath(import.meta.url);
+  return /engine\.m?js$/.test(self) ? self : process.env['POWERMOVE_ENGINE_SCRIPT'];
+}
+
+export async function startEngine(options: EngineOptions): Promise<{ close(): Promise<void>; pool: DocumentHostPool }> {
   const log = options.log ?? ((line: string) => console.log(line));
-  installDom();
 
-  let onRequest: ((request: AgentToolRequestEvent) => void) | null = null;
-  const responses: Array<(response: AgentToolResponseEvent) => void> = [];
-  const agentTools: PowermoveBridge['agentTools'] = {
-    onRequest: (cb) => { onRequest = cb; return () => { if (onRequest === cb) onRequest = null; }; },
-    respond: (response) => { for (const listener of responses) listener(response); }
-  };
-  const stub = bridgeStub(agentTools);
-  (window as unknown as { powermove: unknown }).powermove = stub;
-
-  const PM = ((window as unknown as { PM?: Record<string, any> }).PM = {});
-  const [diag, util, kernel, uiState, memory, fonts, easing, model, selection, anim, history, library, projects, editing, capabilities, workspace, harness] = await Promise.all([
-    import('../renderer/src/legacy/core/diag'), import('../renderer/src/legacy/core/util'), import('../renderer/src/kernel/install'),
-    import('../renderer/src/legacy/core/ui-state'), import('../renderer/src/legacy/core/memory'), import('../renderer/src/legacy/core/fonts'),
-    import('../renderer/src/legacy/core/easing'), import('../renderer/src/legacy/core/model'), import('../renderer/src/legacy/core/selection'),
-    import('../renderer/src/legacy/core/anim'), import('../renderer/src/legacy/core/history'), import('../renderer/src/legacy/core/library'),
-    import('../renderer/src/legacy/core/projects'), import('../renderer/src/legacy/core/editing'), import('../renderer/src/legacy/core/capabilities'),
-    import('../renderer/src/legacy/core/workspace'), import('../renderer/src/legacy/assistant/harness')
-  ]);
-  diag.install(PM as never); util.install(PM as never);
-  PM['store'] = memoryStore();
-  void kernel.installKernel(PM as never);
-  for (const step of [uiState, memory, fonts, easing, model, selection, anim, history]) step.install(PM as never);
-  /* The document on pm-wasm (docs/rust-engine.md, section 26, Phase 1): the
-     mirror, the write barrier, and the native evaluator, on by default here.
-     With no renderer, 2D bounds and picks come from pm-wasm alone. */
-  await installHeadlessEngineDoc(PM, log);
-  for (const step of [library, projects, editing, capabilities, workspace, harness]) step.install(PM as never);
-  if (!onRequest) throw new Error('engine: the agent tool harness did not register');
-  PM['proj'] = PM['mkProject']({ name: 'Untitled' });
-  PM['isHomeProject'] = () => !PM['proj']?.id;
-
-  /* the link to the host */
   const socket = new WebSocket(options.url, { rejectUnauthorized: false, headers: { cookie: `pm_session=${options.token}` } });
   await new Promise<void>((resolve, reject) => {
     socket.once('open', () => resolve());
     socket.once('error', (error) => reject(error));
   });
   const link = new Connection(socket as unknown as ConstructorParameters<typeof Connection>[0]);
-  /* Agent media tools find a project's media in the host's own store by key;
-     the engine has no bytes of its own to stage (media-tools lane). */
-  stub.mediaPath = { lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request) };
-  const { attachRemoteSync } = await import('../renderer/src/host/remote-sync');
-  const detachSync = attachRemoteSync(link, PM as never);
+  const services = linkServices(link, log);
+  const stored = await services.store.read(NEW_ENGINE_STORE_KEY).catch(() => null);
+  const newEngine = newEngineEnabled({ [NEW_ENGINE_ENV]: process.env[NEW_ENGINE_ENV] }, stored);
+  const pool = new DocumentHostPool({ services, newEngine, script: bundlePath() });
 
-  /* project switching: a tool call names the project it works on */
-  let current: string | null = null;
-  const ensureProject = async (projectId: string): Promise<void> => {
-    if (current === projectId && PM['proj']?.id === projectId) return;
-    const result = await link.invoke<{ seq: number; doc: unknown | null }>(WEB.syncJoin, { projectId, doc: null });
-    if (!result.doc) throw new Error(`The host has no document for project ${projectId}.`);
-    current = projectId;
-    PM['hist']?.clear?.();
-    PM['replaceProject'](result.doc, {});
-    PM['bus']?.emit('projects:open');
-    log(`[engine] opened ${projectId} (seq ${result.seq})`);
-  };
-
-  responses.push((response) => link.send(IPC.agentToolResponse, response));
   link.on(IPC.agentToolRequest, (payload) => {
     const request = payload as EngineToolRequest;
-    void (async () => {
-      try {
-        await ensureProject(request.projectId);
-        onRequest!(request);
-      } catch (error) {
-        link.send(IPC.agentToolResponse, { runId: request.runId, callId: request.callId, ok: false, content: [], error: error instanceof Error ? error.message : String(error) } satisfies AgentToolResponseEvent);
-      }
-    })();
+    void pool.call(request.projectId, request).then(
+      (response) => link.send(IPC.agentToolResponse, response),
+      (error) => link.send(IPC.agentToolResponse, {
+        runId: request.runId, callId: request.callId, ok: false, content: [],
+        error: error instanceof DocumentHostError ? `${error.message}${error.retry ? ' (retry the call)' : ''}` : error instanceof Error ? error.message : String(error),
+      } satisfies AgentToolResponseEvent),
+    );
   });
-  link.on('__closed', () => { log('[engine] host connection closed'); process.exit(0); });
+  link.on('__closed', () => {
+    log('[engine] host connection closed');
+    void pool.shutdown().finally(() => process.exit(0));
+  });
   await link.invoke(WEB.hello);
-  log('[engine] connected');
-  return { close: () => { detachSync(); socket.close(); } };
+  log(`[engine] connected (document host protocol ${pool.protocol}, new engine ${newEngine ? 'on' : 'off'})`);
+  return {
+    pool,
+    close: async () => { await pool.shutdown(); socket.close(); },
+  };
 }
 
-/* child-process entry: node engine.mjs <url> <token> */
-if (process.argv[1] && /engine\.(m?js|ts)$/.test(process.argv[1]) && process.argv[2]) {
-  startEngine({ url: process.argv[2]!, token: process.argv[3] ?? '' }).catch((error) => {
-    console.error('[engine] failed to start', error);
-    process.exit(1);
-  });
+/* child-process entries */
+if (process.argv[1] && /engine\.(m?js|ts)$/.test(process.argv[1])) {
+  if (process.argv.includes('--document-worker')) {
+    runWorkerProcess();
+  } else if (process.argv[2]) {
+    startEngine({ url: process.argv[2]!, token: process.argv[3] ?? '' }).catch((error) => {
+      console.error('[engine] failed to start', error);
+      process.exit(1);
+    });
+  }
 }
