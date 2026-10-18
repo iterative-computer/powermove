@@ -68,8 +68,8 @@ export interface RasterCompatHandle {
   attach(transport: EngineRenderTransport): () => void;
   /** Drops every answer the engine holds (a font change, an extension reload). */
   reset(): void;
-  /** Answers one need (tests, the transport). */
-  answer(need: CompatNeed, revision: number): CompatAnswerResult;
+  /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
+  answer(need: CompatNeed, revision: number, options?: { fresh?: boolean }): CompatAnswerResult;
   dispose(): void;
 }
 
@@ -216,7 +216,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       return lazySurface({ layer, scale: s, time: t, crop }, load);
     },
 
-    answer(need: CompatNeed, revision: number): CompatAnswerResult {
+    answer(need: CompatNeed, revision: number, answerOptions?: { fresh?: boolean }): CompatAnswerResult {
       const layer = findLayer(PM, String(need.composition), String(need.layer));
       // A layer the window no longer has: the engine draws its own.
       if (!layer) return { kind: 'native' };
@@ -240,7 +240,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (result == null) return TRANSPARENT;
       const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}`;
       const ownKey = typeof result.key === 'string' && result.key ? result.key : '';
-      if (ownKey && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
+      if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
       const source = canvasOf(result);
       if (!source) return TRANSPARENT;
       const pixels = readPixels(source);
@@ -251,7 +251,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
       const uv = Array.isArray(result.uv) && result.uv.length === 4 && result.uv.every((v: unknown) => Number.isFinite(v)) ? result.uv as [number, number, number, number] : undefined;
       const key = (ownKey || `powermove:${++serial}:${revision}`).slice(0, 512);
-      posted.set(tag, key);
+      if (!answerOptions?.fresh) posted.set(tag, key);
       if (posted.size > 8192) posted.clear();
       return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
     },
@@ -273,7 +273,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // A producer list without the source drops its answers, then the
       // source comes back: the next frame asks afresh.
       unanswer();
-      unanswer = transport.answerCompat('rasterOverride', (need, revision) => handle.answer(need, revision));
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options));
     },
 
     dispose(): void {
@@ -288,7 +288,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   function sync(): void {
     if (!transport) return;
     if (wrapped() && !unanswer) {
-      unanswer = transport.answerCompat('rasterOverride', (need, revision) => handle.answer(need, revision));
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options));
     } else if (!wrapped() && unanswer) {
       unanswer();
       unanswer = null;

@@ -80,4 +80,16 @@ describe('CompatFrames', () => {
     expect(validCompatAnswer({ ...pixels(1), origin: [0, Number.NaN] })).toBe(false);
     expect(validCompatAnswer({ ask: 1, status: 'unavailable', message: 'x' })).toBe(true);
   });
+
+  it('answers a pass-through as a native frame and carries the quad of a raster', async () => {
+    const { frames, asks } = setup([1]);
+    const native = frames.serve(request);
+    expect(frames.answer(1, { ask: asks.get(1)![0]!.ask, status: 'native' })).toBe(true);
+    expect(await native).toMatchObject({ type: 'compatFrame', native: true, payload: { kind: 'inline', bytes: new Uint8Array(0) } });
+    const raster = frames.serve(request);
+    expect(frames.answer(1, { ...pixels(asks.get(1)![1]!.ask), size: [40, 20], uv: [0, 0, 1, 1] })).toBe(true);
+    expect(await raster).toMatchObject({ size: [40, 20], uv: [0, 0, 1, 1] });
+    expect(validCompatAnswer({ ...pixels(9), size: [0, 1] })).toBe(false);
+    expect(validCompatAnswer({ ...pixels(9), uv: [0, 0, 1] })).toBe(false);
+  });
 });

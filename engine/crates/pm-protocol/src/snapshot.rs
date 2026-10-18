@@ -809,16 +809,41 @@ pub struct CompatFrame {
     pub origin: [f64; 2],
     pub scale: f64,
     pub payload: PixelPayload,
+    /// The producer passed the layer through: the engine draws it itself
+    /// (the payload is empty).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub native: bool,
+    /// The quad in layer pixels and the part of the raster it samples (as
+    /// [`CompatPixels`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub size: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub uv: Option<[f64; 4]>,
 }
 
 impl Validate for CompatFrame {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::HostServices;
+        if self.native {
+            return ensure(self.payload.is_empty(), C, || {
+                "a pass-through carries no pixels".into()
+            });
+        }
         ensure(
             (1..=MAX_COMPAT_EDGE).contains(&self.width)
                 && (1..=MAX_COMPAT_EDGE).contains(&self.height),
             C,
             || format!("compatibility frame {}×{}", self.width, self.height),
+        )?;
+        ensure(
+            self.size
+                .is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
+                && self.uv.is_none_or(|u| u.iter().all(|v| v.is_finite())),
+            C,
+            || "compatibility size and uv must be finite".into(),
         )?;
         let expected =
             u64::from(self.width) * u64::from(self.height) * self.format.bytes_per_pixel();

@@ -55,6 +55,10 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
   const v = value as Record<string, unknown>;
   if (!Number.isSafeInteger(v['ask'])) return false;
   if (v['status'] === 'unavailable') return typeof v['message'] === 'string';
+  if (v['status'] === 'native') return true;
+  const finite = (a: unknown, n: number) => Array.isArray(a) && a.length === n && a.every((x) => Number.isFinite(x));
+  if (v['size'] !== undefined && !(finite(v['size'], 2) && (v['size'] as number[]).every((x) => x > 0))) return false;
+  if (v['uv'] !== undefined && !finite(v['uv'], 4)) return false;
   if (v['status'] !== 'pixels') return false;
   const w = v['width'], h = v['height'];
   if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_EDGE || (h as number) > MAX_EDGE) return false;
@@ -87,6 +91,9 @@ export class CompatFrames {
       this.pending.set(ask, { windows: new Set(windows.map((w) => w.id)), last: closed, resolve, timer });
       for (const window of windows) window.ask({ ask, request });
     });
+    if (answer.status === 'native') {
+      return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true } as Response;
+    }
     if (answer.status !== 'pixels') throw new ProtocolError('notHeadlessRenderable', answer.message.slice(0, 1024));
     let payload: { kind: 'inline'; bytes: Uint8Array } | { kind: 'sharedMemory'; name: string; length: number };
     if (answer.data.byteLength <= INLINE_PIXEL_BYTES) {
@@ -98,7 +105,8 @@ export class CompatFrames {
       (this.options.schedule ?? defaultSchedule)(() => this.options.unlinkPixels?.(name), SEGMENT_ORPHAN_MS);
       payload = { kind: 'sharedMemory', name, length: answer.data.byteLength };
     }
-    return { type: 'compatFrame', key: answer.key, width: answer.width, height: answer.height, format: answer.format, origin: answer.origin, scale: answer.scale, payload } as Response;
+    return { type: 'compatFrame', key: answer.key, width: answer.width, height: answer.height, format: answer.format, origin: answer.origin, scale: answer.scale, payload,
+      ...(answer.size ? { size: answer.size } : {}), ...(answer.uv ? { uv: answer.uv } : {}) } as Response;
   }
 
   /** A window's answer (IPC input). Only an asked window may answer, once:
@@ -114,7 +122,7 @@ export class CompatFrames {
     }
     this.pending.delete(value.ask);
     pending.timer.cancel();
-    pending.resolve(value.status === 'pixels' ? value : { ask: value.ask, status: 'unavailable', message: pending.last });
+    pending.resolve(value.status === 'unavailable' ? { ask: value.ask, status: 'unavailable', message: pending.last } : value);
     return true;
   }
 

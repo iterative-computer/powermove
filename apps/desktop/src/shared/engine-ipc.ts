@@ -111,6 +111,9 @@ export type SheetExportOptions = {
   hideCaptions?: boolean;
   /** "Render using: Proxies (draft)" (section 14.8). */
   draft?: boolean;
+  /** Compatibility producers the exporting window has (a registered
+   *  `raster` override): the job asks the window for those layers. */
+  compat?: import('./engine-protocol').CompatSource[];
 };
 
 /** Checks the shape and limits of sheet export options (IPC input). */
@@ -291,7 +294,11 @@ export type EngineCompatAsk = { ask: number; request: import('./engine-protocol'
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =
-  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }
+  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array;
+      /** The quad in layer pixels and the part of the raster it samples (today's `w`, `h`, `uv`). */
+      size?: [number, number]; uv?: [number, number, number, number] }
+  /** The producer passed the layer through: the job draws it itself. */
+  | { ask: number; status: 'native' }
   | { ask: number; status: 'unavailable'; message: string };
 
 /** The renderer's view (`window.powermove.nativeEngine`, present on the

@@ -534,6 +534,7 @@ pub fn export_settings() -> ExportSettings {
             hide_captions: false,
             preview: true,
             sequence_name: None,
+            compat: vec![crate::snapshot::CompatSource::RasterOverride],
         },
     }
 }
@@ -1127,6 +1128,9 @@ pub fn responses() -> Vec<Envelope> {
                     name: "/pm.0123456789abcdef01234567".into(),
                     length: bytes(1024 * 512 * 4),
                 },
+                native: false,
+                size: Some([256.0, 128.0]),
+                uv: None,
             })),
         ),
     ]

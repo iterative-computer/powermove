@@ -194,6 +194,7 @@ export function wireSettings(input: {
   draft?: boolean;
   preview?: boolean;
   sequenceName?: string;
+  compat?: import('../../shared/engine-protocol').CompatSource[];
 }): ExportSettings {
   const { format, delivery } = input;
   const image = format === 'png' || format === 'still';
@@ -219,7 +220,9 @@ export function wireSettings(input: {
       timecode,
       hideCaptions: input.hideCaptions === true,
       preview: input.preview === true,
-      sequenceName: format === 'png' ? input.sequenceName ?? null : null
+      sequenceName: format === 'png' ? input.sequenceName ?? null : null,
+      // The exporting window's compatibility producers (a raster override).
+      ...(Array.isArray(input.compat) && input.compat.length ? { compat: input.compat } : {})
     }
   };
 }
@@ -280,6 +283,7 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
     audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    ...(Array.isArray(o.compat) ? { compat: o.compat.filter((s) => s === 'rasterOverride' || s === 'compatContext') } : {}),
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
   });

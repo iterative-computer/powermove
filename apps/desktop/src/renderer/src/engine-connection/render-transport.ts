@@ -164,7 +164,7 @@ export type CompatAnswerResult =
   | null;
 
 /** Answers the engine's needs for one source (the raster override's producer). */
-export type CompatAnswerer = (need: CompatNeed, revision: number) => CompatAnswerResult;
+export type CompatAnswerer = (need: CompatNeed, revision: number, options?: { fresh?: boolean }) => CompatAnswerResult;
 
 export type RenderTransportOptions = {
   native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
@@ -230,6 +230,12 @@ export class EngineRenderTransport {
   }
 
   /* ── compatibility answers (the `raster` override; pm_render::compat) ── */
+
+  /** The sources this window produces (an export names them so its job
+   *  asks the window for those layers). */
+  get producing(): CompatSource[] {
+    return [...this.answerers.keys()];
+  }
 
   /**
    * Registers the producer that answers the engine's needs for `source`
@@ -696,6 +702,25 @@ export class EngineRenderTransport {
     const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });
     if (ask.request.document !== this.options.document()) return no('This window has another document open.');
     const producer = this.producers.get(ask.request.source);
+    const answerer = this.answerers.get(ask.request.source);
+    if (!producer && answerer) {
+      // An export frame's layer (the job engine has no store of uploaded
+      // rasters): the producer's answer, with fresh pixels.
+      const request = ask.request;
+      let result: CompatAnswerResult = null;
+      this.answering++;
+      try {
+        result = answerer({ composition: request.composition, layer: request.layer, time: request.time, source: request.source, scale: request.scale }, Number(request.revision), { fresh: true });
+      } catch (error) {
+        return no(error instanceof Error ? error.message : String(error));
+      } finally {
+        this.answering--;
+      }
+      if (!result) return no(`Layer ${request.layer} has no compatibility pixels at that frame.`);
+      if (result.kind === 'native') return answer({ ask: ask.ask, status: 'native' });
+      if (result.kind === 'reuse') return no(`Layer ${request.layer}'s raster was not drawn again.`);
+      return answer({ ask: ask.ask, status: 'pixels', key: result.key, width: result.width, height: result.height, format: result.format, origin: result.anchor, scale: request.scale, data: result.data, size: result.size, ...(result.uv ? { uv: result.uv } : {}) });
+    }
     if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
     try {
       const pixels = await producer(ask.request);
