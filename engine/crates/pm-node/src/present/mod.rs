@@ -20,6 +20,7 @@
 pub mod audio;
 pub mod blender;
 pub mod clock;
+pub mod compat;
 pub mod compose;
 pub mod document;
 mod layer_reports;
@@ -491,6 +492,19 @@ impl FramePresenter for BridgePresenter {
             revision,
         });
         Ok(())
+    }
+
+    fn compat(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        message: pm_protocol::snapshot::CompatMessage,
+    ) {
+        self.send(Command::Compat {
+            key: (port, session),
+            message,
+        });
     }
 
     fn snapshot(

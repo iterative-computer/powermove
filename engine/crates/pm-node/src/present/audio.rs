@@ -232,9 +232,11 @@ impl Control {
             let timeout = match (feeding, self.dirty, self.last_project) {
                 (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
                 (true, true, None) => Duration::ZERO,
-                _ if self.playback.is_none() && self.warm_due.is_some() => self
-                    .warm_due
-                    .map_or(Duration::ZERO, |due| due.saturating_duration_since(Instant::now())),
+                _ if self.playback.is_none() && self.warm_due.is_some() => {
+                    self.warm_due.map_or(Duration::ZERO, |due| {
+                        due.saturating_duration_since(Instant::now())
+                    })
+                }
                 _ => Duration::from_secs(3600),
             };
             // Levels while the device plays (or is about to).

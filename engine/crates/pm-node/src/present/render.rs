@@ -198,6 +198,12 @@ pub enum Command {
     /// A host snapshot of a session's document (the Phase 3c render
     /// transport, [`super::snapshot`]).
     Snapshot(Box<super::snapshot::SnapshotJob>),
+    /// Compatibility pixels the session's renderer uploaded
+    /// ([`super::compat`]).
+    Compat {
+        key: Key,
+        message: pm_protocol::snapshot::CompatMessage,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     /// The paused viewer's Blender previews (sent once, at start).
@@ -377,6 +383,11 @@ pub struct Stats {
     pub snapshot_failures: u64,
     pub snapshot_us_max: i64,
     pub snapshot_shared: u64,
+    /// Compatibility rasters (the `raster` override, compatibility
+    /// contexts): complete ones received, held per view, and bytes held.
+    pub compat_rasters_received: u64,
+    pub compat_rasters: BTreeMap<String, usize>,
+    pub compat_bytes: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -499,6 +510,8 @@ struct Thread {
     last_interactive: Option<i64>,
     /// Snapshots served per session, and the slowest (µs).
     snapshot_costs: BTreeMap<Key, (u64, i64)>,
+    /// Compatibility rasters the renderers uploaded.
+    compat: super::compat::CompatStore,
 }
 
 /// The decision 19 fallback runner's state on this thread.
@@ -556,6 +569,7 @@ pub fn run(
         segments: pm_bridge::shm::Segments::default(),
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
+        compat: super::compat::CompatStore::default(),
     };
     thread.check_in();
     loop {
@@ -880,6 +894,16 @@ impl Thread {
                     self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
                 }
             }
+            Command::Compat { key, message } => {
+                let applied = self.compat.apply(key, message);
+                let (rasters, bytes) = self.compat.usage();
+                let mut stats = self.stats();
+                if applied == super::compat::Applied::Complete {
+                    stats.compat_rasters_received += 1;
+                }
+                stats.compat_rasters = rasters;
+                stats.compat_bytes = bytes;
+            }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
@@ -960,6 +984,7 @@ impl Thread {
             blender.forget(key);
         }
         self.snapshot_costs.remove(&key);
+        self.compat.forget_session(key);
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(

@@ -558,6 +558,47 @@ fn child_snapshots() {
         "the engine wrote to the renderer while serving snapshots"
     );
 
+    // Compatibility pixels (a raster override's result) uploaded in bands
+    // on the session's port are assembled and held for the session.
+    use pm_protocol::snapshot::{
+        CompatFormat, CompatKey, CompatMessage, CompatPixels, CompatSource,
+    };
+    let id = CompatKey {
+        composition: "Psnap-root".into(),
+        layer: "box".into(),
+        time: Ticks::ZERO,
+        source: CompatSource::RasterOverride,
+        key: "typewriter:box:1".into(),
+    };
+    for (row, rows) in [(0u32, 2u32), (2, 2)] {
+        c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
+            id: id.clone(),
+            revision: Revision::new(2).unwrap(),
+            width: 4,
+            height: 4,
+            format: CompatFormat::Rgba8Premultiplied,
+            origin: [0.0, 0.0],
+            scale: 1.0,
+            row,
+            rows,
+            data: Bytes(vec![200; (4 * rows * 4) as usize]),
+        })));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+        if status["presenter"]["compatRastersReceived"] == 1 {
+            assert_eq!(status["presenter"]["compatBytes"], 64, "{status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", status["presenter"]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    c.event(Event::Compat(CompatMessage::Forget {
+        composition: "Psnap-root".into(),
+        layer: "box".into(),
+    }));
+
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     let presenter = &status["presenter"];
     assert_eq!(presenter["snapshots"], 4, "{presenter}");
