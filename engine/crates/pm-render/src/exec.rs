@@ -420,6 +420,7 @@ impl Exec<'_> {
                             )),
                         ),
                         Err(crate::shader_layers::exec::Missed::Pending(request)) => {
+                            self.effects.fallback.blocked = true;
                             if !self.fallback_pending.iter().any(|p| p.key == request.key) {
                                 self.fallback_pending.push(request);
                             }

@@ -31,8 +31,9 @@ use std::sync::Arc;
 use crate::effects::program::Call;
 
 pub use pm_protocol::shader_fallback::{
-    ShaderFallbackCall as FallbackCall, ShaderFallbackPixels as FallbackBand,
-    ShaderFallbackRequest as FallbackRequest,
+    ShaderFallbackCall as FallbackCall, ShaderFallbackInput as FallbackInputBand,
+    ShaderFallbackPixels as FallbackBand, ShaderFallbackRequest as FallbackRequest,
+    ShaderFallbackUnit as FallbackUnit,
 };
 
 /// The runner's form of one uniform call (the shader corpus's format,
@@ -46,10 +47,17 @@ pub fn call(name: &str, call: &Call) -> FallbackCall {
         Call::I(i) => ("1i", vec![f64::from(*i)]),
         Call::M3(m) => ("m3", m.iter().map(|x| f64::from(*x)).collect()),
     };
+    // `name|alias`: a parameter bound by name when that uniform is active,
+    // else through its positional alias (`effects::exec::param_calls`).
+    let (name, alias) = match name.split_once('|') {
+        Some((n, a)) => (n, Some(a.to_owned())),
+        None => (name, None),
+    };
     FallbackCall {
         function: function.into(),
         name: name.into(),
         v,
+        alias,
     }
 }
 
@@ -88,7 +96,132 @@ pub fn request(
         calls: calls.iter().map(|(n, c)| self::call(n, c)).collect(),
         stage: failure.stage.name().into(),
         message: failure.message.lines().next().unwrap_or_default().into(),
+        textures: 0,
+        units: Vec::new(),
+        more_passes: Vec::new(),
     }
+}
+
+/// The request for an effect's or a transition's program: one entry of
+/// `passes` per pass (its calls), `units` naming which of `textures` each
+/// texture unit samples, the textures the target's size. The key covers
+/// the textures' pixels, so the same program on other pixels is another
+/// request.
+#[allow(clippy::too_many_arguments)]
+pub fn request_with_textures(
+    layer: String,
+    fragment: String,
+    width: u32,
+    height: u32,
+    passes: &[Vec<(String, Call)>],
+    units: Vec<FallbackUnit>,
+    textures: &[&FallbackPixels],
+    failure: &pm_glsl::Failure,
+) -> FallbackRequest {
+    use sha2::{Digest, Sha256};
+    let vertex = pm_glsl::VERTEX.to_owned();
+    let mut h = Sha256::new();
+    h.update(b"pm-render shader fallback with textures 1\0");
+    h.update(vertex.as_bytes());
+    h.update([0]);
+    h.update(fragment.as_bytes());
+    h.update([0]);
+    h.update(width.to_le_bytes());
+    h.update(height.to_le_bytes());
+    for calls in passes {
+        h.update((calls.len() as u32).to_le_bytes());
+        h.update(super::plan::calls_bytes(calls));
+    }
+    for u in &units {
+        h.update(u.unit.to_le_bytes());
+        h.update(u.texture.to_le_bytes());
+        h.update([u8::from(u.chain)]);
+    }
+    for t in textures {
+        h.update(t.width.to_le_bytes());
+        h.update(t.height.to_le_bytes());
+        for v in &t.rgba16f {
+            h.update(v.to_le_bytes());
+        }
+    }
+    let key = h
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let mut passes = passes.iter().map(|calls| {
+        calls
+            .iter()
+            .map(|(n, c)| self::call(n, c))
+            .collect::<Vec<_>>()
+    });
+    FallbackRequest {
+        key,
+        layer,
+        vertex,
+        fragment,
+        width,
+        height,
+        calls: passes.next().unwrap_or_default(),
+        stage: failure.stage.name().into(),
+        message: failure.message.lines().next().unwrap_or_default().into(),
+        textures: textures.len() as u32,
+        units,
+        more_passes: passes.collect(),
+    }
+}
+
+/// A program's identity for the runner's failures (its vertex and
+/// fragment source): a program the runner could not draw is not asked for
+/// again until its source changes.
+pub fn program_id(request: &FallbackRequest) -> String {
+    crate::effects::fallback::program_id_of(&request.vertex, &request.fragment)
+}
+
+/// Splits pixels into row bands that fit a message, at most `max_bytes`
+/// each: `(row, rows, bytes)`.
+pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8>)> {
+    let row_bytes = pixels.width as usize * 8;
+    let per = (max_bytes / row_bytes.max(1)).max(1) as u32;
+    let mut out = Vec::new();
+    let mut row = 0;
+    while row < pixels.height {
+        let rows = per.min(pixels.height - row);
+        let start = row as usize * pixels.width as usize * 4;
+        let end = (row + rows) as usize * pixels.width as usize * 4;
+        let bytes = pixels.rgba16f[start..end]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        out.push((row, rows, bytes));
+        row += rows;
+    }
+    out
+}
+
+/// Why the runner could not draw a request (`ShaderFallbackMessage::Failed`,
+/// or the host's error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackFailure {
+    /// `compile`, `deadline`, `contextLost`, `unavailable`, `size`, or
+    /// `watchdog`.
+    pub reason: String,
+    pub message: String,
+}
+
+/// A request with the textures it samples, for a host that runs it
+/// synchronously ([`FallbackHost`]).
+#[derive(Debug, Clone)]
+pub struct FallbackJob {
+    pub request: FallbackRequest,
+    pub textures: Vec<Arc<FallbackPixels>>,
+}
+
+/// A runner a renderer can wait on (the job engine's: the host runs the
+/// request in a window's runner, contract 14). The interactive engine's
+/// runner is asynchronous instead (`RenderError::ShaderFallbackPending`).
+pub trait FallbackHost: Send + Sync {
+    fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure>;
 }
 
 /// Collects a request's row bands (`ShaderFallbackMessage::Pixels`) into

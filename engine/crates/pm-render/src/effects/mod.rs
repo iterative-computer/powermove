@@ -19,6 +19,7 @@
 //! produces them (`tools/effects/builtins.ts`).
 
 pub(crate) mod exec;
+pub mod fallback;
 pub mod plan;
 pub mod program;
 pub mod watchdog;
@@ -89,6 +90,9 @@ pub struct Effects {
     cache: Arc<pm_glsl::Cache>,
     context: String,
     pub watchdog: Watchdog,
+    /// Effects and transitions only the fallback runner draws
+    /// ([`fallback`]).
+    pub fallback: fallback::EffectFallback,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
@@ -243,6 +247,7 @@ impl Effects {
             cache,
             context,
             watchdog: Watchdog::default(),
+            fallback: Default::default(),
             dummies: Default::default(),
             simple: Default::default(),
         }

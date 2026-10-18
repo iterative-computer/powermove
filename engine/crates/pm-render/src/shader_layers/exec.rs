@@ -30,6 +30,11 @@ pub struct ShaderState {
     /// not uploaded again for every frame.
     uploads: HashMap<String, (Arc<FallbackPixels>, Target, u64)>,
     uploaded: u64,
+    /// Requests asked for and not answered: their program (`program_id`).
+    pub(crate) waiting: HashMap<String, String>,
+    /// Programs the runner could not draw, by `program_id`, and whether
+    /// the failure was reported.
+    pub(crate) failed: HashMap<String, (super::FallbackFailure, bool)>,
     /// Tests: the device refuses every shader-layer pipeline, as Metal
     /// would a translation it cannot compile.
     #[cfg(test)]
@@ -298,6 +303,61 @@ impl crate::exec::Exec<'_> {
         source: &ShaderSource,
     ) -> Result<(Target, bool), Missed> {
         if let ProgramRef::Fallback(request) = &source.program {
+            // A program the runner could not draw draws nothing, as one
+            // WebGL refuses, and is reported once (a draw past the
+            // runner's deadline by the watchdog).
+            let program = super::fallback::program_id(request);
+            if let Some((why, reported)) = self.shaders.failed.get_mut(&program) {
+                let first = !std::mem::replace(reported, true);
+                let why = why.clone();
+                let span = crate::effects::watchdog::Span {
+                    subject: crate::effects::watchdog::Subject::Definition {
+                        kind: DefinitionKind::Layer,
+                        id: format!("fallback:{program}").as_str().into(),
+                    },
+                    layer: source.layer.as_str().into(),
+                    instance: None,
+                    builtin: false,
+                };
+                if why.reason == "watchdog" {
+                    self.effects.watchdog.runner_runaway(
+                        &span,
+                        &format!("the shader of layer {}", source.layer),
+                        format!(
+                            "The shader of layer {} did not finish drawing in the WebGL fallback runner ({}), so it is turned off until its code changes.",
+                            source.layer, why.message
+                        ),
+                    );
+                } else if self.effects.watchdog.policy()
+                    == crate::effects::watchdog::Policy::Job
+                    && why.reason != "compile"
+                {
+                    self.effects.fallback.fatal.get_or_insert_with(|| {
+                        format!(
+                            "Layer {} needs the WebGL fallback runner, which could not draw it ({}: {}).",
+                            source.layer, why.reason, why.message
+                        )
+                    });
+                } else if first {
+                    self.effects.watchdog.report(
+                        pm_protocol::error::EngineError::new(
+                            if why.reason == "unavailable" {
+                                pm_protocol::error::ErrorCode::NotHeadlessRenderable
+                            } else {
+                                pm_protocol::error::ErrorCode::ShaderCompile
+                            },
+                            pm_protocol::error::ErrorScope::Layer {
+                                layer: source.layer.as_str().into(),
+                            },
+                            crate::effects::truncate(format!(
+                                "Layer {} could not be drawn by the WebGL fallback runner ({}: {}); it draws nothing.",
+                                source.layer, why.reason, why.message
+                            )),
+                        ),
+                    );
+                }
+                return Err(Missed::Disabled);
+            }
             return match self
                 .shaders
                 .fallback_target(self.device, self.queue, request)

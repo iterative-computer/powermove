@@ -981,6 +981,26 @@ impl Watchdog {
         }
     }
 
+    /// A runtime failure to report with the watchdog's (the fallback
+    /// runner's).
+    pub(crate) fn report(&mut self, error: EngineError) {
+        self.reports.push(error);
+    }
+
+    /// The fallback runner stopped a draw of `span`'s program at its
+    /// deadline: turned off (reported), and a job stops.
+    pub(crate) fn runner_runaway(&mut self, span: &Span, name: &str, message: String) {
+        if self.disabled.contains_key(&span.subject) {
+            return;
+        }
+        if self.policy == Policy::Job && self.stopped.is_none() {
+            self.stopped = Some(format!(
+                "The render stopped: {name} did not finish in the WebGL fallback runner."
+            ));
+        }
+        self.disable(span, self.hang.as_secs_f64() * 1000.0, message);
+    }
+
     fn disable(&mut self, span: &Span, ms: f64, message: String) {
         if let Subject::Code(key) = &span.subject {
             if self.disabled_code.len() >= DISABLED_CODE
