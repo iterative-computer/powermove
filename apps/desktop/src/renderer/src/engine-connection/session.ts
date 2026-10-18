@@ -30,6 +30,8 @@ interface WaitingFallback { request: ShaderFallbackRequest; textures: Uint16Arra
 
 /** Largest pixel band in one message (pm_protocol shader_fallback::MAX_BAND_BYTES). */
 export const MAX_FALLBACK_BAND_BYTES = 8 * 1024 * 1024;
+/** Effect and transition requests waiting for their textures at once (the engine's `effects::fallback::WAITING`). */
+export const MAX_FALLBACK_WAITING = 32;
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
 export interface DocumentStream {
@@ -403,6 +405,16 @@ export class DocumentSession {
             continue;
           }
           // An effect's or a transition's textures follow in row bands.
+          // At most as many wait as the engine keeps textures for (its
+          // `WAITING`); the oldest is failed as transient, so the engine
+          // asks for it again rather than wait for it.
+          while (this.fallbackWaiting.size >= MAX_FALLBACK_WAITING && !this.fallbackWaiting.has(request.key)) {
+            const [oldest] = this.fallbackWaiting.keys();
+            this.fallbackWaiting.delete(oldest!);
+            if (this.id !== null && !this.closed) {
+              this.options.connection.event({ type: 'shaderFallback', fallback: 'failed', key: oldest, reason: 'unavailable', message: 'its textures did not arrive before newer requests' } as never, this.id);
+            }
+          }
           this.fallbackWaiting.set(request.key, {
             request,
             textures: Array.from({ length: n }, () => new Uint16Array(request.width * request.height * 4)),

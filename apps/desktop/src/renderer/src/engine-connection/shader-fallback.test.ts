@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { PROTOCOL_BUILD, type Envelope } from '../../../shared/engine-protocol';
 import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../main/engine/protocol';
 import { EngineConnection, type PortLike } from './connection';
-import { DocumentSession, MAX_FALLBACK_BAND_BYTES, type FallbackRunner, type StreamBatch } from './session';
+import { DocumentSession, MAX_FALLBACK_BAND_BYTES, MAX_FALLBACK_WAITING, type FallbackRunner, type StreamBatch } from './session';
 import { ShaderFallbackError, ShaderFallbackRunner, applyCalls, toHalf, type ShaderFallbackRequest } from './shader-fallback';
 
 class FakePort implements PortLike {
@@ -157,6 +157,17 @@ describe('effect and transition requests in a session', () => {
     expect(port.fallback()[0]).toMatchObject({ fallback: 'pixels', key: '7a'.repeat(32) });
   });
 
+  it('keeps at most as many requests waiting for textures as the engine does, failing the oldest as transient', async () => {
+    const { port } = await session({ render: async () => { throw new Error('not reached'); } });
+    const keyed = (i: number): ShaderFallbackRequest => ({ ...effect(4, 3), key: i.toString(16).padStart(64, '0') });
+    const requests = Array.from({ length: MAX_FALLBACK_WAITING + 2 }, (_, i) => keyed(i));
+    port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests } } as never, 5));
+    await flush();
+    const failed = port.fallback().filter((m) => m['fallback'] === 'failed');
+    expect(failed.map((m) => m['key'])).toEqual([keyed(0).key, keyed(1).key]);
+    expect(failed[0]).toMatchObject({ reason: 'unavailable' });
+  });
+
   it('fails a request whose texture band does not fit it', async () => {
     const { port } = await session({ render: async () => { throw new Error('not reached'); } });
     port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [effect(4, 3)] } } as never, 5));
@@ -208,7 +219,9 @@ function fakeGl(active: string[], fence: () => number) {
     readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {}
   };
   const canvas = { addEventListener: () => {}, getContext: () => gl } as unknown as OffscreenCanvas;
-  return { canvas, state, C };
+  /** The context is lost under the runner (a GPU-process restart). */
+  const lose = () => { lost = true; };
+  return { canvas, state, C, lose };
 }
 
 describe('the runner with textures, passes, and its draw deadline', () => {
@@ -248,6 +261,91 @@ describe('the runner with textures, passes, and its draw deadline', () => {
     expect(state.draws).toHaveLength(1);
     await expect(runner.render(r, [new Uint16Array(8), new Uint16Array(8)])).rejects.toMatchObject({ reason: 'watchdog' });
     expect(state.draws).toHaveLength(1);
+  });
+});
+
+describe('the runner after a lost context', () => {
+  const effect = (): ShaderFallbackRequest => ({
+    ...request(2, 1, '5c'.repeat(32)), calls: [], textures: 1, units: [{ unit: 0, texture: 0, chain: false }]
+  });
+  const input = () => [new Uint16Array(8)];
+
+  it('makes a new context and draws again when the context is lost under a draw, keeping nothing for the program', async () => {
+    const contexts: Array<ReturnType<typeof fakeGl>> = [];
+    let loseNext = 1;
+    const runner = new ShaderFallbackRunner({
+      createCanvas: () => {
+        const ctx: ReturnType<typeof fakeGl> = fakeGl([], () => {
+          if (loseNext > 0 && contexts.indexOf(ctx) === 0) { loseNext--; ctx.lose(); return 28; }
+          return 25;
+        });
+        contexts.push(ctx);
+        return ctx.canvas;
+      }
+    });
+    const out = await runner.render(effect(), input());
+    expect(out.rgba16f).toHaveLength(8);
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]!.state.lostBy).toBe(0);
+    expect(contexts[1]!.state.draws).toHaveLength(1);
+    // The program is not blamed: it draws on the same context from now on.
+    await runner.render(effect(), input());
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1]!.state.draws).toHaveLength(2);
+  });
+
+  it('fails with contextLost when the new context is lost too, and draws the program once the GPU is back', async () => {
+    let healthy = false;
+    let made = 0;
+    const runner = new ShaderFallbackRunner({
+      createCanvas: () => {
+        made++;
+        const ctx: ReturnType<typeof fakeGl> = fakeGl([], () => {
+          if (!healthy) { ctx.lose(); return 28; }
+          return 25;
+        });
+        return ctx.canvas;
+      }
+    });
+    await expect(runner.render(effect(), input())).rejects.toMatchObject({ reason: 'contextLost' });
+    expect(made).toBe(2);
+    healthy = true;
+    const out = await runner.render(effect(), input());
+    expect(out.rgba16f).toHaveLength(8);
+  });
+
+  it('does not take a link status read from a lost context for a refusal', async () => {
+    let first = true;
+    const runner = new ShaderFallbackRunner({
+      createCanvas: () => {
+        const ctx = fakeGl([], () => 25);
+        const gl = (ctx.canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+        if (first) {
+          first = false;
+          gl['getProgramParameter'] = () => { ctx.lose(); return null; };
+        }
+        return ctx.canvas;
+      }
+    });
+    const out = await runner.render(effect(), input());
+    expect(out.rgba16f).toHaveLength(8);
+  });
+
+  it('keeps a refusal: a program WebGL does not link is not compiled again', async () => {
+    let links = 0;
+    const runner = new ShaderFallbackRunner({
+      createCanvas: () => {
+        const ctx = fakeGl([], () => 25);
+        const gl = (ctx.canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+        gl['linkProgram'] = () => { links++; };
+        gl['getProgramParameter'] = () => false;
+        gl['getProgramInfoLog'] = () => 'ERROR: 0:1: nope';
+        return ctx.canvas;
+      }
+    });
+    await expect(runner.render(effect(), input())).rejects.toMatchObject({ reason: 'compile', message: expect.stringContaining('nope') });
+    await expect(runner.render(effect(), input())).rejects.toMatchObject({ reason: 'compile' });
+    expect(links).toBe(1);
   });
 });
 

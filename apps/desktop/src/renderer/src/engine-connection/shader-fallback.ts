@@ -29,9 +29,16 @@
  * deadline. Every pass's draw is fenced and bounded by the draw deadline
  * (the runner's watchdog): a draw that has not finished by then loses the
  * context on purpose, fails with `watchdog`, and its program is never run
- * again, so a runaway program never blocks the renderer in `readPixels`. A
- * lost context is recreated, and a program whose draw lost it is not run
- * again (it would lose it again).
+ * again, so a runaway program never blocks the renderer in `readPixels`.
+ *
+ * Only two failures are kept for a program: WebGL refusing it (`compile`)
+ * and the draw deadline (`watchdog`). A context lost for any other reason
+ * (a GPU-process restart, another context's loss) says nothing about the
+ * program, as today's compositor treats it (`compositor.ts` clears its
+ * errors and programs on `webglcontextrestored` and draws again): the
+ * runner makes a new context and draws the request again once, and if
+ * that loses it too fails with `contextLost`, which the engine retries
+ * later. A compile past its deadline (`deadline`) is not kept either.
  */
 
 export type FallbackCallFn = '1f' | '2f' | '3f' | '4f' | '1i' | 'm3';
@@ -152,7 +159,7 @@ export class ShaderFallbackRunner {
   /** Renders requests one at a time (one context). `textures` are the
    *  request's (binary16 RGBA, GL row order, `width × height × 4` each). */
   render(request: ShaderFallbackRequest, textures: Uint16Array[] = []): Promise<ShaderFallbackPixels> {
-    const run = this.queue.then(() => this.run(request, textures));
+    const run = this.queue.then(() => this.attempt(request, textures));
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -177,7 +184,8 @@ export class ShaderFallbackRunner {
         const status = gl.clientWaitSync(sync, 0, 0);
         if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
         if (status === gl.WAIT_FAILED || this.lost || gl.isContextLost()) {
-          throw this.fail(id, request, 'compile', 'the program lost the WebGL context when drawn');
+          this.lost = true;
+          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
         }
         if (this.now() > deadline) {
           const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
@@ -253,6 +261,11 @@ export class ShaderFallbackRunner {
     }
     const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
     const log = (gl.getShaderInfoLog(fs) || '') + (gl.getProgramInfoLog(program) || '');
+    // A lost context answers every query with null: not a refusal.
+    if (this.lost || gl.isContextLost()) {
+      this.lost = true;
+      throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while compiling');
+    }
     gl.deleteShader(vs); gl.deleteShader(fs);
     if (!linked) {
       gl.deleteProgram(program);
@@ -268,10 +281,23 @@ export class ShaderFallbackRunner {
     return entry;
   }
 
+  /** A failure; kept for the program only when it says something about
+   *  it (WebGL refused it, or its draw passed the deadline). */
   private fail(id: string, request: ShaderFallbackRequest, reason: ShaderFallbackError['reason'], message: string): ShaderFallbackError {
     const error = new ShaderFallbackError(request.key, reason, message);
-    if (reason !== 'contextLost') this.failed.set(id, error);
+    if (reason === 'compile' || reason === 'watchdog') this.failed.set(id, error);
     return error;
+  }
+
+  /** Runs a request; a context lost under it (not by the runner's own
+   *  watchdog) is made again and the request drawn once more. */
+  private async attempt(request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackPixels> {
+    try {
+      return await this.run(request, textures);
+    } catch (error) {
+      if (!(error instanceof ShaderFallbackError) || error.reason !== 'contextLost') throw error;
+      return this.run(request, textures);
+    }
   }
 
   private async run(request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackPixels> {
@@ -342,7 +368,8 @@ export class ShaderFallbackRunner {
       const pixels = new Float32Array(width * height * 4);
       gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
       if (this.lost || gl.isContextLost()) {
-        throw this.fail(id, request, 'compile', 'the program lost the WebGL context when drawn');
+        this.lost = true;
+        throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
       }
       const rgba16f = new Uint16Array(pixels.length);
       for (let i = 0; i < pixels.length; i++) rgba16f[i] = toHalf(pixels[i]!);
