@@ -79,6 +79,22 @@ pub fn preroll(sample_rate: u32) -> i64 {
     (p + CONTROL - 1) / CONTROL * CONTROL
 }
 
+/// The most output a committed drop may leave for a run to catch up on
+/// before it starts fresh instead: the most a fresh start ever renders
+/// before its first kept sample (one [`GRID`] step plus the pre-roll).
+///
+/// The unit is render work, in project-rate output samples, not device
+/// time: catching up analyses every skipped interval with its real input,
+/// so its cost is the output distance it renders, whatever the device or
+/// shuttle speed. Within this bound, re-entry continues the vocoder's phase
+/// history exactly (it equals a render that never dropped) at no more cost
+/// than a fresh start's worst case; past it, a fresh start's pre-roll is
+/// cheaper. 0.58 s at 48 kHz (`measure_gap_catch_up`: catch-up and fresh
+/// start cost about the same at 0.5 s, and catch-up grows linearly after).
+pub fn catch_up_limit(sample_rate: u32) -> i64 {
+    GRID + preroll(sample_rate)
+}
+
 /// The map at one control point: the source position in project-rate
 /// samples and whether the voice sounds there.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -129,6 +145,8 @@ pub struct StretchRun {
     /// (a seek, a loop wrap, a direction change) starts fresh by the
     /// pre-roll rules, so it never walks the run over the gap.
     pending: Option<(i64, i64)>,
+    /// First committed silent request since this run stopped producing.
+    dropped_from: Option<i64>,
     scratch_in: Vec<Vec<f32>>,
     scratch_out: Vec<Vec<f32>>,
     /// Map points evaluated (diagnostics).
@@ -157,6 +175,7 @@ impl StretchRun {
             live: None,
             spare: None,
             pending: None,
+            dropped_from: None,
             scratch_in: vec![Vec::new(); channels],
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
@@ -177,6 +196,22 @@ impl StretchRun {
     /// run: what it renders next is a new request, not a retry).
     pub fn abandon_retry(&mut self) {
         self.pending = None;
+        self.dropped_from = None;
+    }
+
+    /// The caller advanced past an incomplete request as intentional silence.
+    /// Phase history carries over the gap while catching up stays within
+    /// [`catch_up_limit`]; ordinary retries remain unbounded in output
+    /// distance (their device-time budget belongs to playback).
+    pub fn commit_drop(&mut self, start: i64) {
+        self.dropped_from.get_or_insert(start);
+        if self.live.is_none() {
+            // The run never started (its first input is missing), so there
+            // is no phase history to keep: the next request starts fresh at
+            // its own sample, and a voice that comes back after a long drop
+            // equals a render started where it comes back.
+            self.pos = i64::MIN;
+        }
     }
 
     /// The output range of a starved render the next request may continue.
@@ -265,8 +300,15 @@ impl StretchRun {
             .pending
             .take()
             .is_some_and(|(from, to)| (from..=to).contains(&a));
+        // Retain uninterrupted phase history through a committed drop while
+        // catching up costs no more than a fresh start can, but never replay
+        // an unbounded outage on the audio render thread.
+        let resumes = resumes
+            && (self.dropped_from.is_none()
+                || end.saturating_sub(self.pos) <= catch_up_limit(self.rate) + n as i64);
         let continues = self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || resumes);
         if !continues {
+            self.dropped_from = None;
             self.fresh_starts += 1;
             if !self.fresh(a, map, read)? {
                 self.pending = Some((a, end));
@@ -284,6 +326,7 @@ impl StretchRun {
             let from = (a - self.buf_start) as usize;
             o.extend_from_slice(&b[from..from + n]);
         }
+        self.dropped_from = None;
         // Keep this render's range (a glide's outgoing mix renders it
         // again) and nothing before it.
         let drop = (a - self.buf_start) as usize;
@@ -734,5 +777,208 @@ mod tests {
         }
         assert_eq!(retries, 1);
         assert_eq!(run.fresh_starts, 1, "the retry continued the run");
+    }
+    #[test]
+    fn short_committed_drops_reenter_with_uninterrupted_phase_history() {
+        for direction in [-1.0, 1.0] {
+            let mut map = |k: i64| {
+                Ok(MapPoint {
+                    x: 200_000.0 + direction * k as f64 * CONTROL as f64 * 1.5,
+                    on: true,
+                })
+            };
+            let mut whole = |lo, len, out: &mut [Vec<f32>]| {
+                sine(lo, len, out);
+                Ok(true)
+            };
+            let mut missing = |_lo, len, out: &mut [Vec<f32>]| {
+                for c in out {
+                    c.clear();
+                    c.resize(len, 0.0);
+                }
+                Ok(false)
+            };
+            let mut run = StretchRun::new(2, 48_000, 0);
+            let mut reference = StretchRun::new(2, 48_000, 0);
+            let mut out = vec![vec![]; 2];
+            let mut expected = vec![vec![]; 2];
+            let mut drops = 0;
+            for a in (48_000..68_000).step_by(256) {
+                reference
+                    .render(a, 256, &mut map, &mut whole, &mut expected)
+                    .unwrap();
+                let complete = if (52_000..56_000).contains(&a) {
+                    run.render(a, 256, &mut map, &mut missing, &mut out)
+                        .unwrap()
+                } else {
+                    run.render(a, 256, &mut map, &mut whole, &mut out).unwrap()
+                };
+                if complete {
+                    assert_eq!(out, expected, "{direction} at {a}");
+                } else {
+                    drops += 1;
+                    run.commit_drop(a);
+                    assert!(out.iter().flatten().all(|&v| v == 0.0));
+                }
+            }
+            assert!(drops > 0);
+            assert_eq!(
+                run.fresh_starts, 1,
+                "a dropped span keeps valid phase state"
+            );
+        }
+    }
+
+    /// A4 point 3: past the old fixed 120 ms window, a committed drop still
+    /// re-enters with the uninterrupted phase history (equal to a render
+    /// that never dropped) while the catch-up costs no more than a fresh
+    /// start's worst case; a longer drop starts fresh by the pre-roll rules
+    /// (equal to a render started at the re-entry, as a seek there).
+    #[test]
+    fn committed_drops_continue_within_the_catch_up_limit() {
+        let rate = 48_000u32;
+        let limit = catch_up_limit(rate);
+        assert_eq!(limit, GRID + preroll(rate));
+        for direction in [-1.0, 1.0] {
+            // The last gap ends on a grid boundary, where a run that kept
+            // its failed fresh start would begin a grid step early.
+            let (from, drop_at) = (3 * GRID, 3 * GRID + 4_096);
+            for (gap_ms, continues) in [(300i64, true), (500, true), (1_000, false), (1_280, false)]
+            {
+                let gap = gap_ms * rate as i64 / 1000;
+                assert_eq!(gap + 256 <= limit, continues, "{gap_ms} ms vs the limit");
+                let mut map = |k: i64| {
+                    Ok(MapPoint {
+                        x: 400_000.0 + direction * k as f64 * CONTROL as f64 * 1.5,
+                        on: true,
+                    })
+                };
+                let mut whole = |lo, len, out: &mut [Vec<f32>]| {
+                    sine(lo, len, out);
+                    Ok(true)
+                };
+                let mut missing = |_lo, len, out: &mut [Vec<f32>]| {
+                    for c in out {
+                        c.clear();
+                        c.resize(len, 0.0);
+                    }
+                    Ok(false)
+                };
+                let mut run = StretchRun::new(2, rate, 0);
+                let mut out = vec![vec![]; 2];
+                let back = drop_at + gap;
+                let mut played = Vec::new();
+                for a in (from..back + 8_192).step_by(256) {
+                    let complete = if (drop_at..back).contains(&a) {
+                        run.render(a, 256, &mut map, &mut missing, &mut out)
+                            .unwrap()
+                    } else {
+                        run.render(a, 256, &mut map, &mut whole, &mut out).unwrap()
+                    };
+                    if complete {
+                        played.push((a, out.clone()));
+                    } else {
+                        assert!(a >= drop_at, "{direction} {gap_ms} ms at {a}");
+                        run.commit_drop(a);
+                    }
+                }
+                if continues {
+                    assert_eq!(run.fresh_starts, 1, "{direction} {gap_ms} ms");
+                } else {
+                    assert!(run.fresh_starts >= 2, "{direction} {gap_ms} ms");
+                }
+                // One uninterrupted run from `from`, rendered through the
+                // gap (a run plays on from what it produced ahead before a
+                // render needs new input). Fresh: a new run from the
+                // re-entry, as a seek there renders.
+                let mut reference = StretchRun::new(2, rate, 0);
+                let mut expected = vec![vec![]; 2];
+                let mut heard = played.iter().peekable();
+                for a in (from..back + 8_192).step_by(256) {
+                    if (back..back + 256).contains(&a) && !continues {
+                        reference = StretchRun::new(2, rate, 0);
+                    }
+                    reference
+                        .render(a, 256, &mut map, &mut whole, &mut expected)
+                        .unwrap();
+                    if let Some((_, out)) = heard.next_if(|(at, _)| *at == a) {
+                        assert_eq!(out, &expected, "{direction} {gap_ms} ms at {a}");
+                    }
+                }
+                assert!(heard.next().is_none(), "every render compared");
+                assert!(played.iter().any(|(a, _)| *a >= back));
+            }
+        }
+    }
+
+    /// Measurement (A4 point 3), not a pass/fail check: what exact vocoder
+    /// continuity across a dropped gap costs. Continuing the phase history
+    /// exactly means analysing every skipped interval with its real input,
+    /// i.e. rendering the whole gap; a fresh start reads only its pre-roll.
+    /// Run with `cargo test --release -p pm-audio --lib
+    /// stretch::tests::measure_gap_catch_up -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_gap_catch_up() {
+        let rate = 48_000;
+        let n = 512usize;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let from = 48_000i64;
+        eprintln!("gap_s, catch_up_reads, catch_up_ms, fresh_reads, fresh_ms");
+        for gap_ms in [120i64, 500, 1_000, 10_000, 60_000] {
+            let target = from + gap_ms * rate as i64 / 1000;
+            let reads = std::cell::Cell::new(0usize);
+            let mut counted = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+                reads.set(reads.get() + len);
+                sine(lo, len, out);
+                Ok(true)
+            };
+            let mut out = vec![Vec::new(); 2];
+            // A run playing up to the drop.
+            let mut run = StretchRun::new(2, rate, 0);
+            for start in (from - 4 * n as i64..from).step_by(n) {
+                assert!(
+                    run.render(start, n, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+            }
+            reads.set(0);
+            let t = std::time::Instant::now();
+            let mut at = from;
+            while at < target {
+                let len = n.min((target - at) as usize);
+                assert!(
+                    run.render(at, len, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+                at += len as i64;
+            }
+            assert!(
+                run.render(target, n, &mut map, &mut counted, &mut out)
+                    .unwrap()
+            );
+            let catch_up = (reads.replace(0), t.elapsed());
+            let mut fresh = StretchRun::new(2, rate, 0);
+            let t = std::time::Instant::now();
+            assert!(
+                fresh
+                    .render(target, n, &mut map, &mut counted, &mut out)
+                    .unwrap()
+            );
+            let fresh = (reads.get(), t.elapsed());
+            eprintln!(
+                "{:.3}, {}, {:.1}, {}, {:.1}",
+                gap_ms as f64 / 1000.0,
+                catch_up.0,
+                catch_up.1.as_secs_f64() * 1000.0,
+                fresh.0,
+                fresh.1.as_secs_f64() * 1000.0
+            );
+        }
     }
 }

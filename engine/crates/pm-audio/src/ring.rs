@@ -66,6 +66,10 @@ pub struct Ring {
     underruns: AtomicU64,
     /// Frames the consumer has played (all epochs).
     played: AtomicU64,
+    written: AtomicU64,
+    retired: AtomicU64,
+    epoch_base: AtomicU64,
+    callback_frames: AtomicUsize,
 }
 
 // The producer and the consumer touch disjoint slots, ordered by the
@@ -94,6 +98,10 @@ impl Ring {
             epoch: AtomicU32::new(0),
             underruns: AtomicU64::new(0),
             played: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            retired: AtomicU64::new(0),
+            epoch_base: AtomicU64::new(0),
+            callback_frames: AtomicUsize::new(CHUNK * 2),
         })
     }
 
@@ -116,6 +124,8 @@ impl Ring {
 
     /// Moves to a new epoch: queued chunks of older epochs will not play.
     pub fn set_epoch(&self, epoch: u32) {
+        self.epoch_base
+            .store(self.written.load(Ordering::Relaxed), Ordering::Relaxed);
         self.epoch.store(epoch, Ordering::Release);
     }
 
@@ -125,6 +135,21 @@ impl Ring {
 
     pub fn played_frames(&self) -> u64 {
         self.played.load(Ordering::Relaxed)
+    }
+
+    /// Producer-side current-epoch reserve, without reading consumer-owned
+    /// slots or its partial-chunk offset. Retired includes skipped old epochs.
+    pub fn buffered_frames(&self) -> u64 {
+        let retired = self
+            .retired
+            .load(Ordering::Acquire)
+            .max(self.epoch_base.load(Ordering::Relaxed));
+        self.written.load(Ordering::Relaxed).saturating_sub(retired)
+    }
+
+    /// Two callback buffers leave time to wake, mix, and prime downstream DSP.
+    pub fn refill_reserve(&self) -> u64 {
+        (self.callback_frames.load(Ordering::Relaxed).max(CHUNK) * 2) as u64
     }
 
     /// Producer: writes a chunk (`interleaved` holds `tag.frames` frames).
@@ -147,6 +172,7 @@ impl Ring {
                 ..tag
             };
         }
+        self.written.fetch_add(frames as u64, Ordering::Relaxed);
         self.head.store(head + 1, Ordering::Release);
         true
     }
@@ -205,6 +231,7 @@ impl Consumer {
         let ring = &*self.ring;
         let rc = ring.channels;
         let frames = out.len() / device_channels.max(1);
+        ring.callback_frames.fetch_max(frames, Ordering::Relaxed);
         out.fill(0.0);
         let current = ring.epoch.load(Ordering::Acquire);
         let mut first: Option<Heard> = None;
@@ -221,6 +248,10 @@ impl Consumer {
             // finished writing it and will not touch it until `tail` passes.
             let (tag, data) = unsafe { (*slot.tag.get(), &*slot.data.get()) };
             if tag.epoch < current || self.offset >= tag.frames as usize {
+                ring.retired.fetch_add(
+                    (tag.frames as usize).saturating_sub(self.offset) as u64,
+                    Ordering::Release,
+                );
                 self.offset = 0;
                 ring.tail.store(tail + 1, Ordering::Release);
                 continue;
@@ -239,6 +270,7 @@ impl Consumer {
                     *d = *s;
                 }
             }
+            ring.retired.fetch_add(take as u64, Ordering::Release);
             done += take;
             self.offset += take;
             if self.offset >= tag.frames as usize {
@@ -298,15 +330,22 @@ mod tests {
         assert!(ring.push(tag(0, 0, CHUNK as u32), &a));
         assert!(ring.push(tag(0, 0, 10), &a));
         assert_eq!(c.queued_frames(), CHUNK + 10);
+        assert_eq!(ring.buffered_frames(), (CHUNK + 10) as u64);
         let mut out = vec![0f32; 100];
         c.fill(&mut out, 1);
         assert_eq!(c.queued_frames(), CHUNK - 100 + 10);
+        assert_eq!(ring.buffered_frames(), (CHUNK - 100 + 10) as u64);
         // A new epoch's chunks only: the old ones will be skipped.
         ring.set_epoch(1);
         assert_eq!(c.queued_frames(), 0);
+        assert_eq!(ring.buffered_frames(), 0);
         assert!(ring.push(tag(0, 1, CHUNK as u32), &a));
         assert_eq!(c.queued_frames(), CHUNK);
         assert_eq!(ring.queued(), 3);
+        assert_eq!(ring.buffered_frames(), CHUNK as u64);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.buffered_frames(), (CHUNK - 100) as u64);
+        assert_eq!(c.queued_frames(), CHUNK - 100);
     }
 
     #[test]
