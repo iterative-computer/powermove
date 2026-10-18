@@ -51,7 +51,12 @@ export const ENGINE_IPC = {
   queueChanged: 'engine:queue-changed',
   /** main → renderer: locate offline media (`string[]` asset ids) after the
    *  offline message's "Locate Media…". */
-  locateMedia: 'engine:locate-media'
+  locateMedia: 'engine:locate-media',
+  /** main → renderer: run a job engine request in the window's shader
+   *  fallback runner (`ShaderFallbackJob`, main/engine/shader-fallback-relay.ts). */
+  shaderFallback: 'engine:shader-fallback',
+  /** renderer → main (send): the runner's answer (`{ id, ok, rgba16f }` or `{ id, ok: false, reason, message }`). */
+  shaderFallbackResult: 'engine:shader-fallback-result'
 } as const;
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -240,4 +245,7 @@ export interface EngineBridge {
   playback(playing: boolean): void;
   /** Interpret Footage's facts of an asset's file (the job engine reads it). */
   probeMedia(request: EngineProbeRequest): Promise<EngineProbeResult>;
+  /** Runs the job engine's fallback requests in this window's runner
+   *  (`run` answers each); returns an unsubscribe. */
+  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;
 }

@@ -31,16 +31,18 @@ import type {
   MediaFacts,
   Request,
   Response,
+  ShaderFallbackRequest,
   SlicingPolicy
 } from '../../shared/engine-protocol';
 import type { HardwareArbiter, LeaseGrant, MemoryArbiter } from './arbiter';
 import type { HostHandler, Log } from './connection';
 import { CrashLedger, isAttributable } from './crash';
 import { DefinitionRelay } from './definitions';
-import type { HandleTable } from './handles';
+import { HandleRejected, type HandleTable } from './handles';
 import type { OutputDestinations } from './outputs';
 import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './ports';
 import { isRecord, isSafeUint, ProtocolError } from './protocol';
+import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-relay';
 import { CACHE_DIRS, HostServicesCore } from './services';
 import { EngineBlender, type BlenderLocator } from './blender';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
@@ -80,6 +82,10 @@ export type NativeEngineOptions = {
    *  it Blender requests answer `unsupported` and the current engine runs
    *  Blender. */
   blender?: { locate: BlenderLocator; tempRoot: string };
+  /** Runs a job engine fallback request in a window's runner
+   *  (`shader-fallback-relay.ts`); without it such requests answer
+   *  `unsupported` and the job fails naming the program. */
+  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: Uint16Array[]) => Promise<ShaderFallbackResult>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -555,10 +561,32 @@ export class NativeEngine {
             return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
           }
         }
+        if (body.type === 'shaderFallback') {
+          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to run fallback requests.'));
+          return this.runShaderFallback(body, session ?? 0, current.hostPort);
+        }
         return this.services.serve(process, current.hostPort, body, session);
       },
       event: (body, session) => this.onEvent(process, body, session)
     };
+  }
+
+  /**
+   * A job engine fallback request (contract 14): the textures are read
+   * from the session's scratch area, the request runs in a window's runner,
+   * and the result is written back as the named output file.
+   */
+  private async runShaderFallback(body: Extract<Request, { type: 'shaderFallback' }>, session: number, hostPort: number): Promise<Response> {
+    const run = this.options.shaderFallback;
+    await serveHostFallback(body, (handle) => {
+      try {
+        return this.services.handles.resolve(handle, session, hostPort);
+      } catch (error) {
+        if (error instanceof HandleRejected) throw new ProtocolError('capabilityRejected', error.message);
+        throw error;
+      }
+    }, run ? (request, textures) => run(session, request, textures) : null);
+    return { type: 'ack' };
   }
 
   private onEvent(process: EngineProcess, body: Event, _session: number | null): void {

@@ -363,6 +363,18 @@ export class AgentJobs {
   private readonly finished: string[] = [];
   /** One live-following job session per window for its agent frames. */
   private readonly frameSessions = new Map<number, Promise<FrameSession>>();
+  /** The window each agent frame session works for (by job engine session). */
+  private readonly frameOwners = new Map<number, number>();
+
+  /**
+   * The window a job engine session works for: an export's or an agent
+   * frame batch's (the render queue's own jobs: `QUEUE_OWNER`); `null` when
+   * no job or frame session of this launch has it.
+   */
+  ownerOf(session: number): number | null {
+    for (const record of this.jobs.values()) if (record.session === session) return record.owner;
+    return this.frameOwners.get(session) ?? null;
+  }
   /** Bumped when the job engine restarts: every session it had is gone. */
   private generation = 0;
   private readonly unlisten: () => void;
@@ -695,6 +707,7 @@ export class AgentJobs {
       }
       const generation = this.generation;
       const session = await this.openSession(`agent-frames-${owner}`, 'job');
+      this.frameOwners.set(session, owner);
       await this.resync(session, `agent-frames-${owner}`, canonical, hash, 1);
       return this.currentDefinitions(owner, { session, revision: 1, hash, generation, definitions: null });
     })();

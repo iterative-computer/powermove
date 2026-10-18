@@ -12,7 +12,7 @@ import { PROTOCOL_BUILD, type Envelope } from '../../../shared/engine-protocol';
 import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../main/engine/protocol';
 import { EngineConnection, type PortLike } from './connection';
 import { DocumentSession, MAX_FALLBACK_BAND_BYTES, type FallbackRunner, type StreamBatch } from './session';
-import { ShaderFallbackError, applyCalls, toHalf, type ShaderFallbackRequest } from './shader-fallback';
+import { ShaderFallbackError, ShaderFallbackRunner, applyCalls, toHalf, type ShaderFallbackRequest } from './shader-fallback';
 
 class FakePort implements PortLike {
   sent: Envelope[] = [];
@@ -112,7 +112,7 @@ describe('the shader fallback runner in a session', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [request(4, 4)] } } as never, 5));
     await flush();
     expect(port.fallback()).toEqual([{ type: 'shaderFallback', fallback: 'failed', key: '5e'.repeat(32), reason: 'compile', message: 'ERROR: 0:3: syntax error' }]);
-    expect(logs.some((l) => l.includes('fallback runner could not draw layer L1'))).toBe(true);
+    expect(logs.some((l) => l.includes('fallback runner could not draw a program of layer L1'))).toBe(true);
   });
 
   it('reports an unavailable runner rather than leaving the frame waiting', async () => {
@@ -120,6 +120,134 @@ describe('the shader fallback runner in a session', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [request(4, 4)] } } as never, 5));
     await flush();
     expect(port.fallback()[0]).toMatchObject({ fallback: 'failed', reason: 'unavailable' });
+  });
+});
+
+describe('effect and transition requests in a session', () => {
+  const effect = (width: number, height: number): ShaderFallbackRequest => ({
+    ...request(width, height, '7a'.repeat(32)), textures: 2,
+    units: [{ unit: 0, texture: 0, chain: true }, { unit: 2, texture: 1, chain: false }], morePasses: []
+  });
+  const band = (texture: number, row: number, rows: number, width: number, height: number, value: number) => {
+    const values = new Uint16Array(width * rows * 4).fill(value);
+    return envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'input', key: '7a'.repeat(32), texture, width, height, row, rows, rgba16f: new Uint8Array(values.buffer) } } as never, 5);
+  };
+
+  it('waits for every row of every texture, then runs the request with them', async () => {
+    const asked: Array<{ r: ShaderFallbackRequest; t: Uint16Array[] }> = [];
+    const runner: FallbackRunner = {
+      async render(r, t = []) {
+        asked.push({ r, t });
+        return { key: r.key, width: r.width, height: r.height, rgba16f: new Uint16Array(r.width * r.height * 4) };
+      }
+    };
+    const { port } = await session(runner);
+    port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [effect(4, 3)] } } as never, 5));
+    port.deliver(band(1, 0, 3, 4, 3, 0x3800));
+    port.deliver(band(0, 2, 1, 4, 3, 0x3c00));
+    await flush();
+    expect(asked).toHaveLength(0);
+    port.deliver(band(0, 0, 2, 4, 3, 0x3400));
+    await flush();
+    expect(asked).toHaveLength(1);
+    const [input, backdrop] = asked[0]!.t;
+    expect(input![0]).toBe(0x3400);
+    expect(input![2 * 16]).toBe(0x3c00);
+    expect(backdrop!.every((v) => v === 0x3800)).toBe(true);
+    expect(port.fallback()[0]).toMatchObject({ fallback: 'pixels', key: '7a'.repeat(32) });
+  });
+
+  it('fails a request whose texture band does not fit it', async () => {
+    const { port } = await session({ render: async () => { throw new Error('not reached'); } });
+    port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [effect(4, 3)] } } as never, 5));
+    port.deliver(band(0, 2, 2, 4, 3, 0));
+    await flush();
+    expect(port.fallback()[0]).toMatchObject({ fallback: 'failed', reason: 'size' });
+  });
+});
+
+/** A recording WebGL2 stand-in: enough of the API for the runner. */
+function fakeGl(active: string[], fence: () => number) {
+  const C = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, LINK_STATUS: 3, ARRAY_BUFFER: 4, STATIC_DRAW: 5, DEPTH_TEST: 6, BLEND: 7,
+    TEXTURE_2D: 8, TEXTURE0: 100, RGBA16F: 9, RGBA: 10, HALF_FLOAT: 11, FLOAT: 12, TEXTURE_MIN_FILTER: 13, TEXTURE_MAG_FILTER: 14,
+    LINEAR: 15, TEXTURE_WRAP_S: 16, TEXTURE_WRAP_T: 17, CLAMP_TO_EDGE: 18, FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20,
+    COLOR_BUFFER_BIT: 21, TRIANGLE_STRIP: 22, NO_ERROR: 0, UNPACK_ALIGNMENT: 23, SYNC_GPU_COMMANDS_COMPLETE: 24,
+    ALREADY_SIGNALED: 25, CONDITION_SATISFIED: 26, TIMEOUT_EXPIRED: 27, WAIT_FAILED: 28
+  };
+  let unit = 0;
+  let next = 0;
+  let lost = false;
+  const bound = new Map<number, unknown>();
+  const state = {
+    uploads: [] as Array<{ id: number; data: Uint16Array | null }>,
+    draws: [] as Array<Record<number, unknown>>,
+    uniforms: [] as string[],
+    lostBy: 0
+  };
+  const gl: Record<string, unknown> = {
+    ...C,
+    getExtension: (name: string) => name === 'EXT_color_buffer_float' ? {} : name === 'WEBGL_lose_context' ? { loseContext: () => { lost = true; state.lostBy++; } } : null,
+    createBuffer: () => ({}), bindBuffer: () => {}, bufferData: () => {}, disable: () => {},
+    createShader: () => ({}), shaderSource: () => {}, compileShader: () => {}, createProgram: () => ({}), attachShader: () => {}, linkProgram: () => {},
+    getProgramParameter: () => true, getShaderInfoLog: () => '', getProgramInfoLog: () => '', deleteShader: () => {}, deleteProgram: () => {},
+    getAttribLocation: () => 0,
+    createTexture: () => ({ id: next++ }), activeTexture: (u: number) => { unit = u - C.TEXTURE0; }, bindTexture: (_t: number, tex: unknown) => { bound.set(unit, tex); },
+    pixelStorei: () => {},
+    texImage2D: (...a: unknown[]) => { state.uploads.push({ id: (bound.get(unit) as { id: number }).id, data: a[8] as Uint16Array | null }); },
+    texParameteri: () => {}, createFramebuffer: () => ({}), bindFramebuffer: () => {}, framebufferTexture2D: () => {}, viewport: () => {},
+    clearColor: () => {}, clear: () => {}, useProgram: () => {}, enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
+    getUniformLocation: (_p: unknown, name: string) => (active.includes(name) ? { name } : null),
+    uniform1f: (l: { name: string }, x: number) => state.uniforms.push(`${l.name}=${x}`),
+    uniform2f: (l: { name: string }) => state.uniforms.push(l.name), uniform3f: (l: { name: string }) => state.uniforms.push(l.name),
+    uniform4f: (l: { name: string }) => state.uniforms.push(l.name), uniform1i: (l: { name: string }, x: number) => state.uniforms.push(`${l.name}=${x}`),
+    uniformMatrix3fv: (l: { name: string }) => state.uniforms.push(l.name),
+    getError: () => 0,
+    drawArrays: () => { state.draws.push(Object.fromEntries([0, 1, 2].map((u) => [u, (bound.get(u) as { id: number } | null)?.id ?? null]))); },
+    fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
+    readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {}
+  };
+  const canvas = { addEventListener: () => {}, getContext: () => gl } as unknown as OffscreenCanvas;
+  return { canvas, state, C };
+}
+
+describe('the runner with textures, passes, and its draw deadline', () => {
+  const effect = (calls: ShaderFallbackRequest['calls']): ShaderFallbackRequest => ({
+    ...request(2, 1, '7a'.repeat(32)), calls, textures: 2,
+    units: [{ unit: 0, texture: 0, chain: true }, { unit: 1, texture: 0, chain: false }, { unit: 2, texture: 1, chain: false }],
+    morePasses: [[{ fn: '1i', name: 'u_pass', v: [1] }]]
+  });
+
+  it('chains u_tex through the passes, keeps u_orig and u_backdrop, and applies a parameter to its alias', async () => {
+    const { canvas, state, C } = fakeGl(['u_tex', 'u_pass', 'u_p0'], () => 25);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const input = new Uint16Array(8).fill(0x3c00);
+    const backdrop = new Uint16Array(8).fill(0x3800);
+    const out = await runner.render(effect([{ fn: '1i', name: 'u_tex', v: [0] }, { fn: '1f', name: 'u_amount', v: [0.5], alias: 'u_p0' }]), [input, backdrop]);
+    expect(out.rgba16f).toHaveLength(8);
+    // Textures 0 and 1 hold the input and the backdrop; 2 and 3 are the passes' targets.
+    expect(state.uploads.slice(0, 2).map((u) => u.data)).toEqual([input, backdrop]);
+    expect(state.draws).toEqual([{ 0: 0, 1: 0, 2: 1 }, { 0: 2, 1: 0, 2: 1 }]);
+    expect(state.uniforms).toEqual(['u_tex=0', 'u_p0=0.5', 'u_pass=1']);
+    expect(C.TEXTURE0).toBe(100);
+  });
+
+  it('refuses textures that do not fit the request', async () => {
+    const { canvas } = fakeGl([], () => 25);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    await expect(runner.render(effect([]), [new Uint16Array(8)])).rejects.toMatchObject({ reason: 'size' });
+  });
+
+  it('stops a draw past its deadline, loses the context on purpose, and never runs the program again', async () => {
+    let clock = 0;
+    const { canvas, state } = fakeGl(['u_tex'], () => 27);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, drawDeadlineMs: 3000, now: () => clock, sleep: async (ms) => { clock += ms * 50; } });
+    const r = effect([]);
+    await expect(runner.render(r, [new Uint16Array(8), new Uint16Array(8)])).rejects.toMatchObject({ reason: 'watchdog', message: expect.stringContaining('3 s') });
+    expect(state.lostBy).toBe(1);
+    expect(state.draws).toHaveLength(1);
+    await expect(runner.render(r, [new Uint16Array(8), new Uint16Array(8)])).rejects.toMatchObject({ reason: 'watchdog' });
+    expect(state.draws).toHaveLength(1);
   });
 });
 

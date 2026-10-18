@@ -583,7 +583,23 @@ const bridge: PowermoveBridge = {
     probeMedia: (request) => ipcRenderer.invoke(ENGINE_IPC.probeMedia, {
       asset: String(request.asset),
       interpret: request.interpret && typeof request.interpret === 'object' ? JSON.parse(JSON.stringify(request.interpret)) : null
-    }) as Promise<EngineProbeResult>
+    }) as Promise<EngineProbeResult>,
+    // The job engine's fallback requests, run in this window's runner
+    // (main/engine/shader-fallback-relay.ts).
+    onShaderFallback: (run) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+        void Promise.resolve()
+          .then(() => run({ request: job.request, textures: job.textures }))
+          .then(
+            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
+              id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
+            })
+          );
+      };
+      ipcRenderer.on(ENGINE_IPC.shaderFallback, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_IPC.shaderFallback, handler); };
+    }
   },
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */

@@ -33,7 +33,7 @@ import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, type DocumentStream, type FallbackRunner } from './session';
-import { ShaderFallbackRunner } from './shader-fallback';
+import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { EngineTransport } from './transport';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -108,6 +108,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
   let fallbackRunner: FallbackRunner | null = null;
+  // The job engine's fallback requests (exports, agent stills) run in this
+  // window's runner too: one WebGL2 context for the window (decision 19).
+  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) =>
+    (await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures)).rgba16f) ?? (() => {});
   const transport = new EngineTransport(() => current, hostClock);
   PM.setTransportDriver?.(transport);
 
@@ -323,6 +327,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      offShaderFallback();
       offPending();
       offEager();
       offAssets();
