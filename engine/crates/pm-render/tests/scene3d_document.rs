@@ -658,7 +658,10 @@ fn the_static_check_looks_inside_legacy_scenes() {
                 doc["assets"]["m"] =
                     json!({ "id": "m", "kind": "model", "format": "glb", "name": "m.glb" });
             }),
-            true,
+            // Listed while the file cannot be checked; an offline model draws
+            // as the missing-model box, as today (the glTF lane draws the
+            // ones that load).
+            false,
         ),
         (
             "3D: knot primitives (legacy scene object ring)",

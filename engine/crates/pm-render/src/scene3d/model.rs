@@ -144,8 +144,14 @@ impl MaterialMaps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterialKind {
     Standard,
-    /// `MeshBasicMaterial` (the missing-model box).
+    /// `MeshBasicMaterial` (the missing-model box, unlit glTF materials).
     Basic,
+    /// `MeshPhysicalMaterial` (glTF materials with physical extensions).
+    Physical,
+    /// `PointsMaterial` (glTF points).
+    Points,
+    /// `LineBasicMaterial` (glTF lines).
+    Line,
 }
 
 /// A material as three.js holds it when the pass draws.
@@ -166,6 +172,9 @@ pub struct Material3d {
     pub side: Side,
     pub wireframe: bool,
     pub maps: MaterialMaps,
+    /// A glTF material's state beyond these fields (its class parameters,
+    /// file maps, vertex colors, alpha test); `None` for scene materials.
+    pub ext: Option<Arc<super::gltf::MaterialExt>>,
 }
 
 impl Material3d {
@@ -185,6 +194,7 @@ impl Material3d {
             side: Side::Front,
             wireframe: false,
             maps: MaterialMaps::default(),
+            ext: None,
         }
     }
 
@@ -208,6 +218,7 @@ impl Material3d {
             side: Side::Front,
             wireframe: true,
             maps: MaterialMaps::default(),
+            ext: None,
         }
     }
 
@@ -251,6 +262,9 @@ pub struct Geometry3d {
     pub geometry: Arc<Geometry>,
     /// `geometry.computeBoundingSphere()`: center and radius.
     pub sphere: ([f64; 3], f64),
+    /// A glTF geometry's other attributes (tangents, colors, secondary UV
+    /// sets, skin attributes, morph targets, primitive mode).
+    pub extra: Option<Arc<super::gltf::VertexExtra>>,
 }
 
 /// `BufferGeometry.computeBoundingSphere()`: the bounding box center and
@@ -303,6 +317,9 @@ pub struct Mesh3d {
     pub materials: Materials,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// A glTF drawable's state (mode, skinning, instances, morph
+    /// influences, culling sphere, sort id); `None` for scene meshes.
+    pub gltf: Option<Arc<super::gltf::MeshExt>>,
 }
 
 /// A scene object (one layer, or one object of a legacy scene).
@@ -432,6 +449,10 @@ impl Scene3d {
             return;
         }
         let edit = |m: &mut Material3d| {
+            // `render(look)` edits mesh materials only (not points or lines).
+            if matches!(m.kind, MaterialKind::Points | MaterialKind::Line) {
+                return;
+            }
             if look.wireframe {
                 m.wireframe = true;
             }
@@ -496,8 +517,11 @@ pub enum ModelLookup {
         key: u64,
         mesh: Arc<pm_geom3d::obj::ObjMesh>,
     },
-    /// A glTF scene (`asset.object3d`): drawn by the glTF lane's loader.
-    Imported,
+    /// A glTF or GLB scene (`asset.object3d`).
+    Gltf(Arc<super::gltf::GltfAsset>),
+    /// A glTF or GLB file this engine does not load although the importer
+    /// accepted it (routed to the legacy engine).
+    Unloadable(String),
 }
 
 /// How a scene finds model assets.
@@ -712,6 +736,10 @@ pub fn source_of(source: &Map) -> Result<Source, Unsupported> {
 #[derive(Default)]
 pub struct SceneBuilder {
     geometries: GeometryCache,
+    /// Mixer time of imported models per object id (`time − layer.from`),
+    /// and the time of the others.
+    animation: HashMap<String, f64>,
+    animation_default: f64,
 }
 
 /// A bounding sphere: center and radius.
@@ -743,6 +771,13 @@ pub struct LayerFacts {
 }
 
 impl SceneBuilder {
+    /// The mixer time of imported models: `per_object[id]`, else `default`
+    /// (`mixer.setTime(max(0, animationTime(id) ?? time))`).
+    pub fn set_animation_times(&mut self, default: f64, per_object: HashMap<String, f64>) {
+        self.animation_default = default;
+        self.animation = per_object;
+    }
+
     fn geometry(&mut self, source: &Source) -> Geometry3d {
         let mut identity = Vec::new();
         source.write_key(&mut identity);
@@ -763,6 +798,7 @@ impl SceneBuilder {
                 key,
                 geometry: g.clone(),
                 sphere: *sphere,
+                extra: None,
             };
         }
         static SHARED: std::sync::OnceLock<std::sync::Mutex<GeometryCache>> =
@@ -788,6 +824,7 @@ impl SceneBuilder {
             key,
             geometry: g,
             sphere,
+            extra: None,
         }
     }
 
@@ -899,6 +936,7 @@ impl SceneBuilder {
             side: if double { Side::Double } else { Side::Front },
             wireframe: false,
             maps,
+            ext: None,
         })
     }
 
@@ -925,6 +963,10 @@ impl SceneBuilder {
         let nodes = arr(scene, "objects");
         let mut locals: HashMap<String, (Mat4, bool, Option<String>)> = HashMap::new();
         let mut objects = Vec::new();
+        // Imported models to place once world matrices are known: object
+        // index, asset, materials, use-source flag.
+        let mut imported: Vec<(usize, Arc<super::gltf::GltfAsset>, Materials, bool)> = Vec::new();
+        let mut imported_vertices = 0usize;
         for node in nodes {
             let Value::Object(node) = node else {
                 continue;
@@ -948,9 +990,19 @@ impl SceneBuilder {
             let cast = boolean(node, "castShadow") != Some(false);
             let receive = boolean(node, "receiveShadow") != Some(false);
             let mut missing = false;
+            let mut gltf_asset = None;
             let materials = if let Some(asset) = text(source, "assetId") {
                 match models.model(&asset) {
-                    ModelLookup::Imported => return Err("imported models".into()),
+                    ModelLookup::Gltf(a) => {
+                        imported_vertices += a.model.vertices;
+                        gltf_asset = Some(a);
+                        Some(self.geometry(&Source::Primitive(pm_geom3d::Primitive::Box {
+                            width: 1.0,
+                            height: 1.0,
+                            depth: 1.0,
+                        })))
+                    }
+                    ModelLookup::Unloadable(why) => return Err(why),
                     ModelLookup::Missing => {
                         warnings.push(format!("Missing model: {asset}"));
                         missing = true;
@@ -1015,6 +1067,14 @@ impl SceneBuilder {
                 opacity: 1.0,
                 occludes: true,
             });
+            if let Some(a) = gltf_asset {
+                imported.push((
+                    objects.len(),
+                    a,
+                    materials.clone(),
+                    use_source && slots.is_empty(),
+                ));
+            }
             objects.push(Object3d {
                 id,
                 visible,
@@ -1025,6 +1085,7 @@ impl SceneBuilder {
                     materials,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    gltf: None,
                 }],
                 layer_opacity: fact.opacity,
                 occludes: fact.occludes,
@@ -1064,8 +1125,50 @@ impl SceneBuilder {
                 mesh.world = world;
             }
         }
-        // Lights.
+        if imported_vertices > 2_000_000 {
+            return Err("an imported scene over two million vertices".into());
+        }
+        // Imported models: drawables and embedded lights at their mixer time.
+        let mut embedded = Vec::new();
+        for (index, asset, materials, use_source) in imported {
+            let o = &mut objects[index];
+            let time = self
+                .animation
+                .get(&o.id)
+                .copied()
+                .unwrap_or(self.animation_default);
+            let rule = match (&materials, use_source) {
+                (_, true) => super::gltf::Override::Source,
+                (Materials::Single(m), false) => super::gltf::Override::Single(m),
+                (Materials::Slots(list), false) => super::gltf::Override::Slots(list),
+            };
+            let (cast, receive) = o
+                .meshes
+                .first()
+                .map_or((true, true), |m| (m.cast_shadow, m.receive_shadow));
+            let world = o.meshes.first().map_or(math::IDENTITY, |m| m.world);
+            let instance = super::gltf::instantiate(
+                &asset,
+                &o.id,
+                index,
+                &world,
+                js::max(0.0, time),
+                o.visible,
+                rule,
+                cast,
+                receive,
+            );
+            o.meshes = instance.meshes;
+            embedded.extend(instance.lights);
+        }
+        // Lights. Embedded lights follow the scene's light layers in a
+        // composition (its objects move after the lights) and precede them
+        // in a legacy scene (objects are created first).
         let mut lights = Vec::new();
+        let embedded_first = matches!(placement, Placement::Channels);
+        if embedded_first {
+            lights.append(&mut embedded);
+        }
         let mut shadow_lights = 0;
         for node in arr(scene, "lights") {
             let Value::Object(node) = node else {
@@ -1123,6 +1226,7 @@ impl SceneBuilder {
                 cast_shadow: cast && kind != LightKind::RectArea,
             });
         }
+        lights.append(&mut embedded);
         // Camera.
         let camera = obj(scene, "camera").ok_or("the 3D camera")?;
         let c = values(obj(camera, "p"), "camera", channels);
@@ -1193,6 +1297,7 @@ pub fn obj_geometry(key: u64, mesh: &pm_geom3d::obj::ObjMesh) -> Geometry3d {
         key,
         geometry: Arc::new(g),
         sphere,
+        extra: None,
     }
 }
 

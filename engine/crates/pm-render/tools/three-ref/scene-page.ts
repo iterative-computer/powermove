@@ -9,6 +9,7 @@
 // every linked program's sources and every draw's uniform values.
 import * as THREE from '../../../../../apps/desktop/node_modules/three/build/three.module.js';
 import { SceneRuntime } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/runtime';
+import { loadGltf } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/import-model';
 
 type Uniforms = Record<string, number[]>;
 type Program = { id: number; vertex: string; fragment: string };
@@ -80,6 +81,8 @@ function hook() {
   };
   wrap('drawElements', (args, _, gl) => draw(args, gl));
   wrap('drawArrays', (args, _, gl) => draw([args[0], args[2]], gl));
+  wrap('drawElementsInstanced', (args, _, gl) => draw(args, gl));
+  wrap('drawArraysInstanced', (args, _, gl) => draw([args[0], args[2]], gl));
 }
 hook();
 
@@ -115,8 +118,15 @@ async function renderCase(c: any) {
     // The asset store decodes images with `createImageBitmap(blob)`.
     assets.set(id, { kind: 'image', bitmap: await createImageBitmap(blob) });
   }
+  // Model assets through the production importer (glTF cases).
+  for (const [id, file] of Object.entries<string>(c.models || {})) {
+    const blob = await (await fetch(`/models/${encodeURIComponent(file)}`)).blob();
+    assets.set(id, { id, kind: 'model', format: /\.gltf$/i.test(file) ? 'gltf' : 'glb', blob, ...(await loadGltf(blob)) });
+  }
   const runtime = new SceneRuntime();
-  runtime.sync(c.scene, (id: string) => assets.get(id) ?? null, (p: any) => p.v, 0, true);
+  const time = c.time ?? 0;
+  const animationTime = c.animationTimes ? (id: string) => c.animationTimes[id] ?? time : undefined;
+  runtime.sync(c.scene, (id: string) => assets.get(id) ?? null, (p: any) => p.v, time, true, animationTime);
   if (c.matrices) {
     for (const [id, m] of Object.entries<number[]>(c.matrices)) {
       const object = runtime.objects.get(id)!;
@@ -174,8 +184,78 @@ async function renderCase(c: any) {
     }));
     outputs.push({ draws: recorded.length });
   }
+  if (c.models) await post(`x/${c.id}/pose.json`, JSON.stringify(poses(runtime, c)));
+  if (c.picks) await post(`x/${c.id}/picks.json`, JSON.stringify(picks(runtime, c)));
   runtime.dispose();
   return { id: c.id, outputs };
+}
+
+/**
+ * The posed drawables of every model layer (traverse order): kind, world
+ * matrix, morph influences, skinning (`bindMatrixInverse`, `boneMatrices`),
+ * instance matrices, and embedded lights with their targets.
+ */
+function poses(runtime: SceneRuntime, c: any) {
+  runtime.scene.updateMatrixWorld(true);
+  const out: any = {};
+  for (const [id, object] of runtime.objects) {
+    const node = c.scene.objects?.find((o: any) => o.id === id);
+    if (!node || !('assetId' in node.source)) continue;
+    const meshes: any[] = [], lights: any[] = [];
+    object.traverse((o: any) => {
+      if (o.isMesh || o.isPoints || o.isLine) {
+        const kind = o.isSkinnedMesh ? 'skinned' : o.isInstancedMesh ? 'instanced' : o.isPoints ? 'points' : o.isLineLoop ? 'lineLoop'
+          : o.isLineSegments ? 'lineSegments' : o.isLine ? 'line' : 'mesh';
+        const m: any = { name: o.name, kind, matrixWorld: Array.from(o.matrixWorld.elements), influences: o.morphTargetInfluences ? Array.from(o.morphTargetInfluences) : null };
+        if (o.isSkinnedMesh && o.skeleton) {
+          o.skeleton.update();
+          m.bindMatrixInverse = Array.from(o.bindMatrixInverse.elements);
+          m.boneMatrices = Array.from(o.skeleton.boneMatrices);
+        }
+        if (o.isInstancedMesh) m.instanceMatrix = Array.from(o.instanceMatrix.array);
+        meshes.push(m);
+      }
+      if (o.isLight) lights.push({ name: o.name, matrixWorld: Array.from(o.matrixWorld.elements), target: o.target ? Array.from(o.target.matrixWorld.elements) : null,
+        color: o.color.toArray(), intensity: o.intensity, distance: o.distance ?? null, angle: o.angle ?? null, penumbra: o.penumbra ?? null });
+    });
+    out[id] = { meshes, lights };
+  }
+  return out;
+}
+
+/**
+ * three.js raycasts against the model layers on a grid of rays (the
+ * engine's picks are compared with these): skinned bounding volumes are
+ * recomputed for the current pose first (production keeps the first
+ * pose's; spike S7 defect 5); hits as `runtime.pick` filters them.
+ */
+function picks(runtime: SceneRuntime, c: any) {
+  runtime.resizeCamera(c.width, c.height);
+  runtime.scene.updateMatrixWorld(true);
+  const models: any[] = [];
+  for (const [id, object] of runtime.objects) {
+    const node = c.scene.objects?.find((o: any) => o.id === id);
+    if (node && 'assetId' in node.source) models.push(object);
+  }
+  for (const m of models) m.traverse((o: any) => { if (o.isSkinnedMesh) { o.computeBoundingSphere(); o.computeBoundingBox(); } });
+  const ray = new THREE.Raycaster(), rays: any[] = [];
+  for (let j = 0; j < c.picks.rows; j++) for (let i = 0; i < c.picks.cols; i++) {
+    const x = ((i + 0.5) / c.picks.cols) * 2 - 1, y = 1 - ((j + 0.5) / c.picks.rows) * 2;
+    ray.setFromCamera(new THREE.Vector2(x, y), runtime.camera);
+    let hit: any = null;
+    for (const h of ray.intersectObjects(models, true)) {
+      if (!h.object.visible || !h.object.userData.sceneId) continue;
+      const materials = (h.object as any).material;
+      if (materials && (Array.isArray(materials) ? materials : [materials]).every((m: any) => m.opacity <= 0)) continue;
+      let visible = true, parent: any = h.object;
+      while (parent) { if (!parent.visible) visible = false; parent = parent.parent; }
+      if (visible) { hit = h; break; }
+    }
+    rays.push({ x, y, origin: ray.ray.origin.toArray(), direction: ray.ray.direction.toArray(),
+      hit: hit && { layer: hit.object.userData.sceneId, object: hit.object.name, distance: hit.distance, faceIndex: hit.faceIndex ?? null,
+        index: hit.index ?? null, instanceId: hit.instanceId ?? null } });
+  }
+  return { near: ray.near, far: ray.far, rays };
 }
 
 // A legacy OBJ mesh layer as `meshExtensionQuad` draws it: the compositor's

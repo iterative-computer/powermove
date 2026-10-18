@@ -385,6 +385,10 @@ fn our_draws(c: &Case) -> Vec<(usize, Vec<DrawDesc>)> {
                     draws.extend(d);
                 }
             }
+            PassDesc::Transmission { opaque, back, .. } => {
+                draws.extend(opaque);
+                draws.extend(back);
+            }
             PassDesc::Prepass(d) | PassDesc::Color { draws: d, .. } => draws.extend(d),
         };
         match &plan.kind {

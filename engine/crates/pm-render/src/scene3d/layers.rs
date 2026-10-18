@@ -142,16 +142,19 @@ impl super::model::ModelSource for DocumentModels<'_> {
         let name = str_member(Some(record), "name")
             .unwrap_or_default()
             .to_ascii_lowercase();
-        match format.as_str() {
-            "gltf" | "glb" => return ModelLookup::Imported,
-            "obj" => {}
-            _ if name.ends_with(".glb") || name.ends_with(".gltf") => return ModelLookup::Imported,
-            _ if name.ends_with(".obj") => {}
+        let gltf = match format.as_str() {
+            "gltf" | "glb" => true,
+            "obj" => false,
+            _ if name.ends_with(".glb") || name.ends_with(".gltf") => true,
+            _ if name.ends_with(".obj") => false,
             _ => return ModelLookup::Missing,
-        }
+        };
         let Some(path) = self.assets.path(asset, Some(record)) else {
             return ModelLookup::Missing;
         };
+        if gltf {
+            return super::gltf::lookup(&path);
+        }
         match super::legacy::obj_mesh_versioned(&path) {
             Ok((key, mesh)) => ModelLookup::Obj { key, mesh },
             Err(_) => ModelLookup::Missing,
@@ -239,6 +242,18 @@ fn composition_scene<'d>(
     let textures = DocumentTextures { root, assets };
     let models = DocumentModels { root, assets };
     let mut builder = SceneBuilder::default();
+    // Imported models' mixers: `time − layer.from` per layer
+    // (`compositionRuntime`'s `animationTime`).
+    let starts: HashMap<String, f64> = layers
+        .iter()
+        .map(|l| {
+            let from = node::number(node::member(Some(l), "from"))
+                .filter(|f| *f != 0.0 && !f.is_nan())
+                .unwrap_or(0.0);
+            (js::layer_id(l), time - from)
+        })
+        .collect();
+    builder.set_animation_times(time, starts);
     let built = builder.build(
         scene,
         width,
@@ -530,7 +545,8 @@ fn check_object(
     if let Some(a) = str_member(source, "assetId")
         && let Some(record) = asset(&a)
     {
-        // An imported glTF scene is the glTF lane's; OBJ models draw
+        // Imported glTF scenes draw here when this engine loads the file
+        // (an offline file is a missing model, as today); OBJ models draw
         // here, other assets as the missing-model box.
         let format = str_member(Some(record), "format").unwrap_or_default();
         let name = str_member(Some(record), "name")
@@ -539,7 +555,16 @@ fn check_object(
         if matches!(format.as_str(), "gltf" | "glb")
             || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
         {
-            out.push("imported models".to_owned());
+            match assets.and_then(|r| r.path(&a, Some(record))) {
+                Some(path) => {
+                    if let super::model::ModelLookup::Unloadable(why) = super::gltf::lookup(&path) {
+                        out.push(why);
+                    }
+                }
+                // Without media the file cannot be checked: routed.
+                None if assets.is_none() => out.push("imported models".to_owned()),
+                None => {}
+            }
         }
     }
     if let Some(p) = str_member(source, "primitive")
@@ -689,7 +714,11 @@ pub(crate) fn legacy_scene<'d>(
         channels,
         error: None,
     };
-    let built = SceneBuilder::default().build(
+    // A legacy scene syncs at `time − layer.from` (every model's mixer).
+    let mut builder = SceneBuilder::default();
+    let from = node::number(node::member(Some(layer), "from")).unwrap_or(0.0);
+    builder.set_animation_times(time - from, HashMap::new());
+    let built = builder.build(
         &scene,
         width,
         height,

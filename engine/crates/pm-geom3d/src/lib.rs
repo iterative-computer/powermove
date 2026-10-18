@@ -8,11 +8,14 @@
 //! [`earcut`] port), mesh sources ([`source`]), and `computeVertexNormals`
 //! ([`normals`]). [`obj`] parses Wavefront OBJ files as the kernel's
 //! `parseObj` does for legacy mesh layers; [`layering`] holds the 3D depth
-//! sets and composition ordering of plan section 8. glTF, BVH picking, and
-//! recipe parts are the glTF lane's (the S7 prototype,
-//! `engine/spikes/s7-3d/crates/s7-geom3d`).
+//! sets and composition ordering of plan section 8. [`gltf`] loads glTF and
+//! GLB models as three.js r180's `GLTFLoader` and today's importer do,
+//! animates them with the `AnimationMixer` rule, and picks posed models
+//! (skinned, morphed, instanced, points, lines). Recipe parts are another
+//! lane's.
 
 pub mod earcut;
+pub mod gltf;
 pub mod layering;
 pub mod normals;
 pub mod obj;
