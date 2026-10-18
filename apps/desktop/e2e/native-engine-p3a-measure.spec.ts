@@ -1,0 +1,222 @@
+/*
+ * Phase 3a performance rows measured in the app with "Use New Engine" on
+ * (plan section 25; docs/engine/phase3a-gate.md):
+ *
+ * - "UHD ProRes 422 HQ, 3 layers with blur: real time at 23.976, 29.97,
+ *   59.94 on Pro; zero drops over 60 s; same with linear blending on".
+ *   Three 3840 × 2160 ProRes 422 HQ layers, each a different 4 s section of
+ *   one 12 s clip (three decodes per frame), each with a Gaussian blur, in
+ *   a 4 s composition at the clip's rate, played looping for 60 s. Every
+ *   timed frame the presentation shows is counted: a composition frame
+ *   skipped between two shown frames is a drop, and so is anything the
+ *   presenter reports dropped (a frame replaced by a newer revision of
+ *   itself is not: it is shown).
+ * - Routing evidence for the canvas text typing row: a canvas text layer
+ *   routes to the current engine (`route` and `routeReason` as the engine
+ *   connection reports them).
+ *
+ * The clips are generated outside the repository (docs/engine/phase3a-gate.md):
+ *   ffmpeg -f lavfi -i "testsrc2=size=3840x2160:rate=30000/1001,noise=alls=12:allf=t" -t 12 \
+ *     -c:v prores_videotoolbox -profile:v hq -pix_fmt p210le \
+ *     -color_primaries bt709 -color_trc bt709 -colorspace bt709 prores422hq-2160p-2997.mov
+ * (and 24000/1001 → -23976, 60000/1001 → -5994) in $PM_P3A_MEDIA. Media
+ * is linked, not copied, into the disposable profile.
+ *
+ * Opt in (heavy; one Electron at a time):
+ *   PM_P3A_MEASURE=1 pm-electron-lock bunx playwright test e2e/native-engine-p3a-measure.spec.ts --workers=1
+ * Results go to $PM_P3A_MEASURE_OUT (JSON lines; default
+ * /tmp/powermove-p3a-measure.jsonl), never into the repository.
+ */
+import { existsSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import type { Page } from 'playwright';
+
+import { expect, test } from './helpers/app';
+
+const ON = { POWERMOVE_NEW_ENGINE: '1' };
+const OUT = process.env.PM_P3A_MEASURE_OUT ?? path.join(os.tmpdir(), 'powermove-p3a-measure.jsonl');
+const MEDIA = process.env.PM_P3A_MEDIA ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/scratch/p3agate');
+const SECONDS = Number(process.env.PM_P3A_SECONDS ?? 60);
+
+test.skip(!process.env.PM_P3A_MEASURE, 'measurements run on request (PM_P3A_MEASURE=1)');
+
+async function record(row: string, value: unknown): Promise<void> {
+  const line = JSON.stringify({ row, at: new Date().toISOString(), cpu: os.cpus()[0]?.model ?? null, load: os.loadavg(), value });
+  await appendFile(OUT, `${line}\n`);
+  console.log(`[measure] ${row}: ${JSON.stringify(value)}`);
+}
+
+const status = (page: Page): Promise<any> => page.evaluate(() => (window as any).PM.EngineConnection.status());
+
+/** Waits until the engine connection has decided this composition's route. */
+async function settledRoute(page: Page, timeout = 120_000): Promise<any> {
+  const deadline = Date.now() + timeout;
+  let last: any = null;
+  while (Date.now() < deadline) {
+    last = await status(page);
+    if (last?.route === 'engine') {
+      const presenting = await page.evaluate(() => !!(window as any).PM.Kernel.services.get('viewer').enginePresentation?.presenting);
+      if (presenting) return last;
+    } else if (last?.route === 'legacy') {
+      // Give a routing decision time to settle (a route can pass through legacy while loading).
+      await page.waitForTimeout(3000);
+      return await status(page);
+    }
+    await page.waitForTimeout(250);
+  }
+  return last;
+}
+
+const RATES = [
+  { name: '23.976', num: 24000, den: 1001, file: 'prores422hq-2160p-23976.mov' },
+  { name: '29.97', num: 30000, den: 1001, file: 'prores422hq-2160p-2997.mov' },
+  { name: '59.94', num: 60000, den: 1001, file: 'prores422hq-2160p-5994.mov' }
+];
+
+test.describe('Use New Engine: Phase 3a measurements', () => {
+  test.use({ desktopLaunchOptions: { env: ON } });
+
+  for (const rate of RATES) {
+    for (const linear of [false, true]) {
+      test(`UHD ProRes 422 HQ, 3 layers with blur, ${rate.name} fps${linear ? ', linear blending' : ''}`, async ({ session }) => {
+        test.setTimeout(SECONDS * 1000 + 360_000);
+        const file = path.join(MEDIA, rate.file);
+        test.skip(!existsSync(file), `generate ${file} first (see the header)`);
+        const { page } = session;
+        await session.openEditor();
+        await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+        await page.evaluate(({ num, den }) => {
+          const PM = (window as any).PM;
+          PM.HostMedia?.setProjectStorage?.('link');
+          const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: 4, bg: '#000000' });
+          project.fpsRational = { num, den };
+          PM.replaceProject(project);
+          PM.setTime(0);
+        }, { num: rate.num, den: rate.den });
+        const chooser = page.waitForEvent('filechooser');
+        await page.evaluate(() => (window as any).PM.pickFiles());
+        await (await chooser).setFiles(file);
+        await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'), undefined, { timeout: 180_000 });
+        const built = await page.evaluate(({ linear }) => {
+          const PM = (window as any).PM;
+          const first = PM.proj.layers.find((l: any) => l.type === 'video');
+          const asset = first.d.asset;
+          // Two more layers of the same clip, 4 s and 8 s into it.
+          for (const trim of [4, 8]) {
+            PM.Edit.apply({ type: 'add_layer', layerType: 'video', name: `UHD ${trim}`, content: { asset, fit: 'contain', w: 3840, h: 2160, trim, speed: 1 } }, { origin: 'panel', label: 'Add layer' });
+          }
+          const videos = PM.proj.layers.filter((l: any) => l.type === 'video');
+          for (const layer of videos) {
+            PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0, duration: 4 } }, { origin: 'panel', label: 'Timing' });
+            PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'blur', parameters: { amount: 24 } }, { origin: 'panel', label: 'Add effect' });
+          }
+          // Lower layers show through: each upper layer at 60% opacity.
+          videos.slice(1).forEach((layer: any) => PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 60 }, { origin: 'panel', label: 'Opacity' }));
+          if (linear) {
+            const next = { mode: 'standard', linearBlending: true, precision: 'float16', blendDomain: 'hdrSafe' };
+            const apply = () => { PM.proj.color = next; };
+            if (PM.hist?.do) PM.hist.do('Blend in linear light', apply);
+            else apply();
+            PM.touch?.();
+            PM.bus?.emit?.('project');
+            PM.invalidate?.('render');
+          }
+          return {
+            layers: PM.proj.layers.map((l: any) => ({ type: l.type, trim: l.d?.trim, from: l.from, dur: l.dur, fx: (l.fx ?? []).map((f: any) => f.type), asset: l.d?.asset })),
+            color: PM.proj.color ?? null,
+            fps: PM.proj.fps
+          };
+        }, { linear });
+        expect(built.layers.filter((l: any) => l.type === 'video')).toHaveLength(3);
+        const routed = await settledRoute(page);
+        if (routed?.route !== 'engine') {
+          await record(`uhd-prores-3-blur-${rate.name}${linear ? '-linear' : ''}`, { built, route: routed?.route ?? null, routeReason: routed?.routeReason ?? null, failures: routed?.failures ?? null });
+          throw new Error(`the composition routes to ${routed?.route}`);
+        }
+        const result = await page.evaluate(async ({ seconds, ticks }) => {
+          const PM = (window as any).PM;
+          const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+          const fps = PM.proj.fps;
+          const frameTicks = ticks / fps;
+          const frames = Math.round(PM.proj.dur * fps);
+          PM.loop = true;
+          PM.setTime(0);
+          PM.play();
+          // Warm up: the decoders and the first loop.
+          await new Promise((r) => setTimeout(r, 3000));
+          const before = presentation.stats();
+          let shown = 0;
+          let previous = -1;
+          let skipped = 0;
+          let repeats = 0;
+          const intervals: number[] = [];
+          let lastDisplay: number | null = null;
+          const off = presentation.onPresented((f: any) => {
+            if (!f.timed) return;
+            shown++;
+            const k = Math.round(f.pts / frameTicks) % frames;
+            if (previous >= 0) {
+              const step = (k - previous + frames) % frames;
+              if (step === 0) repeats++;
+              else if (step > 1) skipped += step - 1;
+            }
+            previous = k;
+            if (f.displayUs != null) {
+              if (lastDisplay !== null) intervals.push((f.displayUs - lastDisplay) / 1000);
+              lastDisplay = f.displayUs;
+            }
+          });
+          const t0 = performance.now();
+          await new Promise((r) => setTimeout(r, seconds * 1000));
+          off();
+          const elapsed = (performance.now() - t0) / 1000;
+          const after = presentation.stats();
+          PM.pause();
+          const sorted = intervals.sort((a, b) => a - b);
+          const at = (p: number) => sorted.length ? +sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!.toFixed(2) : null;
+          return { elapsed, expected: Math.round(elapsed * fps), shown, skipped, repeats, before, after, intervalMs: { n: sorted.length, p50: at(0.5), p99: at(0.99), max: at(1) } };
+        }, { seconds: SECONDS, ticks: 705_600_000 });
+        const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+        const dropped = (s: any) => Object.entries(s?.dropped ?? {}).filter(([reason]) => reason !== 'replaced').reduce((a: number, [, b]: [string, any]) => a + Number(b), 0);
+        const presenterDropped = dropped(result.after) - dropped(result.before);
+        await record(`uhd-prores-3-blur-${rate.name}${linear ? '-linear' : ''}`, {
+          seconds: result.elapsed,
+          expectedFrames: result.expected,
+          shownFrames: result.shown,
+          skippedFrames: result.skipped,
+          repeatedFrames: result.repeats,
+          presenterDropped,
+          presenterDroppedByReason: result.after?.dropped ?? null,
+          displayIntervalMs: result.intervalMs,
+          engine: {
+            lateSkipped: report?.presenter?.lateSkipped ?? null,
+            renderErrors: report?.presenter?.renderErrors ?? null,
+            layerFailures: report?.presenter?.layerFailures ?? null,
+            composeUsMax: report?.presenter?.composeUsMax ?? null,
+            composeUsMean: report?.presenter?.documentFrames ? Math.round(report.presenter.composeUsTotal / report.presenter.documentFrames) : null
+          },
+          built
+        });
+        expect(result.shown).toBeGreaterThan(0);
+      });
+    }
+  }
+
+  test('routing: a canvas text layer', async ({ session }) => {
+    test.setTimeout(300_000);
+    const { page } = session;
+    await session.openEditor();
+    await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.replaceProject(PM.mkProject({ name: 'Typing', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000' }));
+      PM.Edit.apply({ type: 'add_layer', id: 'p3a-title', layerType: 'text', content: { text: 'Typing' } }, { origin: 'panel', label: 'Add text' });
+    });
+    const text = await settledRoute(page);
+    await record('route-canvas-text', { route: text?.route ?? null, routeReason: text?.routeReason ?? null, failures: text?.failures ?? null });
+    expect(text?.route).toBeTruthy();
+  });
+});

@@ -148,7 +148,11 @@ const RUNS = [
   // connection draws a synthetic project of slice features (Use New
   // Engine on); "today" is the WebGL viewer on the same project. Summaries
   // go to docs/engine/tracer-measurements/.
-  ...tracerRuns()
+  ...tracerRuns(),
+  // Phase 3a (docs/engine/phase3a-gate.md): layer drag on the 884-layer
+  // project (the corpus perf copy), today and with Use New Engine on, idle.
+  { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'docs/engine/phase3a-gate-measurements' },
+  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' }
 ];
 
 /** The tracer's runs: layer drag on 500 layers (engine and today, idle and
@@ -985,7 +989,7 @@ try {
       process.stdout.write(`   analysis failed: ${error.message}\n${(raw.log ?? []).slice(-15).join('\n')}\n`);
       continue;
     }
-    const dir = run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
+    const dir = run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;
