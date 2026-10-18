@@ -14,6 +14,8 @@ export interface ContractCall {
   runId: string;
   tool: string;
   arguments: Record<string, unknown>;
+  /** The call answers with an error on both hosts (the same error). */
+  fails?: true;
 }
 
 /** Counter ids and a fixed clock, installed on `window.PM` (self-contained: Playwright sends its source). */
@@ -35,7 +37,11 @@ export function deterministicSeam(): void {
 
 const L = (id: string) => id;
 
-/** Document tools only (no pixels, no DOM, no jobs): the document host's route. */
+/**
+ * Document tools only (no pixels, no DOM, no jobs): the document host's
+ * route. get_workspace_state is compared separately (its document fields;
+ * the rest describes an editor window, WORKSPACE_DOCUMENT_FIELDS).
+ */
 export const CONTRACT_SEQUENCE: ContractCall[] = [
   { runId: 'run-1', tool: 'get_project_state', arguments: {} },
   { runId: 'run-1', tool: 'apply_commands', arguments: { label: 'Build the scene', commands: [
@@ -69,6 +75,33 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
   { runId: 'run-1', tool: 'apply_commands', arguments: { label: 'Captions', commands: [
     { type: 'edit_captions', target: 'Lcaps', op: 'move', by: 0.25 },
   ] } },
+  // Type edits that record font-anchor bounds (glyph ink).
+  { runId: 'run-1', tool: 'apply_commands', arguments: { label: 'Type', commands: [
+    { type: 'set_content', target: 'Ltitle', patch: { size: 96 } },
+  ] } },
+  { runId: 'run-1', tool: 'apply_commands', arguments: { label: 'Type 2', commands: [
+    { type: 'set_content', target: 'Ltitle', patch: { weight: 400, tracking: 4 } },
+    { type: 'set_content', target: 'Ltitle', patch: { font: 'Helvetica Neue' } },
+    { type: 'set_property', target: 'Ltitle', path: 'anchor.x', value: 30, time: 0 },
+  ] } },
+  { runId: 'run-1', tool: 'select_layers', arguments: { layerIds: ['Lrig', 'Ltitle'] } },
+  { runId: 'run-1', tool: 'select_layers', arguments: { layerIds: ['Lvoice'], add: true } },
+  { runId: 'run-1', tool: 'select_layers', arguments: { layerIds: ['Lnope'] }, fails: true },
+  { runId: 'run-1', tool: 'validate_effect', arguments: { definition: { id: 'contract.tint', label: 'Tint', group: 'Color', params: [{ k: 'amount', label: 'Amount', def: 0.5, min: 0, max: 1 }],
+    frag: '#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform float u_p0;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) * u_p0; }' } } },
+  { runId: 'run-1', tool: 'validate_effect', arguments: { definition: { id: '', params: [] } }, fails: true },
+  // Clip edits on media the project references (no bytes needed).
+  { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Cut', operation: 'split', layerId: 'Lvoice', at: 2 } },
+  { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Trim', operation: 'trim', layerId: 'Lvoice', start: 0.5, end: 1.75 } },
+  { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Move', operation: 'move', layerId: 'Lvoice', from: 1 } },
+  { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Gain', operation: 'audio', layerId: 'Lvoice', gain: 0.8, fadeIn: 0.25 } },
+  { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Speed', operation: 'speed', layerId: 'Lvoice', speed: 2 }, fails: true },
+  { runId: 'run-1', tool: 'export_captions', arguments: { layerId: 'Lcaps', format: 'srt' } },
+  { runId: 'run-1', tool: 'export_captions', arguments: { layerId: 'Lcaps', format: 'vtt' } },
+  { runId: 'run-1', tool: 'list_media', arguments: {} },
+  { runId: 'run-1', tool: 'generate_captions', arguments: { layerIds: ['Lrig'] }, fails: true },
+  { runId: 'run-1', tool: 'check_project', arguments: {} },
+  { runId: 'run-1', tool: '__mcp_context', arguments: {} },
   { runId: 'run-1', tool: 'get_project_state', arguments: {} },
   { runId: 'run-1', tool: '__finish_run', arguments: { commit: true } },
   { runId: 'run-2', tool: 'apply_commands', arguments: { label: 'Rolled back', commands: [{ type: 'delete_layers', targets: ['Ltitle'] }] } },
@@ -78,3 +111,6 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
   { runId: 'run-3', tool: 'get_project_state', arguments: {} },
   { runId: 'run-3', tool: '__finish_run', arguments: { commit: true } },
 ];
+
+/** get_workspace_state's fields that come from the document and the kernel, not from an editor window. */
+export const WORKSPACE_DOCUMENT_FIELDS = ['project', 'extensions', 'registeredEffects', 'selection', 'errors'] as const;

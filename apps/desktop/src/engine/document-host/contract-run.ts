@@ -6,17 +6,37 @@
  */
 import { canonicalProject, canonicalStringify } from '../../shared/canonical-json';
 import type { AgentToolResponseEvent } from '../../shared/ipc';
-import { CONTRACT_SEQUENCE, type ContractCall } from './contract';
+import { CONTRACT_SEQUENCE, WORKSPACE_DOCUMENT_FIELDS, type ContractCall } from './contract';
+import type { ExtensionRecord } from '../../shared/extensions';
 import { DocumentHostPool } from './pool';
-import { BRIDGE, FIXTURE, WASM, hostServices } from './test-host';
+import { BRIDGE, FIXTURE, WASM, extensionHost, hostServices } from './test-host';
 
 export interface ContractTranscript {
   answers: Array<Omit<AgentToolResponseEvent, 'runId' | 'callId'>>;
   document: string;
+  /** get_workspace_state after the sequence: its document fields (WORKSPACE_DOCUMENT_FIELDS). */
+  workspace?: Record<string, unknown>;
+}
+
+/** The fields of a get_workspace_state answer that both hosts must give alike. */
+export function workspaceDocumentFields(answer: Omit<AgentToolResponseEvent, 'runId' | 'callId'>): Record<string, unknown> {
+  const state = JSON.parse(String((answer.content?.[0] as { text?: string } | undefined)?.text ?? '{}'));
+  return Object.fromEntries(WORKSPACE_DOCUMENT_FIELDS.map((key) => [key, state[key]]));
 }
 
 export const CONTRACT_PROJECT_ID = 'Pcontract';
-export const contractProject = (): Record<string, unknown> => ({ ...structuredClone(FIXTURE), id: CONTRACT_PROJECT_ID, name: 'Contract' });
+/**
+ * The fixture plus a voice-over clip whose media the project references but
+ * neither host has bytes for (media status, clip edits, captions errors).
+ */
+export const contractProject = (): Record<string, unknown> => ({
+  ...structuredClone(FIXTURE), id: CONTRACT_PROJECT_ID, name: 'Contract',
+  assets: { Avoice: { id: 'Avoice', kind: 'audio', name: 'Voice.wav', storageKey: 'media:contract-voice', size: 1024, dur: 6, mime: 'audio/wav' } },
+  layers: [{
+    id: 'Lvoice', type: 'audio', name: 'Voice', from: 0, dur: 6, color: '#7f8cff', on: true, lock: false, solo: false,
+    p: {}, d: { asset: 'Avoice', trim: { v: 0, kf: [], expr: null }, volume: { v: 1, kf: [], expr: null } },
+  }],
+});
 
 /** The answer as both hosts produce it, without the ids that route it. */
 export function answerOf(response: AgentToolResponseEvent | Omit<AgentToolResponseEvent, 'runId' | 'callId'>): Omit<AgentToolResponseEvent, 'runId' | 'callId'> {
@@ -50,17 +70,35 @@ function idsIn(value: unknown, out = new Set<string>()): Set<string> {
  */
 export function normalizeMintedIds(transcript: ContractTranscript, initial: unknown): ContractTranscript {
   const known = idsIn(initial);
-  const serialized = JSON.stringify(transcript);
-  const minted = [...idsIn(transcript)].filter((id) => !known.has(id) && id.length >= 3);
-  minted.sort((a, b) => serialized.indexOf(a) - serialized.indexOf(b));
-  let out = serialized;
-  minted.forEach((id, n) => { out = out.split(id).join(`#${n + 1}`); });
-  return JSON.parse(out);
+  // Generated ids carry digits (`PM.uid`, keys, cues); words that happen to be ids do not count.
+  const minted = [...idsIn(transcript)].filter((id) => !known.has(id) && id.length >= 3 && /\d/.test(id));
+  const names = new Map<string, string>();
+  // Whole string values only (an id never matches inside other text), in
+  // order of first appearance; JSON held in strings is renamed inside.
+  const rename = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      if (minted.includes(value)) {
+        if (!names.has(value)) names.set(value, `#${names.size + 1}`);
+        return names.get(value);
+      }
+      if (value.startsWith('{') || value.startsWith('[')) {
+        try { return JSON.stringify(rename(JSON.parse(value))); } catch { /* not JSON */ }
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map(rename);
+    // A key is renamed only where it names its own entry (`comps: { [id]: { id } }`).
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [minted.includes(k) && (v as { id?: unknown } | null)?.id === k ? (names.get(k) ?? (names.set(k, `#${names.size + 1}`), names.get(k)!)) : k, rename(v)]));
+    return value;
+  };
+  return rename(transcript) as ContractTranscript;
 }
 
-export async function runContractOnWorker(script: string, sequence: ContractCall[] = CONTRACT_SEQUENCE): Promise<ContractTranscript> {
+/** `extensions`: the host's extension list (the desktop's, in the Electron spec). */
+export async function runContractOnWorker(script: string, sequence: ContractCall[] = CONTRACT_SEQUENCE, extensions?: ExtensionRecord[]): Promise<ContractTranscript> {
   const host = hostServices();
   host.seed(CONTRACT_PROJECT_ID, 'Contract', contractProject());
+  if (extensions) host.services.extensions = extensionHost(extensions).service;
   const pool = new DocumentHostPool({
     services: host.services, newEngine: true, script,
     env: { POWERMOVE_PM_WASM: WASM, POWERMOVE_PM_BRIDGE: BRIDGE, POWERMOVE_DOCUMENT_HOST_TEST_SEED: '1' },
@@ -73,8 +111,9 @@ export async function runContractOnWorker(script: string, sequence: ContractCall
       if (typeof response.revision === 'number') revision = response.revision;
       answers.push(answerOf(response));
     }
+    const workspace = workspaceDocumentFields(await pool.call(CONTRACT_PROJECT_ID, { runId: 'run-w', callId: 'contract-workspace', tool: 'get_workspace_state', arguments: {}, baseRevision: revision }));
     await pool.shutdown();
-    return { answers, document: canonicalDocument(host.sessions.document(CONTRACT_PROJECT_ID)) };
+    return { answers, document: canonicalDocument(host.sessions.document(CONTRACT_PROJECT_ID)), workspace };
   } finally {
     await pool.shutdown();
   }

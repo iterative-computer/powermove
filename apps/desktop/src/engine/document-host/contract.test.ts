@@ -17,7 +17,9 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the agent-tool contra
   it('answers every call and leaves the same bytes on every run', async () => {
     const first = await runContractOnWorker(bundle!.script);
     for (const [index, answer] of first.answers.entries()) {
-      expect([CONTRACT_SEQUENCE[index]!.tool, answer.ok, answer.error ?? null]).toEqual([CONTRACT_SEQUENCE[index]!.tool, true, null]);
+      const call = CONTRACT_SEQUENCE[index]!;
+      if (call.fails) expect([index, call.tool, answer.ok, typeof answer.error]).toEqual([index, call.tool, false, 'string']);
+      else expect([index, call.tool, answer.ok, answer.error ?? null]).toEqual([index, call.tool, true, null]);
     }
     const second = await runContractOnWorker(bundle!.script);
     expect(second.document).toBe(first.document);
