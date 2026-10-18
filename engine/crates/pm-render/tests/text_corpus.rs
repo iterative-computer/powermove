@@ -14,6 +14,14 @@
 //! (amendment 19, `docs/engine/text.md`); the registry is seeded the same
 //! way from the capture's device pixel ratio.
 //!
+//! Fonts come the way the engines and `pm-cli` give them: a served
+//! registry (`pm_text::served`) over full fonts, with the capture renderer's
+//! seeds, and level 1 glyphs from CoreGraphics masks. Routing is forbidden
+//! for text: a project the renderer refuses for a text reason fails the
+//! test. Projects refused for features outside text (effects without a
+//! definition, SVG images, masks, motion blur) are listed with their
+//! reasons and left to `tests/corpus.rs`.
+//!
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`); `PM_TEXT_ONLY` limits project names by prefix;
 //! `PM_TEXT_DIFFS=<dir>` writes engine and legacy PNGs of failures.
@@ -54,23 +62,17 @@ fn main() {
             .and_then(|m| serde_json::from_str::<serde_json::Value>(&m).ok())
             .and_then(|m| m["gpu"]["devicePixelRatio"].as_f64())
             .unwrap_or(1.0) as f32;
-        let mut measure =
-            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new());
-        if dpr != 1.0 {
-            measure.compat().set_font_cache_seeds(
-                [12.0f32, 13.0]
-                    .iter()
-                    .map(|&css| pm_text::compat::FontCacheSeed {
-                        family: "system-ui".into(),
-                        weight: 400.0,
-                        italic: false,
-                        size: pm_text::compat::canvas::effective_font_size(css * dpr),
-                        specified: css,
-                    })
-                    .collect(),
-            );
-        }
-        renderer.set_text_fonts(Some(Box::new(text::MainThreadFonts(measure, None))));
+        // The registry served on this thread, as `pm-cli` serves it; the
+        // engines serve it from their main thread to render threads.
+        let server = std::sync::Arc::new(pm_text::served::DirectServer::new(
+            pm_text::registry::CoreTextRegistry::new(),
+            |r| r.generation(),
+        ));
+        let seeds = pm_text::compat::app_ui_font_cache_seeds(&[dpr]);
+        renderer.set_text_fonts(Some(Box::new(pm_render::text::served::ServedFonts::new(
+            server,
+            std::sync::Arc::new(pm_render::text::served::FixedSeeds(seeds)),
+        ))));
         for dir in projects(capture) {
             let p = load_project(capture, &dir);
             if only.as_deref().is_some_and(|o| !p.name.starts_with(o)) {
@@ -86,10 +88,49 @@ fn main() {
                 ));
                 continue;
             }
-            let issues = renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
+            // The capture app had the built-in definitions only.
+            let mut set = pm_render::all_builtin_definitions();
+            set.missing = support::extension_definitions(&p.document)
+                .into_iter()
+                .filter(|id| !set.definitions.iter().any(|d| d.id.as_str() == id))
+                .map(|id| id.as_str().into())
+                .collect();
+            renderer.set_definitions(&set).expect("built-in definitions");
+            let with_fonts =
+                renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
+            let issues: Vec<_> = pm_render::unsupported_with_definitions(
+                &p.document,
+                &p.composition,
+                Some(&p.resolver),
+                renderer.effects(),
+            )
+            .into_iter()
+            // Drawn: the renderer has fonts (the static check without them
+            // lists every text layer).
+            .filter(|u| !matches!(&u.feature, pm_render::Feature::Text(_)))
+            .chain(
+                with_fonts
+                    .into_iter()
+                    .filter(|u| matches!(&u.feature, pm_render::Feature::Text(_))),
+            )
+            .collect();
+            let text_refusals: Vec<String> = issues
+                .iter()
+                .filter(|u| matches!(&u.feature, pm_render::Feature::Text(_)))
+                .map(ToString::to_string)
+                .collect();
+            if !text_refusals.is_empty() {
+                failed.push(format!(
+                    "{}: text refused (routing is forbidden): {}",
+                    p.name,
+                    text_refusals.join("; ")
+                ));
+                continue;
+            }
             if !issues.is_empty() {
                 let mut reasons: Vec<String> =
                     issues.iter().map(|u| u.feature.to_string()).collect();
+                reasons.sort();
                 reasons.dedup();
                 skipped.push((p.name.clone(), reasons.join(", ")));
                 continue;
@@ -104,6 +145,15 @@ fn main() {
                 };
                 let ours = match render(&mut renderer, &p.document) {
                     Ok(o) => o,
+                    Err(pm_render::RenderError::Unsupported(u))
+                        if u.iter().all(|u| !matches!(&u.feature, pm_render::Feature::Text(_))) =>
+                    {
+                        skipped.push((
+                            format!("{} t={}", p.name, s.time),
+                            u.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                        ));
+                        continue;
+                    }
                     Err(e) => {
                         failed.push(format!("{} t={}: render error {e}", p.name, s.time));
                         continue;
@@ -155,7 +205,7 @@ fn main() {
             }
         }
     }
-    println!("\nskipped:");
+    println!("\nnot compared (features outside text; tests/corpus.rs):");
     for (name, why) in &skipped {
         println!("  {name:<36} {why}");
     }
