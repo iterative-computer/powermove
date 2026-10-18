@@ -110,7 +110,8 @@ export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
 export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
   reconnecting: 'Reconnecting to the engine…',
-  gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.'
+  gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
+  unavailable: 'The viewer cannot draw engine frames:'
 } as const;
 
 /** What the viewer decides; the presentation adds what the window knows. */
@@ -482,7 +483,10 @@ export class ViewerPresentation {
       painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
-      this.options.log?.('error', `engine presentation is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log?.('error', `engine presentation is unavailable: ${message}`);
+      // A visible, named failure, never another engine's frames.
+      if (this.exclusive) this.setStatus(`${PRESENTATION_STATUS.unavailable} ${message}`);
       return false;
     }
     if (this.disposed || token !== this.backendToken || this.painter) {

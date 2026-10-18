@@ -619,6 +619,16 @@ describe('ViewerPresentation', () => {
     delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
   });
 
+  it('exclusive: a viewer that cannot draw says so instead of showing another engine', async () => {
+    const service = new Service();
+    Object.assign(service, { exclusive: true });
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => { throw new Error('WebGPU is not available'); } });
+    await settle();
+    expect(presentation.status).toBe(`${PRESENTATION_STATUS.unavailable} WebGPU is not available`);
+    presentation.dispose();
+  });
+
   it('does nothing without WebGPU and says why', async () => {
     const service = new Service();
     const logs: string[] = [];
