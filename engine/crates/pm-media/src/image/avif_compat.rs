@@ -123,10 +123,7 @@ fn colorimetry(image: &a::avifImage) -> Option<String> {
         // Blink converts from the ICC profile instead of the CICP one.
         return Some("AVIF stills with an ICC profile".into());
     }
-    let (p, t) = (
-        image.colorPrimaries as u16,
-        image.transferCharacteristics as u16,
-    );
+    let (p, t) = (image.colorPrimaries, image.transferCharacteristics);
     (!srgb_cicp(p, t)).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
 }
 
