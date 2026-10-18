@@ -211,15 +211,14 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 
 ## Gaps
 
-- Imported glTF scenes, recipe parts (model groups), Blender surfaces, and
-  Studio Cube belong to other lanes and stay routed.
+- Imported glTF scenes draw (docs/engine/gltf.md); recipe parts (model
+  groups) draw since Phase 3c (last section). Blender surfaces and Studio
+  Cube belong to other lanes.
 - Third-party mesh layers render natively only with a definition
   snapshot; the static check routes them until the definition snapshot lane
   delivers them (the built-in OBJ model layer needs none).
-- 3D picks and bounds (`pm-eval`'s `LayerHost` hooks `pick_object`,
-  `object_bounds`, `scene_bounds`, `pick_extension_scene`) still come from
-  the host's three.js runtime (section 26, Phase 1: until 3c). Rectangle
-  picking of mesh layers is `pm-eval`'s `GL.pick` port and needs no 3D.
+- (Done in Phase 3c, see the last section.) 3D picks and bounds came from
+  the host's three.js runtime; pm-eval answers them now.
 - Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` are
   routed by 2D features other lanes own; their 3D behavior is covered by
   the sweep and the document tests.
@@ -289,3 +288,130 @@ answers with the unhydrated legacy evaluator, retains the absolute numeric
 22.5/45 assertions, checks assigned ids, and requires unchanged JSON after
 evaluation and a second hydration. Removing scene adoption fails the expanded
 regression; no easing behavior or renderer tolerance changed.
+
+## Phase 3c: 3D questions and model groups on the engine (3D lane, 2026-10-18)
+
+Plan section 8, appendix C rows C9, C10 and C14 (model groups), amendments
+21 and 22. Code: `engine/crates/pm-geom3d/src/query.rs`,
+`engine/crates/pm-eval/src/query3d.rs` and `recipe.rs`,
+`engine/crates/pm-wasm/src/geometry.rs`,
+`apps/desktop/src/renderer/src/core/scene3d/engine-geometry.ts`.
+
+### What changed
+
+- **pm-wasm answers every 3D question the mirror used to refuse.** The
+  `RefuseHost` is gone. `pm_eval::bounds::LayerHost` no longer has the five
+  three.js hooks; it offers `geometry()` (`pm_eval::query3d::Geometry3d`:
+  model assets, the editor camera, caches), and pm-eval answers:
+  - `GL.pick` on 3D object layers: `compositionRuntime(...).pick(ndc,
+    compositionDepthIds, viewportCamera)`, with Local View;
+  - `GL.bounds` on 3D object layers: `runtime.bounds(proj.w, proj.h, [id],
+    camera)` (the camera resized to the project, as today);
+  - `groups.bounds` / `GL.bounds` on model groups: `modelGroupBounds`,
+    including `z0` and `z1` (`Bounds::z`), and the native `groupPlacement`
+    edit writes the group's `anchor.z` / `position.z` for 3D groups as
+    today;
+  - extension scenes without a background (legacy `powermove.3d.scene`
+    layers and mesh definition layers): `sceneRuntime(...).bounds` and
+    `.pick`, with `parseScene`'s refusals of `sceneForLayer`'s scene (an
+    empty background throws a `ZodError` today and here).
+- **Geometry and semantics** (`pm_geom3d::query`): `Mesh.raycast` step by
+  step (bounding sphere unless it contains the origin, local bounding box,
+  draw range or per-group triangles with each group's material side, a
+  group without a material throws three.js's `TypeError`, an array
+  material on a mesh without groups finds nothing), the closest hit whose
+  object passes `pick`'s filter (visible chain, depth-set ids, not every
+  material at opacity 0); `Raycaster.setFromCamera` for both projections;
+  `worldBounds` (visible meshes' geometry boxes, lights, points, and lines
+  excluded), `Vector3.project`, and `Box3.setFromObject` (posed skinned
+  vertices, instances, points and lines included). Imported glTF models
+  are picked by the glTF lane's kernel (`gltf::pick::Picker`, 7,584 rays
+  equal to three.js) under `sync`'s material rule. Primitive, lathe,
+  extrude and mesh sources come from the bit-identical generators; OBJ
+  models from `obj::parse_obj`; the missing-model box is `BoxGeometry(1, 1,
+  1)`. Triangle meshes keep a BVH (built once per geometry and per source
+  key in the mirror).
+- **Model assets reach the mirror on demand.** A question that meets an
+  asset it lacks answers `{"models": [ids]}`; the renderer adds each one
+  from its asset store as `SceneRuntime.makeObject` reads it (a glTF
+  model's source bytes, kept by `loadGltf` per `object3d`; an OBJ model's
+  text; otherwise "missing", the orange box) and asks again
+  (`resolveModels`). A record that changes (relink, reload, removal) is
+  forgotten and fetched again (`refreshModels`). New ABI: `pm_model_set`,
+  `pm_model_forget`, `pm_models_clear`.
+- **The editor camera and Local View travel with each question**
+  (`geometryRequest`: `matrixWorld`, `matrixWorldInverse`,
+  `projectionMatrix` and its inverse exactly as the renderer holds them,
+  and the lens for questions that resize it). `editorCamera(PM)` gives the
+  camera without building the composition's three.js runtime.
+- **The three.js answer fallback for 3D picks is removed**
+  (`engine-doc/native.ts` no longer returns `fallback: '3d'`); 3D bounds,
+  group bounds, and geometry-dependent edits (`edits.ts`) carry the
+  geometry request too.
+- **Animated model-group recipes draw natively.** `animatedPart` and the
+  recipe geometry (`recipeParts`) moved to `pm_eval::recipe`:
+  `compositionScene` replaces a part's source with the recipe's geometry for
+  the evaluated parameters and moves its transform channels by the new base
+  minus the stored one; `compositionRuntime`'s parent-space offset is
+  `Scope::recipe_world_offset`, used by the render placement and the 3D
+  questions. Staircase steps are `BoxGeometry` through `rotateY`
+  (positions through the matrix, normals through the normal matrix and
+  normalized, stored as f32), extrusions are translated and their normals
+  renormalized as `applyNormalMatrix` does. pm-render no longer lists
+  "model groups" or "model-group recipe parts", pm-wasm's `compositionScene`
+  answers recipe parts, and 3D object, light, and camera layers inside a 3D
+  group draw (they are placed by `world3D` through the group; the
+  `TwoAndAHalfD` reason stays for other layer types).
+
+### Tests and measurements
+
+Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
+
+| Test | What | Result |
+|---|---|---|
+| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm, dual-answer mode against today's `GL.pick`, `GL.bounds`, `PM.groupBounds` with three.js r180) | 5 seeded compositions (every primitive, lathe, extrude with and without bevel, a mesh source with groups and one or two slots, a hand-built animated GLB, an OBJ model, the missing box, untextured Khronos models: `BoxAnimated`, `RiggedSimple`, `RiggedFigure`, `BrainStem`, `RecursiveSkeletons`, `AnimatedMorphCube`, `SimpleInstancing`; keyframed transforms, opacity 0, double-sided, inactive, solo, layer opacity, 2D barriers, plain and model groups, a camera layer; a legacy scene layer with a hierarchy and models, a mesh definition layer, one with an invalid empty background) at 4 times, in the camera view, the editor view (orbited, then orthographic), and Local View | 7,328 compared answers (picks, bounds, group bounds), 0 mismatches, 0 fragile differences, 0 fallbacks; picks hit 472 object layers and 420 extension scenes, 1,009 throws agreed (the invalid background) |
+| same | Animated rocket and staircase recipes: `compositionScene` from pm-wasm against today's at 5 times; picks and bounds in the camera and editor views | Scenes equal (every number exact, key order aside), 0 mismatches, 0 fallbacks |
+| same | Model assets fetched once; a relinked record fetched again; a removed one draws the missing box | Pass |
+| same | Pick latency in wasm (V8, Node), the 7 Khronos models above plus a random composition, a new time per pick (skinned models re-posed), 400 picks, editor view | p50 2.37 ms, p95 2.61 ms, max 3.73 ms |
+| `pm-geom3d` `query` unit tests | Nearest object, depth-set ids, invisible and transparent objects, slots and groups (throw, nothing, hit), back faces by side, projected bounds, `setFromObject`, orthographic rays | Pass |
+| `pm-eval` `tests/layers_unit.rs` `object_picks_raycast_the_scene` | A box seen by the studio camera, a 2D layer below, no geometry host (`HostOnly`), Local View | Pass |
+| `pm-render` `tests/corpus.rs`, capture `threed-modelgroup-20261018-165040` (new corpus project `3d/model-group`, captured through the app) | Animated rocket and staircase recipes in turning 3D groups at 0, 1.5, 3 s | 3 frames: 100% exact outside 3D, 3D bar ≤ 2 CV 100%, max 1 CV, SSIM 0.99998 |
+| `pm-render` `tests/corpus.rs`, `PM_RENDER_ONLY=3d/` (v1 and render captures) | Regression after the capability changes | 30 frames, 0 failed (`3d/motion-blur`, `3d/transparency` still routed by motion blur and masks) |
+| `pm-render` `scene3d_document`, `headless`, `scene3d_layering`, `scene3d_resources` | Capability expectations updated (recipe parts and 3D objects in 3D groups draw) | Pass |
+| `pm-geom3d`, `pm-eval`, `pm-edit`, `pm-wasm` test suites; clippy `-D warnings` | | Pass |
+
+### Known differences from today (history-dependent there)
+
+- Hits at exactly equal distances keep scene order, not the runtime's
+  object insertion history.
+- A skinned model's bounding sphere and box are those of the current pose;
+  three.js caches the first pose it saw (S7 defect 5), so today a ray can
+  miss a skinned model that moved outside its first-pose sphere.
+- The local bounding-box pre-test always runs (three.js runs it only once
+  some bounds question computed the box). It only prunes.
+- Stored legacy scenes that fail `parseScene` (today every question about
+  them throws a `ZodError`) answer instead of throwing; scenes are
+  validated when written, so this needs a corrupted document.
+- An imported model this engine cannot load but three.js can is picked as
+  the missing box (logged); the glTF lane's static check lists such files.
+- Third-party mesh definitions are not known to the mirror (only the
+  built-in OBJ model layer); their layers are bounded as rectangles until
+  the definition snapshots reach pm-wasm.
+
+### What remains (3D lane, Phase 3c)
+
+- The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
+  scene with three.js for occlusion and selection masks; it does not yet
+  read the engine's depth and id surface.
+- Edit Mode, modal transforms, the 3D cursor, navigation framing, snapping,
+  and box select still read the three.js `compositionRuntime`
+  (`controller.ts`, `operators.ts`, `editmode.ts`, `navigation.ts`).
+- The `scene3d` API members are still assembled by `makeScene3DAPI` over
+  today's modeling, rendering, and controller code; `assets.get().object3d`
+  is still the importer's three.js object.
+- Blender: imported glTF models and recipe parts are not built into
+  snapshots (`blender/snapshot.rs` still refuses recipe parts), the editor
+  camera, `previewState`, and agent stills are as in docs/engine/blender.md.
+- 3D layers with masks (`3d/transparency`), 3D motion blur, 3D texture maps
+  outside the drawn still classes and with transparency, and the 3D orbit
+  pointer-to-pixel row are not done here.

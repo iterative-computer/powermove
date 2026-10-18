@@ -151,10 +151,10 @@ repository.
 
 ## Gaps
 
-- `pm-eval`'s 3D picks and bounds (`LayerHost`) still come from the host's
-  three.js runtime: `pm_geom3d::gltf::pick` matches three.js on every
-  tested ray, but wiring it (and primitive picks) into `pm-eval` and the
-  hosts is not done here. The S7 lazy skinned pick (joint-bounded BVH
+- Picks and bounds are wired (docs/engine/scene3d.md, "Phase 3c: 3D
+  questions"): `pm_eval::query3d` asks `pm_geom3d::gltf::pick` through
+  pm-wasm with the editor camera, measured against today's runtime in
+  dual-answer mode on skinned, morphed, and instanced Khronos models. The S7 lazy skinned pick (joint-bounded BVH
   nodes) is not ported; the full re-pose meets the targets natively.
   `pm-geom3d` with the glTF code builds for wasm32-unknown-unknown; picks
   in wasm are not measured.
