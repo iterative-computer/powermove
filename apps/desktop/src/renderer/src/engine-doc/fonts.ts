@@ -23,6 +23,11 @@ export interface FontProvider {
   subset(blob: string, index: number): Uint8Array | Promise<Uint8Array>;
   /** Whether both calls return values directly (no promises). */
   readonly sync: boolean;
+  /** This window's font cache seeds (`{ seeds }` JSON; docs/engine/text.md,
+   *  "The renderer's font cache"). */
+  seeds?(): string | Promise<string>;
+  /** Calls `listener` with the window's seeds whenever they change. */
+  onSeedsChanged?(listener: (json: string) => void): void;
 }
 
 const MAX_ROUNDS = 6;
@@ -80,7 +85,45 @@ export class FontLoader {
   /** Set after MAX_FAILURES failures in a row: the provider is unavailable. */
   disabled = false;
 
+  /** The window's latest font cache seeds, applied to every pm-wasm
+   *  instance (a revived one too). */
+  private seedsJson: string | null = null;
+  private seedsTarget: (() => PmWasm | null) | null = null;
+
   constructor(readonly provider: FontProvider) {}
+
+  /**
+   * Follows the window's font cache seeds: asks once, hears changes, and
+   * applies them to `target()` whenever it is ready (and on `applySeeds`
+   * when an instance starts).
+   */
+  watchSeeds(target: () => PmWasm | null): void {
+    this.seedsTarget = target;
+    const take = (json: unknown) => {
+      if (typeof json !== 'string') return;
+      this.seedsJson = json;
+      const wasm = this.seedsTarget?.();
+      if (wasm) this.applySeeds(wasm);
+    };
+    this.provider.onSeedsChanged?.(take);
+    try {
+      const value = this.provider.seeds?.();
+      if (value instanceof Promise) value.then(take, (error) => console.warn('[engine-doc] font cache seeds unavailable', error));
+      else take(value);
+    } catch (error) {
+      console.warn('[engine-doc] font cache seeds unavailable', error);
+    }
+  }
+
+  /** Gives `wasm` the latest seeds, if any arrived. */
+  applySeeds(wasm: PmWasm): void {
+    if (this.seedsJson === null) return;
+    try {
+      wasm.setFontSeeds(this.seedsJson);
+    } catch (error) {
+      console.warn('[engine-doc] font cache seeds refused', error);
+    }
+  }
 
   /**
    * After a `{fonts}` reply: with a synchronous provider, loads until `retry`

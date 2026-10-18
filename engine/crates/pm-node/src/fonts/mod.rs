@@ -195,7 +195,8 @@ pub struct FontService {
     generation_base: u64,
     /// The editor renderer's font cache seeds, as main last sent them.
     seeds: Vec<pm_text::compat::FontCacheSeed>,
-    /// Main opened a port on this service.
+    /// Main finished replaying to a port (its seeds come last, after the
+    /// open and the project fonts).
     opened: bool,
 }
 
@@ -246,12 +247,12 @@ impl FontService {
             Op::Open => {
                 let args: OpenArgs = parse(json)?;
                 self.generation_base = args.generation_base;
-                self.opened = true;
                 Ok(generation_json(self.generation()))
             }
             Op::Seeds => {
                 let args: SeedsArgs = parse(json)?;
                 self.seeds = seeds(args.seeds)?;
+                self.opened = true;
                 Ok(generation_json(self.generation()))
             }
             Op::Answer => {
@@ -344,7 +345,10 @@ impl FontService {
         &self.seeds
     }
 
-    /// Whether main has opened a port (sent `Op::Open`).
+    /// Whether main has finished its replay on a port: the open, the
+    /// project fonts, then the seeds (`Op::Seeds` goes last), so render
+    /// threads never lay text out before the fonts and seeds main is about
+    /// to send.
     pub fn opened(&self) -> bool {
         self.opened
     }

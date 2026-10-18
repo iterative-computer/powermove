@@ -23,9 +23,9 @@
 //! ends every wait, and the engine host calls it before the presenter and
 //! job lanes are joined.
 //!
-//! Until main has opened a font port (`Op::Open`, followed by its replay of
-//! project fonts and seeds), requests wait for it: a frame is never laid out
-//! without the project fonts and seeds main is about to send. A host that
+//! Until main has finished replaying to a font port (`Op::Open`, the project
+//! fonts, then the seeds, which go last), requests wait for it: a frame is
+//! never laid out without the project fonts and seeds main is about to send. A host that
 //! never opens one makes the requests fail after [`OPEN_TIMEOUT`], and the
 //! layers that needed them are refused (named), never drawn with another
 //! font.

@@ -122,6 +122,8 @@ pub struct Fonts {
     pub(crate) outlines: bool,
     answers: Answers,
     fonts: Vec<(String, u32, FontBytes)>,
+    /// The editor renderer's font cache seeds (amendment 19), from main.
+    seeds: Vec<pm_text::compat::FontCacheSeed>,
     pub(crate) measure: CompatMeasure<ReplayResolver>,
 }
 
@@ -133,6 +135,7 @@ impl Fonts {
             measure: CompatMeasure::new(ReplayResolver::new(&answers)),
             answers,
             fonts: Vec::new(),
+            seeds: Vec::new(),
         }
     }
 
@@ -144,6 +147,9 @@ impl Fonts {
             resolver.add_font(blob, *index, data.clone(), 0);
         }
         self.measure = CompatMeasure::new(resolver);
+        self.measure
+            .compat()
+            .set_font_cache_seeds(self.seeds.clone());
     }
 
     /// Whether the last layout met a query the answers lack, or a face whose
@@ -544,10 +550,34 @@ impl Engine {
     }
 
     /// Drops every answer and face (after a registry generation change).
+    /// The seeds stay: they describe the renderer, not the registry.
     pub fn clear_fonts(&mut self) {
         let outlines = self.fonts.outlines;
+        let seeds = std::mem::take(&mut self.fonts.seeds);
         self.fonts = Fonts::new();
         self.fonts.outlines = outlines;
+        self.fonts.seeds = seeds;
+        self.fonts.rebuild();
+    }
+
+    /// The editor renderer's font cache seeds (`{ seeds: FontCacheSeed[] }`
+    /// or a bare array, main's `engine-fonts:seeds`): level 1 measures as
+    /// that renderer does (amendment 19, docs/engine/text.md). Returns
+    /// whether they changed; a change lays text out again.
+    pub fn set_font_seeds(&mut self, json: &[u8]) -> Result<bool, String> {
+        let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        let list = match value {
+            serde_json::Value::Object(mut o) => o.remove("seeds").unwrap_or_default(),
+            other => other,
+        };
+        let seeds: Vec<pm_text::compat::FontCacheSeed> =
+            serde_json::from_value(list).map_err(|e| e.to_string())?;
+        if seeds == self.fonts.seeds {
+            return Ok(false);
+        }
+        self.fonts.seeds = seeds;
+        self.fonts.rebuild();
+        Ok(true)
     }
 
     /// Declares that the faces added are whole fonts with outlines, so

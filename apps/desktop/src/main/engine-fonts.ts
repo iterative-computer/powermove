@@ -99,6 +99,9 @@ export function registryProvider(registry: NativeFontRegistry): FontsProvider {
 export interface EngineFontsContext {
   /** Main's sender check: an editor window's main frame. */
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
+  /** The sender window's font cache seeds as `{ seeds }` JSON
+   *  (engine-fonts-seeds.ts); without it every renderer is fresh. */
+  seedsFor?(sender: number): string;
 }
 
 export function engineFontsEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -211,6 +214,7 @@ export function registerEngineFontsIpc(ipc: IpcLike, ctx: EngineFontsContext, so
   });
   handle(ENGINE_FONTS_IPC.clearProjectFonts, () => run(() => provider.clearProjectFonts()));
   handle(ENGINE_FONTS_IPC.generation, () => run(() => provider.generation()));
+  handle(ENGINE_FONTS_IPC.seeds, (sender) => run(() => ctx.seedsFor?.(sender) ?? '{"seeds":[]}'));
 }
 
 export interface EngineFontsSetup {
@@ -257,7 +261,8 @@ export const FONT_OP = {
   setFontSource: 7,
   clearProjectFonts: 8,
   generation: 9,
-  familyNames: 10
+  familyNames: 10,
+  seeds: 11
 } as const;
 
 /** Reply statuses (pm-node `fonts::wire::Status`). */
@@ -316,6 +321,9 @@ export type EngineFontClientOptions = {
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
 };
 
+/** No font cache seeds: a fresh renderer. */
+const NO_SEEDS = '{"seeds":[]}';
+
 const MUTATING = new Set<FontOp>([FONT_OP.addProjectFont, FONT_OP.setFontSource, FONT_OP.clearProjectFonts]);
 
 /**
@@ -345,6 +353,13 @@ export class EngineFontClient implements FontsProvider {
   /** Requests waiting for a port, in order. */
   private queue: Pending[] = [];
   private project: ProjectChange[] = [];
+  /** The latest font cache seeds (`{ seeds }` JSON), replayed after the
+   *  project fonts on every new port. They always go out: the engine's
+   *  render threads wait for them as the end of the replay. */
+  private seeds: string = NO_SEEDS;
+  /** Clients that get every project font change and the seeds too (the job
+   *  engine's font port: its exports lay text out with the same fonts). */
+  private mirrors: EngineFontClient[] = [];
   private maxGeneration = 0;
   private readonly log: NonNullable<EngineFontClientOptions['log']>;
   private readonly timeoutMs: number;
@@ -386,6 +401,8 @@ export class EngineFontClient implements FontsProvider {
     const base = this.maxGeneration + 1;
     this.send(this.internal(FONT_OP.open, JSON.stringify({ generationBase: base }), undefined));
     for (const change of this.project) this.send(this.internal(change.op, change.json, change.bytes));
+    // Last: the engine's render threads start laying text out after it.
+    this.send(this.internal(FONT_OP.seeds, this.seeds, undefined));
     const queued = this.queue;
     this.queue = [];
     for (const p of queued) this.send(p);
@@ -431,15 +448,64 @@ export class EngineFontClient implements FontsProvider {
 
   addProjectFont(family: string, data: Uint8Array, descriptors: FontFaceDescriptors, index: number | undefined): Promise<number> {
     const json = JSON.stringify({ family, ...descriptors, ...(index === undefined ? {} : { index }) });
-    return this.change({ op: FONT_OP.addProjectFont, json, bytes: data.slice() });
+    const bytes = data.slice();
+    for (const m of this.mirrors) m.applyMirrored({ op: FONT_OP.addProjectFont, json, bytes });
+    return this.change({ op: FONT_OP.addProjectFont, json, bytes });
   }
 
   setFontSource(family: string, data: Uint8Array): Promise<number> {
-    return this.change({ op: FONT_OP.setFontSource, json: JSON.stringify({ family }), bytes: data.slice() });
+    const json = JSON.stringify({ family });
+    const bytes = data.slice();
+    for (const m of this.mirrors) m.applyMirrored({ op: FONT_OP.setFontSource, json, bytes });
+    return this.change({ op: FONT_OP.setFontSource, json, bytes });
   }
 
   clearProjectFonts(): Promise<number> {
+    for (const m of this.mirrors) m.applyMirrored('clear');
     return this.call(FONT_OP.clearProjectFonts, '{}').then((r) => this.generationOf(r));
+  }
+
+  /** A change made through the client this one mirrors. With a port it goes
+   *  out (and joins the replay when sent); without one it joins the replay
+   *  directly, so the next port gets it however long the engine is down. */
+  private applyMirrored(change: ProjectChange | 'clear'): void {
+    if (!this.port) {
+      if (change === 'clear') this.project = [];
+      else this.project.push(change);
+      return;
+    }
+    if (change === 'clear') this.mirrored(this.call(FONT_OP.clearProjectFonts, '{}'));
+    else this.mirrored(this.change(change));
+  }
+
+  /** The editor renderers' font cache seeds (`{ seeds }` JSON): sent now
+   *  when a port is open, and replayed on every new port. Resolves with the
+   *  generation, or null when no port is open (the seeds go out on the next). */
+  setSeeds(json: string): Promise<number | null> {
+    for (const m of this.mirrors) void m.setSeeds(json);
+    if (this.seeds === json) return Promise.resolve(null);
+    this.seeds = json;
+    if (!this.port) return Promise.resolve(null);
+    const p = this.internal(FONT_OP.seeds, json, undefined);
+    return new Promise((resolve) => {
+      const done = p.resolve;
+      p.resolve = (reply) => {
+        done(reply);
+        resolve(reply.status === FONT_STATUS.json ? this.maxGeneration : null);
+      };
+      this.send(p);
+    });
+  }
+
+  /** Sends every later project font change and seeds to `client` too. */
+  mirror(client: EngineFontClient): void {
+    if (client === this || this.mirrors.includes(client)) return;
+    this.mirrors.push(client);
+    void client.setSeeds(this.seeds);
+  }
+
+  private mirrored(result: Promise<unknown>): void {
+    result.catch((error: unknown) => this.log('warn', `[engine-fonts] the job engine's font service: ${message(error)}`));
   }
 
   generation(): Promise<number> {
@@ -477,7 +543,7 @@ export class EngineFontClient implements FontsProvider {
       internal: true,
       resolve: (reply) => {
         if (reply.status === FONT_STATUS.error) {
-          this.log('warn', `[engine-fonts] the engine refused a replayed project font: ${fromUtf8.decode(reply.payload)}`);
+          this.log('warn', `[engine-fonts] the engine refused a replayed font change: ${fromUtf8.decode(reply.payload)}`);
           return;
         }
         try {

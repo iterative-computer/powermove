@@ -338,7 +338,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
-  if (fontProvider) api.fonts = new FontLoader(fontProvider);
+  if (fontProvider) {
+    api.fonts = new FontLoader(fontProvider);
+    api.fonts.watchSeeds(() => (state.ready ? wasm : null));
+  }
   api.onStale = (op, paths) => {
     reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite(undefined, 8), tx: PM.hist?.busy?.() ? (PM.hist?.scoped?.() ? 'scoped' : 'plain') : 'none' });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
@@ -406,6 +409,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       replacing = true;
       try { barrier.resync(); } finally { replacing = false; }
       pendingReplace = null;
+      api.fonts?.applySeeds(wasm);
       state.ready = true;
       reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
       return true;
@@ -480,6 +484,8 @@ function editorFonts(): FontProvider | null {
     sync: false,
     answer: async (queries: string) => unwrapResult(await bridge.answer(queries)),
     subset: async (blob: string, index: number) => new Uint8Array(unwrapResult(await bridge.subset(blob, index))),
+    ...(typeof bridge.seeds === 'function' ? { seeds: async () => String(unwrapResult(await bridge.seeds())) } : {}),
+    ...(typeof bridge.onSeedsChanged === 'function' ? { onSeedsChanged: (listener: (json: string) => void) => { bridge.onSeedsChanged(listener); } } : {}),
   };
 }
 

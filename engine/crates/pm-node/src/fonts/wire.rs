@@ -50,7 +50,8 @@ pub enum Op {
     /// `{ seeds: FontCacheSeed[] }` → `{ generation }`. The editor
     /// renderer's font cache seeds (amendment 19; `docs/engine/text.md`):
     /// the engine's own text layout measures as that renderer does. Main
-    /// replays the latest seeds on every new port.
+    /// sends them last when it replays to a new port; render threads' font
+    /// requests wait for them.
     Seeds = 11,
 }
 

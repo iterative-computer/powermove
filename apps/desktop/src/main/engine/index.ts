@@ -25,6 +25,7 @@ import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { EngineFontClient, installEngineFontService } from '../engine-fonts';
+import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
@@ -36,6 +37,9 @@ import type { ChildLike, PortLike } from './ports';
 /** Main's own client id for its font port to the interactive engine (never
  *  a window id: those are positive). */
 export const FONT_CLIENT_ID = -1;
+/** Main's font port to the job engine (its exports and agent frames lay
+ *  text out with the same project fonts and seeds). */
+export const JOB_FONT_CLIENT_ID = -2;
 
 export { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from './flag';
 
@@ -321,8 +325,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
   // font port and keeps only the project fonts a restarted engine needs.
   const fontClient = new EngineFontClient({ log });
-  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
+  const jobFontClient = new EngineFontClient({ log });
+  fontClient.mirror(jobFontClient);
+  const fontSeeds = startEngineFontSeeds(fontClient, log);
+  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender, seedsFor: fontSeeds.seedsFor }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
+  engine.addClient(JOB_FONT_CLIENT_ID, (_info, port) => jobFontClient.connect(port), { peer: 'fonts', processes: ['job'] });
 
   // The shared host clock for the renderer's engine connection: it maps
   // performance.now() onto the engines' host µs (clock samples, the
@@ -582,7 +590,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       await renderQueue?.dispose();
       for (const job of [...awake.keys()]) letSleep(job);
       uninstallFonts();
+      fontSeeds.stop();
       fontClient.disconnect();
+      jobFontClient.disconnect('the job engine stopped');
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       agentJobs.dispose();
