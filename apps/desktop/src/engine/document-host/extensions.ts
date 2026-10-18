@@ -16,7 +16,7 @@
  * panel shows, so a worker never reports an extension broken to the host; its
  * stats carry the worker's own health.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -31,14 +31,18 @@ export interface ExtensionServices {
 
 /** Records the embedder registered (`registerExtension`) win over the host's list by id. */
 export class WorkerExtensions {
-  private readonly dir = mkdtempSync(path.join(tmpdir(), 'powermove-document-host-'));
+  // The real path (macOS links /var to /private/var): contained runtimes are allowed to read exactly it.
+  private readonly dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'powermove-document-host-')));
   private readonly files = new Map<string, string>();
   private readonly listeners = new Set<(event: ExtensionsChangedEvent) => void>();
   private readonly registered = new Map<string, ExtensionRecord>();
   /** Whether the host has an extensions service (decided on the first list). */
   available = false;
 
-  constructor(private readonly services: ExtensionServices, private readonly builtinIds: readonly string[]) {}
+  constructor(private readonly services: ExtensionServices, private readonly builtinIds: readonly string[]) {
+    // A worker that exits without closing (its pool went away) leaves no bundles behind.
+    process.once('exit', () => this.dispose());
+  }
 
   /** Asks the host once: with a service, the editor's bridge; without, the built-ins only. */
   async probe(): Promise<boolean> {

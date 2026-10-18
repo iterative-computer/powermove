@@ -9,6 +9,8 @@
  * same document and undo history.
  */
 import { fork, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import type { AgentToolRequestEvent, AgentToolResponseEvent } from '../../shared/ipc';
 import type { ExtensionRecord } from '../../shared/extensions';
 import type { PersistReason } from '../../shared/engine-protocol';
@@ -103,8 +105,11 @@ export class DocumentHostPool implements DocumentHostPoolApi {
   private spawn(): WorkerHandle {
     if (this.options.spawn) return this.options.spawn();
     if (!this.options.script) throw new DocumentHostError('worker-crashed', 'The document engine bundle (engine.mjs) is not built, so no document host worker can start. Run `bun run build` and restart the host.', false);
+    const runtime = path.join(path.dirname(this.options.script), 'sandbox-runtime.mjs');
     return forkWorker(this.options.script, {
       POWERMOVE_DOCUMENT_HOST_NEW_ENGINE: this.options.newEngine ? '1' : '0',
+      // The contained runtime for Store extensions and scripts (sandbox.ts).
+      POWERMOVE_SANDBOX_RUNTIME: existsSync(runtime) ? runtime : '',
       ...this.options.env,
     });
   }

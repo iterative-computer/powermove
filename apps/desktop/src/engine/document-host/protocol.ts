@@ -66,7 +66,10 @@ export type DocumentHostFailureCode =
   | 'closed'
   /** The tool belongs to another route (contract 15's `route_tool`). */
   | 'wrong-route'
-  /** A Store extension needs a contained sandbox this host cannot give. */
+  /**
+   * A contained runtime could not start (sandbox.ts: the runtime bundle is
+   * not built). Store extensions and scripts never run uncontained.
+   */
   | 'sandbox-unavailable'
   /** A host service the call needs is not provided by the embedder. */
   | 'service-unavailable'

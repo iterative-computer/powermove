@@ -257,4 +257,46 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
     expect((await pool.stats('Pext')).extensions.active).toContain('test-glow');
     expect(text(await ask(pool, 'Pext', 'run-y', 'get_project_state', {}))).toBeTruthy();
   }, 120_000);
+
+  it('runs Store extensions in a contained process: their contributions work, the host stays out of reach', async () => {
+    revisions.clear();
+    const host = hostServices();
+    host.seed('Pstore', 'Store');
+    const probe = `export default async function activate(api) {
+  const results = {};
+  try { await import('node:fs'); results.fs = 'escaped'; } catch { results.fs = 'refused'; }
+  try { await import('node:child_process'); results.exec = 'escaped'; } catch { results.exec = 'refused'; }
+  try { await fetch('https://127.0.0.1:9/'); results.net = 'escaped'; } catch (error) { results.net = error instanceof TypeError && error.message === 'Failed to fetch' ? 'refused' : 'error'; }
+  results.proc = typeof process === 'undefined' || (process.getBuiltinModule === undefined && process.binding === undefined && process.dlopen === undefined) ? 'refused' : 'escaped';
+  results.env = typeof process === 'undefined' || Object.keys(process.env).every((k) => ['PATH', 'LANG', 'TZ'].includes(k)) ? 'clean' : 'leaked';
+  const register = (id, def = 0.5) => api.effects.register({ id, label: id, group: 'Stylize', params: [{ k: 'amount', label: 'Amount', def, min: 0, max: 100 }],
+    frag: '#version 300 es\\nprecision highp float;\\nin vec2 v_st;\\nuniform sampler2D u_tex;\\nout vec4 o;\\nvoid main(){ o = texture(u_tex, v_st); }' });
+  for (const [k, v] of Object.entries(results)) await register(k + '-' + v);
+  await register('glow', 3);
+}
+`;
+    const ext = extensionHost([userRecord('store-probe', {}, { trust: 'store', scope: 'user' } as never)], {
+      'app://powermove/ext/store-probe/bundle.js?v=h11': probe,
+    });
+    host.services.extensions = ext.service;
+    const pool = newPool(host.services);
+    await pool.open('Pstore');
+    const stats = await pool.stats('Pstore');
+    if (stats.extensions.failed.length) console.log(host.log.filter((l) => /store-probe|contained/.test(l)).join('\n'));
+    expect(stats.extensions.failed).toEqual([]);
+    expect(stats.extensions.active).toContain('store-probe');
+    const add = (effect: string) => ask(pool, 'Pstore', 'run-s', 'apply_commands', { commands: [{ type: 'add_effect', target: 'Lplate', effect }], label: effect });
+    expect((await ask(pool, 'Pstore', 'run-s', 'apply_commands', { commands: [{ type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate' }], label: 'plate' })).ok).toBe(true);
+    // Its ids are namespaced at the sandbox boundary, as in the editor.
+    expect((await add('store-probe.glow')).error ?? null).toBeNull();
+    for (const outcome of ['fs-refused', 'exec-refused', 'net-refused', 'proc-refused', 'env-clean']) {
+      expect((await add(`store-probe.${outcome}`)).error ?? null, outcome).toBeNull();
+    }
+    await ask(pool, 'Pstore', 'run-s', '__finish_run', { commit: true });
+    const plate = (host.sessions.document('Pstore') as any).layers.find((l: any) => l.id === 'Lplate');
+    expect(plate.fx[0]).toMatchObject({ type: 'store-probe.glow' });
+    expect(plate.fx[0].p.amount.v).toBe(3);
+    // Closing the project stops its contained process.
+    await pool.close('Pstore');
+  }, 120_000);
 });

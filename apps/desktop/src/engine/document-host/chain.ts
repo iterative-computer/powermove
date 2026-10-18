@@ -19,6 +19,7 @@ import type { PowermoveBridge } from '../../shared/ipc';
 import type { FontProvider } from '../../renderer/src/engine-doc/fonts';
 import type { EngineDocMode } from '../../renderer/src/engine-doc/flags';
 import { DocumentHostError } from './protocol';
+import { sandboxRuntimePath, scriptRuntime, storeSandbox } from './sandbox';
 
 /** A synchronous store over a map the worker seeds and persists itself. */
 export interface ChainStore {
@@ -173,19 +174,19 @@ export async function bootChain(options: ChainOptions): Promise<Chain> {
   for (const step of [library, projects, editing, capabilities, media, shaders, transitions]) step.install(PM as never);
   captions.installCaptions(PM as never);
   for (const step of [workspace, harness, scripting]) step.install(PM as never);
-  // Scripts run in the browser's opaque-origin frame and worker (its
-  // guarantees in PM.Script.catalog()); happy-dom is no isolation boundary,
-  // so a document host never runs one. The catalog the agent reads is the same.
-  const noIsolation = () => Promise.reject(new DocumentHostError('service-unavailable', 'Scripts run in the editor’s isolated browser runtime, which the document host does not have.'));
-  PM['Script'].preview = noIsolation;
-  PM['Script'].apply = noIsolation;
+  // Scripts run in the editor's opaque-origin frame and worker; here the
+  // same worker source runs in a contained process (sandbox.ts), with the
+  // same guarantees (PM.Script.catalog()). happy-dom is no isolation boundary.
+  const runtime = sandboxRuntimePath();
+  PM['Script'].isolate = scriptRuntime(runtime, options.log);
   let loader: import('../../renderer/src/kernel/loader').Loader | null = null;
   return {
     PM,
     engine,
     loader: () => loader,
     async bootExtensions() {
-      loader = await kernel.bootExtensions(PM['Kernel'], builtins.BUILTIN_EXTENSIONS);
+      // Store extensions run in a contained process each (sandbox.ts), driven by the kernel's own sandbox host.
+      loader = await kernel.bootExtensions(PM['Kernel'], builtins.BUILTIN_EXTENSIONS, { sandboxProcess: storeSandbox(runtime, options.log) });
       const records = loader.records();
       const failed = records.filter((r) => r.health && r.health.state !== 'ok')
         .map((r) => ({ id: r.id, error: 'error' in r.health! ? String((r.health as { error?: unknown }).error) : r.health!.state }));
