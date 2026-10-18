@@ -98,10 +98,24 @@ interface Program { program: WebGLProgram; position: number; locations: Map<stri
 const MAX_PROGRAMS = 32;
 const POLL_MS = 16;
 
+const scratchF32 = new Float32Array(1);
+const scratchU32 = new Uint32Array(scratchF32.buffer);
+
 /** f32 to binary16 bits, round to nearest even (values from RGBA16F storage convert exactly). */
 export function toHalf(value: number): number {
-  const f = new Float32Array([value]);
-  const x = new Uint32Array(f.buffer)[0]!;
+  scratchF32[0] = value;
+  return halfBits(scratchU32[0]!);
+}
+
+/** `toHalf` over a whole array, reading the f32 bits in place (no
+ *  allocation per value): a full-HD RGBA frame in tens of milliseconds. */
+export function toHalfArray(src: Float32Array, dst: Uint16Array = new Uint16Array(src.length)): Uint16Array {
+  const bits = new Uint32Array(src.buffer, src.byteOffset, src.length);
+  for (let i = 0; i < bits.length; i++) dst[i] = halfBits(bits[i]!);
+  return dst;
+}
+
+function halfBits(x: number): number {
   const sign = (x >>> 16) & 0x8000;
   const exp = (x >>> 23) & 0xff;
   let mant = x & 0x7fffff;
@@ -365,14 +379,23 @@ export class ShaderFallbackRunner {
         await this.finished(gl, id, request);
         previous = target;
       }
-      const pixels = new Float32Array(width * height * 4);
-      gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
+      // The target's binary16 values as stored: read as half floats when
+      // the implementation reads RGBA16F that way (ANGLE does), else as
+      // floats, which convert back exactly.
+      const values = width * height * 4;
+      let rgba16f: Uint16Array;
+      if (gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RGBA && gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.HALF_FLOAT) {
+        rgba16f = new Uint16Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.HALF_FLOAT, rgba16f);
+      } else {
+        const pixels = new Float32Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
+        rgba16f = toHalfArray(pixels);
+      }
       if (this.lost || gl.isContextLost()) {
         this.lost = true;
         throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
       }
-      const rgba16f = new Uint16Array(pixels.length);
-      for (let i = 0; i < pixels.length; i++) rgba16f[i] = toHalf(pixels[i]!);
       return { key: request.key, width, height, rgba16f };
     } finally {
       if (!gl.isContextLost()) {

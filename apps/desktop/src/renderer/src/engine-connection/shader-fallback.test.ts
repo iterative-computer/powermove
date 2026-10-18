@@ -12,7 +12,7 @@ import { PROTOCOL_BUILD, type Envelope } from '../../../shared/engine-protocol';
 import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../main/engine/protocol';
 import { EngineConnection, type PortLike } from './connection';
 import { DocumentSession, MAX_FALLBACK_BAND_BYTES, MAX_FALLBACK_WAITING, type FallbackRunner, type StreamBatch } from './session';
-import { ShaderFallbackError, ShaderFallbackRunner, applyCalls, toHalf, type ShaderFallbackRequest } from './shader-fallback';
+import { ShaderFallbackError, ShaderFallbackRunner, applyCalls, toHalf, toHalfArray, type ShaderFallbackRequest } from './shader-fallback';
 
 class FakePort implements PortLike {
   sent: Envelope[] = [];
@@ -216,7 +216,8 @@ function fakeGl(active: string[], fence: () => number) {
     getError: () => 0,
     drawArrays: () => { state.draws.push(Object.fromEntries([0, 1, 2].map((u) => [u, (bound.get(u) as { id: number } | null)?.id ?? null]))); },
     fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
-    readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {}
+    readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {},
+    getParameter: () => null
   };
   const canvas = { addEventListener: () => {}, getContext: () => gl } as unknown as OffscreenCanvas;
   /** The context is lost under the runner (a GPU-process restart). */
@@ -384,5 +385,36 @@ describe('the runner helpers', () => {
     expect(toHalf(1 + 2 ** -11)).toBe(0x3c00);
     expect(toHalf(1 + 3 * 2 ** -11)).toBe(0x3c02);
     expect(toHalf(2 ** -24)).toBe(1);
+  });
+
+  it('converts whole arrays exactly as value by value', () => {
+    const values = new Float32Array(20_000);
+    const bits = new Uint32Array(values.buffer);
+    for (let i = 0; i < bits.length; i++) bits[i] = Math.imul(i, 2654435761) >>> 0;
+    values.set([1, 0.5, -2, 65504, 1e6, Number.NaN, 1 + 2 ** -11, 2 ** -24, -0, Infinity], 0);
+    const expected = Uint16Array.from(values, (v) => toHalf(v));
+    expect(toHalfArray(values)).toEqual(expected);
+  });
+});
+
+describe('the runner reads its target', () => {
+  it('as half floats when the implementation reads RGBA16F that way, else as floats', async () => {
+    for (const halfRead of [true, false]) {
+      const { canvas, C } = fakeGl([], () => 25);
+      const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+      const reads: number[] = [];
+      gl['IMPLEMENTATION_COLOR_READ_FORMAT'] = 30;
+      gl['IMPLEMENTATION_COLOR_READ_TYPE'] = 31;
+      gl['getParameter'] = (p: number) => (p === 30 ? C.RGBA : p === 31 ? (halfRead ? C.HALF_FLOAT : C.FLOAT) : null);
+      gl['readPixels'] = (_x: number, _y: number, _w: number, _h: number, _f: number, type: number, out: Float32Array | Uint16Array) => {
+        reads.push(type);
+        if (type === C.HALF_FLOAT) (out as Uint16Array).fill(0x3800);
+        else (out as Float32Array).fill(0.5);
+      };
+      const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+      const out = await runner.render(request(2, 1, '6d'.repeat(32)));
+      expect(reads).toEqual([halfRead ? C.HALF_FLOAT : C.FLOAT]);
+      expect(Array.from(out.rgba16f)).toEqual(new Array(8).fill(0x3800));
+    }
   });
 });
