@@ -196,7 +196,7 @@ fn reference(
 /// clipping anywhere. A diagnostic beside zimg, whose word-type resize
 /// clamps chroma overshoot at the 16-bit code floor and ceiling. Opaque
 /// sources only; RGB interleaved, alpha 1.
-fn reference_f64(path: &Path, n: u32, color: &ColorDescription, w: u32, h: u32) -> Vec<f64> {
+fn reference_f64(path: &Path, n: u32, color: &Tags, w: u32, h: u32) -> Vec<f64> {
     let depth = probe_depth(path);
     let sub = match color.subsampling {
         Subsampling::S444 => "444",
@@ -404,7 +404,131 @@ fn corpus_sources() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The engine's reading of a file, in zscale's names.
+/// What a file's tags say, read by ffprobe and interpreted with section 9's
+/// rules for untagged sources, written here from the plan rather than from
+/// `pm-media`'s code: untagged matrix BT.601 at heights up to 576, else
+/// BT.709; MJPEG, `yuvj` and RGB full range, other Y′CbCr limited; untagged
+/// siting left (type 0). The references are built from this reading, and the
+/// engine's reading (`Renderer::video_color`) is asserted equal to it, so a
+/// file whose tags the engine misreads fails instead of being compared with
+/// a reference built from the same misreading.
+#[derive(Clone, Debug)]
+struct Tags {
+    matrix: MatrixCoefficients,
+    range: Range,
+    siting: ChromaSiting,
+    subsampling: Subsampling,
+    /// ffprobe's own words, for the report.
+    raw: String,
+}
+
+fn file_tags(path: &Path) -> Tags {
+    let out = Command::new(ffprobe())
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+        .args([
+            "stream=codec_name,height,pix_fmt,color_space,color_range,color_primaries,color_transfer,chroma_location",
+            "-of",
+            "default=nw=1",
+        ])
+        .arg(path)
+        .output()
+        .expect("ffprobe runs");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let field = |k: &str| -> String {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (codec, pix_fmt) = (field("codec_name"), field("pix_fmt"));
+    let height: u32 = field("height").parse().expect("a height");
+    let rgb = ["gbr", "rgb", "bgr"].iter().any(|p| pix_fmt.starts_with(p));
+    let matrix = if rgb {
+        MatrixCoefficients::Identity
+    } else {
+        match field("color_space").as_str() {
+            "bt709" => MatrixCoefficients::Bt709,
+            "smpte170m" | "bt470bg" => MatrixCoefficients::Bt601,
+            "bt2020nc" => MatrixCoefficients::Bt2020Ncl,
+            "" | "unknown" | "gbr" => {
+                if height <= 576 {
+                    MatrixCoefficients::Bt601
+                } else {
+                    MatrixCoefficients::Bt709
+                }
+            }
+            other => panic!("{}: matrix {other} is not in the class", path.display()),
+        }
+    };
+    let jpeg_like = codec == "mjpeg" || codec == "mjpegb" || pix_fmt.starts_with("yuvj");
+    let range = match field("color_range").as_str() {
+        _ if rgb || jpeg_like => Range::Full,
+        "pc" => Range::Full,
+        _ => Range::Limited,
+    };
+    let siting = match field("chroma_location").as_str() {
+        "center" => ChromaSiting::Center,
+        "topleft" => ChromaSiting::TopLeft,
+        "top" => ChromaSiting::Top,
+        "bottomleft" => ChromaSiting::BottomLeft,
+        "bottom" => ChromaSiting::Bottom,
+        _ => ChromaSiting::Left,
+    };
+    let subsampling = if pix_fmt.contains("444") {
+        Subsampling::S444
+    } else if pix_fmt.contains("422") {
+        Subsampling::S422
+    } else if pix_fmt.contains("420") || pix_fmt.starts_with("nv12") {
+        Subsampling::S420
+    } else {
+        panic!(
+            "{}: pixel format {pix_fmt} is not in the class",
+            path.display()
+        )
+    };
+    let raw = format!(
+        "{pix_fmt}, matrix {}, range {}, primaries {}, transfer {}, siting {}",
+        or_untagged(field("color_space")),
+        or_untagged(field("color_range")),
+        or_untagged(field("color_primaries")),
+        or_untagged(field("color_transfer")),
+        or_untagged(field("chroma_location")),
+    );
+    Tags {
+        matrix,
+        range,
+        siting,
+        subsampling,
+        raw,
+    }
+}
+
+fn or_untagged(v: String) -> String {
+    if v.is_empty() || v == "unknown" || v == "unspecified" {
+        "untagged".into()
+    } else {
+        v
+    }
+}
+
+/// Whether the engine's reading equals the tags' (siting where the source
+/// is subsampled, vertical siting where it is 4:2:0).
+fn reading_matches(engine: &ColorDescription, tags: &Tags) -> bool {
+    let siting = match tags.subsampling {
+        Subsampling::S444 => true,
+        Subsampling::S422 => {
+            engine.siting.horizontally_cosited() == tags.siting.horizontally_cosited()
+        }
+        Subsampling::S420 => engine.siting == tags.siting,
+    };
+    engine.matrix == tags.matrix
+        && engine.range == tags.range
+        && engine.subsampling == tags.subsampling
+        && siting
+}
+
+/// The tags' reading, in zscale's names.
 struct Reading {
     matrix: &'static str,
     range: &'static str,
@@ -534,16 +658,7 @@ fn generate_edge_sources(dir: &Path) -> Vec<(PathBuf, &'static str)> {
         } else {
             cmd.args(["-f", "lavfi", "-i", SRC]);
         }
-        cmd.args(codec).args([
-            "-colorspace",
-            "smpte170m",
-            "-color_primaries",
-            "smpte170m",
-            "-color_trc",
-            "smpte170m",
-            "-color_range",
-            "tv",
-        ]);
+        cmd.args(codec).args(BT601_TV);
         let status = cmd.arg(&path).output().expect("ffmpeg runs");
         if status.status.success() {
             out.push((path, label));
@@ -602,7 +717,181 @@ fn generate_edge_sources(dir: &Path) -> Vec<(PathBuf, &'static str)> {
             "hvc1",
         ],
     );
+    // Tagged other than BT.601 limited: the samples are converted from
+    // testsrc2's RGB with the tagged matrix and range (`scale`), then the
+    // frames carry the tags (`setparams`), which the encoders and muxers
+    // write (Matroska `Colour`, MOV `colr`, HEVC VUI).
+    let tagged = |matrix: &str, primaries: &str, trc: &str, range: &str, fmt: &str| {
+        let scale_range = if range == "pc" { "full" } else { "limited" };
+        let scale_matrix = if matrix == "bt2020nc" {
+            "bt2020"
+        } else {
+            matrix
+        };
+        format!(
+            "scale=out_color_matrix={scale_matrix}:out_range={scale_range},format={fmt},\
+             setparams=colorspace={matrix}:color_primaries={primaries}:color_trc={trc}:range={range}"
+        )
+    };
+    let tagged_sets: [(&str, &'static str, String, &[&str]); 5] = [
+        (
+            "edges-ffv1-420-bt709.mkv",
+            "FFV1, 4:2:0 8-bit, BT.709 limited, left (tagged)",
+            tagged("bt709", "bt709", "bt709", "tv", "yuv420p"),
+            &["-c:v", "ffv1", "-chroma_sample_location", "left"],
+        ),
+        (
+            "edges-ffv1-420-bt709-full.mkv",
+            "FFV1, 4:2:0 8-bit, BT.709 full range",
+            tagged("bt709", "bt709", "bt709", "pc", "yuv420p"),
+            // FFV1's range is written from the encoder option, not the frame.
+            &["-c:v", "ffv1", "-color_range", "pc"],
+        ),
+        (
+            "edges-ffv1-420p10-bt2020nc.mkv",
+            "FFV1, 4:2:0 10-bit, BT.2020 NCL matrix, BT.709 primaries, limited",
+            tagged("bt2020nc", "bt709", "bt709", "tv", "yuv420p10le"),
+            &["-c:v", "ffv1"],
+        ),
+        (
+            "edges-prores422hq-bt709.mov",
+            "ProRes 422 HQ (VideoToolbox), 4:2:2 10-bit, BT.709 limited",
+            tagged("bt709", "bt709", "bt709", "tv", "p210le"),
+            &["-c:v", "prores_videotoolbox", "-profile:v", "hq"],
+        ),
+        (
+            "edges-hevc-main10-bt2020.mp4",
+            "HEVC Main 10 (VideoToolbox), 4:2:0 10-bit, BT.2020 NCL with BT.2020 primaries",
+            tagged("bt2020nc", "bt2020", "bt2020-10", "tv", "p010le"),
+            &[
+                "-c:v",
+                "hevc_videotoolbox",
+                "-profile:v",
+                "main10",
+                "-q:v",
+                "90",
+                "-tag:v",
+                "hvc1",
+            ],
+        ),
+    ];
+    for (file, label, vf, codec) in tagged_sets {
+        let path = dir.join(file);
+        let status = Command::new(ffmpeg())
+            .args([
+                "-hide_banner",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                SRC,
+            ])
+            .args(["-vf", &vf])
+            .args(codec)
+            .arg(&path)
+            .output()
+            .expect("ffmpeg runs");
+        if status.status.success() {
+            out.push((path, label));
+        } else {
+            println!(
+                "{file}: not generated ({})",
+                String::from_utf8_lossy(&status.stderr).trim()
+            );
+        }
+    }
     out
+}
+
+/// The tags of the untagged-primaries sources: BT.601 matrix, limited range
+/// (primaries and transfer stay untagged with this FFmpeg; the engine reads
+/// them by height, BT.601 525-line, drawn as Rec.709 in Standard).
+const BT601_TV: [&str; 8] = [
+    "-colorspace",
+    "smpte170m",
+    "-color_primaries",
+    "smpte170m",
+    "-color_trc",
+    "smpte170m",
+    "-color_range",
+    "tv",
+];
+
+/// The generated sources, untagged-primaries and tagged.
+const GENERATED: usize = 17;
+
+/// VideoToolbox's ProRes decode against FFmpeg's software decoder, plane by
+/// plane over every frame: both downloaded as planar 16-bit at the source's
+/// own subsampling (no resampling, no matrix), differences given in codes of
+/// the source's bit depth.
+fn decoder_planes(path: &Path, alpha: bool) -> String {
+    let tags = file_tags(path);
+    let depth = probe_depth(path);
+    let sub = match tags.subsampling {
+        Subsampling::S444 => "444",
+        Subsampling::S422 => "422",
+        Subsampling::S420 => "420",
+    };
+    let fmt = format!("yuv{}{sub}p16le", if alpha { "a" } else { "" });
+    let decode = |videotoolbox: bool| -> Vec<u16> {
+        let mut cmd = Command::new(ffmpeg());
+        cmd.args(["-v", "error"]);
+        if videotoolbox {
+            cmd.args(["-hwaccel", "videotoolbox"]);
+        }
+        let out = cmd
+            .arg("-i")
+            .arg(path)
+            .args(["-vf", &format!("format={fmt}"), "-f", "rawvideo", "-"])
+            .output()
+            .expect("ffmpeg runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect()
+    };
+    let (sw, vt) = (decode(false), decode(true));
+    assert_eq!(sw.len(), vt.len(), "{}: decoded sizes", path.display());
+    let (w, h, _) = probe(path);
+    let (fx, fy) = match tags.subsampling {
+        Subsampling::S444 => (1, 1),
+        Subsampling::S422 => (2, 1),
+        Subsampling::S420 => (2, 2),
+    };
+    let luma = (w * h) as usize;
+    let chroma = (w.div_ceil(fx) * h.div_ceil(fy)) as usize;
+    let planes: Vec<(&str, usize)> = [("Y", luma), ("Cb", chroma), ("Cr", chroma)]
+        .into_iter()
+        .chain(alpha.then_some(("A", luma)))
+        .collect();
+    let frame: usize = planes.iter().map(|p| p.1).sum();
+    let frames = sw.len() / frame;
+    let unit = f64::from(1u32 << (16 - depth));
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    for (plane, len) in &planes {
+        let (mut max, mut over) = (0.0f64, 0usize);
+        for f in 0..frames {
+            let start = f * frame + offset;
+            for i in start..start + len {
+                let d = (f64::from(sw[i]) - f64::from(vt[i])).abs() / unit;
+                max = max.max(d);
+                if d > 1.0 {
+                    over += 1;
+                }
+            }
+        }
+        parts.push(format!("{plane} max {max:.2} ({over} over 1)"));
+        offset += len;
+    }
+    format!("{frames} frames, {depth}-bit codes: {}", parts.join(", "))
 }
 
 #[derive(Default)]
@@ -630,6 +919,16 @@ struct Row {
     worst_pixel: String,
     alpha_max_cv: f64,
     rendered: bool,
+    /// ffprobe's tags, and whether the engine's reading equals them.
+    tags: String,
+    reading_ok: bool,
+    /// `pm_render::media::probe_video`'s refusal: the source routes to the
+    /// legacy engine and is not drawn here.
+    refused: Option<String>,
+    /// ProRes: VideoToolbox's decode against FFmpeg's software decode, per
+    /// plane (Y, Cb, Cr, A): max difference in codes of the source's depth,
+    /// and samples over 1 code, over every frame.
+    planes: Option<String>,
 }
 
 /// Measures frames `frames` of `path` (every frame index below the
@@ -642,14 +941,50 @@ fn measure(
     frames: &[u32],
 ) -> Option<Row> {
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
-    let color = match r.video_color(path) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("{name}: the engine does not read it ({e})");
-            return None;
-        }
+    // A source the renderer refuses (`video_color` answers unsupported) is
+    // still read by the probe; its reading is checked, and it is recorded as
+    // routed to the legacy engine.
+    let (engine_color, refused) = match r.video_color(path) {
+        Ok(c) => (c, pm_render::media::probe_video(path).err()),
+        Err(e) => match pm_media::decode::service::MediaSource::open(path) {
+            Ok(src) => (src.color, Some(e.to_string())),
+            Err(open) => {
+                println!("{name}: the engine does not read it ({e}; probe: {open})");
+                return None;
+            }
+        },
     };
+    let color = file_tags(path);
+    let reading_ok = reading_matches(&engine_color, &color);
+    println!(
+        "{name}: tags {}; read as {:?} {:?} {:?} {:?}; engine {:?} {:?} {:?} {:?} {:?}{}",
+        color.raw,
+        color.matrix,
+        color.range,
+        color.siting,
+        color.subsampling,
+        engine_color.matrix,
+        engine_color.range,
+        engine_color.siting,
+        engine_color.subsampling,
+        engine_color.primaries,
+        if reading_ok { "" } else { "  MISREAD" }
+    );
     let (w, h, fps) = probe(path);
+    let mut row = Row {
+        name: name.clone(),
+        encoding: encoding.into(),
+        siting: format!("{:?} {:?} {:?}", color.matrix, color.range, color.siting),
+        edges,
+        tags: color.raw.clone(),
+        reading_ok,
+        ..Row::default()
+    };
+    if let Some(e) = refused {
+        println!("{name}: routes to the legacy engine ({e})");
+        row.refused = Some(e);
+        return Some(row);
+    }
     let reading = Reading {
         matrix: match color.matrix {
             MatrixCoefficients::Bt709 => "709",
@@ -683,14 +1018,14 @@ fn measure(
     let doc = document(w, h, fps, f64::from(last + 1) / fps);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("clip".into(), path.to_path_buf());
-    let mut row = Row {
-        name: name.clone(),
-        encoding: encoding.into(),
-        kind,
-        siting: format!("{:?} {:?} {:?}", color.matrix, color.range, color.siting),
-        edges,
-        ..Row::default()
-    };
+    row.kind = kind;
+    if prores {
+        row.planes = Some(decoder_planes(path, alpha));
+        println!(
+            "{name}: VideoToolbox against FFmpeg's decode: {}",
+            row.planes.as_ref().unwrap()
+        );
+    }
     for &n in frames {
         let t = (f64::from(n) + 0.5) / fps;
         let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
@@ -709,7 +1044,8 @@ fn measure(
         let ours = r.read_rgba(&frame).expect("readback");
         let zimg_edges = reference(path, n, &reading, alpha, false, false);
         let repeated = reference(path, n, &reading, alpha, true, false);
-        if !alpha {
+        let exact = (!alpha).then(|| reference_f64(path, n, &color, w, h));
+        if let Some(exact) = &exact {
             let max_against = |k: u32| -> f64 {
                 let exact = reference_f64(path, k, &color, w, h);
                 ours.chunks_exact(4)
@@ -721,7 +1057,6 @@ fn measure(
                     })
                     .fold(0.0, f64::max)
             };
-            let exact = reference_f64(path, n, &color, w, h);
             let mut frame_max: f64 = 0.0;
             for (o, q) in ours.chunks_exact(4).zip(exact.chunks_exact(4)) {
                 let worst = (0..3)
@@ -775,8 +1110,18 @@ fn measure(
             if worst > row.max_repeat_cv {
                 let cv =
                     |v: &[f32]| [v[0], v[1], v[2]].map(|c| (f64::from(c) * 2550.0).round() / 10.0);
+                let f64_cv = exact
+                    .as_ref()
+                    .map(|e| {
+                        let p = &e[4 * i..4 * i + 3];
+                        format!(
+                            ", f64 reference {:?}",
+                            [p[0], p[1], p[2]].map(|c| (c * 2550.0).round() / 10.0)
+                        )
+                    })
+                    .unwrap_or_default();
                 row.worst_pixel = format!(
-                    "frame {n} ({}, {}): engine {:?}, reference {:?}",
+                    "frame {n} ({}, {}): engine {:?}, zimg reference {:?}{f64_cv}",
                     i as u32 % w,
                     i as u32 / w,
                     cv(o),
@@ -864,7 +1209,9 @@ fn video_class_against_ffmpeg_and_zimg() {
     let fixtures = repo().join("apps/desktop/e2e/fixtures");
     let mut r = Renderer::headless().expect("a Metal device");
     let mut rows = Vec::new();
-    println!("Flat e2e fixtures (one Y'CbCr triple per frame: matrix and range only):");
+    println!(
+        "Flat e2e fixtures (one Y'CbCr triple per frame: the BT.601 limited conversion only):"
+    );
     for name in [
         "prores422.mov",
         "prores4444-alpha.mov",
@@ -911,7 +1258,33 @@ fn video_class_against_ffmpeg_and_zimg() {
             &all,
         ));
     }
-    let edged: Vec<&Row> = rows.iter().filter(|r| r.edges).collect();
+    println!("Readings (ffprobe tags under section 9's rules; the engine's reading):");
+    for row in &rows {
+        println!(
+            "  {:<32} {:<28} {}{}",
+            row.name,
+            row.siting,
+            row.tags,
+            match (&row.refused, row.reading_ok) {
+                (_, false) => "  MISREAD by the engine".to_string(),
+                (Some(e), true) => format!("  routes to legacy: {e}"),
+                (None, true) => String::new(),
+            }
+        );
+    }
+    let misread: Vec<&str> = rows
+        .iter()
+        .filter(|r| !r.reading_ok)
+        .map(|r| r.name.as_str())
+        .collect();
+    let refused: Vec<(&str, &str)> = rows
+        .iter()
+        .filter_map(|r| r.refused.as_deref().map(|e| (r.name.as_str(), e)))
+        .collect();
+    let edged: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.edges && r.refused.is_none())
+        .collect();
     let unrendered: Vec<&str> = edged
         .iter()
         .filter(|r| !r.rendered)
@@ -923,14 +1296,30 @@ fn video_class_against_ffmpeg_and_zimg() {
         "flat fixtures: worst {:.3} CV; chroma-edge sources ({} of {} generated, {} rendered): worst {:.3} CV, interior {:.3} CV, repeated edges {:.3} CV, alpha {:.3} CV (bar 1)",
         worst(&flat, |r| r.max_cv),
         generated.len() + corpus.len(),
-        12 + corpus.len(),
+        GENERATED + corpus.len(),
         edged.len() - unrendered.len(),
         worst(&edged, |r| r.max_cv),
         worst(&edged, |r| r.max_interior_cv),
         worst(&edged, |r| r.max_repeat_cv),
         worst(&edged, |r| r.alpha_max_cv),
     );
-    assert_eq!(generated.len(), 12, "every chroma-edge source is generated");
+    assert_eq!(
+        generated.len(),
+        GENERATED,
+        "every chroma-edge source is generated"
+    );
+    assert!(
+        misread.is_empty(),
+        "the engine misreads the tags of {misread:?}"
+    );
+    // Only the BT.2020-primaries source routes (wide gamut waits for
+    // Interpret and wide-gamut projects; `pm_render::media::video_supported`).
+    assert!(
+        refused.len() == 1
+            && refused[0].0 == "edges-hevc-main10-bt2020.mp4"
+            && refused[0].1.contains("Bt2020 primaries"),
+        "routed to legacy: {refused:?}"
+    );
     assert!(unrendered.is_empty(), "not rendered: {unrendered:?}");
     // Judged: FFmpeg's software decode plus zimg with the engine's filter and
     // edge rule, color and alpha.
