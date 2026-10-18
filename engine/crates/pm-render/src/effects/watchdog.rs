@@ -6,7 +6,7 @@
 //! Two guards, each judged from evidence about a frame, never from when
 //! someone happened to look:
 //!
-//! - **The budget** (interactive renderers): every effect instance,
+//! - **The budget**: every effect instance,
 //!   transition, and shader or extension fragment layer is timed between two
 //!   marker dispatches, each a one-workgroup compute pass whose end-of-pass
 //!   sample is the timestamp (as `pm-export`'s `GpuSpan`: Metal's
@@ -16,14 +16,20 @@
 //!   its last pass reading a texel of its output. The timestamps are resolved
 //!   in a submission of their own once the frame has completed (resolved in
 //!   the frame's own command buffer, Metal returned the previous frame's end
-//!   sample). A program over the budget is disabled for every later frame
-//!   (skipped with its data kept, like a missing effect) and reported as
-//!   `WatchdogTimeout` until it is registered again (a shader layer: until
-//!   its code changes).
+//!   sample). **The budget records only** ([`Watchdog::measured_ms`]):
+//!   today's compositor (`legacy/gl/gpu-timing.ts`) times programs and
+//!   never turns one off, so a slow user program that draws today draws
+//!   here (amendment 22). Enforcing it ([`Watchdog::set_budget`]: a user
+//!   program over it is disabled for every later frame and reported as
+//!   `WatchdogTimeout` until it is registered again, a shader layer until
+//!   its code changes; built-ins never) is off unless a renderer opts in,
+//!   and no production renderer does.
 //! - **The hang guard** (every renderer): a program that does not finish (a
 //!   runaway loop the GPU runs until the operating system's GPU timeout
-//!   aborts the command buffer) is disabled and reported; a job stops. It
-//!   works in two steps:
+//!   aborts the command buffer) is disabled and reported; a job stops. Its
+//!   budget is Chromium's GPU watchdog's, about 10 s, in the viewer as in
+//!   jobs ([`HANG`]): a program today's WebGL finishes, however slowly, is
+//!   never turned off. It works in two steps:
 //!   1. *Suspicion.* A frame is suspected only when a poll made after the
 //!      hang budget had passed saw it still running, counting from when it
 //!      could start (its submission, or the completion of the frame before
@@ -52,8 +58,8 @@
 //!
 //! **Policies.** An interactive renderer skips a disabled program and keeps
 //! drawing ([`Policy::Interactive`]). A job renderer ([`Policy::Job`]: export
-//! jobs, agent stills) never skips a program: it applies no per-program
-//! budget (today's exporter renders a slow effect slowly), never holds a
+//! jobs, agent stills) never skips a program: it never enforces a
+//! per-program budget (today's exporter renders a slow effect slowly), never holds a
 //! frame, and after a runaway fails every later frame with a named error
 //! until [`Watchdog::reset`] (the job engine resets it per job), so nothing
 //! is delivered without the program the project asks for.
@@ -76,20 +82,17 @@ use pm_protocol::common::{DefinitionId, EffectInstanceId, LayerId};
 use pm_protocol::definitions::DefinitionKind;
 use pm_protocol::error::{EngineError, ErrorCode, ErrorScope, Retry};
 
-/// Default budget per program per frame. The slowest built-in at UHD
-/// (Gaussian Blur) takes about 15 ms on the reference machine; a quarter
-/// second is far past anything playable and still well inside the operating
-/// system's GPU timeout.
-pub const DEFAULT_BUDGET: Duration = Duration::from_millis(250);
+/// The hang budget of every renderer: Chromium's own GPU watchdog lets a
+/// WebGL frame run about this long before it loses the context, so a
+/// program that finishes today, in the viewer or an export, finishes here.
+/// A frame seen still running this long after it could start is suspected.
+pub const HANG: Duration = Duration::from_secs(10);
 
-/// Default hang budget of an interactive renderer: a frame seen still
-/// running this long after it could start is suspected.
-pub const DEFAULT_HANG: Duration = Duration::from_secs(2);
+/// The interactive hang budget (the same as a job's: [`HANG`]).
+pub const DEFAULT_HANG: Duration = HANG;
 
-/// Hang budget of a job renderer: Chromium's own GPU watchdog lets a WebGL
-/// frame run this long before it loses the context, so an export that
-/// finishes today finishes here.
-pub const JOB_HANG: Duration = Duration::from_secs(10);
+/// The job hang budget ([`HANG`]).
+pub const JOB_HANG: Duration = HANG;
 
 /// Timed programs per frame (two queries each).
 pub const CAPACITY: u32 = 64;
@@ -111,11 +114,11 @@ const STRIKES: u32 = 2;
 /// How a renderer acts on what the watchdog finds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Policy {
-    /// The viewer: the budget and the hang guard; a disabled program is
-    /// skipped with its data kept and reported.
+    /// The viewer: the hang guard (and the budget, when enforced); a
+    /// disabled program is skipped with its data kept and reported.
     #[default]
     Interactive,
-    /// Export jobs and agent stills: no per-program budget; after a runaway
+    /// Export jobs and agent stills: a budget is never enforced; after a runaway
     /// every later frame fails with a named error until [`Watchdog::reset`].
     Job,
 }
@@ -442,7 +445,11 @@ impl FrameTimer {
 
 /// The watchdog state of a renderer.
 pub struct Watchdog {
-    budget: Duration,
+    /// The per-program budget, when enforced (`None`: recorded only, as
+    /// today's compositor does).
+    budget: Option<Duration>,
+    /// Spans measured (a timed program's time read and recorded).
+    measurements: u64,
     hang: Duration,
     policy: Policy,
     disabled: BTreeMap<Subject, f64>,
@@ -474,8 +481,9 @@ pub struct Watchdog {
 impl Default for Watchdog {
     fn default() -> Self {
         Watchdog {
-            budget: DEFAULT_BUDGET,
-            hang: DEFAULT_HANG,
+            budget: None,
+            measurements: 0,
+            hang: HANG,
             policy: Policy::Interactive,
             disabled: BTreeMap::new(),
             disabled_code: VecDeque::new(),
@@ -496,12 +504,27 @@ impl Default for Watchdog {
 }
 
 impl Watchdog {
+    /// Enforces a per-program budget on user programs in an interactive
+    /// renderer (tests; no production renderer opts in: today's compositor
+    /// only records GPU time, amendment 22). Built-ins are never held to it.
     pub fn set_budget(&mut self, budget: Duration) {
-        self.budget = budget;
+        self.budget = Some(budget);
     }
 
-    pub fn budget(&self) -> Duration {
+    /// Back to recording only.
+    pub fn clear_budget(&mut self) {
+        self.budget = None;
+    }
+
+    /// The enforced budget (`None`: recorded only).
+    pub fn budget(&self) -> Option<Duration> {
         self.budget
+    }
+
+    /// Program times measured and recorded so far (every timed span of
+    /// every judged frame).
+    pub fn measurements(&self) -> u64 {
+        self.measurements
     }
 
     /// The running time past which a frame seen still running is suspected.
@@ -517,10 +540,7 @@ impl Watchdog {
     /// job hang budget ([`JOB_HANG`]).
     pub fn set_policy(&mut self, policy: Policy) {
         self.policy = policy;
-        self.hang = match policy {
-            Policy::Interactive => DEFAULT_HANG,
-            Policy::Job => JOB_HANG,
-        };
+        self.hang = HANG;
     }
 
     pub fn policy(&self) -> Policy {
@@ -912,10 +932,15 @@ impl Watchdog {
     }
 
     fn record(&mut self, span: &Span, ms: f64) {
+        self.measurements += 1;
         let longest = self.measured.entry(span.subject.clone()).or_insert(0.0);
         *longest = longest.max(ms);
+        let Some(budget) = self.budget else {
+            return;
+        };
         if self.policy == Policy::Job
-            || ms <= self.budget.as_secs_f64() * 1000.0
+            || span.builtin
+            || ms <= budget.as_secs_f64() * 1000.0
             || self.disabled.contains_key(&span.subject)
         {
             return;
@@ -923,7 +948,7 @@ impl Watchdog {
         let message = format!(
             "{} took {ms:.1} ms of GPU time in one frame (budget {} ms) and is turned off until {}.",
             span.name(),
-            self.budget.as_millis(),
+            budget.as_millis(),
             span.until(),
         );
         self.disable(span, ms, message);

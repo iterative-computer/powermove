@@ -789,9 +789,24 @@ fn blur_takes(
 }
 
 #[test]
-fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
+fn an_enforced_watchdog_budget_disables_an_overrunning_user_effect_from_the_next_frame() {
+    // The budget records only unless a renderer opts in (today's
+    // compositor never turns a program off, amendment 22), and an enforced
+    // budget never applies to built-ins: Blur here is the user's override
+    // of `blur` by id.
     let _gpu = gpu();
     let mut r = builtins();
+    let user_set = || {
+        let mut set: DefinitionSetSnapshot = builtin_definitions();
+        for d in set.definitions.iter_mut().filter(|d| d.id.as_str() == "blur") {
+            d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+        }
+        set
+    };
+    assert!(r.set_definitions(&user_set()).unwrap().is_empty());
+    r.effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
     let (doc, res) = document(
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
@@ -824,7 +839,7 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     );
     // The same definitions pushed again (any unrelated registration, a
     // second view's set) keep it off: its program and record are kept.
-    let mut set: DefinitionSetSnapshot = builtin_definitions();
+    let mut set: DefinitionSetSnapshot = user_set();
     assert!(r.set_definitions(&set).unwrap().is_empty());
     blur_ms.store(5, std::sync::atomic::Ordering::Relaxed);
     let kept = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
@@ -893,9 +908,9 @@ fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
     );
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
     let mut judged = 0;
     for frame in 0..8 {
+        let before = r.effects().watchdog.measurements();
         render(
             &mut r,
             &doc,
@@ -904,15 +919,19 @@ fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
             &request(),
         )
         .unwrap();
-        let reports = r.watchdog_reports(true);
-        if reports.len() == 1 {
+        // Waits for the frame to be judged; the budget records only, so
+        // nothing is reported or turned off.
+        assert!(r.watchdog_reports(true).is_empty());
+        if r.effects().watchdog.measurements() > before {
             judged += 1;
         }
-        // Registered again: on for the next frame.
-        r.effects_mut()
-            .watchdog
-            .forget(DefinitionKind::Effect, &"blur".into());
     }
+    assert!(
+        r.effects()
+            .watchdog
+            .measured_ms(DefinitionKind::Effect, "blur")
+            .is_some_and(|ms| ms > 0.0)
+    );
     // Metal can leave a sample empty while other devices are busy in this
     // process; nearly every frame must still be judged.
     assert!(judged >= 6, "{judged} of 8 frames judged");
