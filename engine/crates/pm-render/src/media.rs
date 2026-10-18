@@ -164,6 +164,17 @@ fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), Probe
 /// ([`still_facts`]); each interpretation is then resolved from its facts.
 pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
     let (color, float) = still_facts(path)?;
+    // A PNG gamma is the file's transfer; only a transfer override replaces
+    // it. Interpretations of it are not implemented.
+    if interp.transfer.is_none()
+        && pm_media::image::png_gamma::imageio_gamma(path)
+            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?
+            .is_some()
+    {
+        return Err(ProbeIssue::Unsupported(Feature::Media(
+            "PNG gamma (gAMA) with Interpret Footage overrides".into(),
+        )));
+    }
     interpreted_color(&color, float, interp).map(|_| ())
 }
 
@@ -243,6 +254,26 @@ fn interpreted_color(
     })
 }
 
+/// Keep native-depth sources unchanged. At level 1, a file Chromium can
+/// decode must not depend on ImageIO accepting the same AVIF container.
+fn image_source(
+    path: &Path,
+    pool: &FramePool,
+    compat: bool,
+) -> pm_media::Result<pm_media::image::StillImage> {
+    pm_media::image::read(path, pool).or_else(|error| {
+        if compat {
+            use std::io::Read;
+            let mut head = [0; 512];
+            let n = std::fs::File::open(path)?.read(&mut head)?;
+            if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Avif {
+                return pm_media::image::avif_compat::read_bitmap(path, pool);
+            }
+        }
+        Err(error)
+    })
+}
+
 /// Whether an image file can be drawn: readable, not animated, in a tested
 /// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
@@ -254,7 +285,7 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         let pool = FramePool::new(0);
-        let still = pm_media::image::read(path, &pool)
+        let still = image_source(path, &pool, true)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
         // Chromium cannot show an AVIF its decoder cannot parse, whatever
         // ImageIO reads: a named failure, not a class.
@@ -267,8 +298,12 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             })?;
         }
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        if pm_media::image::compat::applies(&still) {
-            let bitmap = pm_media::image::compat::bitmap(&still, &pool)
+        if pm_media::image::avif_compat::applies(&still) {
+            let bitmap = pm_media::image::avif_compat::read(path, &still, &pool)
+                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
+            image_color(&bitmap).map(|_| ())
+        } else if pm_media::image::compat::applies(&still) {
+            let bitmap = pm_media::image::compat::bitmap_at(path, &still, &pool)
                 .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
             image_color(&bitmap).map(|_| ())
         } else {
@@ -841,13 +876,13 @@ impl MediaCache {
             None => probe_image(path),
         }
         .map_err(issue)?;
-        let mut still = pm_media::image::read(path, &self.pool)
+        let mut still = image_source(path, &self.pool, compat && interpret.is_none())
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
             still = pm_media::image::avif_compat::read(path, &still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
-            still = pm_media::image::compat::bitmap(&still, &self.pool)
+            still = pm_media::image::compat::bitmap_at(path, &still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         }
         let color = match interpret {
@@ -863,6 +898,16 @@ impl MediaCache {
                 read.color
             }
             None => {
+                // Level 2 reads a gamma-only PNG as ImageIO does; level 1's
+                // bitmap above already applied Chromium's reading.
+                if !compat
+                    && still.format == pm_media::image::ImageFormat::Png
+                    && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
+                {
+                    still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
+                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                }
                 if still.color.icc_class == Some(IccClass::Other) {
                     still = pm_media::image::imageio::convert_to_linear_srgb(
                         &still,
