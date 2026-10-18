@@ -5,9 +5,12 @@
 //!   (black on a fresh canvas, the box fill under a caption box), never the
 //!   previous glyph's or word's color;
 //! - `hexToRgba` strings holding `NaN` are rejected the same way;
-//! - a valid CSS color the engine does not reproduce (`oklch()`, `lab()`,
-//!   `color()`, ...) refuses the layer, in `text_raster` and in `render`, and
-//!   the refusal is not left behind for the next layer.
+//! - CSS Color 4/5 colors (`oklch()`, `lab()`, `color()`, `color-mix()`,
+//!   relative colors, `currentcolor`) draw (`pm_text::render::color4`; their
+//!   pixels are gated on the closure capture in `text_raster`);
+//! - a valid CSS color the engine does not reproduce (`light-dark()`, system
+//!   colors not measured) refuses the layer, in `text_raster` and in
+//!   `render`, and the refusal is not left behind for the next layer.
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -178,27 +181,38 @@ fn main() {
         }
     }
 
-    // Valid CSS colors the engine does not reproduce refuse the layer.
-    let refused = [
+    // CSS Color 4/5 colors draw.
+    for (name, ty, d) in [
         ("oklch() text", "text", text("oklch(62.8% 0.258 29.2)")),
         ("lab() text", "text", text("lab(50% 40 59.5)")),
         ("color() text", "text", text("color(display-p3 1 0 0)")),
         ("currentcolor text", "text", text("currentcolor")),
-        (
-            "oklch() range style",
-            "text",
-            ranged("#00FF00", "oklch(70% 0.1 200)"),
-        ),
+        ("oklch() range style", "text", ranged("#00FF00", "oklch(70% 0.1 200)")),
         (
             "color-mix() caption fill",
             "captions",
-            caption(
-                "color-mix(in srgb, red, blue)",
-                "#FFD43B",
-                "#202020",
-                "#000000",
-                true,
-            ),
+            caption("color-mix(in srgb, red, blue)", "#FFD43B", "#202020", "#000000", true),
+        ),
+    ] {
+        match raster(&mut r, ty, &d) {
+            Ok(Some(_)) => println!("{name:<72} drawn"),
+            Ok(None) => failures.push(format!("{name}: text_raster drew nothing")),
+            Err(e) => failures.push(format!("{name}: text_raster refused: {e}")),
+        }
+    }
+    // Valid CSS colors the engine does not reproduce refuse the layer.
+    let refused = [
+        ("light-dark() text", "text", text("light-dark(red, blue)")),
+        ("system color text", "text", text("ButtonFace")),
+        (
+            "light-dark() range style",
+            "text",
+            ranged("#00FF00", "light-dark(#000, #fff)"),
+        ),
+        (
+            "system color caption fill",
+            "captions",
+            caption("Highlight", "#FFD43B", "#202020", "#000000", true),
         ),
     ];
     let plain = text("#F2F2F2");
