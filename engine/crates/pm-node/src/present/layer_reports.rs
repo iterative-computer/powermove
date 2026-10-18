@@ -110,18 +110,27 @@ mod tests {
     fn reports_repeat_per_revision_and_send_changes_within_one() {
         let mut r = LayerReports::default();
         let a = report("a", "a fails");
-        assert_eq!(r.due(rev(1), None, "c", || vec![a.clone()]), vec![a.clone()]);
+        assert_eq!(
+            r.due(rev(1), None, "c", || vec![a.clone()]),
+            vec![a.clone()]
+        );
         // The same frame key: nothing is computed or sent.
         assert!(r.due(rev(1), None, "c", || unreachable!()).is_empty());
         // New definitions at the same revision: only what changed.
         let b = report("b", "b is missing");
         assert_eq!(
-            r.due(rev(1), Some(Seq::new(2).unwrap()), "c", || vec![a.clone(), b.clone()]),
+            r.due(rev(1), Some(Seq::new(2).unwrap()), "c", || vec![
+                a.clone(),
+                b.clone()
+            ]),
             vec![b.clone()]
         );
         // A new revision repeats every report that still holds.
         assert_eq!(
-            r.due(rev(2), Some(Seq::new(2).unwrap()), "c", || vec![a.clone(), b.clone()]),
+            r.due(rev(2), Some(Seq::new(2).unwrap()), "c", || vec![
+                a.clone(),
+                b.clone()
+            ]),
             vec![a.clone(), b.clone()]
         );
         // A changed message at the same revision is sent again.

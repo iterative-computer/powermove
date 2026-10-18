@@ -141,7 +141,6 @@ fn frame(envelope: &Envelope) -> Option<FrameDescriptor> {
     }
 }
 
-
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
 }
@@ -356,15 +355,34 @@ fn child_engine() {
     assert_eq!(first.revision.get(), 1, "the engine presents (not routed)");
     assert_eq!(reports.len(), 2, "{reports:#?}");
     assert!(reports.iter().all(|(r, _)| *r == 1));
-    let compile = &reports.iter().find(|(_, e)| layer_of(e) == "sky").unwrap().1;
+    let compile = &reports
+        .iter()
+        .find(|(_, e)| layer_of(e) == "sky")
+        .unwrap()
+        .1;
     assert_eq!(compile.code, ErrorCode::ShaderCompile);
-    assert!(compile.message.starts_with("Shader layer sky does not compile"), "{}", compile.message);
+    assert!(
+        compile
+            .message
+            .starts_with("Shader layer sky does not compile"),
+        "{}",
+        compile.message
+    );
     let Some(ErrorDetail::ShaderCompile { diagnostics }) = &compile.detail else {
         panic!("no diagnostics: {compile:?}");
     };
     // The author's line: the header and the joining newline are removed.
-    assert!(diagnostics.iter().any(|d| d.line == 2 && d.message.contains("nope")), "{diagnostics:?}");
-    let missing = &reports.iter().find(|(_, e)| layer_of(e) == "gone").unwrap().1;
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.line == 2 && d.message.contains("nope")),
+        "{diagnostics:?}"
+    );
+    let missing = &reports
+        .iter()
+        .find(|(_, e)| layer_of(e) == "gone")
+        .unwrap()
+        .1;
     assert_eq!(missing.code, ErrorCode::DefinitionMissing);
     release(&mut host, &first);
 
@@ -399,7 +417,10 @@ fn child_engine() {
         }
         release(&mut host, &f);
     };
-    let repeated: Vec<_> = reports.iter().map(|(r, e)| (*r, layer_of(e), e.code)).collect();
+    let repeated: Vec<_> = reports
+        .iter()
+        .map(|(r, e)| (*r, layer_of(e), e.code))
+        .collect();
     assert_eq!(repeated, vec![(2, "gone", ErrorCode::DefinitionMissing)]);
     release(&mut host, &second);
 

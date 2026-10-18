@@ -380,14 +380,13 @@ impl Exec<'_> {
                                 self.taken.push(target);
                             }
                         }
-                        Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self
-                            .fail(
-                                plan,
-                                draw,
-                                MediaFailure::Unsupported(
-                                    crate::capability::Feature::ShaderFallback(what),
-                                ),
-                            ),
+                        Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self.fail(
+                            plan,
+                            draw,
+                            MediaFailure::Unsupported(crate::capability::Feature::ShaderFallback(
+                                what,
+                            )),
+                        ),
                         Err(crate::shader_layers::exec::Missed::Pending(request)) => {
                             if !self.fallback_pending.iter().any(|p| p.key == request.key) {
                                 self.fallback_pending.push(request);

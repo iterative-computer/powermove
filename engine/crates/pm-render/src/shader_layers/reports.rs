@@ -117,9 +117,7 @@ fn shader_compile(layer: &Node, id: &str) -> Option<EngineError> {
     Some(
         EngineError::new(
             ErrorCode::ShaderCompile,
-            ErrorScope::Layer {
-                layer: id.into(),
-            },
+            ErrorScope::Layer { layer: id.into() },
             message,
         )
         .with_retry(Retry::AfterUserAction)
@@ -161,9 +159,7 @@ fn missing(
     ));
     Some(EngineError::new(
         ErrorCode::DefinitionMissing,
-        ErrorScope::Layer {
-            layer: id.into(),
-        },
+        ErrorScope::Layer { layer: id.into() },
         message,
     ))
 }
