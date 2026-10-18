@@ -27,6 +27,11 @@ const KNOWN: &[(&str, usize, i32)] = &[
     ("diag-ellipse-380", 2, 64),
     // The parity corpus's composition/metadata rectangle (radius 24).
     ("shape-corpus-rect-r24-s1", 2, 64),
+    // The cards of the corpus's space/groups-25d (130 × 140, radius 24),
+    // which a 3D group's plane magnifies (pm-render routes level 1 shapes
+    // on 2.5D planes for this; docs/engine/composite.md).
+    ("shape-groups25d-card-ff6040-s1", 2, 64),
+    ("shape-groups25d-card-4060ff-s1", 2, 64),
 ];
 
 #[test]

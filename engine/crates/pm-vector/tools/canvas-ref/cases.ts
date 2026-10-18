@@ -151,6 +151,8 @@ export function cases(): Case[] {
   for (const [id, paths] of pathCases) for (const scale of [0.5, 1, 1.75, 3]) out.push({ id: `paths-${id}-s${scale}`, kind: 'paths', paths, scale });
   // The rounded rectangle of the parity corpus's composition/metadata.
   for (const scale of [1, 1.25]) out.push({ id: `shape-corpus-rect-r24-s${scale}`, kind: 'shape', d: { shape: 'rect', color: '#3FCF8E', w: 100, h: 100, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale });
+  // The cards of the parity corpus's space/groups-25d (radius 24 by default), drawn through a 3D group's plane.
+  for (const color of ['#FF6040', '#4060FF']) out.push({ id: `shape-groups25d-card-${color.slice(1).toLowerCase()}-s1`, kind: 'shape', d: { shape: 'rect', color, w: 130, h: 140, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale: 1 });
   out.push(...diagnostics(), ...svgCases());
   return out;
 }

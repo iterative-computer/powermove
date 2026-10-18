@@ -26,7 +26,9 @@ pub(crate) mod local;
 
 /// Layer types drawn as 2.5D planes and compared with today's (groups
 /// supply the space). Shapes and text keep today's raster density (the 2D
-/// world matrix's) and draw through the plane; 3D object layers draw in
+/// world matrix's) and draw through the plane (level 1 shapes still route,
+/// `Feature::PlaneShapeRaster`, while the plane magnifies the Canvas2D
+/// emulation's pinned MSAA residuals); 3D object layers draw in
 /// screen space, as today; adjustment layers map their masks through the
 /// plane; level 2 content rasterizes in layer space at the plane's density.
 pub const DRAWN_TYPES: [&str; 11] = [

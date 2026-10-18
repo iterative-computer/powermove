@@ -8776,6 +8776,36 @@
    "scale": 1.25
   },
   {
+   "id": "shape-groups25d-card-ff6040-s1",
+   "kind": "shape",
+   "d": {
+    "shape": "rect",
+    "color": "#FF6040",
+    "w": 130,
+    "h": 140,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "scale": 1
+  },
+  {
+   "id": "shape-groups25d-card-4060ff-s1",
+   "kind": "shape",
+   "d": {
+    "shape": "rect",
+    "color": "#4060FF",
+    "w": 130,
+    "h": 140,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "scale": 1
+  },
+  {
    "id": "diag-tri-cubic-0",
    "kind": "raw",
    "width": 40,

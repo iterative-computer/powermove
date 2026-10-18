@@ -288,6 +288,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::Scene3d(s) => format!("3D: {s}"),
         Feature::Effects => "effects".into(),
         Feature::Masks => "masks".into(),
+        Feature::PlaneShapeRaster => "shape rasters on 2.5D planes".into(),
         Feature::Transition => "transitions".into(),
         Feature::MotionBlur => "motion blur".into(),
         Feature::TwoAndAHalfD => "2.5D layers".into(),
