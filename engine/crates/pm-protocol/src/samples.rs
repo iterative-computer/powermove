@@ -825,10 +825,30 @@ fn fallback_effect_request() -> crate::shader_fallback::ShaderFallbackRequest {
     use crate::shader_fallback::{ShaderFallbackCall, ShaderFallbackRequest, ShaderFallbackUnit};
     let pass = |p: f64| {
         vec![
-            ShaderFallbackCall { function: "1i".into(), name: "u_tex".into(), v: vec![0.0], alias: None },
-            ShaderFallbackCall { function: "1i".into(), name: "u_backdrop".into(), v: vec![2.0], alias: None },
-            ShaderFallbackCall { function: "1i".into(), name: "u_pass".into(), v: vec![p], alias: None },
-            ShaderFallbackCall { function: "1f".into(), name: "u_amount".into(), v: vec![0.5], alias: Some("u_p0".into()) },
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_tex".into(),
+                v: vec![0.0],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_backdrop".into(),
+                v: vec![2.0],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_pass".into(),
+                v: vec![p],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1f".into(),
+                name: "u_amount".into(),
+                v: vec![0.5],
+                alias: Some("u_p0".into()),
+            },
         ]
     };
     ShaderFallbackRequest {

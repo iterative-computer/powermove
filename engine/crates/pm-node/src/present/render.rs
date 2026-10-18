@@ -877,8 +877,10 @@ impl Thread {
     }
 
     /// The runner's answer: a band of pixels (the frame renders again once
-    /// every band of a request arrived), or a failure (the composition is
-    /// routed to the legacy viewer, as a program the engine cannot draw).
+    /// every band of a request arrived), or a failure: the program draws
+    /// nothing or is skipped, as WebGL does with a program it refuses, and
+    /// is reported (a draw past the runner's deadline is turned off by the
+    /// watchdog). Nothing is routed to the legacy viewer (amendment 21).
     fn shader_fallback(
         &mut self,
         key: Key,
@@ -913,23 +915,21 @@ impl Thread {
                 (self.sink)(vec![Action::Log {
                     level: LogLevel::Warn,
                     message: format!(
-                        "viewer: the shader fallback runner could not draw a layer ({reason}: {message})"
+                        "viewer: the shader fallback runner could not draw a program ({reason}: {message})"
                     ),
                 }]);
-                if let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key))
-                {
-                    let composition = view.state.composition.as_str().to_owned();
-                    doc.force_legacy(
-                        &composition,
-                        vec![format!(
-                            "the shader fallback runner could not draw a layer ({reason})"
-                        )],
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.renderer().put_fallback_failure(
+                        &request,
+                        pm_render::shader_layers::FallbackFailure { reason, message },
                     );
+                }
+                if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
             }
-            // Requests travel the other way.
-            M::Requests { .. } => {}
+            // Requests and their textures travel the other way.
+            M::Requests { .. } | M::Input(_) => {}
         }
     }
 
@@ -2412,6 +2412,39 @@ impl Thread {
                         envelope.revision = Revision::new(doc.revision()).ok();
                         if let Ok(bytes) = codec::encode(&envelope) {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                        // The textures an effect or transition samples, in
+                        // row bands after its request.
+                        for r in chunk.iter().filter(|r| r.textures > 0) {
+                            let textures = composer
+                                .renderer()
+                                .fallback_textures(&r.key)
+                                .unwrap_or_default();
+                            for (texture, pixels) in textures.iter().enumerate() {
+                                for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
+                                    pixels,
+                                    pm_protocol::shader_fallback::MAX_BAND_BYTES,
+                                ) {
+                                    let body = Event::ShaderFallback(
+                                        pm_protocol::shader_fallback::ShaderFallbackMessage::Input(
+                                            pm_protocol::shader_fallback::ShaderFallbackInput {
+                                                key: r.key.clone(),
+                                                texture: texture as u32,
+                                                width: pixels.width,
+                                                height: pixels.height,
+                                                row,
+                                                rows,
+                                                rgba16f: pm_protocol::common::Bytes(bytes),
+                                            },
+                                        ),
+                                    );
+                                    let envelope =
+                                        Envelope::new(Message::Event { body }).with_session(key.1);
+                                    if let Ok(bytes) = codec::encode(&envelope) {
+                                        (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                                    }
+                                }
+                            }
                         }
                     }
                     return None;

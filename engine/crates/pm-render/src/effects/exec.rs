@@ -19,12 +19,12 @@ use pm_protocol::definitions::DefinitionKind;
 use super::plan::{Binding, EffectStep, Param, TransitionStep};
 use super::program::{Call, GpuProgram, active};
 use super::watchdog::{FrameTimer, Span, Subject};
-use crate::shader_layers::{FallbackPixels, FallbackUnit};
-use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 use super::{Effects, SimpleOp};
 use crate::capability::{Feature, Unsupported};
 use crate::composite::effects::{Covered, EffectContext, EffectPasses, TransitionPasses};
 use crate::exec::Region;
+use crate::shader_layers::{FallbackPixels, FallbackUnit};
+use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 
 /// `fullQuad(w, h)` as the column-major mat3 uniform.
 fn full_quad(w: u32, h: u32) -> [f32; 9] {
@@ -80,11 +80,7 @@ fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, 
 /// `shader_layers::fallback::call`).
 fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
     for (index, p) in params.iter().enumerate() {
-        let name = format!(
-            "u_{}|{}{index}",
-            p.key,
-            if p.color { "u_c" } else { "u_p" }
-        );
+        let name = format!("u_{}|{}{index}", p.key, if p.color { "u_c" } else { "u_p" });
         let call = match p.value {
             Binding::Float(v) => f(&[v]),
             Binding::Color(rgb) => f(&rgb),
@@ -95,8 +91,13 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
 
 /// A target's pixels as binary16 RGBA in its row order (GL order for
 /// every pm-render target).
-fn read_half(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target) -> Result<FallbackPixels, String> {
-    let raw = pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
+fn read_half(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &Target,
+) -> Result<FallbackPixels, String> {
+    let raw =
+        pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
     let rgba16f: Vec<u16> = match target.format() {
         wgpu::TextureFormat::Rgba16Float => raw
             .chunks_exact(2)
@@ -127,7 +128,14 @@ fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
                 .collect(),
             16,
         ),
-        _ => (pixels.rgba16f.iter().flat_map(|h| h.to_le_bytes()).collect(), 8),
+        _ => (
+            pixels
+                .rgba16f
+                .iter()
+                .flat_map(|h| h.to_le_bytes())
+                .collect(),
+            8,
+        ),
     };
     queue.write_texture(
         target.texture.as_image_copy(),
@@ -328,7 +336,15 @@ impl<'c> Gpu<'c> {
                 self.fallback(layer, &step.definition);
                 return None;
             }
-            let mut result = self.runner_effect(layer, step, input, backdrop, time, failure, (uv, origin, resolution))?;
+            let mut result = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                failure,
+                (uv, origin, resolution),
+            )?;
             if step.clamp {
                 let clamped = self.take(w, h);
                 self.simple_pass(SimpleOp::Clamp, &result, &clamped);
@@ -698,7 +714,12 @@ impl<'c> Gpu<'c> {
     /// past the runner's deadline is a runaway (the watchdog turns it off,
     /// or stops a job); a job cannot deliver without a program WebGL draws
     /// today, so any other failure but WebGL refusing it stops the job.
-    fn runner_failed(&mut self, span: &Span, program: &str, why: &crate::shader_layers::FallbackFailure) {
+    fn runner_failed(
+        &mut self,
+        span: &Span,
+        program: &str,
+        why: &crate::shader_layers::FallbackFailure,
+    ) {
         let name = span_name(span);
         let job = self.effects.watchdog.policy() == super::watchdog::Policy::Job;
         if why.reason == "watchdog" {
@@ -727,16 +748,24 @@ impl<'c> Gpu<'c> {
         let (code, message) = match why.reason.as_str() {
             "unavailable" => (
                 ErrorCode::NotHeadlessRenderable,
-                format!("{name} needs the WebGL fallback runner, which is not available here ({}).", why.message),
+                format!(
+                    "{name} needs the WebGL fallback runner, which is not available here ({}).",
+                    why.message
+                ),
             ),
             reason => (
                 ErrorCode::ShaderCompile,
-                format!("{name} could not be drawn by the WebGL fallback runner ({reason}: {}); it is skipped.", why.message),
+                format!(
+                    "{name} could not be drawn by the WebGL fallback runner ({reason}: {}); it is skipped.",
+                    why.message
+                ),
             ),
         };
-        self.effects
-            .watchdog
-            .report(EngineError::new(code, span_scope(span), crate::effects::truncate(message)));
+        self.effects.watchdog.report(EngineError::new(
+            code,
+            span_scope(span),
+            crate::effects::truncate(message),
+        ));
     }
 
     /// One draw of a legacy program into `out` (cleared to transparent,

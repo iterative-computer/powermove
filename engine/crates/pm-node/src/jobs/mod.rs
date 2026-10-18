@@ -35,6 +35,7 @@
 pub(crate) mod blender;
 mod compile;
 mod definitions;
+mod fallback;
 pub mod gate;
 
 use std::collections::{HashMap, VecDeque};
@@ -860,6 +861,18 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             fail_work(shared, work, ErrorCode::InvalidMessage, &message);
             continue;
         }
+        // Programs only the WebGL runner draws run in a window's runner
+        // through the host (contract 14): the job waits for them.
+        let (session, cancel) = match &work {
+            Work::Frames { document, cancel, .. } | Work::Export { document, cancel, .. } => {
+                (document.session, cancel.clone())
+            }
+        };
+        r.set_fallback_host(Some(Arc::new(fallback::HostFallback::new(
+            shared.clone(),
+            session,
+            cancel,
+        ))));
         match work {
             Work::Frames {
                 port,

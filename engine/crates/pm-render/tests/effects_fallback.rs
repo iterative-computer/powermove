@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
-use pm_protocol::definitions::{DefinitionKind, DefinitionOrigin, DefinitionSetSnapshot, DefinitionSnapshot};
+use pm_protocol::definitions::{
+    DefinitionKind, DefinitionOrigin, DefinitionSetSnapshot, DefinitionSnapshot,
+};
 use pm_protocol::error::{ErrorCode, ErrorScope};
 use pm_render::effects::Status;
 use pm_render::effects::watchdog::Policy;
@@ -83,7 +85,8 @@ fn cube_copy(set: &DefinitionSetSnapshot, base: &str, id: &str, passes: u8) -> D
         1,
     );
     let end = glsl.source.rfind('}').unwrap();
-    glsl.source.insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
+    glsl.source
+        .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
     if d.kind == DefinitionKind::Effect {
         d.flags.passes = passes;
         d.flags.keep_orig = true;
@@ -125,7 +128,11 @@ impl FallbackHost for Cpu {
             .map(|i| {
                 let x = pm_gpu::readback::half_to_f32(a[i]);
                 let y = b.map_or(0.0, |b| pm_gpu::readback::half_to_f32(b[i]));
-                pm_gpu::readback::f32_to_half(if i % 4 == 3 { x.max(y) } else { 0.5 * x + 0.5 * y })
+                pm_gpu::readback::f32_to_half(if i % 4 == 3 {
+                    x.max(y)
+                } else {
+                    0.5 * x + 0.5 * y
+                })
             })
             .collect();
         Ok(FallbackPixels {
@@ -143,13 +150,24 @@ fn request() -> RenderRequest {
 }
 
 fn render(r: &mut Renderer, doc: &pm_model::Document) -> Result<Vec<f32>, RenderError> {
-    let frame = r.render(doc, "P-root", Ticks::new(0).unwrap(), &request(), &MapResolver::default())?;
+    let frame = r.render(
+        doc,
+        "P-root",
+        Ticks::new(0).unwrap(),
+        &request(),
+        &MapResolver::default(),
+    )?;
     Ok(r.read_rgba(&frame).unwrap())
 }
 
 fn renderer() -> Renderer {
     let mut r = Renderer::headless().unwrap();
-    assert!(r.set_definitions(&definitions()).unwrap().iter().all(|e| e.code != ErrorCode::ShaderCompile));
+    assert!(
+        r.set_definitions(&definitions())
+            .unwrap()
+            .iter()
+            .all(|e| e.code != ErrorCode::ShaderCompile)
+    );
     for (kind, id) in [
         (DefinitionKind::Effect, "acme.cube-invert"),
         (DefinitionKind::Transition, "acme.cube-fade"),
@@ -172,11 +190,14 @@ fn without_a_runner_a_fallback_effect_routes_as_before() {
     let _gpu = gpu();
     let mut r = renderer();
     match render(&mut r, &stack(fx("acme.cube-invert"), Value::Null)) {
-        Err(RenderError::Unsupported(list)) => assert!(
-            list.iter()
-                .any(|u| u.feature == pm_render::Feature::ShaderFallback("acme.cube-invert".into())),
-            "{list:?}"
-        ),
+        Err(RenderError::Unsupported(list)) => {
+            assert!(
+                list.iter()
+                    .any(|u| u.feature
+                        == pm_render::Feature::ShaderFallback("acme.cube-invert".into())),
+                "{list:?}"
+            )
+        }
         other => panic!("expected routing, got {:?}", other.map(|_| ())),
     }
 }
@@ -195,13 +216,25 @@ fn the_viewer_asks_the_runner_with_the_effects_textures_and_draws_its_pixels() {
     assert_eq!(requests.len(), 1);
     let q = &requests[0];
     assert_eq!(q.layer, "top");
-    assert_eq!((q.textures, q.more_passes.len()), (2, 1), "input and backdrop, two passes");
-    let units: Vec<(u32, u32, bool)> = q.units.iter().map(|u| (u.unit, u.texture, u.chain)).collect();
+    assert_eq!(
+        (q.textures, q.more_passes.len()),
+        (2, 1),
+        "input and backdrop, two passes"
+    );
+    let units: Vec<(u32, u32, bool)> = q
+        .units
+        .iter()
+        .map(|u| (u.unit, u.texture, u.chain))
+        .collect();
     assert_eq!(units, vec![(0, 0, true), (1, 0, false), (2, 1, false)]);
     assert_eq!(q.stage, "bind");
     assert!(q.fragment.contains("samplerCube u_env"));
     // setParam's rule travels with the call: by name, else the alias.
-    let amount = q.calls.iter().find(|c| c.name == "u_amount").expect("amount");
+    let amount = q
+        .calls
+        .iter()
+        .find(|c| c.name == "u_amount")
+        .expect("amount");
     assert_eq!(amount.alias.as_deref(), Some("u_p0"));
     assert_eq!(amount.v, vec![100.0]);
     let pass: Vec<f64> = std::iter::once(&q.calls)
@@ -209,12 +242,21 @@ fn the_viewer_asks_the_runner_with_the_effects_textures_and_draws_its_pixels() {
         .map(|c| c.iter().find(|c| c.name == "u_pass").unwrap().v[0])
         .collect();
     assert_eq!(pass, vec![0.0, 1.0]);
-    let textures = r.fallback_textures(&q.key).expect("textures held for the runner");
+    let textures = r
+        .fallback_textures(&q.key)
+        .expect("textures held for the runner");
     assert_eq!(textures.len(), 2);
-    assert!(textures.iter().all(|t| (t.width, t.height) == (q.width, q.height)));
+    assert!(
+        textures
+            .iter()
+            .all(|t| (t.width, t.height) == (q.width, q.height))
+    );
     // The runner answers: the frame draws its pixels.
     let cpu = Cpu::default();
-    let job = FallbackJob { request: q.clone(), textures };
+    let job = FallbackJob {
+        request: q.clone(),
+        textures,
+    };
     let pixels = cpu.run(&job).unwrap();
     r.put_fallback_pixels(q.key.clone(), pixels);
     let drawn = render(&mut r, &doc).unwrap();
@@ -230,7 +272,10 @@ fn a_job_renderer_waits_on_its_fallback_host_and_matches_the_viewer() {
     // The viewer, answered by hand.
     let mut viewer = renderer();
     viewer.set_shader_fallback_runner(true);
-    let doc = stack(fx("acme.cube-invert"), json!({ "type": "acme.cube-fade", "dur": 1, "p": {} }));
+    let doc = stack(
+        fx("acme.cube-invert"),
+        json!({ "type": "acme.cube-fade", "dur": 1, "p": {} }),
+    );
     let cpu = Arc::new(Cpu::default());
     let expected = loop {
         match render(&mut viewer, &doc) {
@@ -238,7 +283,12 @@ fn a_job_renderer_waits_on_its_fallback_host_and_matches_the_viewer() {
             Err(RenderError::ShaderFallbackPending(requests)) => {
                 for q in requests {
                     let textures = viewer.fallback_textures(&q.key).unwrap();
-                    let px = cpu.run(&FallbackJob { request: q.clone(), textures }).unwrap();
+                    let px = cpu
+                        .run(&FallbackJob {
+                            request: q.clone(),
+                            textures,
+                        })
+                        .unwrap();
                     viewer.put_fallback_pixels(q.key, px);
                 }
             }
@@ -251,13 +301,18 @@ fn a_job_renderer_waits_on_its_fallback_host_and_matches_the_viewer() {
     let host = Arc::new(Cpu::default());
     job.set_fallback_host(Some(host.clone()));
     assert!(
-        job.unsupported_with_media(&doc, "P-root", &MapResolver::default()).is_empty(),
+        job.unsupported_with_media(&doc, "P-root", &MapResolver::default())
+            .is_empty(),
         "a job with a host is not routed"
     );
     assert_eq!(render(&mut job, &doc).unwrap(), expected);
     let seen = host.seen.lock().unwrap();
     let kinds: Vec<u32> = seen.iter().map(|j| j.request.textures).collect();
-    assert_eq!(kinds, vec![2, 2], "the effect (input, backdrop), then the transition (from, to)");
+    assert_eq!(
+        kinds,
+        vec![2, 2],
+        "the effect (input, backdrop), then the transition (from, to)"
+    );
     assert_eq!(seen[1].request.more_passes.len(), 0);
     assert!(seen[1].request.calls.iter().any(|c| c.name == "u_prog"));
 }
@@ -267,36 +322,58 @@ fn a_program_the_runner_refuses_is_skipped_and_reported_once() {
     let _gpu = gpu();
     let mut r = renderer();
     let host = Arc::new(Cpu::default());
-    *host.fail.lock().unwrap() = Some(FallbackFailure { reason: "compile".into(), message: "ERROR: 0:3: nope".into() });
+    *host.fail.lock().unwrap() = Some(FallbackFailure {
+        reason: "compile".into(),
+        message: "ERROR: 0:3: nope".into(),
+    });
     r.set_fallback_host(Some(host.clone()));
     let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
     let doc = stack(fx("acme.cube-invert"), Value::Null);
-    assert_eq!(render(&mut r, &doc).unwrap(), without, "skipped, as WebGL skips it");
+    assert_eq!(
+        render(&mut r, &doc).unwrap(),
+        without,
+        "skipped, as WebGL skips it"
+    );
     assert_eq!(render(&mut r, &doc).unwrap(), without);
     assert_eq!(host.seen.lock().unwrap().len(), 1, "not asked for again");
     let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
-    assert!(matches!(&reports[0].scope, ErrorScope::Effect { definition, .. } if definition.as_str() == "acme.cube-invert"));
-    assert!(reports[0].message.contains("nope"), "{}", reports[0].message);
+    assert!(
+        matches!(&reports[0].scope, ErrorScope::Effect { definition, .. } if definition.as_str() == "acme.cube-invert")
+    );
+    assert!(
+        reports[0].message.contains("nope"),
+        "{}",
+        reports[0].message
+    );
 }
 
 #[test]
 fn a_draw_past_the_runners_deadline_is_turned_off_and_stops_a_job() {
     let _gpu = gpu();
-    let deadline = FallbackFailure { reason: "watchdog".into(), message: "its draw did not finish within 10 s".into() };
+    let deadline = FallbackFailure {
+        reason: "watchdog".into(),
+        message: "its draw did not finish within 10 s".into(),
+    };
     // The viewer: turned off and reported as a watchdog timeout.
     let mut r = renderer();
     r.set_shader_fallback_runner(true);
     let doc = stack(fx("acme.cube-invert"), Value::Null);
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else { panic!() };
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!()
+    };
     r.put_fallback_failure(&q[0].key, deadline.clone());
     let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
     assert_eq!(render(&mut r, &doc).unwrap(), without);
     let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::WatchdogTimeout);
-    assert!(r.effects().watchdog.is_disabled(DefinitionKind::Effect, "acme.cube-invert"));
+    assert!(
+        r.effects()
+            .watchdog
+            .is_disabled(DefinitionKind::Effect, "acme.cube-invert")
+    );
     // A job: stopped with a named error.
     let mut job = renderer();
     job.effects_mut().watchdog.set_policy(Policy::Job);
@@ -315,13 +392,18 @@ fn a_job_without_a_runner_fails_naming_the_program_instead_of_skipping_it() {
     let mut job = renderer();
     job.effects_mut().watchdog.set_policy(Policy::Job);
     let host = Arc::new(Cpu::default());
-    *host.fail.lock().unwrap() = Some(FallbackFailure { reason: "unavailable".into(), message: "no window is open".into() });
+    *host.fail.lock().unwrap() = Some(FallbackFailure {
+        reason: "unavailable".into(),
+        message: "no window is open".into(),
+    });
     job.set_fallback_host(Some(host));
     match render(&mut job, &stack(fx("acme.cube-invert"), Value::Null)) {
         Err(RenderError::Fallback(m)) => {
-            assert!(m.contains("acme.cube-invert") && m.contains("no window"), "{m}")
+            assert!(
+                m.contains("acme.cube-invert") && m.contains("no window"),
+                "{m}"
+            )
         }
         other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
     }
 }
-

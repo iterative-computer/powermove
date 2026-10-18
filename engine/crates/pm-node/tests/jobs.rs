@@ -26,8 +26,8 @@ use pm_protocol::envelope::{
 };
 use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::host::{
-    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved, OutputChoice,
-    OutputCommitted, OutputDestination, PortId,
+    CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved,
+    OutputChoice, OutputCommitted, OutputDestination, PortId,
 };
 use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
 use pm_protocol::priority::*;
@@ -285,6 +285,19 @@ impl Host {
         match body {
             Request::MintHandle(m) => {
                 self.host_requests.push("mintHandle");
+                if let CapabilityKind::Cache {
+                    cache: CacheKind::Scratch,
+                } = &m.kind
+                {
+                    let path = self.dir.join("scratch");
+                    std::fs::create_dir_all(&path).unwrap();
+                    let handle = self.mint(m.kind.clone(), path);
+                    return Ok(Response::Handle(HandleGrant {
+                        handle,
+                        kind: m.kind,
+                        content_hash: None,
+                    }));
+                }
                 let CapabilityKind::MediaRead { asset } = &m.kind else {
                     return err(ErrorCode::Unsupported, "only media");
                 };
@@ -305,6 +318,7 @@ impl Host {
                 };
                 let access = match kind {
                     CapabilityKind::OutputWrite { .. } => HandleAccess::Write,
+                    CapabilityKind::Cache { .. } => HandleAccess::ReadWrite,
                     _ => HandleAccess::Read,
                 };
                 Ok(Response::HandleResolved(HandleResolved {
@@ -379,6 +393,30 @@ impl Host {
                     }
                 }
                 unreachable!()
+            }
+            // A window's fallback runner (main relays it): every texel
+            // blue, after checking the textures arrived as files.
+            Request::ShaderFallback(f) => {
+                self.host_requests.push("shaderFallback");
+                assert!(session.is_some(), "bound to the job's session");
+                let Some((_, area)) = self.handles.get(&f.area).cloned() else {
+                    return err(ErrorCode::CapabilityRejected, "unknown area");
+                };
+                let r = &f.request;
+                let bytes = u64::from(r.width) * u64::from(r.height) * 8;
+                for name in &f.textures {
+                    assert_eq!(
+                        std::fs::metadata(area.join(name)).unwrap().len(),
+                        bytes,
+                        "{name}"
+                    );
+                }
+                let out: Vec<u8> = (0..r.width * r.height)
+                    .flat_map(|_| [0u16, 0, 0x3c00, 0x3c00])
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                std::fs::write(area.join(&f.output), out).unwrap();
+                Ok(Response::Ack)
             }
             other => err(ErrorCode::InvalidMessage, &format!("unexpected {other:?}")),
         }
@@ -1129,7 +1167,8 @@ fn inverted_project() -> Value {
         .iter_mut()
         .find(|l| l["id"] == "back")
         .unwrap();
-    back["fx"] = json!([{ "id": "fx1", "type": "invert", "on": true, "p": { "amount": ch(json!(100)) } }]);
+    back["fx"] =
+        json!([{ "id": "fx1", "type": "invert", "on": true, "p": { "amount": ch(json!(100)) } }]);
     doc
 }
 
@@ -1166,7 +1205,11 @@ impl Host {
     }
 
     /// The top-left pixel of each frame of a batch on `session`.
-    fn corner_pixels(&mut self, session: SessionId, revision: u64) -> Vec<Result<[u8; 3], ErrorCode>> {
+    fn corner_pixels(
+        &mut self,
+        session: SessionId,
+        revision: u64,
+    ) -> Vec<Result<[u8; 3], ErrorCode>> {
         let id = self.send_request(
             Request::AgentFrames(frames_request(2)),
             Some(session),
@@ -1277,7 +1320,10 @@ fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
     // An export from a snapshot session with the window's set draws every
     // effect (it was routed before definitions reached the job engine).
     let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
-    host.push_definitions(snapshot, update(1, true, builtins.definitions.clone(), vec![]));
+    host.push_definitions(
+        snapshot,
+        update(1, true, builtins.definitions.clone(), vec![]),
+    );
     host.send_request(
         Request::SubmitJob(agent_export(
             "job-fx",
@@ -1289,7 +1335,9 @@ fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
         None,
         None,
     );
-    assert!(host.run_until(Duration::from_secs(120), |h| terminal(h, "job-fx").is_some()));
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-fx").is_some()
+    }));
     let status = terminal(&host, "job-fx").unwrap();
     assert_eq!(status.state, JobState::Done, "{:?}", status.error);
     // Without definitions the same export is refused before anything is
@@ -1306,10 +1354,15 @@ fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
         None,
         None,
     );
-    assert!(host.run_until(Duration::from_secs(60), |h| terminal(h, "job-bare").is_some()));
+    assert!(host.run_until(Duration::from_secs(60), |h| {
+        terminal(h, "job-bare").is_some()
+    }));
     let status = terminal(&host, "job-bare").unwrap();
     assert_eq!(status.state, JobState::Failed);
-    assert_eq!(status.error.as_ref().map(|e| e.code), Some(ErrorCode::Unsupported));
+    assert_eq!(
+        status.error.as_ref().map(|e| e.code),
+        Some(ErrorCode::Unsupported)
+    );
 }
 
 fn raw_effect(id: &str, source: &str) -> pm_protocol::definitions::DefinitionSnapshot {
@@ -1384,11 +1437,89 @@ fn pushed_definitions_are_compiled_before_they_are_acknowledged() {
         .iter()
         .find(|e| e.code == ErrorCode::ShaderCompile)
         .unwrap();
-    let Some(pm_protocol::error::ErrorDetail::ShaderCompile { diagnostics }) = &broken.detail else {
+    let Some(pm_protocol::error::ErrorDetail::ShaderCompile { diagnostics }) = &broken.detail
+    else {
         panic!("{broken:?}")
     };
     assert!(
-        diagnostics.iter().any(|d| d.line == 5 && d.message.contains("nope")),
+        diagnostics
+            .iter()
+            .any(|d| d.line == 5 && d.message.contains("nope")),
         "{diagnostics:?}"
     );
+}
+
+/// Contract 14 and amendment 21 in the job engine: an effect only the WebGL
+/// runner draws is not routed and not skipped. The job asks the host to run
+/// it in a window's runner, with its textures as files in the session's
+/// scratch area, and draws the pixels the host writes back: agent frames
+/// and an export alike.
+#[test]
+fn effects_only_the_webgl_runner_draws_run_in_a_window_through_the_host() {
+    use pm_protocol::definitions::DefinitionsUpdate;
+    let mut host = Host::new("fallback", &[]);
+    let mut doc = project(false);
+    let back = doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "back")
+        .unwrap();
+    back["fx"] = json!([{ "id": "fx1", "type": "acme.cube", "on": true, "p": {} }]);
+    let mut set = pm_render::builtin_definitions();
+    let mut cube = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    cube.id = "acme.cube".into();
+    cube.origin = pm_protocol::definitions::DefinitionOrigin::Store;
+    let glsl = cube.glsl.as_mut().unwrap();
+    glsl.source = glsl.source.replacen(
+        "void main(){",
+        "uniform samplerCube u_env;\nvoid main(){",
+        1,
+    );
+    let end = glsl.source.rfind('}').unwrap();
+    glsl.source
+        .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
+    set.definitions.push(cube);
+    let update = DefinitionsUpdate {
+        generation: Seq::new(1).unwrap(),
+        full: true,
+        upserts: set.definitions,
+        removals: vec![],
+    };
+    let sid = host.snapshot(&doc, SessionRole::Job, 1);
+    host.push_definitions(sid, update.clone());
+    for px in host.corner_pixels(sid, 1) {
+        assert!(
+            near(px.unwrap(), [0, 0, 255]),
+            "the runner's pixels: {px:?}"
+        );
+    }
+    assert!(host.host_requests.contains(&"shaderFallback"));
+    // The scratch files are gone once read.
+    let left = std::fs::read_dir(host.dir.join("scratch")).unwrap().count();
+    assert_eq!(left, 0);
+    // An export draws it too.
+    let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.push_definitions(snapshot, update);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-cube",
+            "run-c",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-cube").is_some()
+    }));
+    let status = terminal(&host, "job-cube").unwrap();
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
 }

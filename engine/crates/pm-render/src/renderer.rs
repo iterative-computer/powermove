@@ -316,7 +316,11 @@ impl Renderer {
     /// reported; it is not asked for again until its source changes. A
     /// draw past the runner's deadline (`watchdog`) is turned off by the
     /// watchdog.
-    pub fn put_fallback_failure(&mut self, key: &str, failure: crate::shader_layers::FallbackFailure) {
+    pub fn put_fallback_failure(
+        &mut self,
+        key: &str,
+        failure: crate::shader_layers::FallbackFailure,
+    ) {
         if self.effects.fallback.expects(key) {
             self.effects.fallback.put_failure(key, failure);
         } else if let Some(program) = self.shaders.waiting.remove(key) {
@@ -376,8 +380,11 @@ impl Renderer {
 
     /// Swaps in another definition set (one per view of a shared renderer:
     /// each keeps its programs and watchdog state); returns the previous.
+    /// Whether a fallback runner is attached belongs to the renderer, not
+    /// to a definition set: the set swapped in draws with it.
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
+        self.effects.fallback.runner = self.shaders.fallback_runner;
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,

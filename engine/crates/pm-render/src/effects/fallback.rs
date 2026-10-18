@@ -134,7 +134,11 @@ impl EffectFallback {
     }
 
     /// A request the frame waits for, with its textures.
-    pub(crate) fn wait(&mut self, request: Arc<FallbackRequest>, textures: Vec<Arc<FallbackPixels>>) {
+    pub(crate) fn wait(
+        &mut self,
+        request: Arc<FallbackRequest>,
+        textures: Vec<Arc<FallbackPixels>>,
+    ) {
         if !self.waiting.contains_key(&request.key) {
             while self.order.len() >= WAITING {
                 if let Some(old) = self.order.pop_front() {

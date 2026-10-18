@@ -328,8 +328,7 @@ impl crate::exec::Exec<'_> {
                             source.layer, why.message
                         ),
                     );
-                } else if self.effects.watchdog.policy()
-                    == crate::effects::watchdog::Policy::Job
+                } else if self.effects.watchdog.policy() == crate::effects::watchdog::Policy::Job
                     && why.reason != "compile"
                 {
                     self.effects.fallback.fatal.get_or_insert_with(|| {

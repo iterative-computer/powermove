@@ -170,7 +170,9 @@ fn request_ok(r: &ShaderFallbackRequest) -> Result<(), Violation> {
     ensure(r.more_passes.len() < MAX_PASSES, c, || {
         format!("{} fallback passes", r.more_passes.len() + 1)
     })?;
-    ensure(r.units.len() as u32 <= MAX_UNITS, c, || "too many units".into())?;
+    ensure(r.units.len() as u32 <= MAX_UNITS, c, || {
+        "too many units".into()
+    })?;
     for u in &r.units {
         ensure(u.unit < MAX_UNITS && u.texture < r.textures, c, || {
             format!("unit {} samples texture {}", u.unit, u.texture)
@@ -201,13 +203,17 @@ impl Validate for HostShaderFallback {
     fn validate(&self) -> Result<(), Violation> {
         let c = ContractId::HostServices;
         request_ok(&self.request)?;
-        ensure(self.textures.len() as u32 == self.request.textures, c, || {
-            format!(
-                "{} texture files for {} textures",
-                self.textures.len(),
-                self.request.textures
-            )
-        })?;
+        ensure(
+            self.textures.len() as u32 == self.request.textures,
+            c,
+            || {
+                format!(
+                    "{} texture files for {} textures",
+                    self.textures.len(),
+                    self.request.textures
+                )
+            },
+        )?;
         ensure(
             self.textures.iter().all(|n| file_name_ok(n)) && file_name_ok(&self.output),
             c,
@@ -395,18 +401,34 @@ mod tests {
         let mut effect = request(8, vec![call("1i", 1)]);
         effect.textures = 2;
         effect.units = vec![
-            ShaderFallbackUnit { unit: 0, texture: 0, chain: true },
-            ShaderFallbackUnit { unit: 2, texture: 1, chain: false },
+            ShaderFallbackUnit {
+                unit: 0,
+                texture: 0,
+                chain: true,
+            },
+            ShaderFallbackUnit {
+                unit: 2,
+                texture: 1,
+                chain: false,
+            },
         ];
         effect.more_passes = vec![vec![call("1i", 1)]; 7];
-        let ok = ShaderFallbackMessage::Requests { requests: vec![effect.clone()] };
+        let ok = ShaderFallbackMessage::Requests {
+            requests: vec![effect.clone()],
+        };
         assert!(ok.validate().is_ok());
         let mut past = effect.clone();
         past.units[1].texture = 2;
         let mut passes = effect.clone();
         passes.more_passes.push(vec![]);
         for bad in [past, passes] {
-            assert!(ShaderFallbackMessage::Requests { requests: vec![bad] }.validate().is_err());
+            assert!(
+                ShaderFallbackMessage::Requests {
+                    requests: vec![bad]
+                }
+                .validate()
+                .is_err()
+            );
         }
         let host = |names: Vec<&str>| HostShaderFallback {
             request: effect.clone(),
@@ -414,7 +436,11 @@ mod tests {
             textures: names.into_iter().map(String::from).collect(),
             output: "out.rgba16f".into(),
         };
-        assert!(host(vec!["in-0.rgba16f", "in-1.rgba16f"]).validate().is_ok());
+        assert!(
+            host(vec!["in-0.rgba16f", "in-1.rgba16f"])
+                .validate()
+                .is_ok()
+        );
         assert!(host(vec!["in-0.rgba16f"]).validate().is_err());
         assert!(host(vec!["../x", "in-1"]).validate().is_err());
         for bad in [
