@@ -12,8 +12,10 @@ import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWE
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE } from './install';
-import { DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
+import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
+import { createEngineDefinitions } from '../kernel/engine-definitions';
+import { createKernel } from '../kernel/registries';
 
 /** A port pair whose far end is a scripted engine. */
 class FakePort implements PortLike {
@@ -152,6 +154,123 @@ describe('the engine connection', () => {
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
+    // A frame of the routed revision or older, still in flight, is stale: it
+    // neither shows nor brings the engine back; a newer one does.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 6 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy']);
+    expect(messages).toEqual(['frame', 'routed']);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 7 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine']);
+    expect(messages).toEqual(['frame', 'routed', 'frame']);
+  });
+
+  it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {
+    const pushes: Array<{ generation: number; full: boolean; ids: string[] }> = [];
+    let refuseNext = false;
+    const base = engine();
+    const port = new FakePort((message, p) => {
+      const m = message.message;
+      if (m.kind === 'request' && (m.body as Request).type === 'pushDefinitions') {
+        const body = m.body as unknown as { generation: number; full: boolean; upserts: Array<{ id: string }> };
+        pushes.push({ generation: body.generation, full: body.full, ids: body.upserts.map((u) => u.id) });
+        const refuse = refuseNext;
+        refuseNext = false;
+        queueMicrotask(() =>
+          p.deliver(
+            refuse
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'gap', retry: { kind: 'afterResync' }, detail: null } } as never)
+              : envelope({ kind: 'response', id: m.id, body: { type: 'definitionsApplied', generation: body.generation, failures: body.upserts.some((u) => u.id === 'broken') ? [{ code: 'shaderCompile', scope: { kind: 'definition', definition: 'broken' }, message: 'The shader of broken does not compile.', retry: { kind: 'afterUserAction' }, detail: { kind: 'shaderCompile', diagnostics: [{ line: 2, column: null, message: 'syntax error' }] } }] : [] } } as never, 5)
+          )
+        );
+        return;
+      }
+      (base as unknown as { reply: (m: Envelope, p: FakePort) => void }).reply(message, p);
+    });
+    const { connection } = await connected(port);
+    const kernel = createKernel();
+    const PM: any = { GLSL_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', TRANSITION_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', SHADER_HEADER: '#version 300 es', proj: { layers: [], comps: {} }, UIState: { setShaderMeta: () => {} } };
+    kernel.registerEffect('local', { id: 'glow2', label: 'Glow', group: 'Light', params: [], frag: 'o = vec4(1.0);' });
+    const definitions = createEngineDefinitions(PM, kernel);
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} }, definitions: () => definitions });
+    await session.start();
+    await flush();
+    // The full update went before the document.
+    const order = port.sent.flatMap((e) => (e.message.kind === 'request' ? [(e.message.body as { type: string }).type] : []));
+    expect(order.indexOf('pushDefinitions')).toBeLessThan(order.indexOf('resync'));
+    expect(pushes).toEqual([{ generation: 1, full: true, ids: ['glow2'] }]);
+    // A registration is a delta; its compile failure comes back as a compile error.
+    kernel.registerEffect('local', { id: 'broken', label: 'Broken', group: 'X', params: [], frag: 'o = ;' });
+    await flush();
+    expect(pushes.at(-1)).toEqual({ generation: 2, full: false, ids: ['broken'] });
+    expect(definitions.meta.compileError('fx:broken')).toBe('The shader of broken does not compile.\nline 2: syntax error');
+    // A refused delta (an engine restart lost the generation): the next update is full.
+    refuseNext = true;
+    kernel.registerEffect('local', { id: 'third', label: 'Third', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    await flush();
+    expect(pushes.at(-2)).toEqual({ generation: 3, full: false, ids: ['third'] });
+    expect(pushes.at(-1)).toMatchObject({ generation: 4, full: true });
+    expect(pushes.at(-1)!.ids.sort()).toEqual(['broken', 'glow2', 'third']);
+    // Failure events reach the shader meta.
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 9, error: { code: 'watchdogTimeout', scope: { kind: 'effect', layer: 'L', effect: 'f', definition: 'glow2' }, message: 'glow2 took 300 ms.', retry: { kind: 'afterUserAction' }, detail: null } } } as never, 5));
+    expect(definitions.meta.compileError('fx:glow2')).toBeNull(); // no layer L in the document: ignored
+    session.close();
+    kernel.registerEffect('local', { id: 'late', label: 'Late', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    expect(pushes.at(-1)!.ids).not.toContain('late');
+  });
+
+  it('backs off from an engine that keeps refusing definitions, then waits for the next registration', async () => {
+    const pushes: Array<{ at: number; full: boolean }> = [];
+    let refuse = true;
+    const base = engine();
+    const port = new FakePort((message, p) => {
+      const m = message.message;
+      if (m.kind === 'request' && (m.body as Request).type === 'pushDefinitions') {
+        const body = m.body as unknown as { generation: number; full: boolean };
+        pushes.push({ at: Date.now(), full: body.full });
+        const refused = refuse;
+        queueMicrotask(() =>
+          p.deliver(
+            refused
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'bad snapshot', retry: { kind: 'afterResync' }, detail: null } } as never)
+              : envelope({ kind: 'response', id: m.id, body: { type: 'definitionsApplied', generation: body.generation, failures: [] } } as never, 5)
+          )
+        );
+        return;
+      }
+      (base as unknown as { reply: (m: Envelope, p: FakePort) => void }).reply(message, p);
+    });
+    const { connection } = await connected(port);
+    const kernel = createKernel();
+    const PM: any = { GLSL_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', TRANSITION_PRE: '', SHADER_HEADER: '', proj: { layers: [], comps: {} } };
+    kernel.registerEffect('local', { id: 'glow2', label: 'Glow', group: 'Light', params: [], frag: 'o = vec4(1.0);' });
+    const definitions = createEngineDefinitions(PM, kernel);
+    const logs: string[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: (_l, m) => logs.push(m), handlers: { message: () => {}, closed: () => {} }, definitions: () => definitions, definitionsRetryMs: 4 });
+    expect(definitions.sessionCount()).toBe(0);
+    await session.start();
+    expect(definitions.sessionCount()).toBe(1);
+    // The first push, an immediate full retry, then DEFINITIONS_RETRIES - 1
+    // retries backing off from 4 ms: 4, 8, 16, 32, 64 ms.
+    await vi.waitFor(() => expect(logs.some((l) => l.includes('times in a row'))).toBe(true), { timeout: 2000 });
+    const settled = pushes.length;
+    expect(settled).toBe(1 + DEFINITIONS_RETRIES);
+    expect(pushes.every((p) => p.full)).toBe(true);
+    const gaps = pushes.slice(2).map((p, i) => p.at - pushes[i + 1]!.at);
+    gaps.forEach((gap, i) => expect(gap).toBeGreaterThanOrEqual(4 * 2 ** i - 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(pushes.length).toBe(settled); // no endless loop
+    // The next registration sends the whole set again.
+    refuse = false;
+    kernel.registerEffect('local', { id: 'third', label: 'Third', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    await flush();
+    expect(pushes.length).toBe(settled + 1);
+    expect(pushes.at(-1)!.full).toBe(true);
+    // A closed session leaves the kernel's list.
+    session.close();
+    expect(definitions.sessionCount()).toBe(0);
   });
 
   it('resyncs after a revision gap, a load batch, and a stale failure', async () => {
@@ -174,6 +293,40 @@ describe('the engine connection', () => {
     await flush();
     expect(port.requests('resync')).toHaveLength(4);
     expect(session.resyncs).toBe(4);
+  });
+
+  it('asks the viewer for its state again once another document is loaded', async () => {
+    const { connection, port } = await connected();
+    const doc = stream();
+    let id = 'P1';
+    const loaded: number[] = [];
+    const session = new DocumentSession({
+      connection, stream: doc, documentId: () => id, log: () => {},
+      handlers: { message: () => {}, closed: () => {} },
+      onLoaded: () => loaded.push(port.requests('resync').length)
+    });
+    await session.start();
+    await flush();
+    // Edits and gaps keep the document: no new layout.
+    doc.emit({ revision: 4 });
+    doc.emit({ revision: 6, baseRevision: 5 });
+    await flush();
+    expect(loaded).toEqual([]);
+    // `PM.proj = PM.mkProject(…)`: the mirror loads another document. The
+    // viewer is asked again only after the engine has it.
+    id = 'P2';
+    doc.emit({ revision: 7, origin: 'load' });
+    expect(loaded).toEqual([]);
+    await flush();
+    const last = port.requests('resync').at(-1)!.message as { body: { document: string } };
+    expect(last.body.document).toBe('P2');
+    expect(loaded).toEqual([3]);
+    expect(session.applied).toBe(7);
+    // A closed session asks for nothing.
+    session.close();
+    doc.emit({ revision: 8, origin: 'load' });
+    await flush();
+    expect(loaded).toEqual([3]);
   });
 
   it('ends its sessions when the engine connection closes (an engine restart)', async () => {

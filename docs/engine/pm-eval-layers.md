@@ -41,14 +41,18 @@ The evaluator core's API is unchanged.
 
 ## Time
 
-`sourceTime` has two integration steps for variable speed. `Retiming::Legacy`
-is `retiming.ts`: a midpoint rule at `1 / (max(30, PM.proj.fps) × 2)` s, so a
-nested layer's source time depends on which composition is open (appendix A
-item 9). `Retiming::Engine` (the default) is section 5 rule 5: one midpoint
-sample per frame of the owning composition's exact rate, frame boundaries on
-the tick grid, plus a partial step to the requested time. Parity tests use
-`Legacy`; `layers_unit.rs` checks that `Engine` follows the owning rate and
-integrates per composition frame.
+`sourceTime` has two integration steps for variable speed, both a midpoint rule
+at `1 / (max(30, fps) × 2)` s (two samples per frame, at no less than 60 Hz).
+`Retiming::Legacy` is `retiming.ts`: `fps` is the open composition's
+(`PM.proj.fps`), so a nested layer's source time depends on which composition is
+open (appendix A item 9). `Retiming::Engine` (the default) is section 5 rule 5
+with amendment 16: `fps` is the owning composition's (`comp.fps || PM.proj.fps`),
+so a root composition matches today bit for bit and a nested one uses its own
+rate. Parity tests use `Legacy`; the layer vectors also check `Engine` against
+the TypeScript at the root (`sourceTime (engine step)`), and `layers_unit.rs`
+checks an eased speed with an expression at five root rates bit for bit and the
+nested case against the legacy step with the nested composition open
+(`docs/engine/gate-fixes.md`, T3).
 
 3D content (section 5 rule 10): shared-material channels (`shader.`,
 `slots.<id>.shader.`) evaluate their keys in composition timing, so keys may

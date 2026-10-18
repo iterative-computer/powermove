@@ -5,22 +5,26 @@ section 26 amendments 4 and 5; contracts 2 and 3). It productionizes spike
 S1 (`docs/engine/spikes/S1.md`, `engine/spikes/s1-bridge/`). Everything runs
 behind "Use New Engine".
 
-**Status: flag-gated; the amended S1 gate against the real WebGL viewer
-is not met, on pointer-to-pixel (amendment 18: Jude decides).** The bridge
-passes its Electron integration test in both presentation modes (frames
-drawn on the page's main thread and by the viewer's presentation worker)
-and the quality lines. Against the real viewer playing the corpus project
-in the real app, the engine path presented from the worker is better for
-playback, idle and under the gate load (0 to 5 drops a minute against 84
-to 238 under load), and worse on gestures: 5 to 9 ms slower at p50 idle
-in three of four paired runs (r9: 19.5 against 14.5 ms) and slower at p99
-idle and under load (see
-[The amended S1 gate](#the-amended-s1-gate-against-the-real-viewer)).
-Amendment 18's three steps are in and measured; the C′ prototype misses
-the zero-drop line and is not adopted; Electron offers no ProMotion
-request. Everything stays behind "Use New Engine": nothing presents
+**Status: flag-gated; the Phase 2 gate's frame-bridge rows are not all
+met (2026-10-16, [The Phase 2 gate items](#the-phase-2-gate-items-2026-10-16)).**
+H1, H2, and D3 are fixed (and a renderer crash after a GPU process crash
+that D3's reproduction found). A/V sync by presentation is within ±10 ms
+at p95 at 23.976, 25, and 30 fps idle; under the gate load it fails, the
+frames outside being those of live window resizes. Cadence at 120 Hz is
+not ideal: the remaining irregular intervals are a race between the
+worker's and the page's compositor frames in viz and the WindowServer's
+presentation lag, neither of which the worker can see; C′ is the only
+measured path to the ideal cadence. Against the real viewer on the perf
+project (through the kernel's connection, the production path), playback
+is better than today under load and equal idle, the pan is equal idle
+and better at p50 under load but worse at p99 under load (102.5 against
+74.9 ms); layer drag with the engine drawing the document is worse, set
+by the document's render cost and the page's main thread. The bridge
+passes its Electron integration test in both presentation modes and the
+quality lines. Everything stays behind "Use New Engine": nothing presents
 unless the kernel registers `engine.viewer` and the engine has a frame
-source. The options are in [Decision](#decision-before-the-phase-2-gate).
+source. The open options are in
+[Decision](#decision-before-the-phase-2-gate).
 
 ## Where the code is
 
@@ -37,7 +41,8 @@ source. The options are in [Decision](#decision-before-the-phase-2-gate).
 | Vsync-phase hint (contract 2 `ViewerState.vsync`) | viewer: `engine-present/display-timing.ts`, `presenter.ts`; engine: `pm-node/src/present/schedule.rs` (`next_in_phase`) |
 | C′ prototype (remote Core Animation layer, measurement builds only) | `engine/crates/pm-gpu/src/bridge_out/remote_layer.rs` and `pm-node/src/present/render.rs` (`remote-layer` feature of both), hosting in `pm-bridge` (`harness` feature), `pm-gpu/examples/refresh_probe.rs` (needs `remote-layer`) |
 | Electron integration test (run on every Electron upgrade) | `apps/desktop/scripts/frame-bridge-integration.mjs`, `src/main/engine/integration/bridge-*.ts` |
-| S1 measurement of the production path | `apps/desktop/scripts/frame-bridge-measure.mjs`, `src/main/engine/integration/measure-*.ts` (stand-in page), `measure-app-*.ts` (the real app); summaries in `docs/engine/bridge-measurements/` |
+| S1 measurement of the production path | `apps/desktop/scripts/frame-bridge-measure.mjs`, `src/main/engine/integration/measure-*.ts` (stand-in page), `measure-app-*.ts` (the real app); summaries in `docs/engine/bridge-measurements/` (and `tracer-measurements/` for the document runs) |
+| Presentation recovery e2e (GPU process crash, a transfer that lands late) | `apps/desktop/e2e/engine-present-recovery.spec.ts` |
 
 ## How a frame gets to the screen
 
@@ -72,9 +77,11 @@ source. The options are in [Decision](#decision-before-the-phase-2-gate).
    transfers it at once to its presentation worker, which owns the
    viewer canvas's drawing (`OffscreenCanvas`) and queues the frame in the
    jitter buffer. At each of the worker's animation frames it predicts
-   when that refresh reaches the display (two refreshes out for a worker
-   canvas, measured), maps it to media time on the latest clock sample,
-   and draws the frame whose interval contains it (`importExternalTexture`,
+   when that refresh reaches the display (1.5 refreshes and 3.2 ms after
+   the animation frame for a worker canvas, calibrated on viz's
+   presentation feedback; see [A/V sync](#av-sync-by-presentation)), maps
+   it to media time on the latest clock sample, and draws the frame whose
+   interval contains that instant rounded to the nearest refresh (`importExternalTexture`,
    sampled 1:1 into a WebGPU canvas: `rgba16float` with extended tone
    mapping for `rgbaf16` pools). Frames shown at the next refresh (paused,
    scrub, gesture) are drawn as they arrive. Without a worker (or if it
@@ -212,10 +219,272 @@ frame as late until it decided on the page's clock):
 - **Ended launches** beyond the newest four that still hold surfaces are
   disposed (main drops its references) rather than left to the garbage
   collector.
+- **A surface delivered twice** (phase2-gate.md D3). While the page's
+  main thread is held up for over a second, Electron's 1000 ms transfer
+  timeout fires on main, the bridge sends the import again, and the first
+  transfer still lands: main counts one renderer reference, the preload
+  held two, and the second release notice reached main after it had
+  dropped the texture ("Shared texture with id … not found" as a page
+  error). The receiver keeps the first copy of a texture it already holds
+  and lets go of the other without a notice; it sends release notices
+  itself (Electron's channel, as Electron's own wrapper does), so a notice
+  main can no longer place is counted (`lateReleases`), never thrown.
+  See [D3](#d3-a-surface-delivered-twice).
+- **A lost WebGPU device** (a GPU process crash). Drawing with the lost
+  device in the presentation worker crashed the renderer; the painter now
+  reports the loss and refuses to draw, the worker hands its frames back,
+  and the presentation draws again on a new canvas and device, keeping the
+  session (it gives up after 4 losses in 30 s). See
+  [D3](#d3-a-surface-delivered-twice).
 - **Packaging.** `native/pm_bridge.node` is in electron-builder's `files`
   and the release script's `--with-engine` check; before, a packaged app
   could not load the bridge, so it presented nothing and the Team ID policy
   could never run in a signed build.
+
+## The Phase 2 gate items (2026-10-16)
+
+The frame-bridge items `phase2-gate.md` left open, fixed or measured on
+`feat/ne-bridgefix` (the integration branch at `f47b1f8c` plus this lane).
+Measured on the same MacBook Pro (M4 Max, built-in 120 Hz XDR panel),
+Electron 44.0.0, release addons, every Electron run hidden and unfocused
+under the machine lock, display awake and session unlocked before and
+after every run. The Mac was shared with other lanes: each summary records
+the 1-minute load average (5 to 16 in these runs; one run at 99 is left
+out). Summaries: `bridge-measurements/*-bf*.json` (the perf project) and
+`tracer-measurements/*-bf*.json` (synthetic projects).
+
+### H1: the engine-host harness reads main's clock
+
+`integration/electron-main.ts` passed libuv's `hostNowUs` (which counts
+sleep) as main's host clock while main uses the engines'
+`CLOCK_UPTIME_RAW` through pm-bridge. Both engine harnesses now load
+pm-bridge and use `engineClock` (`integration/main-clock.ts`), and refuse
+to fall back to libuv's clock. Measured after 4 days of uptime with the
+Mac having slept: libuv's clock was 28,892.9 s ahead of the engines';
+`engine-host-integration.mjs` passes (interactive engine killed and
+resynced in 332.9 ms, job engine 328.7 ms), `engine-fonts-integration.mjs`
+passes.
+
+### H2: the S1 app harness shares the kernel's connection
+
+The harness's `engine` mode opened a second connection on the window's
+interactive port; the engine refused its hello because the kernel's
+connection had negotiated the port, and every `app-*-engine-*` run timed
+out. Both engine modes now wrap the kernel's `engine.viewer` (asking for
+the per-frame trace and the presentation thread) and play through the
+kernel's transport driver; `engine` mode keeps the test source over the
+perf project, which routes to the current engine. This is the production
+path: the kernel's session, its overlay at the frame's revision, and the
+transport on the engine's clock are all live, which the old harness
+connection left out. The S1 comparison below uses it.
+
+### D3: a surface delivered twice
+
+Reproduced deterministically (`e2e/engine-present-recovery.spec.ts`, the
+second test): a renderer main thread busy for 1.8 s while a pool is
+handed over makes 7 of 8 transfers time out on main (Electron's 1000 ms),
+the bridge sends them again, the first transfers land too, and after the
+pool is retired 7 page errors "Shared texture with id … not found".
+Electron counts one renderer reference per transfer completed in time,
+so the preload held two copies of a texture main counted once; releasing
+both sent one notice too many. The receiver now keeps the first copy of a
+texture it holds and lets the duplicate go without a notice, and sends
+release notices itself with the rejection handled (`lateReleases`). After
+the fix: 7 duplicates, 0 late releases, every retired surface reported
+`allReferencesReleased` (16 of 16), no page errors.
+
+The same spec found a worse failure behind "a WebGL context loss": after
+a GPU process crash, the first engine frame drawn with the presentation's
+lost WebGPU device crashed the renderer (SIGSEGV on the presentation
+worker's thread, 3 of 3). The painter now reports the loss and refuses to
+draw, the worker hands its frames back, and the presentation draws again
+on a new canvas, device, and worker, keeping the session. The spec checks
+the edited engine frame's pixels after the crash.
+
+Proof: `engine-present-recovery.spec.ts --repeat-each=5` 10 of 10 pass
+(twice); `viewer-tools.spec.ts:140` with the flag on `--repeat-each=10`
+10 of 10 pass.
+
+### A/V sync by presentation
+
+The analysis now compares each frame's presentation with the audio
+clock's line in effect at that instant (the newest sample made before
+it), not the run's last sample: the engine re-anchors the line every
+100 ms and an output glitch moves it, which one line for the run charged
+to every earlier frame (`avSync` in each playback summary).
+
+What the presentation feedback shows (`vizHopsByDepth`, `vizLags`): a
+worker canvas's frame is drawn by viz at the BeginFrame of the animation
+frame that drew it when its compositor frame arrives before the page's
+frame for that BeginFrame, and at the next BeginFrame otherwise; the
+panel shows it one refresh after that draw (sometimes two), 3.2 ms into
+the refresh (p5 3.21, p95 3.41 ms). The race between the two frame sinks
+went the early way for 0 to 40% of frames depending on the run. The
+viewer predicted rAF + 2 refreshes and showed the frame whose interval
+contained that instant, so a frame drawn at the next BeginFrame showed
+3.2 ms to a refresh after its start and one drawn early up to a refresh
+before: presentation minus the frame's start p95 10.2 and 11.0 ms at 25
+and 23.976 fps idle, 12.2 ms at 30 fps under load (bf2), 10.2 ms on the
+perf project idle (bf1).
+
+The worker now predicts 1.5 refreshes plus 3.2 ms after its animation
+frame and picks the frame nearest that instant (`nearestRefresh`): either
+draw lands within a refresh of the frame's time on the line.
+
+| Run (bf5, bf6) | Load avg | Presented within ±10 ms | \|offset\| p95 (ms) | Outside ±10 ms, by load event |
+|---|---|---|---|---|
+| 23.976 fps idle | 8.8 | 1433 of 1433 | 6.78 | |
+| 25 fps idle | 6.0 | 1488 of 1494 | 7.63 | |
+| 30 fps idle | 9.5 | 1794 of 1794 | 5.98 | |
+| Perf project, 30 fps, gate load | 12.1 | 1729 of 1793 | 8.89 | resize 47, long task + resize 8, long task 2, none 7 |
+| 23.976 fps, gate load | 8.0 | 1333 of 1432 | 11.85 | |
+| 25 fps, gate load | 9.2 | 1363 of 1494 | 12.15 | resize 107, long task + resize 10, long task 1, none 13 |
+| 30 fps, gate load | 5.9 | 1678 of 1794 | 12.33 | resize 88, long task + resize 18, long task 3, none 7 |
+
+Idle passes ±10 ms at p95 at all three rates. Under the gate load it
+passes on the perf project and fails on the synthetic projects, and the
+frames outside are the live window resizes (1.2 s every 5 s): outside
+resizes 25 fps has p95 7.24 ms (1,040 frames) and 30 fps 4.10 ms; during
+them p5 −8.5 / p95 15.5 ms and p5 −7.9 / p95 12.4 ms: the WindowServer
+shows frames a refresh early or late while the window resizes, both
+ways, so no constant prediction removes it.
+
+### Cadence at 120 Hz
+
+Each irregular interval is attributed to the lag that changed between
+its two frames (`vizLags`). Idle, they are the sink race (draw lag) and
+the WindowServer's presentation lag; the engine and the presenter are
+never late (0 drops in every run but one whose clock line jumped
+10.7 s, replaced by bf6; frames arrive 78 to 153 ms before their time):
+
+| Run | Irregular (ideal) | Draw lag changed | Present lag changed | Both | Neither |
+|---|---|---|---|---|---|
+| 23.976 idle (bf6) | 105 (≈7) | 0 | 99 | 0 | 6 |
+| 25 idle (bf5) | 405 (299) | 92 | 33 | 0 | 280 (the 5-5-5-5-4 pattern) |
+| 30 idle (bf5) | 162 (0) | 162 | 0 | 0 | 0 |
+| Perf project 30 idle (bf1) | 859 (0) | 678 | 135 | 46 | 0 |
+| 25 gate load (bf6) | 521 (299) | 64 | 128 | 131 | 198 |
+| 30 gate load (bf6) | 416 (0) | 121 | 189 | 96 | 10 |
+
+Today's WebGL viewer on the perf project at the same time: 917 irregular
+intervals idle and 664 under load (bf7).
+
+What was tried, in amendment 18's order and after it:
+
+1. `pointerrawupdate` and the vsync-phase hint are in (earlier rounds).
+2. **Redrawing the last frame at every refresh** (so the canvas submits a
+   frame every BeginFrame): no change in which refresh shows a frame
+   (rAF to present p50 19.85 against 19.84 ms, bf2). Removed.
+3. **Drawing timed frames outside the animation frame**, at a chosen point
+   of the refresh, to fix which side of the race they land on. At 0.15 of
+   a refresh, idle drew 88% at the next BeginFrame (363 irregular at
+   25 fps against 376 drawn in the rAF) but under load 679 against 514;
+   at 0.5 and 0.75, frames drawn mid-refresh made viz's own BeginFrames
+   irregular (rAF gap p95 10.0 against 9.0 ms) and the present lag erratic
+   (460 of 1,500 frames two refreshes late at 0.75). Removed.
+4. **C′** (measured earlier, not adopted): jitter p99 0.21 ms, the ideal
+   cadence, but 25 drops a minute in live resizes under load and private
+   API (see C′ below). It is the only measured path to the ideal cadence.
+
+The ideal cadence (zero irregular intervals beyond the 25 fps pattern) is
+not reached on the Chromium path. The draw lag is decided by which of two
+compositor frames, the page's and the worker's, reaches viz first for a
+BeginFrame, which neither can see; the present lag by the WindowServer.
+
+### Pointer-to-pixel, the bridge's half
+
+The engine's per-frame trace (render start, GPU done, sent; host µs) now
+reaches the app harness, which splits `handledToArrival` into the hop to
+the engine (the page's flush, the engine's JavaScript thread, waiting for
+the render thread), the render, and the descriptor's way back (the
+engine's JavaScript thread, the port, and the page's main thread).
+
+Layer drag on 500 layers, idle (bf8, load 7):
+
+| Hop (ms, p50 / p99) | |
+|---|---|
+| input → handled | 3.5 / 11.2 |
+| handled → render start (page flush, engine thread, render thread busy) | 9.3 / 23.4 |
+| render start → GPU done (pm-render) | 14.0 / 18.7 |
+| sent → arrival on the page (the way back) | 6.4 / 30.1 |
+| viz draw → presented | 18.5 / 19.2 |
+| total | 55.3 / 88.4 (today 20.8 / 36.7, same session) |
+
+Renders that take longer than a refresh (14 ms here, 10 ms in the gate's
+runs) run back to back while the pointer moves, so a new edit waits for
+the current render (about half a render) and the compositor's own GPU
+work is pushed a refresh later (viz draw → presented 18.5 against 11 ms
+for the pan, whose renders take 1 ms). The way back waits on the page's
+main thread: under load in a pan, outside load events 8.6 ms p50, during
+live resizes 29.4 ms p50 and 98 ms p99 (bf6).
+
+Two bridge-side changes were tried against this and not kept:
+
+- **Pacing renders of frames shown at the next refresh** (paused,
+  gestures) to the vsync phase, once per refresh, so the engine's GPU work
+  lands after the compositor's (`POWERMOVE_BRIDGE_PAUSED_PHASE` in an A/B
+  build of pm-node). Three pairs of 500-layer drags idle and two under
+  load (summaries tagged `bf9phase*` and `bf9base*`):
+  where the render cost matched between the two runs of a pair, paced was
+  4 ms better at p50 idle once (38.4 against 42.1 ms, render 10 ms) and
+  7 ms worse at p50 under load once (75.4 against 68.5 ms, render 16.5 ms);
+  the render cost itself moved between 10 and 17 ms from run to run with
+  the machine's other work, more than any difference between the arms.
+  Not adopted on that evidence; the code was not kept.
+- **Taking the descriptor off the page's main thread.** The way back
+  needs the page's main thread only to turn the descriptor into a
+  `VideoFrame` from the preload's import. A `VideoFrame` made once per
+  pool slot and kept would let the descriptor go straight to the worker.
+  Probed in the Electron integration test (main-thread mode, not kept):
+  of 180 frames, a kept `VideoFrame` of the slot showed the same code as
+  a fresh one 5 times; it shows the contents of when it was made. So a
+  fresh `VideoFrame` per frame is needed, and it can only come from the
+  preload on the page's main thread: the way back stays on the main thread
+  until Electron hands shared textures to a worker (option 2 under
+  [Decision](#decision-before-the-phase-2-gate)).
+
+What is left for pointer-to-pixel is the render cost of the document
+(the perf lane: pm-render compose, pm-eval lookups, the per-layer passes
+in `tracer.md`) and the page's main thread, which both the input and the
+way back need (today's pan needs it once).
+
+### S1 against the real viewer (perf project, 884 layers)
+
+Paired runs the same night (bf6, bf7, bf8; load averages 5.6 to
+12.1). The engine path is the production path now (above), drawing its
+test source over the project.
+
+| Line | Today (real WebGL viewer) | Engine path (worker) |
+|---|---|---|
+| Playback idle: drops, \|jitter\| p99 | 1 of 1,793, 8.35 ms | 0 of 1,793, 8.57 ms |
+| Playback under load: drops, \|jitter\| p99 | 56 of 1,793, 58.3 ms | 0 of 1,793, 12.7 ms |
+| Pan idle, pointer-to-pixel p50 / p99 | 19.98 / 28.89 ms | 19.41 / 29.19 ms |
+| Pan under load, p50 / p99 | 24.89 / 74.90 ms (with dropped first frames 24.92 / 91.08) | 19.21 / 102.53 ms (bf8); 37.02 / 153.93 ms (bf6) |
+
+Playback is better than today's viewer under load and equal idle. The
+pan is equal idle and better at p50 under load, but its p99 under load is
+worse (102.5 against 74.9 ms, or 91.1 ms with today's dropped-frame
+inputs), set by the live resizes holding the page's main thread with a
+descriptor waiting in its queue. Layer drag (the gate's row) is worse
+because the engine renders the document (above).
+
+### Files outside this lane (2026-10-16)
+
+Kept small, for the owning lanes to review:
+
+- `apps/desktop/src/main/engine/engine-process.ts`: with
+  `POWERMOVE_BRIDGE_TRACE=1` (measurements only) the status report carries
+  the presenter's per-frame trace (`presentTrace` of pm-node's addon,
+  which nothing called before).
+- `apps/desktop/scripts/engine-fonts-integration.mjs` and
+  `src/main/engine/integration/fonts-main.ts`: the fonts harness had the
+  same libuv clock as H1.
+- `apps/desktop/src/preload/index.ts`: the receiver sends release notices
+  on Electron's channel (`IMPORT_SHARED_TEXTURE_RELEASE_RENDERER_TO_MAIN`,
+  the channel Electron 44's own wrapper invokes; S1 found it); an Electron
+  upgrade must keep it (the integration test's release checks cover it).
+- `apps/desktop/src/shared/frame-bridge.ts`: two receiver counters.
+- `apps/desktop/e2e/engine-present-recovery.spec.ts`: new.
 
 ## The amended S1 gate against the real viewer
 
@@ -581,6 +850,17 @@ decides. The options as they stand:
    layer drag, orbit, and walk, before deciding; the engine's render cost
    is the one thing these runs do not include.
 
+**Update (2026-10-16).** Option 4 is measured: with the document drawn,
+the 500-layer drag is set by its render (10 to 17 ms on this shared
+machine, run to run) and the page's main thread, not by the bridge's
+hops ([Pointer-to-pixel](#pointer-to-pixel-the-bridges-half)). Option 2
+without an Electron change is ruled out: a `VideoFrame` kept per pool
+slot shows the slot as it was when made (175 of 180 frames stale), so a
+fresh one per frame must come from the preload on the page's main
+thread. The cadence work found no Chromium-path change that reaches the
+ideal cadence ([Cadence](#cadence-at-120-hz)); option 3 (C′) remains the
+only measured path to it.
+
 ## Stand-in measurements (before amendment 18)
 
 Kept for history. These runs compare against the harness's synthetic
@@ -799,17 +1079,17 @@ user, flag or not, and are for their owning lanes to review:
 - The kernel's engine connection (which registers `engine.viewer` and
   decodes the viewer's port) is not in this lane. The integration test and
   the real-app harness play that part (`integration/page-engine.ts`).
-- Pointer-to-pixel fails the amended gate (idle p50 and p99, load p99);
-  see [Decision](#decision-before-the-phase-2-gate).
-- Engine playback frames show 6.1 to 17.9 ms after their time on the
-  transport clock's line (p50, r6 to r9), outside section 15's ±10 ms in
-  every run but r9. With frames
-  picked for two refreshes out and rAF to presentation at 18.6 to 20.3 ms,
-  a frame shown at its first chance would land 2 to 12 ms after its time
-  (about 7 ms on average); the measured p50 sits at the top of that
-  range, which is not explained. The presenter's
-  clock-to-display offset needs calibrating against measured presentation
-  (and the audio device latency added) before A/V sync can be claimed.
+- Pointer-to-pixel: the layer drag fails the Phase 2 row (render cost of
+  the document, the page's main thread); the pan's p99 under load is worse
+  than today's (live resizes hold the main thread with a descriptor
+  queued). See [Decision](#decision-before-the-phase-2-gate).
+- A/V sync under the gate load: frames during live window resizes fall
+  outside ±10 ms both ways (the WindowServer's presentation timing), 6 to
+  9% of frames on the synthetic projects. The prediction is calibrated on
+  this panel (3.2 ms presentation phase); a 60 Hz display and the base
+  machines are not measured.
+- Cadence: not ideal on the Chromium path (the sink race and the
+  WindowServer's presentation lag); see [Cadence](#cadence-at-120-hz).
 - Layer drag, orbit, and walk through the engine, and playback with the
   engine drawing the document, wait for `pm-render` to draw real layers.
 - C′ is a prototype: not adopted (25 drops a minute under load). Its
@@ -824,11 +1104,12 @@ user, flag or not, and are for their owning lanes to review:
 - A signed end-to-end run (Team ID through Electron) needs the release
   signing identity; the Team ID check is covered by Rust tests against a
   real Developer ID process.
-- The worker canvas's rAF → presentation is one or two refreshes from run
-  to run (r9: about half each, idle and under load; r5 to r8: mostly
-  two), which costs cadence in such a run (jitter p50 3.7 ms idle in r9)
-  and moves the A/V offset. A worker's WebGPU canvas has no presentation
-  feedback, so the presenter cannot correct it; viz's timing or a
-  feedback path would be needed.
+- A worker canvas has no presentation feedback at run time: the
+  prediction is calibrated from viz's traces in the harness, not
+  corrected per frame.
+- 3D orbit and walk through the engine are not measured (no engine-drawn
+  3D corpus scene with a gesture harness).
 - The measurements share the machine with other agents' builds (load
-  average 2.3 to 14.3); a quiet-machine round would tighten the spread.
+  average 2.3 to 16; the document's render cost moved between 10 and
+  17 ms from run to run on 2026-10-16); a quiet-machine round would
+  tighten the spread.

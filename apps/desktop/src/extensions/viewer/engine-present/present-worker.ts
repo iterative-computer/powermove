@@ -53,6 +53,9 @@ export type ToWorker =
 export type FromWorker =
   | { type: 'ready' }
   | { type: 'failed'; message: string }
+  /** The painter's device was lost: this worker draws nothing more (its
+   *  session's frames went back to the engine); the page replaces it. */
+  | { type: 'lost'; message: string }
   | { type: 'release'; session: number; release: FrameRelease }
   /** A frame drawn, with the session's stats after it. */
   | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
@@ -80,8 +83,20 @@ export type ServeOptions = {
   onPresented?: (frame: PresentedFrame) => void;
 };
 
-/** Animation frame to display, in refreshes, for a worker canvas. */
-export const WORKER_LATENCY_REFRESHES = 2;
+/**
+ * A worker canvas's animation frame to the panel (docs/engine/bridge.md,
+ * "A/V sync"): viz draws the canvas's compositor frame at the BeginFrame
+ * of its animation frame when it arrives before the page's frame for that
+ * BeginFrame, else at the next one (a race between two frame sinks the
+ * worker cannot see: 0 to 40% of frames the first way, by run and load),
+ * and the panel shows it a refresh after that draw (8% two refreshes),
+ * 3.2 ms into that refresh (measured on the 120 Hz panel, viz's
+ * presentation feedback). The prediction sits between the two draws, so
+ * with the nearest refresh either lands within a refresh of the frame's
+ * time on the audio clock.
+ */
+export const WORKER_LATENCY_REFRESHES = 1.5;
+export const WORKER_PRESENT_OFFSET_MS = 3.2;
 
 /** How often the worker sends a session's stats while frames flow. */
 export const STATS_INTERVAL_MS = 250;
@@ -149,11 +164,12 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // now can reach the display frame being composed, instead of
         // waiting for the worker's next animation frame.
         drawOnArrival: true,
-        // A worker canvas's frame reaches the display two refreshes after
-        // the animation frame that drew it (measured in the real app: 2 in
-        // 80% of frames, 18.7 ms at 120 Hz), so timed frames are picked for
-        // that instant and stay on the audio clock's line.
+        // Timed frames are picked for the instant a worker canvas's frame
+        // reaches the panel (WORKER_LATENCY_REFRESHES), rounded to the
+        // nearest refresh, so they stay on the audio clock's line.
         latencyRefreshes: WORKER_LATENCY_REFRESHES,
+        presentOffsetMs: WORKER_PRESENT_OFFSET_MS,
+        nearestRefresh: true,
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,
@@ -171,7 +187,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   };
 
   const handle = (message: ToWorker): void => {
-    if (disposed || failed) {
+    // A worker that failed still answers `dispose`, so the page can end it at once.
+    if (disposed || (failed && message.type !== 'dispose')) {
       if (message.type === 'frame') giveBack(message);
       return;
     }
@@ -254,6 +271,14 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       painter = null;
       return;
     }
+    void painter.lost?.then((message) => {
+      if (disposed || failed) return;
+      // Nothing may touch the lost device again: the session's frames go
+      // back to the engine, later ones are handed back as they come.
+      failed = true;
+      post({ type: 'lost', message });
+      close();
+    });
     const queued = pending ?? [];
     pending = null;
     post({ type: 'ready' });

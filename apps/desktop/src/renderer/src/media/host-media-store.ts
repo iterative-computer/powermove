@@ -543,6 +543,8 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
   const stamp = () => {
     const project = PM.proj;
     if (!project?.id || !applyEngineStamp(project)) return;
+    // Set or removed after the event's own announcement: announce it too.
+    PM.doc?.touched?.([['requiresEngine']]);
     try { PM.Projects?.put?.(project); } catch { /* the next autosave keeps it */ }
   };
   for (const event of ['project', 'assets', 'projects:open']) PM.bus?.on?.(event, () => { stamp(); schedule(); });

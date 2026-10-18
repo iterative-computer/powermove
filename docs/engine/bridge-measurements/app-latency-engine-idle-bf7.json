@@ -1,0 +1,198 @@
+{
+  "run": "app-latency-engine-idle-bf7",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "offMainThread": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      10.447265625,
+      7.81005859375,
+      7.61767578125
+    ],
+    "after": [
+      6.3095703125,
+      7.08984375,
+      7.35546875
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 39,
+    "offsetUs": 335407182237.5
+  },
+  "load": null,
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.8545f288601e39b502aaa4ee41b9ef68",
+    "accepted": {
+      "pid": 48635,
+      "pidversion": 5153473
+    },
+    "rejections": 0,
+    "surfaces": 32,
+    "imports": 32,
+    "sends": 32,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 24,
+    "allReleased": 16,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 16,
+      "bytes": 335462400
+    },
+    "live": 8
+  },
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 4366,
+      "draws": 2397,
+      "unmatched": 0,
+      "unpresented": 4,
+      "presentation": {
+        "thread": "worker",
+        "timing": "viz",
+        "sink": "7:2147483650"
+      },
+      "pointerToPixelMs": {
+        "n": 2397,
+        "p50": 19.41,
+        "p95": 27.86,
+        "p99": 29.19,
+        "max": 37.3
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 19.41,
+        "p95": 27.86,
+        "p99": 29.19,
+        "max": 37.3
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2397,
+          "p50": 0.75,
+          "p95": 5.6,
+          "p99": 6.2,
+          "max": 14.76
+        },
+        "handledToArrival": {
+          "n": 2397,
+          "p50": 4.1,
+          "p95": 5.4,
+          "p99": 7.4,
+          "max": 12.8
+        },
+        "arrivalToSubmit": {
+          "n": 2397,
+          "p50": 0.8,
+          "p95": 0.9,
+          "p99": 0.9,
+          "max": 1.8
+        },
+        "submitToReceived": {
+          "n": 2397,
+          "p50": 2.42,
+          "p95": 6.23,
+          "p99": 7.07,
+          "max": 7.71
+        },
+        "receivedToPresent": {
+          "n": 2397,
+          "p50": 10.71,
+          "p95": 19.06,
+          "p99": 20.42,
+          "max": 22.69
+        },
+        "receivedToDraw": {
+          "n": 2397,
+          "p50": 0.15,
+          "p95": 5.21,
+          "p99": 5.87,
+          "max": 6.86
+        },
+        "drawToPresent": {
+          "n": 2397,
+          "p50": 10.64,
+          "p95": 14.46,
+          "p99": 18.37,
+          "max": 19.5
+        },
+        "handledToRenderStart": {
+          "n": 2397,
+          "p50": -0.14,
+          "p95": -0.01,
+          "p99": 6.09,
+          "max": 8.7
+        },
+        "renderStartToGpuDone": {
+          "n": 2397,
+          "p50": 0.98,
+          "p95": 1.57,
+          "p99": 1.68,
+          "max": 1.99
+        },
+        "gpuDoneToSent": {
+          "n": 2397,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "sentToArrival": {
+          "n": 2397,
+          "p50": 2.73,
+          "p95": 4.32,
+          "p99": 5.17,
+          "max": 12.5
+        }
+      }
+    }
+  }
+}

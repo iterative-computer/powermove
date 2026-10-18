@@ -17,7 +17,7 @@
 use pm_gpu::Target;
 use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 
-use super::effects::{Covered, EffectContext, Padding, PreparedEffects};
+use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
     FLAG_BLEND_IN_E, FLAG_HALF, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED,
     FLAG_MATTE_LUMA, Op, OpUniform,
@@ -31,6 +31,9 @@ use crate::plan::{CompPlan, Content};
 /// The padding a node's effects need around the region.
 fn node_padding(node: &Node) -> Padding {
     match node {
+        // A transition reads the whole frame (its program sees the full
+        // level, as today's).
+        Node::Layer(l) if l.transition.is_some() => Padding::Full,
         Node::Layer(l) => l.effects.as_ref().map_or(Padding::NONE, |e| e.padding),
         Node::Adjustment(a) => a.effects.padding,
     }
@@ -166,8 +169,59 @@ impl Exec<'_> {
                         encoded: false,
                         uv: [0.0, 0.0, 1.0, 1.0],
                         layer: n.layer.clone(),
+                        plane: None,
+                        level2: None,
+                        pyramid: None,
                     };
-                    if n.blend == BlendMode::Normal {
+                    if let Some(transition) = &n.transition {
+                        // `withLayer`: the stack with the layer, then the
+                        // transition from the stack beneath to it.
+                        let with_layer = if n.blend == BlendMode::Normal {
+                            let w = self.take_rect(rect);
+                            copy_same(encoder, &acc, &w);
+                            self.draw_pass(
+                                encoder,
+                                plan,
+                                std::slice::from_ref(&image),
+                                pass_region,
+                                &w,
+                                false,
+                            );
+                            w
+                        } else {
+                            let out = self.take_rect(rect);
+                            let u = self.composite_uniform(full, n.blend, n.alpha);
+                            self.run_op(
+                                encoder,
+                                Op::Composite,
+                                &u,
+                                &res,
+                                Some(&acc),
+                                &out,
+                                rect,
+                                full,
+                            );
+                            out
+                        };
+                        acc = match self.run_transition(
+                            encoder,
+                            transition,
+                            &acc,
+                            &with_layer,
+                            rect,
+                            full,
+                        ) {
+                            Ok(Some(t)) => t,
+                            Ok(None) => with_layer,
+                            Err(message) => {
+                                // The layer fails; the stack stays as it was.
+                                self.fail_layer(plan, &n.layer, message);
+                                continue;
+                            }
+                        };
+                        in_target = false;
+                        ids.push(image);
+                    } else if n.blend == BlendMode::Normal {
                         // `drawFbo(res, W, H, compositeAlpha)`.
                         pending.push(image);
                     } else {
@@ -304,6 +358,12 @@ impl Exec<'_> {
                 working: self.working,
                 full,
                 taken: &mut taken,
+                native: Some(crate::effects::exec::Native {
+                    effects: self.effects,
+                    timer: self.timer.as_mut(),
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut self.unsupported,
+                }),
             };
             effects.passes.record(
                 &mut cx,
@@ -317,6 +377,50 @@ impl Exec<'_> {
             )
         };
         // The chain's targets, the returned one included, are in `taken`.
+        self.taken.extend(taken);
+        result
+    }
+
+    /// `runTransition` over the pass rectangle (the whole frame).
+    fn run_transition(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        transition: &PreparedTransition,
+        before: &Target,
+        with_layer: &Target,
+        rect: Region,
+        full: (u32, u32),
+    ) -> Result<Option<Target>, String> {
+        let mut taken = Vec::new();
+        let result = {
+            let mut cx = EffectContext {
+                device: self.device,
+                queue: self.queue,
+                encoder,
+                pool: self.pool,
+                precision: self.precision,
+                working: self.working,
+                full,
+                taken: &mut taken,
+                native: Some(crate::effects::exec::Native {
+                    effects: self.effects,
+                    timer: self.timer.as_mut(),
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut self.unsupported,
+                }),
+            };
+            transition.passes.record(
+                &mut cx,
+                Covered {
+                    target: before,
+                    rect,
+                },
+                Covered {
+                    target: with_layer,
+                    rect,
+                },
+            )
+        };
         self.taken.extend(taken);
         result
     }
@@ -459,4 +563,17 @@ impl Exec<'_> {
             size,
         );
     }
+}
+
+/// `copyFbo`: an exact copy between targets of one size and format.
+fn copy_same(encoder: &mut wgpu::CommandEncoder, source: &Target, target: &Target) {
+    encoder.copy_texture_to_texture(
+        source.texture.as_image_copy(),
+        target.texture.as_image_copy(),
+        wgpu::Extent3d {
+            width: target.width(),
+            height: target.height(),
+            depth_or_array_layers: 1,
+        },
+    );
 }

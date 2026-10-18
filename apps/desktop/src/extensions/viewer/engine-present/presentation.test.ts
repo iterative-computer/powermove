@@ -38,6 +38,12 @@ class Source implements FrameSource {
 class Painter implements FramePainter {
   draws = 0;
   disposed = false;
+  private loseDevice: (reason: string) => void = () => {};
+  readonly lost = new Promise<string>((resolve) => (this.loseDevice = resolve));
+  /** The device goes away (the GPU process restarted). */
+  lose(reason: string): void {
+    this.loseDevice(reason);
+  }
   configure(): void {}
   draw(): void {
     this.draws++;
@@ -451,6 +457,75 @@ describe('ViewerPresentation', () => {
     expect(presentation.presenting).toBe(true);
     presentation.dispose();
     delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('replaces a worker whose device was lost with a new canvas and worker, keeping the session', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const logs: string[] = [];
+    const painters = [new Painter(), new Painter()];
+    const workers = painters.map((p) => inProcessWorker(p));
+    let made = 0;
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => workers[made++]!, createPainter: async () => new Painter(), log: (_l, m) => logs.push(m) });
+    await settle();
+    const first = presentation.canvas;
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    expect(painters[0]!.draws).toBe(1);
+    painters[0]!.lose('A valid external Instance reference no longer exists.');
+    await settleLong();
+    expect(logs).toEqual(['engine presentation lost its WebGPU device (A valid external Instance reference no longer exists.); drawing again on a new one']);
+    // A new worker on a new canvas, the same session; still off the main thread.
+    expect(made).toBe(2);
+    expect(workers[0]!.terminated).toBe(true);
+    expect(presentation.offMainThread).toBe(true);
+    expect(presentation.canvas).not.toBe(first);
+    expect(service.channels).toHaveLength(1);
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    await settleLong();
+    expect(painters[1]!.draws).toBe(1);
+    expect(presentation.presenting).toBe(true);
+    expect(channel.releases.map((r) => r.seq)).toEqual([1, 2]);
+    presentation.dispose();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('replaces a main-thread painter whose device was lost, and gives up after repeated losses', async () => {
+    const service = new Service();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const logs: string[] = [];
+    const painters: Painter[] = [];
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => (painters.push(new Painter()), painters.at(-1)!), log: (_l, m) => logs.push(m) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(painters[0]!.draws).toBe(1);
+    painters[0]!.lose('gpu restarted');
+    await settleLong();
+    expect(painters).toHaveLength(2);
+    expect(painters[0]!.disposed).toBe(true);
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(painters[1]!.draws).toBe(1);
+    expect(presentation.presenting).toBe(true);
+    // Losses that keep coming back: after the third replacement it stops,
+    // and the current engine's canvas shows.
+    for (let i = 1; i <= 3; i++) {
+      painters[i]!.lose('gpu restarted');
+      await settleLong();
+    }
+    expect(painters).toHaveLength(4);
+    expect(logs.at(-1)).toMatch(/^engine presentation stopped: the WebGPU device was lost 4 times/);
+    expect(presentation.presenting).toBe(false);
+    channel.handlers.message({ type: 'frame', frame: desc(3, 1) }, performance.now());
+    expect(channel.releases.at(-1)).toEqual({ poolIndex: 3, seq: 3 });
+    presentation.dispose();
   });
 
   it('gives a popout a new canvas and worker, carrying the session and pool over', async () => {

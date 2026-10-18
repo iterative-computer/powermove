@@ -36,7 +36,7 @@ use pm_protocol::priority::{
     AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
     ExportSettings, ProResProfile as WireProRes, WebmCodec,
 };
-use pm_render::{RenderError, RenderRequest, Renderer};
+use pm_render::{RenderError, RenderRequest, Renderer, VideoEnd};
 use pm_time::Rate;
 
 use crate::Error;
@@ -843,6 +843,20 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         background: alpha == AlphaOutput::None,
         export: true,
         view: None,
+        // Today's export counts: 16 samples opaque, 20 with alpha (the
+        // composition's `motionBlurSamples` when set).
+        motion_blur: if s.motion_blur {
+            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
+                pm_protocol::frame::MotionBlurKind::Export
+            } else {
+                pm_protocol::frame::MotionBlurKind::AlphaExport
+            })
+        } else {
+            pm_render::motion::MotionBlur::Off
+        },
+        sampling: pm_render::sampling::Sampling::Final,
+        // `prepareFrame`'s end padding: the last frame of a clip is kept.
+        video_end: VideoEnd::Final,
     };
     Ok(ExportPlan {
         spec,
@@ -1251,7 +1265,11 @@ pub fn render_still(
     routing.check(document, composition, media)?;
     let (cw, ch) = composition_size(document, composition)?;
     let size = still_size(cw, ch, max_dimension);
-    let request = RenderRequest::sized(size, Precision::Float16);
+    // Today's agent stills run `prepareFrame` first (`snapshotAsync`).
+    let request = RenderRequest {
+        video_end: VideoEnd::Final,
+        ..RenderRequest::sized(size, Precision::Float16)
+    };
     let frame = render_frame(
         renderer,
         document,

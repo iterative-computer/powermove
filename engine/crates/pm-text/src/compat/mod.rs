@@ -231,38 +231,7 @@ impl<R: FontResolver> Compat<R> {
             let width = measured.width as f64;
             let x = aligned_start(align, width);
             let baseline = row as f64 * lh + size * BASELINE;
-            let mut pen = x;
-            let mut runs = Vec::new();
-            for item in &measured.items {
-                // Runs are in logical order; an RTL item's runs read right to left.
-                let ordered: Vec<_> = if item.runs.iter().any(|r| r.rtl) {
-                    item.runs.iter().rev().collect()
-                } else {
-                    item.runs.iter().collect()
-                };
-                for run in ordered {
-                    let info = m.resolver.face(run.face);
-                    let mut glyphs = Vec::with_capacity(run.glyphs.len());
-                    for g in &run.glyphs {
-                        if g.glyph != UNMATCHED_VS_GLYPH {
-                            glyphs.push(PlacedGlyph {
-                                id: g.glyph,
-                                x: pen + g.x_offset as f64 / 65536.0,
-                                y: baseline - g.y_offset as f64 / 65536.0,
-                            });
-                        }
-                        pen += g.advance as f64 / 65536.0;
-                    }
-                    runs.push(GlyphRun {
-                        face: run.face,
-                        size: run.size,
-                        coords: run.coords.clone(),
-                        synthetic_bold: info.synthetic_bold,
-                        synthetic_italic: info.synthetic_italic,
-                        glyphs,
-                    });
-                }
-            }
+            let runs = placed_runs(&m, &measured, x, baseline);
             out.push(LineRuns {
                 text: String::from_utf16_lossy(&line.text),
                 start: line.start,
@@ -274,6 +243,69 @@ impl<R: FontResolver> Compat<R> {
         }
         out
     }
+}
+
+impl<R: FontResolver> Compat<R> {
+    /// The glyphs `fillText(text, 0, 0)` paints in `d`'s context with
+    /// `textAlign = 'left'` and `letterSpacing = tracking px` (`tracking`
+    /// overrides `d.tracking`): no wrapping, pens from 0 on the baseline
+    /// at y = 0. Returns the runs and the measured width.
+    pub fn text_runs(
+        &mut self,
+        d: &TextContent,
+        text: &str,
+        tracking: f64,
+    ) -> (Vec<GlyphRun>, f64) {
+        let mut ctx = d.clone();
+        ctx.tracking = Some(tracking);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut m = self.measurer(&ctx);
+        let measured = m.shape(&units);
+        let runs = placed_runs(&m, &measured, 0.0, 0.0);
+        (runs, measured.width as f64)
+    }
+}
+
+/// Places a shaped string's glyphs from pen `x` on `baseline`.
+fn placed_runs(
+    m: &CanvasMeasurer<'_>,
+    measured: &crate::blink::measure::Measured,
+    x: f64,
+    baseline: f64,
+) -> Vec<GlyphRun> {
+    let mut pen = x;
+    let mut runs = Vec::new();
+    for item in &measured.items {
+        // Runs are in logical order; an RTL item's runs read right to left.
+        let ordered: Vec<_> = if item.runs.iter().any(|r| r.rtl) {
+            item.runs.iter().rev().collect()
+        } else {
+            item.runs.iter().collect()
+        };
+        for run in ordered {
+            let info = m.resolver.face(run.face);
+            let mut glyphs = Vec::with_capacity(run.glyphs.len());
+            for g in &run.glyphs {
+                if g.glyph != UNMATCHED_VS_GLYPH {
+                    glyphs.push(PlacedGlyph {
+                        id: g.glyph,
+                        x: pen + g.x_offset as f64 / 65536.0,
+                        y: baseline - g.y_offset as f64 / 65536.0,
+                    });
+                }
+                pen += g.advance as f64 / 65536.0;
+            }
+            runs.push(GlyphRun {
+                face: run.face,
+                size: run.size,
+                coords: run.coords.clone(),
+                synthetic_bold: info.synthetic_bold,
+                synthetic_italic: info.synthetic_italic,
+                glyphs,
+            });
+        }
+    }
+    runs
 }
 
 fn aligned_start(align: Align, width: f64) -> f64 {

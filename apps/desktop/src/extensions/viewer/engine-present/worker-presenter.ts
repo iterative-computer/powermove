@@ -35,6 +35,8 @@ export type PresentWorkerOptions = {
   timeOrigin?: number;
   /** The worker could not draw (no WebGPU in workers): present on the main thread instead. */
   onFailed?: (message: string) => void;
+  /** The worker's device was lost (the GPU process restarted): replace the worker. */
+  onLost?: (message: string) => void;
   timers?: Timers;
 };
 
@@ -45,6 +47,8 @@ export class PresentWorker {
   /** Terminated after an uncaught error: nothing more is posted to it. */
   private dead = false;
   private failure: string | null = null;
+  /** The worker's device was lost: it draws nothing more. */
+  private lostReason: string | null = null;
   private readonly timers: Timers;
 
   constructor(private readonly options: PresentWorkerOptions) {
@@ -57,6 +61,11 @@ export class PresentWorker {
   /** Why the worker cannot present, once it said so. */
   get failed(): string | null {
     return this.failure;
+  }
+
+  /** Whether the worker's device was lost (frames sent now are handed back undrawn). */
+  get lost(): boolean {
+    return this.lostReason !== null;
   }
 
   post(message: ToWorker, transfer?: Transferable[]): void {
@@ -85,11 +94,20 @@ export class PresentWorker {
       case 'failed':
         this.fail(message.message);
         return;
+      case 'lost':
+        if (this.lostReason !== null) return;
+        this.lostReason = message.message;
+        if (!this.disposed && !this.dead) this.options.onLost?.(message.message);
+        return;
       case 'disposed':
         this.terminate();
         return;
       case 'closed':
-        this.sessions.get(message.session)?.dropHeld();
+        // Its releases came before this: what it still held (frames it drew
+        // whose GPU work had not finished when it closed, or every frame of
+        // a lost device) goes back to the engine too, or those slots stay
+        // held for a session that continues on a replaced drawing.
+        this.sessions.get(message.session)?.releaseHeld();
         this.sessions.delete(message.session);
         return;
       default:
@@ -259,6 +277,12 @@ export class WorkerPresenter implements Presenter {
       this.local.staleGeneration++;
       return;
     }
+    if (this.options.host.lost) {
+      // The worker can no longer draw: the slot goes straight back.
+      this.local.released++;
+      this.options.link.release({ poolIndex: desc.poolIndex, seq: desc.seq });
+      return;
+    }
     const frame = this.options.source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) {
       this.local.parked++;
@@ -321,7 +345,7 @@ export class WorkerPresenter implements Presenter {
   }
 
   /** A message from the worker for this session. */
-  fromWorker(message: Exclude<FromWorker, { type: 'ready' | 'failed' | 'disposed' | 'closed' }>): void {
+  fromWorker(message: Exclude<FromWorker, { type: 'ready' | 'failed' | 'lost' | 'disposed' | 'closed' }>): void {
     switch (message.type) {
       case 'release':
         // Releases keep flowing after the page ended the session: frames the
@@ -380,6 +404,16 @@ export class WorkerPresenter implements Presenter {
     }
     this.inWorker.clear();
     this.dispose();
+  }
+
+  /** The worker closed this session: frames it never handed back go back to the engine. */
+  releaseHeld(): void {
+    for (const { release, frame } of this.inWorker.values()) {
+      frame.close();
+      this.local.released++;
+      this.options.link.release(release);
+    }
+    this.inWorker.clear();
   }
 
   /**

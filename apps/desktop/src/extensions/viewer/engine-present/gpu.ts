@@ -42,14 +42,36 @@ type NavigatorGpu = {
   };
 };
 
+/**
+ * Thrown by `FramePainter.draw` once the painter's device is lost: the frame
+ * was not drawn, and nothing may touch the device again.
+ */
+export class DeviceLostError extends Error {
+  constructor(message: string) {
+    super(`the WebGPU device was lost: ${message}`);
+    this.name = 'DeviceLostError';
+  }
+}
+
 /** What the presenter needs from a painter (WebGPU here; fakes in tests). */
 export interface FramePainter {
   /** Matches the canvas to a frame's format, color space, and size. */
   configure(format: SurfaceFormat, colorSpace: ViewerColorSpace, width: number, height: number): void;
-  /** Records and submits one draw of `frame`. The caller closes the frame. */
+  /** Records and submits one draw of `frame`. The caller closes the frame.
+   *  Throws `DeviceLostError` once the device is lost. */
   draw(frame: VideoFrame): void;
   /** Resolves when the GPU work submitted so far completed. */
   workDone(): Promise<void>;
+  /**
+   * Resolves with the reason when the painter's device is lost (the GPU
+   * process restarted, or the device was destroyed under it). The drawing
+   * must then be replaced: a lost device draws nothing, and drawing with it
+   * in the presentation worker crashed the renderer (Electron 44: SIGSEGV
+   * on the worker's thread at the first engine frame after a GPU process
+   * crash, 3 of 3 runs).
+   * Not resolved by `dispose`.
+   */
+  readonly lost?: Promise<string>;
   dispose(): void;
 }
 
@@ -97,8 +119,20 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
   };
   let canvasFormat = gpu.getPreferredCanvasFormat();
   let configured = '';
+  let disposed = false;
+  let lostReason: string | null = null;
+  // `dispose` destroys the device, which also settles `lost`: only a loss
+  // the painter did not ask for is reported.
+  const lost = new Promise<string>((resolve) => {
+    void device.lost.then((info) => {
+      lostReason = info?.message || 'unknown';
+      if (!disposed) resolve(lostReason);
+    });
+  });
   return {
+    lost,
     configure(format, colorSpace, width, height) {
+      if (lostReason !== null) return;
       const f16 = format === 'rgba16Float';
       canvasFormat = f16 ? 'rgba16float' : gpu.getPreferredCanvasFormat();
       const key = `${canvasFormat}:${colorSpace}:${width}x${height}`;
@@ -120,6 +154,7 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
       pipelineFor(canvasFormat);
     },
     draw(frame) {
+      if (lostReason !== null) throw new DeviceLostError(lostReason);
       const pipeline = pipelineFor(canvasFormat);
       const external = device.importExternalTexture({ source: frame, colorSpace: 'srgb' });
       const group = device.createBindGroup({
@@ -140,6 +175,9 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
       device.queue.submit([encoder.finish()]);
     },
     workDone: () => device.queue.onSubmittedWorkDone(),
-    dispose: () => device.destroy()
+    dispose: () => {
+      disposed = true;
+      device.destroy();
+    }
   };
 }

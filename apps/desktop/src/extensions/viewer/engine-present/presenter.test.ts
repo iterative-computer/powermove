@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { FramePainter } from './gpu';
+import { DeviceLostError, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
 import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
@@ -42,11 +42,13 @@ class Source implements FrameSource {
 class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   configured: string[] = [];
+  lostReason: string | null = null;
   private pending: (() => void)[] = [];
   configure(format: string, colorSpace: string, width: number, height: number): void {
     this.configured.push(`${format}:${colorSpace}:${width}x${height}`);
   }
   draw(frame: VideoFrame): void {
+    if (this.lostReason !== null) throw new DeviceLostError(this.lostReason);
     const fake = frame as unknown as FakeFrame;
     expect(fake.closed).toBe(false);
     this.draws.push(fake);
@@ -313,5 +315,59 @@ describe('EnginePresenter', () => {
     presenter.receive({ type: 'frame', frame: desc(3, { pts: 0, duration: F }) }, 102);
     expect(painter.draws).toHaveLength(2);
     presenter.dispose();
+  });
+
+  it('releases a frame its lost device cannot draw, without throwing', () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1);
+    painter.lostReason = 'GPU process restarted';
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    expect(() => presenter.refresh(16)).not.toThrow();
+    expect(painter.draws).toHaveLength(0);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(presenter.stats.dropped['device-lost']).toBe(1);
+  });
+
+  it('picks the frame nearest the calibrated display instant (nearestRefresh, presentOffsetMs)', () => {
+    const source = new Source();
+    const painter = new Painter();
+    const link = new Link();
+    let now = 0;
+    const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, now: () => now, latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } });
+    for (let i = 0; i < 6; i++) source.arrive(1, i);
+    const P = 1000 / 120;
+    const raf = (i: number): void => {
+      now = i * P + 0.3;
+      presenter.refresh(i * P);
+      painter.finishGpu();
+    };
+    for (let i = 0; i < 30; i++) raf(i);
+    // Host = ms × 1000 + 900_000; media 0 at page 300 ms; 25 fps frames
+    // (40 ms: 4.8 refreshes, no decision shift).
+    const sample: ClockSample = { seq: 1, epoch: 2, state: 'playing', hostTime: 1_200_000, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null };
+    presenter.receive({ type: 'clock', sample }, 300);
+    const F25 = TICKS_PER_SECOND / 25;
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented((f) => shown.push(f));
+    let next = 0;
+    for (let i = 30; i < 90; i++) {
+      // Keep four frames queued ahead.
+      while (next < 12 && presenter.stats.received - presenter.stats.drawn - Object.values(presenter.stats.dropped).reduce((a, b) => a + b, 0) < 4) {
+        presenter.receive({ type: 'frame', frame: desc(next + 1, { poolIndex: next % 6, pts: next * F25, duration: F25 }) }, i * P);
+        next++;
+      }
+      raf(i);
+    }
+    expect(shown.length).toBeGreaterThanOrEqual(5);
+    for (const f of shown) {
+      // Shown from the refresh nearest its start: the display instant is
+      // within half a refresh of the frame's time on the line.
+      const displayMs = (f.displayUs! - 900_000) / 1000;
+      expect(Math.abs(displayMs - (300 + (f.pts / F25) * 40))).toBeLessThanOrEqual(P / 2 + 1e-6);
+      // The instant is 1.5 refreshes and 3.2 ms after the animation frame's vsync.
+      expect(displayMs - f.rafMs).toBeCloseTo(1.5 * P + 3.2, 6);
+    }
   });
 });

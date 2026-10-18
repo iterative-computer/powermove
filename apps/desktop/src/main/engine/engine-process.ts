@@ -27,6 +27,8 @@ type Addon = {
     tick(): EngineAction[];
     status(): string;
     simulateGpuLoss?(): boolean;
+    /** The viewer presenter's per-frame trace as JSON, emptied (POWERMOVE_BRIDGE_TRACE=1). */
+    presentTrace?(): string;
   };
   buildId(): string;
   hostNowUs(): number;
@@ -81,6 +83,13 @@ function main(): void {
   }
 
   let control: MessagePortMain | null = null;
+  // The S1 harness's per-frame engine trace (render start, GPU done, sent;
+  // host µs) rides on status reports while it is on, emptied by each.
+  const traceOn = process.env['POWERMOVE_BRIDGE_TRACE'] === '1';
+  const withPresentTrace = (json: string): string => {
+    if (!traceOn || typeof engine.presentTrace !== 'function' || !json.startsWith('{') || !json.endsWith('}')) return json;
+    return `${json.slice(0, -1)}${json.length > 2 ? ',' : ''}"presentTrace":${engine.presentTrace()}}`;
+  };
   const shutdown = (): void => {
     for (const port of ports.values()) port.close();
     ports.clear();
@@ -122,7 +131,7 @@ function main(): void {
       const lost = engine.simulateGpuLoss?.() === true;
       notify({ type: 'log', level: 'warn', message: lost ? 'simulated a GPU device loss' : 'this engine does not present; no GPU device to lose' });
     } else if (message?.type === 'status' && Number.isSafeInteger(message.id)) {
-      notify({ type: 'status', id: message.id, json: engine.status() });
+      notify({ type: 'status', id: message.id, json: withPresentTrace(engine.status()) });
     } else if (message?.type === 'shutdown') {
       shutdown();
     }

@@ -164,6 +164,16 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
     },
+    /// The session's definitions (contract 10), and those a delta
+    /// registered again.
+    Definitions {
+        key: Key,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    },
     /// An asset's file, or `None` when it is offline or gone.
     Media {
         key: Key,
@@ -211,6 +221,18 @@ pub struct ThreadConfig {
     /// Play without the audio device: the line runs on the host clock
     /// (tests on machines without an output, and the S1 harness).
     pub host_clock: bool,
+    /// The program cache folder (`SHADER_CACHE_ENV`).
+    pub shader_cache: Option<PathBuf>,
+}
+
+/// The device's composer, keeping translated programs in the configured
+/// cache folder.
+fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -> Composer {
+    let mut composer = Composer::new(device, queue);
+    composer
+        .renderer()
+        .set_program_cache_dir(config.shader_cache.clone());
+    composer
 }
 
 /// One frame's record for the S1 harness.
@@ -281,6 +303,9 @@ pub struct Stats {
     pub device_losses: u64,
     /// Runs that fell back to the host clock (no audio output).
     pub host_clock_runs: u64,
+    /// Runs of a composition with nothing to hear, on the host clock from
+    /// Play (today's playhead does not wait for the audio device either).
+    pub silent_runs: u64,
     /// Audio playback, per view.
     pub audio: BTreeMap<String, AudioStatus>,
     #[serde(skip)]
@@ -675,6 +700,41 @@ impl Thread {
                 }
             }
             Command::Document { key, update } => self.document(key, update),
+            Command::Definitions {
+                key,
+                set,
+                registered,
+            } => {
+                let doc = self.docs.entry(key).or_default();
+                doc.set_definitions(set, registered);
+                let definitions = doc.definitions().cloned();
+                let registered = doc.take_registered();
+                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // Translate now (not at the next frame) and report each
+                // definition that fails (contract 10; the kernel fills the
+                // shader UI from these).
+                let mut failures = Vec::new();
+                if self.config.document
+                    && let Some(gpu) = self.gpu.as_mut()
+                {
+                    let composer = gpu
+                        .composer
+                        .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+                    failures = composer
+                        .use_definitions(key, definitions.as_ref(), &registered)
+                        .unwrap_or_default();
+                } else if let Some(doc) = self.docs.get_mut(&key) {
+                    // Applied with the view's next frame.
+                    doc.keep_registered(registered);
+                }
+                for error in failures {
+                    let report = pm_protocol::error::FailureReport { revision, error };
+                    self.event(key, Event::Failure(report), None);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
             Command::Media { key, asset, path } => {
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -700,6 +760,9 @@ impl Thread {
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            composer.forget_definitions(key);
+        }
         let mut stats = self.stats();
         stats.routes.remove(&view_name(key));
         stats.audio.remove(&view_name(key));
@@ -730,6 +793,8 @@ impl Thread {
         }
         if let Some(audio) = self.audio.get(&key) {
             audio.send(AudioCtl::Document(update));
+        } else {
+            self.warm_audio(key);
         }
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
@@ -801,7 +866,16 @@ impl Thread {
                 }
                 let from = view.clock.media_at(at);
                 let wants_audio = !host_clock && pm_protocol::clock::JKL_RATES.contains(&rate);
-                if wants_audio && self.audio_for(key).is_some() {
+                // Nothing to hear: the line starts on the host clock at once,
+                // as today's playhead does, instead of waiting for the device
+                // to present its first (silent) buffer.
+                if wants_audio && !self.audible(key) {
+                    self.stats().silent_runs += 1;
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.clock.apply(TransportCommand::Play { rate }, at);
+                    view.schedule.reset();
+                    view.sample_due = true;
+                } else if wants_audio && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
                     let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
                     audio.send(AudioCtl::Play { from, rate });
@@ -999,6 +1073,35 @@ impl Thread {
         (!link.failed()).then_some(link)
     }
 
+    /// Whether the composition a view shows has anything to hear
+    /// (`pm_audio::graph::audible`, without opening media).
+    fn audible(&self, key: Key) -> bool {
+        let (Some(doc), Some(view)) = (self.docs.get(&key), self.views.get(&key)) else {
+            return false;
+        };
+        if !doc.has_document() {
+            return false;
+        }
+        let mut ev = pm_eval::Evaluator::new();
+        pm_audio::graph::audible(doc.document(), view.state.composition.as_str(), &mut ev)
+            .unwrap_or(false)
+    }
+
+    /// Starts a document view's audio thread before its first Play, so it
+    /// opens the output device once the document is audible and the editor
+    /// is idle (today's `requestContextWarmup`) and that Play does not wait
+    /// for the device to open.
+    fn warm_audio(&mut self, key: Key) {
+        if self.config.host_clock || !self.config.document || self.audio.contains_key(&key) {
+            return;
+        }
+        let ready = self.views.contains_key(&key)
+            && self.docs.get(&key).is_some_and(|d| d.has_document());
+        if ready && let Some(link) = self.audio_for(key) {
+            link.send(AudioCtl::Warm);
+        }
+    }
+
     fn retire(&mut self, mut view: View) {
         if let Some(live) = view.pool.take() {
             self.retire_pool(view.key, live);
@@ -1102,6 +1205,7 @@ impl Thread {
         if refresh {
             self.refresh_timing(key);
         }
+        self.warm_audio(key);
         let Some(spec) = pool else {
             return;
         };
@@ -1912,8 +2016,13 @@ impl Thread {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu
                 .composer
-                .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
+                .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
             let composition = view.state.composition.as_str().to_owned();
+            // The renderer draws with this view's definitions (one renderer
+            // serves every view on the device).
+            let registered = doc.take_registered();
+            let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            composer.set_playing(timing.is_some());
             match composer.compose(
                 doc.document(),
                 &composition,
@@ -1930,6 +2039,22 @@ impl Thread {
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    drop(stats);
+                    // Effects the GPU watchdog turned off (measured on an
+                    // earlier frame): reported at this frame's revision.
+                    for error in composer.renderer().watchdog_reports(false) {
+                        let report = pm_protocol::error::FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
