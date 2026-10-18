@@ -16,7 +16,8 @@
 //!
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`); `PM_TEXT_ONLY` limits project names by prefix;
-//! `PM_TEXT_DIFFS=<dir>` writes engine and legacy PNGs of failures.
+//! `PM_TEXT_DIFFS=<dir>` writes engine and legacy PNGs of failures (of every
+//! frame with `PM_TEXT_DIFFS_ALL`).
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -176,30 +177,35 @@ fn main() {
                     d.max
                 );
                 println!("{line}");
-                if text_ssim < 0.98 || !d.passes() {
+                let fails = text_ssim < 0.98 || !d.passes();
+                if fails {
                     failed.push(line);
-                    if let Some(dir) = &diffs {
-                        std::fs::create_dir_all(dir).unwrap();
-                        let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
-                        write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
-                        write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
-                        // Pixels the "rest" check compares that differ by
-                        // more than 1 code value, magnified in red.
-                        let mut rest_diff = vec![0u8; wu * hu * 4];
-                        for i in 0..wu * hu {
-                            let d = (0..3)
-                                .map(|c| ours[i * 4 + c].abs_diff(reference[i * 4 + c]))
-                                .max()
-                                .unwrap_or(0);
-                            rest_diff[i * 4 + 3] = 255;
-                            if rest[i] && d > 1 {
-                                rest_diff[i * 4] = d.saturating_mul(5).max(64);
-                            } else if mask[i] {
-                                rest_diff[i * 4 + 2] = 48;
-                            }
+                }
+                // `PM_TEXT_DIFFS_ALL` writes the images of passing frames too
+                // (side-by-sides for review).
+                if (fails || std::env::var("PM_TEXT_DIFFS_ALL").is_ok())
+                    && let Some(dir) = &diffs
+                {
+                    std::fs::create_dir_all(dir).unwrap();
+                    let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
+                    write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
+                    write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                    // Pixels the "rest" check compares that differ by
+                    // more than 1 code value, magnified in red.
+                    let mut rest_diff = vec![0u8; wu * hu * 4];
+                    for i in 0..wu * hu {
+                        let d = (0..3)
+                            .map(|c| ours[i * 4 + c].abs_diff(reference[i * 4 + c]))
+                            .max()
+                            .unwrap_or(0);
+                        rest_diff[i * 4 + 3] = 255;
+                        if rest[i] && d > 1 {
+                            rest_diff[i * 4] = d.saturating_mul(5).max(64);
+                        } else if mask[i] {
+                            rest_diff[i * 4 + 2] = 48;
                         }
-                        write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
                     }
+                    write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
                 }
             }
         }
