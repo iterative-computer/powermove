@@ -269,7 +269,7 @@ fn motion_corpus_parity() {
                     let (x, y) = (i as u32 % w, i as u32 / w);
                     *m &= (40..200).contains(&x) && (135..225).contains(&y);
                 }
-                let mut unblurred = request;
+                let mut unblurred = request.clone();
                 unblurred.motion_blur = MotionBlur::Off;
                 let first = opaque8(&render(&mut renderer, &unblurred, 0.0));
                 let (stale, n) = masked_max(&first, &reference, &clip);
