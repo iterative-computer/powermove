@@ -49,6 +49,8 @@ pub struct CgMasks {
     colors: HashMap<ColorKey, ColorGlyph>,
     /// Masks Skia generates from paths (`skpath`).
     paths: HashMap<PathKey, Option<Arc<GlyphMask>>>,
+    /// Glyph outlines at the canonical 64 px, for text drawn as paths.
+    canonical: HashMap<PathKey, Option<Arc<pm_skia_path::Path>>>,
     bytes: usize,
 }
 
@@ -143,6 +145,44 @@ impl super::scene::MaskSource for CgMasks {
         mask
     }
 
+    fn canonical_path(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+    ) -> Option<Arc<pm_skia_path::Path>> {
+        let key = PathKey {
+            face: face.id,
+            index: face.index,
+            glyph,
+            size: 64f32.to_bits(),
+            coords: coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+            quarter: u8::MAX,
+            skew: 0,
+            scale: 0,
+            frame: (0, false, 0, 0),
+        };
+        if let Some(p) = self.canonical.get(&key) {
+            return p.clone();
+        }
+        let run = RefRun {
+            data: face.data,
+            index: face.index,
+            size: 64.0,
+            coords,
+            glyphs: Vec::new(),
+            color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let path = self
+            .fonts
+            .font_of(face.id, &run)
+            .and_then(|font| glyph_path_with(&font, glyph, 1.0, 0.0, 0.0))
+            .map(Arc::new);
+        self.bytes += path.as_ref().map_or(0, |p| p.points().len() * 8 + 64);
+        self.canonical.insert(key, path.clone());
+        path
+    }
+
     fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
         super::skpath::skia_mask_gamma(luminance_bucket(rgb))
     }
@@ -203,6 +243,7 @@ impl CgMasks {
         self.masks.clear();
         self.colors.clear();
         self.paths.clear();
+        self.canonical.clear();
         self.bytes = 0;
     }
 
@@ -268,6 +309,25 @@ fn glyph_path(
     glyph: u16,
     style: MaskStyle,
 ) -> Option<pm_skia_path::Path> {
+    glyph_path_with(
+        font,
+        glyph,
+        4.0,
+        style.skew,
+        f32::from(style.quarter) * 0.25,
+    )
+}
+
+/// The glyph's outline from CoreText through `x_scale` horizontally (4 for
+/// subpixel-positioned glyphs, scaled back by its inverse; 1 for paths)
+/// and the shear `skew`, y down, moved right by `dx`.
+fn glyph_path_with(
+    font: &CFRetained<CTFont>,
+    glyph: u16,
+    x_scale: f64,
+    skew: f32,
+    dx: f32,
+) -> Option<pm_skia_path::Path> {
     use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
     struct Sink {
         builder: pm_skia_path::PathBuilder,
@@ -329,9 +389,9 @@ fn glyph_path(
         }
     }
     let xform = objc2_core_foundation::CGAffineTransform {
-        a: 4.0,
+        a: x_scale,
         b: 0.0,
-        c: 4.0 * -f64::from(style.skew),
+        c: x_scale * -f64::from(skew),
         d: 1.0,
         tx: 0.0,
         ty: 0.0,
@@ -344,11 +404,14 @@ fn glyph_path(
     };
     unsafe { CGPath::apply(Some(&path), (&mut sink as *mut Sink).cast(), Some(apply)) };
     let built = sink.builder.finish()?;
-    let dx = f32::from(style.quarter) * 0.25;
-    // Scale x by ¼ (`SkMatrix::Scale(1/4, 1)`), then the subpixel offset.
+    if x_scale == 1.0 && dx == 0.0 {
+        return Some(built);
+    }
+    // Scale x back (`SkMatrix::Scale(1/4, 1)`), then the subpixel offset.
+    let back = (1.0 / x_scale) as f32;
     let pts: Vec<(pm_skia_path::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
     let mut b = pm_skia_path::PathBuilder::new();
-    let m = |q: pm_skia_path::Point| (q.x * 0.25 + dx, q.y);
+    let m = |q: pm_skia_path::Point| (q.x * back + dx, q.y);
     for (seg, _) in pts {
         match seg {
             pm_skia_path::PathSegment::MoveTo(a) => {
