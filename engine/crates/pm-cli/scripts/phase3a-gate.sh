@@ -84,6 +84,10 @@ done
 # Section 2's third linear-blending line (a blurred white line conserves energy).
 run blur-energy cargo test --release -p pm-cli --test phase3a_bars -- --ignored --nocapture --test-threads=1
 
+# Section 25's video class against FFmpeg plus zimg (the sources the legacy
+# capture shows as a playback proxy, and the opaque fixtures beside them).
+run video-class cargo test --release -p pm-cli --test phase3a_video_class -- --ignored --nocapture --test-threads=1
+
 # Section 2's determinism bar, second half: native and WASM evaluation are
 # bit-identical on the corpus (needs pm_wasm.wasm: bun run --cwd apps/desktop build:wasm).
 run eval-wasm ./target/release/pm-cli parity eval --wasm --json "$out/parity-eval.json"
