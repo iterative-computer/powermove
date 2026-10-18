@@ -19,7 +19,9 @@ Code:
 - `engine/crates/pm-protocol/src/shader_fallback.rs`: the runner's messages
   (`Event::ShaderFallback`, contract 10).
 - `engine/crates/pm-node/src/present/` (`render.rs`, `mod.rs`, `document.rs`)
-  and `pm-engine/src/{engine,present}.rs`: the interactive presenter's side.
+  and `pm-engine/src/{engine,present}.rs`: the interactive presenter's side;
+  `pm-node/src/present/layer_reports.rs` and `shader_layers/reports.rs`: the
+  Shader panel's layer reports.
 - `apps/desktop/src/renderer/src/engine-connection/shader-fallback.ts` (the
   runner), `session.ts`, `install.ts`.
 - `engine/crates/pm-render/tools/shaders/`: the gate corpus and its tools;
@@ -191,7 +193,11 @@ Sources and provenance:
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
 
 Measured 2026-10-17 (M4 Max, macOS 27, wgpu 30.0.1 Metal; corpus
-`shaders-20261017-073721`, 144 cases, 522 variants):
+`shaders-20261017-073721`, 144 cases, 522 variants), and reproduced on
+2026-10-18 after merging `feat/native-engine` at `f3bf2478` from a fresh
+run of every step (the Store fetched again: the same 4 releases; corpus
+`shaders-20261018-022611`; WebGL and perturbed WebGL captured again, the
+3 runner requests answered again): the same table, cell for cell.
 
 | Group | Cases | Variants | Match WebGL | via the runner | Both refuse | WebGL-unstable | Failures |
 |---|---|---|---|---|---|---|---|
@@ -238,7 +244,36 @@ App level: the v1 corpus's shader and extension projects
 `tests/corpus.rs` marks every non-built-in extension definition of a capture
 missing, as the capture app had only the built-ins. The whole corpus with this
 lane (newest v1, render, effects, and composite captures): 249 frames, 0
-failed, 6 listed apart (the effects lane's Posterize frames).
+failed, 6 listed apart (the effects lane's Posterize frames); the same on
+2026-10-18 after the merge.
+
+## Layer reports for the Shader panel
+
+With the engine presenting, the WebGL compositor draws nothing, so nothing
+fills `GL.errors` or `uiState.getShaderMeta` for shader and extension
+layers. `shader_layers::reports::layer_reports` (through
+`Renderer::layer_reports`) lists, for a document revision and the viewed
+composition with the compositions it nests, every shader layer whose code
+WebGL refuses too (`ShaderCompile`, layer scope, diagnostics in the author's
+lines) and every extension layer drawn as the missing checkerboard
+(`DefinitionMissing`, layer scope); drawn at the frame's time or not, so a
+hidden layer's error shows too. The presenter
+(`pm-node/src/present/layer_reports.rs`) sends the whole list as `Failure`
+events at every revision it presents, before the frame, and only what
+changed when the definitions or the composition change within a revision;
+routing to the legacy viewer resets it. The app
+(`kernel/engine-definitions.ts`) holds a layer report for its revision and
+clears it when a frame of a later revision did not repeat it, or when the
+definition a missing layer needs is pushed. This relies on the engine
+repeating every layer report that still holds; a future sender of layer-scope
+reports must repeat them the same way. Programs only the fallback runner
+draws compile in WebGL and are not reported as errors.
+
+Evidence: `pm-node/tests/layer_reports.rs` (the interactive engine in a child
+process: a refused shader layer and a missing extension layer reach the view
+at the frame's revision, before the frame, and are repeated per revision and
+not within one), the unit test in `layer_reports.rs`, and the vitest
+`definition-snapshots.test.ts` ("holds layer reports for their revision").
 
 Regression suite (`tests/shader_layers.rs`, no WebGL needed): the binding
 quirks, the time and resolution uniforms at the root rate, the cap, refused
@@ -266,7 +301,7 @@ cargo test -p pm-render --test shader_gate -- --nocapture       # writes fallbac
 cargo test -p pm-render --test shader_gate -- --nocapture       # with the runner's pixels
 cargo test -p pm-render --test shader_layers
 PM_RENDER_ONLY=layers/ cargo test -p pm-render --test corpus -- --nocapture
-cargo test -p pm-node --test shader_fallback
+cargo test -p pm-node --test shader_fallback --test layer_reports
 bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 ```
 
@@ -292,5 +327,12 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
   readback, and upload per frame shown; there is no render-ahead for it.
 - **Not run:** the full pm-render suite (targeted tests only, per the machine
-  limits); `effects.rs`'s watchdog test fails on this machine with and without
-  this lane's changes (checked on the base commit).
+  limits).
+- **Watchdog tests fail on the base too** (2026-10-18, base `f3bf2478` built
+  in a temporary worktree): `pm-render/tests/effects.rs`
+  `the_watchdog_disables_an_overrunning_effect_from_the_next_frame` fails
+  ("overran again") on the base and on this branch; `pm-node/tests/definitions.rs`
+  `a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views`
+  (`assert!(overran)`) passed 1 of 6 runs on the base and 1 of 6 on this
+  branch. Both are the effects lane's GPU-timestamp watchdog, not this lane's
+  code.
