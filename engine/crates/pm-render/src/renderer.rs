@@ -833,7 +833,7 @@ impl Renderer {
             bracket.end(&mut encoder, &target.view);
         }
         self.queue.submit([encoder.finish()]);
-        self.effects.watchdog.submitted();
+        self.effects.watchdog.submitted(&self.queue);
         for t in taken {
             self.pool.give(t);
         }

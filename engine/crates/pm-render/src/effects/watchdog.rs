@@ -9,9 +9,13 @@
 //! render passes came back empty while several devices were busy): one
 //! before the effect's first pass that reads a texel of its input, one after
 //! its last pass that reads a texel of its output, so neither runs out of
-//! order with the effect. The timestamps are resolved into a buffer in the frame's own command
-//! buffer and read back without waiting ([`Watchdog::collect`], at the start
-//! of the next frame); a definition whose time is over the budget is
+//! order with the effect. The timestamps are resolved in a submission of
+//! their own once the frame's command buffer has completed (resolved in the
+//! frame's own command buffer, Metal returned the previous frame's end
+//! sample, as `pm-export`'s `GpuSpan` found: every span after the first
+//! read as ending before it began and went unjudged), and read back without
+//! waiting ([`Watchdog::collect`], at the start of later frames); a
+//! definition whose time is over the budget is
 //! disabled for every later frame (skipped with its data kept, like a
 //! missing effect) and reported as `WatchdogTimeout` until it is registered
 //! again. A true GPU hang is device loss, which the device's owner recovers
@@ -50,9 +54,18 @@ pub struct Span {
 /// One frame's timestamps in flight.
 struct Pending {
     spans: Vec<Span>,
-    /// `map_async` was called (after the frame was submitted).
-    requested: bool,
-    mapped: Arc<AtomicBool>,
+    stage: Stage,
+}
+
+/// Where a timed frame's timestamps are.
+enum Stage {
+    /// Encoded; the frame is not submitted yet.
+    Encoded,
+    /// The frame was submitted; `done` is set when its commands completed.
+    Submitted(Arc<AtomicBool>),
+    /// The resolve was submitted after the frame completed; `mapped` is set
+    /// when the readback can be read.
+    Resolving(Arc<AtomicBool>),
 }
 
 /// The query set and buffers, allocated once per renderer: Metal's counter
@@ -298,66 +311,81 @@ impl Watchdog {
         })
     }
 
-    /// Resolves a frame's timestamps in its command buffer; the readback is
-    /// mapped after [`Watchdog::submitted`].
-    pub(crate) fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, timer: FrameTimer) {
-        let Some(timing) = &self.timing else { return };
-        if timer.spans.is_empty() {
+    /// Keeps a frame's spans until its command buffer is submitted
+    /// ([`Watchdog::submitted`]); its timestamps are resolved after it has
+    /// completed ([`Watchdog::collect`]).
+    pub(crate) fn finish(&mut self, _encoder: &mut wgpu::CommandEncoder, timer: FrameTimer) {
+        if self.timing.is_none() || timer.spans.is_empty() {
             return;
         }
-        let count = timer.spans.len() as u32 * 2;
-        let bytes = u64::from(count) * 8;
-        encoder.resolve_query_set(&timing.set, 0..count, &timing.resolve, 0);
-        encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.readback, 0, bytes);
         self.pending = Some(Pending {
             spans: timer.spans,
-            requested: false,
-            mapped: Arc::new(AtomicBool::new(false)),
+            stage: Stage::Encoded,
         });
     }
 
-    /// Starts mapping the readback of the frame just submitted.
-    pub(crate) fn submitted(&mut self) {
+    /// The frame just submitted: its completion is watched.
+    pub(crate) fn submitted(&mut self, queue: &wgpu::Queue) {
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        if !matches!(pending.stage, Stage::Encoded) {
+            return;
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        queue.on_submitted_work_done(move || flag.store(true, Ordering::Release));
+        pending.stage = Stage::Submitted(done);
+    }
+
+    /// Advances the timed frame: once its commands completed, its
+    /// timestamps are resolved in a submission of their own; once that
+    /// readback is mapped, they are read. `wait` blocks until they are
+    /// (tests). Overruns disable their definitions and are reported.
+    pub fn collect(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, wait: bool) {
+        let poll = || {
+            let _ = device.poll(if wait {
+                wgpu::PollType::wait_indefinitely()
+            } else {
+                wgpu::PollType::Poll
+            });
+        };
         let (Some(pending), Some(timing)) = (&mut self.pending, &self.timing) else {
             return;
         };
-        if pending.requested {
-            return;
-        }
-        pending.requested = true;
-        let done = pending.mapped.clone();
-        timing
-            .readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                if result.is_ok() {
-                    done.store(true, Ordering::Release);
-                }
+        if let Stage::Submitted(done) = &pending.stage {
+            poll();
+            if !done.load(Ordering::Acquire) {
+                return;
+            }
+            let count = pending.spans.len() as u32 * 2;
+            let bytes = u64::from(count) * 8;
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm effect watchdog resolve"),
             });
-    }
-
-    /// Reads the timed frame's timestamps when they are ready; `wait`
-    /// blocks until they are (tests). Overruns disable their definitions
-    /// and are reported.
-    pub fn collect(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, wait: bool) {
-        if self.pending.as_ref().is_none_or(|p| !p.requested) {
-            return;
+            encoder.resolve_query_set(&timing.set, 0..count, &timing.resolve, 0);
+            encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.readback, 0, bytes);
+            queue.submit([encoder.finish()]);
+            let mapped = Arc::new(AtomicBool::new(false));
+            let flag = mapped.clone();
+            timing
+                .readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    if result.is_ok() {
+                        flag.store(true, Ordering::Release);
+                    }
+                });
+            pending.stage = Stage::Resolving(mapped);
         }
-        let poll = if wait {
-            wgpu::PollType::wait_indefinitely()
-        } else {
-            wgpu::PollType::Poll
+        let Stage::Resolving(mapped) = &pending.stage else {
+            return;
         };
-        let _ = device.poll(poll);
-        if !self
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.mapped.load(Ordering::Acquire))
-        {
+        poll();
+        if !mapped.load(Ordering::Acquire) {
             return;
         }
         let pending = self.pending.take().expect("checked");
-        let timing = self.timing.as_ref().expect("a pending frame has timing");
         let period = f64::from(queue.get_timestamp_period());
         let ticks: Vec<u64> = {
             let data = timing
