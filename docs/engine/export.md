@@ -587,9 +587,11 @@ containing any compat-level-1 layer (including a missing `compat` field) uses
 the legacy boundary. Every composition is considered, while the stored open
 composition wins over its stale `comps` copy. Documents whose layers are all
 level 2 use direct float unpremultiplication before byte quantization, so
-low-alpha color retains its precision. The lower-level pipeline has no
-implicit legacy content; the job sets this choice explicitly. Linear and
-16-bit output retain their existing conversions.
+low-alpha color retains its precision. `Pipeline::new` (and so
+`pm_export::export`) defaults to the legacy boundary, so a caller that never
+calls `set_legacy_png` keeps today's level 1 bytes; the job renderer selects
+direct precision only for all-level-2 documents. Linear and 16-bit output
+retain their existing conversions.
 
 Unit tests pin both conversions and document selection, including mixed and
 nested compositions. `job_export::png_byte_compatibility_follows_the_frozen_document`
