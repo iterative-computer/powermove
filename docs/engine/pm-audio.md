@@ -708,8 +708,19 @@ The rest of the path follows the same rule:
 - `Playback::fill` counts a missing segment and retries it before advancing to
   another segment. It queues no incomplete PCM and never feeds undecoded silence
   into the master 2x shuttle or the device-rate converter. The ring can underrun
-  while waiting, which its separate counter reports. A new pre-roll discards the
-  pending segment from the previous epoch.
+  while waiting, which its separate counter reports. A new pre-roll or a stop
+  discards the pending segment and every stretch's starved request.
+- A starved `StretchRun` remembers the starved request's output range. Only a
+  request inside that range or starting where it ended (a retry, or the
+  continuation rule) resumes the run; any other request (a seek, a play around,
+  a switch back from reverse or `no_stretch`) starts fresh by the pre-roll
+  rules. Before review round 2 a bare `pending` flag let any later request
+  continue: one render 60 s past a starve read 4.4 M source samples (a fresh
+  start reads 44 k) and differed from the offline render at every sample.
+  `stretch::tests::a_seek_after_a_starve_starts_fresh` (forward 60 s, just past,
+  a grid step, backward; with and without `abandon_retry`) and the playback
+  test `a_seek_after_a_starve_plays_as_rendered_offline` both fail on the old
+  flag.
 - Retune glides include outgoing voices' starvation and errors in the returned
   report and advance their envelope only after a complete render. A shared
   stretch can be retried at the same range without changing the envelope.
@@ -721,6 +732,31 @@ The rest of the path follows the same rule:
   protects the downstream converter and shuttle when those readers miss.
   Constant and animated speeds, reverse remaps, trims, preserve/follow pitch,
   conformed footage, and existing stretch determinism tests are exercised.
+
+**Stall policy (decision record).** A source miss stalls the whole mix and the
+audio clock: the starved segment is retried every turn of the render loop (about
+2 ms), nothing after it is queued, and the device underruns once the ring is
+empty (counted in `PlaybackStats::underruns`; the clock holds because the ring's
+tags say what is heard). Before this lane only the missing voice went silent while
+the timeline played on, which played wrong samples silently. Limits:
+
+- There is no bound on the wait. A block that never decodes (a decode error is
+  an error, not a miss, so this means the cache cannot hold what one segment
+  needs, or a worker is stuck) stalls playback until the user stops or seeks.
+  The cache budget (64 MB default) holds minutes of audio, far more than one
+  segment reads, so budget thrash cannot starve a single segment forever.
+- A stall longer than `STALL_REPORT` (1 s) is reported once per stall through
+  `Playback::take_errors` ("playback waited over 1 s for a source to decode").
+  `pm-node`'s audio presenter does not read `take_errors` yet (it reports
+  `underruns` and `starved_renders` only), so the message is not shown in the
+  app; that is the bridge's to wire.
+- `starved_renders` counts starved segments once each; `starve_retries` counts
+  the retries of a segment still missing (review round 2: it used to count every
+  2 ms retry as a new starve).
+- The mixer's strip and master meter taps take a render only when it is
+  complete, so a retried block is metered once (round 2:
+  `decode_readiness::a_retried_render_meters_once`; before, a silent block
+  entered the 2,048-sample window for every starve).
 
 The reported wave-5 playback A1 pattern (79,744 of 80,000 different, decoder
 starvation zero) also has a distinct possible cause: the first 256-frame ring chunk plays, the second
@@ -741,6 +777,20 @@ regression uses 20 ms cold decode delay and no pre-roll wait; a cold run must co
 source starvation and produce exactly the same recovered stereo samples as a
 warm run at 1x/48 kHz, 2x/44.1 kHz and -2x/44.1 kHz.
 
+Review round 2 found that regression flaky (5/6 plain, 5/6 stressed at load
+about 48): its stall on purpose outlasted the 40 ms simulated device's
+patience, the ring underran, and the capture was displaced by 256 frames, the
+A1 signature again. Tests of rendered content (that one, the seek after a
+starve, the long stall) now use a patient simulated device that waits up to 5 s
+for a whole buffer of the current epoch (`DeviceSide::queued_frames`; a chunk
+count would also count a seek's dropped chunks and short chunks) and assert it
+never gave up. The comparisons are unchanged (bit equality). Real-time tests,
+including the two time-mapped comparisons, keep the 40 ms device and assert
+`underruns == 0`, so on a heavily loaded machine they can still fail, and when
+they do the failure names the ring, not the decoder. The artificial decode
+delay compiles only with the `test-hooks` feature, which the crate's tests turn
+on through a dev-dependency on the crate itself.
+
 Reproduce the repetition gate with `source engine/env.sh`, then 30 iterations of
 `nice -n 15 cargo test --manifest-path engine/Cargo.toml --release -p pm-audio
 --test playback -- --test-threads=4 --nocapture`, and another 30 iterations with
@@ -748,22 +798,34 @@ Reproduce the repetition gate with `source engine/env.sh`, then 30 iterations of
 `nice -n 15 cargo test --manifest-path engine/Cargo.toml --release -p pm-audio
 --lib --test decode_readiness --test mixer --test stretch -- --test-threads=4`.
 
-Measured on the final implementation: **30/30 plain suites and 30/30 stressed
-suites**, 20 tests each (1,200 playback test executions, no failures or ignored
-tests), with `nice -n 15` and four test threads. Both mapped tests in each suite
-compare three clips over 80,000 frames per channel: 360 stereo comparisons,
-57,600,000 samples, no differing samples and no mapped decoder starvations or
-ring underruns. The final direct run also passes all 61 tests: 38 library,
-3 decode-readiness, 14 mixer, and 6 stretch tests. No audio tolerance, callback
-patience, or corpus coverage was changed.
+Measured in round 1: 30/30 plain and 30/30 stressed suites of 20 tests. The
+independent review could not reproduce that (5/6 and 5/6, the forced-starvation
+test above), so those counts are superseded.
+
+Measured after review round 2 (2026-10-18, this Mac, load average 20 to 41 from
+other lanes): **30/30 plain suites and 30/30 stressed suites**, 22 tests each
+(1,320 playback test executions, no failures, none ignored), with `nice -n 15`
+and four test threads. The two time-mapped tests compared three clips over
+80,000 frames each in every suite: 360 comparisons, 0 differing samples, 0
+starved renders and 0 ring underruns in every one. The seek-after-starve test
+matched the offline render at the seek target in all 60 suites (0 of 48,000).
+The reviewer's
+probe (one starved render, then a render 60 s forward, public `StretchRun` API
+only) now reads 43,920 source samples in 3.7 ms and differs from the fresh render
+in 0 of 512 samples (before: 4,368,240 samples, 408 ms, 512 of 512). Direct
+suites: 41 library, 4 decode-readiness, 14 mixer, 6 stretch, 5 sources,
+3 resampler, 2 layouts and 1 legacy-parity test pass. No audio tolerance or
+corpus coverage was changed; the real-time tests keep the 40 ms device.
 
 **Remaining evidence gap for wave-5 A1.** The original intermittent failure did
-not recur with both counters recorded in these 60 suites. Its exact mismatch
-signature is reproduced by a counted ring underrun; the independent decoder/DSP
-corruption is fixed and covered by regressions that fail on the old code. The
-original failure's attribution remains unconfirmed until its reproducer records
-both counters. Keep that attribution open rather than inferring a silent decoder
-race from `starved_renders == 0` alone.
+not recur with both counters recorded in these 120 suites. Its exact mismatch
+signature is reproduced by a counted ring underrun, and the review's failing
+runs of the forced-starvation test showed that same 256-frame displacement from
+a ring underrun on a loaded machine; the independent decoder/DSP corruption is
+fixed and covered by regressions that fail on the old code. The original
+failure's attribution stays unconfirmed until a failure records both counters.
+The time-mapped tests are real-time tests (40 ms device, `underruns == 0`), so a
+heavily loaded machine can still fail them; such a failure now names the ring.
 
 ## Gaps
 
