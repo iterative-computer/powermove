@@ -413,6 +413,8 @@ struct ClipStack {
     /// Depth-only clip draws produced when elements leave the stack
     /// (`RawElement::drawClip`), taken by the device when recorded.
     clip_draws: Vec<Draw>,
+    /// Classification only: clip draws carry no geometry.
+    classify: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,7 +545,7 @@ fn snap_scissor(a: [f32; 4], device: [f32; 4]) -> [f32; 4] {
 }
 
 impl ClipStack {
-    fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32, classify: bool) -> Self {
         let device_bounds = [0.0, 0.0, width as f32, height as f32];
         Self {
             device_bounds,
@@ -558,6 +560,7 @@ impl ClipStack {
                 deferred_saves: 0,
             }],
             clip_draws: Vec::new(),
+            classify,
         }
     }
 
@@ -584,8 +587,12 @@ impl ClipStack {
             return;
         }
         let (path, rule) = e.shape.as_path();
-        let local = tess::fill_polygons_local(&path, &e.local_to_device.m);
-        let polys = tess::to_device(&local, &e.local_to_device.m, 0, 0);
+        let polys = if self.classify {
+            Vec::new()
+        } else {
+            let local = tess::fill_polygons_local(&path, &e.local_to_device.m);
+            tess::to_device(&local, &e.local_to_device.m, 0, 0)
+        };
         let inverse = e.intersect;
         self.clip_draws.push(Draw {
             geom: Geom::Polygons { polys, rule, msaa: true },
@@ -1465,6 +1472,13 @@ pub struct Canvas<'a> {
     clip: ClipStack,
     clip_saves: Vec<ClipStack>,
     pub text: Option<Box<TextDrawFn<'a>>>,
+    /// Classification only ([`Canvas::classifier`]): draws are recorded
+    /// with their renderer but without tessellated geometry, and nothing is
+    /// rasterized.
+    classify: bool,
+    /// The first device whose draw pass the emulation does not reproduce
+    /// (see [`pass_verdict`]).
+    verdict: Option<SvgError>,
 }
 
 /// The host's SVG text raster: the text element, its local-to-device
@@ -1473,6 +1487,17 @@ pub type TextDrawFn<'a> = dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Vec<u8
 
 impl<'a> Canvas<'a> {
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_mode(width, height, false)
+    }
+
+    /// A canvas that records which renderer and clip each draw gets, as the
+    /// raster would, without tessellating or rasterizing; [`Canvas::verdict`]
+    /// then says whether every draw pass is one the emulation reproduces.
+    pub fn classifier(width: u32, height: u32) -> Self {
+        Self::with_mode(width, height, true)
+    }
+
+    fn with_mode(width: u32, height: u32, classify: bool) -> Self {
         Self {
             mc: vec![Mc { matrix: M44::IDENTITY, layer: false }],
             devices: vec![Device {
@@ -1486,9 +1511,28 @@ impl<'a> Canvas<'a> {
                 current_z: 0,
                 bm: BoundsManager::default(),
             }],
-            clip: ClipStack::new(width, height),
+            clip: ClipStack::new(width, height, classify),
             clip_saves: Vec::new(),
             text: None,
+            classify,
+            verdict: None,
+        }
+    }
+
+    /// After [`Canvas::finish`] (or [`Canvas::classify_finish`]): the first
+    /// draw pass outside what the emulation reproduces, if any.
+    pub fn verdict(&self) -> Result<(), SvgError> {
+        match &self.verdict {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn judge(&mut self, dev: &Device) {
+        if self.verdict.is_none()
+            && let Err(e) = pass_verdict(dev)
+        {
+            self.verdict = Some(e);
         }
     }
 
@@ -1601,7 +1645,7 @@ impl<'a> Canvas<'a> {
             bm: BoundsManager::default(),
         });
         // The layer starts with a wide-open clip of its own bounds.
-        let saved = std::mem::replace(&mut self.clip, ClipStack::new(w, h));
+        let saved = std::mem::replace(&mut self.clip, ClipStack::new(w, h, self.classify));
         self.clip_saves.push(saved);
         Ok(())
     }
@@ -1613,7 +1657,8 @@ impl<'a> Canvas<'a> {
         self.clip = self.clip_saves.pop().unwrap();
         // The layer's clip stack state was saved at saveLayer; restore it.
         self.clip.restore();
-        let image = render_device(&layer);
+        self.judge(&layer);
+        let image = if self.classify { Vec::new() } else { render_device(&layer) };
         let mut pending: Vec<([f32; 4], Arc<LayerImage>)> = Vec::new();
         match &layer.filter {
             None => {
@@ -1632,6 +1677,14 @@ impl<'a> Canvas<'a> {
                 ];
                 pending.push((rect, img));
             }
+            Some(_) if self.classify => {
+                // The filter's output draws are image draws like the
+                // unfiltered composite; their bounds do not change which
+                // renderer they get.
+                let b = layer.layer_bounds_in_parent;
+                let img = Arc::new(LayerImage { origin: [b[0], b[1]], width: layer.width, height: layer.height, rgba: Vec::new(), alpha: layer.alpha });
+                pending.push(([b[0] as f32, b[1] as f32, b[2] as f32, b[3] as f32], img));
+            }
             Some(filter) => {
                 let ltd = self.local_to_device();
                 let parent = self.devices.last().unwrap();
@@ -1649,7 +1702,7 @@ impl<'a> Canvas<'a> {
             let Some(clip) = self.clip.visit(&mut shape, 0.0, &dev.bm, z) else {
                 continue;
             };
-            let Some(geom) = fill_geometry(&shape.geometry, &shape.local_to_device)? else {
+            let Some(geom) = fill_geometry(&shape.geometry, &shape.local_to_device, self.classify)? else {
                 continue;
             };
             self.record(geom, Paint::Image(img), clip, z);
@@ -1744,7 +1797,8 @@ impl<'a> Canvas<'a> {
             && let Some((intervals, phase)) = &s.dash
         {
             let (path, rule) = shape.as_path();
-            let dashed = super::dash::dash_path(&path, intervals, *phase, ltd.max_scale)?;
+            // Classification needs only the dashed shape's kind (a path).
+            let dashed = if self.classify { path } else { super::dash::dash_path(&path, intervals, *phase, ltd.max_scale)? };
             shape = Shape::Path(dashed, rule);
         }
         let paint = self.paint_of(flags, ltd);
@@ -1777,8 +1831,8 @@ impl<'a> Canvas<'a> {
             return Ok(());
         }
         let geom = match &stroke {
-            None => fill_geometry(&shape, &ltd)?,
-            Some((params, cap, _)) => stroke_geometry(&shape, &ltd, *params, *cap)?,
+            None => fill_geometry(&shape, &ltd, self.classify)?,
+            Some((params, cap, _)) => stroke_geometry(&shape, &ltd, *params, *cap, self.classify)?,
         };
         let Some(geom) = geom else { return Ok(()) };
         self.record(geom, paint, clip, z);
@@ -1824,7 +1878,7 @@ impl<'a> Canvas<'a> {
         let Some(clip) = self.clip.visit(&mut draw, 0.0, &dev.bm, z) else {
             return Ok(());
         };
-        let Some(geom) = fill_geometry(&draw.geometry, &draw.local_to_device)? else {
+        let Some(geom) = fill_geometry(&draw.geometry, &draw.local_to_device, self.classify)? else {
             return Ok(());
         };
         self.record(geom, Paint::Image(img), clip, z);
@@ -1856,6 +1910,14 @@ impl<'a> Canvas<'a> {
     pub fn finish(&mut self) -> Vec<u8> {
         self.clip.record_deferred_clip_draws();
         self.take_clip_draws();
+        if self.verdict.is_none()
+            && let Err(e) = pass_verdict(&self.devices[0])
+        {
+            self.verdict = Some(e);
+        }
+        if self.classify {
+            return Vec::new();
+        }
         render_device(&self.devices[0])
     }
 }
@@ -1919,8 +1981,9 @@ fn corner_radii(rr: &SkRRect) -> ([f32; 4], [f32; 4]) {
     )
 }
 
-/// The fill geometry `chooseRenderer` selects.
-fn fill_geometry(shape: &Shape, t: &Transform) -> Result<Option<Geom>, SvgError> {
+/// The fill geometry `chooseRenderer` selects (`classify`: the renderer
+/// without the tessellated polygons).
+fn fill_geometry(shape: &Shape, t: &Transform, classify: bool) -> Result<Option<Geom>, SvgError> {
     match shape {
         Shape::Empty | Shape::Line(_) => Ok(None),
         Shape::Rect(r) => {
@@ -1936,12 +1999,15 @@ fn fill_geometry(shape: &Shape, t: &Transform) -> Result<Option<Geom>, SvgError>
         }
         Shape::RRect(rr) => {
             if rr.is_rect() {
-                return fill_geometry(&Shape::Rect(rr.rect), t);
+                return fill_geometry(&Shape::Rect(rr.rect), t, classify);
             }
             let (x_radii, y_radii) = corner_radii(rr);
             Ok(Some(Geom::Analytic(analytic::instance(&AnalyticGeometry::FillRRect { rect: rr.rect, x_radii, y_radii }, &t.m))))
         }
         Shape::Path(p, rule) => {
+            if classify {
+                return Ok(Some(Geom::Triangles(Vec::new())));
+            }
             if p.is_convex() && *rule == Rule::NonZero {
                 let tris = tess::convex_wedge_triangles(p, &t.m, 0, 0);
                 return Ok(Some(Geom::Triangles(tris)));
@@ -1954,7 +2020,7 @@ fn fill_geometry(shape: &Shape, t: &Transform) -> Result<Option<Geom>, SvgError>
 }
 
 /// The stroke geometry `chooseRenderer` selects.
-fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap) -> Result<Option<Geom>, SvgError> {
+fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap, classify: bool) -> Result<Option<Geom>, SvgError> {
     if is_simple_shape(shape, t, true) {
         let g = match shape {
             Shape::Line(l) => AnalyticGeometry::StrokeLine { line: *l, radius: params.radius, cap },
@@ -1971,6 +2037,9 @@ fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap)
         };
         return Ok(Some(Geom::Analytic(analytic::instance(&g, &t.m))));
     }
+    if classify {
+        return Ok(Some(Geom::Triangles(Vec::new())));
+    }
     let (path, _) = shape.as_path();
     let tris = stroke::stroke_triangles(&path, &t.m, params, cap);
     Ok(Some(Geom::Triangles(tris)))
@@ -1978,6 +2047,33 @@ fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap)
 
 // ---------------------------------------------------------------------------
 // Rasterization
+
+/// Whether the emulation reproduces Chromium's pixels for a device's draw
+/// pass. Measured on Chromium 152 / Graphite / Metal (docs/engine/vector.md,
+/// "Chromium SVG paint-record replay"):
+///
+/// - analytic draws (round rects, ovals, unaligned rects) in a pass with no
+///   multisampled draw, and multisampled draws (tessellated paths) in a pass
+///   with no analytic draw and no clip, match;
+/// - an analytic draw or an analytic clip in a multisampled pass takes, at
+///   isolated pixels along mesh edges, one mesh triangle's fragment for
+///   every sample, which the emulation does not model;
+/// - clip elements drawn into the depth attachment have no reference that
+///   is free of the multisampled-pass behaviour.
+///
+/// A document whose bucket raster contains any such pass is not drawn.
+fn pass_verdict(dev: &Device) -> Result<(), SvgError> {
+    if dev.draws.iter().any(|d| d.depth_only) {
+        return Err(SvgError("an SVG clip drawn into the depth attachment needs compatibility support".into()));
+    }
+    let msaa = dev.draws.iter().any(needs_msaa);
+    if msaa && dev.draws.iter().any(|d| matches!(d.geom, Geom::Analytic(_)) || d.clip.analytic.is_some()) {
+        return Err(SvgError(
+            "analytic SVG draws sharing a multisampled pass with tessellated draws need compatibility support".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn needs_msaa(d: &Draw) -> bool {
     match &d.geom {
@@ -2220,4 +2316,112 @@ pub fn polygons_of(path: &SkPath, m: &Mat) -> Vec<Vec<[f64; 2]>> {
 #[allow(dead_code)]
 fn verbs_count(p: &SkPath) -> usize {
     p.verbs.iter().filter(|v| !matches!(v, Verb::Move | Verb::Close)).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(c: [f32; 4]) -> Flags {
+        Flags { color: c, shader: None, anti_alias: true, dither: false, stroke: None }
+    }
+
+    fn triangle() -> SkPath {
+        let mut p = SkPath::new();
+        p.move_to([2.0, 2.0]);
+        p.line_to([30.0, 6.0]);
+        p.line_to([12.0, 28.0]);
+        p.close();
+        p
+    }
+
+    /// (renderer, depth-only, analytic clip) of every draw of the root.
+    fn kinds(c: &Canvas) -> Vec<(u8, bool, bool)> {
+        c.devices[0]
+            .draws
+            .iter()
+            .map(|d| {
+                let g = match &d.geom {
+                    Geom::Polygons { msaa: false, .. } => 0,
+                    Geom::Polygons { msaa: true, .. } | Geom::Triangles(_) => 1,
+                    Geom::Analytic(_) => 2,
+                };
+                (g, d.depth_only, d.clip.analytic.is_some())
+            })
+            .collect()
+    }
+
+    fn cases() -> Vec<(&'static str, Vec<Op>, bool)> {
+        let red = solid([1.0, 0.0, 0.0, 1.0]);
+        let blue = solid([0.0, 0.0, 1.0, 0.6]);
+        let scale = Op::Concat(M44::affine(1.5, 0.0, 0.0, 1.5, 0.25, 0.0));
+        vec![
+            ("path and oval", vec![scale.clone(), Op::DrawPath { path: triangle(), rule: Rule::NonZero, flags: red.clone() }, Op::DrawOval { rect: [4.0, 4.0, 20.0, 14.0], flags: blue.clone() }], false),
+            ("analytic only", vec![scale.clone(), Op::DrawOval { rect: [4.0, 4.0, 20.0, 14.0], flags: blue.clone() }, Op::DrawRect { rect: [1.3, 2.0, 9.0, 9.0], flags: red.clone() }], true),
+            ("paths only", vec![scale.clone(), Op::DrawPath { path: triangle(), rule: Rule::EvenOdd, flags: red.clone() }, Op::DrawPath { path: triangle(), rule: Rule::NonZero, flags: blue.clone() }], true),
+            ("path clip", vec![Op::ClipPath { path: triangle(), rule: Rule::NonZero, aa: true }, Op::DrawRect { rect: [0.0, 0.0, 20.0, 20.0], flags: red.clone() }], false),
+            ("oval clip over a path", vec![Op::ClipRRect { rrect: SkRRect::make_oval([3.0, 3.0, 25.0, 25.0]), aa: true }, Op::DrawPath { path: triangle(), rule: Rule::NonZero, flags: red.clone() }], false),
+            (
+                "layer of ovals under a path",
+                vec![
+                    Op::SaveLayerAlpha(0.5),
+                    Op::DrawOval { rect: [4.0, 4.0, 20.0, 14.0], flags: blue.clone() },
+                    Op::Restore,
+                    Op::DrawPath { path: triangle(), rule: Rule::NonZero, flags: red.clone() },
+                ],
+                true,
+            ),
+        ]
+    }
+
+    /// The classifier gives every draw the renderer, depth-only flag and
+    /// clip the raster gives it, and the same verdict.
+    #[test]
+    fn the_classifier_chooses_the_raster_renderers() {
+        for (name, ops, ok) in cases() {
+            let mut raster = Canvas::new(32, 32);
+            raster.replay(&ops).unwrap();
+            raster.finish();
+            let mut class = Canvas::classifier(32, 32);
+            class.replay(&ops).unwrap();
+            assert!(class.finish().is_empty(), "{name}: the classifier rasterized");
+            assert_eq!(kinds(&raster), kinds(&class), "{name}");
+            assert_eq!(raster.verdict().is_ok(), ok, "{name}: {:?}", raster.verdict());
+            assert_eq!(class.verdict().is_ok(), ok, "{name}: {:?}", class.verdict());
+        }
+    }
+
+    /// Later draws cover earlier ones (painter's depth); a translucent draw
+    /// blends over what is under it in premultiplied 8-bit.
+    #[test]
+    fn draws_composite_in_painter_order() {
+        let ops = vec![
+            Op::DrawRect { rect: [0.0, 0.0, 8.0, 8.0], flags: solid([1.0, 0.0, 0.0, 1.0]) },
+            Op::DrawRect { rect: [4.0, 4.0, 12.0, 12.0], flags: solid([0.0, 0.0, 1.0, 1.0]) },
+            Op::DrawRect { rect: [0.0, 10.0, 4.0, 14.0], flags: solid([0.0, 1.0, 0.0, 0.5]) },
+        ];
+        let mut c = Canvas::new(16, 16);
+        c.replay(&ops).unwrap();
+        let px = c.finish();
+        let at = |x: usize, y: usize| &px[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
+        assert_eq!(at(2, 2), [255, 0, 0, 255]);
+        assert_eq!(at(6, 6), [0, 0, 255, 255]);
+        assert_eq!(at(2, 12), [0, 128, 0, 128]);
+        assert_eq!(at(14, 2), [0, 0, 0, 0]);
+    }
+
+    /// An unaligned rect is the analytic renderer: its edge pixel carries
+    /// the covered fraction.
+    #[test]
+    fn unaligned_rect_edges_are_fractional() {
+        let ops = vec![Op::DrawRect { rect: [2.5, 0.0, 10.0, 8.0], flags: solid([1.0, 1.0, 1.0, 1.0]) }];
+        let mut c = Canvas::new(12, 8);
+        c.replay(&ops).unwrap();
+        assert_eq!(kinds(&c), vec![(2, false, false)]);
+        let px = c.finish();
+        let a = |x: usize| px[(4 * 12 + x) * 4 + 3];
+        assert_eq!(a(1), 0);
+        assert!((120..=135).contains(&a(2)), "{}", a(2));
+        assert_eq!(a(5), 255);
+    }
 }
