@@ -262,8 +262,8 @@ fn kernel_1d_linear(sigma: f32, radius: i32) -> Vec<(f32, f32)> {
     let at = |i: usize| full.get(i).copied().unwrap_or(0.0);
     let half_size = (radius + 1) as usize;
     let half_radius = half_size / 2;
-    let mut kernel = vec![0.0f32; MAX_SAMPLES];
-    let mut offsets = vec![0.0f32; MAX_SAMPLES];
+    let mut kernel = [0.0f32; MAX_SAMPLES];
+    let mut offsets = [0.0f32; MAX_SAMPLES];
     let mut low = half_radius as isize - 1;
     let mut index = radius as usize;
     let new_weight = |wi: f32, wj: f32| (wi + wj, wj / (wi + wj));
