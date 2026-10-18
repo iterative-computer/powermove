@@ -604,6 +604,100 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
     );
 }
 
+/// Level 1 SVG images end to end (the gate in the plan, the bucket
+/// `svgRasterDimensions` picks, the replay, the upload and the image quad)
+/// against Chromium's `<img>` rasters: every reference document of
+/// `pm-vector/tools/canvas-ref/svg-gate-cases.ts` with an explicit root
+/// size captured at that size, drawn at scale 1 so the bucket is the
+/// captured size and the quad covers the frame texel for texel. These are
+/// the root sizing (`width`/`height` against the viewBox, a viewBox
+/// origin, every `preserveAspectRatio`), shape transforms and gradients.
+/// Without the capture (`PM_SVG_GATE_REF` or the newest `svg-gate-*`
+/// under the corpus directory) the frames are compared with the replay's
+/// own bucket only.
+#[test]
+fn level1_svg_images_match_chromium_buckets() {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-vector/tests/fixtures/svg-gate-cases.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let capture = std::env::var_os("PM_SVG_GATE_REF")
+        .map(std::path::PathBuf::from)
+        .or_else(|| support::newest_capture("svg-gate-"));
+    if capture.is_none() {
+        eprintln!("note: no svg-gate-* capture (canvas-ref/run.ts --svg-gate); compared with the replay only");
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let mut failures = Vec::new();
+    let (mut drawn, mut against_chromium) = (0, 0);
+    for c in fixture["cases"].as_array().unwrap() {
+        let id = c["id"].as_str().unwrap();
+        let svg = c["svg"].as_str().unwrap();
+        let (cw, ch) = (c["width"].as_u64().unwrap() as u32, c["height"].as_u64().unwrap() as u32);
+        let parsed = pm_vector::render::svg::SvgDocument::parse(svg.as_bytes()).unwrap();
+        let root = &svg[..svg.find('>').unwrap()];
+        if !(root.contains(" width=\"") && root.contains(" height=\"")) || parsed.size() != (f64::from(cw), f64::from(ch)) {
+            continue;
+        }
+        if parsed.compat_supported(f64::from(cw), f64::from(ch)).is_err() {
+            continue;
+        }
+        let dir = std::env::temp_dir().join(format!("pm-render-vector-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.svg"));
+        std::fs::write(&path, svg).unwrap();
+        let d = json!({ "asset": "art", "fit": "stretch", "w": cw, "h": ch });
+        let mut l = layer("svg", "image", d, f64::from(cw) / 2.0, f64::from(ch) / 2.0, 2.0);
+        set(&mut l, "rotation", json!(0.0));
+        let mut doc = project(cw, ch, 2.0, no_fill(), vec![l]);
+        asset(&mut doc, "art", "image", "svg", cw, ch, 0.0);
+        let mut resolver = MapResolver::default();
+        resolver.paths.insert("art".into(), path);
+        let doc = load(&doc);
+        assert_eq!(unsupported_with_media(&doc, "Ptest-root", &resolver), vec![], "{id}");
+        let request = RenderRequest::sized(Size::new(cw, ch), Precision::Float32);
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .expect("render");
+        assert!(frame.failures.is_empty(), "{id}: {:?}", frame.failures);
+        let ours = support::rgba8(&renderer.read_rgba(&frame).unwrap());
+        drawn += 1;
+        let diff = |reference: &[u8]| {
+            let (mut max, mut over1) = (0u8, 0usize);
+            for (a, b) in ours.chunks(4).zip(reference.chunks(4)) {
+                let e = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+                max = max.max(e);
+                over1 += usize::from(e > 1);
+            }
+            (max, over1)
+        };
+        // The frame is the replay's bucket.
+        let bucket = parsed.raster_compat(cw, ch).unwrap();
+        let (max, _) = diff(&bucket.rgba);
+        if max > 1 {
+            failures.push(format!("{id}: the frame differs from the replayed bucket by {max}"));
+        }
+        let Some(dir) = &capture else { continue };
+        let (rw, rh, reference) = support::read_png(&dir.join(format!("{id}.png")));
+        assert_eq!((rw, rh), (cw, ch), "{id}");
+        let (max, over1) = diff(&reference);
+        let class = max <= 4 && over1 * 1000 <= (cw * ch) as usize;
+        eprintln!("{id:40} against Chromium: max {max}, {over1} px over 1");
+        against_chromium += 1;
+        if !class {
+            failures.push(format!("{id}: max {max}, {over1} px over 1 against Chromium (outside the 2D class)"));
+        }
+    }
+    eprintln!("{drawn} level 1 SVG frames drawn, {against_chromium} compared with Chromium");
+    // The icon, the 200 × 120 documents and the 42 preserveAspectRatio documents.
+    assert!(drawn >= 45, "{drawn} frames");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn level2_svg_fallbacks_and_text() {
     let mut renderer = Renderer::headless().unwrap();
