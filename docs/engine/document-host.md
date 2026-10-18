@@ -70,20 +70,32 @@ them into the tool's error text, with "(retry the call)" when `retry` holds.
    undo, as in remote-sync). When another member changed the document since, undo
    applies on top, as it does in a tab.
 2. **Read-your-writes across the hop.** Before a call answers, the worker diffs its
-   document against what the session last had and sends the patches
-   (`session.patch`), awaiting the host's sequence number. Remote patches from other
-   members arrive through `onPatch`; the worker sends its own unsent edits first,
-   then applies them without touching its history (as `remote-sync.ts` does).
+   document against what the session last had from it, marks it synced and queues the
+   patches, all synchronously (as `remote-sync.ts` does), and awaits the host's
+   acknowledgement of that batch. An edit made while an earlier batch or a remote
+   patch is in flight is therefore always in a later batch, never marked synced
+   unsent. Remote patches apply at once without touching history. When a remote
+   patch writes a path one of the worker's unacknowledged batches also writes (the
+   host's order, which the worker cannot see, decides the value), and after a batch
+   the host refused, the worker reconciles behind its sends: it joins again, takes the
+   host's copy, puts its unsent edits on top, and sends them. `stats().hash` is the
+   instance document's canonical hash, which tests compare with the host's.
 3. **Concurrent calls.** Tool calls run concurrently inside a worker (the harness
    keeps one transaction per run and checks base revisions); lifecycle requests run
    in order. Each answer is matched to its call by run and call id.
-4. **Extensions register before the call returns.** `registerExtension` activates
-   through the kernel's own loader and records the extension in the kernel's store.
-   `definitionsGeneration` counts registrations in this instance; pushing definition
-   snapshots to `pm-node` for `render_frames` is the agents lane's (contract 10).
+4. **Extensions register before the call returns.** `registerExtension` adds the
+   record to the worker's list and sends the kernel's loader an `extensionsChanged`
+   for it, so `planLoad` decides as in the editor (a disabled record stays off, a fork
+   replaces its built-in, a missing dependency or blocked state skips it, a Store
+   record runs contained); it answers once the loader settled. `definitionsGeneration`
+   counts registrations in this instance; pushing definition snapshots to `pm-node`
+   for `render_frames` is the agents lane's (contract 10).
 5. **Crash and backoff.** A worker that exits rejects its pending calls with
    `worker-crashed` (retry); the next call starts it again after 1 s, doubling to
-   30 s, up to five attempts, as the desktop's engine supervisor does.
+   30 s, up to five attempts, as the desktop's engine supervisor does. A crash more
+   than a minute ago no longer counts, so a retry after the budget ran out can work.
+   History persists once a burst of changing calls settles (750 ms), on close and at
+   shutdown; the document itself is in the session before each answer.
 6. **The production consistency check** runs after every changing call: the mirror's
    hash must equal the document's.
 7. **The shared reader guards** (`shared/engine-stamp.ts`, `shared/reader-version.ts`)
@@ -154,58 +166,129 @@ The dual, audit, and tracking modes are development-only: a production build tak
 them only from its build flag; a profile's stored override can turn the plain mirror
 on or off and nothing else (`flags.ts profileOverride`).
 
+## Extensions
+
+The worker's bridge carries the editor's extensions bridge (`document-host/extensions.ts`)
+over the embedder's optional `extensions` service (`list`, `bundle(url)`,
+`onChanged`, `values`), so the kernel's own loader boots the user's extensions as the
+editor does: built-ins first, then user and project extensions, overrides and forks
+(`replaces`), `dependsOn`, enabled state and blocked health, through `planLoad`, and
+reloads on `extensionsChanged`. Bundles are fetched once per URL into a worker temp
+directory (its real path) and imported from there. Health stays in the worker (the
+editor is the authority for what Mods shows); `stats().extensions.failed` reports it.
+The serve supervisor lists records over its link (`EXT_IPC.list`, `EXT_IPC.changed`)
+and fetches bundles from the host's `/ext/` route with the session cookie; vars values
+stay on the Mac that runs Powermove, as for a tab. Without the service a worker boots
+the built-ins only.
+
+## Contained runtimes (Store extensions and scripts)
+
+A Store extension runs its sandbox runtime role (`renderer/sandbox/boot.ts`
+`bootRuntime`) in a process of its own from `sandbox-runtime.mjs` (a second entry of
+the engine bundle). The kernel's own sandbox host (`kernel/sandbox-host.ts`) drives it
+exactly as it drives a frame, through the `process` option (`loaded`, `start(port,
+init)`, `terminate`): the same RPC, schemas, budgets, watchdog (it is isolated, so a
+spinning runtime is killed and turned off) and permission checks, over the process's
+IPC channel instead of a frame's port. Disposing the runtime stops the process.
+
+The process (`document-host/contained.ts`) is held three ways:
+
+1. **macOS seatbelt** (`sandbox-exec`): deny by default; read only Node, the system
+   libraries, the runtime bundle (and the `ws` package happy-dom imports) and the
+   extension's bundle, with metadata only on their ancestors; write nothing but
+   `/dev/null`; exec nothing but Node; no network unless the manifest has `network`
+   (then outbound TCP and DNS only).
+2. **Node's permission model** (`--permission`): the same reads, no writes, no child
+   processes, worker threads, addons or WASI.
+3. **Inside the runtime**: a resolve hook refuses every import the bundle makes (it
+   is self-contained, as under the frame's `script-src`), `process.binding`,
+   `getBuiltinModule`, `dlopen`, `kill` and friends are removed before it runs, and
+   `fetch`/`WebSocket` follow the CSP's `connect-src` (data:, blob:, and with
+   `network` https: and wss:), reporting violations as the frame does. The environment
+   is scrubbed to `PATH`, `LANG`, `TZ`.
+
+Without seatbelt (not macOS) layers 2 and 3 hold; the worker logs which
+(`containment()`). Generated scripts (`PM.Script.preview`/`apply`) run the editor's
+own worker source the same way (`PM.Script.isolate`, `--script`), with no network, the
+frame's time limit and its error texts. Store records whose runtime bundle is missing
+fail activation by name; nothing runs uncontained.
+
+## Media status and file state
+
+`PM.assets` in a worker is a status view over the host's media store
+(`document-host/media.ts`): an asset is available when `mediaPath.lookup` finds its
+bytes and offline when not; `dur`, `w`, `h`, `hasAudio` come from the asset record,
+which the editor's decoder wrote at import. Lookups settle before every call, so
+`check_project`, `list_media`, `edit_video` and media sources answer as on the desktop
+and never depend on timing. Importing and replacing media still refuse in a worker
+(survey C24). `get_workspace_state` reads the project's file state from the profile
+store (`projectMeta.<id>`), unsaved unless the document's fingerprint equals the saved
+or baseline hash; a worker reports no viewport (it has no window).
+
+## Text ink
+
+Workers load whole faces (pm-bridge `FontRegistry.whole`, `pm_text::subset::whole_face`:
+a single-face file's bytes, or a collection face's tables as one sfnt) and declare
+outlines to pm-wasm, so font-anchor capture, anchor references and text bounds are
+native; with the new engine on a registry without `whole` is `font-service-unavailable`.
+Anchor bounds keep the legacy key order (x0, y0, x1, y1) whichever side measured them
+(`edits.ts legacyKeyOrder`), so answers that serialize the live document are byte-for-byte
+the desktop's. Where there is no raster, `PM.textLayout` (the glyph layout
+`get_project_state` reports for selected text) is pm-wasm's `glyphLayout`; kernels and
+queries with no headless legacy reference (`captureFontAnchor`, `anchorReference`,
+`glyphLayout`, `gl.bounds`, `gl.pick`) are not dual-compared in a worker.
+
+## The editor with the new engine on
+
+`legacy/bootstrap.ts` waits (bounded at 15 s) for the mirror before the project opens,
+then (bounded at 10 s) for the boot project's faces (`EngineDoc.warmFonts`, which asks
+pm-wasm directly and loads what its text layers need), and warms the faces of every
+project opened later. A module that does not load is the named `pm-wasm-unavailable`
+failure with Retry.
+
 ## Interfaces to other lanes
 
-- **Fonts (ink).** `FontProvider.whole?(blob, index)` (engine-doc/fonts.ts): when the
-  fonts lane's service provides whole faces, the loader loads every face whole and
-  declares outlines to pm-wasm (`pm_fonts_outlines(1)`), and ink questions (text
-  bounds, picks over text, raster placement, font-anchor capture) answer natively.
-  pm-bridge's `FontRegistry` has no such method yet.
+- **Fonts (editor ink and new faces).** The editor's provider is asynchronous (main
+  relays to the font service) and has no `whole`, so in the editor an ink question
+  still answers `{ink}`, and a face first used after a project opened (a font picked
+  in the inspector) is answered by the legacy code while it loads. Closing both needs
+  a synchronous channel from the renderer to a registry in main
+  (`ipcRenderer.sendSync`, the fonts and bridge lanes' files) and `whole` on it.
 - **3D (host, 3d).** pm-wasm's `RefuseHost` and the `3d` pick fallback are the threed
   lane's (`pm-geom3d` in pm-wasm). Nothing here routes around them.
-- **Store extensions.** The kernel's sandbox runtime needs a browser frame; a worker
-  refuses a Store extension with `sandbox-unavailable` rather than running it
-  uncontained.
 - **Agents (hidden MCP host).** Builds on `DocumentHostPoolApi`, implements
-  `DocumentHostServices` in the CLI process, routes DOM, job, and host-services tools
-  itself (`DOM_TOOLS`, `JOB_TOOLS` mirror `pm_protocol::document_host`), and owns
-  export and save routing (`server/runs.ts`).
+  `DocumentHostServices` (including `extensions`) in the CLI process, routes DOM, job,
+  and host-services tools itself (`DOM_TOOLS`, `JOB_TOOLS` mirror
+  `pm_protocol::document_host`), and owns export and save routing (`server/runs.ts`).
 
 ## Verification
 
 | Check | Command | Result (2026-10-18, M4 Max) |
 |---|---|---|
-| Pool against real workers | `vitest run src/engine/document-host/pool.test.ts` | 8 tests: reader guards (stamped project refused with the flag off, newer project read-only); two projects in two processes with interleaved calls, answers attributed by run and call; rollback on one never touches the other; restart (new pool, same store) resumes 3 and 1 undo entries; SIGKILL'd worker restarts and resumes; remote session edits applied without undo entries; missing pm-wasm and missing font service fail by name with retry and recover when the module appears; flag off keeps today's evaluator; export_video refused as `wrong-route` |
-| Worker without a browser | `vitest run src/engine/document-host/hosts.test.ts` | 5 tests: `generate_captions` through host services; no-model answer without a service; 2D and text edits in `audit` mode with **0 fallbacks, 0 dual mismatches, 0 auditor failures**; the measured ink fallback (below); local extension registration and Store refusal |
-| Contract sequence | `vitest run src/engine/document-host/contract.test.ts` | 15 calls answered, two workers byte-identical |
-| Serve wiring | `vitest run src/engine/document-host/serve.integration.test.ts` | a pool on the supervisor's link services against a real serve host: a tab and a worker share the session both ways; the history reaches the host's profile store |
-| Desktop vs worker | `pm-electron-lock playwright test e2e/document-host-contract.spec.ts --workers=1` | 15 calls from the same document: **byte-identical canonical documents and identical answers**, ids minted during the run renamed by order of appearance (they come from `Math.random`, which the desktop UI also draws from); one pinned difference, `check_project`'s `mediaChecked` (below) |
-| Exact answers | `vitest run src/renderer/src/engine-doc/strict.test.ts` | detached inputs native with 0 dual mismatches; trap answered by a fresh instance; double trap named; unloadable module named and recovered by `retry()`; development modes kept out of production overrides |
+| Pool against real workers | `vitest run src/engine/document-host/pool.test.ts` | 10 tests: the previous 8, plus the reviewer's sequence step by step (T1's batch in flight, remote patch, T2 edits, T2's batch in flight, T3 edits: every edit reaches the host, hashes equal; fails on the previous worker) and a same-path conflict converging on the host's order |
+| Worker without a browser | `vitest run src/engine/document-host/hosts.test.ts` | 7 tests: captions through host services; no-model answer; 2D and text edits (size, weight, tracking, font) in `audit` mode with **0 fallbacks, 0 dual mismatches, 0 auditor failures**; font-anchor bounds recorded natively with 0 fallbacks; user extensions with a fork replacing `effects-basic`, a missing dependency, a disabled record and a live disable; registration and hot reload through the loader; a Store extension contained (its effects work; `node:fs`, `node:child_process`, fetch, native process members refused; clean environment) |
+| Contained runtimes | `vitest run src/engine/document-host/contained.test.ts` | 5 tests: scripts' results, time limit and errors as the frame gives them; a contained process cannot read home or `/etc`, write, exec, and gets a clean environment; with seatbelt it cannot connect without `network` and can with it |
+| Contract sequence | `vitest run src/engine/document-host/contract.test.ts` | 31 calls (4 expected refusals), two workers byte-identical |
+| Serve wiring | `vitest run src/engine/document-host/serve.integration.test.ts` | a tab and a worker share the session both ways; a user extension in the host profile is built by the serve host, listed over the link, fetched from `/ext/` and used by the worker; history reaches the host's profile store |
+| Desktop vs worker | `pm-electron-lock playwright test e2e/document-host-contract.spec.ts --workers=1` | 31 calls from the same document, errors included: **byte-identical canonical documents and identical answers, with no pinned difference**; `get_workspace_state`'s document fields equal with the desktop's extension list |
+| Exact answers | `vitest run src/renderer/src/engine-doc/strict.test.ts` | 6 tests: the previous 5, plus warmed faces answer the editor's first text question natively (an unwarmed one falls back, measured) |
 
 ## What remains
 
-- **Font-anchor capture headlessly needs glyph ink.** A size, font, weight,
-  tracking, or box edit on a text layer records its ink bounds
-  (`font-anchor.ts captureFontAnchor`). With subsets the kernel answers `{ink}`, the
-  legacy edit runs, and the headless legacy raster has no pixels, so the worker
-  records no `fontAnchorBounds` where the desktop records them: a document
-  difference for those edits until `FontProvider.whole` exists
-  (`hosts.test.ts` pins it as `edit.captureFontAnchor:ink: 1`).
-- **`check_project` media status.** A worker has no media runtime (`PM.assets` lives in
-  `legacy/gl/raster.ts`), so `check_project` answers `mediaChecked: false` and cannot
-  report offline or failed media, where the desktop checks its decoded media. Workers
-  need media status from the host's media store and engine probes (survey C24, the
-  agents lane's media tools); the contract spec pins the difference.
-- **Scripts** (`PM.Script.preview`/`apply`, used by generated workspace tools) refuse
-  by name in workers: their guarantees need the browser's opaque-origin frame.
-- **The editor's boot window and first font question** still answer with the legacy
-  code (`unavailable` before `whenReady`, `fonts` while main serves a face for the
-  first time). Closing them needs the renderer's bootstrap to await the mirror and the
-  project's fonts before the editor opens a project (legacy/bootstrap.ts, not this
-  lane's file).
-- **`context`** (no `compId`, or `PM.curComp()` not registered in `comps`) still
-  answers with the legacy code; it occurs only mid-replacement.
-- **Store extensions in workers** need a contained runtime that is not an iframe.
+- **The editor's first question about a face picked after open**, and **ink in the
+  editor**, wait for the fonts lane's synchronous channel (above). Workers have neither.
+- **`context`** (no `compId`, or `PM.curComp()` not registered in `comps`, mid-replacement
+  or a nested composition from a composition's own `comps`) still answers with the
+  legacy code; making it exact needs pm-wasm to address compositions by path.
+- **`get_workspace_state`'s window fields** (`layout`, `viewport`, `openProjects`,
+  `projectsScreenOpen`) describe an editor window; a worker has none. Its document
+  fields match the desktop's. Whether the route table sends the tool to an open editor
+  window is the orchestrator's decision.
+- **Media decoding facts** a worker cannot know without engine probes: decode failures
+  and cloud placeholders (`media-failed`, `media-in-cloud`), a video's audio track when
+  the record does not say, and media import and replace (survey C24).
 - **3D** questions (`host`, `3d`) wait for the threed lane.
 - **Export and save** from workers (survey C23) and the hidden MCP host's tool
   routing are the agents lane's on this interface.
+- Store extensions use Web Workers or `XMLHttpRequest` only in a browser; the
+  contained runtime offers neither.

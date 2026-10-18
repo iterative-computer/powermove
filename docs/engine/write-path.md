@@ -191,8 +191,22 @@ on; docs/engine/document-host.md):
   and message: `engine:failure` on the bus, a `failure` report line, and
   `PM.EngineDoc.failures()`.
 - **Font state per instance.** The loader keeps loaded faces per module instance, so
-  a replacement instance loads them again. `FontProvider.whole` (the fonts lane's
-  whole-face service) makes ink questions native.
+  a replacement instance loads them again. `FontProvider.whole` makes ink questions
+  native: the headless document host has it (pm-bridge `FontRegistry.whole`); the
+  editor's provider through main does not yet.
+- **The editor's boot** (`legacy/bootstrap.ts`, new engine on): the project opens
+  once the mirror is ready (bounded wait), and the boot project's faces load first
+  (`EngineDoc.warmFonts`, which asks pm-wasm directly, uncounted); every project
+  opened later warms its faces. What still answers with the legacy code in the
+  editor: a face first used after a project opened (`fonts`, until the fonts lane's
+  synchronous channel), ink (`ink`, same), and `context` (mid-replacement, or a
+  nested composition held in a composition's own `comps`).
+- **Anchor bounds key order.** pm-edit's JSON objects come out with sorted keys;
+  `legacyKeyOrder` writes `fontAnchorBounds`/`sizeAnchorBounds` as the legacy edits
+  do (x0, y0, x1, y1), so the document's bytes do not depend on which side measured.
+- **No headless reference.** In a host without a raster (`headless`), the dual modes
+  skip what has no legacy answer there: `gl.bounds`, `gl.pick`, `glyphLayout` (the
+  native `PM.textLayout`), and the kernels `captureFontAnchor` and `anchorReference`.
 - **Development modes.** `audit`, `audit-proxy`, and `strict` come from the build
   flag (or a development build's stored override); a production build's stored
   override can only choose `on` or `off` (`profileOverride`).
