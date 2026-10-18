@@ -97,16 +97,16 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
     within as f64 / pixels.max(1) as f64
 }
 
-/// Frames where today's renderer departs from the exact composite and the
-/// engine does not follow (docs/engine/composite.md, "Today's composite
-/// drift"; proposed appendix A item): `FRAG_COMPOSITE` runs over the whole
-/// frame for every blend layer and sends every pixel through unpremultiply
-/// and re-premultiply, so on a translucent stack the half-float target loses
-/// up to a few code values over many blend layers. The engine passes pixels
-/// outside the layer through exactly. Bounds as measured on the capture
-/// (largest transparent-float and opaque differences, in CV); the rest of the
-/// class still applies.
-const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 5.0, 5)];
+/// Frames with a measured residual of the soft-alpha image class
+/// (docs/engine/composite.md, "Today's composite drift"): the engine
+/// evaluates `FRAG_COMPOSITE` as today does at every pixel, so the
+/// translucent stack drifts as today's does (the half float target
+/// truncates each pass); what remains is 32 pixels on the edges of the
+/// rotated soft-alpha images, where the bilinear still samples differ by
+/// the still class and the blend passes carry it. Bounds as measured
+/// (largest transparent-float and opaque differences, in CV); the rest of
+/// the class still applies. This is a gap, not an allowed difference.
+const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 4.61, 4)];
 
 /// Frames outside the render class by a measured, explained residual:
 /// (project, most pixels off by more than 1, largest difference). A frame

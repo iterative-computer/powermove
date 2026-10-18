@@ -76,16 +76,34 @@ fn load_b(pos: vec4<f32>) -> vec4<f32> {
     return textureLoad(tb, vec2<i32>(pos.xy) + op.off.zw, 0);
 }
 
+// An RGBA16F render target stores a fragment's f32 output rounded toward
+// zero on this GPU (measured: 0.75 − 1 f32 ulp stores as 0.74951), so each
+// of today's intermediate passes truncates. Fused steps reproduce it.
+fn half_rtz(v: f32) -> f32 {
+    let a = abs(v);
+    if (a != a || a >= 65536.0) {
+        return v;
+    }
+    if (a >= 65504.0) {
+        return sign(v) * 65504.0;
+    }
+    if (a < 6.103515625e-05) {
+        // Subnormal halves: multiples of 2^-24, truncated.
+        return sign(v) * floor(a * 16777216.0) / 16777216.0;
+    }
+    return bitcast<f32>(bitcast<u32>(v) & 0xffffe000u);
+}
+
 fn half(v: f32) -> f32 {
     if (has(FLAG_HALF)) {
-        return quantizeToF16(v);
+        return half_rtz(v);
     }
     return v;
 }
 
 fn half4(v: vec4<f32>) -> vec4<f32> {
     if (has(FLAG_HALF)) {
-        return quantizeToF16(v);
+        return vec4<f32>(half_rtz(v.x), half_rtz(v.y), half_rtz(v.z), half_rtz(v.w));
     }
     return v;
 }
@@ -173,23 +191,17 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `FRAG_COMPOSITE`: the layer (`ta`) over the accumulator (`tb`) with a
-// blend mode, in the working encoding.
+// blend mode, in the working encoding, evaluated as today's program
+// evaluates it at every pixel of the frame: outside the layer the
+// destination goes through `(d.rgb / d.a) · d.a`, whose result the half
+// float target truncates, so a translucent stack drifts by up to an ulp per
+// blend layer exactly as today's frames do (docs/engine/composite.md).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     var s = load_a(in.pos);
     let d = load_b(in.pos);
     s.a *= op.f.x;
     s = vec4<f32>(s.rgb * op.f.x, s.a);
-    if (s.a == 0.0) {
-        // Outside the layer the formula reduces to the destination
-        // (`(d.rgb / d.a) · d.a`, or zero color below the 0.0001 guard).
-        // Evaluating the round trip instead loses an ulp per pass to the
-        // render target's rounding, which today's frames do not show.
-        if (d.a > 0.0001) {
-            return d;
-        }
-        return vec4<f32>(0.0, 0.0, 0.0, d.a);
-    }
     var sc = vec3<f32>(0.0);
     if (s.a > 0.0001) {
         sc = s.rgb / s.a;
