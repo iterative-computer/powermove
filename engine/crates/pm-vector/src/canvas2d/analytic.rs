@@ -770,6 +770,9 @@ pub fn rasterize_region(inst: &Instance, region: [u32; 4], pattern: &[[f64; 2]])
         coverage: vec![None; (rw * rh) as usize * n],
     };
     let (width, height) = (region[2], region[3]);
+    // Experimental (svg-diagnostics): the mesh triangle owning each sample.
+    let quad_rule = n > 1 && super::diagnostic("PM_SVG_QUAD_RULE").is_some();
+    let mut owner: Vec<u16> = if quad_rule { vec![u16::MAX; out.coverage.len()] } else { Vec::new() };
     let index = |px: i64, py: i64, si: usize| ((py as u32 - region[1]) * rw + (px as u32 - region[0])) as usize * n + si;
     let one = 1i64 << SUBPIXEL_BITS;
     for k in 2..INDICES.len() {
@@ -834,9 +837,66 @@ pub fn rasterize_region(inst: &Instance, region: [u32; 4], pattern: &[[f64; 2]])
                 for (si, &cov) in covered.iter().enumerate().take(n) {
                     if cov {
                         out.coverage[index(px, py, si)] = Some(c);
+                        if quad_rule {
+                            owner[index(px, py, si)] = k as u16;
+                        }
                     }
                 }
             }
+        }
+    }
+    if quad_rule {
+        // Experimental lead (docs/engine/vector.md, "SVG replay parity"): in
+        // an aligned 2 × 2 quad fully covered by exactly two mesh
+        // triangles, a pixel split one sample to three takes the fragment
+        // of the triangle covering sample 0 for every sample.
+        let (x0, y0) = (region[0] & !1, region[1] & !1);
+        let mut qy = y0;
+        while qy < region[3] {
+            let mut qx = x0;
+            while qx < region[2] {
+                let pixels: Vec<(u32, u32)> = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().map(|&(dx, dy)| (qx + dx, qy + dy)).collect();
+                let inside = pixels.iter().all(|&(x, y)| x >= region[0] && y >= region[1] && x < region[2] && y < region[3]);
+                if inside {
+                    let mut tris: Vec<u16> = Vec::new();
+                    let mut full = true;
+                    for &(x, y) in &pixels {
+                        for si in 0..n {
+                            let o = owner[index(i64::from(x), i64::from(y), si)];
+                            if o == u16::MAX {
+                                full = false;
+                            } else if !tris.contains(&o) {
+                                tris.push(o);
+                            }
+                        }
+                    }
+                    if full && tris.len() == 2 {
+                        for &(x, y) in &pixels {
+                            let base = index(i64::from(x), i64::from(y), 0);
+                            let a = (0..n).filter(|&si| owner[base + si] == tris[0]).count();
+                            if a == 1 || a == n - 1 {
+                                let lone_tri = if a == 1 { tris[0] } else { tris[1] };
+                                let lone = (0..n).find(|&si| owner[base + si] == lone_tri).unwrap();
+                                let tri_cov: Vec<String> = tris.iter().map(|t| {
+                                    let si = (0..n).find(|&si| owner[base + si] == *t).unwrap();
+                                    format!("{t}:{:.4}", out.coverage[base + si].unwrap())
+                                }).collect();
+                                let quad_counts: Vec<usize> = tris.iter().map(|t| pixels.iter().map(|&(x2, y2)| {
+                                    let b2 = index(i64::from(x2), i64::from(y2), 0);
+                                    (0..n).filter(|&si| owner[b2 + si] == *t).count()
+                                }).sum()).collect();
+                                eprintln!("QUADRULE {x} {y} pos {} {} lone {lone} lonetri {lone_tri} owner0 {} tris {} quad {:?}", x - qx, y - qy, owner[base], tri_cov.join(","), quad_counts);
+                                let first = out.coverage[base];
+                                for si in 0..n {
+                                    out.coverage[base + si] = first;
+                                }
+                            }
+                        }
+                    }
+                }
+                qx += 2;
+            }
+            qy += 2;
         }
     }
     if n > 1 && super::diagnostic("PM_SVG_S0_RULE").is_some() {

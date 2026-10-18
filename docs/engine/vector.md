@@ -339,6 +339,15 @@ touched by three or more triangles most pixels follow the per-sample model
 (218 of 234). That points at a quad-level decision in the hardware's
 fragment generation for multisampled draws, not at the coverage shader.
 No rule found so far predicts every pixel, so it is not modeled.
+`PM_SVG_QUAD_RULE` (an `svg-diagnostics` switch) applies the
+two-triangle quad rule: on the canvas cases it makes solid 333 × 150 exact
+and halves the stroke residuals (stroke 333 × 150: 135 → 60 pixels; the
+x = 22 column is fixed), but it breaks solid 64² (one pixel, 11 CV) and
+stroke 200² (six pixels, up to 18 CV). Of the 1,530 pixels it changes, 1,423
+were already within 1 CV either way, 98 move to the reference and 9 move
+away; the nine are one-to-three splits with the lone sample at 1, 2 or 3,
+the same features as some of the pixels it fixes, so the deciding input is
+still missing.
 
 Not measured against Chromium and therefore routed: repeat and reflect
 spreads, focal radial gradients, more than four stops, `crispEdges`,
