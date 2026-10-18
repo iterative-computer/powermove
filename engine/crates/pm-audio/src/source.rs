@@ -122,6 +122,7 @@ pub struct SourceCache {
     evicted: AtomicU64,
     stop: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    #[cfg(feature = "test-hooks")]
     decode_delay_us: AtomicU64,
 }
 
@@ -147,6 +148,7 @@ impl SourceCache {
             evicted: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             workers: Mutex::default(),
+            #[cfg(feature = "test-hooks")]
             decode_delay_us: AtomicU64::new(0),
         });
         let mut handles = lock(&cache.workers);
@@ -180,7 +182,7 @@ impl SourceCache {
 
     /// Injects decoder latency for loaded-machine diagnostics. Applies to
     /// cache misses only, on both the calling thread and decode workers.
-    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn set_decode_delay(&self, delay: std::time::Duration) {
         self.decode_delay_us.store(
             delay.as_micros().min(u64::MAX as u128) as u64,
@@ -239,9 +241,12 @@ impl SourceCache {
     }
 
     fn decode(&self, source: &Source, index: u64) -> Result<Block> {
-        let delay = self.decode_delay_us.load(Ordering::Relaxed);
-        if delay != 0 {
-            std::thread::sleep(std::time::Duration::from_micros(delay));
+        #[cfg(feature = "test-hooks")]
+        {
+            let delay = self.decode_delay_us.load(Ordering::Relaxed);
+            if delay != 0 {
+                std::thread::sleep(std::time::Duration::from_micros(delay));
+            }
         }
         let mut decoder = lock(&source.decoder);
         let start = index * BLOCK as u64;
