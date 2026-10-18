@@ -430,7 +430,8 @@ fn check_composition(
         // reached through a blurred precomp are drawn at every sample time:
         // types outside the compared lists keep routing.
         let (three_d, blurred) = enclosing_groups(layers, layer);
-        let level1 = !node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0);
+        let level1 =
+            !node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0);
         if ty == "shape" && level1 && (three_d || js::flag(layer, "threeD")) {
             add(layer, Feature::PlaneShapeRaster);
         }

@@ -99,7 +99,9 @@ fn main() {
                 .filter(|id| !set.definitions.iter().any(|d| d.id.as_str() == id))
                 .map(|id| id.as_str().into())
                 .collect();
-            renderer.set_definitions(&set).expect("built-in definitions");
+            renderer
+                .set_definitions(&set)
+                .expect("built-in definitions");
             let issues = pm_render::capability::unsupported_with_definitions_and_fonts(
                 &p.document,
                 &p.composition,

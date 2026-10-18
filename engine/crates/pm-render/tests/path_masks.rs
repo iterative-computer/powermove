@@ -29,8 +29,15 @@ fn path_mask_coverage_matches_chromium() {
         if only.as_deref().is_some_and(|o| !c.id.starts_with(o)) {
             continue;
         }
-        let LayerMasks::Path(masks) = LayerMasks::new(&c.masks) else { panic!("{}: not a path route", c.id) };
-        let cov = PathCoverage { width: c.width, height: c.height, world: c.world, masks };
+        let LayerMasks::Path(masks) = LayerMasks::new(&c.masks) else {
+            panic!("{}: not a path route", c.id)
+        };
+        let cov = PathCoverage {
+            width: c.width,
+            height: c.height,
+            world: c.world,
+            masks,
+        };
         let ours = coverage_bytes(&gpu.device, &gpu.queue, &cov).unwrap();
         let (_, _, reference) = mask_cases::read_coverage(&dir.join(format!("{}.png", c.id)));
         let (over1, max, any) = mask_cases::diff(&ours, &reference);
@@ -50,7 +57,11 @@ fn path_mask_coverage_matches_chromium() {
             if max > 1 {
                 save("engine", &ours);
                 save("legacy", &reference);
-                let d: Vec<u8> = ours.iter().zip(&reference).map(|(a, b)| (a.abs_diff(*b)).saturating_mul(40)).collect();
+                let d: Vec<u8> = ours
+                    .iter()
+                    .zip(&reference)
+                    .map(|(a, b)| (a.abs_diff(*b)).saturating_mul(40))
+                    .collect();
                 save("diff40", &d);
             }
         }
@@ -59,5 +70,8 @@ fn path_mask_coverage_matches_chromium() {
         }
     }
     eprintln!("{cases} cases, {total_off} pixels off by 1");
-    assert!(failures.is_empty(), "coverage differs by more than 1: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "coverage differs by more than 1: {failures:?}"
+    );
 }
