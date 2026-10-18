@@ -512,5 +512,7 @@ export function runWorkerProcess(): void {
   };
   // The pool owns this process: when its channel closes, the project is gone.
   process.on('disconnect', () => process.exit(0));
+  // Stopped by its pool: exit through 'exit' handlers, so its temporary bundles go too.
+  process.on('SIGTERM', () => process.exit(0));
   new DocumentWorker(port, policy).start();
 }
