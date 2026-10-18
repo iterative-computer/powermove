@@ -32,3 +32,14 @@ samples). `bt2020-sdr.avif` is the same FFmpeg AVIF recipe with CICP 9/1/9.
 Arithmetic JPEGs use `cjpeg -arithmetic` with optional `-progressive`, at
 8 and 12 bits. Chromium exposes those as float ImageBitmaps, so even the
 8-bit arithmetic case has an incomplete black WebGL texture.
+
+The color-description sweep pins every CICP pair the level 1 bitmap draws
+without an equivalent ICC profile. `png-cicp-P-T-*.png` are the same 32×24
+ramps with cICP P/T/0/full for P ∈ {1, 9, 12} and T ∈ {13, 16, 18}, 8-bit
+opaque and 16-bit with alpha. `avif-cicp-P-T-10.avif` use the FFmpeg AVIF
+recipe (10-bit, matrix 1, full range) for every P ∈ {1, 2, 9, 12} and
+T ∈ {1, 2, 6, 13, 14, 15, 16, 18}, plus 8-bit HLG for each P; the HLG cases
+outside BT.2020 exercise Skia's primaries-adapted luminance weights.
+`png-chrm-*.png` are cHRM/gAMA edge cases: an all-zero (invalid) cHRM with
+gAMA 0.7, P3 cHRM without gAMA, sRGB cHRM with gAMA 0.7, and P3 cHRM with
+gAMA 0.45455; Chromium reads the first two as sRGB.

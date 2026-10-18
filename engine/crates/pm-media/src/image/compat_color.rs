@@ -7,6 +7,20 @@
 //! src/opts/SkRasterPipeline_opts.h.
 use crate::sys::skcms as s;
 
+/// skcms marks a PQ transfer function (`skcms_TransferFunction_makePQ`)
+/// with this `g`; its `a` is the reference white in nits.
+pub(super) const PQ_TF: f32 = -5.0;
+/// skcms marks an HLG transfer function (`skcms_TransferFunction_makeHLG`)
+/// with this `g`; `a` is the reference white, `b` the peak in nits and
+/// `c` the system gamma.
+pub(super) const HLG_TF: f32 = -6.0;
+
+/// HLG's `K` (1/12) as the pinned Skia `hlg` stage evaluates it: the stage
+/// stores `K - 1` in its f32 context and multiplies by `ctx + 1`. 1/12 is
+/// not exactly representable, so the f32 round trip is kept rather than
+/// folded to `1.0 / 12.0`.
+const HLG_K: f32 = 1.0 / 12.0 - 1.0 + 1.0;
+
 fn pow(x: f32, y: f32) -> f32 {
     if x == 0.0 || x == 1.0 {
         return x;
@@ -28,19 +42,21 @@ fn pow2(x: f32) -> f32 {
 
 fn transfer(v: f32, t: s::skcms_TransferFunction) -> f32 {
     let x = v.abs();
-    let r = if t.g == -5.0 {
+    let r = if t.g == PQ_TF {
         let p = pow(x, 32.0 / 2523.0);
         pow(
             (p - 107.0 / 128.0).max(0.0) / (-2392.0f32 / 128.0).mul_add(p, 2413.0 / 128.0),
             8192.0 / 1305.0,
         )
-    } else if t.g == -6.0 {
+    } else if t.g == HLG_TF {
+        // HLG inverse OETF with R = 2, G = 2 and BT.2100's a, b, c, in the
+        // stage's operation order.
         let hlg = if x * 2.0 <= 1.0 {
             pow(x * 2.0, 2.0)
         } else {
             pow2(std::f32::consts::LOG2_E * ((x - 0.5599107) * (1.0 / 0.17883277))) + 0.28466892
         };
-        (1.0 / 12.0 - 1.0 + 1.0) * hlg
+        HLG_K * hlg
     } else if x <= t.d {
         t.c.mul_add(x, t.f)
     } else {
@@ -63,7 +79,7 @@ pub(super) unsafe fn transform(
             || !profile.trc.iter().all(|c| {
                 c.__bindgen_anon_2.table_entries == 0
                     && (c.__bindgen_anon_1.parametric.g >= 0.0
-                        || matches!(c.__bindgen_anon_1.parametric.g, -5.0 | -6.0))
+                        || [PQ_TF, HLG_TF].contains(&c.__bindgen_anon_1.parametric.g))
             })
         {
             return false;
@@ -74,9 +90,9 @@ pub(super) unsafe fn transform(
             return false;
         }
         let t = profile.trc[0].__bindgen_anon_1.parametric;
-        let scale = if t.g == -5.0 {
+        let scale = if t.g == PQ_TF {
             10000.0 / t.a
-        } else if t.g == -6.0 {
+        } else if t.g == HLG_TF {
             t.b / t.a
         } else {
             1.0
@@ -112,7 +128,7 @@ pub(super) unsafe fn transform(
                     profile.trc[c].__bindgen_anon_1.parametric,
                 )
             });
-            if t.g == -6.0 {
+            if t.g == HLG_TF {
                 let y = weights[2].mul_add(rgb[2], weights[1].mul_add(rgb[1], weights[0] * rgb[0]));
                 let ootf = pow(y.abs(), t.c - 1.0).copysign(y);
                 for v in &mut rgb {

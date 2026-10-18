@@ -91,11 +91,10 @@ pub fn bitmap_at(
     {
         return Ok(bitmap);
     }
+    // TIFF (palettes included): the shipped FFmpeg PNG rendition, read
+    // here when the caller passed another reader's still.
     if still.format == ImageFormat::Tiff && still.backend == super::ImageBackend::Ffmpeg {
         return bitmap(still, pool);
-    }
-    if still.format == ImageFormat::Tiff && super::raster::tiff_photometric(path)? == Some(3) {
-        return bitmap(&super::compat_palette::read(path, still, pool)?, pool);
     }
     if still.format == ImageFormat::Tiff {
         return bitmap(
@@ -120,6 +119,11 @@ pub fn read_tiff_source(path: &std::path::Path, pool: &FramePool) -> Result<Stil
     super::compat_tiff::read(path, orientation, pool)
 }
 
+/// AVIF CICP pairs Chromium's bitmap draws through Skia's PQ/HLG/primaries
+/// transform: primaries BT.709, unspecified, BT.2020 or P3-D65 with every
+/// SDR sRGB-family transfer, PQ or HLG. Every one of these 32 pairs was
+/// compared byte-exact with the app's upload, 8 and 10-bit (media.md,
+/// "Level 1 HDR and chromaticity stills"); other pairs stay named.
 pub(super) fn cicp_supported(primaries: u16, transfer: u16) -> bool {
     matches!(primaries, 1 | 2 | 9 | 12) && matches!(transfer, 1 | 2 | 6 | 13 | 14 | 15 | 16 | 18)
 }
@@ -219,13 +223,13 @@ fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> R
                         };
                         let t = if transfer == 16 {
                             s::skcms_TransferFunction {
-                                g: -5.0,
+                                g: super::compat_color::PQ_TF,
                                 a: 203.0,
                                 ..Default::default()
                             }
                         } else if transfer == 18 {
                             s::skcms_TransferFunction {
-                                g: -6.0,
+                                g: super::compat_color::HLG_TF,
                                 a: 203.0,
                                 b: 1000.0,
                                 c: 1.2,
@@ -345,7 +349,10 @@ fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> R
 }
 
 /// PNG color-profile selection from the pinned SkPngRustCodec. CICP
-/// overrides ICC/sRGB, then valid cHRM requires a valid gAMA.
+/// overrides ICC/sRGB; a valid cHRM is used only with a valid gAMA (alone
+/// it is ignored), and a cHRM whose primaries do not form a matrix discards
+/// the gAMA too, so the image reads as sRGB. Each case was compared with
+/// the app's upload (media.md, "Level 1 HDR and chromaticity stills").
 #[derive(Clone, Copy)]
 enum PngColor {
     Gamma(f32),
@@ -698,7 +705,18 @@ mod tests {
             }
         }
         assert!(check("srgb", &[(b"sRGB", vec![0]), gama(70_000)]).is_none());
+        // Measured: Chromium reads both as sRGB (fixtures/stills2,
+        // png-chrm-invalid-gama-*.png and png-chrm-p3-nogama-*.png).
         assert!(check("chrm-invalid", &[(b"cHRM", vec![0; 32]), gama(70_000)]).is_none());
+        let p3 = [31270u32, 32900, 68000, 32000, 26500, 69000, 15000, 6000]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect::<Vec<_>>();
+        assert!(check("chrm-no-gama", &[(b"cHRM", p3.clone())]).is_none());
+        assert!(matches!(
+            check("chrm-gama", &[(b"cHRM", p3), gama(70_000)]),
+            Some(PngColor::Chromaticity { .. })
+        ));
         assert!(matches!(
             check("p3", &[(b"cICP", vec![12, 13, 0, 1]), gama(70_000)]),
             Some(PngColor::Cicp(12, 13))
