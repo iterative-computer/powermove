@@ -398,6 +398,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const agentJobs = new AgentJobs({
     engine,
     log,
+    // A window's exports measure text with its font cache seeds.
+    sessionOwner: (session, owner) => jobFontClient.setSessionOwner(session, owner),
     onDelivered: (owner, file) => rememberExport(owner, file),
     onUserStatus: (owner, status) => {
       const file = userDestinations.get(status.jobId);

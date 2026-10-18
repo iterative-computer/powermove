@@ -528,6 +528,51 @@ describe('the engine font client', () => {
     expect(c.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds]);
   });
 
+  it('tells the job engine which window each export session is for, after the next replay when it is down', async () => {
+    const interactive = new EngineFontClient();
+    const timers = manualSchedule();
+    const job = new EngineFontClient({ schedule: timers.schedule });
+    interactive.mirror(job);
+    const table = '{"seeds":[],"owners":[{"owner":4,"seeds":[]}]}';
+    void interactive.setSeeds(table);
+    const port = new FakeFontPort();
+    job.connect(port);
+    expect(port.sent.at(-1)).toMatchObject({ op: FONT_OP.seeds, json: table });
+    port.serve({ generation: 0 });
+    let done = false;
+    const owned = job.setSessionOwner(9, 4).then(() => { done = true; });
+    expect(port.sent.map(r => [r.op, JSON.parse(r.json)])).toEqual([[FONT_OP.seeds, { ...JSON.parse(table), sessions: [{ session: 9, owner: 4 }] }]]);
+    await Promise.resolve();
+    expect(done).toBe(false);
+    port.serve({ generation: 0 });
+    await owned;
+    // The same owner again sends nothing; new seeds from main keep the sessions.
+    await job.setSessionOwner(9, 4);
+    expect(port.sent).toEqual([]);
+    void interactive.setSeeds('{"seeds":[]}');
+    expect(JSON.parse(port.sent.at(-1)!.json)).toEqual({ seeds: [], sessions: [{ session: 9, owner: 4 }] });
+    port.serve({ generation: 0 });
+    // The interactive engine never gets job sessions.
+    expect(port.sent).toEqual([]);
+    // While the job engine is down a new session waits for the next replay.
+    port.goAway();
+    let later = false;
+    const waiting = job.setSessionOwner(10, 4).then(() => { later = true; });
+    await Promise.resolve();
+    expect(later).toBe(false);
+    const next = new FakeFontPort();
+    job.connect(next);
+    expect(JSON.parse(next.sent.at(-1)!.json).sessions).toEqual([{ session: 9, owner: 4 }, { session: 10, owner: 4 }]);
+    next.serve({ generation: 0 });
+    await waiting;
+    // A closed session leaves the table; an engine that never answers does
+    // not hold the export up.
+    const closed = job.setSessionOwner(9, null);
+    expect(JSON.parse(next.sent.at(-1)!.json).sessions).toEqual([{ session: 10, owner: 4 }]);
+    timers.fire();
+    await closed;
+  });
+
   it('serves the channels, and main\'s own registry then stays unloaded', async () => {
     const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
     const ipc = { handle: (channel: string, fn: any) => void handlers.set(channel, fn), removeHandler: (channel: string) => void handlers.delete(channel) };

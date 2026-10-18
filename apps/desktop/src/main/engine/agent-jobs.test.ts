@@ -270,8 +270,13 @@ describe('export sheet jobs through the job engine', () => {
     const engine = new FakeEngine();
     const statuses: Array<[number, UserExportStatus]> = [];
     const delivered: Array<[number, string]> = [];
-    const jobs = new AgentJobs({ engine, onUserStatus: (o, s) => statuses.push([o, s]), onDelivered: (o, p) => delivered.push([o, p]) });
+    // The job engine learns the window of each export session before the
+    // job is submitted (its text measures with that window's seeds).
+    const owners: Array<[number, number | null, number]> = [];
+    const sessionOwner = async (session: number, owner: number | null) => void owners.push([session, owner, engine.of('submitJob').length]);
+    const jobs = new AgentJobs({ engine, onUserStatus: (o, s) => statuses.push([o, s]), onDelivered: (o, p) => delivered.push([o, p]), sessionOwner });
     const { jobId, frames } = await jobs.exportUser(5, project(), options, '/Users/x/Cut.mp4');
+    expect(owners).toEqual([[10, 5, 0]]);
     expect(frames).toBe(120);
     expect(engine.chosen).toEqual([['/Users/x/Cut.mp4', jobId, 10]]);
     const body = engine.of('submitJob')[0]!.body as Extract<Request, { type: 'submitJob' }>;

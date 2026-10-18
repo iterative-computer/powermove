@@ -69,6 +69,11 @@ pub trait TextFonts: Send {
     fn take_failures(&mut self) -> Vec<String> {
         Vec::new()
     }
+    /// What the next layers are laid out for (the window whose font cache
+    /// seeds they measure with); applied at the next [`TextFonts::sync`].
+    fn set_seed_scope(&mut self, scope: served::SeedScope) {
+        let _ = scope;
+    }
     /// Level 2 layout for `compat` ≥ 2 text layers, when the host provides
     /// it (`None`: such layers are refused).
     fn level2(&mut self) -> Option<&mut Level2Fonts> {
@@ -1066,13 +1071,21 @@ mod tests {
         let mut cx = TextContext::default();
         cx.set_masks(Some(Box::new(Masks(resets.clone()))));
         cx.set_fonts(Some(Box::new(Fonts(generation.clone()))));
-        assert_eq!(resets.load(Ordering::SeqCst), 1, "new fonts reset the masks");
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            1,
+            "new fonts reset the masks"
+        );
         let key = cx.generation;
         cx.sync_fonts();
         assert_eq!((resets.load(Ordering::SeqCst), cx.generation), (1, key));
         generation.store(2, Ordering::SeqCst);
         cx.sync_fonts();
-        assert_eq!(resets.load(Ordering::SeqCst), 2, "a new generation resets the masks");
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            2,
+            "a new generation resets the masks"
+        );
         assert_ne!(cx.generation, key, "and re-keys rasters");
         cx.sync_fonts();
         assert_eq!(resets.load(Ordering::SeqCst), 2);

@@ -176,7 +176,7 @@ impl Host {
             .collect();
         let mut engine =
             EngineHost::with_sink(EngineProcess::Job, Some(sink), |k| env.get(k).cloned()).unwrap();
-        engine.attach(HOST.0, "host").unwrap();
+        engine.attach(HOST.0, "host", None).unwrap();
         let out = engine.receive(HOST.0, &hello(PeerRole::Host));
         let dir = std::env::temp_dir().join(format!("pm-node-jobs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

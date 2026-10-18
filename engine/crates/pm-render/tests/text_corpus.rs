@@ -95,7 +95,9 @@ fn main() {
                 .filter(|id| !set.definitions.iter().any(|d| d.id.as_str() == id))
                 .map(|id| id.as_str().into())
                 .collect();
-            renderer.set_definitions(&set).expect("built-in definitions");
+            renderer
+                .set_definitions(&set)
+                .expect("built-in definitions");
             let with_fonts =
                 renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
             let issues: Vec<_> = pm_render::unsupported_with_definitions(
@@ -146,11 +148,15 @@ fn main() {
                 let ours = match render(&mut renderer, &p.document) {
                     Ok(o) => o,
                     Err(pm_render::RenderError::Unsupported(u))
-                        if u.iter().all(|u| !matches!(&u.feature, pm_render::Feature::Text(_))) =>
+                        if u.iter()
+                            .all(|u| !matches!(&u.feature, pm_render::Feature::Text(_))) =>
                     {
                         skipped.push((
                             format!("{} t={}", p.name, s.time),
-                            u.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                            u.iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", "),
                         ));
                         continue;
                     }

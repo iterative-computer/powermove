@@ -315,6 +315,78 @@ fn main() {
             &[],
         );
 
+        // Each window is its own renderer: an editor window only ever on a
+        // 1x display and a popout on a 2x display measure system-ui 24 px
+        // differently, and so does the engine for each window's views and
+        // for the export main opened a session for. The fallback (every
+        // window's seeds) applies only to work of no known window.
+        let mut both = seeds.clone();
+        both.extend(one.clone());
+        main.json(
+            Op::Seeds,
+            &serde_json::json!({
+                "seeds": both,
+                "owners": [{ "owner": 1, "seeds": one }, { "owner": 2, "seeds": seeds }],
+                "sessions": [{ "session": 40, "owner": 1 }],
+            })
+            .to_string(),
+            &[],
+        );
+        main.host.attach(30, "renderer", Some(1)).unwrap();
+        main.host.attach(31, "renderer", Some(2)).unwrap();
+        let thread = {
+            let hub = hub.clone();
+            let content = contents[0].clone();
+            std::thread::spawn(move || {
+                use pm_render::text::served::SeedScope;
+                let mut fonts = ServedFonts::new(hub.clone(), hub.clone());
+                let layout = |fonts: &mut ServedFonts, scope| {
+                    fonts.set_seed_scope(scope);
+                    fonts.sync();
+                    let lines = fonts.line_runs(&content);
+                    let mut names = |id| fonts.face(id).postscript_name.clone();
+                    (glyphs(&mut names, &lines), fonts.seeds())
+                };
+                let export = SeedScope {
+                    port: None,
+                    session: Some(40),
+                };
+                let out = [
+                    layout(&mut fonts, SeedScope::port(30)),
+                    layout(&mut fonts, SeedScope::port(31)),
+                    layout(&mut fonts, export),
+                    // Back to the first window: its parked measurer.
+                    layout(&mut fonts, SeedScope::port(30)),
+                ];
+                (out, fonts.rebuilds())
+            })
+        };
+        pump_until(main, &|| thread.is_finished());
+        let (per_window, rebuilds) = thread.join().unwrap();
+        assert_eq!(per_window[0], (fresh.clone(), one.clone()), "the 1x window");
+        assert_eq!(
+            per_window[1],
+            (want[0].clone(), seeds.clone()),
+            "the 2x window"
+        );
+        assert_eq!(
+            per_window[2],
+            (fresh.clone(), one.clone()),
+            "the 1x window's export"
+        );
+        assert_eq!(per_window[3], per_window[0]);
+        assert_eq!(
+            rebuilds, 0,
+            "switching windows parks measurers, never rebuilds"
+        );
+        main.host.detach(30);
+        main.host.detach(31);
+        main.json(
+            Op::Seeds,
+            &serde_json::json!({ "seeds": seeds }).to_string(),
+            &[],
+        );
+
         // A restarted engine: main opens the new port above every generation
         // it has seen and replays the seeds; text lays out as before.
         let mut restarted = Main {
@@ -322,7 +394,7 @@ fn main() {
             port: 7,
             next: 0,
         };
-        restarted.host.attach(7, FONTS_PEER).unwrap();
+        restarted.host.attach(7, FONTS_PEER, None).unwrap();
         let base = hub.generation() + 100;
         restarted.json(
             Op::Open,
@@ -453,7 +525,7 @@ fn main() {
     // Both engines serve fonts (the job engine for its exports and agent
     // frames).
     let mut job = EngineHost::new(EngineProcess::Job).unwrap();
-    assert!(job.attach(9, FONTS_PEER).unwrap().is_empty());
+    assert!(job.attach(9, FONTS_PEER, None).unwrap().is_empty());
     drop(job);
 
     let mut main = Main {
@@ -461,7 +533,7 @@ fn main() {
         port: 4,
         next: 0,
     };
-    assert!(main.host.attach(4, FONTS_PEER).unwrap().is_empty());
+    assert!(main.host.attach(4, FONTS_PEER, None).unwrap().is_empty());
     let status: serde_json::Value = serde_json::from_str(&main.host.status_json()).unwrap();
     assert_eq!(status["fontPorts"], 1);
 
@@ -676,7 +748,7 @@ fn main() {
     assert_eq!(reply["answers"].as_array().unwrap().len(), 1);
 
     // A second font port (main reconnecting) shares the launch's registry.
-    main.host.attach(5, FONTS_PEER).unwrap();
+    main.host.attach(5, FONTS_PEER, None).unwrap();
     assert!(main.host.detach(4).is_empty());
     main.port = 5;
     assert_eq!(main.json(Op::Generation, "{}", &[])["generation"], 43);
@@ -703,5 +775,5 @@ fn main() {
 fn main() {
     let mut host =
         pm_node::EngineHost::new(pm_protocol::error::EngineProcess::Interactive).unwrap();
-    assert!(host.attach(1, pm_node::FONTS_PEER).is_err());
+    assert!(host.attach(1, pm_node::FONTS_PEER, None).is_err());
 }

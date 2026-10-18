@@ -101,6 +101,22 @@ enum Work {
     },
 }
 
+impl Work {
+    /// Whose font cache seeds the work's text measures with.
+    fn seed_scope(&self) -> pm_render::text::served::SeedScope {
+        match self {
+            Work::Frames { port, document, .. } => pm_render::text::served::SeedScope {
+                port: Some(port.0),
+                session: Some(document.session.get()),
+            },
+            Work::Export { document, .. } => pm_render::text::served::SeedScope {
+                port: None,
+                session: Some(document.session.get()),
+            },
+        }
+    }
+}
+
 struct JobRecord {
     class: PriorityClass,
     run: Option<AgentRunId>,
@@ -830,6 +846,10 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             }
         }
         let r = renderer.as_mut().expect("set above");
+        // Text measures with the font cache seeds of the window the work is
+        // for: the requesting port's window, or the window main opened the
+        // session for (an export).
+        r.set_text_seed_scope(work.seed_scope());
         match work {
             Work::Frames {
                 port,

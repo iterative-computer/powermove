@@ -96,11 +96,88 @@ struct NoArgs {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedsArgs {
+    /// The seeds of work no window is known for.
+    seeds: Vec<pm_text::compat::FontCacheSeed>,
+    /// Each window's own seeds.
+    #[serde(default)]
+    owners: Vec<OwnerSeedsArgs>,
+    /// The window each session main opened is for (its exports).
+    #[serde(default)]
+    sessions: Vec<SessionOwnerArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerSeedsArgs {
+    owner: u32,
     seeds: Vec<pm_text::compat::FontCacheSeed>,
 }
 
-/// Most seeds a message may carry (the app sends a few per scale factor).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionOwnerArgs {
+    session: u64,
+    owner: u32,
+}
+
+/// Most seeds a message may carry per window (the app sends a few per
+/// scale factor).
 pub const MAX_SEEDS: usize = 256;
+/// Most windows and sessions a seeds message may name.
+pub const MAX_SEED_OWNERS: usize = 256;
+pub const MAX_SEED_SESSIONS: usize = 4096;
+
+/// The editor renderers' font cache seeds: each window is its own renderer
+/// with its own font cache, so a layout measures with the seeds of the
+/// window it is drawn for (`docs/engine/text.md`, "Seeds per window").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SeedTable {
+    /// Work no window is known for (every window's seeds, as main sends
+    /// them).
+    pub fallback: Vec<pm_text::compat::FontCacheSeed>,
+    /// Each window's seeds, by its owner id (main's webContents id).
+    pub owners: std::collections::BTreeMap<u32, Vec<pm_text::compat::FontCacheSeed>>,
+    /// The window each session main opened is for.
+    pub sessions: std::collections::BTreeMap<u64, u32>,
+}
+
+impl SeedTable {
+    /// The seeds of the window `owner`, or the fallback when main named no
+    /// such window.
+    pub fn for_owner(&self, owner: Option<u32>) -> &[pm_text::compat::FontCacheSeed] {
+        owner
+            .and_then(|o| self.owners.get(&o))
+            .unwrap_or(&self.fallback)
+    }
+
+    /// The seeds of work on a port of window `port_owner` (when the port
+    /// belongs to one) or in `session`.
+    pub fn resolve(
+        &self,
+        port_owner: Option<u32>,
+        session: Option<u64>,
+    ) -> &[pm_text::compat::FontCacheSeed] {
+        let owner = port_owner.or_else(|| session.and_then(|s| self.sessions.get(&s).copied()));
+        self.for_owner(owner)
+    }
+}
+
+fn seed_table(args: SeedsArgs) -> Result<SeedTable, String> {
+    if args.owners.len() > MAX_SEED_OWNERS || args.sessions.len() > MAX_SEED_SESSIONS {
+        return Err("too many font cache seed owners".into());
+    }
+    let mut table = SeedTable {
+        fallback: seeds(args.seeds)?,
+        ..SeedTable::default()
+    };
+    for o in args.owners {
+        table.owners.insert(o.owner, seeds(o.seeds)?);
+    }
+    for s in args.sessions {
+        table.sessions.insert(s.session, s.owner);
+    }
+    Ok(table)
+}
 
 /// Checks seeds main sent: a family name within the limits and finite,
 /// positive sizes and weights.
@@ -193,8 +270,8 @@ type Registry = pm_text::registry::CoreTextRegistry;
 pub struct FontService {
     layout: pm_text::compat::Compat<Registry>,
     generation_base: u64,
-    /// The editor renderer's font cache seeds, as main last sent them.
-    seeds: Vec<pm_text::compat::FontCacheSeed>,
+    /// The editor renderers' font cache seeds, as main last sent them.
+    seeds: SeedTable,
     /// Main finished replaying to a port (its seeds come last, after the
     /// open and the project fonts).
     opened: bool,
@@ -209,7 +286,7 @@ impl FontService {
         Ok(FontService {
             layout: pm_text::compat::Compat::new(registry),
             generation_base: 0,
-            seeds: Vec::new(),
+            seeds: SeedTable::default(),
             opened: false,
         })
     }
@@ -251,7 +328,7 @@ impl FontService {
             }
             Op::Seeds => {
                 let args: SeedsArgs = parse(json)?;
-                self.seeds = seeds(args.seeds)?;
+                self.seeds = seed_table(args)?;
                 self.opened = true;
                 Ok(generation_json(self.generation()))
             }
@@ -340,8 +417,8 @@ impl FontService {
         }
     }
 
-    /// The editor renderer's font cache seeds main sent (`Op::Seeds`).
-    pub fn seeds(&self) -> &[pm_text::compat::FontCacheSeed] {
+    /// The editor renderers' font cache seeds main sent (`Op::Seeds`).
+    pub fn seeds(&self) -> &SeedTable {
         &self.seeds
     }
 
@@ -442,8 +519,9 @@ impl FontService {
         0
     }
 
-    pub fn seeds(&self) -> &[pm_text::compat::FontCacheSeed] {
-        &[]
+    pub fn seeds(&self) -> &SeedTable {
+        static NONE: std::sync::OnceLock<SeedTable> = std::sync::OnceLock::new();
+        NONE.get_or_init(SeedTable::default)
     }
 
     pub fn opened(&self) -> bool {

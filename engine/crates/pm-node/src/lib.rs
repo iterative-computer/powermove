@@ -185,11 +185,21 @@ impl EngineHost {
         "[]".into()
     }
 
-    pub fn attach(&mut self, port: u32, peer: &str) -> Result<Vec<Action>, String> {
+    /// A port main connected. `owner` names the window a renderer client's
+    /// port belongs to (its layouts measure with that window's font cache
+    /// seeds).
+    pub fn attach(
+        &mut self,
+        port: u32,
+        peer: &str,
+        owner: Option<u32>,
+    ) -> Result<Vec<Action>, String> {
         if peer == FONTS_PEER {
             return self.attach_fonts(port);
         }
-        Ok(self.engine.attach(PortId(port), parse_peer(peer)?))
+        let actions = self.engine.attach(PortId(port), parse_peer(peer)?);
+        self.font_hub.set_port_owner(port, owner);
+        Ok(actions)
     }
 
     /// Main's font port. Both engines host the registry: the interactive
@@ -226,6 +236,7 @@ impl EngineHost {
         if self.font_ports.remove(&port) {
             return Vec::new();
         }
+        self.font_hub.set_port_owner(port, None);
         self.engine.detach(PortId(port))
     }
 
@@ -238,7 +249,7 @@ impl EngineHost {
                     // its generation (project fonts, a new generation base)
                     // and main's seeds; the open lets their requests go out.
                     self.font_hub.note_registry_generation(service.generation());
-                    self.font_hub.set_seeds(service.seeds().to_vec());
+                    self.font_hub.set_seeds(service.seeds().clone());
                     if service.opened() {
                         self.font_hub.opened();
                     }
@@ -338,7 +349,7 @@ mod tests {
         // Run on a fresh thread so the test runner's thread keeps its class.
         let qos = std::thread::spawn(|| {
             let mut host = EngineHost::new(EngineProcess::Job).unwrap();
-            host.attach(1, "host").unwrap();
+            host.attach(1, "host", None).unwrap();
             let out = host.receive(1, &hello(PeerRole::Host));
             assert!(matches!(
                 sent(&out, PortId(1))[0].message,

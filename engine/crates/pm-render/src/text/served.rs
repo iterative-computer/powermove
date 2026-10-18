@@ -7,7 +7,8 @@
 //! continues, with the full font bytes (outlines, color glyphs, variable
 //! axes, hidden system fonts, project fonts). The renderer's font cache seeds
 //! (amendment 19, the editor renderer's state; `docs/engine/text.md`) come
-//! from the server.
+//! from the server, per window: each layout measures with the seeds of the
+//! renderer that shows it ([`SeedScope`]).
 //!
 //! When the server's generation moves (project fonts or seeds changed), the
 //! next text layer starts from a fresh resolver and measurer, and the
@@ -24,34 +25,65 @@ use pm_text::served::{FontServer, ServedResolver};
 
 use super::TextFonts;
 
-/// Font cache seeds as a server knows them (the editor renderer's state).
+/// What a layout is for, so it measures with the font cache seeds of the
+/// renderer that shows it: each editor window is its own renderer with its
+/// own font cache (`docs/engine/text.md`, "Seeds per window").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct SeedScope {
+    /// The engine port the layout's document came through (a window's
+    /// port names that window).
+    pub port: Option<u32>,
+    /// The engine session (sessions main opened for a window's export).
+    pub session: Option<u64>,
+}
+
+impl SeedScope {
+    /// A document a client port opened.
+    pub fn port(port: u32) -> Self {
+        SeedScope {
+            port: Some(port),
+            session: None,
+        }
+    }
+}
+
+/// Font cache seeds as a server knows them (the editor renderers' state).
 pub trait SeedSource: Send + Sync {
-    fn seeds(&self) -> Vec<FontCacheSeed>;
+    /// The seeds of the renderer a layout in `scope` is for.
+    fn seeds(&self, scope: SeedScope) -> Vec<FontCacheSeed>;
 }
 
 /// No seeds: a fresh renderer.
 pub struct NoSeeds;
 
 impl SeedSource for NoSeeds {
-    fn seeds(&self) -> Vec<FontCacheSeed> {
+    fn seeds(&self, _: SeedScope) -> Vec<FontCacheSeed> {
         Vec::new()
     }
 }
 
-/// Fixed seeds (`pm-cli`, tests).
+/// Fixed seeds for every scope (`pm-cli`, tests).
 pub struct FixedSeeds(pub Vec<FontCacheSeed>);
 
 impl SeedSource for FixedSeeds {
-    fn seeds(&self) -> Vec<FontCacheSeed> {
+    fn seeds(&self, _: SeedScope) -> Vec<FontCacheSeed> {
         self.0.clone()
     }
 }
+
+/// Measurers kept for other seed sets (windows on other kinds of display)
+/// besides the current one.
+const PARKED_MEASURERS: usize = 3;
 
 /// Level 1 text over a served registry.
 pub struct ServedFonts {
     server: Arc<dyn FontServer>,
     seeds: Arc<dyn SeedSource>,
+    scope: SeedScope,
     measure: CompatMeasure<ServedResolver>,
+    /// Measurers of other seed sets, most recent first, all of the current
+    /// server generation (a layout cache belongs to one font cache).
+    parked: Vec<CompatMeasure<ServedResolver>>,
     /// The server generation `measure` was built for.
     generation: u64,
     rebuilds: u64,
@@ -60,11 +92,14 @@ pub struct ServedFonts {
 impl ServedFonts {
     pub fn new(server: Arc<dyn FontServer>, seeds: Arc<dyn SeedSource>) -> Self {
         let generation = server.generation();
-        let measure = Self::measure_for(&server, &*seeds);
+        let scope = SeedScope::default();
+        let measure = Self::measure_for(&server, seeds.seeds(scope));
         ServedFonts {
             server,
             seeds,
+            scope,
             measure,
+            parked: Vec::new(),
             generation,
             rebuilds: 0,
         }
@@ -72,16 +107,21 @@ impl ServedFonts {
 
     fn measure_for(
         server: &Arc<dyn FontServer>,
-        seeds: &dyn SeedSource,
+        seeds: Vec<FontCacheSeed>,
     ) -> CompatMeasure<ServedResolver> {
         let mut measure = CompatMeasure::new(ServedResolver::new(server.clone()));
-        measure.compat().set_font_cache_seeds(seeds.seeds());
+        measure.compat().set_font_cache_seeds(seeds);
         measure
     }
 
     /// The seeds the current measurer uses.
     pub fn seeds(&mut self) -> Vec<FontCacheSeed> {
         self.measure.compat().font_cache_seeds().to_vec()
+    }
+
+    /// The scope layouts are measured for now.
+    pub fn scope(&self) -> SeedScope {
+        self.scope
     }
 
     /// Times the measurer was replaced after a generation change.
@@ -99,6 +139,26 @@ impl ServedFonts {
     pub fn prefetch(&mut self, queries: &[pm_text::answers::Query]) {
         self.sync();
         self.measure.compat().resolver_mut().prefetch(queries);
+    }
+
+    /// Makes the measurer the one of `seeds`: the current one when its seeds
+    /// are these, else a parked one, else a new one (the current one is
+    /// parked).
+    fn select(&mut self, seeds: Vec<FontCacheSeed>) {
+        if self.measure.compat().font_cache_seeds() == seeds.as_slice() {
+            return;
+        }
+        let parked = self
+            .parked
+            .iter_mut()
+            .position(|m| m.compat().font_cache_seeds() == seeds.as_slice());
+        let next = match parked {
+            Some(i) => self.parked.remove(i),
+            None => Self::measure_for(&self.server, seeds),
+        };
+        let previous = std::mem::replace(&mut self.measure, next);
+        self.parked.insert(0, previous);
+        self.parked.truncate(PARKED_MEASURERS);
     }
 }
 
@@ -130,10 +190,18 @@ impl TextFonts for ServedFonts {
     fn sync(&mut self) {
         let now = self.server.generation();
         if now != self.generation || !self.measure.compat().resolver().is_current() {
-            self.measure = Self::measure_for(&self.server, &*self.seeds);
+            // New fonts or seeds: every measurer starts over.
+            self.parked.clear();
+            self.measure = Self::measure_for(&self.server, self.seeds.seeds(self.scope));
             self.generation = self.server.generation();
             self.rebuilds += 1;
+        } else {
+            self.select(self.seeds.seeds(self.scope));
         }
+    }
+
+    fn set_seed_scope(&mut self, scope: SeedScope) {
+        self.scope = scope;
     }
 
     fn take_failures(&mut self) -> Vec<String> {

@@ -364,6 +364,14 @@ export class EngineFontClient implements FontsProvider {
    *  project fonts on every new port. They always go out: the engine's
    *  render threads wait for them as the end of the replay. */
   private seeds: string = NO_SEEDS;
+  /** The engines' seeds as main last set them (`setSeeds`), before this
+   *  client's sessions are added. */
+  private seedsBase: string = NO_SEEDS;
+  /** The window each session of this client's engine is for (the job
+   *  engine's exports; `setSessionOwner`). */
+  private sessions = new Map<number, number>();
+  /** Waiting for the seeds to reach an engine: the next port replays them. */
+  private seedWaiters: Array<() => void> = [];
   /** Clients that get every project font change and the seeds too (the job
    *  engine's font port: its exports lay text out with the same fonts). */
   private mirrors: EngineFontClient[] = [];
@@ -409,7 +417,16 @@ export class EngineFontClient implements FontsProvider {
     this.send(this.internal(FONT_OP.open, JSON.stringify({ generationBase: base }), undefined));
     for (const change of this.project) this.send(this.internal(change.op, change.json, change.bytes));
     // Last: the engine's render threads start laying text out after it.
-    this.send(this.internal(FONT_OP.seeds, this.seeds, undefined));
+    const seeds = this.internal(FONT_OP.seeds, this.seeds, undefined);
+    const waiters = this.seedWaiters.splice(0);
+    if (waiters.length) {
+      const done = seeds.resolve;
+      seeds.resolve = (reply) => {
+        done(reply);
+        for (const w of waiters) w();
+      };
+    }
+    this.send(seeds);
     const queued = this.queue;
     this.queue = [];
     for (const p of queued) this.send(p);
@@ -485,11 +502,51 @@ export class EngineFontClient implements FontsProvider {
     else this.mirrored(this.change(change));
   }
 
-  /** The editor renderers' font cache seeds (`{ seeds }` JSON): sent now
-   *  when a port is open, and replayed on every new port. Resolves with the
-   *  generation, or null when no port is open (the seeds go out on the next). */
+  /** The editor renderers' font cache seeds (`{ seeds, owners }` JSON,
+   *  engineSeedsJson): sent now when a port is open, and replayed on every
+   *  new port. Resolves with the generation, or null when no port is open
+   *  (the seeds go out on the next). */
   setSeeds(json: string): Promise<number | null> {
     for (const m of this.mirrors) void m.setSeeds(json);
+    this.seedsBase = json;
+    return this.sendSeeds();
+  }
+
+  /** The window a session of this client's engine is for (`null`: none, or
+   *  the session closed): the engine measures its text with that window's
+   *  seeds. Resolves once the engine has them (after the next port's replay
+   *  when none is open), or after `timeoutMs` (the session then measures
+   *  with every window's seeds). */
+  setSessionOwner(session: number, owner: number | null, timeoutMs = 5_000): Promise<void> {
+    if (owner === null ? !this.sessions.delete(session) : this.sessions.get(session) === owner) return Promise.resolve();
+    if (owner !== null) this.sessions.set(session, owner);
+    const sent = this.port
+      ? this.sendSeeds().then(() => undefined)
+      : new Promise<void>((resolve) => {
+        this.seeds = this.composedSeeds();
+        this.seedWaiters.push(resolve);
+      });
+    return new Promise<void>((resolve) => {
+      const timer = this.schedule(() => {
+        this.log('warn', `[engine-fonts] the engine did not take the seeds of session ${session} in time`);
+        resolve();
+      }, timeoutMs);
+      void sent.then(() => {
+        timer.cancel();
+        resolve();
+      });
+    });
+  }
+
+  /** The seeds this client's engine gets: main's, plus its sessions' windows. */
+  private composedSeeds(): string {
+    if (!this.sessions.size) return this.seedsBase;
+    const base = JSON.parse(this.seedsBase) as Record<string, unknown>;
+    return JSON.stringify({ ...base, sessions: [...this.sessions].map(([session, owner]) => ({ session, owner })) });
+  }
+
+  private sendSeeds(): Promise<number | null> {
+    const json = this.composedSeeds();
     if (this.seeds === json) return Promise.resolve(null);
     this.seeds = json;
     if (!this.port) return Promise.resolve(null);
@@ -508,7 +565,7 @@ export class EngineFontClient implements FontsProvider {
   mirror(client: EngineFontClient): void {
     if (client === this || this.mirrors.includes(client)) return;
     this.mirrors.push(client);
-    void client.setSeeds(this.seeds);
+    void client.setSeeds(this.seedsBase);
   }
 
   private mirrored(result: Promise<unknown>): void {

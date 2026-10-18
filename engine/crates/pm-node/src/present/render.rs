@@ -2266,6 +2266,11 @@ impl Thread {
             // serves every view on the device).
             let registered = doc.take_registered();
             let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            // Text measures with the font cache seeds of the window the view
+            // belongs to (each window is its own renderer).
+            composer
+                .renderer()
+                .set_text_seed_scope(pm_render::text::served::SeedScope::port(key.0.0));
             composer.set_playing(timing.is_some());
             // Paused in Material Preview or Rendered: Blender surfaces
             // (`super::blender`); playback and draft shadings draw natively.

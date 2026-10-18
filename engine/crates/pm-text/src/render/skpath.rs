@@ -99,12 +99,13 @@ fn first_direction(path: &tiny_skia::Path) -> Option<bool> {
     let mut pts: Vec<(f32, f32)> = Vec::new();
     let mut contours: Vec<(usize, usize)> = Vec::new();
     for seg in path.segments() {
-        let add = |q: tiny_skia::Point, pts: &mut Vec<(f32, f32)>, contours: &mut Vec<(usize, usize)>| {
-            pts.push((q.x, q.y));
-            if let Some(c) = contours.last_mut() {
-                c.1 += 1;
-            }
-        };
+        let add =
+            |q: tiny_skia::Point, pts: &mut Vec<(f32, f32)>, contours: &mut Vec<(usize, usize)>| {
+                pts.push((q.x, q.y));
+                if let Some(c) = contours.last_mut() {
+                    c.1 += 1;
+                }
+            };
         match seg {
             tiny_skia::PathSegment::MoveTo(q) => {
                 contours.push((pts.len(), 0));
@@ -321,7 +322,11 @@ pub fn path_mask(device: &BezPath, scale: f32, frame: Option<Frame>) -> Option<A
 /// internalGetPath`); `scale` is the device transform's 2×2 part
 /// (`getMatrixFrom2x2`, a uniform scale for level 1 rasters): the frame
 /// applies with it removed. Coverage is before the mask gamma.
-pub fn frame_mask(device: &tiny_skia::Path, scale: f32, frame: Option<Frame>) -> Option<Arc<GlyphMask>> {
+pub fn frame_mask(
+    device: &tiny_skia::Path,
+    scale: f32,
+    frame: Option<Frame>,
+) -> Option<Arc<GlyphMask>> {
     let path = match frame {
         None => device.clone(),
         Some(frame) => {
@@ -333,7 +338,9 @@ pub fn frame_mask(device: &tiny_skia::Path, scale: f32, frame: Option<Frame>) ->
             let user = if scale == 1.0 {
                 device.clone()
             } else {
-                device.clone().transform(tiny_skia::Transform::from_scale(inv, inv))?
+                device
+                    .clone()
+                    .transform(tiny_skia::Transform::from_scale(inv, inv))?
             };
             let framed = framed(&user, frame)?;
             if scale == 1.0 {
@@ -386,9 +393,15 @@ pub fn frame_mask(device: &tiny_skia::Path, scale: f32, frame: Option<Frame>) ->
 /// spread), before the mask gamma.
 fn pack_4x_h(src: &[u8], sample_width: usize, height: usize) -> Vec<u8> {
     const COEFFICIENTS: [[u32; 12]; 3] = [
-        [0x03, 0x0b, 0x1c, 0x33, 0x40, 0x39, 0x24, 0x10, 0x05, 0x01, 0x00, 0x00],
-        [0x00, 0x02, 0x08, 0x16, 0x2b, 0x3d, 0x3d, 0x2b, 0x16, 0x08, 0x02, 0x00],
-        [0x00, 0x00, 0x01, 0x05, 0x10, 0x24, 0x39, 0x40, 0x33, 0x1c, 0x0b, 0x03],
+        [
+            0x03, 0x0b, 0x1c, 0x33, 0x40, 0x39, 0x24, 0x10, 0x05, 0x01, 0x00, 0x00,
+        ],
+        [
+            0x00, 0x02, 0x08, 0x16, 0x2b, 0x3d, 0x3d, 0x2b, 0x16, 0x08, 0x02, 0x00,
+        ],
+        [
+            0x00, 0x00, 0x01, 0x05, 0x10, 0x24, 0x39, 0x40, 0x33, 0x1c, 0x0b, 0x03,
+        ],
     ];
     let out_w = sample_width / 4 + 2;
     let mut out = Vec::with_capacity(out_w * height);
@@ -516,7 +529,11 @@ mod tests {
         };
         let b = path_mask(&sq, 1.0, Some(bold)).unwrap();
         assert_eq!((b.left, b.top, b.width, b.height), (-1, 0, 8, 6));
-        assert!(b.coverage.chunks(8).all(|r| r[2..6].iter().all(|&c| c == 255)));
+        assert!(
+            b.coverage
+                .chunks(8)
+                .all(|r| r[2..6].iter().all(|&c| c == 255))
+        );
         // The same frame at 2× in user space is twice as wide in device px.
         let mut sq2 = BezPath::new();
         sq2.move_to((2.0, 2.0));

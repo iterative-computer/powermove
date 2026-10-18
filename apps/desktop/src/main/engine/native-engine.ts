@@ -88,6 +88,8 @@ export type NativeEngineStatus = Record<EngineProcess, EngineProcessStatus>;
 export type ClientDeliver = (info: ClientPortInfo, port: PortLike) => void;
 
 type Client = {
+  /** The window (its webContents id) or main's own client id. */
+  id: number;
   deliver: ClientDeliver;
   ports: Map<EngineProcess, { port: number; generation: number }>;
   kind: ClientKind;
@@ -263,7 +265,7 @@ export class NativeEngine {
   /** Connects a client to every running engine now and after every restart. */
   addClient(id: number, deliver: ClientDeliver, kind: ClientKind = RENDERER_CLIENT): void {
     this.removeClient(id);
-    const client: Client = { deliver, ports: new Map(), kind };
+    const client: Client = { id, deliver, ports: new Map(), kind };
     this.clients.set(id, client);
     for (const process of kind.processes) {
       const launch = this.supervisors[process].current;
@@ -296,7 +298,7 @@ export class NativeEngine {
     if (previous && previous.generation === launch.generation) launch.control({ type: 'disconnect', port: previous.port });
     const { port1, port2 } = this.options.channel();
     const port = this.nextPort++;
-    launch.control({ type: 'connect', port, peer: client.kind.peer }, [port1]);
+    launch.control({ type: 'connect', port, peer: client.kind.peer, ...(client.kind.peer === 'renderer' ? { owner: client.id } : {}) }, [port1]);
     client.ports.set(launch.process, { port, generation: launch.generation });
     client.deliver({ process: launch.process, port, generation: launch.generation }, port2);
   }

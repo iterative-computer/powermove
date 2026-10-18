@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { appUiFontCacheSeeds, effectiveFontSize, FontSeedTracker, seedsJson } from './engine-fonts-seeds';
+import { appUiFontCacheSeeds, effectiveFontSize, engineSeedsJson, FontSeedTracker, seedsJson } from './engine-fonts-seeds';
 
 describe('font cache seeds', () => {
   it('are the UI text entries at each scale factor, as pm-text computes them', () => {
@@ -35,6 +35,12 @@ describe('font cache seeds', () => {
     tracker.observe(2, 1);
     expect(tracker.seedsFor(2).map(s => s.size)).toEqual([12, 13]);
     expect(tracker.allSeeds().map(s => s.size)).toEqual([24, 26, 12, 13]);
+    // The engines measure each window with its own seeds.
+    const table = tracker.engineSeeds();
+    expect(table.owners.map(o => [o.owner, o.seeds.map(s => s.size)])).toEqual([[1, [24, 26, 12, 13]], [2, [12, 13]]]);
+    expect(table.seeds).toEqual(tracker.allSeeds());
+    expect(JSON.parse(engineSeedsJson(table, [{ session: 5, owner: 2 }])).sessions).toEqual([{ session: 5, owner: 2 }]);
+    expect(JSON.parse(engineSeedsJson(table))).not.toHaveProperty('sessions');
     expect(tracker.seedsFor(9)).toEqual([]);
     tracker.forget(1);
     expect(changed).toHaveBeenLastCalledWith(null);

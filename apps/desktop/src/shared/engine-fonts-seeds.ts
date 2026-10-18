@@ -14,6 +14,8 @@
  *
  * A window keeps the entries of every scale factor it has been on (moving
  * to a 1x display adds the 12 and 13 px entries; the 24 and 26 px ones stay).
+ * Each window is its own renderer with its own cache: the engines measure a
+ * view with the seeds of its window, never another window's.
  * `appUiFontCacheSeeds` equals pm-text's `app_ui_font_cache_seeds`.
  */
 
@@ -57,6 +59,25 @@ export function seedsJson(seeds: readonly FontCacheSeed[]): string {
 }
 
 /**
+ * The engines' seeds: each window's own (the engine lays a view out with the
+ * seeds of the window its port belongs to, and an export with those of the
+ * window it was started from), and every window's for work no window is
+ * known for (pm-node `SeedTable`).
+ */
+export interface EngineSeedTable {
+  seeds: FontCacheSeed[];
+  owners: { owner: number; seeds: FontCacheSeed[] }[];
+}
+
+/** The window each job engine session main opened is for. */
+export type SessionOwner = { session: number; owner: number };
+
+/** The engines' seeds as their font ports take them (`Op::Seeds`). */
+export function engineSeedsJson(table: EngineSeedTable, sessions: readonly SessionOwner[] = []): string {
+  return JSON.stringify(sessions.length ? { ...table, sessions } : table);
+}
+
+/**
  * Scale factors each window has been on, in order (main tracks its editor
  * windows; Electron-free so it is testable).
  */
@@ -87,13 +108,19 @@ export class FontSeedTracker {
     return appUiFontCacheSeeds(this.factors.get(owner) ?? []);
   }
 
-  /** The engines serve every window: the seeds of all windows' renderers,
-   *  windows in the order they were first seen (identical for windows that
-   *  were only ever on the same kind of display). */
+  /** The seeds of all windows' renderers, windows in the order they were
+   *  first seen (identical for windows that were only ever on the same kind
+   *  of display): the engines' fallback for work of no known window. */
   allSeeds(): FontCacheSeed[] {
     const scales: number[] = [];
     for (const seen of this.factors.values()) for (const s of seen) if (!scales.includes(s)) scales.push(s);
     return appUiFontCacheSeeds(scales);
+  }
+
+  /** What the engines measure with: every window's own seeds, and all of
+   *  them for work of no known window. */
+  engineSeeds(): EngineSeedTable {
+    return { seeds: this.allSeeds(), owners: [...this.factors.keys()].map((owner) => ({ owner, seeds: this.seedsFor(owner) })) };
   }
 
   /** Called with the owner whose seeds changed (null: a window went away). */

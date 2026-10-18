@@ -274,7 +274,8 @@ fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option
         fn going_to(&mut self, pt: CGPoint) {
             if !self.started {
                 self.started = true;
-                self.builder.move_to(self.current.x as f32, (-self.current.y) as f32);
+                self.builder
+                    .move_to(self.current.x as f32, (-self.current.y) as f32);
             }
             self.current = pt;
         }
@@ -282,7 +283,10 @@ fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option
             self.current.x != pt.x || self.current.y != pt.y
         }
     }
-    unsafe extern "C-unwind" fn apply(info: *mut std::ffi::c_void, element: NonNull<CGPathElement>) {
+    unsafe extern "C-unwind" fn apply(
+        info: *mut std::ffi::c_void,
+        element: NonNull<CGPathElement>,
+    ) {
         // SAFETY: `info` is the `Sink` passed to `CGPathApply` below, and
         // CoreGraphics passes each element with its points.
         let sink = unsafe { &mut *(info as *mut Sink) };
@@ -312,7 +316,8 @@ fn glyph_path(font: &CFRetained<CTFont>, glyph: u16, style: MaskStyle) -> Option
                 let (c0, c1, a) = (p(0), p(1), p(2));
                 if sink.current_is_not(c0) || sink.current_is_not(c1) || sink.current_is_not(a) {
                     sink.going_to(a);
-                    sink.builder.cubic_to(f(c0.x), f(-c0.y), f(c1.x), f(-c1.y), f(a.x), f(-a.y));
+                    sink.builder
+                        .cubic_to(f(c0.x), f(-c0.y), f(c1.x), f(-c1.y), f(a.x), f(-a.y));
                 }
             }
             CGPathElementType::CloseSubpath if sink.started => sink.builder.close(),
@@ -685,7 +690,10 @@ mod tests {
                 .to_u32() as u16
         };
         let bounds = kurbo::Rect::new(-2.0, -30.0, 30.0, 12.0);
-        let style = MaskStyle { quarter: 0, skew: 0.0 };
+        let style = MaskStyle {
+            quarter: 0,
+            skew: 0.0,
+        };
         let glyph_style = GlyphStyle {
             size: 40.0,
             synthetic_bold: (0.0, 0.0),
@@ -696,7 +704,11 @@ mod tests {
         let mut outlines = Outlines::new();
         let old = {
             let bytes = FontBytes::from_shared(slot.clone());
-            let face = FaceRef { data: bytes.as_slice(), index: 0, id: bytes.id() };
+            let face = FaceRef {
+                data: bytes.as_slice(),
+                index: 0,
+                id: bytes.id(),
+            };
             let g = gid(bytes.as_slice());
             let mask = masks.mask(face, &[], g, 40.0, style, bounds).unwrap();
             let outline = outlines.get(face, Coords::User(&[]), u32::from(g), glyph_style);
@@ -706,7 +718,11 @@ mod tests {
         unsafe { (*slot.0.get()).copy_from_slice(&pad(georgia.clone())) };
         assert_eq!(slot.as_ref().as_ref().as_ptr(), address);
         let bytes = FontBytes::from_shared(slot.clone());
-        let face = FaceRef { data: bytes.as_slice(), index: 0, id: bytes.id() };
+        let face = FaceRef {
+            data: bytes.as_slice(),
+            index: 0,
+            id: bytes.id(),
+        };
         let g = gid(bytes.as_slice());
         let mask = masks.mask(face, &[], g, 40.0, style, bounds).unwrap();
         let outline = outlines.get(face, Coords::User(&[]), u32::from(g), glyph_style);
@@ -715,7 +731,11 @@ mod tests {
             let mut masks = CgMasks::new();
             let mut outlines = Outlines::new();
             let own = FontBytes::new(pad(georgia.clone()));
-            let face = FaceRef { data: own.as_slice(), index: 0, id: own.id() };
+            let face = FaceRef {
+                data: own.as_slice(),
+                index: 0,
+                id: own.id(),
+            };
             (
                 masks.mask(face, &[], g, 40.0, style, bounds).unwrap(),
                 outlines

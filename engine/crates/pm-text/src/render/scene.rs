@@ -729,10 +729,7 @@ impl Painter<'_> {
         };
         // `SkStrikeSpec::ShouldDrawAsPath`: the text matrix's scale beyond
         // 256 px draws paths, not glyph images.
-        if runs
-            .iter()
-            .any(|r| f64::from(r.size) * place.scale > 256.0)
-        {
+        if runs.iter().any(|r| f64::from(r.size) * place.scale > 256.0) {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();

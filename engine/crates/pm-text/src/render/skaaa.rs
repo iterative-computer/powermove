@@ -401,7 +401,14 @@ impl Edge {
         true
     }
 
-    fn update_line(&mut self, mut x0: Fixed, mut y0: Fixed, mut x1: Fixed, mut y1: Fixed, slope: Fixed) -> bool {
+    fn update_line(
+        &mut self,
+        mut x0: Fixed,
+        mut y0: Fixed,
+        mut x1: Fixed,
+        mut y1: Fixed,
+        slope: Fixed,
+    ) -> bool {
         if y0 > y1 {
             std::mem::swap(&mut x0, &mut x1);
             std::mem::swap(&mut y0, &mut y1);
@@ -553,8 +560,13 @@ impl Edge {
                 };
             }
             if slope < MAX_S32 {
-                success =
-                    self.update_line(self.snapped_x, self.snapped_y, new_snapped_x, new_snapped_y, slope);
+                success = self.update_line(
+                    self.snapped_x,
+                    self.snapped_y,
+                    new_snapped_x,
+                    new_snapped_y,
+                    slope,
+                );
             }
             oldx = newx;
             oldy = newy;
@@ -827,7 +839,13 @@ fn chop_quad_at_y_extrema(src: [Pt; 3]) -> ([Pt; 5], usize) {
         b = if (a - b).abs() < (b - c).abs() { a } else { c };
     }
     (
-        [(src[0].0, a), (src[1].0, b), (src[2].0, c), (0.0, 0.0), (0.0, 0.0)],
+        [
+            (src[0].0, a),
+            (src[1].0, b),
+            (src[2].0, c),
+            (0.0, 0.0),
+            (0.0, 0.0),
+        ],
         1,
     )
 }
@@ -844,7 +862,11 @@ fn find_unit_quad_roots(a: f32, b: f32, c: f32) -> Vec<f32> {
     if !r.is_finite() {
         return Vec::new();
     }
-    let q = if b < 0.0 { -(b - r) / 2.0 } else { -(b + r) / 2.0 };
+    let q = if b < 0.0 {
+        -(b - r) / 2.0
+    } else {
+        -(b + r) / 2.0
+    };
     let mut roots: Vec<f32> = Vec::with_capacity(2);
     roots.extend(valid_unit_divide(q, a));
     roots.extend(valid_unit_divide(c, q));
@@ -874,7 +896,9 @@ fn chop_cubic_at(src: &[Pt; 4], t: f32) -> [Pt; 7] {
 fn chop_cubic_at2(src: &[Pt; 4], t0: f32, t1: f32) -> [Pt; 10] {
     if t1 == 1.0 {
         let a = chop_cubic_at(src, t0);
-        return [a[0], a[1], a[2], a[3], a[4], a[5], a[6], src[3], src[3], src[3]];
+        return [
+            a[0], a[1], a[2], a[3], a[4], a[5], a[6], src[3], src[3], src[3],
+        ];
     }
     let lane = |t: f32| {
         let ab = mix(src[0], src[1], t);
@@ -1117,7 +1141,12 @@ fn insertion_sort<T: Copy>(v: &mut [T], less: &impl Fn(&T, &T) -> bool) {
     }
 }
 
-fn heap_sift_up<T: Copy>(a: &mut [T], mut root: usize, bottom: usize, less: &impl Fn(&T, &T) -> bool) {
+fn heap_sift_up<T: Copy>(
+    a: &mut [T],
+    mut root: usize,
+    bottom: usize,
+    less: &impl Fn(&T, &T) -> bool,
+) {
     let x = a[root - 1];
     let start = root;
     let mut j = root << 1;
@@ -1142,7 +1171,12 @@ fn heap_sift_up<T: Copy>(a: &mut [T], mut root: usize, bottom: usize, less: &imp
     a[root - 1] = x;
 }
 
-fn heap_sift_down<T: Copy>(a: &mut [T], mut root: usize, bottom: usize, less: &impl Fn(&T, &T) -> bool) {
+fn heap_sift_down<T: Copy>(
+    a: &mut [T],
+    mut root: usize,
+    bottom: usize,
+    less: &impl Fn(&T, &T) -> bool,
+) {
     let x = a[root - 1];
     let mut child = root << 1;
     while child <= bottom {
@@ -1258,7 +1292,11 @@ impl Device {
         }
         if let Some(d) = self.px(x, y) {
             // canFoldAA: src = div255(255 × aa) = aa; srcover.
-            let src = if aa == 0xFF { 0xFF } else { div255(255 * u32::from(aa)) };
+            let src = if aa == 0xFF {
+                0xFF
+            } else {
+                div255(255 * u32::from(aa))
+            };
             *d = srcover(src, *d);
         }
     }
@@ -1306,7 +1344,9 @@ enum Additive {
 impl Additive {
     fn mask_row(&mut self, y: i32) -> Option<MaskRow> {
         match self {
-            Additive::Mask { left, top, width, .. } => Some(MaskRow {
+            Additive::Mask {
+                left, top, width, ..
+            } => Some(MaskRow {
                 offset: 1 + ((y - *top) * *width) as isize - *left as isize,
             }),
             Additive::Rle { .. } => None,
@@ -1375,7 +1415,14 @@ impl Additive {
     /// `blitAntiH(x, y, antialias[], len)`.
     fn blit_anti_h_array(&mut self, x: i32, y: i32, alphas: &[u8], dev: &mut Device) {
         self.check_y(y, dev);
-        if let Additive::Rle { left, width, row, dirty, .. } = self {
+        if let Additive::Rle {
+            left,
+            width,
+            row,
+            dirty,
+            ..
+        } = self
+        {
             let mut x = x - *left;
             let mut alphas = alphas;
             let mut len = alphas.len() as i32;
@@ -1395,7 +1442,14 @@ impl Additive {
     /// `blitAntiH(x, y, alpha)`.
     fn blit_anti_h1(&mut self, x: i32, y: i32, alpha: u8, dev: &mut Device) {
         self.check_y(y, dev);
-        if let Additive::Rle { left, width, row, dirty, .. } = self {
+        if let Additive::Rle {
+            left,
+            width,
+            row,
+            dirty,
+            ..
+        } = self
+        {
             let x = x - *left;
             if x >= 0 && x < *width {
                 safely_add_alpha(&mut row[x as usize], alpha);
@@ -1407,7 +1461,14 @@ impl Additive {
     /// `blitAntiH(x, y, width, alpha)`.
     fn blit_anti_hn(&mut self, x: i32, y: i32, n: i32, alpha: u8, dev: &mut Device) {
         self.check_y(y, dev);
-        if let Additive::Rle { left, width, row, dirty, .. } = self {
+        if let Additive::Rle {
+            left,
+            width,
+            row,
+            dirty,
+            ..
+        } = self
+        {
             let x = x - *left;
             if x >= 0 && x + n <= *width {
                 for i in 0..n {
@@ -1420,14 +1481,23 @@ impl Additive {
 
     fn finish(&mut self, dev: &mut Device) {
         match self {
-            Additive::Mask { left, top, width, height, buf } => {
+            Additive::Mask {
+                left,
+                top,
+                width,
+                height,
+                buf,
+            } => {
                 // blitMask: dst = lerp(dst, srcover(255, dst), m).
                 for yy in 0..*height {
                     for xx in 0..*width {
                         let m = buf[(1 + yy * *width + xx) as usize];
                         if let Some(d) = dev.px(*left + xx, *top + yy) {
                             let one = srcover(0xFF, *d);
-                            *d = div255((255 - u32::from(m)) * u32::from(*d) + u32::from(m) * u32::from(one));
+                            *d = div255(
+                                (255 - u32::from(m)) * u32::from(*d)
+                                    + u32::from(m) * u32::from(one),
+                            );
                         }
                     }
                 }
@@ -1533,7 +1603,15 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn single_alpha(&mut self, y: i32, x: i32, alpha: u8, full_alpha: u8, mask: Option<MaskRow>, no_real: bool) {
+    fn single_alpha(
+        &mut self,
+        y: i32,
+        x: i32,
+        alpha: u8,
+        full_alpha: u8,
+        mask: Option<MaskRow>,
+        no_real: bool,
+    ) {
         if let Some(row) = mask {
             if full_alpha == 0xFF && !no_real {
                 self.add.mask_set(row, x, alpha);
@@ -1543,11 +1621,21 @@ impl Ctx<'_> {
         } else if full_alpha == 0xFF && !no_real {
             self.dev.blit_v(x, y, 1, alpha);
         } else {
-            self.add.blit_anti_h1(x, y, partial_alpha(alpha, full_alpha), self.dev);
+            self.add
+                .blit_anti_h1(x, y, partial_alpha(alpha, full_alpha), self.dev);
         }
     }
 
-    fn two_alphas(&mut self, y: i32, x: i32, a1: u8, a2: u8, full_alpha: u8, mask: Option<MaskRow>, no_real: bool) {
+    fn two_alphas(
+        &mut self,
+        y: i32,
+        x: i32,
+        a1: u8,
+        a2: u8,
+        full_alpha: u8,
+        mask: Option<MaskRow>,
+        no_real: bool,
+    ) {
         if let Some(row) = mask {
             self.add.mask_add(row, x, a1);
             self.add.mask_add(row, x + 1, a2);
@@ -1561,7 +1649,15 @@ impl Ctx<'_> {
         }
     }
 
-    fn full_alpha(&mut self, y: i32, x: i32, len: i32, full_alpha: u8, mask: Option<MaskRow>, no_real: bool) {
+    fn full_alpha(
+        &mut self,
+        y: i32,
+        x: i32,
+        len: i32,
+        full_alpha: u8,
+        mask: Option<MaskRow>,
+        no_real: bool,
+    ) {
         if let Some(row) = mask {
             for i in 0..len {
                 self.add.mask_add(row, x + i, full_alpha);
@@ -1621,7 +1717,11 @@ impl Ctx<'_> {
             );
             for i in u_l..l_l {
                 let k = (i - l) as usize;
-                alphas[k] = if alphas[k] > temp[k] { alphas[k] - temp[k] } else { 0 };
+                alphas[k] = if alphas[k] > temp[k] {
+                    alphas[k] - temp[k]
+                } else {
+                    0
+                };
             }
         }
 
@@ -1632,8 +1732,16 @@ impl Ctx<'_> {
             let second = lr - ur - first;
             let a1 = partial_triangle_to_alpha(first, r_dy);
             let a2 = full_alpha.wrapping_sub(partial_triangle_to_alpha(second, r_dy));
-            alphas[n - 2] = if alphas[n - 2] > a1 { alphas[n - 2] - a1 } else { 0 };
-            alphas[n - 1] = if alphas[n - 1] > a2 { alphas[n - 1] - a2 } else { 0 };
+            alphas[n - 2] = if alphas[n - 2] > a1 {
+                alphas[n - 2] - a1
+            } else {
+                0
+            };
+            alphas[n - 1] = if alphas[n - 1] > a2 {
+                alphas[n - 1] - a2
+            } else {
+                0
+            };
         } else {
             let start = (u_r - l) as usize;
             compute_alpha_above_line(
@@ -1645,7 +1753,11 @@ impl Ctx<'_> {
             );
             for i in u_r..l_r {
                 let k = (i - l) as usize;
-                alphas[k] = if alphas[k] > temp[k] { alphas[k] - temp[k] } else { 0 };
+                alphas[k] = if alphas[k] > temp[k] {
+                    alphas[k] - temp[k]
+                } else {
+                    0
+                };
             }
         }
 
@@ -1864,7 +1976,9 @@ fn edges_too_close(edges: &Edges, prev: usize, next: usize, lower_y: Fixed) -> b
         && prev != NONE
         && edges.0[next].upper_y < lower_y
         && edges.0[prev].x.wrapping_add(SLACK)
-            >= edges.0[next].x.wrapping_sub(edges.0[next].dx.wrapping_abs())
+            >= edges.0[next]
+                .x
+                .wrapping_sub(edges.0[next].dx.wrapping_abs())
 }
 
 fn edges_too_close_rite(prev_rite: i32, ul: Fixed, ll: Fixed) -> bool {
@@ -1945,7 +2059,15 @@ fn aaa_walk_edges(
                             || edges_too_close(edges, curr, curr_next, next_y)));
                 let curr_dy = edges.0[curr].dy;
                 ctx.trapezoid_row(
-                    y >> 16, left, rite, next_left, next_rite, left_dy, curr_dy, full_alpha, mask,
+                    y >> 16,
+                    left,
+                    rite,
+                    next_left,
+                    next_rite,
+                    left_dy,
+                    curr_dy,
+                    full_alpha,
+                    mask,
                     no_real,
                 );
                 prev_rite = fixed_ceil_to_int(rite.max(edges.0[curr].x));
@@ -1995,11 +2117,19 @@ fn aaa_walk_edges(
 
         if in_interval {
             let lp = edges.0[left_e].prev;
-            let no_real =
-                no_real_blitter || (full_alpha == 0xFF && edges_too_close(edges, lp, left_e, next_y));
+            let no_real = no_real_blitter
+                || (full_alpha == 0xFF && edges_too_close(edges, lp, left_e, next_y));
             let next_left = left_clip.max(edges.0[left_e].x);
             ctx.trapezoid_row(
-                y >> 16, left, right_clip, next_left, right_clip, left_dy, 0, full_alpha, mask,
+                y >> 16,
+                left,
+                right_clip,
+                next_left,
+                right_clip,
+                left_dy,
+                0,
+                full_alpha,
+                mask,
                 no_real,
             );
         }
@@ -2032,7 +2162,12 @@ pub fn fill_path_a8(path: &tiny_skia::Path, width: u32, height: u32) -> Vec<u8> 
     );
     let clip = (0, 0, w, h);
     // Intersect with the clip.
-    let ix = (ir.0.max(clip.0), ir.1.max(clip.1), ir.2.min(clip.2), ir.3.min(clip.3));
+    let ix = (
+        ir.0.max(clip.0),
+        ir.1.max(clip.1),
+        ir.2.min(clip.2),
+        ir.3.min(clip.3),
+    );
     if ix.0 >= ix.2 || ix.1 >= ix.3 || ir.0 >= ir.2 || ir.1 >= ir.3 {
         return dev.data;
     }

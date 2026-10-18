@@ -57,7 +57,9 @@ struct State {
     /// Main opened a font port (seeds and project fonts are in).
     open: bool,
     shutdown: bool,
-    seeds: Vec<FontCacheSeed>,
+    seeds: super::SeedTable,
+    /// The window each client port belongs to (main names it on connect).
+    port_owners: HashMap<u32, u32>,
     /// The registry generation last noted.
     registry: Option<u64>,
     served: u64,
@@ -89,6 +91,7 @@ pub struct HubStats {
     pub served: u64,
     pub round_trips: u64,
     pub seeds: usize,
+    pub seed_owners: usize,
 }
 
 impl FontHub {
@@ -149,8 +152,18 @@ impl FontHub {
         }
     }
 
+    /// A client port of window `owner` connected (`None`: main's own
+    /// ports and peers), or went away.
+    pub fn set_port_owner(&self, port: u32, owner: Option<u32>) {
+        let mut st = self.lock();
+        match owner {
+            Some(o) => st.port_owners.insert(port, o),
+            None => st.port_owners.remove(&port),
+        };
+    }
+
     /// Main's font cache seeds.
-    pub fn set_seeds(&self, seeds: Vec<FontCacheSeed>) {
+    pub fn set_seeds(&self, seeds: super::SeedTable) {
         let mut st = self.lock();
         if st.seeds != seeds {
             st.seeds = seeds;
@@ -178,7 +191,8 @@ impl FontHub {
             queued: st.outbox.len(),
             served: st.served,
             round_trips: st.round_trips,
-            seeds: st.seeds.len(),
+            seeds: st.seeds.fallback.len(),
+            seed_owners: st.seeds.owners.len(),
         }
     }
 
@@ -274,8 +288,10 @@ impl FontServer for FontHub {
 
 #[cfg(target_os = "macos")]
 impl pm_render::text::served::SeedSource for FontHub {
-    fn seeds(&self) -> Vec<FontCacheSeed> {
-        self.lock().seeds.clone()
+    fn seeds(&self, scope: pm_render::text::served::SeedScope) -> Vec<FontCacheSeed> {
+        let st = self.lock();
+        let port_owner = scope.port.and_then(|p| st.port_owners.get(&p).copied());
+        st.seeds.resolve(port_owner, scope.session).to_vec()
     }
 }
 
@@ -381,9 +397,58 @@ mod tests {
             size: 24.0,
             specified: 12.0,
         };
-        hub.set_seeds(vec![seed.clone()]);
+        let table = |seeds: Vec<FontCacheSeed>| crate::fonts::SeedTable {
+            fallback: seeds,
+            ..Default::default()
+        };
+        hub.set_seeds(table(vec![seed.clone()]));
         assert_eq!(hub.generation(), g0 + 2);
-        hub.set_seeds(vec![seed]);
+        hub.set_seeds(table(vec![seed]));
         assert_eq!(hub.generation(), g0 + 2, "the same seeds are no change");
+    }
+
+    /// Each window is its own renderer: a view measures with the seeds of
+    /// the window its port belongs to, an export with those of the window
+    /// main opened its session for, anything else with the fallback.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn layouts_measure_with_the_seeds_of_their_window() {
+        use pm_render::text::served::{SeedScope, SeedSource};
+        let seed = |size: f32, specified: f32| FontCacheSeed {
+            family: "system-ui".into(),
+            weight: 400.0,
+            italic: false,
+            size,
+            specified,
+        };
+        let retina = vec![seed(24.0, 12.0), seed(26.0, 13.0)];
+        let external = vec![seed(12.0, 12.0), seed(13.0, 13.0)];
+        let mut all = retina.clone();
+        all.extend(external.clone());
+        let hub = FontHub::new();
+        hub.set_seeds(crate::fonts::SeedTable {
+            fallback: all.clone(),
+            owners: [(1, external.clone()), (2, retina.clone())].into(),
+            sessions: [(40, 2)].into(),
+        });
+        hub.set_port_owner(11, Some(1));
+        hub.set_port_owner(12, Some(2));
+        assert_eq!(hub.seeds(SeedScope::port(11)), external, "editor on 1x");
+        assert_eq!(hub.seeds(SeedScope::port(12)), retina, "popout on 2x");
+        let export = SeedScope {
+            port: None,
+            session: Some(40),
+        };
+        assert_eq!(hub.seeds(export), retina, "the export of window 2");
+        // A window's port names the window even for a session of another.
+        let frames = SeedScope {
+            port: Some(11),
+            session: Some(40),
+        };
+        assert_eq!(hub.seeds(frames), external);
+        assert_eq!(hub.seeds(SeedScope::port(99)), all, "no window known");
+        assert_eq!(hub.seeds(SeedScope::default()), all);
+        hub.set_port_owner(11, None);
+        assert_eq!(hub.seeds(SeedScope::port(11)), all, "the port went away");
     }
 }

@@ -5,11 +5,13 @@
    text at the scale factor of each display the window has been on. Main
    watches its windows' displays, answers `engine-fonts:seeds` per window
    (pm-wasm in that window measures as its renderer does), tells a window
-   when its seeds change, and sends the seeds of all windows to the engines'
-   font services (their render threads draw for every window). */
+   when its seeds change, and sends every window's seeds to the engines'
+   font services: their render threads draw each window's views, and its
+   exports, with that window's seeds (the window's id comes with its engine
+   ports, and with the job sessions main opens for it). */
 import { app, BrowserWindow, screen, webContents, type App, type Screen, type WebContents } from 'electron';
 
-import { FontSeedTracker, seedsJson } from '../shared/engine-fonts-seeds';
+import { engineSeedsJson, FontSeedTracker, seedsJson } from '../shared/engine-fonts-seeds';
 import { ENGINE_FONTS_EVENTS } from '../shared/engine-fonts-ipc';
 
 export { FontSeedTracker };
@@ -23,9 +25,9 @@ export interface SeedWatchDeps {
 }
 
 /**
- * Tracks every window's displays in `tracker`. `onEngineSeeds` gets the seeds
- * of all windows (`{ seeds }` JSON) now and whenever they change. Returns the
- * uninstall.
+ * Tracks every window's displays in `tracker`. `onEngineSeeds` gets the
+ * engines' seeds (`{ seeds, owners }` JSON, engineSeedsJson) now and whenever
+ * they change. Returns the uninstall.
  */
 export function watchWindowSeeds(tracker: FontSeedTracker, deps: SeedWatchDeps, onEngineSeeds: (json: string) => void): () => void {
   const watched = new WeakSet<BrowserWindow>();
@@ -52,7 +54,7 @@ export function watchWindowSeeds(tracker: FontSeedTracker, deps: SeedWatchDeps, 
     for (const update of updates.values()) update();
   };
   const stop = tracker.onChange((owner) => {
-    onEngineSeeds(seedsJson(tracker.allSeeds()));
+    onEngineSeeds(engineSeedsJson(tracker.engineSeeds()));
     if (owner === null) return;
     const contents = deps.contents(owner);
     if (contents && !contents.isDestroyed()) contents.send(ENGINE_FONTS_EVENTS.seedsChanged, seedsJson(tracker.seedsFor(owner)));
@@ -62,7 +64,7 @@ export function watchWindowSeeds(tracker: FontSeedTracker, deps: SeedWatchDeps, 
   deps.screen.on('display-added', metrics);
   deps.screen.on('display-removed', metrics);
   for (const window of deps.windows()) watch(window);
-  onEngineSeeds(seedsJson(tracker.allSeeds()));
+  onEngineSeeds(engineSeedsJson(tracker.engineSeeds()));
   return () => {
     stop();
     deps.app.removeListener('browser-window-created', created);
@@ -72,9 +74,9 @@ export function watchWindowSeeds(tracker: FontSeedTracker, deps: SeedWatchDeps, 
   };
 }
 
-/** Main's seeds for "Use New Engine": the windows of this app, the seeds
- *  of all windows to `engines` (the font clients of both engines, through
- *  the interactive one's mirror), and each window's own seeds for its
+/** Main's seeds for "Use New Engine": the windows of this app, the engines'
+ *  seeds to `engines` (the font clients of both engines, through the
+ *  interactive one's mirror), and each window's own seeds for its
  *  `engine-fonts:seeds` channel. */
 export function startEngineFontSeeds(engines: { setSeeds(json: string): Promise<unknown> }, log: (level: 'warn', message: string) => void): { seedsFor(sender: number): string; stop(): void } {
   const tracker = new FontSeedTracker();

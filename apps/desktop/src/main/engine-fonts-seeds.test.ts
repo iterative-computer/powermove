@@ -27,12 +27,17 @@ describe('main\'s window seeds', () => {
     const tracker = new FontSeedTracker();
     const stop = watchWindowSeeds(tracker, { app: app as any, screen: screen as any, windows: () => [first as any], contents }, (json) => engines.push(json));
     const sizes = (json: string) => (JSON.parse(json).seeds as Array<{ size: number }>).map(s => s.size);
+    // The engines get each window's own seeds, and all of them for work of
+    // no known window.
+    const owners = (json: string) => Object.fromEntries((JSON.parse(json).owners as Array<{ owner: number; seeds: Array<{ size: number }> }>).map(o => [o.owner, o.seeds.map(s => s.size)]));
     expect(sizes(engines.at(-1)!)).toEqual([24, 26]);
-    expect(sent).toEqual([[1, ENGINE_FONTS_EVENTS.seedsChanged, engines.at(-1)!]]);
-    // A new window on a 1x display.
+    expect(owners(engines.at(-1)!)).toEqual({ 1: [24, 26] });
+    expect(sent).toEqual([[1, ENGINE_FONTS_EVENTS.seedsChanged, JSON.stringify({ seeds: JSON.parse(engines.at(-1)!).seeds })]]);
+    // A new window on a 1x display: each window keeps its own seeds.
     const second = new FakeWindow({ id: 2 }, { x: 1200 });
     app.emit('browser-window-created', {}, second);
     expect(sizes(engines.at(-1)!)).toEqual([24, 26, 12, 13]);
+    expect(owners(engines.at(-1)!)).toEqual({ 1: [24, 26], 2: [12, 13] });
     expect(sizes(sent.at(-1)![2])).toEqual([12, 13]);
     // The first window moves to the 1x display: it keeps its 2x entries.
     first.bounds = { x: 1500 };
@@ -46,6 +51,7 @@ describe('main\'s window seeds', () => {
     // The first window closes: the engines get the second window's seeds.
     first.emit('closed');
     expect(sizes(engines.at(-1)!)).toEqual([12, 13]);
+    expect(owners(engines.at(-1)!)).toEqual({ 2: [12, 13] });
     stop();
     expect(app.listenerCount('browser-window-created')).toBe(0);
     expect(screen.listenerCount('display-metrics-changed')).toBe(0);
