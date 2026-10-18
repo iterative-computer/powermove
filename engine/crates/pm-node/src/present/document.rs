@@ -44,6 +44,12 @@ impl MediaMap {
     pub fn path(&self, asset: &str) -> Option<PathBuf> {
         self.0.get(asset).cloned().flatten()
     }
+
+    /// The host's answer for an asset: `None` before it answered,
+    /// `Some(None)` when the file is offline.
+    pub fn answer(&self, asset: &str) -> Option<Option<PathBuf>> {
+        self.0.get(asset).cloned()
+    }
 }
 
 impl pm_render::AssetResolver for MediaMap {

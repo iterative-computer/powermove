@@ -559,7 +559,12 @@ struct Thread {
     snapshot_costs: BTreeMap<Key, (u64, i64)>,
     /// Compatibility rasters the renderers uploaded.
     compat: super::compat::CompatStore,
+    /// Waveform requests waiting for the host's media answer.
+    peaks_waiting: BTreeSet<(Key, String)>,
 }
+
+/// Most waveform requests that wait for media answers at once.
+const MAX_PEAKS_WAITING: usize = 4096;
 
 /// The decision 19 fallback runner's state on this thread.
 #[derive(Default)]
@@ -617,6 +622,7 @@ pub fn run(
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
         compat: super::compat::CompatStore::default(),
+        peaks_waiting: BTreeSet::new(),
     };
     thread.check_in();
     loop {
@@ -933,6 +939,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
+                if self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks.request(key, asset.clone(), path.clone());
+                }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
                 let media = doc.media().clone();
@@ -1050,6 +1059,7 @@ impl Thread {
         }
         self.snapshot_costs.remove(&key);
         self.compat.forget_session(key);
+        self.peaks_waiting.retain(|(k, _)| *k != key);
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -1349,8 +1359,16 @@ impl Thread {
                 }
             }
             AudioMessage::PeaksWanted { asset } => {
-                let path = self.docs.get(&key).and_then(|d| d.media().path(&asset));
-                self.peaks.request(key, asset, path);
+                // Asked before the host answered for the asset (a file just
+                // imported): wait for the answer rather than call it offline.
+                match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
+                    Some(path) => self.peaks.request(key, asset, path),
+                    None => {
+                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
+                            self.peaks_waiting.insert((key, asset));
+                        }
+                    }
+                }
             }
             AudioMessage::Levels(_) | AudioMessage::Peaks(_) => self.log(
                 LogLevel::Warn,
