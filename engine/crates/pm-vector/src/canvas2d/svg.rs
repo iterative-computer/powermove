@@ -504,7 +504,7 @@ pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, h
     ops.push(Op::Concat(draw.src_to_dst));
     ops.extend(record);
     ops.push(Op::Restore);
-    if std::env::var_os("PM_SVG_DEBUG").is_some() {
+    if super::diagnostic("PM_SVG_DEBUG").is_some() {
         for op in &ops {
             match op {
                 Op::DrawPath { path, rule, flags } => eprintln!("DrawPath verbs={} rule={rule:?} stroke={:?} shader={}", path.verbs.len(), flags.stroke.as_ref().map(|s| s.width), flags.shader.is_some()),

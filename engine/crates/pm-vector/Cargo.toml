@@ -16,6 +16,10 @@ conformance = []
 # backend, and SVG through usvg (text off) with filters through resvg.
 # Off for pm-eval and pm-wasm, which need geometry only.
 render = ["dep:pm-text", "usvg/text", "usvg/system-fonts", "dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
+# Environment switches of the SVG replay for offline experiments
+# (docs/engine/vector.md): debug prints, per-pixel probes, mesh dumps and
+# the experimental multisampled-pass fragment rule. Never on in the engine.
+svg-diagnostics = ["render"]
 # Vello's GPU compute coverage backend on the engine's wgpu device.
 gpu = ["render", "dep:vello", "dep:wgpu"]
 
@@ -62,3 +66,7 @@ required-features = ["render"]
 [[example]]
 name = "svg_compat_compare"
 required-features = ["render"]
+
+[[example]]
+name = "svg_debug"
+required-features = ["svg-diagnostics"]

@@ -1141,7 +1141,7 @@ impl DrawShape {
 
     /// `intersectClipElement`: geometric intersection with a rect or rrect.
     fn intersect_clip_element(&mut self, clip: &RawElement) -> bool {
-        let dbg = std::env::var_os("PM_SVG_DEBUG").is_some();
+        let dbg = super::diagnostic("PM_SVG_DEBUG").is_some();
         if !(self.can_modify && self.matches_geometry) {
             if dbg {
                 eprintln!("  intersect: cannot modify (can_modify={} matches_geometry={})", self.can_modify, self.matches_geometry);
@@ -1989,7 +1989,7 @@ fn needs_msaa(d: &Draw) -> bool {
 
 /// Renders a device's draws: MSAA when any draw or clip element requires it.
 fn render_device(dev: &Device) -> Vec<u8> {
-    if let Ok(path) = std::env::var("PM_SVG_MESH") {
+    if let Ok(path) = super::diagnostic("PM_SVG_MESH").ok_or(()) {
         // The analytic draws' device-space mesh strips (36 vertices, index
         // strip expanded to sequential vertices) for the hardware probe
         // (tools/canvas-ref/wgpu-probe.ts).
@@ -1999,7 +1999,7 @@ fn render_device(dev: &Device) -> Vec<u8> {
                 meshes.push(analytic::mesh_strip(inst));
             }
         }
-        if std::env::var_os("PM_SVG_MESH_VERTS").is_some() {
+        if super::diagnostic("PM_SVG_MESH_VERTS").is_some() {
             for d in &dev.draws {
                 if let Geom::Analytic(inst) = &d.geom {
                     for (i, v) in analytic::mesh_vertices(inst).iter().enumerate() {
@@ -2015,7 +2015,7 @@ fn render_device(dev: &Device) -> Vec<u8> {
         let doc = format!("{{\"width\":{},\"height\":{},\"meshes\":[{}]}}", dev.width, dev.height, strips.join(","));
         std::fs::write(&path, doc).unwrap();
     }
-    if std::env::var_os("PM_SVG_STRADDLE").is_some() {
+    if super::diagnostic("PM_SVG_STRADDLE").is_some() {
         // Every pixel where an analytic draw's mesh splits the samples
         // between triangles (MSAA devices only): "STRADDLE draw x y
         // tri:covers:center;..." for offline comparison with a capture.
@@ -2026,7 +2026,7 @@ fn render_device(dev: &Device) -> Vec<u8> {
                     for py in 0..dev.height {
                         for px in 0..dev.width {
                             let e = analytic::explain_data(inst, px, py, &SAMPLES_4X);
-                            let all = std::env::var("PM_SVG_STRADDLE").is_ok_and(|v| v == "all");
+                            let all = super::diagnostic("PM_SVG_STRADDLE").is_some_and(|v| v == "all");
                             if e.len() >= 2 || (all && !e.is_empty()) {
                                 let parts: Vec<String> = e.iter().map(|(k, c, cov)| format!("{k}:{}:{cov}", c.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(""))).collect();
                                 println!("STRADDLE {i} {px} {py} {}", parts.join(";"));
@@ -2037,9 +2037,9 @@ fn render_device(dev: &Device) -> Vec<u8> {
             }
         }
     }
-    if std::env::var_os("PM_SVG_DEBUG").is_some() {
+    if super::diagnostic("PM_SVG_DEBUG").is_some() {
         eprintln!("render device origin={:?} size={}x{} draws={} alpha={} filter={}", dev.origin, dev.width, dev.height, dev.draws.len(), dev.alpha, dev.filter.is_some());
-        if let Some(probe) = std::env::var("PM_SVG_PROBE").ok().and_then(|p| {
+        if let Some(probe) = super::diagnostic("PM_SVG_PROBE").and_then(|p| {
             let (x, y) = p.split_once(',')?;
             Some((x.trim().parse::<u32>().ok()?, y.trim().parse::<u32>().ok()?))
         }) {

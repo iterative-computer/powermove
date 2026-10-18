@@ -798,7 +798,7 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
             }
         }
     }
-    if n > 1 && std::env::var_os("PM_SVG_S0_RULE").is_some() {
+    if n > 1 && super::diagnostic("PM_SVG_S0_RULE").is_some() {
         // Experimental; measured on Chromium 152 / Metal: in a multisampled pass the pixel
         // takes one fragment of this step, the one from the mesh triangle
         // covering the lowest-index sample, for every sample the mesh covers
