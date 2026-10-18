@@ -270,3 +270,86 @@ POWERMOVE_NEW_ENGINE=1 $L bunx playwright test e2e/export-video-frames.spec.ts e
 for f in 0 1; do POWERMOVE_NEW_ENGINE=$f $L bunx playwright test e2e/import-image-sequence.spec.ts:7 \
   --repeat-each=12 --workers=1 --retries=0; done
 ```
+
+## Rerun correctness fixes: D4, D5, R3, R2 and the two test writers
+
+Verified 2026-10-18 on `feat/ne-races`, integration base `9f6e8f27`, the same
+M4 Max reference machine. Release addons and pm-wasm built in the worktree;
+hidden Electron under the machine lock, one worker, no retries.
+
+**D4 and D5 share the import-binding race.** The renderer exposed a completed
+import before the debounced asset binding reached main. An immediate export's
+offline check saw an unknown asset; the interactive engine could also resolve
+newly imported images before main knew them. The integration branch already
+contains the fix, `6a2f9587`: `ingestAsset` awaits
+`HostMedia.flushBindings(targetProject)` before returning, including silent,
+parallel imports. This lane keeps that fix and adds a multi-import regression.
+
+The negative control removed **only** that await and rebuilt the app. All three
+reproductions failed: `export-mp4.spec.ts:7` returned `{cancelled: true}`;
+both generated PNGs in the new readiness test resolved to null immediately;
+the synthetic 500-layer measurement recorded 41 layer failures. Restoring the
+await makes all three pass, with zero render/layer failures in the synthetic
+project (two imported images used by 35 image layers).
+
+`media-import-readiness.spec.ts` runs with the flag off and on. It checks both
+images are imported, resolves each through main immediately with no polling or
+extra flush (flag on), exports immediately with no offline prompt, and checks
+both exported regions are exactly opaque red and green. Assigning the regions
+does not assume a parallel import's completion order.
+
+**R3 was lazy temporal-ease adoption.** Hydration sanitized ordinary channels
+but left `powermove.3d.scene` animation inside extension data untouched. Legacy
+evaluation then added defaults that native evaluation did not write. Which
+frames had evaluated determined whether a flag-off open changed the document.
+`legacy/app.ts` now adopts and normalizes these scene channels during hydration,
+including nested compositions. Bare scene keys retain their linear behavior:
+adoption precedes the general sanitizer's ordinary layer default handles.
+The regression checks object, material, light, camera and environment tracks,
+quarter/midpoint values, unchanged JSON after evaluation, and idempotent reopen.
+It fails before the fix and passes after it. `scene3d.md` records the change.
+
+**R2 and test writers.** The alpha ProRes preset expects canonical
+`prores-4444`, still supplying old `prores` to test migration. The render-queue
+rename and tracer work-area assignment call `PM.touch()`. The affected import
+rerun also reached three old assertions that predate preservation of originals.
+Native TIFF/HEIC/Matroska imports now verify source bytes by BLAKE3 and separate
+PNG/WebM renditions; legacy mode still verifies stored conversions. Existing
+pixel, alpha, frame-order and duration assertions remain unchanged.
+
+**Verification:**
+
+- Four targeted unit files (`legacy/app`, renderer `host-media-store`, main
+  `media-store/service`, `engine/offline-media`): **78 pass**.
+- All 11 affected cases (`export-mp4`, `export-webm`, `import-animated-image`,
+  `import-converted-formats`, the saved-preset case) pass with the flag off and
+  on. The first native run passed all seven D4 reproductions, then failed the
+  three obsolete storage assertions; those pass after the spec update. The
+  new two-mode image readiness/pixel test also passes.
+- The two writer reproductions and saved-preset case in `audit`, with engine
+  fonts: **3 pass; 76 audits, zero failures**, including zero missed writes,
+  mirror mismatches and stale answers; 777 dual answers, zero mismatched/stale;
+  zero consistency mismatches and tracking violations.
+- Unchanged engine-switch corpus harness: **131/131 in both runs**, 71 s and
+  67 s, including `3d/legacy-scene`. Each compares 131 baseline, control, off,
+  and on-again documents; 65 assets across 60 media projects; zero failed or
+  skipped projects and zero page errors. Its existing on→on control still
+  records regenerated key ids in 16 effect projects; switching adds nothing
+  beyond that. This is inherited harness behavior, not a new exception or a
+  claim that those 16 raw document hashes are stable.
+
+No main/engine, preload, kernel API or raster changes were needed in this lane;
+the temporary negative-control raster edit was restored exactly. No capability
+reason, routing path, tolerance or corpus case changed. Both requested
+integration merges were already up to date.
+
+Reproduce with the existing commands above plus
+`e2e/media-import-readiness.spec.ts`; the synthetic case is
+`PM_TRACER_MEASURE=1` with `native-engine-tracer-measure.spec.ts --grep 'synthetic 500-layer'`.
+The auditor cases are `engine-delivery.spec.ts:199`,
+`native-engine-tracer.spec.ts:348`, and `ae-audit-implementation.spec.ts:102`, with
+`VITE_POWERMOVE_NATIVE_EVALUATOR=audit POWERMOVE_ENGINE_FONTS=1` and
+`POWERMOVE_NATIVE_REPORT_FILE` outside the repository. Run every e2e under the
+lock with `--workers=1 --retries=0`. Run
+`scripts/gate-engine-switch-corpus.mjs --json <outside-repo-path>` twice under
+the lock for the corpus gate. Build both `build:engine` and `build:wasm` first.
