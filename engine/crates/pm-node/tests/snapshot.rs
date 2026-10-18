@@ -121,6 +121,11 @@ fn frames_carry_their_depth_and_id_surface_when_the_viewer_asks() {
     run_child("child_depth");
 }
 
+#[test]
+fn blender_compositions_are_captured_as_today() {
+    run_child("child_blender");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -975,4 +980,62 @@ fn child_depth() {
     );
     assert!(status["presenter"]["depthFrames"].as_u64().unwrap() >= 1);
     println!("CHILD-OK");
+}
+
+/// A composition Blender renders (`render3d.enabled`) with one 3D object.
+fn blender_project() -> Value {
+    let object = json!({
+        "id": "o", "type": "extension", "name": "o", "on": true, "from": 0, "dur": 2, "blend": "normal",
+        "fx": [], "masks": [], "threeD": true, "p": {},
+        "d": { "definition": "powermove.3d.object", "version": 1, "w": 64, "h": 36, "params": {},
+            "data": { "object": { "source": { "primitive": "box", "parameters": {} },
+                "material": { "p": {}, "maps": {}, "doubleSided": true }, "useSourceMaterials": false,
+                "slots": [], "castShadow": true, "receiveShadow": true } } }
+    });
+    let mut p = project(100.0);
+    p["layers"] = json!([object]);
+    p["render3d"] = json!({ "enabled": true, "engine": "eevee", "samples": 8 });
+    p
+}
+
+#[test]
+#[ignore = "run by blender_compositions_are_captured_as_today"]
+fn child_blender() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    c.resync(2, 1, &blender_project());
+    // Today's capture draws the frame Blender prepared or fails; there is
+    // none, so the snapshot fails with today's error, never native shading
+    // labelled final.
+    let small = Size::new(320, 180);
+    c.snapshot(
+        10,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let outcome = c.inbox.wait(Duration::from_secs(20), answer(10));
+    assert_eq!(outcome.err(), Some(ErrorCode::BlenderFailed));
+    // A draft 3D capture draws native shading and says so.
+    let mut draft = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    draft.target = SnapshotTarget::Frame {
+        motion_blur_samples: 0,
+        background: true,
+        draft_3d: true,
+    };
+    c.snapshot(11, draft, Some(1), WINDOW, session);
+    match c.inbox.wait(Duration::from_secs(20), answer(11)) {
+        Ok(SnapshotOutcome::Rendered(result)) => assert!(result.quality.draft_3d),
+        Err(code) => assert_ne!(
+            code,
+            ErrorCode::BlenderFailed,
+            "draft 3D is not refused for Blender"
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+    println!("CHILD-OK blender: refused without draft 3D, drawn natively with it");
 }
