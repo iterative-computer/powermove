@@ -75,8 +75,9 @@ export type NativeEngineOptions = {
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
   /** Finds the user's Blender (contract 11 Blender jobs from the job
-   *  engine); without it Blender requests answer `unsupported` and the
-   *  current engine runs Blender. */
+   *  engine's exports and the interactive engine's paused viewer); without
+   *  it Blender requests answer `unsupported` and the current engine runs
+   *  Blender. */
   blender?: { locate: BlenderLocator; tempRoot: string };
 };
 
@@ -116,7 +117,7 @@ export const DEFAULT_FRAME_BUDGET_US = 16_667;
 
 export class NativeEngine {
   readonly services: HostServicesCore;
-  /** Blender supervision for the job engine (contract 11, `blender.ts`). */
+  /** Blender supervision for both engines (contract 11, `blender.ts`). */
   readonly blender: EngineBlender | null;
   readonly definitions = new DefinitionRelay();
   readonly ledger = new CrashLedger();
@@ -479,14 +480,15 @@ export class NativeEngine {
         if (blender) {
           if (body.type === 'blenderStatus') return blender.status();
           if (body.type === 'blenderRender') {
-            if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine renders with Blender.'));
-            // Surfaces and progress go to the launch that asked, before the answer.
+            // The job engine's exports, and the interactive engine's paused
+            // viewer (Material Preview and Rendered shading). Surfaces and
+            // progress go to the launch that asked, before the answer.
             const send = (event: Event): void => {
               if (launch() === current) this.supervisors[process].event(event, session);
             };
             return blender.render(body, session ?? 0, current.hostPort, send).then(() => ({ type: 'ack' }) as Response);
           }
-          if (body.type === 'cancelJobs' && process === 'job' && body.kind === 'job') {
+          if (body.type === 'cancelJobs' && body.kind === 'job' && (process === 'job' || blender.owns(body.job, current.hostPort))) {
             return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
           }
         }

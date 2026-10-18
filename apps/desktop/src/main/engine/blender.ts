@@ -1,6 +1,7 @@
 /*
- * Blender supervision in host services (contract 14) for the job engine's
- * Blender requests (contract 11), behind "Use New Engine". Design notes:
+ * Blender supervision in host services (contract 14) for the engines'
+ * Blender requests (contract 11: the job engine's exports, the interactive
+ * engine's paused viewer), behind "Use New Engine". Design notes:
  * docs/engine/blender.md.
  *
  * The job engine writes each frame's snapshot (`renderSnapshotJsonV1`)
@@ -334,6 +335,12 @@ export class EngineBlender {
       return true;
     }
     return false;
+  }
+
+  /** Whether `job` is queued or running for the engine launch on `port`
+   *  (an engine cancels only its own Blender jobs). */
+  owns(job: string, port: number): boolean {
+    return this.queued.some((q) => q.job === job && q.port === port) || (this.current?.job === job && this.current.port === port);
   }
 
   /** Playback started or stopped anywhere: Blender pauses while anything

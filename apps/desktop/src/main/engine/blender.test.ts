@@ -118,7 +118,7 @@ describe('scratch', () => {
   });
 });
 
-describe('Blender jobs from the job engine', () => {
+describe('Blender jobs from the engines', () => {
   it('launch Blender least-privileged and deliver every surface before the answer', async () => {
     const b = blender();
     const events: Event[] = [];
@@ -173,6 +173,10 @@ describe('Blender jobs from the job engine', () => {
       await new Promise((r) => setTimeout(r, 20));
     }
     const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    // An engine cancels only its own launch's jobs (the interactive
+    // engine's paused viewer and the job engine share one Blender).
+    expect(b.owns('j6', port)).toBe(true);
+    expect(b.owns('j6', port + 1)).toBe(false);
     expect(b.cancel('j6')).toBe(true);
     await expect(running).rejects.toMatchObject({ code: 'cancelled' });
     await new Promise((r) => setTimeout(r, 100));

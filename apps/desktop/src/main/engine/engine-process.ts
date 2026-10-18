@@ -25,6 +25,8 @@ type Addon = {
     detach(port: number): EngineAction[];
     receive(port: number, bytes: Uint8Array): EngineAction[];
     tick(): EngineAction[];
+    /** What threads off this one produced (host calls, job status). */
+    pump(): EngineAction[];
     status(): string;
     simulateGpuLoss?(): boolean;
     /** The viewer presenter's per-frame trace as JSON, emptied (POWERMOVE_BRIDGE_TRACE=1). */
@@ -61,7 +63,9 @@ function main(): void {
   const ports = new Map<number, MessagePortMain>();
   try {
     addon = loadAddon(addonPath);
-    engine = new addon.EngineHost(kind, (actions) => run(actions));
+    // An empty batch is a wake-up from a thread off this one (job lanes,
+    // the viewer's Blender worker): its host calls wait in `pump`.
+    engine = new addon.EngineHost(kind, (actions) => run(actions.length ? actions : engine.pump()));
   } catch (error) {
     notify({ type: 'fatal', message: `could not load the engine: ${error instanceof Error ? error.message : String(error)}` });
     process.exit(70);
