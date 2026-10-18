@@ -201,6 +201,9 @@ export function realizeOps(ops: readonly PatchOp[], open: string): PatchOp[] {
 
 export class NativeEdits {
   readonly stats: NativeEditStats = { calls: {}, applied: {}, ops: 0, fallbacks: {} };
+  /** Re-instantiates a trapped module synchronously (install.ts), as for queries. */
+  revive: (() => boolean) | null = null;
+  onFailure: ((code: 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable', message: string) => void) | null = null;
 
   constructor(
     private PM: Legacy,
@@ -254,18 +257,31 @@ export class NativeEdits {
     // from every id `PM.uid` makes (`prefix + random`, or a counter in tests).
     const uid = { base: `${String(this.PM.uid?.('') ?? Math.random().toString(36).slice(2, 9))}_`, start: 1 };
     let reply: any;
-    const run = () => wasm.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...request });
-    try {
-      reply = run();
+    const ask = (instance: PmWasm) => {
+      const run = () => instance.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...request });
+      let got = run();
       // Text layout met fonts the mirror lacks: load them (at once from a
       // synchronous registry; in the background otherwise, and this edit
       // runs the legacy code) and ask again.
       const fonts = this.fonts();
-      if (reply?.fonts && fonts) reply = fonts.resolve(wasm, run, (r: any) => !!r?.fonts) ?? reply;
+      if (got?.fonts && fonts) got = fonts.resolve(instance, run, (r: any) => !!r?.fonts) ?? got;
+      return got;
+    };
+    try {
+      reply = ask(wasm);
     } catch (error) {
+      // A trap: kernels read the mirror only, so a fresh instance resynced
+      // from the shadow answers the same edit (it stays native).
       console.warn(`[engine-doc] edit.${name} failed`, error);
-      return { fallback: 'trap' };
+      const fresh = this.revive?.() ? this.wasm() : null;
+      if (!fresh || fresh.dead) return { fallback: 'trap' };
+      try { reply = ask(fresh); } catch (again) {
+        this.onFailure?.('pm-wasm-trap', `pm-wasm trapped twice in edit.${name}: ${String((again as Error)?.message ?? again)}`);
+        this.revive?.();
+        return { fallback: 'trap' };
+      }
     }
+    if (reply?.fonts && this.fonts()?.disabled) this.onFailure?.('font-service-unavailable', 'The native font service stopped answering, so text edits cannot run in the new engine.');
     if (reply && 'ok' in reply) return { reply: reply.ok as KernelReply };
     if (reply?.throw) {
       const Kind = reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error;
@@ -275,6 +291,7 @@ export class NativeEdits {
     if (reply?.fonts) return { fallback: 'fonts' };
     if (reply?.ink) return { fallback: 'ink' };
     if (reply?.legacy) return { fallback: 'legacy' };
+    this.onFailure?.('pm-wasm-error', `pm-wasm could not answer edit.${name}: ${reply?.error ?? 'unknown'}`);
     return { fallback: `error:${reply?.error ?? 'unknown'}` };
   }
 

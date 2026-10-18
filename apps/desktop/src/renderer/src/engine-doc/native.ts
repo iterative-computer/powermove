@@ -144,6 +144,9 @@ export function at(root: any, path: readonly PathPart[]): any {
   return node;
 }
 
+/** A detached input as the JSON the mirror would hold (evaluated ad hoc). */
+const asJson = (value: any): any => JSON.parse(JSON.stringify(value));
+
 interface Context {
   comp: string;
   open: string;
@@ -214,6 +217,10 @@ export class NativeApi {
   fonts: FontLoader | null = null;
   /** Called when a dual answer differed because the mirror missed a write. */
   onStale: ((op: string, paths: string[]) => void) | null = null;
+  /** Re-instantiates a trapped module synchronously (install.ts); false when it cannot. */
+  revive: (() => boolean) | null = null;
+  /** A named failure ("Use New Engine" on; install.ts decides whether to report it). */
+  onFailure: ((code: 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable', message: string) => void) | null = null;
 
   constructor(
     private PM: Legacy,
@@ -293,17 +300,31 @@ export class NativeApi {
   }
 
   private query<T>(op: string, request: Record<string, unknown>, map?: (v: any) => T): Native<T> {
-    const wasm = this.ready();
+    let wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
+    const ask = (instance: PmWasm): any => {
+      let reply = instance.query({ op, ...request });
+      if (reply?.fonts && this.fonts) {
+        // Text layout met fonts the mirror lacks: load them (at once from a
+        // synchronous registry, in the background otherwise) and ask again.
+        reply = this.fonts.resolve(instance, () => instance.query({ op, ...request }), (r: any) => !!r?.fonts) ?? reply;
+      }
+      return reply;
+    };
     let reply: any;
-    try { reply = wasm.query({ op, ...request }); } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
-    if (reply?.fonts && this.fonts) {
-      // Text layout met fonts the mirror lacks: load them (at once from a
-      // synchronous registry, in the background otherwise) and ask again.
-      try {
-        reply = this.fonts.resolve(wasm, () => wasm.query({ op, ...request }), (r: any) => !!r?.fonts) ?? reply;
-      } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
+    try { reply = ask(wasm); } catch (error) {
+      // A trap: a fresh instance, resynced, answers the same question (the
+      // answer stays native). A second trap on it is a pm-wasm defect.
+      console.warn('[engine-doc] pm-wasm query failed', error);
+      if (!this.revive?.() || !(wasm = this.ready())) return { fallback: 'trap' };
+      try { reply = ask(wasm); } catch (again) {
+        console.warn('[engine-doc] pm-wasm query failed again on a fresh instance', again);
+        this.onFailure?.('pm-wasm-trap', `pm-wasm trapped twice answering ${op}: ${String((again as Error)?.message ?? again)}`);
+        this.revive?.();
+        return { fallback: 'trap' };
+      }
     }
+    if (reply?.fonts && this.fonts?.disabled) this.onFailure?.('font-service-unavailable', 'The native font service stopped answering, so text layout cannot run in the new engine.');
     if ('ok' in reply) return { value: map ? map(reply.ok) : reply.ok };
     if (reply.throw) {
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
@@ -312,6 +333,7 @@ export class NativeApi {
     if (reply.host) return { fallback: 'host' };
     if (reply.fonts) return { fallback: 'fonts' };
     if (reply.ink) return { fallback: 'ink' };
+    this.onFailure?.('pm-wasm-error', `pm-wasm could not answer ${op}: ${reply.error ?? 'unknown'}`);
     return { fallback: `error:${reply.error ?? 'unknown'}` };
   }
 
@@ -646,8 +668,13 @@ export class NativeApi {
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const path = findPath(ctx.raw, this.unwrap(prop));
-      if (!path) return { fallback: 'detached-prop' };
-      return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
+      // A channel outside the layer: pm-wasm reads its JSON (its keys are
+      // found by index, so the answer is still the live key).
+      const detached = path ? {} : { prop: prop && typeof prop === 'object' ? asJson(this.unwrap(prop)) : prop };
+      // Not a channel at all: the legacy code throws reading its `kf` before
+      // any evaluation, and that throw is the API's answer.
+      if (!path && !(prop && typeof prop === 'object')) return { fallback: 'invalid-input' };
+      return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path: path ?? [], ...detached, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
     }, () => this.legacy.hasKeyAt(L, prop, T), () => ({ layer: L?.id, t: T }));
   }
 
@@ -679,7 +706,8 @@ export class NativeApi {
         if (parent == null) extra.parent = null;
         else {
           const ctx = this.context(parent);
-          if (!ctx || typeof ctx.layer !== 'number') return { fallback: 'detached-parent' };
+          if (!ctx) return { fallback: 'context' };
+          // A parent outside the composition is evaluated from its JSON.
           extra.parent = ctx.layer;
         }
       }
@@ -764,7 +792,8 @@ export class NativeApi {
         if (parent == null) extra.parent = null;
         else {
           const ctx = this.context(parent);
-          if (!ctx || typeof ctx.layer !== 'number') return { fallback: 'detached-parent' };
+          if (!ctx) return { fallback: 'context' };
+          // A parent outside the composition is evaluated from its JSON.
           extra.parent = ctx.layer;
         }
       }
@@ -885,9 +914,11 @@ export class NativeApi {
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
-      if (index < 0) return { fallback: 'detached-path' };
       const live = this.unwrap(path);
-      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time, ...(prefix === undefined ? {} : { prefix }) },
+      // A path outside `d.paths` is evaluated from its JSON, with the layer as context.
+      const detached = index < 0 ? (live && typeof live === 'object' ? { pathJson: asJson(live) } : null) : {};
+      if (!detached) return { fallback: 'invalid-input' };
+      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time, ...(prefix === undefined ? {} : { prefix }) },
         (v: any) => {
           const out = keyOrder(v, live?.p);
           // `vertices` last, each in its own `p` order, as pathValues builds them.
@@ -904,8 +935,10 @@ export class NativeApi {
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
-      if (index < 0) return { fallback: 'detached-path' };
-      return this.query('groupMatrix', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time });
+      const live = this.unwrap(path);
+      const detached = index < 0 ? (live && typeof live === 'object' ? { pathJson: asJson(live) } : null) : {};
+      if (!detached) return { fallback: 'invalid-input' };
+      return this.query('groupMatrix', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time });
     }, () => this.legacy.groupMatrix(L, path, time), () => ({ layer: L?.id, t: time }));
   }
 
