@@ -7,6 +7,9 @@ import { install } from './app';
 import { install as installHistory } from './core/history';
 import { install as installProjects } from './core/projects';
 import { unpackProjectFile } from './core/project-file';
+import { makePM } from './__tests__/make-pm';
+import { install as installAnim } from './core/anim';
+import { sceneProperties } from '../core/scene3d/schema';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
@@ -731,6 +734,32 @@ describe('legacy app install', () => {
     expect(shader.d.uniforms.strength.kf[0]).toMatchObject({ t: 0, v: 3 });
     expect(PM.__normalizationCalls.length).toBeGreaterThanOrEqual(5);
   });
+});
+
+it('hydrates legacy scene animation before either engine evaluates it', () => {
+  const { PM } = appRegistry();
+  PM.Ease = makePM('core/easing').Ease;
+  installAnim(PM);
+  const prop = () => ({ v: 0, kf: [{ i: PM.uid('k'), t: 0, v: 0 }, { i: PM.uid('k'), t: 1, v: 90 }], expr: null });
+  const layer = () => ({ id: PM.uid('L'), type: 'extension', from: 0, dur: 2, p: {}, fx: [], masks: [],
+    d: { definition: 'powermove.3d.scene', data: { scene: {
+      objects: [{ id: 'box', name: 'Box', p: { ry: prop() }, material: { p: { roughness: prop() } } }],
+      lights: [{ id: 'sun', p: { x: prop() } }], camera: { p: { x: prop() } }, environment: { p: { exposure: prop() } },
+    } } } });
+  const raw = PM.mkProject({ id: 'scene-project', layers: [layer()], comps: {
+    nested: { id: 'nested', w: 64, h: 64, fps: 30, dur: 2, layers: [layer()] },
+  } });
+  const project = PM.hydrateProject(raw);
+  const before = JSON.stringify(project);
+  for (const comp of [project, project.comps.nested]) {
+    for (const { prop: channel } of sceneProperties(comp.layers[0])) {
+      expect(PM.evalKfs(channel.kf, 0.5)).toBe(45);
+      expect(PM.evalKfs(channel.kf, 0.25)).toBe(22.5);
+    }
+  }
+  // A flag-off draw must not add temporal fields to the flag-on baseline.
+  expect(JSON.stringify(project)).toBe(before);
+  expect(JSON.stringify(PM.hydrateProject(JSON.parse(before)))).toBe(before);
 });
 
 it('saves real undo and redo history in the native file and local session', async () => {

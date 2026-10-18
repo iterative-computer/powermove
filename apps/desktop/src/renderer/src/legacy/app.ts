@@ -13,6 +13,8 @@ import { normalizeExportDefaults, type ExportDefaults } from '../core/export-def
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
+import { SCENE3D_DEFINITION, sceneProperties } from '../core/scene3d/schema';
+import { temporalKeys } from './core/temporal-bridge';
 import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
@@ -376,6 +378,15 @@ function hydrate(p: any) {
         if (!isProperty(L.d.h)) L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
         L.d.params = sanitizeLooseParams(L.d.params, -L.from);
         L.d.data = sanitizeJson(L.d.data) || {};
+        // Legacy scene channels used to adopt temporal ease on their first
+        // WebGL draw. Hydrate them on open, as ordinary layer channels do,
+        // so switching engines cannot change the persisted animation.
+        if (L.d.definition === SCENE3D_DEFINITION) for (const { prop } of sceneProperties(L)) {
+          // Bare scene keys have always meant linear; adopt before the
+          // general sanitizer supplies the layer editor's default handles.
+          if (prop.kf.every((key: any) => key && typeof key === 'object')) temporalKeys(prop.kf);
+          sanitizeProp(prop, { v: prop.v }, -L.from);
+        }
       }
       if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
     });
