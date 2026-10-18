@@ -247,9 +247,15 @@ fn pmv_projects_render_from_embedded_media() {
 
 #[test]
 fn projects_the_engine_cannot_render_exit_3_and_write_nothing() {
+    // pm-cli has fonts, so text no longer refuses. A project color setting
+    // this engine does not know (one from a later version) still does
+    // (`Feature::ProjectColor`), and always will: drawing it with a guess
+    // would differ from the app that wrote it.
     let dir = scratch("routed");
+    let mut p = project(true, true);
+    p["color"] = json!({ "mode": "a-mode-from-a-later-version" });
     let project_file = dir.join("p.json");
-    std::fs::write(&project_file, project(true, true).to_string()).unwrap();
+    std::fs::write(&project_file, p.to_string()).unwrap();
     let out = cli(&[
         project_file.to_str().unwrap(),
         "-o",
@@ -261,12 +267,30 @@ fn projects_the_engine_cannot_render_exit_3_and_write_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("text"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("project color"), "{stderr}");
+    assert!(!stderr.contains("text"), "text no longer refuses: {stderr}");
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         1,
         "only the project"
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_projects_render_with_the_hosts_fonts() {
+    let dir = scratch("text");
+    let project_file = dir.join("p.json");
+    std::fs::write(&project_file, project(true, true).to_string()).unwrap();
+    let out_file = dir.join("text.mov");
+    let s = summary(&cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        out_file.to_str().unwrap(),
+    ]));
+    assert!(s["frames"].as_u64().unwrap_or(0) > 0, "{s}");
+    assert!(out_file.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
