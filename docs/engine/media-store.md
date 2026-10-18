@@ -377,3 +377,31 @@ proxy) instead of converted from its bytes.
 - Bookmark-based tracking of moved files (security-scoped bookmarks) and a
   Relink sheet for name, timecode, or duration proposals (4b).
 - Garbage collection of unreferenced store objects (4b Storage).
+
+
+## K1, B1 and R3 follow-up (2026-10-18)
+
+The export sheet and Add to Queue now await `HostMedia.flushBindings` before
+submitting their captured project. The agent's `__mcp_context` does the same
+before returning its project snapshot. The barrier first finishes migration of
+IndexedDB-only media into the verified host store, then awaits main's binding
+acknowledgement. A project switch during the await does not change which project
+is exported. Flag off keeps the barrier a no-op.
+
+Queue snapshots persist each copied asset's content hash when the entry is added,
+including older projects that only have storage keys. Main binds every export
+snapshot's copied hashes and linked originals to that job session before resync.
+Host media capability requests carry their engine process and session to the
+resolver, so those bindings survive a project switch, window close and queued-job
+relaunch, and cannot be confused with an interactive session with the same number.
+A later write under the same storage key does not change the queued content.
+Completion, failure and cancellation release the session bindings. The live
+window's bindings keep their existing lifetime and ambiguity checks.
+
+The unit regressions cover acknowledgement ordering, IndexedDB migration without
+writing/deleting IndexedDB, copied and linked media after window release, reused
+storage keys, session/process isolation, and release after success or submission
+failure. The image-readiness e2e retains its immediate-import check, exact red and
+green export pixels and zero import-time layer failures, then checks immediate
+export after reopen and queued export after switching away and releasing the
+window's bindings.

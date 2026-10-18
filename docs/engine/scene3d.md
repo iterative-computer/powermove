@@ -272,3 +272,19 @@ tests and tools named above are its own files. Everything else it touched:
 - `pm-render/tests/headless.rs`: the capability test's 3D section.
 - `docs/engine/pm-render.md`: its 3D section points here.
 - `engine/Cargo.lock`: `pm-geom3d` in `pm-render`'s dependencies.
+
+
+## Hydration follow-up (K1 and R3b, 2026-10-18)
+
+Effect parameters now enter the project-wide key-id sanitizer exactly once.
+Registered parameters use their definition's fallback; unknown parameters retain
+inferred values. Saved numeric, color and boolean keys keep their ids on every
+reopen, and loose primitive values remain supported. Duplicate ids across actual
+channels still go through the existing uniqueness check.
+
+The legacy-scene hydration regression now includes color and boolean tracks and
+keys without ids in root and nested compositions. It compares quarter/midpoint
+answers with the unhydrated legacy evaluator, retains the absolute numeric
+22.5/45 assertions, checks assigned ids, and requires unchanged JSON after
+evaluation and a second hydration. Removing scene adoption fails the expanded
+regression; no easing behavior or renderer tolerance changed.
