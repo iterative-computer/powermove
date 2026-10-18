@@ -9,7 +9,7 @@ the integration branch `feat/native-engine` at `c5833c5d` (waves 1 to 4, with
 measurement scripts. No engine code was changed here beyond the merge resolution
 below.
 
-Measured 2026-10-17 between 20:30 and 23:00 on Jude's MacBook Pro (Apple M4 Max,
+Measured 2026-10-17 between 20:30 and 22:20 on Jude's MacBook Pro (Apple M4 Max,
 128 GB, macOS 27.0, built-in 120 Hz XDR panel, MacBook Pro Speakers as the output
 device), Electron 44.0.0, Blender 4.5.14 LTS, release `pm_node.node` built in the
 worktree. The Mac was shared with other lanes (1-minute load average 5 to 10; another
