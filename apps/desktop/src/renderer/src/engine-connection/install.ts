@@ -249,6 +249,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         onAudio: (message) => {
           if (session) audio.receive(message, session);
         },
+        // The viewer lays out for the new document, as opening a project
+        // makes it do: its state names the new composition, so the engine
+        // draws and plays it (a `PM.proj` assignment emits nothing).
+        onLoaded: () => PM.bus?.emit?.('layout'),
         onRoute: (route, reason) => {
           if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
           transport.refresh();

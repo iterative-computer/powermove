@@ -58,9 +58,27 @@ function retiming(): CorpusProject[] {
   clip('Remap reverse', 40, 112.5, { timeRemap: video.ch(true), sourceTime: video.ch(1.9, [[0, 1.9], [1.9, 0]]) });
   clip('Freeze', 120, 112.5, { timeRemap: video.ch(true), sourceTime: video.ch(1.4, [[0, 1.4, { hold: true }]]) });
   clip('Second decoder, same media', 200, 112.5, {});
+  /* Variable speed that the midpoint rule does not integrate exactly (an
+     eased ramp, an expression on top), at the root and in a 24 fps
+     composition nested in the 30 fps root: amendment 16's integration step
+     (two samples per frame of the owning composition, at least 60 Hz)
+     matches today bit for bit at the root; the nested case is its one
+     allowed difference. Samples are off the frame grid. */
+  const varied = newProject('retiming/variable-speed', { name: 'Variable speed', w: 320, h: 180, dur: 3, bg: '#202020' });
+  const eased = (d: typeof varied) => d.ch(1, [[0, .5, { legacy: 'easeInOut' }], [2.5, 2.5, { legacy: 'easeInOut' }]]);
+  const wobble = (d: typeof varied) => d.ch(1, [[0, .5, { legacy: 'cubicOut' }], [2, 1.8, { legacy: 'cubicOut' }]], 'value * (1 + 0.1 * Math.sin(time * 7))');
+  const nested = clock(varied, 'Clock at 24 fps', { w: 160, h: 90, fps: 24, dur: 6 });
+  varied.within(nested, () => {
+    varied.add(varied.layer('video', { name: 'Nested eased speed', d: { asset: ref('h264-aac.mp4'), fit: 'contain', w: 80, h: 45, speed: eased(varied) }, p: { 'position.x': 40, 'position.y': 22.5 } }));
+  });
+  varied.add(varied.layer('video', { name: 'Eased speed', d: { asset: ref('h264-aac.mp4'), fit: 'contain', w: 160, h: 90, speed: eased(varied) }, p: { 'position.x': 80, 'position.y': 45 } }));
+  varied.add(varied.layer('video', { name: 'Eased speed with an expression', from: .2, d: { asset: ref('h264-aac.mp4'), fit: 'contain', w: 160, h: 90, trim: .1, speed: wobble(varied) }, p: { 'position.x': 240, 'position.y': 45 } }));
+  varied.add(varied.layer('precomp', { name: 'Precomp at eased speed', d: { comp: nested.id, w: 160, h: 90, speed: eased(varied) }, p: { 'position.x': 80, 'position.y': 135 } }));
+  varied.add(varied.layer('precomp', { name: 'Precomp at speed with an expression', d: { comp: nested.id, w: 160, h: 90, speed: wobble(varied) }, p: { 'position.x': 240, 'position.y': 135 } }));
   return [
     project(b, { group: 'Retiming', title: 'Retimed precomps', covers: ['trim', 'time remap', 'freeze', 'reverse', 'source time'], samples: [0, .8, 1.6, 2.4, 3.2] }),
     project(video, { group: 'Retiming', title: 'Retimed video', covers: ['speed', 'variable speed', 'trim', 'time remap reverse', 'freeze', 'independent decoders per instance'], samples: [.3, .7, 1.1, 1.6] }),
+    project(varied, { group: 'Retiming', title: 'Variable speed', covers: ['eased variable speed', 'variable speed with an expression', 'variable speed in a nested 24 fps composition', 'variable-speed precomps'], samples: [.4567, 1.2345, 2.0111, 2.8765] }),
   ];
 }
 

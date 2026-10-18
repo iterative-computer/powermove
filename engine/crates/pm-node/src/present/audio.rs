@@ -5,7 +5,11 @@
 //! output device through `cpal`) and its own mirror of the document, fed
 //! with the same updates the render thread gets. The render thread never
 //! blocks on audio: it sends controls and reads the clock through a
-//! [`ClockHandle`]. The device opens at the first Play. A new revision
+//! [`ClockHandle`]. The device opens at the first Play, or earlier once
+//! warmed ([`AudioCtl::Warm`]): while paused, when the composition has
+//! something to hear and no control arrived for [`WARM_IDLE`] (today's
+//! `requestContextWarmup` opens its AudioContext on idle the same way), so
+//! the first Play does not wait for the device to open. A new revision
 //! reaches the mixer at most every [`PROJECT_INTERVAL`] while edits stream
 //! in (pm-audio glides from what played into the new mix).
 //!
@@ -42,6 +46,9 @@ pub const LEVELS_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Where the levels of what is heard go (the renderer's port).
 pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
+/// How long the controls must rest before a warmed thread checks whether
+/// the composition is audible and opens the device.
+pub const WARM_IDLE: Duration = Duration::from_millis(100);
 
 /// Decoded audio kept per viewer.
 const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
@@ -57,6 +64,9 @@ pub enum AudioCtl {
         rate: PlaybackRate,
     },
     Pause,
+    /// Open the device ahead of the first Play once the composition is
+    /// audible and the controls rest.
+    Warm,
     /// A seek while playing.
     Seek(i64),
     /// A scrub seek while paused: a grain at `ticks` when audio scrub is on.
@@ -131,6 +141,9 @@ impl AudioLink {
                     last_levels: None,
                     levels_running: false,
                     watch_until: None,
+                    warm: false,
+                    warm_due: None,
+                    warmed: false,
                 }
                 .run()
             },
@@ -202,14 +215,26 @@ struct Control {
     /// After a play, a scrub, or a play around, the device starts within the
     /// pre-roll and the output latency: watch for its levels until then.
     watch_until: Option<Instant>,
+    /// Asked to open the device ahead of Play ([`AudioCtl::Warm`]).
+    warm: bool,
+    /// When to check, once the controls rested ([`WARM_IDLE`]).
+    warm_due: Option<Instant>,
+    /// The device opened ahead of Play and the mixer has no project yet.
+    warmed: bool,
 }
 
 impl Control {
     fn run(mut self) {
         loop {
-            let timeout = match (&self.playback, self.dirty, self.last_project) {
-                (Some(_), true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
-                (Some(_), true, None) => Duration::ZERO,
+            // A device opened ahead of Play gets the project at Play, with
+            // the media the engine has resolved by then (as before).
+            let feeding = self.playback.is_some() && !self.warmed;
+            let timeout = match (feeding, self.dirty, self.last_project) {
+                (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
+                (true, true, None) => Duration::ZERO,
+                _ if self.playback.is_none() && self.warm_due.is_some() => self
+                    .warm_due
+                    .map_or(Duration::ZERO, |due| due.saturating_duration_since(Instant::now())),
                 _ => Duration::from_secs(3600),
             };
             // Levels while the device plays (or is about to).
@@ -230,16 +255,26 @@ impl Control {
             while let Ok(ctl) = self.rx.try_recv() {
                 controls.push(ctl);
             }
+            let rested = controls.is_empty();
             for ctl in controls {
                 if !self.apply(ctl) {
                     self.shutdown();
                     return;
                 }
             }
+            if self.playback.is_none() && self.warm {
+                if !rested || self.warm_due.is_none() {
+                    // A control came: check once they rest again.
+                    self.warm_due = Some(Instant::now() + WARM_IDLE);
+                } else if self.warm_due.is_some_and(|due| Instant::now() >= due) {
+                    self.warm_due = None;
+                    self.warm_if_audible();
+                }
+            }
             let due = self
                 .last_project
                 .is_none_or(|last| last.elapsed() >= PROJECT_INTERVAL);
-            if self.playback.is_some() && self.dirty && due {
+            if self.playback.is_some() && !self.warmed && self.dirty && due {
                 self.set_project();
             }
             self.send_levels();
@@ -315,6 +350,7 @@ impl Control {
                 self.command(TransportCommand::SetLoop { range });
             }
             AudioCtl::Pause => self.command(TransportCommand::Pause),
+            AudioCtl::Warm => self.warm = true,
             AudioCtl::Seek(at) => self.command(TransportCommand::Seek {
                 time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
                 mode: SeekMode::Exact,
@@ -364,6 +400,7 @@ impl Control {
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
+                self.warmed = false;
                 if self.dirty {
                     self.set_project();
                 }
@@ -378,6 +415,21 @@ impl Control {
             }
         }
         true
+    }
+
+    /// Opens the device when the composition has something to hear (the mixer
+    /// gets the project at Play). Until it does, the next control checks
+    /// again.
+    fn warm_if_audible(&mut self) {
+        if self.playback.is_some() || self.broken || self.doc.root().is_none() {
+            return;
+        }
+        let mut ev = pm_eval::Evaluator::new();
+        if pm_audio::graph::audible(&self.doc, &self.composition, &mut ev).unwrap_or(false)
+            && self.open()
+        {
+            self.warmed = true;
+        }
     }
 
     fn command(&mut self, command: TransportCommand) {

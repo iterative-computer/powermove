@@ -38,3 +38,22 @@ it('prepares nested Blender output sizes and every group shutter sample',()=>{
   expect(frames.map(frame=>frame.time)).toEqual([1,1-.25*.5/30,1+.25*.5/30]);
   expect(blenderFrameRequests(PM,1,parent,{mblur:false})).toHaveLength(1);
 });
+
+it('waits for the compositor context before preparing a frame', async () => {
+  let release!: (ready: boolean) => void;
+  const GL: any = { gl: null, whenReady: vi.fn(() => new Promise<boolean>((resolve) => { release = resolve; })) };
+  const PM: any = { proj: { layers: [], fps: 30 }, active: () => true, scope: { push() {}, pop() {} }, assets: { get: () => null }, GL };
+  let done = false;
+  const pending = prepareFrame(PM, 0).then(() => { done = true; });
+  await Promise.resolve();
+  expect(GL.whenReady).toHaveBeenCalledOnce();
+  expect(done).toBe(false);
+  expect(PM.preparedVideoFrames).toBeUndefined();
+  GL.gl = {};
+  release(true);
+  await pending;
+  expect(PM.preparedVideoFrames).toBeInstanceOf(Map);
+  // With a context, no wait.
+  await prepareFrame(PM, 0);
+  expect(GL.whenReady).toHaveBeenCalledOnce();
+});

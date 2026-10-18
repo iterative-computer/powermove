@@ -306,3 +306,33 @@ HQ, ProRes 4444; `--color quicktime`) and measures each movie with
 half-float and 8-bit BGRA deliveries, the frame's attached color space to the main
 display's profile and to Display P3 through ColorSync, CIEDE2000 on 32 × 32 patch-center
 means, with Sharma's vectors checked before measuring). Neither opens a window.
+
+## Fixed after the gate
+
+Notes appended on 2026-10-16 (`feat/ne-correct`, `docs/engine/gate-fixes.md`); the
+measured results above are as they were.
+
+- **D1, fixed after the gate (2026-10-16).** `pm-render` pads video source times per
+  output kind as today does (`RenderRequest::video_end`: 0.04 s for the viewer, scrubs,
+  and thumbnails; `1 / fps` for exports and agent stills, `prepareFrame`'s padding).
+  `pm-render/tests/video_end.rs` renders a 20-frame clip at 10, 24, 25, 30, and 60 fps
+  for both kinds against today's rule (fails at 30 fps without the fix). With
+  `POWERMOVE_NEW_ENGINE=1`, `export-video-frames.spec.ts` passes 9 of 9.
+- **D2, fixed after the gate (2026-10-16).** A project installed by assigning `PM.proj`
+  now lays the viewer out after the engine loads it, as opening a project does, so the
+  viewer's state names the new composition and it plays on the engine clock. The Play
+  start: the engine opened the audio device at the first Play (about 150 ms) and held
+  every run, silent ones too, for the output's first buffer (160 ms on the AirPods);
+  today's transport warms its device while idle and starts its playhead at Play. A
+  composition with nothing to hear now plays on the host clock from Play (run start
+  50 ms after Play, the frame pre-roll), and the device opens ahead of the first Play
+  once the composition is audible (first Play 181 to 198 ms, the output latency plus
+  pre-roll, kept for A/V sync). With the flag on, `export-mp4.spec.ts` passes 2 of 2
+  and `native-engine-tracer.spec.ts` 10 of 10.
+- **R1, fixed after the gate (2026-10-16).** Not the store lane's restore path itself:
+  the legacy export never waited for the compositor's WebGL context, which the viewer
+  makes when it mounts; after the relaunch the open and the frame preparation used to
+  finish after the viewer had mounted, and from the store wave 3 merge on they often
+  finish first (instrumented runs at the render merge, the store merge, and the tip in
+  `gate-fixes.md`). `prepareFrame` now waits for the context. `import-image-sequence.spec.ts:7`
+  `--repeat-each=12`: 24 of 24 with the flag off, 24 of 24 with it on.

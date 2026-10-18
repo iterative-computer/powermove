@@ -14,7 +14,10 @@
 //!   session the engine draws the effect and an adjustment layer;
 //! * playback on the host clock at the composition's rate;
 //! * a GPU device loss: the device and pool are rebuilt as a new
-//!   generation and the paused frame is drawn again.
+//!   generation and the paused frame is drawn again;
+//! * with the audio device in use (no host-clock override), a composition
+//!   with nothing to hear plays on the host clock from Play, as today's
+//!   playhead does, without waiting for the device (Phase 2 gate D2).
 #![cfg(target_os = "macos")]
 
 use std::process::{Command, Stdio};
@@ -115,6 +118,156 @@ fn the_engine_draws_the_document_follows_its_patches_routes_and_recovers() {
         retired, 2,
         "the lost pool and the last one are retired: {events:?}"
     );
+}
+
+/// Runs `child` (an ignored test of this file) as the interactive engine
+/// child with `envs`, against this process as main; returns its stdout.
+fn run_child(child: &str, envs: &[(&str, &str)]) -> String {
+    let name = random_service_name(SERVICE_PREFIX).unwrap();
+    let server = Rendezvous::register(&name).unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", child, "--ignored", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .env(BRIDGE_ENV, &name)
+        .env_remove(HOST_CLOCK_ENV)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        command.env(k, v);
+    }
+    let child = command.spawn().unwrap();
+    let expected =
+        ExpectedPeer::for_child(child.id() as i32, SignaturePolicy::UnsignedDevBypass).unwrap();
+    let table = Arc::new(Mutex::new(SurfaceTable::default()));
+    let main = std::thread::spawn(move || {
+        let stop = AtomicBool::new(false);
+        host::run(server, &expected, Duration::from_secs(60), &table, &stop, &mut |_| {});
+    });
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
+    main.join().unwrap();
+    stdout
+}
+
+#[test]
+fn a_silent_composition_plays_from_play_without_waiting_for_the_audio_device() {
+    let stdout = run_child("child_silent_play", &[(SOURCE_ENV, "document")]);
+    assert!(stdout.contains("CHILD-OK"), "child did not finish:\n{stdout}");
+}
+
+#[test]
+#[ignore = "run by a_silent_composition_plays_from_play_without_waiting_for_the_audio_device"]
+fn child_silent_play() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let inbox = Arc::new(Inbox::default());
+    let sink_inbox = inbox.clone();
+    let mut host = EngineHost::with_sink(
+        EngineProcess::Interactive,
+        Some(Arc::new(move |actions| sink_inbox.push(actions))),
+        |key: &str| std::env::var(key).ok(),
+    )
+    .unwrap();
+    let send = |host: &mut EngineHost, envelope: Envelope| {
+        let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
+        inbox.push(actions);
+    };
+    host.attach(1, "host").unwrap();
+    host.receive(1, &hello(PeerRole::Host));
+    host.attach(WINDOW.0, "renderer").unwrap();
+    inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(1).unwrap(),
+            body: Request::OpenSession(OpenSession {
+                document: "Ptracer".into(),
+                role: SessionRole::Interactive,
+                process: EngineProcess::Interactive,
+                color: ProjectColor::DEFAULT,
+            }),
+        }),
+    );
+    let session = inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::SessionOpened { session },
+            ..
+        } => Some(*session),
+        _ => None,
+    });
+    let event = |body: Event| Envelope::new(Message::Event { body }).with_session(session);
+    // A solid and nothing else: nothing to hear.
+    let doc = project(solid(100.0, json!([])));
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(2).unwrap(),
+            body: Request::Resync(Resync {
+                document: "Ptracer".into(),
+                revision: Revision::new(1).unwrap(),
+                encoding: DocumentEncoding::CanonicalJsonV1,
+                source: ResyncSource::Inline {
+                    body: Bytes(doc.to_string().into_bytes()),
+                },
+                hash: ContentHash(pm_model::hash::canonical_digest(&model(&doc))),
+            }),
+        })
+        .with_session(session),
+    );
+    send(&mut host, event(Event::Viewer(state(1))));
+    let first = inbox.wait(Duration::from_secs(20), frame);
+    send(
+        &mut host,
+        event(Event::ReleaseFrame(FrameRelease {
+            pool_index: first.pool_index,
+            seq: first.seq,
+        })),
+    );
+    // Give a warmed audio thread time to decide (it must not open the
+    // device for a silent composition).
+    std::thread::sleep(Duration::from_millis(300));
+    let pressed = pm_node::present::render::now_us();
+    send(
+        &mut host,
+        event(Event::Transport(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })),
+    );
+    let run = inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Event {
+            body: Event::Clock(c),
+        } if c.state == TransportState::Playing => Some(*c),
+        _ => None,
+    });
+    let lead = run.host_time.get() as i64 - pressed;
+    // The host-clock line's frame pre-roll (50 ms), not an output's
+    // latency (160 ms on the reference machine's Bluetooth output).
+    assert!(
+        (0..=pm_node::present::clock::PREROLL_US + 20_000).contains(&lead),
+        "the run starts {lead} µs after Play"
+    );
+    assert_eq!(run.output_latency_us, 0, "{run:?}");
+    send(&mut host, event(Event::Transport(TransportCommand::Pause)));
+    inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Event {
+            body: Event::Clock(c),
+        } if c.state == TransportState::Stopped => Some(()),
+        _ => None,
+    });
+    let status: Value = serde_json::from_str(&host.status_json()).unwrap();
+    let presenter = &status["presenter"];
+    assert_eq!(presenter["silentRuns"], 1, "{presenter}");
+    assert_eq!(presenter["hostClockRuns"], 0, "{presenter}");
+    // The view's audio thread never opened a device.
+    for audio in presenter["audio"].as_object().into_iter().flat_map(|a| a.values()) {
+        assert!(audio["device"].is_null(), "{presenter}");
+    }
+    drop(host);
+    println!("CHILD-OK lead={lead}");
 }
 
 #[derive(Default)]
