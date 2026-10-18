@@ -37,7 +37,6 @@ function blurGenerated(): CorpusProject {
     d: { definition: studioCube.id, version: studioCube.version, w: 160, h: 120, params: cubeParams(b, { autoRotate: false, rotation: b.ch(0, [[0, 0], [2, 240]]), background: '#1B2A4A' }), data: structuredClone(studioCube.defaults) },
     p: { 'position.x': b.ch(300, [[0, 300], [2, 220]]), 'position.y': 20, rotation: b.ch(0, [[0, 0], [2, 60]]) },
   }));
-  b.add(b.layer('captions', { name: 'Captions rise (blur)', mblur: true, d: b.captions(CUES, { placement: 'bottom' }), p: { 'position.y': b.ch(40, [[0, 40], [2, -60]]) } }));
   // A shader layer moving with its blurred group.
   const group = b.layer('group', { name: 'Blurred group with a shader', mblur: true, p: { 'position.x': b.ch(0, [[0, 0], [2, 160]]), opacity: 90 } });
   b.add(b.layer('shader', { name: 'Grouped aurora', group: group.id, d: { code: aurora, uniforms: shaderUniforms(b, aurora) }, p: { 'position.x': 10, 'position.y': 150, 'scale.x': 25, 'scale.y': 25, rotation: b.ch(0, [[0, 0], [2, 90]]) } }));
@@ -55,7 +54,7 @@ function blurGenerated(): CorpusProject {
   b.add(b.layer('precomp', { name: 'Precomp of generated layers (blur)', mblur: true, d: { comp: inner.id, w: 200, h: 120 }, p: { 'position.x': b.ch(260, [[0, 260], [2, 200]]), 'position.y': 140, rotation: b.ch(0, [[0, 0], [2, 30]]) } }));
   return project(b, {
     group: 'Motion', title: 'Motion blur on shader, extension, and caption layers',
-    covers: ['shader layer motion blur', 'extension fragment layer motion blur', 'captions motion blur', 'shader in a blurred group', 'shader and extension in a blurred precomp'],
+    covers: ['shader layer motion blur', 'extension fragment layer motion blur', 'shader in a blurred group', 'shader and extension in a blurred precomp'],
     samples: [0.5, 1.3], alpha: true, blurSamples: [3, 6],
   });
 }
@@ -71,7 +70,6 @@ function spaceGenerated(): CorpusProject {
     d: { definition: studioCube.id, version: studioCube.version, w: 200, h: 140, params: cubeParams(b, { autoRotate: false, rotation: 30 }), data: structuredClone(studioCube.defaults) },
     p: { 'position.x': 330, 'position.y': 30, 'rotation.x': b.ch(50, [[0, 50], [2.5, -30]]), 'position.z': b.ch(-120, [[0, -120], [2.5, 100]]) },
   }));
-  b.add(b.layer('captions', { name: 'Captions (orientation Y)', threeD: true, d: b.captions(CUES, { placement: 'bottom' }), p: { 'orientation.y': 25, 'rotation.x': b.ch(10, [[0, 10], [2.5, -20]]) } }));
   // Generated layers inside a 3D group, with a blurred member.
   const rig = b.layer('group', { name: '3D group of generated layers', threeD: true, p: { 'position.x': 320, 'position.y': 180, 'anchor.x': 320, 'anchor.y': 180, 'rotation.y': b.ch(35, [[0, 35], [2.5, -35]]), perspective: 55 } });
   b.add(b.layer('shader', { name: 'Grouped bars', group: rig.id, d: { code: bars, uniforms: shaderUniforms(b, bars) }, p: { 'position.x': 60, 'position.y': 200, 'scale.x': 30, 'scale.y': 30 } }));
@@ -83,7 +81,7 @@ function spaceGenerated(): CorpusProject {
   b.add(rig);
   return project(b, {
     group: 'Space', title: '2.5D shader, extension, and caption layers',
-    covers: ['3D shader layer', '3D extension fragment layer', '3D captions', 'generated layers in a 3D group', 'blurred extension in a 3D group'],
+    covers: ['3D shader layer', '3D extension fragment layer', 'generated layers in a 3D group', 'blurred extension in a 3D group'],
     samples: [0, 1.25, 2.5], alpha: true,
   });
 }
@@ -95,10 +93,6 @@ function pathMasksMore(): CorpusProject {
   // A motion-blurred layer with a feathered path mask (today's slow path).
   const moving = b.add(b.layer('solid', { name: 'Blurred, path masked', mblur: true, d: { color: '#FF6B1A', w: 140, h: 110 }, p: { 'position.x': b.ch(20, [[0, 20], [2, 140]]), 'position.y': 20 } }));
   moving.masks.push(b.mask('rect', { x: 70, y: 55, feather: 10 }, { path: blob() }));
-  // Text with a path mask and a subtract ellipse.
-  const text = b.add(b.layer('text', { name: 'Masked title', d: { text: 'Masked', size: 64, weight: 800, color: '#FFFFFF', align: 'center' }, p: { 'position.x': 360, 'position.y': 60 } }));
-  text.masks.push(b.mask('rect', { x: 0, y: -10, feather: 6 }, { path: blob({ scaleX: 130, scaleY: 70, rotation: b.ch(0, [[0, 0], [3, 45]]) }) }));
-  text.masks.push(b.mask('ellipse', { x: 20, y: -15, w: 30, h: 30, feather: 0 }, { mode: 'subtract' }));
   // A layer inside a 3D group (its plane maps the coverage).
   const rig = b.layer('group', { name: '3D group', threeD: true, p: { 'position.x': 120, 'position.y': 220, 'anchor.x': 120, 'anchor.y': 220, 'rotation.y': b.ch(-30, [[0, -30], [3, 30]]), perspective: 50 } });
   const card = b.add(b.layer('solid', { name: 'Masked card in a 3D group', group: rig.id, d: { color: '#4C8DFF', w: 150, h: 100 }, p: { 'position.x': 45, 'position.y': 170 } }));
@@ -115,11 +109,43 @@ function pathMasksMore(): CorpusProject {
   b.add(b.camera3d({ camera: { p: { targetX: 0, targetY: 0, targetZ: 0 } }, environment: { shadows: false } }, { position: [0, 0.5, 4] }));
   return project(b, {
     group: 'Compositing', title: 'Path masks on more layer types',
-    covers: ['path mask with motion blur', 'path mask on text', 'path mask in a 3D group', 'path mask on an adjustment layer', 'path mask on a 3D object layer'],
+    covers: ['path mask with motion blur', 'path mask in a 3D group', 'path mask on an adjustment layer', 'path mask on a 3D object layer'],
     samples: [0.5, 1.6], alpha: true,
   });
 }
 
+// Captions and text (the text class, tests/text_corpus.rs): blurred, in
+// depth, in blurred and 3D groups and a blurred precomp, and path masked.
+function captionsAndText(): CorpusProject[] {
+  const blur = newProject('motion/blur-captions', { name: 'Motion blur on captions', w: 480, h: 270, dur: 3, backgroundFill: DARK });
+  blur.add(blur.layer('captions', { name: 'Captions rise (blur)', mblur: true, d: blur.captions(CUES, { placement: 'bottom' }), p: { 'position.y': blur.ch(40, [[0, 40], [2, -60]]) } }));
+  const group = blur.layer('group', { name: 'Blurred group with captions', mblur: true, p: { 'position.x': blur.ch(-60, [[0, -60], [2, 60]]) } });
+  blur.add(blur.layer('captions', { name: 'Grouped captions', group: group.id, d: blur.captions(CUES, { placement: 'top' }) }));
+  blur.add(group);
+  const inner = blur.composition({ name: 'Inner captions', w: 480, h: 270, dur: 3, bg: '#00000000' });
+  blur.within(inner, () => {
+    blur.add(blur.layer('captions', { name: 'Inner captions', d: blur.captions(CUES, { placement: 'middle' }), p: { 'position.x': blur.ch(-40, [[0, -40], [3, 40]]) } }));
+  });
+  blur.add(blur.layer('precomp', { name: 'Precomp of captions (blur)', mblur: true, d: { comp: inner.id, w: 480, h: 270 }, p: { rotation: blur.ch(-4, [[0, -4], [2, 4]]) } }));
+  const space = newProject('space25d/captions', { name: '2.5D captions', w: 640, h: 360, dur: 3, backgroundFill: DARK });
+  space.add(space.layer('captions', { name: 'Captions (orientation Y)', threeD: true, d: space.captions(CUES, { placement: 'bottom' }), p: { 'orientation.y': 25, 'rotation.x': space.ch(10, [[0, 10], [2.5, -20]]) } }));
+  const rig = space.layer('group', { name: '3D group of captions', threeD: true, p: { 'position.x': 320, 'position.y': 180, 'anchor.x': 320, 'anchor.y': 180, 'rotation.y': space.ch(35, [[0, 35], [2.5, -35]]), perspective: 55 } });
+  space.add(space.layer('captions', { name: 'Grouped captions', group: rig.id, d: space.captions(CUES, { placement: 'top' }) }));
+  space.add(rig);
+  const masked = newProject('composite/path-masks-text', { name: 'Path masks on text', w: 480, h: 300, dur: 3, backgroundFill: GRADIENT });
+  const blob = (extra: Record<string, unknown> = {}) => masked.path('Blob', [[-60, -20, 0, 0, 30, -40], [30, -50, -20, 0, 40, 15], [70, 15, 0, -30, -10, 45], [-15, 55, 40, 0, -50, 0]], { closed: true, ...extra });
+  const text = masked.add(masked.layer('text', { name: 'Masked title', d: { text: 'Masked', size: 64, weight: 800, color: '#FFFFFF', align: 'center' }, p: { 'position.x': 240, 'position.y': 110 } }));
+  text.masks.push(masked.mask('rect', { x: 0, y: -10, feather: 6 }, { path: blob({ scaleX: 130, scaleY: 70, rotation: masked.ch(0, [[0, 0], [3, 45]]) }) }));
+  text.masks.push(masked.mask('ellipse', { x: 20, y: -15, w: 30, h: 30, feather: 0 }, { mode: 'subtract' }));
+  const caps = masked.add(masked.layer('captions', { name: 'Masked captions', d: masked.captions(CUES, { placement: 'bottom' }) }));
+  caps.masks.push(masked.mask('rect', { x: 240, y: 250, feather: 18 }, { path: blob({ scaleX: 200, scaleY: 60 }) }));
+  return [
+    project(blur, { group: 'Motion', title: 'Motion blur on captions', covers: ['captions motion blur', 'captions in a blurred group', 'captions in a blurred precomp'], samples: [0.5, 1.3] }),
+    project(space, { group: 'Space', title: '2.5D captions', covers: ['3D captions', 'captions in a 3D group'], samples: [0, 1.25, 2.5] }),
+    project(masked, { group: 'Compositing', title: 'Path masks on text', covers: ['path mask on text', 'path mask on captions'], samples: [0.5, 1.6] }),
+  ];
+}
+
 export function compclose3Projects(): CorpusProject[] {
-  return [blurGenerated(), spaceGenerated(), pathMasksMore()];
+  return [blurGenerated(), spaceGenerated(), pathMasksMore(), ...captionsAndText()];
 }

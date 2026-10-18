@@ -227,6 +227,17 @@ pub fn unsupported_with_media(
     check(document, composition, Some(assets), None, false)
 }
 
+/// [`unsupported_with_definitions`] for a renderer with fonts configured
+/// (`Renderer::set_text_fonts`): text and captions layers are drawn.
+pub fn unsupported_with_definitions_and_fonts(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+    effects: &crate::effects::Effects,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, Some(effects), true)
+}
+
 /// [`unsupported_with_media`] for a renderer with fonts configured
 /// (`Renderer::set_text_fonts`): text and captions layers are drawn
 /// (`Renderer::unsupported_with_media` picks the right check).

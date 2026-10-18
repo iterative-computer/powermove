@@ -45,6 +45,11 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    // The built-in effects, transitions, and extension layers as the kernel
+    // snapshots them (as tests/corpus.rs sets them).
+    renderer
+        .set_definitions(&pm_render::all_builtin_definitions())
+        .expect("built-in definitions");
     let mut compared = 0;
     let mut failed = Vec::new();
     let mut skipped = Vec::new();
@@ -86,7 +91,21 @@ fn main() {
                 ));
                 continue;
             }
-            let issues = renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
+            // The capture app had only the built-in definitions: any other
+            // extension layer definition was missing there.
+            let mut set = pm_render::all_builtin_definitions();
+            set.missing = extension_definitions(&p.document)
+                .into_iter()
+                .filter(|id| !set.definitions.iter().any(|d| d.id.as_str() == id))
+                .map(|id| id.as_str().into())
+                .collect();
+            renderer.set_definitions(&set).expect("built-in definitions");
+            let issues = pm_render::capability::unsupported_with_definitions_and_fonts(
+                &p.document,
+                &p.composition,
+                Some(&p.resolver),
+                renderer.effects(),
+            );
             // Amendment 21: these classes are drawn natively; routing one
             // of them is a failure, not a skip.
             let forbidden: Vec<String> = issues
