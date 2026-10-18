@@ -915,20 +915,14 @@ fn frame_time_at_1080p() {
     }
 }
 
-/// A 24-bit BMP of `w` × `h` (a container the renderer does not draw).
-fn bmp(w: u32, h: u32) -> Vec<u8> {
-    let row = (w * 3).div_ceil(4) * 4;
-    let size = 54 + row * h;
-    let mut b = b"BM".to_vec();
-    for v in [size, 0, 54, 40, w, h] {
-        b.extend_from_slice(&v.to_le_bytes());
-    }
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&24u16.to_le_bytes());
-    for v in [0u32, row * h, 2835, 2835, 0, 0] {
-        b.extend_from_slice(&v.to_le_bytes());
-    }
-    b.extend(std::iter::repeat_n(0x80u8, (row * h) as usize));
+/// A 24-bit uncompressed TGA of `w` × `h` (a container the renderer does
+/// not draw: it decodes, through ImageIO, as an unrecognized format).
+fn tga(w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0u8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    b.extend_from_slice(&w.to_le_bytes());
+    b.extend_from_slice(&h.to_le_bytes());
+    b.extend_from_slice(&[24, 0x20]);
+    b.extend(std::iter::repeat_n(0x80u8, w as usize * h as usize * 3));
     b
 }
 
@@ -965,12 +959,12 @@ fn exec_time_unsupported_media_leaves_the_target_untouched() {
         rendered.failures
     );
     let before = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
-    // The document records a PNG; the file is a BMP: only the media probe
+    // The document records a PNG; the file is a TGA: only the media probe
     // at exec time can tell.
     let dir = std::env::temp_dir().join(format!("pm-render-exec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let still = dir.join("still.png");
-    std::fs::write(&still, bmp(160, 90)).unwrap();
+    std::fs::write(&still, tga(160, 90)).unwrap();
     let mut bad = MapResolver {
         paths: resolver.paths.clone(),
     };
@@ -989,7 +983,7 @@ fn exec_time_unsupported_media_leaves_the_target_untouched() {
         .expect("an unsupported frame");
     assert!(
         matches!(&err, pm_render::RenderError::Unsupported(u)
-            if u.iter().any(|u| u.feature == Feature::Media("BMP stills".into()))),
+            if u.iter().any(|u| u.feature == Feature::Media("stills of an unrecognized format".into()))),
         "{err:?}"
     );
     let after = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();

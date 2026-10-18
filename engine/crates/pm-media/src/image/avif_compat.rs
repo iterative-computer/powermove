@@ -4,17 +4,16 @@
 //! before conversion (any other `clap` shows the full image), and `irot` /
 //! `imir` become the image orientation, applied as the ImageBitmap applies
 //! it. Native-depth ImageIO reading is unchanged.
-use super::{ImageColor, ImageFormat, Rgba, StillImage, icc::IccClass, orient, pool_rgba};
+use super::{ImageColor, ImageFormat, Rgba, StillImage, orient, pool_rgba};
 use crate::{MediaError, Result, pool::FramePool, sys::avif as a};
 use pm_protocol::color::{AlphaMode, Transfer};
 use std::path::Path;
 
 /// Whether the decoded facts are in the class this module reproduces
-/// (8-bit, sRGB or untagged). [`structure`] adds the container facts.
+/// (SDR with supported ICC or CICP; ImageIO exposes deep AVIF as 16-bit).
+/// [`unmeasured`] adds the container facts.
 pub fn applies(still: &StillImage) -> bool {
-    still.format == ImageFormat::Avif
-        && still.bit_depth == 8
-        && matches!(still.color.icc_class, None | Some(IccClass::Srgb))
+    still.format == ImageFormat::Avif && matches!(still.bit_depth, 8 | 16) && !still.float
 }
 
 struct Decoder(*mut a::avifDecoder);
@@ -115,23 +114,54 @@ pub fn srgb_cicp(primaries: u16, transfer: u16) -> bool {
     matches!(primaries, 1 | 2) && matches!(transfer, 1 | 2 | 6 | 13 | 14 | 15)
 }
 
+/// Profile pointers borrow the decoder-owned ICC bytes. Blink rejects an
+/// invalid AVIF profile rather than silently substituting the CICP profile.
+unsafe fn profile(image: &a::avifImage) -> Result<crate::sys::skcms::skcms_ICCProfile> {
+    use crate::sys::skcms as s;
+    unsafe {
+        let mut source = std::mem::zeroed();
+        if image.icc.data.is_null()
+            || !s::skcms_ParseWithA2BPriority(
+                image.icc.data.cast(),
+                image.icc.size,
+                [0, 1].as_ptr(),
+                2,
+                &mut source,
+            )
+        {
+            return Err(MediaError::decode("invalid AVIF ICC profile"));
+        }
+        let signature = source.data_color_space;
+        if signature != s::skcms_Signature_RGB
+            && !(image.yuvFormat == a::AVIF_PIXEL_FORMAT_YUV400
+                && signature == s::skcms_Signature_Gray)
+        {
+            return Err(MediaError::decode(
+                "AVIF ICC color model does not match its planes",
+            ));
+        }
+        Ok(source)
+    }
+}
+
 /// Why the container's color description (what Blink's
 /// `AVIFImageDecoder` reads after `avifDecoderParse`) is outside the class
 /// this module reproduces.
 fn colorimetry(image: &a::avifImage) -> Option<String> {
     if image.icc.size != 0 {
-        // Blink converts from the ICC profile instead of the CICP one.
-        return Some("AVIF stills with an ICC profile".into());
+        // ICC overrides CICP in Blink. Validate the same RGB/gray model
+        // here; the ImageBitmap conversion applies it in `read`.
+        return unsafe { profile(image).err().map(|e| e.to_string()) };
     }
     let (p, t) = (image.colorPrimaries, image.transferCharacteristics);
     (!srgb_cicp(p, t)).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
 }
 
-/// Why an AVIF is outside the class compared with Chromium (8-bit 4:2:0,
-/// full or limited range, opaque or with alpha, any `irot`/`imir`/`clap`,
-/// no ICC profile, and a CICP color description Blink reads as sRGB
-/// ([`srgb_cicp`]); `tests/stills.rs` and
-/// `e2e/native-still-orientation-parity.spec.ts`). None inside it.
+/// Why an AVIF is outside the class compared with Chromium: SDR 8/10/12-bit
+/// 4:4:4, 4:2:2, 4:2:0 or monochrome, full/limited range, alpha, container
+/// transforms and ICC, plus the measured 16-bit enhanced 4:4:4 containers.
+/// Gain maps keep the SDR base image, as the shipped
+/// ImageBitmap-to-WebGL upload does; HDR base images remain unmeasured.
 pub fn unmeasured(path: &Path) -> Result<Option<String>> {
     let bytes = std::fs::read(path)?;
     unsafe {
@@ -141,17 +171,31 @@ pub fn unmeasured(path: &Path) -> Result<Option<String>> {
             return Ok(Some(what));
         }
         Ok(match image.yuvFormat {
-            a::AVIF_PIXEL_FORMAT_YUV420 if image.depth == 8 => None,
-            a::AVIF_PIXEL_FORMAT_YUV420 => Some(format!("{}-bit AVIF stills", image.depth)),
-            a::AVIF_PIXEL_FORMAT_YUV444 => Some("AVIF stills with 4:4:4 chroma".into()),
-            a::AVIF_PIXEL_FORMAT_YUV422 => Some("AVIF stills with 4:2:2 chroma".into()),
-            a::AVIF_PIXEL_FORMAT_YUV400 => Some("monochrome AVIF stills".into()),
-            other => Some(format!("AVIF stills of pixel format {other}")),
+            a::AVIF_PIXEL_FORMAT_YUV420
+            | a::AVIF_PIXEL_FORMAT_YUV444
+            | a::AVIF_PIXEL_FORMAT_YUV422
+            | a::AVIF_PIXEL_FORMAT_YUV400
+                if matches!(image.depth, 8 | 10 | 12)
+                    || image.depth == 16 && image.yuvFormat == a::AVIF_PIXEL_FORMAT_YUV444 =>
+            {
+                None
+            }
+            _ => Some(format!(
+                "{}-bit AVIF stills of pixel format {}",
+                image.depth, image.yuvFormat
+            )),
         })
     }
 }
 
-pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<StillImage> {
+pub fn read(path: &Path, _original: &StillImage, pool: &FramePool) -> Result<StillImage> {
+    read_bitmap(path, pool)
+}
+
+/// Decode the compatibility bitmap independently of ImageIO. Some valid AVIFs
+/// (including premultiplied alpha) are accepted by Chromium but not ImageIO.
+/// Native-depth reading continues to use the ordinary source reader.
+pub fn read_bitmap(path: &Path, pool: &FramePool) -> Result<StillImage> {
     let bytes = std::fs::read(path)?;
     // Decoder and its image own all allocations until after the pool copy.
     unsafe {
@@ -220,7 +264,7 @@ pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<Stil
         } else {
             AlphaMode::Premultiplied
         };
-        Ok(StillImage {
+        let bitmap = StillImage {
             frame: pool_rgba(
                 pool,
                 w,
@@ -239,8 +283,25 @@ pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<Stil
                 chromaticities: None,
             },
             orientation: o,
-            ..original.clone()
-        })
+            bit_depth: 8,
+            float: false,
+            format: ImageFormat::Avif,
+            backend: super::ImageBackend::CrabbyAvif,
+        };
+        if decoded.icc.size != 0 {
+            let bytes = std::slice::from_raw_parts(decoded.icc.data, decoded.icc.size).to_vec();
+            let class = super::icc::classify(&bytes);
+            // ImageBitmap tags its decoded source-space bitmap. WebGL's
+            // readPixels conversion uses Skia's float color pipeline, which
+            // can retain out-of-gamut premultiplied RGB above alpha.
+            let mut tagged = bitmap;
+            tagged.color.icc_bytes = Some(bytes.len());
+            tagged.color.icc_class = Some(class);
+            tagged.color.icc = Some(bytes);
+            super::compat::bitmap(&tagged, pool)
+        } else {
+            Ok(bitmap)
+        }
     }
 }
 
