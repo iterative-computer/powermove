@@ -41,7 +41,7 @@ function rng(seed: number) {
   };
 }
 
-async function editor() {
+async function editor(mode = 'audit') {
   const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
   PM.layerDefinition = (id: string) => Object.values(LAYER3D_DEFINITIONS).includes(id as any)
     ? { id, label: '3D', version: 1, params: [], defaults: {}, renderer: { kind: 'layer3d' } }
@@ -51,7 +51,7 @@ async function editor() {
   // The asset store's shape (`legacy/gl/raster.ts`): records by id.
   const store = new Map<string, any>();
   PM.assets = { map: store, get: (id: string) => store.get(id) ?? null, set: (id: string, a: any) => store.set(id, a), delete: (id: string) => store.delete(id) };
-  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode('audit'), loadModule, sink: () => {}, auditMs: 1e9 });
+  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: () => {}, auditMs: 1e9 });
   PM.proj = PM.mkProject({ name: '3D', fps: 30, dur: 6, w: 1280, h: 720 });
   PM.time = 0;
   expect(await doc.whenReady).toBe(true);
@@ -347,6 +347,31 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     expect(mismatches(doc)).toEqual([]);
     expect(fellBack(doc)).toEqual([]);
     expect(hits.object).toBeGreaterThan(0);
+  }, 300_000);
+
+  it('answers a pick within a frame on a scene with skinned models', async () => {
+    const { PM, doc } = await editor('on');
+    const models = await addModels(PM);
+    const random = rng(31);
+    populate(PM, random, ['cube', 'wedge', ...models]);
+    for (const name of models) editScene(PM, { operation: 'add_object', object: { id: `k${models.indexOf(name)}`, source: { assetId: name }, p: { x: (random() - 0.5) * 3, z: -1 } } });
+    PM.touch();
+    setViewportMode(PM, 'editor');
+    const api = doc.api!;
+    api.pick(1, 1, 0); // models load once
+    const times: number[] = [];
+    for (let i = 0; i < 400; i++) {
+      // A new time per pick: every skinned model is posed again.
+      const t = (i % 40) * 0.05, x = random() * PM.proj.w, y = random() * PM.proj.h;
+      const start = performance.now();
+      try { api.pick(x, y, t); } catch { /* slot throws are answers too */ }
+      times.push(performance.now() - start);
+    }
+    times.sort((a, b) => a - b);
+    const p = (q: number) => times[Math.min(times.length - 1, Math.floor(q * times.length))]!;
+    if (process.env.PM_GEOMETRY_REPORT) writeFileSync(`${process.env.PM_GEOMETRY_REPORT}.timing`, JSON.stringify({ models, p50: p(0.5), p95: p(0.95), max: times.at(-1) }));
+    expect(fellBack(doc)).toEqual([]);
+    expect(p(0.95)).toBeLessThan(33);
   }, 300_000);
 
   it('asks the renderer for model assets once and follows a relinked asset', async () => {
