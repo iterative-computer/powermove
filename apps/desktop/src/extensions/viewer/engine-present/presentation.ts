@@ -657,7 +657,7 @@ export class ViewerPresentation {
     this.hide(this.canvasElement);
   }
 
-  /** The output scale a frame was drawn at (today's `PM.quality`). */
+  /** The output scale a frame was drawn at (today's preview quality factor). */
   private qualityOf(frame: PresentedFrame): number {
     const state = this.states.find((s) => Number(s.viewSeq) === frame.viewSeq) ?? this.sequencer.current;
     switch (state?.resolution) {
