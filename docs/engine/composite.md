@@ -41,9 +41,12 @@ section 25's Standard class (≤ 1 CV for 99.9% of pixels, ≤ 4 CV anywhere) an
 for transparent captures, the float frames within 1 CV. The corpus tests fail
 any project routed for masks, motion blur, 2.5D, `compat` level 2, the
 `requiresEngine` stamp, or project color (`support::routing_forbidden`). Bezier
-path masks no longer have a routing reason (`Feature::PathMasks` is removed).
-Level 1 shape layers on 2.5D planes keep one (`Feature::PlaneShapeRaster`,
-under 2.5D below), listed as a skip.
+path masks no longer have a routing reason (`Feature::PathMasks` is removed),
+and neither do level 1 shapes on 2.5D planes (`Feature::PlaneShapeRaster`, a
+route of the previous round, is removed: the Canvas2D emulation's residual it
+stood for is closed; motion.md, "2.5D"). Level 2 text the text renderer does
+not lay out yet (`capability::level2_text_gap`, reported as text) is forbidden
+too.
 
 ## Graph
 
@@ -248,7 +251,8 @@ matte passes render over the pass rectangle.
   79 presenter drops (late), max 268 ms** (engine compose mean 1.6 ms, 25
   late-skipped). The 59.94 linear row fails real time on this loaded run; it
   needs the clean rerun phase3a-gate item 6 already asks for before it can be
-  read either way. Results: `/tmp/ne-compclose/evidence/r2/uhd-2997-5994.jsonl`.
+  read either way. (The per-row results are kept with the lane's evidence,
+outside the repository.)
 
 ## Tests
 
@@ -257,12 +261,13 @@ matte passes render over the pass rectangle.
 | `tests/composite.rs` | Blend modes (5 color pairs, 9 modes, 2 opacities, 3 color setups, 2 precisions), styled groups, mask coverage, matte modes and visibility, matte depth and cycles, group matte sources, adjustment layers, isolation, regions with padding, determinism, project settings | Pass |
 | `tests/linear.rs` | 50% white over black and a 2× downscaled checkerboard: 188 with linear blending, 128 without | Pass |
 | `tests/color.rs` | Invariant (2), pipeline transparency (ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`), and invariant (1) for 4:2:0, each with linear blending on too | Pass: 0 samples differ |
-| `tests/corpus.rs` | Every supported corpus project of the default captures (v1, render, effects, composite, motion, compclose, compclose2, compclose3) | 2026-10-18: 339 frames, 5 failures, all video class (`motion/blur-video`, the appendix A item; `retime/speed` and `space25d/precomps`, the media lane's chroma-edge decode); skips: SVG images, animated images, playback proxies, `space25d/vector` (level 1 shapes on planes) |
-| `tests/text_corpus.rs` | Text and captions projects of the same captures, with the built-in definitions | 2026-10-18: 143 frames, 0 failures; `space/groups-25d` skipped (level 1 shapes on planes) |
+| `tests/corpus.rs` | Every supported corpus project of the default captures (v1, render, effects, composite, motion, compclose, compclose2, compclose3) | 2026-10-19: 342 frames, 5 failures, all video class (`motion/blur-video`, the appendix A item; `retime/speed` and `space25d/precomps`, the media lane's chroma-edge decode, confined to the video plane); `space25d/vector` and `composition/metadata` bit-exact; skips: SVG images (`layers/svg-scales`, `mattes/nested-and-animated`), animated images, playback proxies |
+| `tests/text_corpus.rs` | Text and captions projects of the same captures, with the built-in definitions | 2026-10-19: `space/groups-25d` drawn: text within the text class, every other pixel exact (max 0); `space/layers-25d` skipped (SVG images, the SVG route) |
 | `tests/path_masks.rs` | 54 path mask coverage canvases against today's (`pm-vector/tools/mask-ref`) | Pass: bit-exact |
 | `pm-vector` `tests/mask_coverage.rs`, `canvas2d::filter` unit tests | Item rasters exact where nothing is blurred; the CPU model of the blur within 2 CV; Skia's step counts and kernels | Pass |
 | `tests/half_store.rs` | `rgba16float` stores truncate on this GPU, and the renderer's probe agrees | Pass |
-| `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | Pass: 338,211 drawn pixels, all picked; level 2 placement 0 misses (motion.md) |
+| `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | Pass: 338,211 drawn pixels, all picked; level 2 placement 0 misses (motion.md). Samples where a layer draws nothing (today's capture is transparent there too) check no box |
+| `pm-vector` `tests/canvas2d.rs` | Level 1 shape and path rasters against today's, including the viewport sweep | 529 cases: 503 exact, 22 within 1, 4 pinned; the radius-24 cases and every `viewport-*` case must be bit-exact |
 | `pm-color` unit tests | Composite and matte references | Pass |
 | App: `project-settings.test.ts`, `settings/project-color.test.ts`, `shared/project-color.test.ts`, `engine-stamp.test.ts`, `e2e/project-color.spec.ts` | The Color rows, Undo, the stamp, hidden without the new engine | Pass |
 
@@ -271,19 +276,6 @@ Recapture the corpus cases with
 
 ## Gaps
 
-- **Level 1 shapes on 2.5D planes stay routed** (`Feature::PlaneShapeRaster`).
-  A shape's Canvas2D raster is drawn through the plane, and the plane magnifies
-  the vector lane's pinned single-sample MSAA residuals: v1 `space/groups-25d`
-  differs at 6 to 11 rounded-corner pixels per frame (max 47, 40, 32 CV at t =
-  0, 1.25, 2.5) while its text is within the text class. The cause is the raster
-  itself: today's `rasterShape` of those cards (130 × 140, radius 24, scale 1)
-  differs from pm-vector's emulation at 2 pixels each, max 64
-  (`pm-vector/tests/canvas2d.rs`, `shape-groups25d-card-*`, pinned with
-  `shape-corpus-rect-r24-s1`). Drawing the planes otherwise matches today
-  (`space25d/vector`, with shapes, a path, a masked shape, shapes in a 3D group,
-  and a blurred 3D shape, was bit-exact), so the route can go when the
-  emulation's residuals close; level 2 shapes on planes are drawn. Evidence:
-  `/tmp/ne-compclose/evidence/r2/groups-25d/`.
 - **Animated path masks fill on the CPU every frame.** An item is the whole
   output-size canvas through pm-vector's emulation: 33 to 40 ms per mask at
   1920 × 1080 with pm-vector optimized (`tests/mask_coverage.rs`, `hd-*`; 2 ms
@@ -294,8 +286,9 @@ Recapture the corpus cases with
   animated masks at UHD; not measured in the viewer.
 - **Level 2 text the text lane does not lay out yet** (animators, range styles,
   typography anchoring) is reported as `Feature::Text` (`capability.rs`,
-  `level2_text_gap`), which `support::routing_forbidden` does not cover: the text
-  lane owns it.
+  `level2_text_gap`) and the text lane owns its layout; `support::routing_forbidden`
+  now forbids it like every other level 2 route, so a corpus project that needs
+  it fails (none does today).
 - **The run-in-E option** has no UI (the plan names only the two rows).
 - Today's masks have no expansion, opacity, or inversion; there is nothing to port.
 
@@ -321,7 +314,8 @@ Recapture the corpus cases with
     `layer_masks` (now given the output size);
   - `capability.rs`: the `requiresEngine` stamp, 3D masks, non-array masks,
     `TrackMatte`, `BlendMode`, and `PathMasks` removed, motion blur, 2.5D, and
-    level 2 for every type, `PlaneShapeRaster` added,
+    level 2 for every type (`PlaneShapeRaster` added in one round and removed
+    in the next),
     `unsupported_with_definitions_and_fonts` (for the text corpus test);
   - `scene3d/layers.rs` (about 130 lines): `Pass3d::at_time` and depth sets for
     blurred 3D objects;

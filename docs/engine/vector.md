@@ -38,7 +38,8 @@ Graphite (Metal). `pm_vector::canvas2d` reproduces that pipeline on the CPU:
 4. **Tessellation** (`tess.rs`, `stroke.rs`): `PatchWriter`'s chopping and
    Wang's formula on the CPU, `tessellate_filled_curve` and the stroke
    vertex function in `f32` as the GPU runs them.
-5. **Rasterization** (`msaa.rs`): vertices snapped to 1/256 px (round half
+5. **Rasterization** (`msaa.rs`): vertices through the viewport round trip
+   (`tess::Viewport`, below), snapped to 1/256 px (round half
    away from zero), the top-left rule, 4× MSAA at the standard positions
    `(0.375, 0.125) (0.875, 0.375) (0.125, 0.625) (0.625, 0.875)`, per-sample
    8-bit source-over, and a `(sum + 2) / 4` box resolve. Graphite
@@ -110,27 +111,56 @@ M-series GPU), 454 Canvas2D cases:
 | One to three pixels with a flipped MSAA sample (max 45–64) | 5 |
 
 Every case has at most 0.1% of pixels off by more than 1 code value. The
-five cases that miss "no pixel off by more than 4" are pinned in
-`tests/canvas2d.rs`: `shape-ellipse-big-s2.75` (3 px), `shape-random153-s3.75`
-(1 px), `paths-badge-rotated-scaled-s3` (2 px), `diag-ellipse-380` (2 px),
-`shape-corpus-rect-r24-s1` (2 px).
+five cases that missed "no pixel off by more than 4" were pinned in
+`tests/canvas2d.rs`; since the viewport round trip (below) the radius-24 one,
+`shape-corpus-rect-r24-s1`, is bit-exact and four remain (Residuals).
 
 Corpus (`pm-render/tests/corpus.rs`): `shapes/primitives`,
 `shapes/editable-paths`, and `shapes/svg-import-paths` are 100.000% exact at
 every sample, opaque and transparent float frames. `composition/metadata`
-(the radius-24 rectangle, rotated) has 2 to 6 pixels with one flipped sample
-(max 43); it is pinned in `KNOWN_RESIDUALS`, and the same raster captured by
-the tool shows the same two pixels, so the capture and the corpus agree and
-the emulation is what differs.
+(the radius-24 rectangle, rotated) had 2 to 6 pixels with one flipped sample
+(max 43), pinned in `KNOWN_RESIDUALS`; with the viewport round trip it is
+bit-exact at every sample and the pin is gone.
+
+### Viewport round trip
+
+Every tessellated vertex goes from device coordinates to normalized device
+coordinates and back to window coordinates before it is snapped
+(`tess::Viewport`): `ndc = (x − w/2) / (w/2)`, `window = ndc · w/2 + w/2`, each
+step rounded to `f32`, over the target's dimensions. The round trip moves a vertex
+by at most a few ulps of `w/2`, which only matters to an MSAA sample that lies
+that close to a tessellated edge.
+
+The model is empirical. It was found with the residual that remained at the
+corners of radius-24 rounded rectangles (one MSAA sample, two pixels per
+rectangle, max 64): of twenty evaluation orders of the round trip (fused or
+unfused `x · 2/w − 1`, the division above, the four viewport expressions) over
+the target's exact dimensions and over approx-fit attachment sizes (Skia's
+`GetApproxSize`, powers of two, multiples of 4 to 256), it is the only one that
+
+- makes the radius-24 rectangles of the corpus (108 × 108 canvas) and of v1
+  `space/groups-25d` (138 × 148) bit-exact, the two cases it was chosen on;
+- predicts the four canvas sizes captured after it was chosen (`viewport-rect-*`
+  at 98 × 178, 208 × 128, 264 × 264, 341 × 219: each a two-pixel residual
+  without it, bit-exact with it);
+- keeps the 68 × 68 radius-24 rectangle of the corpus's `precomps/cycle` and the
+  529 × 303 raster of `shapes/editable-paths` exact (every approx-fit variant
+  breaks one of them), and changes no other captured case.
+
+The radius-24 residual is closed by it: `shape-corpus-rect-r24-s1`, the
+`shape-groups25d-card-*` cards, `composition/metadata` in the corpus (formerly
+pinned in `KNOWN_RESIDUALS`, now bit-exact at every sample), and level 1 shapes
+on 2.5D planes, which are no longer routed.
 
 ### Residuals
 
-Each remaining difference is a single MSAA sample within 0.07–0.46/256 px of
-a tessellated edge. In the corpus rectangle the sample is 0.145/256 px inside
-a middle-out sliver triangle whose vertex lies 0.0004/256 px below a
-rounding boundary; the GPU must have placed it at least three float ulps
-lower, which no evaluation order, reciprocal model, snapping rule, or NDC
-round trip reproduces. They are left as measured.
+On `canvas-20261018-220349-9a95e00c` (529 cases): 503 bit-exact, 22 within 1
+code value (analytic renderer rounding), and four pinned in `tests/canvas2d.rs`:
+`shape-ellipse-big-s2.75` (3 px), `shape-random153-s3.75` (1 px),
+`paths-badge-rotated-scaled-s3` (2 px), `diag-ellipse-380` (2 px). Each is a
+single MSAA sample within 0.07–0.46/256 px of a tessellated edge that neither the
+curve evaluation nor the viewport round trip reproduces. They are left as
+measured.
 
 Performance (release, this Mac): the whole 454-case sweep rasterizes in
 1.8 s including PNG decoding; the largest case (1947 × 1397, MSAA) in 0.13 s.

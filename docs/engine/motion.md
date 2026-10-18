@@ -113,16 +113,15 @@ through VideoToolbox; MP4 export with motion blur on; 2026-10-18 for all three):
   value of H.264);
 - **the blurred export holds frame 0 in every frame** (level 20 twenty times)
   for every source, VP9, H.264, and ProRes alike: users' exports today contain
-  the stale frame (levels:
-  `/tmp/ne-compclose/evidence/r2/blur-video/legacy-export-levels-vp9-h264-prores.jsonl`);
+  the stale frame (`apps/desktop/e2e/legacy-blurred-video-export.spec.ts`);
 - the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
   50, 100, 170, the same as without blur).
 
 So today's preview and export disagree, and the engine follows the preview.
 This is an appendix A item for the plan owner, not a parity target the engine
-should reproduce: side-by-sides of the corpus capture against the engine at
-`/tmp/ne-compclose/evidence/blur-video/side-by-side-t0.5.png` and `-t1.2.png`,
-the export levels at `/tmp/ne-compclose/evidence/blur-video/legacy-export-levels.jsonl`.
+should reproduce. The side-by-sides of the corpus capture against the engine
+and the export levels are kept with the lane's evidence, outside the
+repository, for Jude's decision.
 
 ## 2.5D
 
@@ -144,12 +143,16 @@ shapes and editable paths, text and captions, shader and extension layers, and
 masked adjustment layers inside 3D groups. Level 1 text keeps today's raster
 density (the continuous raster scale of the 2D world matrix, as `contentQuad`
 computes it for a 3D layer outside the preview's clipping) and draws through the
-plane. **Level 1 shapes on planes stay routed** (`Feature::PlaneShapeRaster`):
-the plane magnifies the Canvas2D emulation's pinned MSAA residuals, which v1
-`space/groups-25d` shows at its rounded corners (up to 47 CV; composite.md,
-Gaps). The engine draws them correctly otherwise (`space25d/vector` was
-bit-exact), so the route goes when the vector residuals close. 3D object, light, and camera layers draw in screen space, as today, also
-inside 3D groups (`space25d/others`).
+plane, and so do level 1 shapes: their Canvas2D raster draws through the
+plane. (The previous round routed level 1 shapes on planes,
+`Feature::PlaneShapeRaster`, because the plane magnified one flipped MSAA sample
+at each rounded corner of the radius-24 cards of v1 `space/groups-25d`, up to
+47 CV. The emulation now models the rasterizer's viewport round trip, which
+makes those rasters bit-exact (docs/engine/vector.md, "Viewport round trip"),
+and the route is removed: `space25d/vector` is bit-exact, and v1
+`space/groups-25d` matches today at every pixel outside its text, whose text is
+within the text class.) 3D object, light, and camera layers draw in screen
+space, as today, also inside 3D groups (`space25d/others`).
 
 **Level 2 content on planes** (`space25d/local.rs`; no legacy reference): level 2
 coverage scenes (solids, shapes, paths, plain SVG images) used to draw through the
@@ -391,7 +394,6 @@ unchanged, continuous precomp rasterization, level 2 routing.
   that also blurs the minor axis. Level 2 text and resvg rasters on planes are
   resampled from a layer-space raster rather than projected analytically (a smoke
   test covers level 2 text's placement; resvg rasters on planes have none).
-- Level 1 shapes on 2.5D planes stay routed (`Feature::PlaneShapeRaster`, above).
 - Level 2 text draws a few descender pixels (4 of 3,046 at 40 px, 18 of 10,048
   at 1.75×) up to 2 pixels below the text box that `bounds` and `pick` measure
   with level 1 metrics, so those pixels do not select the layer (new content,
