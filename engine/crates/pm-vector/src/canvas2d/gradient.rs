@@ -396,8 +396,8 @@ mod tests {
     #[test]
     fn half_rounds_to_eleven_bits() {
         assert_eq!(f16_round(1.0), 1.0);
-        assert_eq!(f16_round(0.1), 0.099_975_59);
-        assert_eq!(f16_round(1.0 / 255.0), 0.003_921_509);
+        assert_eq!(f16_round(0.1), 6552.0 / 65536.0);
+        assert_eq!(f16_round(1.0 / 255.0), 257.0 / 65536.0);
         assert_eq!(f16_round(1e-9), 0.0);
     }
 
