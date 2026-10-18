@@ -458,10 +458,10 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **transport** — time and playback (`time()` and `playing()` are reactive in components), stepping, quality/performance, preview resolution, and render/UI invalidation.
 - **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
 - **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
-- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
+- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading. `media.assets.source(id)` resolves to `{ url, kind, mime, rendition }`, a browser-playable URL for your own element, once the asset has loaded; `media.assets.audio(id)` resolves to its audio as a Blob. Both resolve to null when there is nothing to play and wait at most `timeoutMs` (30 s by default).
 - **media import defaults** — `registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } })` sets normalized anchors for future image, video and SVG imports and asset-to-timeline additions. `getImportDefaults()` reads the active override. Registration is owned by the mod; unloading restores the prior default. Existing layers/keyframes and audio/3D origins are untouched.
 - **inspector** — `registerSection({ id, title, after: 'content' | 'transform' | 'effects', when?, build })` adds controls to Properties. `build(target, { layerIds })` returns a disposer or cleanup function. Sections rebuild on selection changes, and disappear when the mod unloads. Use `sections()` to inspect active contributions.
-- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots.
+- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots. `snapshotAsync(time, maxWidth?)`, `renderFrameToAsync(time, width, height, options?)` and `rasterAsync(layer, scale?, time?, crop?)` return the same results as `snapshot`, `renderFrameTo` and `raster` without blocking the editor; use them in new code ([Deprecated compatibility APIs](#deprecated-compatibility-apis)).
 - **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
 - **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, edit/history-backed `gesture` construction, and `openExternal(url)` for https links.
 - **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
@@ -481,12 +481,57 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **render.gl.compileError** — `compileError(key): string | null` reads the latest shader compilation diagnostic for a program key.
 - **events.fonts** — `on('fonts', families => …)` receives the complete ordered font-family list whenever the catalogue changes.
 
-### Deprecated
+### Deprecated compatibility APIs
 
-`api.host.pm` and `api.host.state` exist for compatibility with older user
-extensions only. They are unstable, untyped escape hatches; new code must use the
-typed namespaces above. Both forms, plus the standalone `PM` identifier, fail the
-built-in extension boundary lint.
+Everything below keeps working fully at `apiVersion` 1 to 3, with the same
+signatures, synchronous return types and live objects as before, with "Use New
+Engine" on or off. Nothing refuses, disables or rewrites code that uses them,
+and no `apiVersion` change is needed to keep using them or to move off them:
+every replacement is available to every `apiVersion` (apiVersion 4 makes them
+part of its documented contract). New code must not use them.
+
+| Deprecated member | Replacement | What changes |
+| --- | --- | --- |
+| `render.snapshot` | `await api.render.snapshotAsync(time, maxWidth)` | Resolves to the same JPEG data URL without blocking the editor while the engine draws the frame. |
+| `render.renderFrameTo` | `await api.render.renderFrameToAsync(time, width, height, options)` | Resolves to the same opaque canvas without blocking the editor. |
+| `render.raster` | `await api.render.rasterAsync(layer, scale, time, crop)` | Resolves to the same raster surface (pixels, anchor, selection, fontOffset) without blocking the editor. |
+| `render.gl.context` | `api.layers.register({ renderer: { kind: 'fragment', fragment } }) to draw, await api.render.renderFrameToAsync(time, width, height) to read the frame` | A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is an offscreen copy. |
+| `services.raster` | `api.layers.register or api.effects.register (GLSL) to change pixels, await api.render.rasterAsync(layer) to read a layer` | Engine-drawn layers and effects need no synchronous round trip per layer and frame. |
+| `media.assets.get().el` | `await api.media.assets.source(id) and an element of your own` | Resolves to a browser-playable URL for the asset; your element owns its playback state. |
+| `media.assets.get().url` | `await api.media.assets.source(id)` | Resolves once a browser-playable rendition exists, instead of reading a field that may not be set yet. |
+| `media.assets.get().audioBlob` | `await api.media.assets.audio(id)` | Resolves to the asset's audio as a Blob once it is available. |
+| `media.assets.get().object3d` | `api.scene3d.describe(layerId)` | Describes the model's objects, materials and lights as data instead of a live three.js object. |
+| `host.pm` | `the typed namespaces (api.project, api.anim, api.model, api.transport, …)` | The legacy registry has no stable shape; every capability built-ins use is on a typed namespace. |
+| `host.state` | `api.project.latest(), api.project.selection(), api.project.time() and api.project.playing() (reactive in Svelte)` | The typed reads are reactive inside Svelte components and stable across versions. |
+
+- `media.assets.get()` means `api.media.assets.get(id)`: the live fields on its
+  result. `peaks` and `audioDecodeError` stay current members.
+- `services.raster` means registering or capturing the `raster` service with
+  `api.services.register('raster', …)` or `api.services.get('raster')`
+  ([Raster overrides](#raster-overrides-and-verification)).
+- The synchronous render members block the editor while the engine draws: the
+  engine renders in its own process, and the call waits for it. With the
+  engine on, `render.snapshot` returns `''` only when the frame really could
+  not be drawn, and throws today's error for an unprepared Blender frame.
+- `api.host.pm`, `api.host.state` and the standalone `PM` identifier also fail
+  the built-in extension boundary lint.
+
+**When Powermove finds one.** Reading, writing or compiling extension source
+in an agent run, validating and publishing staged extensions (every agent
+provider, and `publish_extensions` over MCP), and preparing a Store publish
+return a structured warning per use: `{ extension, file, line, column, member,
+replacement, access, message }`. `access` says how it was found: `static`
+(`api.render.snapshot`), `alias` (through a variable), `destructured`,
+`computed` (`api.render['snapshot']`), or `dynamic` (a computed key that may be
+one). The analysis is lexical and best-effort; it does not follow values
+through function parameters other than `activate`'s, object properties or
+imports. Warnings never block anything.
+
+**For agents.** Never use these members in new code. When an extension you
+read, compile or publish uses one, tell the user the file, line and
+replacement and suggest the migration. Make the change only when the user
+agrees; never rewrite working code silently, and never raise `apiVersion` for
+it.
 
 ## Patterns
 
@@ -775,6 +820,10 @@ changed in `extensions` so the app reloads them. If the app reports a build or
 activation error, fix the extension; do not work around by touching the app bundle.
 
 ### Raster overrides and verification
+
+Raster overrides are a [deprecated compatibility API](#deprecated-compatibility-apis):
+existing ones keep working in preview and export; new code draws with
+`api.layers.register` or `api.effects.register`.
 
 The host registers a `raster` service with the `RenderAPI['raster']` signature. Capture it with `api.services.get` before registering a wrapper under the same name. Delegate unaffected layers to the captured implementation; calling `api.render.raster` from inside the wrapper recurses. Native raster surfaces store their canvas in `cv`, with `w`, `h`, `anchorX`, `anchorY`, `selection` and a texture cache `key`. Preserve those fields when replacing pixels. The override affects preview and export and is removed automatically when the extension disposes.
 

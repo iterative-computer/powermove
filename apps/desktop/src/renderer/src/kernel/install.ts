@@ -114,6 +114,7 @@ import { bridge as hostBridge } from './bridge';
 import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { assetAudio, assetSource } from './live-media';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -377,7 +378,10 @@ function makeMedia(PM: LegacyPM): MediaAPI {
     assets: {
       get: (id) => PM?.assets?.get?.(id),
       add: (...args) => PM?.assets?.add?.(...args) ?? Promise.resolve(undefined),
-      kind: (file) => PM?.assetKind?.(file) ?? null
+      kind: (file) => PM?.assetKind?.(file) ?? null,
+      // The replacements of the deprecated live fields (live-media.ts).
+      source: (id, options) => assetSource(PM, id, options),
+      audio: (id, options) => assetAudio(PM, id, options)
     },
     get fonts() { return PM?.Fonts ?? emptyFonts; }
   } as MediaAPI;

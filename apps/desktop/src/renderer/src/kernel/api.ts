@@ -749,7 +749,60 @@ export interface ImportFilesOptions {
   /** For a dropped folder: keep it as a media folder of individual files rather than an image sequence. */
   asFolder?: boolean;
 }
-export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
+/**
+ * The live media of an asset (`media.assets.get`): the durable record plus what
+ * the editor loaded for it. The live fields stay at apiVersion 1 to 3 with
+ * today's values; with "Use New Engine" on they come from the engine's media
+ * store and a browser-playable rendition.
+ */
+export interface RuntimeAsset extends AssetRecord {
+  blob?: Blob;
+  sourceText?: string;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.source(id)`,
+   * which resolves once a browser-playable rendition exists.
+   *
+   * An object URL of a browser-playable copy of the media (the original when
+   * Chromium can play it, otherwise a generated web rendition).
+   */
+  url?: string;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.source(id)`
+   * and an element of your own.
+   *
+   * The editor's own `<img>` or `<video>` element for the media. Reading it is
+   * supported; changing its playback state affects the editor's previews.
+   */
+  el?: HTMLImageElement | HTMLVideoElement;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.audio(id)`.
+   *
+   * The asset's audio (an audio asset, or a video's soundtrack) as a Blob.
+   */
+  audioBlob?: Blob;
+  /** Waveform peaks once decoded (min/max pairs per bucket); draw them with `media.audio.drawWaveform`. */
+  peaks?: Float32Array | number[];
+  /** Why the audio could not be decoded, once decoding failed. */
+  audioDecodeError?: string | null;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `api.scene3d.describe(layerId)`.
+   *
+   * A three.js object tree for an imported model (OBJ, glTF).
+   */
+  object3d?: unknown;
+  [key: string]: unknown;
+}
+
+/** A browser-playable source for an asset (`media.assets.source`). */
+export interface AssetSource {
+  /** An object URL your own `<img>`, `<video>` or `<audio>` element can play. Valid until the asset is removed. */
+  url: string;
+  kind: 'image' | 'video' | 'audio' | 'model';
+  /** The rendition's MIME type when known. */
+  mime: string | null;
+  /** True when the URL is a generated web rendition rather than the original bytes. */
+  rendition: boolean;
+}
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {
   bundled: string[];
@@ -784,9 +837,23 @@ export interface MediaAPI {
   readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };
   /** Requires the full-access permission for Store extensions. */
   readonly assets: {
+    /** The live asset. Its `url`, `el`, `audioBlob` and `object3d` fields are deprecated compatibility members. */
     get(id: string): RuntimeAsset | undefined;
     add(file: File, options?: Record<string, unknown>): Promise<RuntimeAsset>;
     kind(file: File): 'image' | 'video' | 'audio' | 'model' | null;
+    /**
+     * A browser-playable URL for the asset (apiVersion 4; available to every
+     * apiVersion). Waits up to `timeoutMs` (default 30 s) for the asset to load
+     * and its rendition to exist; null when there is no such asset, or it has no
+     * playable media (a model, or media that failed to load).
+     */
+    source(id: string, options?: { timeoutMs?: number }): Promise<AssetSource | null>;
+    /**
+     * The asset's audio (an audio asset, or a video's soundtrack) as a Blob
+     * (apiVersion 4; available to every apiVersion). Waits like `source`; null
+     * when the asset has no audio.
+     */
+    audio(id: string, options?: { timeoutMs?: number }): Promise<Blob | null>;
   };
   /** Requires the full-access permission for Store extensions. */
   readonly fonts: FontCatalog;
@@ -805,18 +872,70 @@ export interface RenderAPI {
   readonly gl: {
     bounds(layer: Layer, time: number): Bounds | null;
     pick(x: number, y: number, time: number, options?: { includeLocked?: boolean }): Layer | null;
+    /** Binds the editor's frame presentation to `canvas` (a custom viewer). With "Use New Engine" on, the engine presents into it. */
     init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
     resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
     compileError(key: string): string | null;
     readonly previewViewport: PreviewViewport | null;
+    /**
+     * @deprecated Compatibility member (apiVersion 1 to 3). To draw, register a
+     * GLSL layer with `api.layers.register({ renderer: { kind: 'fragment', fragment } })`
+     * or an effect with `api.effects.register`; to read the frame, use
+     * `await api.render.renderFrameToAsync(time, width, height)`.
+     *
+     * With "Use New Engine" on this is a compatibility context: a WebGL2 context
+     * on an offscreen canvas the size of the preview. Before each `frame:rendered`
+     * it holds the engine's finished frame (so `readPixels` reads the composite);
+     * whatever the extension draws into it afterwards, until the next frame, is
+     * composited over the composition as the top layer in the preview and in
+     * export (see "The compatibility WebGL context" in EXTENSIONS.md).
+     * Without the engine it is the compositor's own context, as before.
+     */
     readonly context: WebGL2RenderingContext | null;
   };
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.rasterAsync(layer, scale, time, crop)`, which resolves to
+   * the same surface without blocking the editor.
+   *
+   * A layer's raster surface, synchronously. With "Use New Engine" on the
+   * pixels come from the engine through a synchronous request.
+   */
   raster(layer: Layer, scale?: number, time?: number, uploaded?: (key: string) => unknown, crop?: RasterWindow): RasterSurface | null;
   /** Caret geometry for a text layer in its local space, produced by the same
       measuring and wrapping as the rasterizer. */
   textLayout(layer: Layer, time?: number): TextCaretLayout | null;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.renderFrameToAsync(time, width, height, options)`.
+   *
+   * Renders a frame of the open composition into a new opaque canvas,
+   * synchronously (the editor waits while the engine draws it).
+   */
   renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.snapshotAsync(time, maxWidth)`.
+   *
+   * A JPEG data URL (quality 0.74) of a frame, synchronously; `''` only when
+   * the frame could not be drawn.
+   */
   snapshot(time: number, maxWidth?: number): string;
+  /**
+   * A JPEG data URL (quality 0.74) of a frame at most `maxWidth` wide (default
+   * 480). apiVersion 4; available to every apiVersion. Never blocks the editor;
+   * a Blender composition renders the frame's Blender surfaces first.
+   */
+  snapshotAsync(time: number, maxWidth?: number): Promise<string>;
+  /** `renderFrameTo` without blocking the editor. apiVersion 4; available to every apiVersion. */
+  renderFrameToAsync(time: number, width: number, height: number, options?: Record<string, unknown>): Promise<HTMLCanvasElement>;
+  /**
+   * `raster` without blocking the editor: the same surface shape (`cv`, `w`,
+   * `h`, `anchorX`, `anchorY`, `selection`, and `fontOffset` for text), or null
+   * when the layer draws nothing then. A registered `raster` service override
+   * runs around it as for `raster`. apiVersion 4; available to every apiVersion.
+   */
+  rasterAsync(layer: Layer, scale?: number, time?: number, crop?: RasterWindow | null): Promise<RasterSurface | null>;
 }
 
 export interface KeyHandleState { [key: string]: unknown }
@@ -1120,7 +1239,13 @@ export interface CaptionsService {
  * wrapping it; calling api.render.raster from inside its override would recurse.
  * Native surfaces expose their pixels as `cv`; preserve key, dimensions, anchor
  * and selection geometry. Overrides affect preview and export and must delegate
- * unaffected layers to the captured service.
+ * unaffected layers to the captured service: return the captured service's own
+ * result object for a layer you do not change.
+ *
+ * Overriding the `raster` service is a deprecated compatibility pattern
+ * (apiVersion 1 to 3; it keeps working fully). New code changes pixels with
+ * `api.layers.register` or `api.effects.register` (GLSL) and reads a layer's
+ * pixels with `await api.render.rasterAsync(layer)`.
  */
 export interface ServicesAPI {
   register<T>(name: string, implementation: T): Disposable;
@@ -1233,7 +1358,8 @@ export interface VarsAPI {
 
 export interface HostAPI {
   /**
-   * @deprecated Use the typed top-level API namespaces instead.
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use the typed namespaces
+   * (`api.project`, `api.anim`, `api.model`, `api.transport`, …).
    *
    * UNSTABLE. The legacy `PM` registry. Built-ins use it mid-migration; user
    * extensions should prefer the typed surface. Shape may change between app
@@ -1241,7 +1367,9 @@ export interface HostAPI {
    */
   readonly pm: unknown;
   /**
-   * @deprecated Use the typed top-level API namespaces instead.
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `api.project.latest()`,
+   * `api.project.selection()`, `api.project.time()` and `api.project.playing()`
+   * (reactive in Svelte components).
    *
    * UNSTABLE. Escape hatch to the renderer's rune stores. Built-ins use it
    * mid-migration; shapes may change between app versions without an
