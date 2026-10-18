@@ -339,6 +339,9 @@ pub struct Stats {
     /// drag showed. Kept only with [`ThreadConfig::stand_in_log`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stand_in_log: Vec<(u64, usize)>,
+    /// The viewer's frame cache in bytes (its lease share,
+    /// docs/engine/scrub.md); 0 until the presenter sized it.
+    pub frame_cache: u64,
     /// The display decode workers (scrubbing, look-ahead, cancellation).
     pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
     #[serde(skip)]
@@ -797,6 +800,7 @@ impl Thread {
             }
             Command::FrameCache { bytes } => {
                 self.frame_cache = bytes;
+                self.stats().frame_cache = bytes as u64;
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
                     composer.renderer().apply_media_lease(media_lease(bytes));
                 }

@@ -229,6 +229,7 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
         standInRedraws: report?.presenter?.standInRedraws ?? null,
         decode: report?.presenter?.scrub ?? null,
         composeUsMax: report?.presenter?.composeUsMax ?? null,
+        frameCacheBytes: report?.presenter?.frameCache ?? null,
         renderErrors: report?.presenter?.renderErrors ?? null
       });
       expect(result.timeouts).toBe(0);
@@ -237,7 +238,10 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
 
   for (const source of [
     { name: 'synthetic-500-silent', clip: null },
-    { name: 'prores-clip-with-audio', clip: 'prores422hq-1080p-2997.mov' }
+    { name: 'prores-clip-with-audio', clip: 'prores422hq-1080p-2997.mov' },
+    // Playback through the viewer's decode workers on long GOP
+    // (docs/engine/scrub.md): skipped and repeated frames.
+    { name: 'longgop-h264-2160p', clip: 'h264-longgop-2160p-2997.mp4' }
   ]) {
     test(`A/V sync during playback: ${source.name}`, async ({ session }) => {
       test.setTimeout(300_000);
@@ -309,7 +313,11 @@ test.describe('Use New Engine: Phase 2 measurements', () => {
         skippedFrames: result.skips,
         repeatedFrames: result.repeats,
         audio: audio ? { device: audio.device, latencyUs: audio.latencyUs, underruns: audio.underruns, starvedRenders: audio.starvedRenders } : null,
-        hostClockRuns: report?.presenter?.hostClockRuns ?? null
+        hostClockRuns: report?.presenter?.hostClockRuns ?? null,
+        lateSkipped: report?.presenter?.lateSkipped ?? null,
+        frameCacheBytes: report?.presenter?.frameCache ?? null,
+        composeUsMax: report?.presenter?.composeUsMax ?? null,
+        scrub: report?.presenter?.scrub ?? null
       });
       expect(result.frames).toBeGreaterThan(100);
     });
