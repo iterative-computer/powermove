@@ -288,16 +288,6 @@ impl SessionGuard<'_> {
         f
     }
 
-    /// Whether a request for presented frame `n` continues the session's
-    /// current run ([`Session::continues`]).
-    pub fn continues(&self, n: usize) -> bool {
-        self.source
-            .index
-            .frames
-            .get(n)
-            .is_some_and(|f| self.session.as_ref().unwrap().continues(f.sample))
-    }
-
     /// See [`Session::set_window`].
     pub fn set_window(&mut self, frames: usize) {
         self.session.as_mut().unwrap().set_window(frames);

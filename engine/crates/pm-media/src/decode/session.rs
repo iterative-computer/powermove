@@ -183,7 +183,7 @@ impl Session {
 
     /// Whether a request for sample `s` continues the current run (no seek):
     /// the run has passed the random-access point `s` needs and not `s`.
-    pub fn continues(&self, s: usize) -> bool {
+    fn continues(&self, s: usize) -> bool {
         if self.window.contains_key(&s) {
             return true;
         }
@@ -193,15 +193,6 @@ impl Session {
                 .run_start
                 .is_some_and(|start| sync >= start && sync < self.next)
             && s >= self.next
-    }
-
-    /// The decode position: the run's sync sample and the next sample it
-    /// feeds (`None` before the first request or after a drain).
-    pub fn position(&self) -> Option<(usize, usize)> {
-        if self.drained {
-            return None;
-        }
-        self.run_start.map(|start| (start, self.next))
     }
 
     /// As [`sample`](Session::sample), asking `stop` between batches of
