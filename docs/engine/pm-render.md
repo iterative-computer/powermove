@@ -15,7 +15,7 @@ the authority.
 | Feature | Status | Parity evidence |
 |---|---|---|
 | Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
-| Image layers in the tested still classes below, including PNG16, Display P3, alpha WebP, SDR AVIF, oriented JPEG and ICC-tagged RGB TIFF | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames below 1 CV; `media/still-*` fixtures: exact |
+| Image layers in the tested still classes below, including PNG16, Display P3, alpha WebP, SDR AVIF, ICC-tagged RGB TIFF, and container transforms as Chromium shows them (EXIF in PNG/JPEG/TIFF, HEIF and AVIF `irot`/`imir`/`clap`, WebP EXIF ignored) | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames below 1 CV; `media/still-*` fixtures: exact; 54 oriented/transformed app cases (`e2e/native-still-orientation-parity.spec.ts`): max ≤ 1 CV |
 | Other still structures (translucent wide-gamut ICC, progressive gray JPEG, GIF, BMP, ICO, OpenEXR, DPX, tiled or float TIFF) | Routed | Measured differences below; `tests/stills.rs` |
 | Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
 | Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
@@ -124,9 +124,13 @@ The header parser still restricts unmeasured structures. PNG gamma-only,
 conflicting CICP/HDR and sub-8-bit encodings; progressive gray and
 non-Y′CbCr RGB/CMYK,
 12-bit/arithmetic/lossless JPEG; tiled, other-model, float and other
-unmeasured TIFF structures; and AVIF outside the tested 8-bit sRGB class
-remain explicit gates. Late PNG EXIF stays gated when the decoder did not
-apply it. BMP, ICO, static GIF, OpenEXR and DPX still need composition parity
+unmeasured TIFF structures; and AVIF outside the tested 8-bit 4:2:0 sRGB
+class (4:4:4, 4:2:2, monochrome) remain explicit gates. Container
+transforms are drawn only where an app comparison shows Chromium's result
+(`media.md`, "Container transforms"): the decoder's applied orientation must
+equal the container's, WebP EXIF is ignored as Blink ignores it, and AVIF
+`irot`/`imir`/`clap` follow Blink's `AVIFImageDecoder`. Late PNG EXIF stays
+gated when the decoder did not apply it. BMP, ICO, static GIF, OpenEXR and DPX still need composition parity
 or an Interpret Footage reading. Decoder breadth beyond these measured
 classes remains an open deliverable.
 

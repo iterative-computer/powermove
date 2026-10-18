@@ -480,6 +480,14 @@ The remaining structural gates (for example float/tiled or other-model
 TIFF, progressive gray JPEG and HDR/gamma-only PNG) are listed in `stills.rs`;
 decoder breadth beyond these proven classes is still an open deliverable.
 
+Review round 3 (2026-10-18): WebP EXIF orientation is no longer applied
+(Blink ignores it). Orientation and container transforms of PNG, JPEG,
+TIFF, HEIF and AVIF are drawn as Chromium shows them, each class compared in
+the app (54 cases, max ≤ 1 CV); AVIF `clap` and `irot`/`imir` follow Blink's
+decoder, and only 8-bit 4:2:0 AVIF (full or limited range, opaque or
+translucent) is in the drawn class. SVG bytes are decoded from their
+declared encoding before usvg. See `media.md`.
+
 Existing animated and numbered imports render their persisted WebM through
 the video path. The three animated corpus sources pass Chromium's video
 class in hidden app exports and all nine frames of their saved 2× corpus

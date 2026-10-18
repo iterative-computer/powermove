@@ -196,7 +196,11 @@ for the pm-text diagnostic below; the production SVG text gate remains.
 
   Edges differ by up to one or two MSAA samples (max 64–116). That is
   outside the 2D class, so level 1 SVG images stay routed
-  (`Feature::SvgImage`); `tests/svg.rs` pins the measurements.
+  (`Feature::SvgImage`); `tests/svg.rs` pins the measurements. Routing
+  does not parse a level 1 SVG (Chromium's `<img>` accepts bytes usvg
+  rejects, such as ISO-8859-1 or UTF-16); only an offline file is a layer
+  failure. pm-render decodes the declared encoding before usvg at level 2
+  (`pm_media::image::svg::utf8_source`, `media.md`).
 - **Level 2**: an SVG of solid fills and strokes in plain groups that stays
   inside its box is a coverage scene (vectors at output resolution). Anything
   else (gradients, patterns, clips, masks, filters, group opacity, blend

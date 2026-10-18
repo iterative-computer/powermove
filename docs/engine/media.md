@@ -185,8 +185,9 @@ The `image` crate (PNG 8/16, JPEG, TIFF 8/16/32f, BMP, ICO, GIF, WebP),
 ImageIO (HEIF/HEIC, AVIF, animation frames, everything else macOS reads),
 OpenEXRCore (scanline and tiled, every compression including DWAA/DWAB and
 HTJ2K), FFmpeg for DPX. Pixels are returned as stored at the file's depth with
-the ICC profile classified, EXIF orientation applied. Image sequences are found
-from one member, with gaps reported.
+the ICC profile classified, EXIF orientation applied where Chromium applies it
+(not WebP EXIF, which Blink's WebP decoder never reads). Image sequences are
+found from one member, with gaps reported.
 
 ## Tests
 
@@ -249,7 +250,7 @@ sessions. `image_bytes` counts outstanding still frames, including frames a
 caller retains across source replacement.
 
 The API returns native-depth frames and their color facts. Image orientation
-is already applied; `video_probe` supplies video geometry, field, and HDR
+is already applied (as Chromium applies it; WebP EXIF is ignored); `video_probe` supplies video geometry, field, and HDR
 facts for the renderer. The consumer must apply source interpretation, video
 geometry, resizing, and thumbnail encoding. This is a source decode API;
 the renderer's browser poster and filmstrip consumers have not been switched
@@ -356,6 +357,79 @@ The oracle strips alpha before zimg and compares alpha separately; zimg
 has no `yuva422p16le`, which would silently insert swscale chroma conversion.
 Original animation APIs remain available for new-import work. Today's conversion and storage policy
 is unchanged; preserving originals for new imports is outside this round.
+
+### Container transforms, AVIF structure and SVG encodings (review round 3)
+
+Orientation and container transforms are drawn only as Chromium shows
+them, and each class has an app comparison:
+`e2e/native-still-orientation-parity.spec.ts` imports 54 generated stills
+with Use New Engine off and on, exports both over an opaque background and
+requires the drawn cases to keep the box today's import measured, route to
+the engine, and stay within the 2D class (max ≤ 4, ≤ 0.1% of pixels above
+1 CV, alpha ≤ 1). Measured 2026-10-18: every drawn case is max 0 or 1 CV
+with no pixel above 1.
+
+- PNG `eXIf` before the image data, orientations 2 to 8, opaque and
+  translucent; JPEG (Y′CbCr, all eight orientations, and gray); TIFF tag
+  274, 2 to 8 and associated alpha (the kept original against today's
+  FFmpeg PNG conversion); HEIF `irot`/`imir` 2 to 8 and `clap` (ImageIO
+  against today's `sips` PNG, which carries the orientation as `eXIf`).
+  `stills::check` requires the decoder's applied orientation to equal the
+  container's; late PNG `eXIf` (Chromium reads chunks before IDAT only)
+  stays explicit.
+- WebP EXIF: Blink's WebP decoder ignores it, so `pm-media` no longer
+  applies it (the reported `still.webp` with orientation 6 is drawn
+  160×90, as stored). Opaque and translucent cases match.
+- AVIF follows Blink's `AVIFImageDecoder` in `avif_compat`: `irot`/`imir`
+  through `kAxisAngleToOrientation`; a valid `clap` anchored at (0, 0)
+  crops the decoded planes before conversion (`avifImageSetViewRect`, as
+  Blink); any other or invalid `clap` shows the whole image. Strict clap
+  validation is off and EXIF ignored, as in Blink. Translucent AVIF, all
+  three quarter turns, both mirrors, `clap` at and off the origin, and
+  limited range (`e2e/fixtures/still-limited-range.avif`, SVT-AV1) match.
+  `avif_compat::unmeasured` keeps 4:4:4, 4:2:2, monochrome and deeper
+  AVIF explicit: no available encoder writes those, so they were not
+  compared.
+
+Chromium's oriented ImageBitmap is a pixel permutation of the unoriented
+premultiplied bitmap: the WebGL texture of a translucent PNG with `eXIf` 6
+equals the rotated texture of the same PNG without it, and both equal the
+compatibility bitmap byte for byte (texture readback through
+`texImage2D(UNPACK_PREMULTIPLY_ALPHA_WEBGL)`, as `compositor.ts` uploads;
+translucent AVIF is also exact). `tests/stills.rs` pins the permutation,
+the WebP rule and every AVIF transform without the app.
+
+Translucent exports with a transparent background differ from the legacy
+export by up to 2 CV in color at high alpha, for unoriented and oriented
+stills alike, while the bitmaps above are exact: legacy's export loses up to
+2 CV against the source values and native does not. This is an export
+compositing difference outside this lane, recorded with its evidence in the
+lane report; the orientation spec composites over an opaque background so
+it measures the media.
+
+Level 1 SVG images are routed without being read: usvg accepts UTF-8 only,
+so a parse at routing time misreported ISO-8859-1 or UTF-16 files that
+Chromium's `<img>` shows. An offline level-1 SVG remains a named layer
+failure. Level 2 decodes SVG bytes as Blink's XML decoder does
+(`image::svg::source_encoding`: byte order mark, UTF-16 by `<?`, the XML
+declaration's label through the WHATWG registry, a UTF-16 label on 8-bit
+bytes meaning UTF-8, malformed sequences replaced) before usvg; the result
+draws the same pixels as the UTF-8 file. Level-1 routing no longer parses
+SVGs at all, which removes the routing-time cost and the system font load
+for text detection there.
+
+`tests/still_compat.rs` and the animation corpus test are `#[ignore]`d and
+fail when their private capture is missing; run them with
+`cargo test -p pm-render --test still_compat --test media_sequences -- --include-ignored`.
+The animation test binds the app-persisted WebM from
+`Powermove Engine Corpus/animation-renditions/<fixture>/native-source.webm`
+(or `PM_MEDIA_RENDITIONS`) with no re-encode fallback: all nine frames are
+max 0 CV and alpha 0 against Chromium.
+
+`PreviewReader::poster` seeks raw source time for every video, including a
+stored sequence or animation WebM. That is today's behavior: `poster.ts`
+seeks the asset's video element to `min(0.5, duration × 0.1)` without
+`sequencePlaybackTime`'s inset.
 
 ### Poster and filmstrip consumer call surface
 
