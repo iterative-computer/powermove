@@ -1,5 +1,5 @@
 {
- "note": "Phase 3a app rows (docs/engine/phase3a-gate.md): e2e/native-engine-p3a-measure.spec.ts, Use New Engine on, M4 Max; clips copied into the profile media store. linkedRun: the same with the clips linked (PM_P3A_LINK=1), which the engine read as offline.",
+ "note": "Phase 3a app rows (docs/engine/phase3a-gate.md): e2e/native-engine-p3a-measure.spec.ts, Use New Engine on, M4 Max; clips copied into the profile media store. linkedRun: the same with the clips linked (PM_P3A_LINK=1), which the engine read as offline. wholeFrameLoopRun: the same with a composition of a whole number of frames (96, 120, 240); 59.94 did not complete (its 2.9 GB import timed out with the disk nearly full). rows: the first copied run, a 4 s composition (95.9, 119.9, 239.8 frames).",
  "rows": [
   {
    "row": "uhd-prores-3-blur-23.976",
@@ -574,6 +574,296 @@
     },
     "route": "legacy",
     "routeReason": "Drawn by the current engine: media offline: prores422hq-2160p-23976.mov; native-only features.",
+    "failures": []
+   }
+  }
+ ],
+ "wholeFrameLoopRun": [
+  {
+   "row": "uhd-prores-3-blur-23.976",
+   "at": "2026-10-18T06:37:45.902Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    3.962890625,
+    3.8779296875,
+    3.720703125
+   ],
+   "value": {
+    "seconds": 60.00130000001192,
+    "expectedFrames": 1439,
+    "compositionFrames": 96,
+    "shownFrames": 1438,
+    "skippedFrames": 0,
+    "skippedAt": [],
+    "repeatedFrames": 0,
+    "presenterDropped": 0,
+    "presenterDroppedByReason": {},
+    "displayIntervalMs": {
+     "n": 1437,
+     "p50": 41.5,
+     "p99": 49.8,
+     "max": 51.6
+    },
+    "engine": {
+     "lateSkipped": 0,
+     "renderErrors": 0,
+     "layerFailures": 0,
+     "composeUsMax": 208258,
+     "composeUsMean": 1845
+    },
+    "importSeconds": 128.857,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 7.8,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      },
+      {
+       "type": "video",
+       "trim": 3.9,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "dur": 4.004,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    }
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-23.976-linear",
+   "at": "2026-10-18T06:37:51.929Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    3.7255859375,
+    3.830078125,
+    3.70458984375
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 7.8,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      },
+      {
+       "type": "video",
+       "trim": 3.9,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "aqen3whn"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "dur": 4.004,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 128.857,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: native-only features.",
+    "failures": []
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-29.97",
+   "at": "2026-10-18T06:41:38.328Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    4.091796875,
+    4.23095703125,
+    3.92578125
+   ],
+   "value": {
+    "seconds": 60.00179999995232,
+    "expectedFrames": 1798,
+    "compositionFrames": 120,
+    "shownFrames": 1799,
+    "skippedFrames": 0,
+    "skippedAt": [],
+    "repeatedFrames": 0,
+    "presenterDropped": 0,
+    "presenterDroppedByReason": {},
+    "displayIntervalMs": {
+     "n": 1798,
+     "p50": 33.2,
+     "p99": 41.5,
+     "max": 41.5
+    },
+    "engine": {
+     "lateSkipped": 0,
+     "renderErrors": 0,
+     "layerFailures": 0,
+     "composeUsMax": 211531,
+     "composeUsMean": 1684
+    },
+    "importSeconds": 159.327,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 7.8,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      },
+      {
+       "type": "video",
+       "trim": 3.9,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      }
+     ],
+     "fps": 29.97002997002997,
+     "dur": 4.004,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    }
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-29.97-linear",
+   "at": "2026-10-18T06:41:44.354Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    3.923828125,
+    4.19384765625,
+    3.9140625
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 7.8,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      },
+      {
+       "type": "video",
+       "trim": 3.9,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4.004,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ahyuh61s"
+      }
+     ],
+     "fps": 29.97002997002997,
+     "dur": 4.004,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 159.327,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: native-only features.",
     "failures": []
    }
   }
