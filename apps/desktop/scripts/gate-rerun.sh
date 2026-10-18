@@ -110,7 +110,7 @@ step() {
     frame-bridge-integration)
       "$L" node scripts/frame-bridge-integration.mjs --skip-build --json "$OUT/frame-bridge-integration.json" ;;
     engine-host-integration)
-      "$L" node scripts/engine-host-integration.mjs ;;
+      "$L" node scripts/engine-host-integration.mjs --skip-build ;;  # a build would replace the harness pm-bridge
     test-mcp)
       "$L" node scripts/test-mcp.mjs --desktop ;;
     engine-switch-corpus)
