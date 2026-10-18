@@ -59,7 +59,11 @@ fn channel(s: &str) -> Option<f64> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
         let v: f64 = p.trim().parse().ok()?;
-        return Some((v / 100.0).clamp(0.0, 1.0));
+        if !v.is_finite() {
+            return None;
+        }
+        // A percentage channel is stored as 8 bits too.
+        return Some(byte_channel(v / 100.0));
     }
     let v: f64 = s.parse().ok()?;
     if !v.is_finite() {
@@ -76,7 +80,8 @@ fn alpha(s: &str) -> Option<f64> {
         return Some((v / 100.0).clamp(0.0, 1.0));
     }
     let v: f64 = s.parse().ok()?;
-    if v.is_nan() {
+    // `inf` and `NaN` are not CSS numbers.
+    if !v.is_finite() {
         return None;
     }
     Some(v.clamp(0.0, 1.0))
@@ -85,6 +90,12 @@ fn alpha(s: &str) -> Option<f64> {
 /// `rgb()`/`rgba()` arguments.
 fn functional(args: &str) -> Option<Rgba> {
     let ([r, g, b], a) = components(args)?;
+    // The legacy syntax takes three numbers or three percentages; the
+    // modern one may mix them. Mixed channels are not reproduced either way.
+    let percents = [r, g, b].iter().filter(|c| c.ends_with('%')).count();
+    if percents != 0 && percents != 3 {
+        return None;
+    }
     Some([
         channel(r)?,
         channel(g)?,
@@ -113,8 +124,17 @@ fn components(args: &str) -> Option<([&str; 3], Option<&str>)> {
     if comma && slash_alpha.is_some() {
         return None;
     }
+    let slash_alpha = slash_alpha.map(str::trim);
+    // Every component is one token (`50 %` is not a percentage), and the
+    // legacy comma syntax has no `none`.
+    let bad = |p: &&str| {
+        p.is_empty() || p.contains(char::is_whitespace) || (comma && p.eq_ignore_ascii_case("none"))
+    };
+    if parts.iter().any(bad) || slash_alpha.iter().any(bad) {
+        return None;
+    }
     match (parts.len(), slash_alpha) {
-        (3, a) => Some(([parts[0], parts[1], parts[2]], a.map(str::trim))),
+        (3, a) => Some(([parts[0], parts[1], parts[2]], a)),
         (4, None) if comma => Some(([parts[0], parts[1], parts[2]], Some(parts[3]))),
         _ => None,
     }
@@ -542,6 +562,29 @@ mod tests {
         // The legacy comma syntax needs percentages (Chromium rejects it);
         // a functional notation that does not parse is refused, not guessed.
         assert_eq!(classify("hsl(0, 100, 50)"), Err(Rejected::Unsupported));
+    }
+
+    #[test]
+    fn strings_outside_the_grammar_are_refused_not_guessed() {
+        // Each of these is either invalid CSS or a form whose handling the
+        // parser does not reproduce; none may draw as a parsed color.
+        for s in [
+            "hsl(none, 100%, 50%)",
+            "rgb(none, 0, 0)",
+            "rgb(255, 50%, 0)",
+            "rgb(255 50% 0)",
+            "rgb(50 % 0% 0%)",
+            "hsl(0 100 % 50%)",
+            "rgb(0 0 0 / inf)",
+            "rgb(0 0 0 / NaN)",
+            "rgb(0, 0, 0, infinity)",
+            "rgb(1,,2,3)",
+            "rgb(1 2 3 /)",
+        ] {
+            assert_eq!(classify(s), Err(Rejected::Unsupported), "{s}");
+        }
+        assert_eq!(parse("rgb(100%, 0%, 50%)"), Some(rgb8(255, 0, 128, 1.0)));
+        assert_eq!(parse("rgb( 1 , 2 , 3 , .5 )"), Some(rgb8(1, 2, 3, 0.5)));
     }
 
     #[test]
