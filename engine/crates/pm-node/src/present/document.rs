@@ -265,6 +265,12 @@ impl ViewDocument {
             {
                 continue;
             }
+            // The viewer never draws final Blender frames: it draws native
+            // shading, and Blender surfaces while paused in Material
+            // Preview or Rendered (`super::blender`), as today.
+            if u.feature == pm_render::Feature::Blender {
+                continue;
+            }
             reasons.push(describe(&u));
         }
         if reasons.is_empty() {
@@ -399,6 +405,35 @@ mod tests {
             view.route("c"),
             Route::Legacy(vec!["media offline: photo.png".into()])
         );
+    }
+
+    #[test]
+    fn blender_compositions_are_drawn_by_the_engine_in_the_viewer() {
+        let object = r#"{"id":"o","type":"extension","on":true,"from":0,"dur":2,"blend":"normal","fx":[],"masks":[],"threeD":true,"p":{},"d":{"definition":"powermove.3d.object","version":1,"w":64,"h":36,"params":{},"data":{"object":{"source":{"primitive":"box","parameters":{}},"material":{"p":{},"maps":{},"doubleSided":true},"useSourceMaterials":false,"slots":[],"castShadow":true,"receiveShadow":true}}}}"#;
+        let doc = |render3d: &str| {
+            format!(
+                r#"{{"id":"P","compId":"c","w":64,"h":36,"fps":30,"dur":2,{render3d}"layers":[{object}],"assets":{{}},"comps":{{}}}}"#
+            )
+        };
+        let mut native = ViewDocument::default();
+        native.update(&replace(&doc(""), 1)).unwrap();
+        let mut blender = ViewDocument::default();
+        let with = doc(r#""render3d":{"enabled":true,"engine":"eevee","samples":8},"#);
+        blender.update(&replace(&with, 1)).unwrap();
+        // The static check lists Blender for exports ...
+        assert!(
+            pm_render::unsupported(blender.document(), "c")
+                .iter()
+                .any(|u| u.feature == pm_render::Feature::Blender)
+        );
+        // ... and the viewer routes it exactly as the same scene without.
+        assert_eq!(blender.route("c"), native.route("c"));
+        if let Route::Legacy(reasons) = blender.route("c") {
+            assert!(
+                !reasons.iter().any(|r| r.contains("Blender")),
+                "{reasons:?}"
+            );
+        }
     }
 
     #[test]
