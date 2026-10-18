@@ -34,6 +34,7 @@ import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream } from './session';
 import { EngineRenderTransport } from './render-transport';
+import { EngineStatsView, RevisionVersions, emitPresented } from './presentation-events';
 import { ShaderFallbackRunner } from './shader-fallback';
 import { EngineTransport } from './transport';
 
@@ -115,7 +116,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   /** A session with no viewer, so snapshots work while no viewer is open
    *  (the Library, a closed viewer): open while no viewer session is. */
   let standby: DocumentSession | null = null;
-  const transport = new EngineTransport(() => current, hostClock);
+  // With the new engine on, the engine holds the transport even while it
+  // starts or restarts: the current engine never plays (exclusive).
+  const transport = new EngineTransport(() => current, hostClock, { exclusive: true });
+  /** animVersion per revision sent, for `frame:rendered.version`. */
+  const versions = new RevisionVersions();
+  const noteVersion = (): void => {
+    const barrier = PM.EngineDoc?.barrier;
+    if (barrier) versions.note(barrier.revision, PM.animVersion?.());
+  };
+  /** Engine stats for the status bar and the performance panel. */
+  const stats = new EngineStatsView();
+  (PM as any).EngineStats = stats;
   PM.setTransportDriver?.(transport);
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
@@ -149,6 +161,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       flushing = true;
       try {
         PM.EngineDoc?.barrier?.flush();
+        noteVersion();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -213,6 +226,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
       barrier.flush();
+      noteVersion();
       return barrier.revision;
     },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
@@ -273,12 +287,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const makeService = (): EngineViewerService & { trace?: boolean } => ({
     trace,
     source,
+    exclusive: true,
+    // Frame events on presentation (presentation-events.ts).
+    presented: (frame, quality) => {
+      emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
+    },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
       barrier.flush();
+      noteVersion();
       return barrier.revision;
     },
     onReady(listener) {
@@ -322,6 +342,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         },
         onAudio: (message) => {
           if (session) audio.receive(message, session);
+        },
+        onStats: (message) => {
+          if (session !== current) return;
+          stats.receive(message, performance.now());
+          PM.invalidate?.('status');
         },
         // The viewer lays out for the new document, as opening a project
         // makes it do: its state names the new composition, so the engine
@@ -403,6 +428,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       closeStandby();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
+      if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
       connection?.close('the engine connection was removed');
       connection = null;
       hostClock.stop();

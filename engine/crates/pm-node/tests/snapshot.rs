@@ -665,6 +665,19 @@ fn child_scheduling() {
     assert!(!idle_early, "an idle snapshot ran during playback");
     c.event(Event::Transport(TransportCommand::Pause));
     let result = rendered(c.inbox.wait(Duration::from_secs(5), answer(20)));
+    // Presentation stats reached the session's renderer (at most 2 Hz),
+    // counting the frames it was sent and the snapshots served for it.
+    let stats = c
+        .inbox
+        .wait(Duration::from_secs(5), |port, m| match &m.message {
+            Message::Event {
+                body: Event::RenderStats(s),
+            } if port == WINDOW && s.snapshots.get() >= 1 => Some(s.clone()),
+            _ => None,
+        });
+    assert!(stats.frames.get() >= 2, "{stats:?}");
+    assert!(stats.timed_frames.get() >= 1, "{stats:?}");
+    assert!(stats.frame_us_avg > 0, "{stats:?}");
     assert_eq!((result.width, result.height), (160, 90));
     println!("CHILD-OK sync={sync_at:?}");
 }

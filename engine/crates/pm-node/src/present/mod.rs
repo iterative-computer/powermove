@@ -27,6 +27,7 @@ pub mod peaks;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;
+pub mod stats;
 pub mod view;
 
 use std::collections::BTreeMap;

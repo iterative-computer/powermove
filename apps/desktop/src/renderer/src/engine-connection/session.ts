@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -93,6 +93,8 @@ export type SessionOptions = {
   onClock?: (sample: ClockSample) => void;
   /** The engine's audio messages (levels, waveform peaks; contract 6). */
   onAudio?: (message: AudioMessage) => void;
+  /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
+  onStats?: (stats: RenderStats) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -377,6 +379,11 @@ export class DocumentSession {
       case 'audio': {
         const { type: _t, ...message } = event;
         this.options.onAudio?.(message as unknown as AudioMessage);
+        return;
+      }
+      case 'renderStats': {
+        const { type: _t, ...stats } = event;
+        this.options.onStats?.(stats as unknown as RenderStats);
         return;
       }
       case 'patchesApplied':

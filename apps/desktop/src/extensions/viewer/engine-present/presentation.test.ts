@@ -6,7 +6,7 @@ import type { FramePainter } from './gpu';
 import { servePresenter, type FromWorker, type ToWorker } from './present-worker';
 import type { WorkerLike } from './worker-presenter';
 import type { FrameSource } from './presenter';
-import { overlayToCss, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
+import { overlayToCss, PRESENTATION_STATUS, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
 import type { FrameDescriptor, FrameRelease, OverlayGeometry, ViewerState } from './protocol';
 
 class FakeFrame {
@@ -324,6 +324,49 @@ describe('ViewerPresentation', () => {
     expect(second.states).toEqual([first.states[0]]);
     expect(presentation.stats()?.sessions).toBe(2);
     presentation.dispose();
+  });
+
+  it('exclusive ("Use New Engine" on): shows its state until the first frame, keeps the last frame through a restart, never hands back', async () => {
+    const service = new Service();
+    const presented: Array<{ seq: number; quality: number }> = [];
+    Object.assign(service, { exclusive: true, presented: (frame: { seq: number }, quality: number) => presented.push({ seq: frame.seq, quality }) });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    const hidden: number[] = [];
+    presentation.onHidden(() => hidden.push(1));
+    expect(presentation.exclusive).toBe(true);
+    expect(presentation.status).toBe(PRESENTATION_STATUS.starting);
+    expect(stage.querySelector('[data-engine-status]')?.textContent).toBe(PRESENTATION_STATUS.starting);
+    await settle();
+    presentation.update({ ...PARAMS, resolution: 'half' });
+    const first = service.channels[0]!;
+    first.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.status).toBeNull();
+    // Each new frame once, with the quality its view asked for.
+    expect(presented).toEqual([{ seq: 1, quality: 0.5 }]);
+    runFrames(rafs, performance.now() + 20);
+    expect(presented).toHaveLength(1);
+    // The engine restarts: the last frame stays, with its tags, and says so.
+    service.connected = false;
+    first.handlers.closed('the interactive engine restarted');
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest?.seq).toBe(1);
+    expect(presentation.status).toBe(PRESENTATION_STATUS.reconnecting);
+    expect(hidden).toEqual([]);
+    service.connected = true;
+    service.fireReady();
+    await settle();
+    const second = service.channels[1]!;
+    second.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 40);
+    expect(presentation.status).toBeNull();
+    // Capability routing (scaffolding until it is removed) still hands back.
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: 'x', revision: 9 } as never, performance.now());
+    expect(hidden).toEqual([1]);
+    presentation.dispose();
+    expect(stage.querySelector('[data-engine-status]')).toBeNull();
   });
 
   it('follows the stage into a popout: the loop runs on its frames and its display sets the state', async () => {

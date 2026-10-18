@@ -441,6 +441,8 @@ struct View {
     /// The frame on screen showed stand-ins: the media "landed" counter when
     /// it was drawn. A change draws the frame again.
     stand_in: Option<u64>,
+    /// What presenting this session costs (`RenderStats`).
+    costs: super::stats::ViewStats,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -495,6 +497,8 @@ struct Thread {
     /// Host µs of the newest frame drawn for a gesture, scrub, or edit
     /// (idle snapshots wait for these to stop).
     last_interactive: Option<i64>,
+    /// Snapshots served per session, and the slowest (µs).
+    snapshot_costs: BTreeMap<Key, (u64, i64)>,
 }
 
 /// The decision 19 fallback runner's state on this thread.
@@ -551,6 +555,7 @@ pub fn run(
         snapshots: super::snapshot::SnapshotQueue::default(),
         segments: pm_bridge::shm::Segments::default(),
         last_interactive: None,
+        snapshot_costs: BTreeMap::new(),
     };
     thread.check_in();
     loop {
@@ -954,6 +959,7 @@ impl Thread {
         if let Some(blender) = &self.blender {
             blender.forget(key);
         }
+        self.snapshot_costs.remove(&key);
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -1397,6 +1403,7 @@ impl Thread {
             audio_version: 0,
             scrub: false,
             stand_in: None,
+            costs: Default::default(),
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -2194,11 +2201,40 @@ impl Thread {
                     }
                 }
                 Next::Skip { .. } => {
+                    if let Some(view) = self.views.get_mut(&key) {
+                        view.costs.late();
+                    }
                     self.stats().late_skipped += 1;
                 }
-                Next::WaitUntil(_) | Next::Idle => return,
+                Next::WaitUntil(_) | Next::Idle => break,
             }
         }
+        self.send_stats(key);
+    }
+
+    /// The session's presentation stats, when a report is due.
+    fn send_stats(&mut self, key: Key) {
+        let now = now();
+        if !self.views.get(&key).is_some_and(|v| v.costs.due(now)) {
+            return;
+        }
+        let (programs, rasters) = self
+            .gpu
+            .as_mut()
+            .and_then(|g| g.composer.as_mut())
+            .map(|c| {
+                let r = c.renderer();
+                (r.shader_state().programs(), r.vector_cache_len())
+            })
+            .unwrap_or((0, 0));
+        let (snapshots, snapshot_us_max) = self.snapshot_costs.get(&key).copied().unwrap_or((0, 0));
+        let Some(view) = self.views.get_mut(&key) else {
+            return;
+        };
+        let report = view
+            .costs
+            .report(now, programs, rasters, snapshots, snapshot_us_max);
+        self.event(key, Event::RenderStats(report), None);
     }
 
     fn answer(
@@ -2280,6 +2316,8 @@ impl Thread {
         let seq = view.next_seq;
         let start = now();
         let overlay;
+        let mut cpu_us = 0i64;
+        let mut failures_n = 0usize;
         let mut stand_in = false;
         let mut stand_in_shown = None;
         if document {
@@ -2335,6 +2373,8 @@ impl Thread {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    cpu_us = composed.cpu_us;
+                    failures_n = composed.failures.len();
                     stand_in = !composed.stand_ins.is_empty();
                     view.stand_in = stand_in.then_some(landed_before);
                     stand_in_shown = composed.stand_ins.first().copied();
@@ -2504,6 +2544,7 @@ impl Thread {
             }]);
             return None;
         }
+        let overlay_layers = overlay.layers.len();
         let seq_value = Seq::new(seq).ok()?;
         if !live.ledger.present(index, seq_value) {
             return None;
@@ -2533,6 +2574,14 @@ impl Thread {
             view_seq: view.state.view_seq,
             duration,
         };
+        view.costs.frame(
+            timing.is_some(),
+            cpu_us,
+            gpu_done - start - cpu_us.min(gpu_done - start),
+            overlay_layers,
+            failures_n,
+            view.revision.get(),
+        );
         let held = live.ledger.held_count() as u32;
         let generation = live.spec.generation;
         let view_seq = view.state.view_seq.get();
@@ -2866,6 +2915,9 @@ impl Thread {
             stats.snapshots += 1;
             stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
         }
+        let costs = self.snapshot_costs.entry(job.key).or_default();
+        costs.0 += 1;
+        costs.1 = costs.1.max(render_us);
         let result = SnapshotResult {
             revision,
             view_seq: job.request.view_seq,

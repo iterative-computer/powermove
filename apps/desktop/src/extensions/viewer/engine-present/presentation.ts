@@ -90,7 +90,25 @@ export interface EngineViewerService {
   /** `false`: draw engine frames on the page's main thread rather than in
    *  a presentation worker (the measurement harness compares the two). */
   readonly offMainThread?: boolean;
+  /**
+   * "Use New Engine" is on (the kernel's connection): engine frames are the
+   * only frames this viewer shows. Until the first frame, while the engine
+   * restarts, and after the GPU fails, the last frame stays (or the stage
+   * stays empty) with a visible state; nothing hands the viewer back to
+   * the current engine.
+   */
+  readonly exclusive?: boolean;
+  /** Each new frame on screen, with the quality it was rendered at (the
+   *  kernel emits `frame:rendered` and `overlay` from it). */
+  presented?(frame: PresentedFrame, quality: number): void;
 }
+
+/** The visible states of an exclusive presentation without a frame to show. */
+export const PRESENTATION_STATUS = {
+  starting: 'Starting the engine…',
+  reconnecting: 'Reconnecting to the engine…',
+  gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.'
+} as const;
 
 /** What the viewer decides; the presentation adds what the window knows. */
 export type ViewParams = Omit<ViewInput, 'composition' | 'cssWidth' | 'cssHeight' | 'devicePixelRatio' | 'edr' | 'colorSpace'>;
@@ -177,12 +195,43 @@ export class ViewerPresentation {
   /** When the drawing's device was lost recently (performance.now ms). */
   private losses: number[] = [];
 
+  /** The visible state while an exclusive presentation has no frame. */
+  private statusElement: HTMLElement | null = null;
+
   constructor(private readonly options: PresentationOptions) {
     this.canvasElement = this.makeCanvas(options.stage.ownerDocument);
     const before = options.before && options.before.parentElement === options.stage ? options.before : null;
     options.stage.insertBefore(this.canvasElement, before);
+    if (options.service.exclusive) this.setStatus(PRESENTATION_STATUS.starting);
     this.offReady = options.service.onReady(() => void this.open());
     void this.open();
+  }
+
+  /** Whether engine frames are the only frames this viewer shows. */
+  get exclusive(): boolean {
+    return this.options.service.exclusive === true;
+  }
+
+  /** The visible state shown while there is no frame (null: none). */
+  get status(): string | null {
+    return this.statusElement?.textContent ?? null;
+  }
+
+  private setStatus(text: string | null): void {
+    if (text === null) {
+      this.statusElement?.remove();
+      this.statusElement = null;
+      return;
+    }
+    if (!this.statusElement) {
+      const el = this.options.stage.ownerDocument.createElement('div');
+      el.dataset['engineStatus'] = '';
+      el.setAttribute('role', 'status');
+      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;max-width:calc(100% - 24px);padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      this.options.stage.append(el);
+      this.statusElement = el;
+    }
+    if (this.statusElement.textContent !== text) this.statusElement.textContent = text;
   }
 
   /** The canvas engine frames are drawn into (replaced when presentation moves to another window from a worker). */
@@ -237,11 +286,13 @@ export class ViewerPresentation {
     return () => this.hiddenListeners.delete(listener);
   }
 
-  /** Hides the canvas; tells `onHidden` listeners when it was showing. */
-  private hide(canvas: HTMLCanvasElement): void {
+  /** Hides the canvas; tells `onHidden` listeners when it was showing. An
+   *  exclusive presentation never hands the stage back: what is under the
+   *  canvas is not another engine's frame to show. */
+  private hide(canvas: HTMLCanvasElement, handBack = !this.exclusive): void {
     const was = canvas.style.visibility === 'visible';
     canvas.style.visibility = 'hidden';
-    if (was && !this.disposed) for (const listener of this.hiddenListeners) listener();
+    if (was && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
   }
 
   /**
@@ -436,9 +487,12 @@ export class ViewerPresentation {
       this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
       this.painterFailed = true;
       this.workerUnavailable = true;
+      // A visible failure, never another engine's frames.
+      if (this.exclusive) this.setStatus(PRESENTATION_STATUS.gpuFailed);
       void this.replaceDrawing();
       return;
     }
+    if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
     this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
     void this.replaceDrawing();
   }
@@ -502,9 +556,12 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
       this.routedRevision = null;
+      const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
       this.latestFrame = frame;
       if (this.canvasElement.style.visibility !== 'visible') this.canvasElement.style.visibility = 'visible';
+      if (this.statusElement) this.setStatus(null);
       for (const listener of this.listeners) listener(frame);
+      if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
     });
     this.host = null;
     if (!this.follow()) presenter.start();
@@ -530,7 +587,10 @@ export class ViewerPresentation {
           // shows until the engine presents again.
           this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
           this.latestFrame = null;
-          this.hide(this.canvasElement);
+          // Capability routing is development scaffolding (amendment 21):
+          // until it is removed it hands the stage back even when exclusive.
+          this.setStatus(null);
+          this.hide(this.canvasElement, true);
           return;
         }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
@@ -562,8 +622,24 @@ export class ViewerPresentation {
     this.held = [];
     this.presenter?.dispose();
     this.presenter = null;
+    if (this.exclusive) {
+      // The engine restarts (section 19): the last frame stays on screen,
+      // with its tags for the overlay, until the new session presents.
+      this.setStatus(PRESENTATION_STATUS.reconnecting);
+      return;
+    }
     this.latestFrame = null;
     this.hide(this.canvasElement);
+  }
+
+  /** The output scale a frame was drawn at (today's `PM.quality`). */
+  private qualityOf(frame: PresentedFrame): number {
+    const state = this.states.find((s) => Number(s.viewSeq) === frame.viewSeq) ?? this.sequencer.current;
+    switch (state?.resolution) {
+      case 'half': return 0.5;
+      case 'quarter': return 0.25;
+      default: return 1;
+    }
   }
 
   dispose(): void {
@@ -585,6 +661,7 @@ export class ViewerPresentation {
     this.listeners.clear();
     this.hiddenListeners.clear();
     this.canvasElement.remove();
+    this.setStatus(null);
   }
 }
 
