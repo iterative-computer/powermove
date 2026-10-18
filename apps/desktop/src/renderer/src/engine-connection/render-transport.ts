@@ -211,7 +211,7 @@ export class EngineRenderTransport {
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
-  readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0 };
+  readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0, exportAsks: 0 };
   private answering = 0;
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
@@ -707,6 +707,7 @@ export class EngineRenderTransport {
       // An export frame's layer (the job engine has no store of uploaded
       // rasters): the producer's answer, with fresh pixels.
       const request = ask.request;
+      this.compatStats.exportAsks++;
       let result: CompatAnswerResult = null;
       this.answering++;
       try {
