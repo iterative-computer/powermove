@@ -7,7 +7,10 @@
  * a `raster` wrapper and from inside an animation-frame callback, which
  * must not deadlock; and frame events on presentation (`frame:rendered`
  * with the exact `render.gl.previewViewport` object, then `overlay`) with
- * engine stats for the status bar.
+ * engine stats for the status bar. With text (the engine's render fonts):
+ * the viewer, snapshots, layer rasters (today's surface shape), and the
+ * exporter's captures; and a sync snapshot during a staged resync, served
+ * by main's session for the window with the document.
  *
  * Run serially, one Electron at a time:
  *   pm-electron-lock bunx playwright test e2e/engine-render-transport.spec.ts --workers=1
@@ -128,6 +131,107 @@ test.describe('Use New Engine: the render transport', () => {
     expect(result.inside.length).toBeGreaterThanOrEqual(1);
     for (const url of result.inside) expect(url.startsWith('data:image/jpeg')).toBe(true);
     expect(result.inFrame.startsWith('data:image/jpeg')).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('a project with text: the viewer, snapshots, rasters, and the app’s captures all draw it with the engine', async ({ session }) => {
+    const { page } = session;
+    await session.openEditor();
+    await page.waitForFunction(() => Boolean((window as any).PM?.EngineRender));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const project = PM.mkProject({ name: 'Text', w: 640, h: 360, fps: 30, dur: 4, bg: '#203040' });
+      project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+      const title = PM.mkLayer('text', { name: 'Title', from: 0, dur: 4, d: { text: 'Engine text', font: 'Helvetica', size: 64, weight: 700, color: '#FFFFFF' } }, project);
+      title.id = 'title';
+      title.p['position.x'].v = 320; title.p['position.y'].v = 180;
+      project.layers = [title];
+      PM.replaceProject(project);
+      PM.Projects?.put?.(PM.proj);
+    });
+    // Text no longer routes the viewer away: the engine draws it.
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const result = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('transport-probe');
+      const before = { ...PM.EngineRender.stats };
+      const url = api.render.snapshot(0.5, 320);
+      const canvas = api.render.renderFrameTo(0.5, 320, 180, { mblur: false });
+      const later = await api.render.snapshotAsync(0.5, 320);
+      // The exporter's own captures (agent look and observe, Library thumbnails).
+      const look = PM.Export.snapshot(0.5, 320);
+      const observe = await PM.Export.snapshotAsync(0.5, 320);
+      const layer = PM.proj.layers[0];
+      const raster = api.render.raster(layer, 1, 0.5);
+      const rasterAsync = await api.render.rasterAsync(layer, 1, 0.5);
+      // A wrapper's modified copy (not the document's object) is drawn as passed.
+      const copy = api.render.raster({ ...layer, d: { ...layer.d, text: 'Eng' } }, 1, 0.5);
+      const ink = (c: HTMLCanvasElement) => {
+        const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+        let n = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i]! > 200 && d[i + 1]! > 200 && d[i + 2]! > 200) n++;
+        return n;
+      };
+      return {
+        url, later, look, observe,
+        frameInk: ink(canvas),
+        raster: raster ? { keys: Object.keys(raster).sort(), width: raster.cv.width, height: raster.cv.height, anchorX: raster.anchorX, selection: !!raster.selection, revision: raster.revision, blank: raster.blank } : null,
+        rasterAsyncKeys: rasterAsync ? Object.keys(rasterAsync).sort() : null,
+        copyWidth: copy ? copy.cv.width : null,
+        captures: !!PM.EngineCaptures,
+        sync: PM.EngineRender.stats.sync - before.sync,
+        failed: PM.EngineRender.stats.failed - before.failed
+      };
+    });
+    for (const url of [result.url, result.later, result.look, result.observe]) expect(url.startsWith('data:image/jpeg')).toBe(true);
+    expect(result.frameInk).toBeGreaterThan(200);
+    expect(result.captures).toBe(true);
+    // render.snapshot, renderFrameTo, PM.Export.snapshot, and the raster.
+    expect(result.sync).toBeGreaterThanOrEqual(4);
+    expect(result.failed).toBe(0);
+    expect(result.raster).not.toBeNull();
+    expect(result.raster!.width).toBeGreaterThan(100);
+    expect(Number.isFinite(result.raster!.anchorX)).toBe(true);
+    expect(result.raster!.selection).toBe(true);
+    expect(result.raster!.blank).toBe(false);
+    expect(typeof result.raster!.revision).toBe('number');
+    expect(result.rasterAsyncKeys).toEqual(result.raster!.keys);
+    expect(result.copyWidth).toBeGreaterThan(0);
+    expect(result.copyWidth).toBeLessThan(result.raster!.width);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('a sync snapshot while a staged resync is in flight returns pixels at once (main serves it with the document)', async ({ session }) => {
+    const { page } = session;
+    await openEngineViewer(session);
+    const result = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('transport-probe');
+      // A document over the inline resync limit: the viewer session stages
+      // it, so its resync waits for main while this thread is blocked.
+      const project = PM.mkProject({ name: 'Large', w: 640, h: 360, fps: 30, dur: 4, bg: '#203040' });
+      project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+      const box = PM.mkLayer('solid', { name: 'Box', from: 0, dur: 4, d: { color: '#FF3300', w: 80, h: 40 } }, project);
+      box.p['position.x'].v = 200; box.p['position.y'].v = 120;
+      project.layers = [box];
+      project.params = { notes: 'x'.repeat(13 * 1024 * 1024) };
+      PM.replaceProject(project);
+      const pending = PM.EngineConnection.session()?.resyncPending ?? null;
+      const before = PM.EngineRender.stats.documentSync;
+      const started = performance.now();
+      const url = api.render.snapshot(0.5, 320);
+      return { url, ms: performance.now() - started, pending, documentSync: PM.EngineRender.stats.documentSync - before };
+    });
+    console.log(`sync snapshot during a staged resync: ${result.ms.toFixed(1)} ms`);
+    expect(result.url.startsWith('data:image/jpeg')).toBe(true);
+    expect(result.pending).toBe(true);
+    expect(result.documentSync).toBe(1);
+    // Not the 5 s sync wait: served without the blocked renderer's resync.
+    expect(result.ms).toBeLessThan(4000);
+    const pixel = await dataUrlPixel(page, result.url, 120, 70);
+    expect(near(pixel, [0xff, 0x33, 0x00], 24)).toBe(true);
+    // The viewer's own session catches up afterwards.
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.session()?.resyncPending), { timeout: 30_000 }).toBe(false);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

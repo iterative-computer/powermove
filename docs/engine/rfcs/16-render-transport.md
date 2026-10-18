@@ -27,7 +27,7 @@ for all of that.
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `Request::Snapshot(HostSnapshot)` | main → interactive engine, on main's host port only | One frame (or one layer's raster) of the document of `session`, which the window port `renderer` owns. The envelope's revision is the minimum to render (read-your-writes). Answer: `Response::Snapshot` |
+| `Request::Snapshot(HostSnapshot)` | main → interactive engine, on main's host port only | One frame (or one layer's raster) of the document of `session`, which the window port `renderer` owns, or which main opened itself (`renderer` names main's own host port; see "Sync snapshots the window's session cannot serve"). The envelope's revision is the minimum to render (read-your-writes). Answer: `Response::Snapshot` |
 | `Response::Snapshot(SnapshotOutcome)` | engine → main | `rendered` (pixels and tags), `needsRenderer` (what only the renderer can draw: fallback programs, compatibility rasters), or `empty` (a layer target that draws nothing then: today's `raster()` returns null) |
 | `Event::Compat(CompatMessage)` | renderer → interactive engine (session-bound) | `pixels`: one row band of a compatibility raster; `forget`: drop a layer's rasters |
 | `Request::CompatFrame(CompatFrameRequest)` | job engine → host | A layer's compatibility pixels for an export frame (the host asks the editor windows). Answer: `Response::CompatFrame` |
@@ -39,7 +39,10 @@ for all of that.
 class, viewSeq, waitMs, uploaded }`:
 
 - `target`: `frame { motionBlurSamples, background, draft3d }` or
-  `layer { layer, scale, crop }`.
+  `layer { layer, scale, crop, content? }`. `content` is the layer object
+  the caller passed, as canonical JSON (at most 4 MiB), when it is not the
+  document's own (a raster wrapper's modified copy): the engine draws it in
+  the composition in place of layer `layer`.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
   (premultiplied over black, alpha 255: today's `renderOpaqueFrame` and the
   input of `toDataURL('image/jpeg')`), `premultiplied`, `straight` (canvas
@@ -58,11 +61,18 @@ class, viewSeq, waitMs, uploaded }`:
 ### Snapshot result
 
 `SnapshotResult { revision, viewSeq, width, height, pixels, payload, origin,
-layerBox, quality, waitedUs, renderUs }`. For a layer target `origin` is the
+layerBox, raster?, quality, waitedUs, renderUs }`. For a layer target `origin` is the
 anchor and `layerBox` the raster's box in layer pixels (today's
-`RasterSurface` `anchorX`, `anchorY`, `w`, `h`); pm-render paints the
-rasters of text and captions layers (`Renderer::text_raster`), any other
-layer is refused `unsupported` with its kind. `revision` is the exact revision rendered;
+`RasterSurface` `anchorX`, `anchorY`, `w`, `h`), and `raster` is
+`RasterGeometry { canvas: [w, h], window: [x, y], cropped, selection? }`:
+the whole canvas, where the pixels sit in it, whether the crop was applied
+(today's raster crops plain text and shapes only), and today's
+`selection` (`x0, y0, x1, y1`). pm-render paints every layer kind as
+`PM.raster` dispatches (`Renderer::layer_raster`): captions, editable
+paths, text (plain or animated), and any other layer as `rasterShape` of
+its resolved content. A text layer with no ink is a transparent canvas of
+its geometry (as today), a captions layer between cues is `empty`.
+`revision` is the exact revision rendered;
 `viewSeq` echoes the request. `payload` is `inline { bytes }` up to 1 MiB,
 otherwise `sharedMemory { name, length }`: a POSIX segment the engine created
 exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
@@ -72,11 +82,13 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
 
 ### Invariants
 
-1. **Only main asks, only for the window's own session.** The engine refuses
-   `snapshot` from any port but the host's (`capabilityRejected`), and
-   refuses a session the named renderer port does not own
-   (`unknownSession`). Main names the port from the IPC sender and refuses a
-   session of an earlier engine launch.
+1. **Only main asks, only for the window's own session or main's session
+   for that window.** The engine refuses `snapshot` from any port but the
+   host's (`capabilityRejected`), and refuses a session the named port does
+   not own (`unknownSession`); the named port is a renderer port or the
+   asking host port itself. Main names the window's port from the IPC
+   sender, refuses a session of an earlier engine launch, and keys its own
+   sessions by the IPC sender.
 2. **Pinned to a revision and a view.** The renderer flushes its pending
    edits to the engine and sends the revision it has; the engine renders
    that revision or a newer one and tags the result with it and with the
@@ -93,12 +105,42 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    `raster` wrapper or a WebGL callback cannot deadlock.
 5. **Memory caps.** Engine: 64 jobs (16 per session), 40 million pixels per
    snapshot, 1 GiB of results queued or published and not taken. Main: 8
-   snapshots in flight per window, 1 GiB of results in flight in all.
+   snapshots in flight per window, 1 GiB of results in flight in all, a
+   document of at most 512 MiB and 16 fallback programs (256 MiB) per
+   request.
+5a. **Media first.** A snapshot waits (within `waitMs`) until the host has
+   answered for every asset the document names, as viewer frames do.
+5b. **Fonts.** Text is laid out on the render thread over the engine's
+   font service (the registry on the utility process's main thread,
+   answered through a broker; `pm-node/src/fonts/render.rs`). A frame whose
+   fonts did not answer in time fails with `timeout`; it never draws text
+   with missing fonts.
 6. **Failures are named, never another engine's pixels.** `unsupported`
    (with the engine's reasons), `timeout`, `unknownSession`,
-   `budgetExceeded`, `deviceLost`, `invalidMessage`, `internal`; main adds
-   `unavailable` (engine off or not running) and `refused` (main's caps).
-   `render.snapshot` returns `''` only then.
+   `budgetExceeded`, `deviceLost`, `invalidMessage`, `internal`,
+   `blenderFailed` (a Blender composition captured without `draft3d`:
+   today's words, "The Blender frame is not prepared. Render this frame
+   before capturing it."); main adds `unavailable` (engine off or not
+   running), `refused` (main's caps), and `needsDocument` (see below).
+   `render.snapshot` returns `''` only then, and throws today's error for
+   `blenderFailed` as today's capture does.
+
+### Sync snapshots the window's session cannot serve
+
+A sync snapshot blocks the renderer, so the window's own session serves it
+only when that session has the document and no staged resync is on its way
+(a staged resync's next step needs the blocked renderer). Otherwise (no
+session yet at boot, a closed viewer, a large document's resync in flight)
+the request carries the window's document instead of a session, and main
+serves it from a session it opens itself on the interactive engine
+(`main/engine/window-sessions.ts`): one per window and engine launch, the
+window's definitions from main's relay, the document resynced inline up to
+12 MiB and staged above, fallback pixels of a `needsRenderer` round posted
+before the next ask. A request whose revision main already has carries
+only `{ id, revision }`; main answers `needsDocument` when it lacks it and
+the window sends it. Main's session closes with its window, its page, its
+engine launch, or after a minute unused. Every wait is bounded by the
+request's own.
 
 ### Compatibility pixels
 
@@ -152,9 +194,14 @@ snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>; // neve
 onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;
 answerCompat?(answer: EngineCompatAnswer): void;
 
-type EngineSnapshotRequest = { generation: number; session: number; revision: number | null; snapshot: SnapshotRequest };
+type EngineSnapshotRequest = {
+  generation: number; session: number | null; revision: number | null; snapshot: SnapshotRequest;
+  document?: { id: string; revision: number; hash?: string | null; json?: Uint8Array | null }; // with session: null
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];   // document requests only
+};
 type EngineSnapshotReply =
-  | { status: 'rendered'; revision; viewSeq; width; height; pixels; data: Uint8Array; origin: [number, number]; quality: FrameQuality; waitedUs; renderUs; mainMs }
+  | { status: 'rendered'; revision; viewSeq; width; height; pixels; data: Uint8Array; origin: [number, number];
+      layerBox: [number, number] | null; raster: RasterGeometry | null; quality: FrameQuality; waitedUs; renderUs; mainMs }
   | { status: 'needsRenderer'; revision; fallback: ShaderFallbackRequest[]; compat: CompatNeed[] }
   | { status: 'empty'; revision }
   | { status: 'failed'; code: string; message: string };
@@ -169,11 +216,12 @@ readonly ready: boolean;
 snapshotSync(options: EngineSnapshotOptions): EngineSnapshot;          // throws EngineSnapshotError
 snapshot(options: EngineSnapshotOptions, cls?: 'async' | 'idle'): Promise<EngineSnapshot>;
 renderFrameToSync(time, width, height, options?): HTMLCanvasElement | null; // today's renderOpaqueFrame
+renderFrameToCanvasSync(time, width, height, options?): HTMLCanvasElement; // throws EngineSnapshotError
 renderFrameTo(time, width, height, options?): Promise<HTMLCanvasElement>;
-snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure
+snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
 snapshotDataUrl(time, maxWidth, size): Promise<string>;
-rasterSync(layer, scale, time, crop?, maxEdge?): EngineSnapshot | null;  // null: draws nothing then
-raster(layer, scale, time, crop?, maxEdge?): Promise<EngineSnapshot | null>;
+rasterSync(layer: string, scale, time, crop?, options?: RasterOptions): EngineSnapshot | null;  // null: draws nothing then
+raster(layer: string, scale, time, crop?, options?: RasterOptions): Promise<EngineSnapshot | null>;
 toCanvas(snapshot: EngineSnapshot): HTMLCanvasElement;
 readonly thumbnails: EngineThumbnails;                                  // idle class, stale-rejecting
 uploadCompat(upload): boolean;
@@ -182,8 +230,10 @@ provideCompat(source: CompatSource, producer: CompatProducer): () => void;
 readonly stats: TransportStats;
 
 type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; background?; draft3d?; waitMs?;
-  layer?: { id: string; scale: number; crop?: { x; y; width; height } | null } };
-type EngineSnapshot = { width; height; data: Uint8ClampedArray; pixels; revision; viewSeq; origin; layerBox: [number, number] | null; quality; waitedUs; renderUs; mainMs };
+  layer?: { id: string; scale: number; crop?: { x; y; width; height } | null; content?: Uint8Array | null } };
+type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };
+type EngineSnapshot = { width; height; data: Uint8ClampedArray; pixels; revision; viewSeq; origin; layerBox: [number, number] | null;
+  raster: RasterGeometry | null; quality; waitedUs; renderUs; mainMs };
 class EngineSnapshotError extends Error { code: string }
 
 EngineThumbnails.request({ key, ...EngineSnapshotOptions, minRevision? }, revision?): Promise<EngineSnapshot | null>; // null: stale or superseded
@@ -193,14 +243,26 @@ EngineThumbnails.cancel(key): void;
 ### Kernel render facade (`kernel/install.ts`)
 
 With the engine on: `render.snapshot` and `render.renderFrameTo` come from
-the engine through `snapshotSync`; `project.snapshot` through `snapshot`.
+the engine through `snapshotSync`; `project.snapshot` through `snapshot`;
+`PM.Export.snapshot` and `snapshotAsync` (the agent's look and observe, the
+Library's thumbnails) through `PM.EngineCaptures`, which the exporter's own
+methods ask first (`engine-connection/app-captures.ts`), so wrappers and
+overrides of them reach the engine in any install order.
+`render.raster(layer, scale, time, uploaded, crop)` returns today's
+`RasterSurface` (`cv, w, h, anchorX, anchorY, selection`, plus `blank`
+and `sourceWindow` for text, `uv` for shapes, and the engine's `revision`)
+from the engine (`engine-connection/raster-surface.ts`): while a public
+call runs, the raster service's base beneath any extension wrapper is the
+engine's raster, so wrappers get engine pixels; the compositor's and the
+editing helpers' own `PM.raster` calls keep today's rasterizer. A layer
+object that is not the document's own goes with the request as `content`.
 apiVersion 4's async siblings are on the render object:
 `snapshotAsync(time, maxWidth = 480): Promise<string>`,
 `renderFrameToAsync(time, w, h, options?): Promise<HTMLCanvasElement>`,
-`rasterAsync(layer, scale = 1, time?, crop?): Promise<EngineSnapshot | null>`.
-Their typings in `kernel/api.ts` belong to the extcompat lane.
-`render.raster` itself stays on today's rasterizer until pm-render draws
-layer rasters (see Open).
+`rasterAsync(layer, scale = 1, time?, crop?): Promise<RasterSurface | null>`
+(the same shape as `raster`, flag on or off; with a wrapper registered it
+runs the wrapper chain). Their typings in `kernel/api.ts` belong to the
+extcompat lane.
 
 `render.gl.init(canvas)` and `render.gl.resize(…)` bind engine presentation
 to the caller's canvas (`PM.EngineCanvas`,
@@ -237,12 +299,10 @@ TypeScript and rebuild their addons when this lands.
 - **Depth and ID consumers**: the surfaces are delivered
   (`ViewerPresentation.depthFrame`); the 3D viewport chrome reading them is
   the 3D lane's.
-- **Layer rasters** of text and captions need render fonts in the
-  interactive engine (until then they are refused naming that); other layer
-  kinds have no raster pass in pm-render. `render.raster` itself stays on
-  today's rasterizer until the compatibility lane switches it.
 - **Compatibility rasters in frames**: the store holds them; pm-render does
   not draw a layer from them yet, so `needsRenderer.compat` is always empty.
-- **Snapshots before the window's first engine session** (during boot) fail
-  with `noSession`; afterwards the standby session keeps them working while
-  no viewer is open.
+- **The job engine's fonts**: the job engine has no font service yet, and
+  pm-export gates exports with the fonts-less capability check, so text
+  exports still route as before (export lane).
+- **Compat level 2 text** needs level 2 fonts on the render thread
+  (`TextFonts::level2`); the app creates no level 2 layers yet.

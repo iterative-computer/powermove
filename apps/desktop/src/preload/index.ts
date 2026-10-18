@@ -48,12 +48,25 @@ import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule
 /** A snapshot request as plain data (the page's object may carry getters or
  *  prototypes; main validates every field). */
 function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest {
-  return JSON.parse(JSON.stringify({
+  // Byte fields travel as bytes (structured clone); the rest as JSON.
+  const bytes = (value: unknown): Uint8Array | null => (value instanceof Uint8Array ? new Uint8Array(value) : null);
+  const target = request?.snapshot?.target as { kind?: string; content?: unknown } | undefined;
+  const plain = JSON.parse(JSON.stringify({
     generation: request?.generation,
-    session: request?.session,
+    session: request?.session ?? null,
     revision: request?.revision ?? null,
-    snapshot: request?.snapshot
+    snapshot: request?.snapshot ? { ...request.snapshot, target: target ? { ...target, content: undefined } : target } : request?.snapshot,
+    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null } : undefined
   })) as EngineSnapshotRequest;
+  if (target?.kind === 'layer' && plain.snapshot?.target?.kind === 'layer') (plain.snapshot.target as { content?: Uint8Array | null }).content = bytes(target.content);
+  if (plain.document) {
+    const json = bytes(request.document?.json);
+    if (json) plain.document.json = json;
+  }
+  if (Array.isArray(request?.fallbackPixels)) {
+    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+  }
+  return plain;
 }
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
