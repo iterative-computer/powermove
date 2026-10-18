@@ -175,6 +175,29 @@ impl Consumer {
         &self.ring
     }
 
+    /// Frames of the current epoch the next [`Self::fill`] can play (the
+    /// rest of the chunk being played counts its unplayed frames only).
+    /// Called from the callback's side, like `fill`.
+    pub fn queued_frames(&self) -> usize {
+        let ring = &*self.ring;
+        let current = ring.epoch.load(Ordering::Acquire);
+        let tail = ring.tail.load(Ordering::Relaxed);
+        let head = ring.head.load(Ordering::Acquire);
+        let mut frames = 0;
+        for (i, at) in (tail..head).enumerate() {
+            let slot = &ring.slots[at % ring.slots.len()];
+            // SAFETY: as in `fill`: `head` (acquired) is past this slot, and
+            // only this side moves `tail`.
+            let tag = unsafe { *slot.tag.get() };
+            if tag.epoch < current {
+                continue;
+            }
+            let played = if i == 0 { self.offset } else { 0 };
+            frames += (tag.frames as usize).saturating_sub(played);
+        }
+        frames
+    }
+
     /// Fills `out` (interleaved, `device_channels` wide) from the ring.
     /// Device channels beyond the ring's are silent. Returns what the first
     /// frame plays, when it plays media.
@@ -264,6 +287,26 @@ mod tests {
         assert_eq!(h.tag.media_ticks, 5000);
         assert_eq!(out[0], 0.0);
         assert_eq!(out[3], 3.0);
+    }
+
+    #[test]
+    fn queued_frames_count_what_the_next_fill_plays() {
+        let ring = Ring::new(4, 1);
+        let mut c = Consumer::new(ring.clone());
+        let a = vec![0.5f32; CHUNK];
+        assert_eq!(c.queued_frames(), 0);
+        assert!(ring.push(tag(0, 0, CHUNK as u32), &a));
+        assert!(ring.push(tag(0, 0, 10), &a));
+        assert_eq!(c.queued_frames(), CHUNK + 10);
+        let mut out = vec![0f32; 100];
+        c.fill(&mut out, 1);
+        assert_eq!(c.queued_frames(), CHUNK - 100 + 10);
+        // A new epoch's chunks only: the old ones will be skipped.
+        ring.set_epoch(1);
+        assert_eq!(c.queued_frames(), 0);
+        assert!(ring.push(tag(0, 1, CHUNK as u32), &a));
+        assert_eq!(c.queued_frames(), CHUNK);
+        assert_eq!(ring.queued(), 3);
     }
 
     #[test]
