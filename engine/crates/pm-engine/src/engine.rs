@@ -340,6 +340,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::RegisterExtension(_) => "registerExtension",
         Request::ToolCall(_) => "toolCall",
         Request::ProbeMedia(_) => "probeMedia",
+        Request::ShaderFallback(_) => "shaderFallback",
     }
 }
 

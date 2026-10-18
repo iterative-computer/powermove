@@ -224,6 +224,8 @@ pub enum Request {
     ToolCall(ToolCall),
     /// Host → job engine. Answer: `mediaFacts`.
     ProbeMedia(crate::media::ProbeMedia),
+    /// Job engine → host. Answer: `ack` once the output file is written.
+    ShaderFallback(crate::shader_fallback::HostShaderFallback),
 }
 
 /// Responses, one per request kind.
@@ -357,6 +359,7 @@ impl Request {
             Request::CloseSession
             | Request::BlenderRender(_)
             | Request::BlenderModel(_)
+            | Request::ShaderFallback(_)
             | Request::CloseProject(_) => ResponseKind::Ack,
             Request::Resync(_) => ResponseKind::PatchesApplied,
             Request::CheckConsistency(_) => ResponseKind::Consistency,
@@ -399,7 +402,8 @@ impl Request {
             | Request::OutputDestination(_)
             | Request::CommitOutput(_)
             | Request::HardwareSessions(_)
-            | Request::ProbeMedia(_) => ContractId::HostServices,
+            | Request::ProbeMedia(_)
+            | Request::ShaderFallback(_) => ContractId::HostServices,
             Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
                 ContractId::Blender
             }
@@ -526,6 +530,7 @@ impl Validate for Request {
             Request::SubmitJob(job) => job.validate(),
             Request::ToolCall(call) => call.validate(),
             Request::ProbeMedia(probe) => probe.validate(),
+            Request::ShaderFallback(fallback) => fallback.validate(),
             Request::CloseSession
             | Request::Resync(_)
             | Request::CheckConsistency(_)
