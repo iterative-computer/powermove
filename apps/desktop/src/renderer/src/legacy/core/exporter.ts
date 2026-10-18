@@ -1154,6 +1154,8 @@ X.muxWebM = muxWebM;
 
 /* Await source decoding before an agent reviews a video frame. */
 X.snapshotAsync = async (T: number, maxW = 480) => {
+  // "Use New Engine": the engine draws it (engine-connection/app-captures.ts).
+  if (PM.EngineCaptures) return PM.EngineCaptures.snapshotAsync(T, maxW);
   if (X.busy || PM.agentFrameCapture) throw new Error('Wait for the current frame capture or export to finish.');
   const wasPlaying = PM.playing;
   PM.pause();
@@ -1171,6 +1173,7 @@ X.snapshotAsync = async (T: number, maxW = 480) => {
 
 /* Fast still capture used by the agent's `look` tool. */
 X.snapshot = (T: any, maxW: any = 480) => {
+  if (PM.EngineCaptures) return PM.EngineCaptures.snapshot(T, maxW);
   const p: any = PM.proj;
   const s: any = Math.min(1, maxW / p.w);
   const cv: any = PM.renderFrameTo(
