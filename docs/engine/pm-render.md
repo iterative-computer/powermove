@@ -123,10 +123,14 @@ Opaque RGBA containers stay in the supported class. Matching SDR PNG cICP
 and ICC declarations are accepted; conflicting/HDR declarations stay gated.
 
 The header parser still restricts unmeasured structures: HDR/independent
-chromaticity PNG; RGB/CMYK, 12-bit/arithmetic/lossless JPEG; tiled,
-compressed float and other-model TIFF; and AVIF outside the measured 8/10-bit
-4:2:0 SDR class. Container transforms match Chromium's measured behavior;
-late PNG EXIF and WebP EXIF are ignored. BMP, ICO and static GIF now have
+chromaticity PNG; CMYK, 12-bit/arithmetic/lossless JPEG; tiled,
+float compression/predictors outside uncompressed/Deflate and other-model
+TIFF; and HDR/wide-CICP AVIF outside the measured SDR classes. Additional AVIF proof covers 39 native compositions:
+8/10/12-bit 420/422/444/monochrome, enhanced 16-bit 444, embedded ICC and
+SDR-base gain maps, max 1 CV with no routed exports. Seven further
+compositions close RGB JPEG, gray/alpha TIFF and Deflate float RGB TIFF,
+also at max 1 CV with no fallback. Container transforms match Chromium's
+measured behavior; late PNG EXIF and WebP EXIF are ignored. BMP, ICO and static GIF now have
 composition proof. EXR and DPX are rejected by today's importer even with
 forced image MIME types; native source APIs remain available through
 Interpret Footage. Full decoder breadth remains open (`media.md`).
@@ -309,7 +313,7 @@ classes re-measured 2026-10-14 against Chromium 152.
 | `tests/color.rs` | Invariant (1), 4:2:0: H.264 → `420v` | 259,200 samples: luma and chroma exact |
 | `tests/headless.rs` | Determinism: every supported feature in one composition, 3 times, 16- and 32-bit, two renderers | Byte-identical |
 | `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2, exec-time unsupported media leaves the target untouched, a replaced video is reopened | Pass |
-| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, float, gray and tiled TIFF, translucent wide-gamut ICC, 1-bit PNG, unhandled `gAMA`/`cICP`, progressive gray JPEG from ImageIO) are unsupported; Y′CbCr JPEG is drawn; decoder-applied orientation is drawn, unapplied late PNG EXIF remains gated, ICC RGB TIFF matches the shipped PNG conversion, and the header parse alone finds each transform; lossless TIFF compressions decode like the uncompressed file; header classes | Pass |
+| `tests/stills.rs`, `stills::tests` | Measured PNG, JPEG, TIFF, BMP/ICO/GIF and SDR AVIF classes pass capability checks; native-depth sources remain separate. Chromium upload hashes pin deep/ICC/chroma AVIF, RGB JPEG and gray TIFF. HDR, CMYK, tiled/other-model TIFF and independent PNG chromaticity remain explicit; malformed/header boundaries and ignored EXIF are checked | Pass |
 | `pm-gpu/tests/msl_math.rs` | Safe math is in effect | Pass |
 | `frame_time_at_1080p` (ignored) | The everything composition at 1920 × 1080, release | 3.06 ms (16-bit, p95 4.69), 2.48 ms (32-bit, p95 2.76) median per frame, plan and GPU |
 

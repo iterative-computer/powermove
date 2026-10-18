@@ -197,10 +197,11 @@ for the pm-text diagnostic below; the production SVG text gate remains.
   Edges differ by up to one or two MSAA samples (max 64–116). That is
   outside the 2D class, so level 1 SVG images stay routed
   (`Feature::SvgImage`); `tests/svg.rs` pins the measurements. Routing
-  does not parse a level 1 SVG (Chromium's `<img>` accepts bytes usvg
-  rejects, such as ISO-8859-1 or UTF-16); only an offline file is a layer
-  failure. pm-render decodes the declared encoding before usvg at level 2
-  (`pm_media::image::svg::utf8_source`, `media.md`).
+  checks only XML/image-document errors for the empty broken image;
+  unsupported usvg paint is not corruption. Declared ISO-8859-1 and UTF-16
+  sources remain valid. Offline/unreadable files are named layer failures.
+  `pm_media::image::svg::utf8_source` normalizes declared encodings
+  (`media.md`).
 - **Level 2**: an SVG of solid fills and strokes in plain groups that stays
   inside its box is a coverage scene (vectors at output resolution). Anything
   else (gradients, patterns, clips, masks, filters, group opacity, blend
@@ -259,6 +260,14 @@ still explicit walker errors. Gaussian blur intermediates and pm-text glyph
 mask rasterization also remain unfinished. Consequently the 34-project SVG
 composition deliverable is unproven and `Feature::SvgImage` remains. A
 successful parse or the existing level-2 resvg output is not a level-1 proof.
+
+Corrupt level-1 image documents are handled independently: XML/image-root
+errors paint the empty image Chromium shows, with no SVG route or named
+layer failure. Five persisted corrupt documents pass the actual native app
+export path exactly. This does not remove the gate on any valid SVG paint
+record; usvg's unsupported features are not corruption. The flagged editable
+SVG import regression also passes; it checks native-route completion before
+undo, and retains its exported-player pixel and geometry assertions.
 
 ## Memory
 

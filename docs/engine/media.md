@@ -543,15 +543,17 @@ float accumulator. `icc_alpha_compare` compares that accumulator directly to
 native float output. Measured: the four translucent uploads are byte-exact
 (24,576 pixels each); all eight float compositions are below 0.125 CV,
 including alpha. The alpha-ICC gate is removed. Opaque compositions keep the
-unchanged 2D bar. The optional `PM_MEDIA_PNG_ALPHA=1` variant measures the
-encoded transparent-PNG boundary separately from the float accumulator.
-That boundary still fails the 2D distribution bar on the translucent ramps:
-max 1.4981 premultiplied CV, with 454–505 of 6,144 pixels above 1 (alpha
-exact). This is an export blocker, not a source-upload discrepancy. Today's
-`alphaFrame` first quantizes the premultiplied accumulator to bytes, then
-truncates its unpremultiply; native export converts the float accumulator to
-straight alpha before its final quantization. The export owner must reproduce
-the level-1 boundary without changing level-2/high-precision output.
+unchanged 2D bar. The default app spec now also checks transparent PNG
+output. E1's encoded boundary is closed: standard-color RGBA8 PNG export
+quantizes the premultiplied accumulator, truncates the alpha division, then
+reproduces Canvas2D's N32 premultiply/PNG unpremultiply. The four translucent
+ICC outputs compare at 0 premultiplied CV after Chromium decoding. The full
+orientation/color-description run has 58 native exports at max 1 CV, no pixel
+above 1, including E1's oriented PNG-alpha and AVIF-alpha fixtures at 0 CV.
+Its one previously unmeasured BT.2020 CICP case remains explicit. Each drawn
+case must finish an actual native export job without fallback; a viewer route
+alone is not proof. Float rendering, linear output and 16-bit PNG keep their
+existing high-precision conversions. See `export.md`.
 
 The opt-in `playwright.svgstills.config.ts` harness captures through the real
 file picker (including Electron's real file path for TIFF conversion),
@@ -564,30 +566,57 @@ unmatched or unusable reference.
 
 Newly drawn classes, each compared through the app:
 
-- BMP24/BMP32, ICO, and static GIF; baseline and progressive gray JPEG.
+- BMP24/BMP32, ICO, and static GIF; baseline/progressive gray and
+  RGB-encoded JPEG. RGB uses the existing libjpeg-turbo decode path;
+  component ids and Adobe transform no longer cause a class gate.
 - PNG grayscale and indexed 1/2/4-bit samples (including palette alpha),
   gamma-only color information, and post-IDAT EXIF. Gamma-only PNG follows
   `SkPngRustCodec`'s profile and neutral-gamma threshold; late EXIF is ignored,
   matching the existing unrotated image.
 - 8-bit palette TIFF in strips: indices are decoded without ImageIO's
   device-RGB conversion and expanded from the stored 16-bit ColorMap before
-  color conversion. Uncompressed RGB float32 TIFF without a non-sRGB ICC
-  profile reproduces the shipped PNG converter's early integer quantization.
-- 10-bit 4:2:0 SDR AVIF with the previously measured sRGB-equivalent CICP
-  descriptions, full/limited range. ImageIO's 16-bit sRGB description is
-  source metadata only; the compatibility bitmap still comes from the
-  pinned CrabbyAvif/dav1d/libyuv decoder. Container ICC, HDR, 12-bit,
-  monochrome and 4:2:2/4:4:4 remain distinct classes.
+  color conversion. Unsigned 8/16-bit gray, white-is-zero and gray-alpha
+  TIFFs now have upload and composition proof. ImageIO supplies the native
+  gray-alpha source when image's TIFF adapter cannot expand it. RGB float32
+  TIFF without a non-sRGB ICC profile reproduces the shipped PNG converter's
+  early integer quantization, for uncompressed and Deflate strips without
+  the floating-point predictor.
+- SDR AVIF at 8/10/12 bits in 4:2:0, 4:2:2, 4:4:4 and monochrome, plus
+  measured enhanced 16-bit 4:4:4 containers. Full/limited range, alpha,
+  identity matrix, embedded ICC, transforms and SDR-base gain maps are
+  covered. The bitmap comes from pinned CrabbyAvif/dav1d/libyuv rather than
+  ImageIO. Container ICC overrides CICP, is validated as Blink validates it,
+  and uses the same float ImageBitmap color conversion as PNG/TIFF;
+  clipping straight RGB early changes translucent P3/Adobe pixels by up to
+  24 CV. Valid AVIFs ImageIO rejects decode independently at level 1; the
+  original native-depth API is unchanged. Some deep-alpha/ICC containers
+  remain unreadable through ImageIO at level 2.
+
+The additional AVIF capture has 41 reachable app uploads: all 39 SDR cases
+are byte-exact, and their transformed 160×120 compositions have max 1 CV
+with no pixels above 1. All 39 exports finish in the native job engine,
+with no routed export. Ten small redistributable synthetic fixtures pin
+Chromium upload SHA-256 values in `tests/stills.rs`; their provenance is in
+`e2e/fixtures/README.md`. Public Chromium 152 decoder fixtures and the pinned
+CrabbyAvif test fixtures supply deep, grid, ICC and gain-map cases; private
+captures stay outside Git. HDR base images (including an HDR-base gain map)
+remain unsupported: neither a successful SDR base comparison nor a valid
+ICC parse establishes HDR tone-map parity.
 
 The 20-case composition comparison has max 1 CV and no pixel above 1.
+Seven further RGB JPEG/gray TIFF/Deflate float TIFF compositions also pass
+at max 1 CV with no pixel above 1, and all seven finish native export jobs
+without fallback. Six integer uploads are exact; the Deflate float upload
+is within 1 CV. Synthetic fixtures pin their decoder and precision boundaries.
 The existing 21 detailed still corpus frames also pass unchanged.
 `tests/stills.rs` covers capability boundaries, source precision, ignored
 late EXIF, and palette equality with the shipped PNG conversion.
 
-Remaining decoder blockers are measurable, reachable sources: HDR PQ/HLG
-PNG, independent PNG chromaticity, CMYK JPEG/TIFF, tiled TIFF, compressed or
-other floating-point TIFF, other TIFF color models, and AVIF beyond the
-measured SDR 4:2:0 class. No gate is removed for these. The captured CMYK
+Remaining decoder gaps include: HDR PQ/HLG
+PNG, independent PNG chromaticity, CMYK JPEG/TIFF, tiled TIFF, float TIFF
+compression/predictors outside the measured uncompressed/Deflate class,
+other TIFF color models, and HDR/wide-CICP AVIF outside the
+measured SDR classes. No gate is removed for these. The captured CMYK
 and tiled references differ from the native source reading; a tiled TIFF
 that the app converts to black is not evidence that every tiled TIFF should
 be black. JPEG12/lossless16 import as float ImageBitmaps but fail today's
@@ -599,3 +628,32 @@ is in `media-formats.ts`, and both the ordinary picker import and forced
 `image/x-exr` / `image/x-dpx` MIME imports reject the captured originals.
 The original native decoding APIs remain available. No app import or
 persistence behavior changes in this lane.
+
+### Broken level-1 SVG documents
+
+A corrupt persisted SVG has the empty paint of Chromium's broken `<img>`.
+`image::svg::broken_image` checks XML and the root SVG namespace independently
+of usvg paint support; SVGZ and resource-limit failures remain undecided.
+Missing/unreadable files keep named media failures. Valid SVG with text,
+unsupported paint, or other usvg limitations retains its original gate.
+The hidden-app regression reloads five persisted corrupt assets: truncated
+XML, wrong root, missing namespace, undefined entity and empty bytes. Each
+has no live Chromium image, exact empty native/legacy transparent output,
+and a completed native export job without fallback. The Rust media-error
+integration checks empty pixels and no layer failure for these corrupt
+level-1 documents. Valid declared-encoding SVGs remain separately gated.
+
+`import-svg.spec.ts:7` passes with the engine flag on at the reviewed tip;
+the reported original failure did not reproduce. It now explicitly waits
+for the imported editable shape's native route before undoing the import,
+while keeping its original durable source, vertex edit, viewport allocation
+and exported-player pixel assertions.
+
+Additional explicit gaps: a Display P3 `cHRM`/`gAMA` PNG differs by up to
+117 CV when its chromaticities are ignored, and a Y'CbCr/JPEG-compressed
+TIFF differs by 255 CV against today's conversion. Neither gate is removed.
+A generated CIELab TIFF is rejected by today's importer because the shipped
+FFmpeg TIFF decoder does not implement that photometric model. This is a
+recorded rejected import, not a native parity claim. Compressed float TIFF
+with other predictors, planar layouts and other color models still lack
+complete app measurements.
