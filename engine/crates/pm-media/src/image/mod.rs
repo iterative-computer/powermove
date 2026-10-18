@@ -22,6 +22,7 @@ pub mod jpeg;
 pub mod raster;
 pub mod sequence;
 pub mod svg;
+mod svg_broken;
 
 use crate::error::{MediaError, Result};
 use crate::frame::{

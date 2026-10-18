@@ -646,10 +646,12 @@ fn check_media(
                 return;
             }
             if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
-                match std::fs::read(path) {
-                    Ok(bytes) if pm_media::image::svg::broken_image(&bytes) => return,
+                // Only a document Chromium is known to show as a broken
+                // <img> draws nothing; every other one stays gated.
+                match pm_media::image::svg::broken_image_file(&path) {
+                    Ok(true) => return,
                     Err(_) => return, // Execution names the unreadable source.
-                    _ => {}
+                    Ok(false) => {}
                 }
             }
             add(layer, Feature::SvgImage);

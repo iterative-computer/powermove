@@ -1145,14 +1145,14 @@ fn native_content_quad<'d>(
                 // XML/image document paints nothing, as Chromium's <img>
                 // does. usvg paint support does not determine corruption.
                 if !crate::vector::level2(layer) {
-                    match std::fs::read(&path) {
+                    match pm_media::image::svg::broken_image_file(&path) {
                         Err(e) => b.failures.push(LayerFailure {
                             composition: comp_id,
                             layer: js::layer_id(layer),
                             message: format!("{}: {e}", path.display()),
                         }),
-                        Ok(bytes) if pm_media::image::svg::broken_image(&bytes) => {}
-                        Ok(_) => b.unsupported.push(Unsupported::layer(
+                        Ok(true) => {}
+                        Ok(false) => b.unsupported.push(Unsupported::layer(
                             &comp_id,
                             layer,
                             Feature::SvgImage,
