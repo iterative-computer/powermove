@@ -82,7 +82,9 @@ fn mask_values<'d>(
     let id = node::to_js_string(node::member(Some(m), "id")).to_string_lossy();
     let num = |scope: &mut Scope<'_, 'd>, key: &str| -> JsResult<f64> {
         if !with_path {
-            return Ok(scope.channel_p(layer, node::member(p, key), time, key)?.to_number());
+            return Ok(scope
+                .channel_p(layer, node::member(p, key), time, key)?
+                .to_number());
         }
         let v = scope
             .channel_p(layer, node::member(p, key), time, &format!("m.{id}.{key}"))?

@@ -44,6 +44,9 @@ const FLAG_BLEND_IN_E: i32 = 32;
 const FLAG_HALF: i32 = 64;
 // Bezier path masks: the layer times today's coverage canvas (`tcov`).
 const FLAG_PATH_MASKS: i32 = 128;
+// The device stores `rgba16float` outputs rounded to nearest (probed;
+// `composite/half_store.rs`), else toward zero.
+const FLAG_HALF_NEAREST: i32 = 256;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
@@ -100,18 +103,31 @@ fn half_rtz(v: f32) -> f32 {
     return bitcast<f32>(bitcast<u32>(v) & 0xffffe000u);
 }
 
+// The same store on a device that rounds to nearest (ties to even).
+fn half_rne(v: f32) -> f32 {
+    let a = abs(v);
+    if (a != a || a >= 65520.0) {
+        return v;
+    }
+    if (a < 6.103515625e-05) {
+        return sign(v) * round(a * 16777216.0) / 16777216.0;
+    }
+    let b = bitcast<u32>(v);
+    return bitcast<f32>((b + 0xfffu + ((b >> 13u) & 1u)) & 0xffffe000u);
+}
+
 fn half(v: f32) -> f32 {
     if (has(FLAG_HALF)) {
+        if (has(FLAG_HALF_NEAREST)) {
+            return half_rne(v);
+        }
         return half_rtz(v);
     }
     return v;
 }
 
 fn half4(v: vec4<f32>) -> vec4<f32> {
-    if (has(FLAG_HALF)) {
-        return vec4<f32>(half_rtz(v.x), half_rtz(v.y), half_rtz(v.z), half_rtz(v.w));
-    }
-    return v;
+    return vec4<f32>(half(v.x), half(v.y), half(v.z), half(v.w));
 }
 
 fn sd_box(p: vec2<f32>, b: vec2<f32>) -> f32 {

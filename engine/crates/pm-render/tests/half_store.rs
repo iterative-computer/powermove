@@ -171,6 +171,11 @@ fn rgba16float_targets_store_fragment_outputs_toward_zero() {
     // Half the probes lie above the midpoint between two halves: rounding to
     // nearest would store the upper one.
     assert_eq!(rtz, n as usize / 2, "rne {rne} rtz-only {rtz} of {n}");
+    // The renderer's own probe (which picks the fused steps' rounding)
+    // reaches the same answer.
+    assert!(!pm_render::composite::half_store::rounds_to_nearest(
+        device, queue
+    ));
 }
 
 fn f16_floor(t: f32) -> f32 {

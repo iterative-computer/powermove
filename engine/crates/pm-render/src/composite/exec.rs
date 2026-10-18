@@ -19,9 +19,8 @@ use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
-    FLAG_BLEND_IN_E, FLAG_HALF, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED,
-    FLAG_PATH_MASKS,
-    FLAG_MATTE_LUMA, Op, OpUniform,
+    FLAG_BLEND_IN_E, FLAG_HALF, FLAG_HALF_NEAREST, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE,
+    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -56,6 +55,9 @@ impl Exec<'_> {
         }
         if self.precision == Precision::Float16 {
             flags |= FLAG_HALF;
+            if self.pipelines.ops.half_nearest(self.device, self.queue) {
+                flags |= FLAG_HALF_NEAREST;
+            }
         }
         OpUniform {
             m: full_quad(full),
@@ -301,11 +303,12 @@ impl Exec<'_> {
         if let Some(m) = masks {
             if let Some(path) = &m.path {
                 u.i[1] |= FLAG_PATH_MASKS;
-                let texture = self
-                    .pipelines
-                    .ops
-                    .path_masks
-                    .coverage(self.device, self.queue, encoder, path)?;
+                let texture = self.pipelines.ops.path_masks.coverage(
+                    self.device,
+                    self.queue,
+                    encoder,
+                    path,
+                )?;
                 coverage = Some(texture.create_view(&Default::default()));
             } else {
                 u.i[1] |= FLAG_MASKS;

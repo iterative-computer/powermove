@@ -34,6 +34,7 @@ pub mod color;
 pub mod effects;
 pub(crate) mod exec;
 pub(crate) mod gpu;
+pub mod half_store;
 pub mod path_masks;
 pub mod region;
 

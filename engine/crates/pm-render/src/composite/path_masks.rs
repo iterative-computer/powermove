@@ -201,11 +201,18 @@ impl Image {
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        Image { texture, rect, ring }
+        Image {
+            texture,
+            rect,
+            ring,
+        }
     }
     /// The space coordinate of texel (0, 0)'s corner.
     fn origin(&self) -> [f32; 2] {
-        [(self.rect.x0 - self.ring) as f32, (self.rect.y0 - self.ring) as f32]
+        [
+            (self.rect.x0 - self.ring) as f32,
+            (self.rect.y0 - self.ring) as f32,
+        ]
     }
     fn inv_size(&self) -> [f32; 2] {
         let s = self.texture.size();
@@ -227,18 +234,29 @@ pub(crate) struct ItemCache {
 const ITEM_CACHE_BYTES: usize = 192 << 20;
 
 impl ItemCache {
-    fn item(&mut self, m: &PathMask, world: [f64; 6], w: u32, h: u32) -> Result<std::sync::Arc<mask::Item>, String> {
+    fn item(
+        &mut self,
+        m: &PathMask,
+        world: [f64; 6],
+        w: u32,
+        h: u32,
+    ) -> Result<std::sync::Arc<mask::Item>, String> {
         let key = format!("{w}x{h} {world:?} {:?} {:?} {:?}", m.ops, m.outline, m.path);
         self.tick += 1;
         if let Some((i, used)) = self.items.get_mut(&key) {
             *used = self.tick;
             return Ok(i.clone());
         }
-        let item = std::sync::Arc::new(mask::item(m, world, w, h).map_err(|u| format!("path mask: {u}"))?);
+        let item =
+            std::sync::Arc::new(mask::item(m, world, w, h).map_err(|u| format!("path mask: {u}"))?);
         self.bytes += item.alpha.len();
         self.items.insert(key, (item.clone(), self.tick));
         while self.bytes > ITEM_CACHE_BYTES && self.items.len() > 1 {
-            let oldest = self.items.iter().min_by_key(|(_, (_, u))| *u).map(|(k, _)| k.clone());
+            let oldest = self
+                .items
+                .iter()
+                .min_by_key(|(_, (_, u))| *u)
+                .map(|(k, _)| k.clone());
             let Some(k) = oldest else { break };
             if let Some((i, _)) = self.items.remove(&k) {
                 self.bytes -= i.alpha.len();
@@ -350,7 +368,11 @@ impl PathMaskPipelines {
             multiview_mask: None,
         });
         for m in &cov.masks.masks {
-            let item = self.items.lock().unwrap_or_else(|e| e.into_inner()).item(m, cov.world, w, h)?;
+            let item = self
+                .items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .item(m, cov.world, w, h)?;
             let mut img = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 1);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -444,7 +466,9 @@ impl PathMaskPipelines {
                 }
                 &self.blur1d
             }
-            Pass::Blur2d { weights, offsets, .. } => {
+            Pass::Blur2d {
+                weights, offsets, ..
+            } => {
                 u.n = (weights.len() / 4) as u32;
                 for (i, k) in weights.chunks(4).enumerate() {
                     u.k[i] = [k[0], k[1], k[2], k[3]];
@@ -473,7 +497,11 @@ impl PathMaskPipelines {
 
 /// The coverage canvas of `cov` read back (top-down, one byte per pixel):
 /// for parity tests and diagnostics.
-pub fn coverage_bytes(device: &wgpu::Device, queue: &wgpu::Queue, cov: &PathCoverage) -> Result<Vec<u8>, String> {
+pub fn coverage_bytes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    cov: &PathCoverage,
+) -> Result<Vec<u8>, String> {
     let pipelines = PathMaskPipelines::new(device);
     let mut encoder = device.create_command_encoder(&Default::default());
     let texture = pipelines.coverage(device, queue, &mut encoder, cov)?;

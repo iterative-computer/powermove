@@ -24,6 +24,9 @@ pub(crate) const FLAG_LINEAR: i32 = 16;
 pub(crate) const FLAG_BLEND_IN_E: i32 = 32;
 pub(crate) const FLAG_HALF: i32 = 64;
 pub(crate) const FLAG_PATH_MASKS: i32 = 128;
+/// The device stores `rgba16float` outputs rounded to nearest (else toward
+/// zero; `super::half_store`).
+pub(crate) const FLAG_HALF_NEAREST: i32 = 256;
 
 /// Which fragment entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +55,8 @@ pub(crate) struct OpPipelines {
     coverage_sampler: wgpu::Sampler,
     /// The path mask coverage passes (`super::path_masks`).
     pub path_masks: super::path_masks::PathMaskPipelines,
+    /// How the device stores `rgba16float` outputs, probed once.
+    half_nearest: std::sync::OnceLock<bool>,
 }
 
 impl OpPipelines {
@@ -184,7 +189,16 @@ impl OpPipelines {
             no_coverage,
             coverage_sampler,
             path_masks: super::path_masks::PathMaskPipelines::new(device),
+            half_nearest: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Whether `rgba16float` targets store rounded to nearest on this
+    /// device (probed on first use; else toward zero).
+    pub fn half_nearest(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        *self
+            .half_nearest
+            .get_or_init(|| super::half_store::rounds_to_nearest(device, queue))
     }
 
     pub fn get(&self, op: Op, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
@@ -211,7 +225,9 @@ impl OpPipelines {
         format: wgpu::TextureFormat,
         viewport: Option<[f32; 4]>,
     ) {
-        self.run_with_coverage(device, queue, encoder, op, uniform, a, b, None, target, format, viewport);
+        self.run_with_coverage(
+            device, queue, encoder, op, uniform, a, b, None, target, format, viewport,
+        );
     }
 
     /// [`Self::run`] with a path mask coverage canvas bound.
@@ -255,7 +271,9 @@ impl OpPipelines {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(coverage.unwrap_or(&self.no_coverage)),
+                    resource: wgpu::BindingResource::TextureView(
+                        coverage.unwrap_or(&self.no_coverage),
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
