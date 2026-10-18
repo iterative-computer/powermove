@@ -359,6 +359,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
+  if (options.headless) for (const op of ['gl.bounds', 'gl.pick']) api.noReference.add(op);
   /* A trap leaves the instance dead. The compiled module is kept, so a fresh
      instance is made synchronously (the module is far below Chromium's
      synchronous-instantiation limit) and resynced from the shadow, and the

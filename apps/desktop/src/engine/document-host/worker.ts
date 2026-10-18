@@ -16,6 +16,7 @@ import type { ExtensionRecord } from '../../shared/extensions';
 import type { PersistReason } from '../../shared/engine-protocol';
 import type { TranscribeProgress } from '../../shared/transcription';
 import { bootChain, memoryStore, type Chain, type EnginePolicy } from './chain';
+import { recordFor, records as storeRecords, setRecords } from '../../renderer/src/kernel/extensions.svelte';
 import {
   DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
   type DocumentHostFailure, type FromWorker, type InstanceOpened, type InstancePersisted, type InstanceStats,
@@ -233,9 +234,13 @@ export class DocumentWorker {
       throw new DocumentHostError('sandbox-unavailable', `"${record.manifest?.name ?? record.id}" is a Store extension; the document host has no contained sandbox for it yet, so it was not loaded.`);
     }
     if (loader.activeIds().includes(record.id)) await loader.deactivate(record.id);
+    // The kernel's record list is what the Mods panel and health read on the desktop.
+    setRecords([...storeRecords().filter((r) => r.id !== record.id), record]);
     const active = await loader.activate(record);
-    const health = loader.records().find((r) => r.id === record.id)?.health ?? recordHealth(record.id, chain);
-    if (!active) throw new DocumentHostError('worker-error', `Extension ${record.id} failed to activate: ${health && 'error' in health ? String((health as { error?: unknown }).error) : 'unknown error'}`);
+    if (!active) {
+      const health = recordFor(record.id)?.health as { state?: string; error?: unknown } | undefined;
+      throw new DocumentHostError('worker-error', `Extension ${record.id} failed to activate: ${health?.error ? String(health.error) : health?.state ?? 'unknown error'}`);
+    }
     // The kernel's registries changed synchronously during activation, so the
     // next tool call in this instance sees them (contract 15, invariant 4).
     this.definitionsGeneration += 1;
@@ -258,7 +263,9 @@ export class DocumentWorker {
       fallbacks,
       calls,
       auditor: engine.audit ? { audits: engine.audit.audits, failures: engine.audit.failures } : null,
-      consistency: { checks: Number(engine.barrier?.checks ?? 0), mismatches: Number(engine.barrier?.mismatches ?? 0) },
+      dual: engine.dual ? { compared: sum(engine.dual.compared), mismatched: sum(engine.dual.mismatched), stale: sum(engine.dual.stale), mismatchedOps: { ...engine.dual.mismatched } } : null,
+      failures: (PM['EngineDoc']?.failures?.() ?? []).map((f: { code: string; message: string; retry: boolean }) => ({ code: f.code, message: f.message, retry: f.retry })),
+      consistency: { checks: Number(engine.barrier?.checks ?? 0), mismatches: Number(engine.barrier?.checkMismatches ?? 0) },
       extensions: this.extensions,
     };
   }
@@ -278,6 +285,9 @@ export class DocumentWorker {
     // Read-your-writes across the hop: the session has this call's edits
     // before the agent sees the answer.
     await this.syncUp();
+    // The production consistency check (plan section 6, item 7) after every
+    // call that changed the document: the mirror must hash as the document.
+    if (Number(PM['proj']?.revision) !== request.baseRevision) PM['EngineDoc']?.check?.('agent-tool');
     if (response.changed || Number(PM['proj']?.revision) !== request.baseRevision) await this.persist('toolCall').catch((error) => this.log(`[engine] persist after ${request.tool} failed: ${(error as Error).message}`));
     return response;
   }
@@ -313,9 +323,7 @@ export class DocumentWorker {
   }
 }
 
-function recordHealth(id: string, chain: Chain) {
-  return chain.loader()?.records().find((r) => r.id === id)?.health;
-}
+const sum = (table: Record<string, number> | undefined): number => Object.values(table ?? {}).reduce((a, b) => a + Number(b), 0);
 
 /* child-process entry: forked by the pool with `--document-worker` */
 export function runWorkerProcess(): void {

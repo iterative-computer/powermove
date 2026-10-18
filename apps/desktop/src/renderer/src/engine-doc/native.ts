@@ -217,6 +217,12 @@ export class NativeApi {
   fonts: FontLoader | null = null;
   /** Called when a dual answer differed because the mirror missed a write. */
   onStale: ((op: string, paths: string[]) => void) | null = null;
+  /**
+   * Operations with no legacy answer to compare with: the headless document
+   * host has no compositor, so `gl.bounds` and `gl.pick` come from pm-wasm
+   * alone there (the editor's dual answers check them against the GPU path).
+   */
+  readonly noReference = new Set<string>();
   /** Re-instantiates a trapped module synchronously (install.ts); false when it cannot. */
   revive: (() => boolean) | null = null;
   /** A named failure ("Use New Engine" on; install.ts decides whether to report it). */
@@ -377,7 +383,7 @@ export class NativeApi {
       this.fell(op, got.fallback);
       return legacy();
     }
-    if (this.dual) {
+    if (this.dual && !this.noReference.has(op)) {
       const dual = this.dual;
       let expected: { value?: T; threw?: unknown };
       try { expected = { value: legacy() }; } catch (error) { expected = { threw: error }; }

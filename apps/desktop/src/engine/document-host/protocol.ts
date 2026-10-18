@@ -161,6 +161,10 @@ export interface InstanceStats {
   /** Native queries and kernels answered. */
   calls: number;
   auditor: { audits: number; failures: number } | null;
+  /** Dual answers (development modes): native vs legacy comparisons. */
+  dual: { compared: number; mismatched: number; stale: number; mismatchedOps: Record<string, number> } | null;
+  /** Named failures the instance's engine reported (Use New Engine on). */
+  failures: Array<{ code: string; message: string; retry: boolean }>;
   consistency: { checks: number; mismatches: number };
   extensions: { active: string[]; failed: Array<{ id: string; error: string }> };
 }
