@@ -72,20 +72,18 @@ impl Timing {
         match self.conformed {
             Some(rate) => {
                 // Frame n (or field 2n + j at twice the rate) from n / rate:
-                // a uniform grid, so no rounding beyond the tick.
+                // section 5 rule 7 on the uniform grid (the last picture
+                // starting at or before t + q/2, `crate::retime`).
                 let grid = if field_rate {
                     Rate::new(rate.num() * 2, rate.den()).ok()?
                 } else {
                     rate
                 };
-                let n = grid.frame_of(t);
-                if n < 0 {
-                    return None;
-                }
+                let n = crate::retime::override_frame_at(t, grid)?;
                 let (frame, second) = if field_rate {
-                    ((n / 2) as usize, n % 2 == 1)
+                    (n / 2, n % 2 == 1)
                 } else {
-                    (n as usize, false)
+                    (n, false)
                 };
                 if frame >= frames {
                     // Past the end: the last picture holds.

@@ -560,13 +560,30 @@ fn a_conformed_rate_shows_frame_n_at_n_over_rate() {
     let (i, _) = Interpretation::from_json(&json!({ "frameRate": 24 }));
     let reading = resolve_video(v, &i);
     let timing = Timing::new(&src, &reading, pm_time::Rate::FPS_24);
-    for n in 0..src.pts.len() as i64 {
+    // Section 5 rule 7 on the conformed grid: frame n shows from an eighth
+    // of a frame before n / rate (q / 2, q a quarter frame), as
+    // `pm_render::retime::override_frame` selects it.
+    let frame = pm_time::Rate::FPS_24.frame_start(1).unwrap();
+    let eighth = frame / 8;
+    assert_eq!(eighth * 8, frame);
+    let frames = src.pts.len() as i64;
+    for n in 0..frames {
         let t = pm_time::Rate::FPS_24.frame_start(n).unwrap();
         assert_eq!(timing.pick(&src, t).unwrap().frame, n as usize);
-        let late = t + pm_time::Rate::FPS_24.frame_start(1).unwrap() - 1;
+        let early = t - eighth;
+        assert_eq!(timing.pick(&src, early).unwrap().frame, n as usize);
+        let late = t + frame - eighth - 1;
         assert_eq!(timing.pick(&src, late).unwrap().frame, n as usize);
+        if n + 1 < frames {
+            assert_eq!(timing.pick(&src, late + 1).unwrap().frame, n as usize + 1);
+        }
+        assert_eq!(
+            pm_render::retime::override_frame_at(t, pm_time::Rate::FPS_24),
+            Some(n as usize)
+        );
     }
-    assert!(timing.pick(&src, -1).is_none());
+    assert_eq!(timing.pick(&src, -1).unwrap().frame, 0);
+    assert!(timing.pick(&src, -eighth - 1).is_none());
     let last = pm_time::Rate::FPS_24
         .frame_start(src.pts.len() as i64 + 10)
         .unwrap();
