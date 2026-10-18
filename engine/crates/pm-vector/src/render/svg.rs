@@ -342,23 +342,19 @@ impl SvgDocument {
         height: u32,
         compat: &mut pm_text::compat::Compat<R>,
     ) -> Result<Bitmap, SvgError> {
-        // The resolver is used only by the parse thread while this thread
-        // blocks on it (a scoped join), so the exclusive borrow moves across
-        // threads without a `Send` bound on the resolver type.
-        struct Exclusive<T>(*mut T);
-        unsafe impl<T> Send for Exclusive<T> {}
-        let compat = Exclusive(compat as *mut pm_text::compat::Compat<R>);
-        let (data, has_text) = (&self.data, self.has_text);
-        with_document_stack(data, move || {
-            let compat = compat;
-            // SAFETY: the pointer came from an exclusive borrow that outlives
-            // the scoped thread, and nothing else touches it meanwhile.
-            let compat: &mut pm_text::compat::Compat<R> = unsafe { &mut *compat.0 };
-            let (annotated, elements) = crate::canvas2d::svg::annotate(data)?;
-            let tree = usvg::Tree::from_data(&annotated, &options(has_text)).map_err(|e| SvgError(e.to_string()))?;
-            let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
-            crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
-        })
+        // The resolver may hold thread-affine state (CoreText's font
+        // manager), so it never leaves this thread: text replays only on
+        // the caller's stack, for documents shallow enough to parse there.
+        let depth = element_depth(&self.data);
+        if depth > INLINE_DEPTH {
+            return Err(SvgError(format!(
+                "SVG text replay needs the caller's stack; elements nest {depth} deep (at most {INLINE_DEPTH})"
+            )));
+        }
+        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
+        let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
+        let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
+        crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter
@@ -695,27 +691,38 @@ mod tests {
         SvgDocument::parse(svg.as_bytes()).unwrap().compat_supported(80.0, 60.0)
     }
 
-    /// The level 1 gate admits what the canvas references measure inside
-    /// the 2D class and names everything else (docs/engine/vector.md, "What
+    /// The level 1 gate admits documents built only from constructs the
+    /// Chromium references measure inside the 2D class (each line names
+    /// its references in `tools/canvas-ref/svg-gate-cases.ts` or the SVG
+    /// cases of `cases.ts`; `tests/svg.rs` checks them against the
+    /// capture) and names everything else (docs/engine/vector.md, "What
     /// level 1 draws").
     #[test]
     fn the_level1_gate_admits_only_measured_paint() {
         let admitted = [
-            // Analytic draws only: rects, a round rect, ovals.
-            r##"<rect x="4.5" y="4" width="40" height="30" fill="#A73366"/><rect width="10" height="10" rx="3" fill="#123"/><circle cx="50" cy="30" r="12" fill="#4C8DFF" fill-opacity="0.5"/><ellipse cx="20" cy="40" rx="9" ry="5" fill="red"/>"##,
-            // Tessellated draws only, either fill rule.
-            r##"<path d="M10 10 L70 20 L40 55 Z" fill="#4C8DFF"/><path fill-rule="evenodd" d="M5 5 H75 V55 H5 Z M20 20 H60 V40 H20 Z" fill="#E8E2CF"/><polygon points="1,1 9,1 5,9" fill="blue"/>"##,
-            // Curves are tessellated wedges.
-            r##"<path d="M0 50 C 20 10, 40 70, 80 30 S 60 10, 40 5 Q 20 0 0 50 Z" fill="#0C0D12"/>"##,
-            // Padded linear and centered radial gradients of up to four stops.
-            r##"<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B2A4A"/><stop offset="60%" stop-color="#4C8DFF"/><stop offset="1" stop-color="#FFD66B"/></linearGradient><radialGradient id="r" href="#g" cx="0.5" cy="0.5" r="0.5"/></defs><rect width="80" height="60" rx="8" fill="url(#g)"/><circle cx="40" cy="30" r="20" fill="url(#r)"/>"##,
+            // Analytic draws only: an unaligned rect, a round rect, a
+            // circle, an ellipse (gate-size-*, svg-opacity).
+            r##"<rect width="80" height="60" fill="#1B2A4A"/><rect x="8.5" y="7.25" width="30" height="20" fill="#3FCF8E"/><rect x="48" y="6" width="44" height="22" rx="6" fill="#F2C14E"/><circle cx="24" cy="44" r="11" fill="#FF6B1A" fill-opacity="0.5"/><ellipse cx="70" cy="44" rx="20" ry="9" fill="#4C8DFF"/>"##,
+            // Tessellated draws only, either fill rule (gate-size-icon-tess,
+            // gate-xform-tess-*, svg-evenodd).
+            r##"<path d="M6 54 L30 6 L54 54 Z" fill="#3FCF8E"/><polygon points="58,8 94,14 88,52 62,46" fill="#FF6B1A"/><path fill-rule="evenodd" d="M50 5 L61 39 L97 39 L68 61 L79 95 L50 74 L21 95 L32 61 L3 39 L39 39 Z M50 30 L58 52 L42 52 Z" fill="#E8E2CF"/>"##,
+            // Curves are tessellated wedges (gate-path-commands, gate-grad-tess).
+            r##"<path d="M5 35 C 15 30 25 60 35 50 S 45 35 50 45 Q 60 60 70 45 T 95 45 L95 58 L5 58 Z" fill="#FF6B1A"/>"##,
+            // Shape transforms (gate-xform-analytic-*, gate-xform-shape-*).
+            r##"<rect x="8.5" y="7.25" width="30" height="20" fill="#3FCF8E" transform="rotate(-30 50 30)"/><ellipse cx="70" cy="44" rx="18" ry="8" fill="#4C8DFF" transform="matrix(0.9 0.3 -0.2 1.1 8 -4)"/>"##,
+            // Padded linear and centered radial gradients of up to four
+            // stops, object bounding box or user space, transformed
+            // (svg-gradient, gate-grad-*).
+            r##"<defs><linearGradient id="g" x1="10%" y1="0%" x2="90%" y2="100%"><stop offset="0" stop-color="#FF6B1A"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient><radialGradient id="r" gradientUnits="userSpaceOnUse" cx="50" cy="30" r="40"><stop offset="0" stop-color="#3FCF8E"/><stop offset="1" stop-color="#1B2A4A" stop-opacity="0.2"/></radialGradient></defs><rect x="5" y="5" width="70" height="50" rx="8" fill="url(#g)"/><circle cx="40" cy="30" r="20" fill="url(#r)"/>"##,
             // Group opacity over analytic draws; a circle clip at the
-            // source's aspect.
+            // source's aspect (svg-opacity, svg-clip).
             r##"<g opacity="0.6"><rect x="4" y="4" width="40" height="40" fill="#A73366"/></g><defs><clipPath id="c"><circle cx="40" cy="30" r="25"/></clipPath></defs><g clip-path="url(#c)"><rect width="80" height="30" fill="#3FCF8E"/><rect y="30" width="80" height="30" fill="#1B2A4A"/></g>"##,
-            // Metadata, editor namespaces, inline style, display none.
-            r##"<title>t</title><desc>d</desc><metadata><x xmlns="urn:x"><y/></x></metadata><g xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" inkscape:label="layer"><rect width="10" height="10" style="fill:#fff; fill-opacity:0.5"/><path d="M0 0 L5 5" display="none"/></g>"##,
-            // A stroke property without a stroke paints nothing.
-            r##"<circle cx="10" cy="10" r="5" fill="red" stroke-width="3" stroke="none"/>"##,
+            // Metadata, editor namespaces, inline style, display none
+            // (gate-doc-metadata, gate-paint-style, gate-paint-display).
+            r##"<title>t</title><desc>d</desc><metadata><x xmlns="urn:x"><y/></x></metadata><g xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" inkscape:label="layer"><rect width="10" height="10" style="fill:#fff; fill-opacity:0.5"/><circle cx="5" cy="5" r="3" fill="red" display="none"/></g>"##,
+            // Stroke properties without a stroke paint nothing
+            // (gate-paint-inert-stroke).
+            r##"<circle cx="10" cy="10" r="5" fill="red" stroke-width="3" stroke="none" stroke-miterlimit="10"/>"##,
         ];
         for body in admitted {
             assert_eq!(gate(body), Ok(()), "{body}");
@@ -744,6 +751,10 @@ mod tests {
             // A path clip is drawn into the depth attachment.
             (r##"<defs><clipPath id="c"><path d="M0 0 L80 0 L40 60 Z"/></clipPath></defs><rect clip-path="url(#c)" width="80" height="60" fill="red"/>"##, "depth attachment"),
             (r##"<text x="1" y="9">a</text>"##, "text"),
+            // Filled nested rects: Graphite's drawDRRect.
+            (r##"<path fill-rule="evenodd" d="M5 5 H75 V55 H5 Z M20 20 H60 V40 H20 Z" fill="#E8E2CF"/>"##, "nested rects"),
+            (r##"<rect width="10" height="10" rx="auto" ry="3" fill="red"/>"##, "rx="),
+            (r##"<rect width="10" height="10" fill="url(#none)"/>"##, "fill="),
         ];
         for (body, why) in routed {
             let e = gate(body).expect_err(body);
