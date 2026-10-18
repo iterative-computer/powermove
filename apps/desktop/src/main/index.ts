@@ -961,7 +961,9 @@ if (!hasSingleInstanceLock) {
     const nativeEngine = installNativeEngine({
       enabled: useNewEngine,
       automaticOutputDirectory: agentExportDirectory,
-      resolveAsset: (asset) => mediaStore.service.resolveAsset(asset),
+      resolveAsset: (asset, context) => mediaStore.service.resolveAsset(asset, context),
+      snapshotMedia: (project) => mediaStore.service.snapshotProject(project),
+      bindMediaSession: (session, project) => mediaStore.service.bindJob(session, project),
       ipc: ipcMain,
       isTrustedSender,
       userData: app.getPath('userData'),

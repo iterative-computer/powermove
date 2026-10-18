@@ -184,6 +184,37 @@ describe('MediaStoreService', () => {
     expect(await svc.resolveAsset('a1')).not.toBeNull();
   });
 
+  it('keeps snapshot media after a project switch and window close, scoped to its job session', async () => {
+    const svc = service();
+    const file = path.join(media, 'queued.png');
+    await settledFile(file, bytes(1000, 1));
+    const record = await svc.store.putFile(file, { key: 'media:v2:queued' });
+    const link = await svc.link(file);
+    const project = { id: 'queued-project', assets: {
+      copied: { id: 'copied', storageKey: record.key }, linked: { id: 'linked', storage: 'linked', link }
+    } };
+    svc.bind(1, project.id, { copied: { key: record.key }, linked: { link } });
+    const snapshot = await svc.snapshotProject(project);
+    expect(project.assets.copied).not.toHaveProperty('contentHash');
+    const replacement = path.join(media, 'replacement.png');
+    await settledFile(replacement, bytes(500, 2));
+    await svc.store.putFile(replacement, { key: record.key });
+    svc.bind(1, 'other-project', { copied: { hash: 'f'.repeat(64) } });
+    await svc.release(1);
+    await svc.bindJob(10, snapshot);
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(record.hash) });
+    expect(await svc.resolveAsset('linked', { process: 'job', session: 10 })).toMatchObject({ path: file });
+    const host = new HostServicesCore({ cacheDirectory: path.join(root, 'cache'), automaticOutputDirectory: path.join(root, 'out'),
+      physicalMemory: 8 * 1024 ** 3, resolveAsset: (asset, context) => svc.resolveAsset(asset, context) });
+    expect(await host.serve('job', 5, { type: 'mintHandle', kind: { kind: 'mediaRead', asset: 'copied' }, session: 10 }, 10))
+      .toMatchObject({ type: 'handle', contentHash: Uint8Array.from(Buffer.from(record.hash, 'hex')) });
+    // Interactive/session-number collisions and other jobs cannot borrow these bindings.
+    expect(await svc.resolveAsset('copied', { process: 'interactive', session: 10 })).toBeNull();
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 11 })).toBeNull();
+    await svc.bindJob(10, null);
+    expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toBeNull();
+  });
+
   it('gives desktop Save the store object only at the expected length', async () => {
     const svc = service();
     const file = path.join(media, 'x.bin');

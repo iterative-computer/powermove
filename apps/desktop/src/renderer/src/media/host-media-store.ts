@@ -505,6 +505,11 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
      * immediate exports must not mistake the debounce window for offline media. */
     async flushBindings(project = PM.proj): Promise<void> {
       if (!enabled || !project?.id || !/^[A-Za-z0-9_-]{1,120}$/.test(project.id)) return;
+      // Imports already have cached records. Keep their original immediate
+      // bind; an extra IPC read here lets the viewer outrun the acknowledgement.
+      const pending = Object.values<any>(project.assets || {}).filter(meta =>
+        !isLinked(meta) && !store.recordFor(storageKeyOf(meta)));
+      if (pending.length) await store.migrate(pending);
       await host.bind(project.id, bindingsFor(project, store.recordFor));
     },
     decide: (input: Parameters<typeof decideImport>[1]) => decideImport(host, { ...input, enabled }),
