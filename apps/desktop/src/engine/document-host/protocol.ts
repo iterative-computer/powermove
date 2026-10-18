@@ -55,6 +55,8 @@ export type DocumentHostFailureCode =
   | 'font-service-unavailable'
   /** The host has no document for the project. */
   | 'project-missing'
+  /** The project is stamped `requiresEngine: "native"` and the new engine is off. */
+  | 'requires-new-engine'
   /** The worker process exited or could not start. */
   | 'worker-crashed'
   /** The worker did not answer in time. */
@@ -144,6 +146,12 @@ export interface InstanceOpened extends ProjectOpened {
   projectId: string;
   /** Undo entries restored from the profile store (0 for a fresh instance). */
   restoredHistory: number;
+  /**
+   * The project needs a newer reader (`minReaderVersion`): as on the
+   * desktop, it opens read-only, so edits stay in the instance and never
+   * reach the session or the profile store.
+   */
+  readOnly: boolean;
   /** Which engine answers the instance's document queries. */
   engine: { evaluator: 'pm-wasm'; mode: string; fonts: 'registry' | 'none' };
 }

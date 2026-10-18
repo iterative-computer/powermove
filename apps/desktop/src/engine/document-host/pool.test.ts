@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentToolResponseEvent } from '../../shared/ipc';
 import { DocumentHostPool } from './pool';
 import { DocumentHostError, INSTANCE_STATE_KEY, type DocumentHostServices } from './protocol';
-import { BRIDGE, WASM, buildEngineBundle, hostServices, type TestHost } from './test-host';
+import { BRIDGE, FIXTURE, WASM, buildEngineBundle, hostServices, type TestHost } from './test-host';
 
 let bundle: { script: string; dispose(): void } | null = null;
 beforeAll(async () => { bundle = await buildEngineBundle(); }, 180_000);
@@ -166,6 +166,24 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     const pool = newPool(host.services, { newEngine: false, env: { ...env, POWERMOVE_PM_WASM: path.join(path.dirname(bundle!.script), 'missing.wasm') } });
     expect((await pool.open('Palpha')).engine.fonts).toBe('none');
     expect((await ask(pool, 'Palpha', 'run-1', 'get_project_state', {})).ok).toBe(true);
+  }, 60_000);
+
+  it('applies the shared reader guards: a stamped project needs the new engine, a newer one opens read-only', async () => {
+    const host = hostServices();
+    host.seed('Pnative', 'Native', { ...structuredClone(FIXTURE), requiresEngine: 'native' });
+    host.seed('Pnewer', 'Newer', { ...structuredClone(FIXTURE), minReaderVersion: 99 });
+    const legacy = newPool(host.services, { newEngine: false });
+    const refused = await legacy.open('Pnative').catch((e) => e);
+    expect(refused.code).toBe('requires-new-engine');
+    expect(refused.message).toMatch(/Turn on Use New Engine/);
+    const engine = newPool(host.services);
+    expect((await engine.open('Pnative')).readOnly).toBe(false);
+    expect((await engine.open('Pnewer')).readOnly).toBe(true);
+    const edited = await ask(engine, 'Pnewer', 'run-n', 'apply_commands', { commands: [{ type: 'add_layer', layerType: 'shape', name: 'Kept local' }], label: 'local' });
+    expect(edited.ok).toBe(true);
+    await ask(engine, 'Pnewer', 'run-n', '__finish_run', { commit: true });
+    expect(names(host, 'Pnewer')).toEqual([]);
+    expect(host.values.has(INSTANCE_STATE_KEY('Pnewer'))).toBe(false);
   }, 60_000);
 
   it('refuses tools that belong to another route', async () => {

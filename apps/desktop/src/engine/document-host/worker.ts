@@ -12,6 +12,8 @@
 import type { AgentToolRequestEvent, AgentToolResponseEvent, PowermoveBridge } from '../../shared/ipc';
 import { diffPatches, applyPatch, type Patch } from '../../shared/patch';
 import { canonicalProjectHash } from '../../shared/canonical-json';
+import { NEWER_PROJECT_MESSAGE, needsNewerReader } from '../../shared/reader-version';
+import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../shared/engine-stamp';
 import type { ExtensionRecord } from '../../shared/extensions';
 import type { PersistReason } from '../../shared/engine-protocol';
 import type { TranscribeProgress } from '../../shared/transcription';
@@ -49,6 +51,7 @@ export class DocumentWorker {
   private synced = '';
   private seq = 0;
   private definitionsGeneration = 0;
+  private readOnly = false;
   private nextService = 1;
   private services = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
   private progress = new Set<(p: TranscribeProgress) => void>();
@@ -163,6 +166,10 @@ export class DocumentWorker {
     if (this.chain && this.projectId === projectId) return this.opened(0);
     const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
     if (!joined?.doc) throw new DocumentHostError('project-missing', `The host has no document for project ${projectId}.`);
+    // The shared reader guards (plan sections 6 and 21), as the desktop applies them.
+    if (refusesProject(joined.doc, this.policy.newEngine)) throw new DocumentHostError('requires-new-engine', `${REQUIRES_NATIVE_MESSAGE}`);
+    this.readOnly = needsNewerReader(joined.doc);
+    if (this.readOnly) this.log(`[engine] ${projectId}: ${NEWER_PROJECT_MESSAGE}. It is open read-only, so changes are not saved.`);
     const saved = await this.service<InstanceState | null>('store.read', INSTANCE_STATE_KEY(projectId)).catch(() => null);
     this.chain = await bootChain({ bridge: this.bridge(), store: memoryStore(), log: (line) => this.log(line), policy: this.policy });
     const PM = this.chain.PM;
@@ -196,6 +203,7 @@ export class DocumentWorker {
       document: this.projectId!,
       revision: Number(PM['proj']?.revision) || 0,
       restoredHistory: restored,
+      readOnly: this.readOnly,
       engine: { evaluator: 'pm-wasm', mode: this.chain!.engine.mode, fonts: this.chain!.engine.fonts },
     };
   }
@@ -207,6 +215,7 @@ export class DocumentWorker {
 
   private async persist(reason: PersistReason): Promise<InstancePersisted> {
     const PM = this.requireChain().PM;
+    if (this.readOnly) return { instance: this.instance, projectId: this.projectId!, revision: Number(PM['proj']?.revision) || 0, bytes: 0, reason };
     await this.syncUp();
     const state: InstanceState = {
       v: 1,
@@ -302,7 +311,7 @@ export class DocumentWorker {
   /** Sends what changed since the last sync; resolves once the host applied it. */
   private syncUp(): Promise<void> {
     this.sending = this.sending.then(async () => {
-      if (!this.chain || !this.projectId) return;
+      if (!this.chain || !this.projectId || this.readOnly) return;
       const after = JSON.stringify(this.chain.PM['proj']);
       if (after === this.synced) return;
       const patches: Patch[] = diffPatches(JSON.parse(this.synced), JSON.parse(after)).forward;
