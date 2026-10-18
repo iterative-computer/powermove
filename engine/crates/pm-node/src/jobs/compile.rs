@@ -58,10 +58,7 @@ pub(crate) fn run(shared: &Arc<Shared>) {
                 if let Some(p) = st.compiles.0.pop_front() {
                     break p;
                 }
-                st = shared
-                    .work
-                    .wait(st)
-                    .unwrap_or_else(|e| e.into_inner());
+                st = shared.work.wait(st).unwrap_or_else(|e| e.into_inner());
             }
         };
         let failures = compile(shared, &base, &pending.update);
@@ -78,7 +75,11 @@ pub(crate) fn run(shared: &Arc<Shared>) {
 }
 
 /// The failures of `update`'s upserts.
-pub(crate) fn compile(shared: &Shared, base: &Effects, update: &DefinitionsUpdate) -> Vec<EngineError> {
+pub(crate) fn compile(
+    shared: &Shared,
+    base: &Effects,
+    update: &DefinitionsUpdate,
+) -> Vec<EngineError> {
     if update.upserts.is_empty() {
         return Vec::new();
     }

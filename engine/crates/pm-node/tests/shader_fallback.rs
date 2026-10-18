@@ -152,15 +152,6 @@ fn frame(envelope: &Envelope) -> Option<FrameDescriptor> {
     }
 }
 
-fn failure(envelope: &Envelope) -> Option<ErrorCode> {
-    match &envelope.message {
-        Message::Event {
-            body: Event::Failure(f),
-        } => Some(f.error.code),
-        _ => None,
-    }
-}
-
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
 }

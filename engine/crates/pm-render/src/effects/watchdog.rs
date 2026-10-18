@@ -42,6 +42,7 @@
 //!      export on the same GPU, or a heavy frame of built-ins turns nothing
 //!      off. Without timestamps (a device without timestamp queries, or both
 //!      query slots busy) a program is guilty only after two such hangs.
+//!
 //!   Built-in programs cannot run away and are never suspected.
 //!
 //! A timestamp sample is trusted only when it is plausible: written (after

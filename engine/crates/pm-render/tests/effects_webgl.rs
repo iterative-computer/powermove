@@ -612,7 +612,15 @@ fn fallback_effects_match_webgl() {
                         .as_array()
                         .map(|r| (r[0].as_u64().unwrap() as u32, r[1].as_u64().unwrap() as u32))
                         .unwrap();
-                    renderer.run_effects(input, backdrop, &[step], time, region, full, Precision::Float16)
+                    renderer.run_effects(
+                        input,
+                        backdrop,
+                        &[step],
+                        time,
+                        region,
+                        full,
+                        Precision::Float16,
+                    )
                 }
                 _ => {
                     let step =
@@ -644,15 +652,23 @@ fn fallback_effects_match_webgl() {
         }
     }
     let missing = *host.missing.lock().unwrap();
-    eprintln!("fallback runner cases: {variants} variants, {matched} match WebGL, {} failures, {missing} requests waiting", failures.len());
+    eprintln!(
+        "fallback runner cases: {variants} variants, {matched} match WebGL, {} failures, {missing} requests waiting",
+        failures.len()
+    );
     for f in &failures {
         eprintln!("  {f}");
     }
     assert_eq!(
-        missing, 0,
+        missing,
+        0,
         "{missing} requests written to {}: run `pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --fallback <that dir>` and run this test again",
         host.dir.display()
     );
     assert!(variants > 0, "no case needs the fallback runner");
-    assert!(failures.is_empty(), "{} fallback cases differ from WebGL", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} fallback cases differ from WebGL",
+        failures.len()
+    );
 }

@@ -38,8 +38,8 @@ use std::sync::OnceLock;
 use pm_protocol::definitions::DefinitionSnapshot;
 
 pub use fallback::{
-    Bands, FallbackBand, FallbackFailure, FallbackHost, FallbackJob, FallbackPixels, FallbackRequest,
-    FallbackStore, FallbackUnit,
+    Bands, FallbackBand, FallbackFailure, FallbackHost, FallbackJob, FallbackPixels,
+    FallbackRequest, FallbackStore, FallbackUnit,
 };
 pub use plan::{ProgramRef, ShaderSource};
 pub use reports::layer_reports;

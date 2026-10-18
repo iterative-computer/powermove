@@ -551,7 +551,12 @@ impl Effects {
     /// refuses too, `NotHeadlessRenderable` for one only the fallback runner
     /// draws (a device refusal turns a ready definition into that). What
     /// `validate_effect` and the job engine's acknowledgment report.
-    pub fn build(&mut self, device: &wgpu::Device, kind: DefinitionKind, id: &str) -> Option<EngineError> {
+    pub fn build(
+        &mut self,
+        device: &wgpu::Device,
+        kind: DefinitionKind,
+        id: &str,
+    ) -> Option<EngineError> {
         let _ = self.program(device, kind, id, wgpu::TextureFormat::Rgba16Float);
         self.status(kind, id)
             .and_then(|status| definition_error(&DefinitionId::from(id), status))

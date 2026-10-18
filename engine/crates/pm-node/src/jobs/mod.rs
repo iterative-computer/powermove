@@ -49,8 +49,8 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_for, render_still,
-    run_export_with_blender, sink_for, to_rgba8,
+    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
+    sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -864,9 +864,12 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         // Programs only the WebGL runner draws run in a window's runner
         // through the host (contract 14): the job waits for them.
         let (session, cancel) = match &work {
-            Work::Frames { document, cancel, .. } | Work::Export { document, cancel, .. } => {
-                (document.session, cancel.clone())
+            Work::Frames {
+                document, cancel, ..
             }
+            | Work::Export {
+                document, cancel, ..
+            } => (document.session, cancel.clone()),
         };
         r.set_fallback_host(Some(Arc::new(fallback::HostFallback::new(
             shared.clone(),
