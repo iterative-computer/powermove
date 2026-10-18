@@ -143,6 +143,7 @@ fn settings_sized(
         precision: Precision::Float32,
         dither: false,
         draft_from_proxies: false,
+        delivery: Default::default(),
     }
 }
 

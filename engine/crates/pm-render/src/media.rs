@@ -384,6 +384,8 @@ struct ImageKey {
     len: u64,
     modified: u128,
     precision: u8,
+    /// Converted textures hold working values: linear light differs.
+    linear: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -392,6 +394,7 @@ struct FrameKey {
     frame: usize,
     precision: u8,
     export: bool,
+    linear: bool,
 }
 
 /// Media state kept across frames: decoded and converted stills, video
@@ -461,6 +464,7 @@ impl MediaCache {
             len,
             modified,
             precision: precision as u8,
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.images.get(&key) {
             return Ok(t.clone());
@@ -499,8 +503,9 @@ impl MediaCache {
         drop(imported);
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
-        self.images
-            .retain(|k, _| k.path != key.path || k.precision != key.precision);
+        self.images.retain(|k, _| {
+            k.path != key.path || k.precision != key.precision || k.linear != key.linear
+        });
         self.images.insert(key, target.clone());
         self.recount();
         Ok(target)
@@ -539,20 +544,34 @@ impl MediaCache {
         path: &Path,
         instance: u64,
         seconds: f64,
+        rate: Option<pm_time::Rate>,
         export: bool,
         working: WorkingEncoding,
         precision: Precision,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
-        let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
-        let Some(n) = src.select(ticks) else {
+        let n = match rate {
+            // Interpret Footage frame rate: frame n at n / rate, clamped to
+            // the file's last frame (`crate::retime`).
+            Some(rate) => crate::retime::override_frame(seconds, rate)
+                .map(|n| n.min(src.pts.len().saturating_sub(1))),
+            None => {
+                let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
+                src.select(ticks)
+            }
+        };
+        let Some(n) = n else {
             return Ok(None);
         };
+        if src.pts.is_empty() {
+            return Ok(None);
+        }
         let key = FrameKey {
             path: path.to_path_buf(),
             frame: n,
             precision: precision as u8,
             export,
+            linear: working == WorkingEncoding::LinearLight,
         };
         if let Some(t) = self.frames.get(&key) {
             return Ok(Some(t.clone()));
@@ -611,7 +630,10 @@ impl MediaCache {
         drop(imported);
         // Keep only the newest frame per source and precision.
         self.frames.retain(|k, _| {
-            k.path != key.path || k.precision != key.precision || k.export != key.export
+            k.path != key.path
+                || k.precision != key.precision
+                || k.export != key.export
+                || k.linear != key.linear
         });
         self.frames.insert(key, target.clone());
         self.recount();

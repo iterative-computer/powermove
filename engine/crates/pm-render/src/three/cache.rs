@@ -6,7 +6,8 @@
 //! it for every program variant. The cache stores what the GPU needs to
 //! build a program without translating it again: both stages' MSL with
 //! their entry points, and the reflection the pass uses (the default
-//! uniform block's slots and the vertex attribute locations). Entries are
+//! uniform block's slots, the 2D textures' bindings, and the vertex
+//! attribute locations). Entries are
 //! keyed by SHA-256 of the program sources, the math mode, and the
 //! translation revision (`pm_gpu::msl::TRANSLATION_REVISION`) with naga's
 //! version, so a changed translation never reads an old entry. Files are
@@ -24,13 +25,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// Bumped when the entry layout changes.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// What a cached program holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedProgram {
     pub block_size: u32,
     pub uniforms: HashMap<String, UniformSlot>,
+    /// GL sampler name (`map`, `directionalShadowMap[0]`) to its texture
+    /// and sampler bindings (2D float textures only).
+    pub textures: HashMap<String, (u32, u32)>,
     /// GL attribute name to shader location.
     pub attributes: HashMap<String, u32>,
     pub vertex_msl: String,
@@ -87,6 +91,8 @@ impl CachedProgram {
         uniforms.sort_by(|a, b| a.0.cmp(b.0));
         let mut attributes: Vec<(&String, &u32)> = self.attributes.iter().collect();
         attributes.sort();
+        let mut textures: Vec<(&String, &(u32, u32))> = self.textures.iter().collect();
+        textures.sort();
         json!({
             "format": FORMAT,
             "key": key,
@@ -95,6 +101,7 @@ impl CachedProgram {
                 n, s.offset, kind_name(s.kind), s.columns, s.rows, s.column_stride, s.count, s.array_stride
             ])).collect::<Vec<_>>(),
             "attributes": attributes.into_iter().map(|(n, l)| json!([n, l])).collect::<Vec<_>>(),
+            "textures": textures.into_iter().map(|(n, (t, s))| json!([n, t, s])).collect::<Vec<_>>(),
             "vertex": { "msl": self.vertex_msl, "entry": self.vertex_entry },
             "fragment": { "msl": self.fragment_msl, "entry": self.fragment_entry },
         })
@@ -126,9 +133,18 @@ impl CachedProgram {
             let a = a.as_array()?;
             attributes.insert(a.first()?.as_str()?.to_owned(), u32_of(a.get(1)?)?);
         }
+        let mut textures = HashMap::new();
+        for t in v["textures"].as_array()? {
+            let t = t.as_array()?;
+            textures.insert(
+                t.first()?.as_str()?.to_owned(),
+                (u32_of(t.get(1)?)?, u32_of(t.get(2)?)?),
+            );
+        }
         Some(CachedProgram {
             block_size: u32_of(&v["blockSize"])?,
             uniforms,
+            textures,
             attributes,
             vertex_msl: v["vertex"]["msl"].as_str()?.to_owned(),
             vertex_entry: v["vertex"]["entry"].as_str()?.to_owned(),
@@ -193,6 +209,7 @@ mod tests {
         let p = CachedProgram {
             block_size: 640,
             uniforms,
+            textures: HashMap::from([("map".to_owned(), (1, 1001))]),
             attributes: HashMap::from([("position".to_owned(), 0), ("normal".to_owned(), 1)]),
             vertex_msl: "#pragma METAL fp math_mode(safe)\nvertex".into(),
             vertex_entry: "main_".into(),

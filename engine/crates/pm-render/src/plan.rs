@@ -23,9 +23,11 @@ use pm_eval::retime::RetimeCache;
 use pm_eval::transform::{Mat2d, mul};
 use pm_eval::{Comp, Evaluator, JsResult, JsValue, Scope};
 use pm_model::{JsString, Node};
+use pm_protocol::color::BlendMode;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
+use crate::composite::{self, EffectHost};
 use crate::error::LayerFailure;
 use crate::js;
 use crate::scene3d::Object3dPlan;
@@ -78,6 +80,13 @@ pub struct Draw {
 pub enum Content {
     /// A premultiplied color.
     Solid([f64; 4]),
+    /// A layer through its own target or an adjustment of the accumulator
+    /// (masks, effects, matte, blend mode; `crate::composite`). Its draw's
+    /// matrix covers the target.
+    Composite(Box<crate::composite::Node>),
+    /// Solid or texture content drawn through a 2.5D plane or with level 2
+    /// sampling (`crate::space25d`, `crate::sampling`).
+    Placed(Box<Placed>),
     /// A source sampled through a UV window (`u_uv`: offset, scale), hard
     /// edges outside 0..1, multiplied by `alpha`.
     Texture {
@@ -85,6 +94,18 @@ pub enum Content {
         uv: [f64; 4],
         alpha: f64,
     },
+}
+
+/// Content with a projective placement or a level 2 resampler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    /// [`Content::Solid`] or [`Content::Texture`].
+    pub content: Content,
+    /// A 2.5D layer's homography: unit quad to target pixels, column-major
+    /// (replaces the draw's affine matrix for drawing).
+    pub plane: Option<crate::space25d::Plane>,
+    /// Level 2 raster content: the resampler and analytic edges.
+    pub level2: Option<crate::sampling::Sampling>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,13 +119,21 @@ pub enum Source {
         path: PathBuf,
         /// Source time in seconds after retiming and today's end clamp.
         time: f64,
+        /// Interpret Footage frame rate override (`interpret.frameRate`):
+        /// frame n shows at n / rate.
+        rate: Option<pm_time::Rate>,
     },
     /// A nested composition (precomp) or a group's compositing boundary.
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
+    /// Shape content (`crate::vector`).
+    Vector(Box<crate::vector::VectorSource>),
     /// A text or captions raster (`crate::text`).
     Text(Box<crate::text::TextPlan>),
+    /// Motion-blur samples accumulated with additive blending into a
+    /// transparent target in the parent's pixel space (`crate::motion`).
+    Accumulate(Box<CompPlan>),
 }
 
 /// Inputs and outputs of a build.
@@ -112,10 +141,38 @@ pub struct Build<'r> {
     pub assets: &'r dyn AssetResolver,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
-    retime: RetimeCache,
+    pub(crate) retime: RetimeCache,
     precomp_depth: u32,
+    /// The 3D state of the compositing passes being built (innermost last).
+    pass3d: Vec<crate::scene3d::Pass3d>,
+    options3d: crate::scene3d::Options3d,
+    /// Prepares effects (`crate::composite::EffectHost`); without one,
+    /// layers with renderable effects are unsupported.
+    effects: Option<&'r dyn EffectHost>,
+    /// Today's `opt.matteDepth`: matte passes entered so far (carried into
+    /// precomps, as `PM._renderOptions3D` carries it).
+    matte_depth: u32,
+    /// The matte source a matte pass renders, which draws even when it is
+    /// switched off (`{ ...source, on: true }`).
+    forced_on: Option<*const Node>,
     /// Text layout and glyph caches (`None`: text layers are unsupported).
     text: Option<&'r mut crate::text::TextContext>,
+    /// Motion blur for layers with their switch on; `None` when the request
+    /// has it off or inside a group's samples (today's `mblur: false`).
+    pub(crate) blur: Option<crate::motion::Blur>,
+    /// The composition time at which video sources select their frame
+    /// inside motion-blur samples (the center time of their level).
+    pub(crate) video_center: Option<f64>,
+    /// The resampler of level 2 raster content.
+    pub(crate) sampling: crate::sampling::Sampling,
+}
+
+/// Options of a build beyond the frame's geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BuildOptions {
+    /// Resolved motion blur (`crate::motion::resolve`).
+    pub blur: Option<crate::motion::Blur>,
+    pub sampling: crate::sampling::Sampling,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -134,15 +191,15 @@ pub fn build<'r>(
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
-    build_with_text(
+    build_with_effects(
         ev, root_comp, project, time, width, height, scale, assets, None,
     )
 }
 
-/// [`build`] with text layout: text and captions layers draw through
-/// `text` (its fonts and glyph caches).
+/// [`build`] with an effect host for layers with effects and adjustment
+/// layers.
 #[allow(clippy::too_many_arguments)]
-pub fn build_with_text<'r>(
+pub fn build_with_effects<'r>(
     ev: &mut Evaluator,
     root_comp: &Comp<'_>,
     project: &Comp<'_>,
@@ -151,7 +208,42 @@ pub fn build_with_text<'r>(
     height: u32,
     scale: (f64, f64),
     assets: &'r dyn AssetResolver,
+    effects: Option<&'r dyn EffectHost>,
+) -> (CompPlan, Build<'r>) {
+    build_with(
+        ev,
+        root_comp,
+        project,
+        time,
+        width,
+        height,
+        scale,
+        assets,
+        effects,
+        crate::scene3d::Options3d::default(),
+        None,
+        BuildOptions::default(),
+    )
+}
+
+/// [`build_with_effects`] with the 3D pass's options (view override, mesh
+/// layer definitions), text layout, motion blur, and the level 2
+/// resampler: text and captions layers draw through `text` (its fonts and
+/// glyph caches; `None`: they are unsupported).
+#[allow(clippy::too_many_arguments)]
+pub fn build_with<'r>(
+    ev: &mut Evaluator,
+    root_comp: &Comp<'_>,
+    project: &Comp<'_>,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    assets: &'r dyn AssetResolver,
+    effects: Option<&'r dyn EffectHost>,
+    options3d: crate::scene3d::Options3d,
     text: Option<&'r mut crate::text::TextContext>,
+    options: BuildOptions,
 ) -> (CompPlan, Build<'r>) {
     let mut b = Build {
         assets,
@@ -159,7 +251,15 @@ pub fn build_with_text<'r>(
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
         precomp_depth: 0,
+        pass3d: Vec::new(),
+        options3d,
+        effects,
+        matte_depth: 0,
+        forced_on: None,
         text,
+        blur: options.blur,
+        video_center: None,
+        sampling: options.sampling,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -186,7 +286,7 @@ fn layer_failure(b: &mut Build<'_>, comp: &Comp<'_>, layer: &Node, message: Stri
 
 /// `renderProject(proj, T, W, H, opt)` for one pass.
 #[allow(clippy::too_many_arguments)]
-fn comp_pass<'d>(
+pub(crate) fn comp_pass<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     time: f64,
@@ -214,9 +314,14 @@ fn comp_pass<'d>(
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
-        let known = |_: &JsString| true;
+        // `PM.transitionDef`: a host knows its registered transitions.
+        let host = b.effects;
+        let known = |ty: &JsString| host.is_none_or(|h| h.transition_known(ty));
+        // A group with motion blur is a boundary only while motion blur
+        // applies (`opt.mblur !== false`).
+        let blur_on = b.blur.is_some();
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
-            s.group_creates_compositing_boundary(l, time, true, &known)
+            s.group_creates_compositing_boundary(l, time, blur_on, &known)
         };
         match scope.compositing_layers(&all, parent_id.as_ref(), &mut boundary) {
             Ok(p) => p,
@@ -228,6 +333,31 @@ fn comp_pass<'d>(
                 });
                 return plan;
             }
+        }
+    };
+    // `compositionOrderedLayers` and the pass's 3D state.
+    let pass = match crate::scene3d::order_pass(
+        scope,
+        &b.pass3d,
+        pass,
+        time,
+        width,
+        height,
+        b.assets,
+        b.options3d.view.as_ref(),
+        b.precomp_depth == 0,
+    ) {
+        Ok((ordered, ctx)) => {
+            b.pass3d.push(ctx);
+            ordered
+        }
+        Err(e) => {
+            b.failures.push(LayerFailure {
+                composition: comp_id,
+                layer: group_parent.map(js::layer_id).unwrap_or_default(),
+                message: e.to_string(),
+            });
+            return plan;
         }
     };
     let solo = all.iter().any(|l| js::flag(l, "solo"));
@@ -250,6 +380,7 @@ fn comp_pass<'d>(
             }
         }
     }
+    b.pass3d.pop();
     plan
 }
 
@@ -308,7 +439,12 @@ fn draw_layer<'d>(
     if ty != "group" && matches!(ty.as_str(), "null" | "audio") {
         return Ok(None);
     }
-    if !scope.active(layer, time)? {
+    let active = if b.forced_on.is_some_and(|p| std::ptr::eq(p, layer)) {
+        scope.active_forced_on(layer, time)?
+    } else {
+        scope.active(layer, time)?
+    };
+    if !active {
         return Ok(None);
     }
     let alpha = js::clamp(scope.num(layer, "opacity", time)? / 100.0, 0.0, 1.0);
@@ -316,101 +452,210 @@ fn draw_layer<'d>(
         return Ok(None);
     }
     let comp_id = scope.comp.id().to_string_lossy();
-    // Everything that would leave the fast path is unsupported here; the
-    // capability check lists the same features statically.
-    let mut refuse = |f: Feature| {
+    let refuse = |b: &mut Build<'_>, f: Feature| {
         b.unsupported.push(Unsupported::layer(&comp_id, layer, f));
     };
-    if scope.has_renderable_effects(layer, time)? {
-        refuse(if ty == "adjustment" {
-            Feature::Adjustment
-        } else {
-            Feature::Effects
-        });
-        return Ok(None);
-    }
-    if ty == "adjustment" {
-        // An adjustment layer without an enabled effect is a no-op.
-        return Ok(None);
-    }
-    let mut masked = false;
-    if let Some(masks) = node::array(node::member(Some(layer), "masks")) {
-        for m in masks {
-            let mid = node::to_js_string(node::member(Some(m), "id")).to_string_lossy();
-            let on = scope.evaluated(
-                layer,
-                node::member(Some(m), "on"),
+    let has_fx = scope.has_renderable_effects(layer, time)?;
+    let has_masks = composite::build::has_masks(scope, layer, time)?;
+    let blend = composite::build::blend_mode(scope, layer, time)?;
+    // Effects prepared by the host (the effects lane); without one, a layer
+    // with renderable effects is routed.
+    let effects = if has_fx {
+        let frame = composite::effects::EffectFrame {
+            width,
+            height,
+            scale,
+            time,
+        };
+        match b.effects {
+            None => {
+                refuse(
+                    b,
+                    if ty == "adjustment" {
+                        Feature::Adjustment
+                    } else {
+                        Feature::Effects
+                    },
+                );
+                return Ok(None);
+            }
+            Some(host) => match host.prepare(scope, layer, frame)? {
+                Ok(e) => e,
+                Err(f) => {
+                    refuse(b, f);
+                    return Ok(None);
+                }
+            },
+        }
+    } else {
+        None
+    };
+    // The transition node (`activeTransition`, `runTransition`): prepared by
+    // the host; without one, a layer in a transition is routed.
+    let transition = match b.effects {
+        None => {
+            let active: Option<ActiveTransition<'d>> =
+                scope.active_transition(layer, time, &|_| true)?;
+            if active.is_some() && ty != "adjustment" {
+                refuse(b, Feature::Transition);
+                return Ok(None);
+            }
+            None
+        }
+        Some(_) if ty == "adjustment" => None,
+        Some(host) => {
+            let frame = composite::effects::EffectFrame {
+                width,
+                height,
+                scale,
                 time,
-                &format!("m.{mid}.on"),
-            )?;
-            if on != JsValue::Bool(false) {
-                masked = true;
+            };
+            match host.prepare_transition(scope, layer, frame)? {
+                Ok(t) => t,
+                Err(f) => {
+                    refuse(b, f);
+                    return Ok(None);
+                }
             }
         }
-    }
-    if masked {
-        refuse(Feature::Masks);
-        return Ok(None);
-    }
-    let blend = scope.evaluated(layer, node::member(Some(layer), "blend"), time, "l.blend")?;
-    if blend.truthy() && blend != JsValue::from("normal") {
-        let name = blend.to_js_string().to_string_lossy();
-        // Unknown names map to normal (`BLEND_ID[...] || 0`).
-        if matches!(
-            name.as_str(),
-            "add"
-                | "screen"
-                | "multiply"
-                | "overlay"
-                | "softlight"
-                | "difference"
-                | "lighten"
-                | "darken"
-        ) {
-            refuse(Feature::BlendMode(name));
+    };
+    let id = js::layer_id(layer);
+    let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
+    let node = |n: composite::Node| Draw {
+        layer: id.clone(),
+        matrix: full,
+        content: Content::Composite(Box::new(n)),
+    };
+    if ty == "adjustment" {
+        // An adjustment layer without an effect that renders is a no-op.
+        let Some(effects) = effects else {
             return Ok(None);
-        }
+        };
+        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![node(composite::Node::Adjustment(
+            composite::AdjustmentNode {
+                layer: id.clone(),
+                effects,
+                masks,
+                blend,
+                alpha,
+            },
+        ))]));
     }
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
-    if mblur.truthy() {
-        refuse(Feature::MotionBlur);
+    let blur = if mblur.truthy() { b.blur } else { None };
+    let matted = js::flag(layer, "matteSource");
+    // Today's fast path draws straight into the accumulator; anything else
+    // goes through the layer's own target.
+    let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
+    // Motion blur samples draw straight into their accumulation; a blurred
+    // layer that also needs its own target (masks, effects, matte, blend
+    // mode, transition) has no parity case and keeps routing.
+    if blur.is_some() && slow {
+        refuse(b, Feature::MotionBlur);
         return Ok(None);
     }
-    let transition: Option<ActiveTransition<'d>> =
-        scope.active_transition(layer, time, &|_| true)?;
-    if transition.is_some() {
-        refuse(Feature::Transition);
-        return Ok(None);
-    }
-    if js::flag(layer, "matteSource") {
-        refuse(Feature::TrackMatte);
-        return Ok(None);
-    }
+    // The layer's own target: masks, effects, matte, then the composite.
+    let wrap = |scope: &mut Scope<'_, 'd>,
+                b: &mut Build<'_>,
+                content: Vec<Draw>,
+                composite_alpha: f64|
+     -> JsResult<Option<Vec<Draw>>> {
+        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
+            return Ok(None);
+        };
+        let matte = if matted {
+            layer_matte(scope, b, layer, time, width, height, scale)?
+        } else {
+            None
+        };
+        Ok(Some(vec![node(composite::Node::Layer(
+            composite::LayerNode {
+                layer: id.clone(),
+                content,
+                masks,
+                effects: effects.clone(),
+                matte,
+                blend,
+                alpha: composite_alpha,
+                transition: transition.clone(),
+            },
+        ))]))
+    };
     if ty == "group" {
-        // A boundary group (only opacity can make it one here): its members
-        // composite into their own target, drawn with the group's opacity.
+        if b.forced_on.is_some_and(|p| std::ptr::eq(p, layer)) {
+            // Today's matte pass of a group renders the group inside itself
+            // until the stack overflows; the matte is empty and the layer
+            // reported. The editor never makes a group a matte source.
+            return Err(pm_eval::JsThrow {
+                kind: "RangeError",
+                message: "Maximum call stack size exceeded (a group used as a track matte)"
+                    .to_owned(),
+            });
+        }
+        if let Some(blur) = blur {
+            // The group's members at every sample time, accumulated.
+            let draw = crate::motion::plan::blur_group(
+                scope, b, layer, time, width, height, scale, alpha, blur,
+            );
+            return Ok(Some(vec![draw]));
+        }
+        // A boundary group: its members composite into their own target,
+        // drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
-        let id = js::layer_id(layer);
-        return Ok(Some(vec![Draw {
-            layer: id,
-            matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+        let draw = |alpha: f64| Draw {
+            layer: id.clone(),
+            matrix: full,
             content: Content::Texture {
-                source: Source::Comp(Box::new(inner)),
+                source: Source::Comp(Box::new(inner.clone())),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha,
             },
-        }]));
+        };
+        if !slow {
+            return Ok(Some(vec![draw(alpha)]));
+        }
+        return wrap(scope, b, vec![draw(1.0)], alpha);
     }
-    // 3D object layers draw in screen space (`c.screenSpace`), never as planes.
-    if pm_eval::parenting::Role3d::of(layer).is_none() && scope.is_3d_layer(layer)? {
-        refuse(Feature::TwoAndAHalfD);
+    if let Some(blur) = blur {
+        let draw = crate::motion::plan::blur_layer(
+            scope, b, layer, time, width, height, scale, alpha, blur,
+        )?;
+        return Ok(draw.map(|d| vec![d]));
+    }
+    let Some(draw) = layer_draw(scope, b, layer, time, width, height, scale, alpha)? else {
         return Ok(None);
+    };
+    if slow {
+        return wrap(scope, b, vec![draw], 1.0);
     }
+    Ok(Some(vec![draw]))
+}
+
+/// `drawContent(L, T, W, H, alpha)`: the layer's content quad at `time`
+/// through its world matrix, or its 2.5D plane, with `alpha` folded in.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layer_draw<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    alpha: f64,
+) -> JsResult<Option<Draw>> {
     let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
     let world = scaled_world(scope, layer, time, scale)?;
     let id = js::layer_id(layer);
+    let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
+    let ty = js::layer_type(layer);
+    let level2 = (crate::sampling::is_level2(layer) && crate::sampling::samples_layer_type(&ty))
+        .then_some(b.sampling);
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -421,10 +666,15 @@ fn draw_layer<'d>(
             ay,
         } => {
             let alpha = alpha * a;
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
             Draw {
-                layer: id,
+                layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
-                content: Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
+                content: placed(
+                    Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
+                    plane,
+                    None,
+                ),
             }
         }
         Quad::Texture {
@@ -434,14 +684,20 @@ fn draw_layer<'d>(
             ax,
             ay,
             uv,
-        } => Draw {
-            layer: id,
-            matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
-            content: Content::Texture { source, uv, alpha },
-        },
+        } => {
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
+            // Level 2 SVG images are drawn at output resolution by
+            // `crate::vector`, never resampled.
+            let level2 = level2.filter(|_| !matches!(source, Source::Vector(_)));
+            Draw {
+                layer: id.clone(),
+                matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
+                content: placed(Content::Texture { source, uv, alpha }, plane, level2),
+            }
+        }
         Quad::Screen { source } => Draw {
-            layer: id,
-            matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+            layer: id.clone(),
+            matrix: full,
             content: Content::Texture {
                 source,
                 uv: [0.0, 0.0, 1.0, 1.0],
@@ -449,15 +705,8 @@ fn draw_layer<'d>(
             },
         },
         Quad::Device { source, rect } => Draw {
-            layer: id,
-            matrix: [
-                rect[2] - rect[0],
-                0.0,
-                0.0,
-                rect[3] - rect[1],
-                rect[0],
-                rect[1],
-            ],
+            layer: id.clone(),
+            matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
             content: Content::Texture {
                 source,
                 uv: [0.0, 0.0, 1.0, 1.0],
@@ -465,7 +714,141 @@ fn draw_layer<'d>(
             },
         },
     };
-    Ok(Some(vec![draw]))
+    Ok(Some(draw))
+}
+
+/// `content` as it is, or wrapped with its plane and resampler.
+fn placed(
+    content: Content,
+    plane: Option<crate::space25d::Plane>,
+    level2: Option<crate::sampling::Sampling>,
+) -> Content {
+    if plane.is_none() && level2.is_none() {
+        return content;
+    }
+    Content::Placed(Box::new(Placed {
+        content,
+        plane,
+        level2,
+    }))
+}
+
+/// The layer's masks for its node: `Some(None)` when nothing is masked,
+/// `None` when the masks are unsupported (recorded).
+fn layer_masks<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    has_masks: bool,
+) -> JsResult<Option<Option<composite::Masks>>> {
+    if !has_masks {
+        return Ok(Some(None));
+    }
+    if pm_eval::parenting::Role3d::of(layer).is_some() {
+        // Today a masked 3D object layer draws its scene pass turned by
+        // 180° (measured on the composite/3d-mask corpus case); routed
+        // until that is matched (docs/engine/composite.md).
+        let comp_id = scope.comp.id().to_string_lossy();
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Masks));
+        return Ok(None);
+    }
+    let world = scaled_world(scope, layer, time, scale)?;
+    let plane = if scope.is_3d_layer(layer)? {
+        let h = scope.plane_matrix(layer, time, false)?;
+        let (sx, sy) = scale;
+        Some([
+            h[0] * sx,
+            h[1] * sy,
+            h[2],
+            h[3] * sx,
+            h[4] * sy,
+            h[5],
+            h[6] * sx,
+            h[7] * sy,
+            h[8],
+        ])
+    } else {
+        None
+    };
+    match composite::build::masks(scope, layer, time, world, plane)? {
+        composite::build::MaskRoute::Unmasked => Ok(Some(None)),
+        composite::build::MaskRoute::Parametric(m) => Ok(Some(Some(m))),
+        composite::build::MaskRoute::Path => {
+            let comp_id = scope.comp.id().to_string_lossy();
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::PathMasks));
+            Ok(None)
+        }
+    }
+}
+
+/// `applyTrackMatte`: the matte source rendered alone (`renderProject`
+/// with `mattePass`, `explicitLayers`, and `{ ...source, on: true }`), or
+/// `None` when the source is missing or the matte depth limit is reached.
+#[allow(clippy::too_many_arguments)]
+fn layer_matte<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+) -> JsResult<Option<composite::Matte>> {
+    let source = composite::build::matte_source(scope.layers(), layer);
+    let (luma, inverted) = composite::build::matte_mode(scope, layer, time)?;
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    if b.matte_depth >= composite::MATTE_MAX_DEPTH {
+        return Ok(None);
+    }
+    b.matte_depth += 1;
+    let outer = b.forced_on.replace(source as *const Node);
+    let pass = matte_pass(scope, b, source, time, width, height, scale);
+    b.forced_on = outer;
+    b.matte_depth -= 1;
+    Ok(Some(composite::Matte {
+        luma,
+        inverted,
+        source: Box::new(pass),
+    }))
+}
+
+/// One layer rendered alone into a transparent target in its parent's
+/// pixel space (the matte pass). Solo and matte-source skipping do not
+/// apply.
+fn matte_pass<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    source: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+) -> CompPlan {
+    let mut plan = CompPlan {
+        composition: scope.comp.id().to_string_lossy(),
+        group: true,
+        width,
+        height,
+        background: Background::Transparent,
+        draws: Vec::new(),
+    };
+    let all = [source];
+    let solo = js::flag(source, "solo");
+    match draw_layer(scope, b, source, time, width, height, scale, solo, &all) {
+        Ok(Some(draws)) => plan.draws.extend(draws),
+        Ok(None) => {}
+        Err(e) => {
+            let comp = scope.comp.clone();
+            layer_failure(b, &comp, source, e.to_string());
+        }
+    }
+    plan
 }
 
 /// `scaledWorld(L, T, W, H)` without a preview viewport.
@@ -506,8 +889,8 @@ enum Quad {
     },
     /// Screen-space content covering the whole target (3D layers).
     Screen { source: Source },
-    /// Content in target pixels over `rect` (x0, y0, x1, y1): level 2 text
-    /// drawn at output resolution.
+    /// Target-space content covering exactly `rect` (x, y, width, height):
+    /// level 2 vectors, and level 2 text drawn at output resolution.
     Device { source: Source, rect: [f64; 4] },
 }
 
@@ -556,6 +939,40 @@ fn native_content_quad<'d>(
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
+        "solid" if crate::vector::level2(layer) => {
+            // Level 2 solids draw at output resolution with analytic edges
+            // (section 8), honoring `d.radius` (section 10); radius 0 is a
+            // plain rectangle.
+            let color = js::string(js::get(&d, "color"));
+            let c = pm_color::standard::parse_hex(&color);
+            let rgba = [
+                c.rgb[0] as f32,
+                c.rgb[1] as f32,
+                c.rgb[2] as f32,
+                c.alpha as f32,
+            ];
+            let world = vector_world(scope, layer, time, scale)?;
+            let scene = crate::vector::level2::solid_scene(
+                js::or_number(js::get(&d, "w"), wf),
+                js::or_number(js::get(&d, "h"), hf),
+                js::get(&d, "radius").to_number(),
+                rgba,
+                &world,
+            );
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            Ok(scene.pixel_bounds(target).map(|rect| {
+                device_quad(crate::vector::VectorQuad::Device {
+                    source: crate::vector::VectorSource::Scene { scene, rect },
+                    rect,
+                })
+            }))
+        }
+        "shape" => {
+            let world = vector_world(scope, layer, time, scale)?;
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
+            Ok(quad.map(device_quad))
+        }
         "solid" => {
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
@@ -585,9 +1002,38 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
-                return Ok(None);
+                // Level 2 SVG images draw at output resolution
+                // (crate::vector::svg); level 1 and SVG text stay routed.
+                if !crate::vector::level2(layer) {
+                    b.unsupported
+                        .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    return Ok(None);
+                }
+                let sw = js::or_number(&rec("w"), 1.0);
+                let sh = js::or_number(&rec("h"), 1.0);
+                let bw = js::or_number(js::get(&d, "w"), wf);
+                let bh = js::or_number(js::get(&d, "h"), hf);
+                let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                let world = vector_world(scope, layer, time, scale)?;
+                let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
+                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => {
+                        Ok(quad.map(|q| device_quad(*q)))
+                    }
+                    Ok(crate::vector::svg::SvgPlan::Text) => {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                        Ok(None)
+                    }
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        Ok(None)
+                    }
+                };
             }
             if ty == "video"
                 && (rec("imageSequence").truthy()
@@ -604,12 +1050,22 @@ fn native_content_quad<'d>(
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
             let source = if ty == "video" {
-                let st = scope.source_time(layer, time, Some(&mut b.retime))?;
-                let dur = rec("dur").to_number();
+                // Inside motion-blur samples video keeps the center time's
+                // frame (`crate::motion`).
+                let at = b.video_center.unwrap_or(time);
+                let st = scope.source_time(layer, at, Some(&mut b.retime))?;
+                let rate = crate::retime::rate_override(record);
+                let time = match rate {
+                    // The file's frames on the overridden grid; the last
+                    // frame clamps when the media is opened.
+                    Some(_) => js::max(0.0, st),
+                    None => playback_time(st, rec("dur").to_number()),
+                };
                 Source::Video {
                     asset: asset_id,
                     path,
-                    time: playback_time(st, dur),
+                    time,
+                    rate,
                 }
             } else {
                 Source::Image {
@@ -638,8 +1094,20 @@ fn native_content_quad<'d>(
             let ch = node::to_number(scope.comp.member("h"));
             let w = js::max(1.0, or_chain(js::get(&d, "w"), cw, wf));
             let hh = js::max(1.0, or_chain(js::get(&d, "h"), ch, hf));
-            let tw = js::max(2.0, js::round(w * scale.0));
-            let th = js::max(2.0, js::round(hh * scale.1));
+            let (tw, th) = if crate::sampling::is_level2(layer) {
+                // Continuous rasterization (section 8): the child renders
+                // at the density it is drawn at, never below its own size.
+                let density = crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?;
+                (
+                    js::max(2.0, js::round(w * js::max(scale.0, density.0))),
+                    js::max(2.0, js::round(hh * js::max(scale.1, density.1))),
+                )
+            } else {
+                (
+                    js::max(2.0, js::round(w * scale.0)),
+                    js::max(2.0, js::round(hh * scale.1)),
+                )
+            };
             if !(tw.is_finite() && th.is_finite()) || tw > 16384.0 || th > 16384.0 {
                 b.failures.push(LayerFailure {
                     composition: comp_id,
@@ -649,11 +1117,19 @@ fn native_content_quad<'d>(
                 return Ok(None);
             }
             let (tw, th) = (tw as u32, th as u32);
-            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
             let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
                 Ok(c) => c,
                 Err(_) => return Ok(None),
             };
+            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
+            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
+            // The child's video frames follow the center time of this level
+            // inside motion-blur samples.
+            let outer_center = b.video_center;
+            if let Some(center) = outer_center {
+                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
+                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
+            }
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;
             let project = scope.project;
@@ -671,6 +1147,7 @@ fn native_content_quad<'d>(
                 )
             };
             b.precomp_depth -= 1;
+            b.video_center = outer_center;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
                 w,
@@ -684,11 +1161,11 @@ fn native_content_quad<'d>(
             let def = js::string(js::get(&d, "definition"));
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
-                    match crate::scene3d::plan_object(scope, layer, time, width, height) {
-                        Ok(Ok(plan)) => Ok(Some(Quad::Screen {
+                    match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
+                        Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
                         })),
-                        Ok(Err(reason)) => {
+                        Err(reason) => {
                             b.unsupported.push(Unsupported::layer(
                                 &comp_id,
                                 layer,
@@ -696,18 +1173,45 @@ fn native_content_quad<'d>(
                             ));
                             Ok(None)
                         }
-                        Err(e) => Err(e),
                     }
                 }
                 Some(_) => Ok(None),
-                None => {
-                    b.unsupported.push(Unsupported::layer(
-                        &comp_id,
-                        layer,
-                        Feature::ExtensionDefinition(def),
-                    ));
-                    Ok(None)
-                }
+                None => match crate::scene3d::legacy::plan_extension(
+                    scope,
+                    layer,
+                    &d,
+                    &def,
+                    time,
+                    (width, height),
+                    scale,
+                    b.assets,
+                    &b.options3d,
+                )? {
+                    Some(Ok((source, w, h))) => Ok(Some(Quad::Texture {
+                        source,
+                        w,
+                        h,
+                        ax: 0.0,
+                        ay: 0.0,
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                    })),
+                    Some(Err(reason)) => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::Scene3d(reason),
+                        ));
+                        Ok(None)
+                    }
+                    None => {
+                        b.unsupported.push(Unsupported::layer(
+                            &comp_id,
+                            layer,
+                            Feature::ExtensionDefinition(def),
+                        ));
+                        Ok(None)
+                    }
+                },
             }
         }
         "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
@@ -720,6 +1224,48 @@ fn native_content_quad<'d>(
             ));
             Ok(None)
         }
+    }
+}
+
+/// The world matrix of a vector layer in target pixels, including the size
+/// anchor offset `contentQuad` applies to its quad.
+fn vector_world<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Mat2d> {
+    let world = scaled_world(scope, layer, time, scale)?;
+    let offset = scope.size_anchor_offset(layer, time)?;
+    Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
+}
+
+/// A planned vector quad as the render graph's quad.
+fn device_quad(q: crate::vector::VectorQuad) -> Quad {
+    match q {
+        crate::vector::VectorQuad::Layer {
+            source,
+            w,
+            h,
+            ax,
+            ay,
+        } => Quad::Texture {
+            source: Source::Vector(Box::new(source)),
+            w,
+            h,
+            ax,
+            ay,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        },
+        crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
+            source: Source::Vector(Box::new(source)),
+            rect: [
+                f64::from(rect.x),
+                f64::from(rect.y),
+                f64::from(rect.width),
+                f64::from(rect.height),
+            ],
+        },
     }
 }
 
@@ -763,7 +1309,8 @@ fn text_quad<'d>(
                 .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
         }
         return Ok(plan.map(|p| {
-            let rect = p.crop.map(f64::from);
+            let [x0, y0, x1, y1] = p.crop.map(f64::from);
+            let rect = [x0, y0, x1 - x0, y1 - y0];
             Quad::Device {
                 source: Source::Text(Box::new(p)),
                 rect,
@@ -832,10 +1379,7 @@ pub fn fit_uv(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
 /// `[0, dur − 0.04]`. The engine then selects the frame by section 5 rule 7
 /// (today's microsecond rounding only steers Chromium's seek to the same
 /// frame).
-pub fn playback_time(time: f64, dur: f64) -> f64 {
-    let dur = if dur.is_nan() { 0.0 } else { dur };
-    js::max(0.0, js::min(js::max(0.0, dur - 0.04), time))
-}
+pub use crate::retime::playback_time;
 
 /// `PM.normalizeFill(comp.backgroundFill, comp.bg)` and the clear it gives.
 pub fn background(comp: &Comp<'_>) -> Background {
@@ -952,14 +1496,6 @@ mod tests {
         assert_eq!(fit_uv("fill", 2.0, 1.0, 1.0, 1.0), [0.0, 0.0, 1.0, 1.0]);
         // A 1:2 source in a 1:1 box.
         assert_eq!(fit_uv("contain", 1.0, 2.0, 1.0, 1.0), [-0.5, 0.0, 2.0, 1.0]);
-    }
-
-    #[test]
-    fn playback_time_clamps_like_video_timing() {
-        assert_eq!(playback_time(-1.0, 2.0), 0.0);
-        assert_eq!(playback_time(1.0, 2.0), 1.0);
-        assert!((playback_time(5.0, 2.0) - 1.96).abs() < 1e-12);
-        assert_eq!(playback_time(0.5, f64::NAN), 0.0);
     }
 
     fn parse(s: &str) -> Node {

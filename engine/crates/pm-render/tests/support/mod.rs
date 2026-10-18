@@ -36,13 +36,15 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 }
 
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
-/// or the newest `v1-*` corpus capture and the newest `render-*` capture
-/// (the render parity cases, `engine/corpus/src/projects/render.ts`).
+/// or the newest `v1-*` corpus capture, the newest `render-*` capture (the
+/// render parity cases, `engine/corpus/src/projects/render.ts`), the
+/// newest `effects-*` capture (`render-effects.ts`), and the newest
+/// `composite-*` capture (`engine/corpus/src/projects/composite.ts`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
     }
-    ["v1-", "render-"]
+    ["v1-", "render-", "effects-", "composite-"]
         .iter()
         .filter_map(|p| newest_capture(p))
         .collect()
@@ -74,6 +76,9 @@ pub struct Sample {
     pub height: u32,
     pub png: PathBuf,
     pub float: Option<PathBuf>,
+    /// Transparent float frames at other motion-blur sample counts
+    /// (`blurSamples` cases): (samples, file).
+    pub blur: Vec<(u32, PathBuf)>,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -149,6 +154,21 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
                         .and_then(|p| member(p, "file")),
                 )
                 .map(|f| capture.join(f)),
+                blur: match member(s, "blur") {
+                    Some(pm_model::Value::Array(list)) => list
+                        .iter()
+                        .filter_map(|b| {
+                            let n = number(member(b, "samples"))? as u32;
+                            let file = string(
+                                member(b, "float")
+                                    .and_then(|p| member(p, "data"))
+                                    .and_then(|p| member(p, "file")),
+                            )?;
+                            Some((n, capture.join(file)))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
             });
         }
     }

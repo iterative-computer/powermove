@@ -3,13 +3,15 @@
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{PixelRect, Size};
-use pm_protocol::frame::{FrameRequest, MAX_OUTPUT_DIMENSION, MAX_SCALE, MIN_SCALE};
+use pm_protocol::frame::{FrameRequest, MAX_OUTPUT_DIMENSION, MAX_SCALE, MIN_SCALE, ViewOverride};
 use pm_protocol::validate::Validate;
 
 use crate::error::RenderError;
+use crate::motion::MotionBlur;
+use crate::sampling::Sampling;
 
 /// A render of one composition at one time.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderRequest {
     /// The full output, in output pixels. Composition pixel `(x, y)` lands at
     /// output pixel `(x · sx, y · sy)`.
@@ -32,6 +34,17 @@ pub struct RenderRequest {
     /// The frame feeds an export: media decodes at export depth
     /// (amendment 6: ProRes 422 as `v216`).
     pub export: bool,
+    /// The view override of a viewer frame (contract 2's
+    /// `FrameRequest.view`): the editor camera, Wireframe and X-ray looks,
+    /// and Local View. Per request, so nothing carries it into a later
+    /// render; an export never draws it, and [`RenderRequest::from_frame_request`]
+    /// drops it for exports and agent captures (section 8).
+    pub view: Option<ViewOverride>,
+    /// Motion blur of layers with their switch on (`crate::motion`).
+    pub motion_blur: MotionBlur,
+    /// The resampler of `compat` level 2 raster content
+    /// (`crate::sampling`).
+    pub sampling: Sampling,
 }
 
 impl RenderRequest {
@@ -47,6 +60,9 @@ impl RenderRequest {
             depth_id: false,
             background: true,
             export: false,
+            view: None,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
         }
     }
 
@@ -61,23 +77,29 @@ impl RenderRequest {
             depth_id: false,
             background: true,
             export: false,
+            view: None,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
         }
     }
 
-    /// Contract 2's request. The view override and editor looks are not
-    /// rendered by this renderer yet; such requests are refused so the
-    /// caller routes them elsewhere.
+    /// Contract 2's request, with its view override for viewer frames: the
+    /// override is dropped for exports and agent captures
+    /// (`FramePurpose::is_final`), as sections 8 and 18 require.
     pub fn from_frame_request(request: &FrameRequest) -> Result<RenderRequest, RenderError> {
         request
             .validate()
             .map_err(|v| RenderError::Request(v.to_string()))?;
-        if request.view.is_some() {
-            return Err(RenderError::Unsupported(vec![
-                crate::capability::Unsupported::request(
-                    "view override (editor camera, shading, Local View)",
-                ),
-            ]));
-        }
+        use pm_protocol::frame::{FramePurpose, MotionBlurKind};
+        // Frames while playing and scrub frames take the playback
+        // resampler; paused frames, exports, and captures the final one.
+        let sampling = if request.purpose == FramePurpose::Scrub
+            || request.motion_blur == MotionBlurKind::PreviewPlaying
+        {
+            Sampling::Playback
+        } else {
+            Sampling::Final
+        };
         Ok(RenderRequest {
             output_size: request.output_size,
             scale: Some((request.scale, request.scale)),
@@ -85,7 +107,13 @@ impl RenderRequest {
             precision: request.precision,
             depth_id: request.depth_id,
             background: true,
-            export: request.purpose == pm_protocol::frame::FramePurpose::Export,
+            export: request.purpose == FramePurpose::Export,
+            view: request.view.clone().filter(|_| !request.purpose.is_final()),
+            motion_blur: match request.motion_blur {
+                MotionBlurKind::Off => MotionBlur::Off,
+                kind => MotionBlur::Kind(kind),
+            },
+            sampling,
         })
     }
 

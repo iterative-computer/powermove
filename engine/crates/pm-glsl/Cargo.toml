@@ -1,0 +1,26 @@
+[package]
+name = "pm-glsl"
+description = "The section 11 GLSL ES 3.00 pipeline for effects, transitions, and fragment layers: limits, ES validation, glslang, SPIR-V rewrites, naga"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+glslang = "0.8.1"
+glslang-sys = "0.8.1"
+rspirv = "0.13.0"
+naga = { version = "30.0.1", features = ["spv-in", "msl-out"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+proptest.workspace = true
+
+[[bin]]
+name = "pm-glsl-fuzz"
+path = "src/bin/fuzz.rs"

@@ -16,7 +16,11 @@ pm-expr = { path = "../pm-expr" }
 pm-color = { path = "../pm-color" }
 pm-geom3d = { path = "../pm-geom3d" }
 pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
+pm-glsl = { path = "../pm-glsl" }
+pollster = "0.4"
+serde.workspace = true
 pm-media = { path = "../pm-media" }
+pm-vector = { path = "../pm-vector", features = ["gpu"] }
 # Glyph rendering (text and captions, docs/engine/text-render.md).
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2"] }
 vello = { version = "0.11", default-features = false, features = ["wgpu"] }

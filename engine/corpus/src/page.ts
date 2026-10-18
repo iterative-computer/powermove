@@ -272,7 +272,7 @@ export function installCorpusPage(): void {
     },
 
     /** One sample: opaque RGBA8 (export path), optional transparent float RGBA and straight-alpha RGBA8, evaluated state. */
-    async capture(args: { time: number; width: number; height: number; alpha: boolean; evaluate: boolean }) {
+    async capture(args: { time: number; width: number; height: number; alpha: boolean; evaluate: boolean; blurSamples?: number[] }) {
       const { time, width, height } = args;
       const gl = PM.GL.gl;
       const shutter = PM.proj.shutter || .5;
@@ -327,6 +327,24 @@ export function installCorpusPage(): void {
             }
           }
           out.alpha = { options: alphaOptions, floatBase64: toBase64(new Uint8Array(flipped.buffer)), straightBase64: toBase64(straight) };
+        }
+        // Transparent float renders at other motion-blur sample counts.
+        for (const samples of args.blurSamples ?? []) {
+          const read = gl.readPixels.bind(gl);
+          let floats: Float32Array | null = null;
+          gl.readPixels = (...params: any[]) => {
+            const result = read(...params);
+            if (params[5] === gl.FLOAT && params[6] instanceof Float32Array) floats = new Float32Array(params[6]);
+            return result;
+          };
+          const options = { transparent: true, mblur: true, mbSamples: samples, shutter };
+          try { PM.GL.renderToPixels(time, width, height, options); }
+          finally { gl.readPixels = read; }
+          const captured = floats as Float32Array | null;
+          if (!captured || captured.length !== width * height * 4) throw new Error(`The ${samples}-sample capture did not read float pixels`);
+          const flipped = new Float32Array(captured.length), rowFloats = width * 4;
+          for (let y = 0; y < height; y++) flipped.set(captured.subarray((height - 1 - y) * rowFloats, (height - y) * rowFloats), y * rowFloats);
+          (out.blur ??= []).push({ samples, options, floatBase64: toBase64(new Uint8Array(flipped.buffer)) });
         }
         out.glErrors = [...(PM.GL.errors?.entries?.() ?? [])].map(([key, value]: any) => `${key}: ${value}`);
         const glError = gl.getError();

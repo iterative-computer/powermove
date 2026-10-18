@@ -8,7 +8,11 @@
 //! - `pm_e_decode(x: f32) -> f32`, `pm_e_decode3`: E⁻¹, extended;
 //! - `pm_luma709(c: vec3<f32>) -> f32`: Rec.709 luma (luma mattes);
 //! - `pm_premultiply(c: vec4<f32>)`, `pm_unpremultiply(c: vec4<f32>)`: the
-//!   section 9 rules with the 1/4096 guard (pixels below it are kept).
+//!   section 9 rules with the 1/4096 guard (pixels below it are kept);
+//! - `pm_premultiplied_e_to_linear(c)`, `pm_premultiplied_linear_to_e(c)`:
+//!   [`crate::linear::premultiplied_e_to_linear`] and its inverse.
+//!
+//! [`BLEND`] adds the nine blend modes in both domains.
 
 /// The shared WGSL functions.
 pub const COLOR: &str = r#"
@@ -63,6 +67,76 @@ fn pm_unpremultiply(c: vec4<f32>) -> vec4<f32> {
         return vec4<f32>(c.rgb / c.a, c.a);
     }
     return c;
+}
+
+fn pm_premultiplied_e_to_linear(c: vec4<f32>) -> vec4<f32> {
+    if (pm_may_unpremultiply(c.a)) {
+        return vec4<f32>(pm_e_decode3(c.rgb / c.a) * c.a, c.a);
+    }
+    return c;
+}
+
+fn pm_premultiplied_linear_to_e(c: vec4<f32>) -> vec4<f32> {
+    if (pm_may_unpremultiply(c.a)) {
+        return vec4<f32>(pm_e_encode3(c.rgb / c.a) * c.a, c.a);
+    }
+    return c;
+}
+"#;
+
+/// WGSL for the nine blend modes (section 9, "Blend modes and mattes"),
+/// to be prepended after [`COLOR`]. Mode numbers are today's `BLEND_ID`
+/// (0 normal, 1 add, 2 screen, 3 multiply, 4 overlay, 5 soft light,
+/// 6 difference, 7 lighten, 8 darken):
+///
+/// - `pm_blend_legacy(b, s, m)`: today's `FRAG_COMPOSITE` `blend()`,
+///   statement for statement (Standard keeps it);
+/// - `pm_blend_hdr_safe(b, s, m)`: screen `b + s − bs` unclamped; overlay
+///   and soft light switch on values clamped to 0..1 and do not clamp
+///   otherwise; every other mode as `pm_blend_legacy`;
+/// - `pm_blend_working(b, s, m, linear, in_e)`: the mode in a project's
+///   setup: Standard runs the legacy formula on E values; linear light runs
+///   normal, add, multiply, difference, lighten, and darken in linear
+///   light, and screen, overlay, and soft light with the HDR-safe formulas,
+///   or in E when `in_e` (the per-project "run in E" option).
+///
+/// [`crate::linear`] holds the f64 references and their f32 twins.
+pub const BLEND: &str = r#"
+fn pm_blend_legacy(b: vec3<f32>, s: vec3<f32>, m: i32) -> vec3<f32> {
+    if (m == 1) { return b + s; }
+    if (m == 2) { return 1.0 - (1.0 - b) * (1.0 - s); }
+    if (m == 3) { return b * s; }
+    if (m == 4) { return mix(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), step(vec3<f32>(0.5), b)); }
+    if (m == 5) {
+        return mix(2.0 * b * s + b * b * (1.0 - 2.0 * s), sqrt(b) * (2.0 * s - 1.0) + 2.0 * b * (1.0 - s), step(vec3<f32>(0.5), s));
+    }
+    if (m == 6) { return abs(b - s); }
+    if (m == 7) { return max(b, s); }
+    if (m == 8) { return min(b, s); }
+    return s;
+}
+
+fn pm_blend_hdr_safe(b: vec3<f32>, s: vec3<f32>, m: i32) -> vec3<f32> {
+    if (m == 2) { return b + s - b * s; }
+    if (m == 4) {
+        return select(1.0 - 2.0 * (1.0 - b) * (1.0 - s), 2.0 * b * s, clamp(b, vec3<f32>(0.0), vec3<f32>(1.0)) < vec3<f32>(0.5));
+    }
+    if (m == 5) {
+        return select(
+            sqrt(max(b, vec3<f32>(0.0))) * (2.0 * s - 1.0) + 2.0 * b * (1.0 - s),
+            2.0 * b * s + b * b * (1.0 - 2.0 * s),
+            clamp(s, vec3<f32>(0.0), vec3<f32>(1.0)) < vec3<f32>(0.5));
+    }
+    return pm_blend_legacy(b, s, m);
+}
+
+fn pm_blend_working(b: vec3<f32>, s: vec3<f32>, m: i32, linear: bool, in_e: bool) -> vec3<f32> {
+    if (!linear) { return pm_blend_legacy(b, s, m); }
+    if (m == 2 || m == 4 || m == 5) {
+        if (in_e) { return pm_e_decode3(pm_blend_legacy(pm_e_encode3(b), pm_e_encode3(s), m)); }
+        return pm_blend_hdr_safe(b, s, m);
+    }
+    return pm_blend_legacy(b, s, m);
 }
 "#;
 

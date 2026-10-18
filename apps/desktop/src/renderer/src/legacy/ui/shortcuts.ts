@@ -366,6 +366,15 @@ def('stepFrames', 'Step frames', null, (frames?: any) => {
   if (!Number.isFinite(Number(frames)) || Number(frames) === 0) return false;
   return PM.step(Number(frames));
 }, 'Transport', hidden);
+/* J/K/L, play around, and audio scrub run on the new engine's transport
+   (legacy/core/engine.ts); with the legacy engine they decline and the keys
+   keep their After Effects meaning. From the palette they start playback. */
+const engineTransport = { preserveFalse: true, when: () => !!PM.engineTransport?.() };
+def('shuttleForward', 'Play forward (again for 2×)', 'L while playing', (fromPause: any = true) => PM.jkl?.('l', { fromPause: fromPause !== false }) ?? false, 'Transport', engineTransport);
+def('shuttleBackward', 'Play backward (again for 2×)', '⌃J · J while playing', (fromPause: any = true) => PM.jkl?.('j', { fromPause: fromPause !== false }) ?? false, 'Transport', engineTransport);
+def('shuttleStop', 'Stop', 'K while playing', () => PM.jkl?.('k') ?? false, 'Transport', { preserveFalse: true, when: () => false });
+def('playAround', 'Play around current frame', '⌃⇧Space', () => PM.playAround?.() ?? false, 'Transport', engineTransport);
+def('toggleAudioScrub', 'Audio scrubbing', null, () => { PM.setAudioScrub?.(!PM.audioScrub?.()); }, 'Transport', { when: () => !!PM.EngineConnection });
 def('nextEdge', 'Next edge', '⇧→', () => { const edge = timelineService(PM)?.nextEdge(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('prevEdge', 'Previous edge', '⇧←', () => { const edge = timelineService(PM)?.prevEdge(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('nextVisibleEvent', 'Next visible timeline event', 'K', () => goToTimelineEvent(PM, 1), 'Transport');

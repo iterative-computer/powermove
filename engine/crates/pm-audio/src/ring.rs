@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use pm_protocol::clock::TransportState;
-use pm_protocol::common::TickRange;
+use pm_protocol::common::{PlaybackRate, TickRange};
 
 /// Frames per chunk.
 pub const CHUNK: usize = 256;
@@ -32,6 +32,9 @@ pub struct Tag {
     /// The loop the clock line wraps by from this chunk on (`None` outside
     /// a loop: before it, past it, in a grain).
     pub loop_range: Option<TickRange>,
+    /// Media advanced per frame of the chunk, in project frames: 1, 2, −1,
+    /// or −2 (J/K/L).
+    pub rate: PlaybackRate,
 }
 
 impl Default for Tag {
@@ -42,6 +45,7 @@ impl Default for Tag {
             state: TransportState::Stopped,
             frames: 0,
             loop_range: None,
+            rate: PlaybackRate::NORMAL,
         }
     }
 }
@@ -235,6 +239,7 @@ mod tests {
             state: TransportState::Playing,
             frames,
             loop_range: None,
+            rate: PlaybackRate::NORMAL,
         }
     }
 

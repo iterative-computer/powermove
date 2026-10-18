@@ -31,7 +31,7 @@ use pm_gpu::bridge_out::remote_layer::{
     Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device, take_display_ticks,
 };
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
-use pm_protocol::clock::{TransportCommand, TransportState};
+use pm_protocol::clock::{AudioMessage, SeekMode, TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::WorkingEncoding;
 use pm_protocol::common::{RequestId, Revision, Seq, SessionId, Size, TICKS_PER_SECOND, Ticks};
@@ -164,11 +164,26 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
     },
+    /// The session's definitions (contract 10), and those a delta
+    /// registered again.
+    Definitions {
+        key: Key,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    },
     /// An asset's file, or `None` when it is offline or gone.
     Media {
         key: Key,
         asset: String,
         path: Option<PathBuf>,
+    },
+    /// The mix's monitor and data for the renderer (contract 6).
+    Audio {
+        key: Key,
+        message: AudioMessage,
     },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
@@ -206,6 +221,18 @@ pub struct ThreadConfig {
     /// Play without the audio device: the line runs on the host clock
     /// (tests on machines without an output, and the S1 harness).
     pub host_clock: bool,
+    /// The program cache folder (`SHADER_CACHE_ENV`).
+    pub shader_cache: Option<PathBuf>,
+}
+
+/// The device's composer, keeping translated programs in the configured
+/// cache folder.
+fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -> Composer {
+    let mut composer = Composer::new(device, queue);
+    composer
+        .renderer()
+        .set_program_cache_dir(config.shader_cache.clone());
+    composer
 }
 
 /// One frame's record for the S1 harness.
@@ -337,6 +364,13 @@ struct View {
 
 type PlaybackRateValue = pm_protocol::common::PlaybackRate;
 
+/// A session's listening choices.
+#[derive(Debug, Clone, Default)]
+struct AudioPrefs {
+    scrub: bool,
+    solo: Option<std::collections::HashSet<String>>,
+}
+
 /// How long a Play waits for the audio device before the line starts on
 /// the host clock.
 pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
@@ -353,6 +387,11 @@ struct Thread {
     docs: BTreeMap<Key, ViewDocument>,
     /// Each session's audio playback, from its first Play.
     audio: BTreeMap<Key, AudioLink>,
+    /// Each session's audio scrub switch and monitor solo, kept before
+    /// its playback opens.
+    audio_prefs: BTreeMap<Key, AudioPrefs>,
+    /// Waveform peaks, computed off this thread.
+    peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
     generations: Generations,
 }
@@ -381,6 +420,7 @@ pub fn run(
 ) {
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
+    let peaks = super::peaks::PeakWorker::new(sink.clone());
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         config,
@@ -391,6 +431,8 @@ pub fn run(
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
+        audio_prefs: BTreeMap::new(),
+        peaks,
         generations,
     };
     thread.check_in();
@@ -615,6 +657,7 @@ impl Thread {
                 }
             }
             Command::Transport { key, command, at } => self.transport(key, command, at),
+            Command::Audio { key, message } => self.audio_message(key, message),
             Command::Render {
                 key,
                 id,
@@ -654,6 +697,41 @@ impl Thread {
                 }
             }
             Command::Document { key, update } => self.document(key, update),
+            Command::Definitions {
+                key,
+                set,
+                registered,
+            } => {
+                let doc = self.docs.entry(key).or_default();
+                doc.set_definitions(set, registered);
+                let definitions = doc.definitions().cloned();
+                let registered = doc.take_registered();
+                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // Translate now (not at the next frame) and report each
+                // definition that fails (contract 10; the kernel fills the
+                // shader UI from these).
+                let mut failures = Vec::new();
+                if self.config.document
+                    && let Some(gpu) = self.gpu.as_mut()
+                {
+                    let composer = gpu
+                        .composer
+                        .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
+                    failures = composer
+                        .use_definitions(key, definitions.as_ref(), &registered)
+                        .unwrap_or_default();
+                } else if let Some(doc) = self.docs.get_mut(&key) {
+                    // Applied with the view's next frame.
+                    doc.keep_registered(registered);
+                }
+                for error in failures {
+                    let report = pm_protocol::error::FailureReport { revision, error };
+                    self.event(key, Event::Failure(report), None);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
             Command::Media { key, asset, path } => {
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -678,6 +756,10 @@ impl Thread {
     fn forget_session(&mut self, key: Key) {
         self.docs.remove(&key);
         self.audio.remove(&key);
+        self.audio_prefs.remove(&key);
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            composer.forget_definitions(key);
+        }
         let mut stats = self.stats();
         stats.routes.remove(&view_name(key));
         stats.audio.remove(&view_name(key));
@@ -744,10 +826,12 @@ impl Thread {
         );
     }
 
-    /// A transport command from the viewer. With a document, Play goes to
-    /// the audio device and the line starts with its first playing sample
-    /// (the audio clock is the master); without an output device, and for
-    /// the test source, the line runs on the host clock.
+    /// A transport command from the viewer. With a document, Play (J/K/L at
+    /// 1× and 2×, forward and reverse) and play around go to the audio
+    /// device and the line starts with its first playing sample (the audio
+    /// clock is the master); without an output device, and for the test
+    /// source, the line runs on the host clock. Scrub seeks while paused
+    /// play an audio grain when audio scrub is on.
     fn transport(&mut self, key: Key, command: TransportCommand, at: i64) {
         let document = self.config.document;
         let host_clock = self.config.host_clock;
@@ -766,7 +850,9 @@ impl Thread {
         }
         match command {
             TransportCommand::Play { rate } => {
-                if view.clock.is_playing() || view.awaiting.is_some() {
+                if view.awaiting.is_some_and(|a| a.2 == rate)
+                    || (view.clock.is_playing() && view.clock.rate() == rate)
+                {
                     return;
                 }
                 // Routed to the legacy viewer: the legacy transport plays.
@@ -774,18 +860,58 @@ impl Thread {
                     return;
                 }
                 let from = view.clock.media_at(at);
-                let wants_audio = !host_clock && rate == PlaybackRateValue::NORMAL;
+                let wants_audio = !host_clock && pm_protocol::clock::JKL_RATES.contains(&rate);
                 if wants_audio && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
                     let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
                     audio.send(AudioCtl::Play { from, rate });
                     let view = self.views.get_mut(&key).expect("checked");
+                    // A new rate while playing holds the line where it is
+                    // until the new run's first sample.
+                    if view.clock.is_playing() {
+                        view.clock.hold(from, at);
+                        view.schedule.reset();
+                    }
                     view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
                     view.sample_due = true;
                 } else {
                     self.stats().host_clock_runs += 1;
                     let view = self.views.get_mut(&key).expect("checked");
                     view.clock.apply(TransportCommand::Play { rate }, at);
+                    view.schedule.reset();
+                    view.sample_due = true;
+                }
+            }
+            TransportCommand::PlayAround {
+                pre_roll,
+                post_roll,
+            } => {
+                if view.reported != Some(Route::Engine) {
+                    return;
+                }
+                let here = view.clock.media_at(at);
+                if !host_clock && self.audio_for(key).is_some() {
+                    let audio = &self.audio[&key];
+                    let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
+                    audio.send(AudioCtl::PlayAround {
+                        at: here,
+                        pre: pre_roll,
+                        post: post_roll,
+                    });
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.clock.hold(here, at);
+                    view.schedule.reset();
+                    view.awaiting = Some((
+                        at + AUDIO_START_TIMEOUT_US,
+                        before,
+                        PlaybackRateValue::NORMAL,
+                    ));
+                    view.sample_due = true;
+                } else {
+                    self.stats().host_clock_runs += 1;
+                    let view = self.views.get_mut(&key).expect("checked");
+                    view.clock
+                        .play_around(here, pre_roll.get(), post_roll.get(), at);
                     view.schedule.reset();
                     view.sample_due = true;
                 }
@@ -821,6 +947,8 @@ impl Thread {
                     if let Some(audio) = self.audio.get(&key) {
                         audio.send(AudioCtl::Seek(time.get()));
                     }
+                } else if mode == SeekMode::Scrub {
+                    self.scrub_grain(key, time.get());
                 }
                 let view = self.views.get_mut(&key).expect("checked");
                 view.schedule.reset();
@@ -834,14 +962,60 @@ impl Thread {
                     audio.send(AudioCtl::SetLoop(range));
                 }
             }
-            other => {
-                // Steps (paused), play around, audio scrub: the line only.
-                if view.clock.apply(other, at) {
+            TransportCommand::AudioScrub { enabled } => {
+                self.audio_prefs.entry(key).or_default().scrub = enabled;
+                if let Some(audio) = self.audio.get(&key) {
+                    audio.send(AudioCtl::AudioScrub(enabled));
+                }
+            }
+            TransportCommand::Step { frames } => {
+                // Steps while paused: the line, and a grain where it lands.
+                let paused = !view.clock.is_playing() && view.awaiting.is_none();
+                if view.clock.apply(TransportCommand::Step { frames }, at) {
                     view.schedule.reset();
                     view.sample_due = true;
                     view.dirty = true;
                 }
+                if paused {
+                    let media = view.clock.media_at(at);
+                    self.scrub_grain(key, media);
+                }
             }
+        }
+    }
+
+    /// An audio grain at `media` for a scrub while paused, when the
+    /// session's audio scrub is on.
+    fn scrub_grain(&mut self, key: Key, media: i64) {
+        if self.config.host_clock
+            || !self.audio_prefs.get(&key).is_some_and(|p| p.scrub)
+            || self.views.get(&key).and_then(|v| v.reported.as_ref()) != Some(&Route::Engine)
+        {
+            return;
+        }
+        if let Some(audio) = self.audio_for(key) {
+            audio.send(AudioCtl::Scrub(media));
+        }
+    }
+
+    /// The mixer's monitor solo and waveform requests from the renderer.
+    fn audio_message(&mut self, key: Key, message: AudioMessage) {
+        match message {
+            AudioMessage::Monitor { solo } => {
+                let solo = (!solo.is_empty()).then(|| solo.into_iter().collect());
+                self.audio_prefs.entry(key).or_default().solo = solo.clone();
+                if let Some(audio) = self.audio.get(&key) {
+                    audio.send(AudioCtl::Solo(solo));
+                }
+            }
+            AudioMessage::PeaksWanted { asset } => {
+                let path = self.docs.get(&key).and_then(|d| d.media().path(&asset));
+                self.peaks.request(key, asset, path);
+            }
+            AudioMessage::Levels(_) | AudioMessage::Peaks(_) => self.log(
+                LogLevel::Warn,
+                "the renderer sent an engine-to-renderer audio message".into(),
+            ),
         }
     }
 
@@ -852,9 +1026,27 @@ impl Thread {
             let doc = self.docs.get(&key)?;
             let composition = self.views.get(&key)?.state.composition.as_str().to_owned();
             let loop_range = self.views.get(&key)?.clock.loop_range();
-            match AudioLink::start(doc.document().clone(), composition, doc.media().clone()) {
+            let sink = self.sink.clone();
+            let levels: super::audio::LevelsSink = Box::new(move |levels| {
+                let envelope = Envelope::new(Message::Event {
+                    body: Event::Audio(AudioMessage::Levels(levels)),
+                })
+                .with_session(key.1);
+                if let Ok(bytes) = codec::encode(&envelope) {
+                    sink(vec![Action::Send { port: key.0, bytes }]);
+                }
+            });
+            match AudioLink::start(
+                doc.document().clone(),
+                composition,
+                doc.media().clone(),
+                levels,
+            ) {
                 Ok(link) => {
                     link.send(AudioCtl::SetLoop(loop_range));
+                    let prefs = self.audio_prefs.get(&key).cloned().unwrap_or_default();
+                    link.send(AudioCtl::AudioScrub(prefs.scrub));
+                    link.send(AudioCtl::Solo(prefs.solo));
                     self.audio.insert(key, link);
                 }
                 Err(error) => {
@@ -1780,8 +1972,13 @@ impl Thread {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu
                 .composer
-                .get_or_insert_with(|| Composer::new(&gpu.device, &gpu.queue));
+                .get_or_insert_with(|| composer(&gpu.device, &gpu.queue, &self.config));
             let composition = view.state.composition.as_str().to_owned();
+            // The renderer draws with this view's definitions (one renderer
+            // serves every view on the device).
+            let registered = doc.take_registered();
+            let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            composer.set_playing(timing.is_some());
             match composer.compose(
                 doc.document(),
                 &composition,
@@ -1798,6 +1995,22 @@ impl Thread {
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    drop(stats);
+                    // Effects the GPU watchdog turned off (measured on an
+                    // earlier frame): reported at this frame's revision.
+                    for error in composer.renderer().watchdog_reports(false) {
+                        let report = pm_protocol::error::FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();

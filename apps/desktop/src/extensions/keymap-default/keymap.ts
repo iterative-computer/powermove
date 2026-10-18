@@ -128,6 +128,20 @@ for (const modifier of ['cmd', 'ctrl']) {
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
 
+/* J/K/L shuttle on the new engine's transport (plan section 15): while it
+   plays, J, K, and L run backward, stop, and forward (again: 2×), ahead of
+   the After Effects meanings below, which they leave to when paused or on
+   the legacy engine (the commands decline). Control-J plays backward from a
+   pause; Control-Shift-Space plays around the current frame. */
+const SHUTTLE_FIRST = 90;
+KEYMAP_DEFAULT.push(
+  { key: 'j', command: 'shuttleBackward', args: [false], priority: SHUTTLE_FIRST },
+  { key: 'k', command: 'shuttleStop', priority: SHUTTLE_FIRST },
+  { key: 'l', command: 'shuttleForward', args: [false], priority: SHUTTLE_FIRST },
+  { key: 'ctrl+j', command: 'shuttleBackward', args: [true], priority: SHUTTLE_FIRST },
+  { key: 'ctrl+shift+space', command: 'playAround', priority: SHUTTLE_FIRST }
+);
+
 /* Timeline navigation and layer timing use AE's native muscle memory. */
 bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');

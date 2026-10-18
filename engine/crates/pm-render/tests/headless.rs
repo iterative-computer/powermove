@@ -241,7 +241,7 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
                 height: 70,
             },
         ] {
-            let mut request = full;
+            let mut request = full.clone();
             request.region = Some(rect);
             let (part, part_ids, _) = render_bytes(&mut r, &doc, 0.6, &request, &resolver);
             let part_ids = part_ids.unwrap();
@@ -401,61 +401,156 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             .any(|u| matches!(u.feature, Feature::Text(_))),
         "{with_fonts:?}"
     );
-    let f = variant(|d| {
-        d["layers"].as_array_mut().unwrap().push(layer(
-            "s",
-            "shape",
-            json!({ "shape": "rect", "w": 10, "h": 10 }),
-            0.0,
-            0.0,
-            2.0,
-        ))
-    });
-    assert!(f.contains(&Feature::LayerType("shape".into())), "{f:?}");
+    // Blend modes, parametric masks, and track mattes are drawn
+    // (`pm_render::composite`); bezier path masks are not.
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["blend"] = json!("multiply");
+        d["layers"][i]["masks"] = json!([{ "id": "m1", "on": true, "shape": "ellipse", "p": {} }]);
+        d["layers"][i]["matteSource"] = json!("over");
     });
-    assert!(f.contains(&Feature::BlendMode("multiply".into())), "{f:?}");
+    assert!(f.is_empty(), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["fx"] = json!([{ "id": "e1", "type": "blur", "on": true, "p": {} }]);
     });
     assert!(f.contains(&Feature::Effects), "{f:?}");
+    // Motion blur and 2.5D planes are drawn for the compared types
+    // (docs/engine/motion.md); other types keep routing.
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["mblur"] = json!(true);
-    });
-    assert!(f.contains(&Feature::MotionBlur), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "back");
         d["layers"][i]["threeD"] = json!(true);
     });
+    assert!(!f.contains(&Feature::MotionBlur), "{f:?}");
+    assert!(!f.contains(&Feature::TwoAndAHalfD), "{f:?}");
+    let f = variant(|d| {
+        let mut shape = layer("sh", "shape", json!({ "shape": "rect" }), 0.0, 0.0, 2.0);
+        shape["mblur"] = json!(true);
+        shape["threeD"] = json!(true);
+        d["layers"].as_array_mut().unwrap().push(shape);
+    });
+    assert!(f.contains(&Feature::MotionBlur), "{f:?}");
     assert!(f.contains(&Feature::TwoAndAHalfD), "{f:?}");
+    // A layer of another type inside a 3D group or a blurred group is
+    // listed; a compared type in the same group is not.
+    let (mut doc, _) = everything();
+    let mut g = layer("g3", "group", json!({}), 0.0, 0.0, 2.0);
+    g["threeD"] = json!(true);
+    g["mblur"] = json!(true);
+    let mut shape = layer("sh", "shape", json!({ "shape": "rect" }), 0.0, 0.0, 2.0);
+    shape["group"] = json!("g3");
+    let mut solid = layer("so", "solid", json!({ "color": "#FFFFFF" }), 0.0, 0.0, 2.0);
+    solid["group"] = json!("g3");
+    let layers = doc["layers"].as_array_mut().unwrap();
+    layers.push(shape);
+    layers.push(solid);
+    layers.push(g);
+    let listed = unsupported(&load(&doc), "Ptest-root");
+    let has = |id: &str, feature: Feature| {
+        listed
+            .iter()
+            .any(|u| u.layer.as_deref() == Some(id) && u.feature == feature)
+    };
+    assert!(has("sh", Feature::MotionBlur), "{listed:?}");
+    assert!(has("sh", Feature::TwoAndAHalfD), "{listed:?}");
+    assert!(!has("so", Feature::MotionBlur) && !has("so", Feature::TwoAndAHalfD));
+    assert!(!has("g3", Feature::MotionBlur) && !has("g3", Feature::TwoAndAHalfD));
+    // The layers of a composition reached through a blurred precomp, or a
+    // precomp inside a blurred group, are drawn at every sample time: other
+    // types are listed there, compared types are not, and an unblurred
+    // precomp adds nothing.
+    let listed_in_inner = |blur_precomp: bool, blur_group: bool| {
+        let (mut doc, _) = everything();
+        doc["comps"]["inner"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .push(layer(
+                "in-sh",
+                "shape",
+                json!({ "shape": "rect" }),
+                0.0,
+                0.0,
+                2.0,
+            ));
+        let i = layer_at(&mut doc, "pre");
+        if blur_precomp {
+            doc["layers"][i]["mblur"] = json!(true);
+        }
+        if blur_group {
+            let mut g = layer("gb", "group", json!({}), 0.0, 0.0, 2.0);
+            g["mblur"] = json!(true);
+            doc["layers"][i]["group"] = json!("gb");
+            doc["layers"].as_array_mut().unwrap().push(g);
+        }
+        unsupported(&load(&doc), "Ptest-root")
+    };
+    let blurred_in = |listed: &[pm_render::Unsupported], id: &str| {
+        listed
+            .iter()
+            .any(|u| u.layer.as_deref() == Some(id) && u.feature == Feature::MotionBlur)
+    };
+    let listed = listed_in_inner(false, false);
+    assert!(!blurred_in(&listed, "in-sh"), "{listed:?}");
+    for (precomp, group) in [(true, false), (false, true)] {
+        let listed = listed_in_inner(precomp, group);
+        assert!(
+            blurred_in(&listed, "in-sh"),
+            "{precomp} {group}: {listed:?}"
+        );
+        assert!(!blurred_in(&listed, "in-img") && !blurred_in(&listed, "in-solid"));
+        assert!(!blurred_in(&listed, "pre"), "{listed:?}");
+    }
+    // 3D object, light, and camera layers inside a 3D group or a blurred
+    // group are listed (their scene pass is built at the center time, and
+    // their placement in a 3D group has no parity case).
+    for (three_d, blur) in [(true, false), (false, true)] {
+        let (mut doc, _) = everything();
+        let mut g = layer("g", "group", json!({}), 0.0, 0.0, 2.0);
+        g["threeD"] = json!(three_d);
+        g["mblur"] = json!(blur);
+        let i = layer_at(&mut doc, "obj");
+        doc["layers"][i]["group"] = json!("g");
+        doc["layers"].as_array_mut().unwrap().push(g);
+        let listed = unsupported(&load(&doc), "Ptest-root");
+        let has = |id: &str, feature: Feature| {
+            listed
+                .iter()
+                .any(|u| u.layer.as_deref() == Some(id) && u.feature == feature)
+        };
+        assert_eq!(has("obj", Feature::TwoAndAHalfD), three_d, "{listed:?}");
+        assert_eq!(has("obj", Feature::MotionBlur), blur, "{listed:?}");
+        assert!(!has("cam", Feature::TwoAndAHalfD) && !has("cam", Feature::MotionBlur));
+    }
     let f = variant(|d| {
         let i = layer_at(d, "back");
-        d["layers"][i]["masks"] = json!([{ "id": "m1", "on": true }]);
+        d["layers"][i]["masks"] =
+            json!([{ "id": "m1", "on": true, "path": { "id": "p", "vertices": [], "p": {} } }]);
     });
-    assert!(f.contains(&Feature::Masks), "{f:?}");
-    let f = variant(|d| d["color"] = json!({ "mode": "standard", "linearBlending": true }));
+    assert!(f.contains(&Feature::PathMasks), "{f:?}");
+    // Linear blending and 32-bit precision are drawn; unknown settings are not.
+    let f = variant(|d| {
+        d["color"] = json!({ "mode": "standard", "linearBlending": true, "precision": "float32" })
+    });
+    assert!(!f.contains(&Feature::ProjectColor), "{f:?}");
+    let f = variant(|d| d["color"] = json!({ "mode": "aces" }));
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
-    // 3D beyond the Phase 2 primitive.
+    // The 3D scene pass draws shadows, every light type, several objects
+    // per composition (depth sets), transparency, every primitive and
+    // source kind, missing models, and maps; what it routes is listed.
     let scene = |f: &[Feature], what: &str| {
         f.iter()
             .any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)))
     };
+    let no_3d = |f: &[Feature]| !f.iter().any(|x| matches!(x, Feature::Scene3d(_)));
     let f = variant(|d| {
         let i = layer_at(d, "cam");
         d["layers"][i]["d"]["data"]["environment"]["shadows"] = json!(true);
         let i = layer_at(d, "sun");
         d["layers"][i]["d"]["data"]["light"]["castShadow"] = json!(true);
-    });
-    assert!(scene(&f, "shadows"), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "sun");
         d["layers"][i]["d"]["data"]["light"]["type"] = json!("point");
     });
-    assert!(scene(&f, "point lights"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         d["layers"].as_array_mut().unwrap().push(object3d(
             "obj2",
@@ -466,45 +561,52 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             H,
             2.0,
         ));
-    });
-    assert!(scene(&f, "more than one 3D object"), "{f:?}");
-    let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["p"]["opacity"] = ch(json!(0.5));
-    });
-    assert!(scene(&f, "transparent materials"), "{f:?}");
-    let f = variant(|d| {
-        let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "capsule" });
     });
-    assert!(scene(&f, "capsule"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
+    // A model whose asset is not in the document is the missing-model box.
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
+        d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
+    });
+    assert!(no_3d(&f), "{f:?}");
+    // An imported model that exists is the glTF lane's.
+    let f = variant(|d| {
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
+        d["assets"]["model"] =
+            json!({ "id": "model", "kind": "model", "format": "glb", "name": "m.glb" });
     });
     assert!(scene(&f, "imported models"), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
+        d["assets"]["tex"] =
+            json!({ "id": "tex", "kind": "image", "format": "svg", "name": "t.svg" });
     });
-    assert!(scene(&f, "texture maps"), "{f:?}");
-    // No camera layer: the studio environment has shadows on and the sun
-    // layer casts by default.
+    assert!(scene(&f, "SVG texture maps"), "{f:?}");
     let f = variant(|d| {
-        let i = layer_at(d, "cam");
-        d["layers"].as_array_mut().unwrap().remove(i);
-        let i = layer_at(d, "sun");
-        d["layers"][i]["d"]["data"]["light"]["castShadow"] = json!(true);
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["generation"] =
+            json!({ "groupId": "g", "partId": "p" });
     });
-    assert!(scene(&f, "shadows"), "{f:?}");
+    assert!(scene(&f, "recipe parts"), "{f:?}");
+    let f = variant(|d| {
+        let i = layer_at(d, "obj");
+        d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
+    });
+    assert!(scene(&f, "knot primitives"), "{f:?}");
     // Nested compositions are checked too.
     let f = variant(|d| {
         d["comps"]["inner"]["layers"]
             .as_array_mut()
             .unwrap()
-            .push(layer("s", "shape", json!({}), 0.0, 0.0, 2.0))
+            .push(layer("t", "text", json!({}), 0.0, 0.0, 2.0))
     });
-    assert!(f.contains(&Feature::LayerType("shape".into())), "{f:?}");
+    assert!(f.iter().any(|f| matches!(f, Feature::Text(_))), "{f:?}");
 }
 
 #[test]

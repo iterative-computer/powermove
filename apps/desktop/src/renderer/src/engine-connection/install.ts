@@ -29,6 +29,7 @@ import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
 import type { ClockSample } from '../../../shared/engine-protocol';
+import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, type DocumentStream } from './session';
@@ -70,6 +71,8 @@ export interface EngineConnectionHandle {
    * viewer opens a new presentation with it.
    */
   setTrace(on: boolean): void;
+  /** The engine's audio for the mixer panel and waveforms. */
+  audio: EngineAudio;
   /** Every clock sample of every session (the measurements). */
   onClock(listener: (sample: ClockSample) => void): () => void;
   /** The session the transport follows (the newest viewer session). */
@@ -105,6 +108,20 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let current: DocumentSession | null = null;
   const transport = new EngineTransport(() => current, hostClock);
   PM.setTransportDriver?.(transport);
+
+  // The engine's levels, monitor solo, and waveform peaks for today's audio
+  // panels (the mixer's meters and solo, `asset.peaks`).
+  const audio = new EngineAudio({
+    session: () => current,
+    driving: () => transport.active(),
+    assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    peaksChanged: () => {
+      PM.invalidate?.('timeline');
+      PM.bus?.emit?.('audio:peaks');
+    }
+  });
+  const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
+  const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -211,6 +228,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         stream: stream(),
         documentId: () => String(PM.proj?.id ?? ''),
         stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
+        definitions: () => ((PM as any).EngineDefinitions ?? null),
         handlers: {
           message: (message, arrivedMs) => {
             if (message.type === 'frame' && !firstFrame) {
@@ -228,9 +246,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         onClock: (sample) => {
           for (const listener of clockListeners) listener(sample);
         },
+        onAudio: (message) => {
+          if (session) audio.receive(message, session);
+        },
         onRoute: (route, reason) => {
           if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
           transport.refresh();
+          if (route === 'engine') audio.sync();
           PM.bus?.emit?.('draw');
         }
       });
@@ -257,6 +279,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const handle: EngineConnectionHandle = {
     hostClock,
     transport,
+    audio,
     session: () => current,
     setTrace: (on) => {
       if (on === trace) return;
@@ -288,6 +311,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }),
     dispose: () => {
       offPending();
+      offAssets();
+      unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
       registration.dispose();

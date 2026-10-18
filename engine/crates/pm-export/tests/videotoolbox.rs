@@ -176,10 +176,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     );
     s.rate = Rate::FPS_29_97;
     s.frames = 30;
-    s.audio = Some(AudioSpec {
-        sample_rate: 48_000,
-        channels: 2,
-    });
+    s.audio = Some(AudioSpec::default_for(s.container, 48_000, 2));
     let df = TimecodeFormat::drop_frame(Rate::FPS_29_97).unwrap();
     s.timecode = Some(TimecodeSpec {
         start_frame: df.parse("01:00:00;00").unwrap(),
@@ -303,7 +300,38 @@ fn prores_4444_xq_opaque() {
         (r.codec.as_str(), r.pixel_format.as_str(), r.alpha),
         ("ap4x", "4:4:4", false)
     );
+    // No alpha channel is coded in the frames either.
+    assert_eq!(coded_alpha(&done.path), 0);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn opaque_prores_4444_codes_no_alpha_channel() {
+    let dir = scratch("4444o");
+    let s = spec(
+        &dir,
+        "Opaque",
+        Codec::ProRes(ProResProfile::P4444),
+        Container::Mov,
+    );
+    let done = run(s).unwrap();
+    assert_eq!((done.report.depth, done.report.alpha), (12, false));
+    assert_eq!(coded_alpha(&done.path), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The `alpha_channel_type` of the first ProRes frame's header (0 none, 1
+/// 8-bit, 2 16-bit).
+fn coded_alpha(path: &Path) -> u8 {
+    let data = std::fs::read(path).unwrap();
+    let at = data
+        .windows(4)
+        .position(|w| w == b"icpf")
+        .expect("a ProRes frame");
+    // icpf, then the frame header: size (2), version (2), creator (4),
+    // width (2), height (2), flags (2), reserved, primaries, transfer,
+    // matrix, then source pixel format and alpha type in one byte.
+    data[at + 4 + 17] & 0x0f
 }
 
 #[test]
@@ -319,10 +347,7 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
     );
     s.rate = Rate::FPS_30;
     s.frames = 45;
-    s.audio = Some(AudioSpec {
-        sample_rate: 48_000,
-        channels: 2,
-    });
+    s.audio = Some(AudioSpec::default_for(s.container, 48_000, 2));
     let done = run(s.clone()).unwrap();
     let r = &done.report;
     eprintln!("{r:#?}");
@@ -513,7 +538,7 @@ fn verification_rejects_mismatches() {
     let done = run(s.clone()).unwrap();
     let movie = Movie::read(&done.path).unwrap();
     let timing = s.timing().unwrap();
-    let format = s.codec.input_format();
+    let format = s.input_format();
     let decoded: Vec<_> = verify::sampled_frames(s.frames)
         .into_iter()
         .map(|f| {
@@ -566,10 +591,7 @@ fn verification_rejects_mismatches() {
     let e = verify::check(&Expected::new(&s, timing, 0, shifted), &movie, &decoded).unwrap_err();
     assert!(e.to_string().contains("differs by"), "{e}");
     let mut with_audio = s.clone();
-    with_audio.audio = Some(AudioSpec {
-        sample_rate: 48_000,
-        channels: 2,
-    });
+    with_audio.audio = Some(AudioSpec::default_for(with_audio.container, 48_000, 2));
     assert!(
         verify::check(
             &Expected::new(&with_audio, timing, 100, blocks),
@@ -625,10 +647,7 @@ fn audio_before_and_after_video_still_interleaves() {
         );
         s.rate = Rate::FPS_24;
         s.frames = 48;
-        s.audio = Some(AudioSpec {
-            sample_rate: 48_000,
-            channels: 1,
-        });
+        s.audio = Some(AudioSpec::default_for(s.container, 48_000, 1));
         let mut job = export(s.clone()).unwrap();
         let audio = tone(96_000, 1, 0, 48_000.0);
         if audio_first {
@@ -654,5 +673,162 @@ fn audio_before_and_after_video_still_interleaves() {
             "audio first: {audio_first}"
         );
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn hevc_main_and_main10_in_mp4_and_mov() {
+    let dir = scratch("hevc");
+    for (ten_bit, container) in [
+        (false, Container::Mp4),
+        (true, Container::Mp4),
+        (false, Container::Mov),
+        (true, Container::Mov),
+    ] {
+        let mut s = spec(
+            &dir,
+            &format!("Hevc{}{:?}", if ten_bit { 10 } else { 8 }, container),
+            Codec::Hevc {
+                bitrate_bps: 16_000_000,
+                ten_bit,
+            },
+            container,
+        );
+        s.audio = Some(AudioSpec::default_for(container, 48_000, 2));
+        if container == Container::Mov {
+            s.timecode = Some(TimecodeSpec {
+                start_frame: 86_400,
+                format: TimecodeFormat::for_rate(s.rate),
+                reel: Some("A001".into()),
+            });
+        }
+        let done = run(s.clone()).unwrap();
+        let r = &done.report;
+        eprintln!("{r:#?}");
+        assert_eq!(
+            (r.codec.as_str(), r.pixel_format.as_str(), r.depth, r.alpha),
+            ("hvc1", "4:2:0", if ten_bit { 10 } else { 8 }, false)
+        );
+        assert_eq!(r.cicp, (1, 13, 1));
+        assert!(!r.full_range);
+        let audio = r.audio.as_ref().unwrap();
+        let want = if container == Container::Mov {
+            "lpcm"
+        } else {
+            "mp4a"
+        };
+        assert_eq!(audio.codec, want);
+        if let Some(p) = probe(
+            &done.path,
+            "stream=codec_name,profile,pix_fmt,color_transfer",
+        ) {
+            let pix = if ten_bit { "yuv420p10le" } else { "yuv420p" };
+            assert!(
+                p.contains("codec_name=hevc") && p.contains(&format!("pix_fmt={pix}")),
+                "{p}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn hevc_with_alpha_is_8_bit_main_with_an_alpha_layer() {
+    let dir = scratch("hevc-alpha");
+    for alpha in [AlphaOutput::Straight, AlphaOutput::Premultiplied] {
+        let mut s = spec(
+            &dir,
+            &format!("HevcAlpha{alpha:?}"),
+            Codec::Hevc {
+                bitrate_bps: 16_000_000,
+                ten_bit: false,
+            },
+            Container::Mov,
+        );
+        s.alpha = alpha;
+        let done = run(s).unwrap();
+        let r = &done.report;
+        let movie = Movie::read(&done.path).unwrap();
+        let visual = movie.track(b"vide").unwrap().visual.clone().unwrap();
+        eprintln!("ALMO {alpha:?} {:?}", visual.alpha_mode);
+        assert_eq!(
+            (r.codec.as_str(), r.pixel_format.as_str(), r.depth, r.alpha),
+            ("hvc1", "4:2:0:4", 8, true)
+        );
+        let alphas: Vec<f64> = r
+            .pixels
+            .iter()
+            .filter(|p| p.frame == 0)
+            .map(|p| p.decoded[3])
+            .collect();
+        assert!(
+            alphas.iter().any(|&a| a < 0.02) && alphas.iter().any(|&a| a > 0.9),
+            "{alphas:?}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn pcm_16_24_and_float_audio_in_mov() {
+    let dir = scratch("pcm");
+    for codec in [
+        AudioCodec::Pcm16,
+        AudioCodec::Pcm24,
+        AudioCodec::PcmF32,
+        AudioCodec::Aac,
+    ] {
+        let mut s = spec(
+            &dir,
+            &format!("Pcm{codec:?}"),
+            Codec::ProRes(ProResProfile::Lt),
+            Container::Mov,
+        );
+        s.audio = Some(AudioSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            codec,
+        });
+        let done = run(s.clone()).unwrap();
+        let a = done.report.audio.clone().unwrap();
+        eprintln!("{codec:?}: {a:?}");
+        let (bits, float) = match codec {
+            AudioCodec::Pcm16 => (16, false),
+            AudioCodec::Pcm24 => (24, false),
+            AudioCodec::PcmF32 => (32, true),
+            _ => (a.bits_per_channel, a.float),
+        };
+        assert_eq!((a.bits_per_channel, a.float), (bits, float), "{codec:?}");
+        // Frames × 1001/24000 × 48000 = 2002 samples per frame, after priming.
+        assert_eq!(a.samples, 12 * 2002, "{codec:?}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn h264_in_mov_carries_timecode_and_pcm() {
+    let dir = scratch("h264mov");
+    let mut s = spec(
+        &dir,
+        "H264Mov",
+        Codec::H264 {
+            bitrate_bps: 4_000_000,
+        },
+        Container::Mov,
+    );
+    s.rate = Rate::FPS_29_97;
+    s.audio = Some(AudioSpec::default_for(Container::Mov, 48_000, 2));
+    let ndf = TimecodeFormat::non_drop(s.rate);
+    s.timecode = Some(TimecodeSpec {
+        start_frame: ndf.parse("01:00:00:00").unwrap(),
+        format: ndf,
+        reel: Some("Reel 7".into()),
+    });
+    let done = run(s.clone()).unwrap();
+    let r = &done.report;
+    let tc = r.timecode.as_ref().unwrap();
+    assert_eq!((tc.start_frame, tc.drop_frame), (108_000, false));
+    assert_eq!(tc.reel.as_deref(), Some("Reel 7"));
+    assert_eq!(r.codec, "avc1");
     std::fs::remove_dir_all(dir).unwrap();
 }

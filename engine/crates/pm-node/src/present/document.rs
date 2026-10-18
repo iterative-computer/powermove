@@ -40,6 +40,13 @@ pub enum Route {
 #[derive(Debug, Clone, Default)]
 pub struct MediaMap(pub Arc<BTreeMap<String, Option<PathBuf>>>);
 
+impl MediaMap {
+    /// The file an asset resolved to, when it did.
+    pub fn path(&self, asset: &str) -> Option<PathBuf> {
+        self.0.get(asset).cloned().flatten()
+    }
+}
+
 impl pm_render::AssetResolver for MediaMap {
     fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
         self.0.get(asset).cloned().flatten()
@@ -69,10 +76,66 @@ pub struct ViewDocument {
     broken: Option<String>,
     media: MediaMap,
     media_version: u64,
+    /// The session's definitions (contract 10) and their version.
+    definitions: Option<(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
+    /// Definitions registered again since the renderer last loaded the set.
+    registered: Vec<(
+        pm_protocol::definitions::DefinitionKind,
+        pm_protocol::common::DefinitionId,
+    )>,
     cached: Option<Cached>,
 }
 
 impl ViewDocument {
+    /// The session's definitions: effects and transitions are drawn with
+    /// them (`pm_render::effects`), routed without them.
+    /// `registered`: the definitions the update registered again (a delta's
+    /// upserts).
+    pub fn set_definitions(
+        &mut self,
+        set: Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    ) {
+        let version = self.definitions.as_ref().map_or(1, |(_, v)| v + 1);
+        self.definitions = Some((set, version));
+        self.keep_registered(registered);
+        self.cached = None;
+    }
+
+    /// The definitions registered again that the renderer has not seen.
+    pub fn take_registered(
+        &mut self,
+    ) -> Vec<(
+        pm_protocol::definitions::DefinitionKind,
+        pm_protocol::common::DefinitionId,
+    )> {
+        std::mem::take(&mut self.registered)
+    }
+
+    /// Keeps `registered` for the renderer's next load of the set.
+    pub fn keep_registered(
+        &mut self,
+        registered: Vec<(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )>,
+    ) {
+        for r in registered {
+            if !self.registered.contains(&r) {
+                self.registered.push(r);
+            }
+        }
+    }
+
+    pub fn definitions(
+        &self,
+    ) -> Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)> {
+        self.definitions.as_ref()
+    }
+
     pub fn document(&self) -> &Document {
         &self.doc
     }
@@ -187,6 +250,21 @@ impl ViewDocument {
             })
             .collect();
         for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
+            // With definitions, effects, transitions, and adjustment layers
+            // with effects are drawn; one the renderer cannot draw (no
+            // definition, a program that needs the fallback runner) fails
+            // the render as unsupported and routes the composition then
+            // (`force_legacy`).
+            if self.definitions.is_some()
+                && matches!(
+                    u.feature,
+                    pm_render::Feature::Effects
+                        | pm_render::Feature::Transition
+                        | pm_render::Feature::Adjustment
+                )
+            {
+                continue;
+            }
             reasons.push(describe(&u));
         }
         if reasons.is_empty() {
@@ -209,6 +287,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::Scene3d(s) => format!("3D: {s}"),
         Feature::Effects => "effects".into(),
         Feature::Masks => "masks".into(),
+        Feature::PathMasks => "path masks".into(),
         Feature::TrackMatte => "track mattes".into(),
         Feature::Transition => "transitions".into(),
         Feature::BlendMode(m) => format!("blend mode {m}"),
@@ -223,6 +302,8 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::ImageSequence => "animated images or sequences".into(),
         Feature::Media(m) => format!("media: {m}"),
         Feature::Request(r) => format!("request: {r}"),
+        Feature::Definition(d) => format!("no definition for {d}"),
+        Feature::ShaderFallback(d) => format!("{d} needs the GLSL fallback runner"),
         Feature::Text(t) => format!("text: {t}"),
     };
     match (&u.composition, &u.layer) {

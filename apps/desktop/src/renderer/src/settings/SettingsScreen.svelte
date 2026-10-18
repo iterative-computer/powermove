@@ -69,6 +69,9 @@
      choice at launch, so a change applies the next time Powermove opens. */
   let useNewEngine = $state(false);
   const newEngineRunning = $derived(!!PM.EngineConnection);
+  /* Audio scrub plays a short grain while scrubbing and stepping; the new
+     engine's transport only (legacy/core/engine.ts `PM.setAudioScrub`). */
+  let audioScrub = $state(false);
   const multiWindow = $derived(!!PM.windows?.supported);
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
@@ -142,6 +145,7 @@
     autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
     previewMemoryMiB = (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) / (1024 * 1024);
     useNewEngine = PM.store?.get?.('useNewEngine', false) === true;
+    audioScrub = PM.audioScrub?.() === true;
     const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
@@ -313,6 +317,11 @@
   function toggleNewEngine(): void {
     useNewEngine = !useNewEngine;
     PM.store?.set?.('useNewEngine', useNewEngine);
+  }
+
+  function toggleAudioScrub(): void {
+    audioScrub = !audioScrub;
+    PM.setAudioScrub?.(audioScrub);
   }
 
   function toggleRestoreWindows(): void {
@@ -501,6 +510,17 @@
                       onclick={toggleNewEngine}
                     ><i aria-hidden="true"></i></button>
                   </div>
+                  {#if newEngineRunning}
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Scrub audio</b>
+                        <span>Hear a short piece of sound as you scrub or step through frames.</span>
+                      </div>
+                      <button class="toggle" class:on={audioScrub} type="button" aria-pressed={audioScrub} aria-label="Scrub audio"
+                        onclick={toggleAudioScrub}
+                      ><i aria-hidden="true"></i></button>
+                    </div>
+                  {/if}
                 </div>
               </section>
               <section class="sg-section">

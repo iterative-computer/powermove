@@ -147,7 +147,7 @@ fn renders_are_identical_from_any_start() {
             0.3,
             3.0,
             &format!(
-                r#"{{"asset":"a48","trim":0.1,"speed":{},"embeddedAudio":true,"audioGain":0.8}}"#,
+                r#"{{"asset":"a48","trim":0.1,"speed":{},"embeddedAudio":true,"audioGain":0.8,"pitch":"follow"}}"#,
                 keys(&[(0.0, 0.5), (3.0, 1.7)])
             ),
             "",
@@ -369,7 +369,8 @@ fn speed_and_remaps_are_followed() {
             "click at {f}, expected {e}"
         );
     }
-    // Pitch follows speed: a 1 kHz tone at speed 1.5 sounds at 1.5 kHz.
+    // With `pitch: "follow"` the pitch follows the speed: a 1 kHz tone at
+    // speed 1.5 sounds at 1.5 kHz.
     let tone_file = dir.join("tone.wav");
     write_wav(&tone_file, SR, &[tone(SR, 4.0, 1000.0, 0.5)]);
     let v = layer(
@@ -377,7 +378,7 @@ fn speed_and_remaps_are_followed() {
         "video",
         0.0,
         2.0,
-        r#"{"asset":"t","speed":1.5,"embeddedAudio":true}"#,
+        r#"{"asset":"t","speed":1.5,"embeddedAudio":true,"pitch":"follow"}"#,
         "",
     );
     let doc = project(30.0, 2.0, &[v], &[], "");
@@ -487,6 +488,7 @@ fn monitor_solo_and_meters() {
         wait: true,
         monitor_solo: Some(["B".to_string()].into_iter().collect()),
         meters: true,
+        ..Default::default()
     };
     m.render(1000, 4096, &mut out, &options).unwrap();
     assert!((out[0][100] - 0.25).abs() < 1e-7, "{}", out[0][100]); // B × master 0.5
@@ -551,6 +553,57 @@ fn animated_clips_start_on_their_sample() {
     let out = rig.render(&mut m, 0, 9_600, 1024);
     assert_eq!(out[0][4804], 0.0);
     assert!((out[0][4805] - 0.5).abs() < 1e-7, "{}", out[0][4805]);
+}
+
+/// A clip whose in-point is a frame start that falls on or between samples
+/// plays its first source sample at the rounded project sample, never one
+/// later: `sample_at` treats a time within amendment 1's tolerance of a sample
+/// as that sample (frame 7 of 25 fps is 0.28000000000000003 s in f64), and a
+/// copy reader's window is measured on its whole-sample shift (frame 7 of
+/// 29.97 fps is 11,211.2 samples). Both used to drop the first sample.
+#[test]
+fn clips_on_frame_starts_keep_their_first_sample() {
+    use pm_audio::mixer::sample_at;
+    assert_eq!(sample_at(7.0 / 25.0, 48_000.0), 13_440);
+    assert_eq!(
+        sample_at(0.280_000_1, 48_000.0),
+        13_441,
+        "off the tolerance: ceil"
+    );
+    assert_eq!(sample_at(13_439.5 / 48_000.0, 48_000.0), 13_440);
+    assert_eq!(sample_at(0.0, 48_000.0), 0);
+    assert_eq!(sample_at(-7.0 / 25.0, 48_000.0), -13_440);
+    // The tolerance scales with n: an hour in, f64 error is still absorbed.
+    assert_eq!(sample_at(3_600.0 + 7.0 / 25.0, 48_000.0), 172_813_440);
+
+    let dir = temp_dir("first-sample");
+    let file = dir.join("click.wav");
+    let mut click = vec![0f32; SR as usize];
+    click[0] = 0.9;
+    click[1] = 0.45;
+    write_wav(&file, SR, &[click]);
+    for (fps, frame, from) in [
+        (25.0, 7, 7.0 / 25.0),
+        (29.97, 7, 7.0 * 1001.0 / 30_000.0),
+        (23.976, 5, 5.0 * 1001.0 / 24_000.0),
+        (30.0, 11, 11.0 / 30.0),
+    ] {
+        let doc = project(fps, 2.0, &[audio("A", "click", from, 1.0, "", "")], &[], "");
+        let rig = Rig::new(&[("click", &file)]);
+        let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        let out = rig.render(&mut m, 0, SR as i64 * 2, 1024);
+        let at = (from * SR as f64).round() as usize;
+        assert_eq!(
+            out[0][at - 1],
+            0.0,
+            "{fps} fps frame {frame}: nothing before the clip"
+        );
+        assert!(
+            (out[0][at] - 0.9).abs() < 1e-6 && (out[0][at + 1] - 0.45).abs() < 1e-6,
+            "{fps} fps frame {frame}: first source samples at {at}: {:?}",
+            &out[0][at - 1..at + 3]
+        );
+    }
 }
 
 /// A live edit during playback glides into the new mix over 12 ms
@@ -650,6 +703,7 @@ fn live_edits_glide_without_clicks() {
         wait: true,
         monitor_solo: Some(["B".to_string()].into_iter().collect()),
         meters: false,
+        ..Default::default()
     };
     m.render(256, 1024, &mut out, &solo).unwrap();
     assert!((out[0][0] - 0.5).abs() < 1e-6, "starts on the old mix");

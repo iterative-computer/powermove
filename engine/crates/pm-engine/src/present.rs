@@ -12,7 +12,7 @@
 //! Pool memory is charged to the lease here, on the engine's thread, through
 //! [`PresentContext`].
 
-use pm_protocol::clock::TransportCommand;
+use pm_protocol::clock::{AudioMessage, TransportCommand};
 use pm_protocol::common::{RequestId, Revision, SessionId};
 use pm_protocol::error::EngineError;
 use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
@@ -96,6 +96,18 @@ pub trait FramePresenter: Send {
         command: TransportCommand,
     );
 
+    /// The mix's monitor and its data (contract 6 [`AudioMessage`]): the
+    /// monitor solo, and requests for waveform peaks, answered later on the
+    /// port. Presenters without audio ignore them.
+    fn audio(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _message: AudioMessage,
+    ) {
+    }
+
     /// A viewer or scrub frame request. The presenter answers later on the
     /// port with `Response::Frame` (or an error) for `id`; an `Err` here is
     /// sent at once.
@@ -130,6 +142,23 @@ pub trait FramePresenter: Send {
         _port: PortId,
         _session: SessionId,
         _update: DocumentUpdate,
+    ) {
+    }
+
+    /// The session's effect, transition, and layer definitions changed
+    /// (contract 10): the winning set after a `pushDefinitions` update, and
+    /// the definitions a delta registered again (a register or hot reload
+    /// of that id: the watchdog gives each a fresh start).
+    fn definitions(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _set: &pm_protocol::definitions::DefinitionSetSnapshot,
+        _registered: &[(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )],
     ) {
     }
 

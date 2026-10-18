@@ -1,0 +1,2374 @@
+{
+ "source": "engine/crates/pm-render/tools/effects/probes.ts",
+ "webgl": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)",
+ "browser": "151.0.7922.34",
+ "show": "\nvec4 show(float x){ x = x / (1.0 + abs(x)); return vec4(vec3(0.5 + 0.5 * x), 1.0); }\nvec4 show(vec2 x){ x = x / (1.0 + abs(x)); return vec4(0.5 + 0.5 * x, 0.5, 1.0); }\nvec4 show(vec3 x){ x = x / (1.0 + abs(x)); return vec4(0.5 + 0.5 * x, 1.0); }\nvec4 show(vec4 x){ x = x / (1.0 + abs(x)); return 0.5 + 0.5 * x; }\nvec4 show(int x){ return vec4(float(x & 255) / 255.0, float((x >> 8) & 255) / 255.0, float((x >> 16) & 255) / 255.0, 1.0); }\nvec4 show(ivec2 x){ return (show(x.x) + show(x.y)) * 0.5; }\nvec4 show(ivec3 x){ return (show(x.x) + show(x.y) + show(x.z)) * 0.25; }\nvec4 show(ivec4 x){ return (show(x.x) + show(x.y) + show(x.z) + show(x.w)) * 0.25; }\nvec4 show(uint x){ return vec4(float(x & 255u) / 255.0, float((x >> 8u) & 255u) / 255.0, float(x >> 24u) / 255.0, 1.0); }\nvec4 show(uvec2 x){ return (show(x.x) + show(x.y)) * 0.5; }\nvec4 show(uvec3 x){ return (show(x.x) + show(x.y) + show(x.z)) * 0.25; }\nvec4 show(uvec4 x){ return (show(x.x) + show(x.y) + show(x.z) + show(x.w)) * 0.25; }\nvec4 show(bool x){ return vec4(x ? 1.0 : 0.0, 0.0, 0.0, 1.0); }\nvec4 show(bvec2 x){ return vec4(float(x.x), float(x.y), 0.0, 1.0); }\nvec4 show(bvec3 x){ return vec4(float(x.x), float(x.y), float(x.z), 1.0); }\nvec4 show(bvec4 x){ return vec4(float(x.x), float(x.y), float(x.z), float(x.w)); }\nvec4 show(mat2 m){ return show(vec4(m[0], m[1])); }\nvec4 show(mat3 m){ return (show(m[0]) + show(m[1]) + show(m[2])) * 0.25; }\nvec4 show(mat4 m){ return (show(m[0]) + show(m[1]) + show(m[2]) + show(m[3])) * 0.25; }\nvec4 show(mat2x3 m){ return (show(m[0]) + show(m[1])) * 0.5; }\nvec4 show(mat2x4 m){ return (show(m[0]) + show(m[1])) * 0.5; }\nvec4 show(mat3x2 m){ return (show(m[0]) + show(m[1]) + show(m[2])) * 0.25; }\nvec4 show(mat3x4 m){ return (show(m[0]) + show(m[1]) + show(m[2])) * 0.25; }\nvec4 show(mat4x2 m){ return (show(m[0]) + show(m[1]) + show(m[2]) + show(m[3])) * 0.25; }\nvec4 show(mat4x3 m){ return (show(m[0]) + show(m[1]) + show(m[2]) + show(m[3])) * 0.25; }\n",
+ "preludeTex": "\n  vec2 p = v_uv * 4.0 - 2.0;\n  vec4 t = texture(u_tex, v_uv);\n  float s = p.x + 0.37 * p.y;\n  vec2 v2 = p;\n  vec3 v3 = vec3(p, t.r - 0.5);\n  vec4 v4 = vec4(p, t.r - 0.5, t.a);\n  int i = int(floor(p.x * 37.0 + p.y * 11.0));\n  ivec2 i2 = ivec2(floor(p * 37.0));\n  ivec3 i3 = ivec3(i2, i * 3);\n  ivec4 i4 = ivec4(i3, -i);\n  uint u = uint(i + 100) * 2654435761u;\n  uvec2 u2 = uvec2(u, u ^ 0x9e3779b9u);\n  uvec3 u3 = uvec3(u2, u * 3u);\n  uvec4 u4 = uvec4(u3, u >> 7u);\n  bool b = p.x > p.y;\n  bvec2 b2 = bvec2(p.x > 0.0, p.y > 0.0);\n  bvec3 b3 = bvec3(b2, t.r > 0.5);\n  bvec4 b4 = bvec4(b3, b);\n  mat2 m2 = mat2(v4 + vec4(3.0, 0.0, 0.0, 3.0));\n  mat3 m3 = mat3(v3 + vec3(5.0, 0.0, 0.0), v3.yzx + vec3(0.0, 5.0, 0.0), v3.zxy + vec3(0.0, 0.0, 5.0));\n  mat4 m4 = mat4(v4 + vec4(6.0, 0.0, 0.0, 0.0), v4.yzwx + vec4(0.0, 6.0, 0.0, 0.0), v4.zwxy + vec4(0.0, 0.0, 6.0, 0.0), v4.wxyz + vec4(0.0, 0.0, 0.0, 6.0));\n  mat2x3 m23 = mat2x3(v3, v3.yzx);\n  mat2x4 m24 = mat2x4(v4, v4.yzwx);\n  mat3x2 m32 = mat3x2(v2, v2.yx, v2 * 0.5);\n  mat3x4 m34 = mat3x4(v4, v4.yzwx, v4.zwxy);\n  mat4x2 m42 = mat4x2(v2, v2.yx, -v2, v2 * 0.3);\n  mat4x3 m43 = mat4x3(v3, v3.yzx, v3.zxy, -v3);\n",
+ "preludeUv": "\n  vec2 p = v_uv * 4.0 - 2.0;\n  vec4 t = vec4(v_uv, 0.25, 1.0);\n  float s = p.x + 0.37 * p.y;\n  vec2 v2 = p;\n  vec3 v3 = vec3(p, t.r - 0.5);\n  vec4 v4 = vec4(p, t.r - 0.5, t.a);\n  int i = int(floor(p.x * 37.0 + p.y * 11.0));\n  ivec2 i2 = ivec2(floor(p * 37.0));\n  ivec3 i3 = ivec3(i2, i * 3);\n  ivec4 i4 = ivec4(i3, -i);\n  uint u = uint(i + 100) * 2654435761u;\n  uvec2 u2 = uvec2(u, u ^ 0x9e3779b9u);\n  uvec3 u3 = uvec3(u2, u * 3u);\n  uvec4 u4 = uvec4(u3, u >> 7u);\n  bool b = p.x > p.y;\n  bvec2 b2 = bvec2(p.x > 0.0, p.y > 0.0);\n  bvec3 b3 = bvec3(b2, t.r > 0.5);\n  bvec4 b4 = bvec4(b3, b);\n  mat2 m2 = mat2(v4 + vec4(3.0, 0.0, 0.0, 3.0));\n  mat3 m3 = mat3(v3 + vec3(5.0, 0.0, 0.0), v3.yzx + vec3(0.0, 5.0, 0.0), v3.zxy + vec3(0.0, 0.0, 5.0));\n  mat4 m4 = mat4(v4 + vec4(6.0, 0.0, 0.0, 0.0), v4.yzwx + vec4(0.0, 6.0, 0.0, 0.0), v4.zwxy + vec4(0.0, 0.0, 6.0, 0.0), v4.wxyz + vec4(0.0, 0.0, 0.0, 6.0));\n  mat2x3 m23 = mat2x3(v3, v3.yzx);\n  mat2x4 m24 = mat2x4(v4, v4.yzwx);\n  mat3x2 m32 = mat3x2(v2, v2.yx, v2 * 0.5);\n  mat3x4 m34 = mat3x4(v4, v4.yzwx, v4.zwxy);\n  mat4x2 m42 = mat4x2(v2, v2.yx, -v2, v2 * 0.3);\n  mat4x3 m43 = mat4x3(v3, v3.yzx, v3.zxy, -v3);\n",
+ "probes": [
+  {
+   "id": "probe/builtin-trig/radians",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(radians(s * 40.0)) + show(radians(v2 * 40.0)) + show(radians(v3 * 40.0)) + show(radians(v4 * 40.0))) * 0.25;\n}\n",
+   "sha256": "b1f31b7cb9aa2c438e3a036ec1472eea296299d25482b26816f03bb377d02295"
+  },
+  {
+   "id": "probe/builtin-trig/degrees",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(degrees(s) * 0.01) + show(degrees(v2) * 0.01) + show(degrees(v3) * 0.01) + show(degrees(v4) * 0.01)) * 0.25;\n}\n",
+   "sha256": "e5025a3c875a056b5181633c4067469f95da8a2f3fc94b3280c463869e1e63eb"
+  },
+  {
+   "id": "probe/builtin-trig/sin",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(sin(s)) + show(sin(v2)) + show(sin(v3)) + show(sin(v4))) * 0.25;\n}\n",
+   "sha256": "aeb19b683212245188d9636b0c71e05a3e696c3070d3284967196a62500152d6"
+  },
+  {
+   "id": "probe/builtin-trig/cos",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(cos(s)) + show(cos(v2)) + show(cos(v3)) + show(cos(v4))) * 0.25;\n}\n",
+   "sha256": "5d3f85d5f844ec473bd132a7209e1c5ca23f42aeb8834ab80d907dd82df7cd1f"
+  },
+  {
+   "id": "probe/builtin-trig/tan",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(tan(s)) + show(tan(v2)) + show(tan(v3)) + show(tan(v4))) * 0.25;\n}\n",
+   "sha256": "83cbef2ff2473551e2b106da473abb62cc45ab7c2218d8ef5e24194432ba5e84"
+  },
+  {
+   "id": "probe/builtin-trig/sinh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(sinh(s)) + show(sinh(v2)) + show(sinh(v3)) + show(sinh(v4))) * 0.25;\n}\n",
+   "sha256": "6b254ac5b6fff8da92d07886321292f9beb8ae290fdb9902aa27c7342aa0f0f9"
+  },
+  {
+   "id": "probe/builtin-trig/cosh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(cosh(s)) + show(cosh(v2)) + show(cosh(v3)) + show(cosh(v4))) * 0.25;\n}\n",
+   "sha256": "4696a4b55c1299e3d4090086e89abbfb77c4e111e1f5166597ae9bd349b9b015"
+  },
+  {
+   "id": "probe/builtin-trig/tanh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(tanh(s)) + show(tanh(v2)) + show(tanh(v3)) + show(tanh(v4))) * 0.25;\n}\n",
+   "sha256": "07febce60fc4147bf9bb3b52cb3b8cc66be1c00116546409946fe7766cb0be16"
+  },
+  {
+   "id": "probe/builtin-trig/asinh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(asinh(s)) + show(asinh(v2)) + show(asinh(v3)) + show(asinh(v4))) * 0.25;\n}\n",
+   "sha256": "e9b995a664152b7cb5714649304d4630be0c61e3dd768007fe1397abaf6ed618"
+  },
+  {
+   "id": "probe/builtin-trig/asin",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(asin(s * 0.3)) + show(asin(v2 * 0.3)) + show(asin(v3 * 0.3)) + show(asin(v4 * 0.3))) * 0.25;\n}\n",
+   "sha256": "a878f6432f9b62d5fa8397879f240427248668c163efbbdc7ce195474f7ad06e"
+  },
+  {
+   "id": "probe/builtin-trig/acos",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(acos(s * 0.3)) + show(acos(v2 * 0.3)) + show(acos(v3 * 0.3)) + show(acos(v4 * 0.3))) * 0.25;\n}\n",
+   "sha256": "2b0f7f00cbbe3b7b1ec1cb78d71645efb21518120edcc3564bc2167e16b0c9a7"
+  },
+  {
+   "id": "probe/builtin-trig/atan-y-over-x",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(atan(s)) + show(atan(v2)) + show(atan(v3)) + show(atan(v4))) * 0.25;\n}\n",
+   "sha256": "2fa9f2ac51e6b98b34b7548dcfd8bdac0f2cd5b784392ea61eff28ba61e65e3d"
+  },
+  {
+   "id": "probe/builtin-trig/atan-y-x",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(atan(s, 0.7)) + show(atan(v2, v2.yx)) + show(atan(v3, v3.zxy)) + show(atan(v4, v4.wzyx))) * 0.25;\n}\n",
+   "sha256": "2d820c9b3992ba1ca4c5852cc63438802a716ad8869f53864753fa6343bac7b3"
+  },
+  {
+   "id": "probe/builtin-trig/acosh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(acosh(1.0 + abs(s))) + show(acosh(1.0 + abs(v2))) + show(acosh(1.0 + abs(v3))) + show(acosh(1.0 + abs(v4)))) * 0.25;\n}\n",
+   "sha256": "557418bb59ea44d72e74c429b02d185fc8395e5db396cc01f08d71b5cc232a41"
+  },
+  {
+   "id": "probe/builtin-trig/atanh",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(atanh(s * 0.3)) + show(atanh(v2 * 0.3)) + show(atanh(v3 * 0.3)) + show(atanh(v4 * 0.3))) * 0.25;\n}\n",
+   "sha256": "b34360b51988a498dffe7b03b46913de92e39613e4bba6d1f3b7e7356135933b"
+  },
+  {
+   "id": "probe/builtin-exp/pow",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(pow(abs(s) + 0.1, s * 0.5)) + show(pow(abs(v2) + 0.1, v2 * 0.5)) + show(pow(abs(v3) + 0.1, v3 * 0.5)) + show(pow(abs(v4) + 0.1, v4 * 0.5))) * 0.25;\n}\n",
+   "sha256": "f2874121c7401394866f4a11df665f5d8dcb9ef97a69c77968e2e761cb2f71d9"
+  },
+  {
+   "id": "probe/builtin-exp/exp",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(exp(s)) + show(exp(v2)) + show(exp(v3)) + show(exp(v4))) * 0.25;\n}\n",
+   "sha256": "512ec73e522964a0ca8e3ed767255497a64a4ed04a0b19e9cce4eda3936e771c"
+  },
+  {
+   "id": "probe/builtin-exp/log",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(log(abs(s) + 0.01)) + show(log(abs(v2) + 0.01)) + show(log(abs(v3) + 0.01)) + show(log(abs(v4) + 0.01))) * 0.25;\n}\n",
+   "sha256": "59f54dcaf543df00ad05bb557950e0f0d48721dfdf74ce3baa8bf4f5404768e4"
+  },
+  {
+   "id": "probe/builtin-exp/exp2",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(exp2(s)) + show(exp2(v2)) + show(exp2(v3)) + show(exp2(v4))) * 0.25;\n}\n",
+   "sha256": "4fc5d72d9feeeb27af0a994ce06c8a327e9324524bbc41343ff1c761d0f25bbd"
+  },
+  {
+   "id": "probe/builtin-exp/log2",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(log2(abs(s) + 0.01)) + show(log2(abs(v2) + 0.01)) + show(log2(abs(v3) + 0.01)) + show(log2(abs(v4) + 0.01))) * 0.25;\n}\n",
+   "sha256": "6d6d9dfbeba5b0727944fbd8b3d185723a5df9c1e380b413f59b20e18a95b036"
+  },
+  {
+   "id": "probe/builtin-exp/sqrt",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(sqrt(abs(s))) + show(sqrt(abs(v2))) + show(sqrt(abs(v3))) + show(sqrt(abs(v4)))) * 0.25;\n}\n",
+   "sha256": "33e5a26487a2ec2cb4661b13849039338edd661399d0c905af9b5ab9020666a3"
+  },
+  {
+   "id": "probe/builtin-exp/inversesqrt",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(inversesqrt(abs(s) + 0.01)) + show(inversesqrt(abs(v2) + 0.01)) + show(inversesqrt(abs(v3) + 0.01)) + show(inversesqrt(abs(v4) + 0.01))) * 0.25;\n}\n",
+   "sha256": "09d7bdf77dc5601d57e4b741ff9c6c42358fd79f78a78a109131458dffcc5b19"
+  },
+  {
+   "id": "probe/builtin-common/abs-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(abs(s * 3.0)) + show(abs(v2 * 3.0)) + show(abs(v3 * 3.0)) + show(abs(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "7d201c9489461e264aaae4010950bd1d8b693546f2cf82a8d30e694c4e0d796b"
+  },
+  {
+   "id": "probe/builtin-common/sign-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(sign(s * 3.0)) + show(sign(v2 * 3.0)) + show(sign(v3 * 3.0)) + show(sign(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "3f576843660725606611dc213b899ec73c27f2f9e75504c3f6d21788dd11d9e3"
+  },
+  {
+   "id": "probe/builtin-common/floor-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(floor(s * 3.0)) + show(floor(v2 * 3.0)) + show(floor(v3 * 3.0)) + show(floor(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "63a5c0a9a33bc37a55f536721d88efa59e748a01f0614e7ce9781a3225c0b49e"
+  },
+  {
+   "id": "probe/builtin-common/trunc-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(trunc(s * 3.0)) + show(trunc(v2 * 3.0)) + show(trunc(v3 * 3.0)) + show(trunc(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "1863ca6335eab1525883422355cdfe0476a8b8da8594aedf62fd01a409aeb501"
+  },
+  {
+   "id": "probe/builtin-common/ceil-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(ceil(s * 3.0)) + show(ceil(v2 * 3.0)) + show(ceil(v3 * 3.0)) + show(ceil(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "efe82ca37339aa3f5e5da9c6ecb10e04f3ab6a31c30c0e904b87ec6ffb40b502"
+  },
+  {
+   "id": "probe/builtin-common/fract-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(fract(s * 3.0)) + show(fract(v2 * 3.0)) + show(fract(v3 * 3.0)) + show(fract(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "cf3cbb273ac4d049e4808f8dbe1b51af19eb0595a458bfd4a171784fb6473f5a"
+  },
+  {
+   "id": "probe/builtin-common/round",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(round(s * 3.0)) + show(round(v2 * 3.0)) + show(round(v3 * 3.0)) + show(round(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "65209ced03300eb9ff5f93b1b6a23639c3fe7a062e27a842c59f5deac6ba224b"
+  },
+  {
+   "id": "probe/builtin-common/roundEven",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(roundEven(s * 3.0)) + show(roundEven(v2 * 3.0)) + show(roundEven(v3 * 3.0)) + show(roundEven(v4 * 3.0))) * 0.25;\n}\n",
+   "sha256": "3812e6506a51481b2d697dd82ba5eca7be85f2dcffd703acc422db4bea1cba04"
+  },
+  {
+   "id": "probe/builtin-common/roundEven-ties",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(roundEven(floor(s * 8.0) + 0.5)) + show(roundEven(floor(v2 * 8.0) + 0.5)) + show(roundEven(floor(v3 * 8.0) + 0.5)) + show(roundEven(floor(v4 * 8.0) + 0.5))) * 0.25;\n}\n",
+   "sha256": "1ec7927c3a5171114a8c88108e216d7fffcd5e11c641fc22a363573889b8a68b"
+  },
+  {
+   "id": "probe/builtin-common/mod-scalar",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(mod(s * 3.0, 0.7)) + show(mod(v2 * 3.0, 0.7)) + show(mod(v3 * 3.0, 0.7)) + show(mod(v4 * 3.0, 0.7))) * 0.25;\n}\n",
+   "sha256": "985db78a21e5e659c4e049650210fb23ab0ec7ffbae3dce99bd224f90f01842a"
+  },
+  {
+   "id": "probe/builtin-common/mod-vector",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(mod(s * 3.0, abs(s) * 0.3 + 0.2)) + show(mod(v2 * 3.0, abs(v2) * 0.3 + 0.2)) + show(mod(v3 * 3.0, abs(v3) * 0.3 + 0.2)) + show(mod(v4 * 3.0, abs(v4) * 0.3 + 0.2))) * 0.25;\n}\n",
+   "sha256": "473659d7ff940e2ba3c09a4ada98577ba3214095a41e284de985ffd5277ccd9b"
+  },
+  {
+   "id": "probe/builtin-common/modf",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(modf(s * 3.0, s)) + show(modf(v2 * 3.0, v2)) + show(modf(v3 * 3.0, v3)) + show(modf(v4 * 3.0, v4))) * 0.25;\n}\n",
+   "sha256": "a30e3ce22e84b2b208396462bf114cd29c7a6a28641313bd970f813cf45f3bbb"
+  },
+  {
+   "id": "probe/builtin-common/modf-both",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float fi; vec2 f2; vec3 f3; vec4 f4;\n  o = (show(modf(s * 3.0, fi) + fi * 0.1) + show(modf(v2 * 3.0, f2) + f2 * 0.1) + show(modf(v3 * 3.0, f3) + f3 * 0.1) + show(modf(v4 * 3.0, f4) + f4 * 0.1)) * 0.25;\n}\n",
+   "sha256": "81eeb99472ef61b744ddaf10d266de821035ba8c5ece3a379a1e70d3ac9376ff"
+  },
+  {
+   "id": "probe/builtin-common/modf-statement",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  vec2 whole; vec2 part = modf(v2 * 5.0, whole); o = show(vec4(part, whole * 0.1));\n}\n",
+   "sha256": "bca4fcae764090a2cc6603b9618db1a59089742257593079a1ce6ebda9b0253c"
+  },
+  {
+   "id": "probe/builtin-common/modf-infinity",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float w; float f = modf(b ? uintBitsToFloat(0x7f800000u) : s * 3.0, w); o = show(vec2(f, isinf(w) ? 9.0 : w));\n}\n",
+   "sha256": "194d8f9614313148012c723de1ce07470cf0d1f590b824d658bc02ab15af480d"
+  },
+  {
+   "id": "probe/builtin-common/min-max-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(min(s, s * s - 1.0) + max(s, 0.3) + min(s, 0.3) + max(s, s * s - 1.0)) + show(min(v2, v2 * v2 - 1.0) + max(v2, 0.3) + min(v2, 0.3) + max(v2, v2 * v2 - 1.0)) + show(min(v3, v3 * v3 - 1.0) + max(v3, 0.3) + min(v3, 0.3) + max(v3, v3 * v3 - 1.0)) + show(min(v4, v4 * v4 - 1.0) + max(v4, 0.3) + min(v4, 0.3) + max(v4, v4 * v4 - 1.0))) * 0.25;\n}\n",
+   "sha256": "1ac9a4ebff8500a97bd1fa5da4dd231bd9cbce88ea474f46ebac7adb9641180f"
+  },
+  {
+   "id": "probe/builtin-common/clamp-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(clamp(s, -0.5, 0.8) + clamp(s, -abs(s) * 0.5, abs(s) * 0.5)) + show(clamp(v2, -0.5, 0.8) + clamp(v2, -abs(v2) * 0.5, abs(v2) * 0.5)) + show(clamp(v3, -0.5, 0.8) + clamp(v3, -abs(v3) * 0.5, abs(v3) * 0.5)) + show(clamp(v4, -0.5, 0.8) + clamp(v4, -abs(v4) * 0.5, abs(v4) * 0.5))) * 0.25;\n}\n",
+   "sha256": "8cf7364fada13c29621e0eccf3fce7f236275d6fcc0110567cce1b6c4c7c5361"
+  },
+  {
+   "id": "probe/builtin-common/mix-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(mix(s, s * s, 0.3) + mix(s, -s, fract(s))) + show(mix(v2, v2 * v2, 0.3) + mix(v2, -v2, fract(v2))) + show(mix(v3, v3 * v3, 0.3) + mix(v3, -v3, fract(v3))) + show(mix(v4, v4 * v4, 0.3) + mix(v4, -v4, fract(v4)))) * 0.25;\n}\n",
+   "sha256": "8a73a784eeee95571bb69f30bd238649d824719f373f20d99cecc1f10a42bce4"
+  },
+  {
+   "id": "probe/builtin-common/mix-bool",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(mix(s, s * s, b)) + show(mix(v2, v2 * v2, b2)) + show(mix(v3, v3 * v3, b3)) + show(mix(v4, v4 * v4, b4))) * 0.25;\n}\n",
+   "sha256": "33f45f865b6d6877f57e9965cd853d81ba93d6b4dfa17ddac66ab367548e0498"
+  },
+  {
+   "id": "probe/builtin-common/step",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(step(0.2, s) + step(s * s, s)) + show(step(0.2, v2) + step(v2 * v2, v2)) + show(step(0.2, v3) + step(v3 * v3, v3)) + show(step(0.2, v4) + step(v4 * v4, v4))) * 0.25;\n}\n",
+   "sha256": "aa8106f78ee614a6e682e5fa522332e7b578bc1dcf4bbaed7a58f7375382430e"
+  },
+  {
+   "id": "probe/builtin-common/smoothstep",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(smoothstep(-0.5, 0.8, s) + smoothstep(-abs(s) - 0.1, abs(s) + 0.2, s * 0.5)) + show(smoothstep(-0.5, 0.8, v2) + smoothstep(-abs(v2) - 0.1, abs(v2) + 0.2, v2 * 0.5)) + show(smoothstep(-0.5, 0.8, v3) + smoothstep(-abs(v3) - 0.1, abs(v3) + 0.2, v3 * 0.5)) + show(smoothstep(-0.5, 0.8, v4) + smoothstep(-abs(v4) - 0.1, abs(v4) + 0.2, v4 * 0.5))) * 0.25;\n}\n",
+   "sha256": "8f58501202911ccecced5ed38cd9bbf619a6e339df1493fd4f654f4d1fb96941"
+  },
+  {
+   "id": "probe/builtin-common/isnan",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(isnan(mix(s, uintBitsToFloat(0x7fc00000u), b))) + show(isnan(mix(v2, vec2(uintBitsToFloat(0x7fc00000u)), b2))) + show(isnan(mix(v3, vec3(uintBitsToFloat(0x7fc00000u)), b3))) + show(isnan(mix(v4, vec4(uintBitsToFloat(0x7fc00000u)), b4)))) * 0.25;\n}\n",
+   "sha256": "37f6832ebbe676882b75166564e6d200c04cd72a5b427a41bc2e6994cf8400f2"
+  },
+  {
+   "id": "probe/builtin-common/isinf",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(isinf(mix(s, uintBitsToFloat(0x7f800000u), b))) + show(isinf(mix(v2, vec2(uintBitsToFloat(0x7f800000u)), b2))) + show(isinf(mix(v3, vec3(uintBitsToFloat(0x7f800000u)), b3))) + show(isinf(mix(v4, vec4(uintBitsToFloat(0x7f800000u)), b4)))) * 0.25;\n}\n",
+   "sha256": "d5c1870a02eab469560141ecc95700852fc9e05ff1671b56bc06dba8f494516b"
+  },
+  {
+   "id": "probe/builtin-common/floatBitsToInt",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(floatBitsToInt(s)) + show(floatBitsToInt(v2)) + show(floatBitsToInt(v3)) + show(floatBitsToInt(v4))) * 0.25;\n}\n",
+   "sha256": "7a2a980681fa39da01a863b4053171b7f105bbb9c16dcdeb5eea80d89cd888d6"
+  },
+  {
+   "id": "probe/builtin-common/floatBitsToUint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(floatBitsToUint(s)) + show(floatBitsToUint(v2)) + show(floatBitsToUint(v3)) + show(floatBitsToUint(v4))) * 0.25;\n}\n",
+   "sha256": "6d11f7dd3727dc48160a8b09d989966782f1a358762fe20ffcfd0e9f73f0e7df"
+  },
+  {
+   "id": "probe/builtin-common/intBitsToFloat",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(intBitsToFloat((i & 0x007fffff) | 0x3f800000)) + show(intBitsToFloat((i2 & 0x007fffff) | 0x3f800000)) + show(intBitsToFloat((i3 & 0x007fffff) | 0x3f800000)) + show(intBitsToFloat((i4 & 0x007fffff) | 0x3f800000))) * 0.25;\n}\n",
+   "sha256": "68b608bb2ff620c2b6fecec753a835db9b53ad1515fe613eb2a0813f6260b813"
+  },
+  {
+   "id": "probe/builtin-common/uintBitsToFloat",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(uintBitsToFloat((u & 0x007fffffu) | 0x3f800000u)) + show(uintBitsToFloat((u2 & 0x007fffffu) | 0x3f800000u)) + show(uintBitsToFloat((u3 & 0x007fffffu) | 0x3f800000u)) + show(uintBitsToFloat((u4 & 0x007fffffu) | 0x3f800000u))) * 0.25;\n}\n",
+   "sha256": "9b0527b0bc4badbe95d8c4f8e047810cde04c2de565ce5c127ad12738aea20d6"
+  },
+  {
+   "id": "probe/builtin-int/abs-sign-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(abs(i) + sign(i) * 1000) + show(abs(i2) + sign(i2) * 1000) + show(abs(i3) + sign(i3) * 1000) + show(abs(i4) + sign(i4) * 1000)) * 0.25;\n}\n",
+   "sha256": "f17c2e43b415c79f2049d323830d3979114cc989f12d354ed5b63264c0127fab"
+  },
+  {
+   "id": "probe/builtin-int/min-max-clamp-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(min(i, i * 2 - 5) + max(i, 3) + clamp(i, -20, 20) + clamp(i, -abs(i) / 2, abs(i) / 2)) + show(min(i2, i2 * 2 - 5) + max(i2, 3) + clamp(i2, -20, 20) + clamp(i2, -abs(i2) / 2, abs(i2) / 2)) + show(min(i3, i3 * 2 - 5) + max(i3, 3) + clamp(i3, -20, 20) + clamp(i3, -abs(i3) / 2, abs(i3) / 2)) + show(min(i4, i4 * 2 - 5) + max(i4, 3) + clamp(i4, -20, 20) + clamp(i4, -abs(i4) / 2, abs(i4) / 2))) * 0.25;\n}\n",
+   "sha256": "3fb6bd0fecdaa6b53703ca84ab4cd0b96f5c8192f3f962031a7dff35cb8a0cf5"
+  },
+  {
+   "id": "probe/builtin-int/min-max-clamp-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(min(u, u >> 3u) + max(u, 77u) + clamp(u, 1000u, 4000000000u)) + show(min(u2, u2 >> 3u) + max(u2, 77u) + clamp(u2, 1000u, 4000000000u)) + show(min(u3, u3 >> 3u) + max(u3, 77u) + clamp(u3, 1000u, 4000000000u)) + show(min(u4, u4 >> 3u) + max(u4, 77u) + clamp(u4, 1000u, 4000000000u))) * 0.25;\n}\n",
+   "sha256": "dd6beb96392f53710edd4a4502a60958af86b3792ee91af27749e76edb23b66e"
+  },
+  {
+   "id": "probe/builtin-pack/packSnorm2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(packSnorm2x16(v2 * 0.6));\n}\n",
+   "sha256": "5bc8f7f5e04e6d71d3a0835a6c127b600b2a86bfcb48e65f365de8fcc66d7895"
+  },
+  {
+   "id": "probe/builtin-pack/unpackSnorm2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(unpackSnorm2x16(u));\n}\n",
+   "sha256": "86f530fe3a44d802b1782737e048eb88728db1ec9b9422dad8c486d61354ffcd"
+  },
+  {
+   "id": "probe/builtin-pack/packUnorm2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(packUnorm2x16(v_uv));\n}\n",
+   "sha256": "944a31db5b8a26f8dae23804eb8e4523b3b13e4967fdb347f9968f074cb0b98a"
+  },
+  {
+   "id": "probe/builtin-pack/unpackUnorm2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(unpackUnorm2x16(u));\n}\n",
+   "sha256": "0bbec1993883b33d133a96b6cc9404a7fd4085fe3f8ab6f17b74531e90996e65"
+  },
+  {
+   "id": "probe/builtin-pack/packHalf2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(packHalf2x16(v2 * 3.1));\n}\n",
+   "sha256": "e67c1faa96db0dcfcba5e979080915a9bc82ee42ceb26fe014275e731a152224"
+  },
+  {
+   "id": "probe/builtin-pack/unpackHalf2x16",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(unpackHalf2x16(u & 0x3fff3fffu));\n}\n",
+   "sha256": "f53761278544bb1fe30ea16d46890f41ffae16f53d726b2679212d44d0c3a07f"
+  },
+  {
+   "id": "probe/builtin-geometric/length",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(length(s)) + show(length(v2)) + show(length(v3)) + show(length(v4))) * 0.25;\n}\n",
+   "sha256": "72e84427d366b082286226416fc3ad4ae740992bd7b5e6f3298c586146e20088"
+  },
+  {
+   "id": "probe/builtin-geometric/distance",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(distance(s, s * s)) + show(distance(v2, v2 * v2)) + show(distance(v3, v3 * v3)) + show(distance(v4, v4 * v4))) * 0.25;\n}\n",
+   "sha256": "375b38d9a4f8aae47fc325b8f1f0348624ac7b85e7273f8c2374696998fa9a88"
+  },
+  {
+   "id": "probe/builtin-geometric/dot",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(dot(s, s * s - 0.3)) + show(dot(v2, v2 * v2 - 0.3)) + show(dot(v3, v3 * v3 - 0.3)) + show(dot(v4, v4 * v4 - 0.3))) * 0.25;\n}\n",
+   "sha256": "7107b8c42b8c94e1f5116228656735b1f8e9b4362a009663763f367d8ff3f36d"
+  },
+  {
+   "id": "probe/builtin-geometric/cross",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(cross(v3, v3.zxy + 0.5));\n}\n",
+   "sha256": "e5acb2e990cc3ecef5557d5fba6892c7860ca1d770e29aead2ebe67662f6eee5"
+  },
+  {
+   "id": "probe/builtin-geometric/normalize",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(normalize(s + 0.01)) + show(normalize(v2 + 0.01)) + show(normalize(v3 + 0.01)) + show(normalize(v4 + 0.01))) * 0.25;\n}\n",
+   "sha256": "7552f74ffd40f9b2bcaa1ccde79e98c96653fee4a6770e8bfda07f2b44ed7f4e"
+  },
+  {
+   "id": "probe/builtin-geometric/faceforward",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(faceforward(s, s * s - 0.5, s * 0.3 + 0.1)) + show(faceforward(v2, v2 * v2 - 0.5, v2 * 0.3 + 0.1)) + show(faceforward(v3, v3 * v3 - 0.5, v3 * 0.3 + 0.1)) + show(faceforward(v4, v4 * v4 - 0.5, v4 * 0.3 + 0.1))) * 0.25;\n}\n",
+   "sha256": "9b6517d4fd1e4a00a7ea1b987769bfed1fe97f32ffedbeedbfcfa0b435a69fc8"
+  },
+  {
+   "id": "probe/builtin-geometric/reflect",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(reflect(s, normalize(s * s + 0.1))) + show(reflect(v2, normalize(v2 * v2 + 0.1))) + show(reflect(v3, normalize(v3 * v3 + 0.1))) + show(reflect(v4, normalize(v4 * v4 + 0.1)))) * 0.25;\n}\n",
+   "sha256": "ad7c6f4bcda7d5912acb5e9a6ac2d0e3633f72799f5f6484f542b04f6b26a72d"
+  },
+  {
+   "id": "probe/builtin-geometric/normalize-scalar-zero",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(vec2(normalize(s * 0.0), normalize(-abs(s))));\n}\n",
+   "sha256": "02e0f38c96e658e56defb1c3173512e6a6bf5fd7c3c917069df514510aaee56c"
+  },
+  {
+   "id": "probe/builtin-geometric/scalar-geometric",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(vec4(faceforward(s, s * s - 0.5, s * 0.3 + 0.1), reflect(s, 0.6), refract(0.5, -0.8, 0.66 + s * 0.1), refract(0.9, 0.95, 1.6)));\n}\n",
+   "sha256": "7a3ed965cb59e57b8a81d20607ee870edd80d2a67b21311f71b9294f7f85500c"
+  },
+  {
+   "id": "probe/builtin-geometric/refract",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(refract(normalize(s + 0.01), normalize(s * s + 0.1), 0.66)) + show(refract(normalize(v2 + 0.01), normalize(v2 * v2 + 0.1), 0.66)) + show(refract(normalize(v3 + 0.01), normalize(v3 * v3 + 0.1), 0.66)) + show(refract(normalize(v4 + 0.01), normalize(v4 * v4 + 0.1), 0.66))) * 0.25;\n}\n",
+   "sha256": "21ca5d17deb53919acfbbca60d66e1d47f8689408c10bb72e9f289dc6d680a99"
+  },
+  {
+   "id": "probe/builtin-matrix/matrixCompMult",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(matrixCompMult(m2, m2)) + show(matrixCompMult(m3, m3)) + show(matrixCompMult(m4, m4)) + show(matrixCompMult(m23, m23)) + show(matrixCompMult(m24, m24)) + show(matrixCompMult(m32, m32)) + show(matrixCompMult(m34, m34)) + show(matrixCompMult(m42, m42)) + show(matrixCompMult(m43, m43))) * 0.111111;\n}\n",
+   "sha256": "e69999375f39634caa8ddcf102cd04ca62ae4d593b8e96fe707cde3545cb6177"
+  },
+  {
+   "id": "probe/builtin-matrix/transpose",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(transpose(m2)) + show(transpose(m3)) + show(transpose(m4)) + show(transpose(m23)) + show(transpose(m24)) + show(transpose(m32)) + show(transpose(m34)) + show(transpose(m42)) + show(transpose(m43))) * 0.111111;\n}\n",
+   "sha256": "3e21bdc93f4f56c782c9147e18783fdcda7946eea0307fe6faa1134eb3315201"
+  },
+  {
+   "id": "probe/builtin-matrix/determinant",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(determinant(m2)) + show(determinant(m3) * 0.01) + show(determinant(m4) * 0.001)) * 0.333333;\n}\n",
+   "sha256": "5eec9525943bf6f1febdabd9888be7f744baf91f3e40828c3fc444376a28281d"
+  },
+  {
+   "id": "probe/builtin-matrix/inverse",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(inverse(m2)) + show(inverse(m3)) + show(inverse(m4))) * 0.333333;\n}\n",
+   "sha256": "49eef36c4414c161d9885ed40719b9f20c36ddaa53ef30836fd84ff905a5ab43"
+  },
+  {
+   "id": "probe/builtin-matrix/outerProduct",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(outerProduct(v2, v2.yx)) + show(outerProduct(v3, v3)) + show(outerProduct(v4, v4)) + show(outerProduct(v3, v2)) + show(outerProduct(v2, v3))\n    + show(outerProduct(v4, v2)) + show(outerProduct(v2, v4)) + show(outerProduct(v4, v3)) + show(outerProduct(v3, v4))) * 0.111111;\n}\n",
+   "sha256": "7f1cc7cb8494a9f4de442cb23bba294eba3152f1c09f676b216604e5823076d5"
+  },
+  {
+   "id": "probe/builtin-matrix/matrix-arithmetic",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(m2 * m2 + m2 * 0.5 - m2 / 3.0) + show(m3 * v3) + show(v4 * m4) + show(m23 * m32) + show(m32 * v3) + show(v2 * m42)\n    + show(m34 * m43) + show(-m24) + show(m42 * m24) + show(m4 * m34)) * 0.1;\n}\n",
+   "sha256": "8b825947b7d0705a222cba12eedf6c7918f2c52240ccbea7c136af19f58a1a6b"
+  },
+  {
+   "id": "probe/builtin-matrix/matrix-compound",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  mat3 a = m3; a *= m3; a += m3; a -= mat3(0.5); a /= 2.0; vec3 w = v3; w *= a; mat2 c = m2; c++; --c; o = show(a) * 0.5 + show(w) * 0.25 + show(c) * 0.25;\n}\n",
+   "sha256": "7884b8cab11bfd8e451f3411255a5bbfaa45d32de0db3ddfa20c2c725d425269"
+  },
+  {
+   "id": "probe/builtin-matrix/matrix-construct",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(mat3(m4)) + show(mat4(m2)) + show(mat2(m3)) + show(mat2x3(m42)) + show(mat4x3(m2)) + show(mat2(s)) + show(mat3(v4, v4, s)) + show(mat4x2(m32))) * 0.125;\n}\n",
+   "sha256": "7c8df200d9ea1cb8ba8c962da15525dda9ef90ea7f3fdf3766ea0aa5f50cbdf8"
+  },
+  {
+   "id": "probe/builtin-matrix/matrix-dynamic-index",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  int k = int(v_uv.x * 2.99); int j = int(v_uv.y * 2.99); mat3 a = m3; a[k][j] = 7.0; o = show(a[k]) * 0.5 + show(m4[k + 1][j]) * 0.25 + show(m43[3 - k]) * 0.25;\n}\n",
+   "sha256": "0a3e85dd43d1ff47aaf54f93da7a38a3fee5cda7f3e718ab1e69281a8ce2dc04"
+  },
+  {
+   "id": "probe/builtin-matrix/matrix-equality",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(bvec4(m3 == m3, m3 != mat3(m4), m2 == mat2(1.0), m43 != m43));\n}\n",
+   "sha256": "62fa8c52fd657ababe274874dc23d5b1c4c7e77cf4f3c93e6542260c2bb3fdf5"
+  },
+  {
+   "id": "probe/builtin-relational/lessThan-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThan(v2, v2.yx)) + show(lessThan(v3, v3.yxx)) + show(lessThan(v4, v4.yxyx))) * 0.25;\n}\n",
+   "sha256": "62a07c95e6174622f074d05137e198f85394667a179ccab08075d16b9ab86ade"
+  },
+  {
+   "id": "probe/builtin-relational/lessThan-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThan(i2, i2.yx)) + show(lessThan(i3, i3.yxx)) + show(lessThan(i4, i4.yxyx))) * 0.25;\n}\n",
+   "sha256": "c705beca11478d5c74da366c5ea63e9dac26e927f1147b60dcfcc6fe21e06b25"
+  },
+  {
+   "id": "probe/builtin-relational/lessThan-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThan(u2, u2.yx)) + show(lessThan(u3, u3.yxx)) + show(lessThan(u4, u4.yxyx))) * 0.25;\n}\n",
+   "sha256": "782a20fd75bc097aa5968b9c3521b85a1a67a3c23f7d32fbfab38aac847e8ca6"
+  },
+  {
+   "id": "probe/builtin-relational/lessThanEqual-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThanEqual(v2, v2.yx)) + show(lessThanEqual(v3, v3.yxx)) + show(lessThanEqual(v4, v4.yxyx))) * 0.25;\n}\n",
+   "sha256": "4540a28abe3ff96004ddfc7d6f567e13c7e9ba515a11a92d9c29a3811bac6156"
+  },
+  {
+   "id": "probe/builtin-relational/lessThanEqual-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThanEqual(i2, i2.yx)) + show(lessThanEqual(i3, i3.yxx)) + show(lessThanEqual(i4, i4.yxyx))) * 0.25;\n}\n",
+   "sha256": "d5d2a3edbff4d7842564654bc0e0d988af313c093e037ba94d350cb1dffd29ca"
+  },
+  {
+   "id": "probe/builtin-relational/lessThanEqual-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(lessThanEqual(u2, u2.yx)) + show(lessThanEqual(u3, u3.yxx)) + show(lessThanEqual(u4, u4.yxyx))) * 0.25;\n}\n",
+   "sha256": "d313dec3e13b06e871d21539a200d381858ceaeed9c7efbe448018c28942b473"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThan-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThan(v2, v2.yx)) + show(greaterThan(v3, v3.yxx)) + show(greaterThan(v4, v4.yxyx))) * 0.25;\n}\n",
+   "sha256": "95810809cde748e4ca4f012ea9af5f2f83837d16bb5b5a197fad37923788bde3"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThan-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThan(i2, i2.yx)) + show(greaterThan(i3, i3.yxx)) + show(greaterThan(i4, i4.yxyx))) * 0.25;\n}\n",
+   "sha256": "e7317e79d8a6198a61e1f3059825fe428192f0668bccfc23a6a20733aa2d1078"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThan-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThan(u2, u2.yx)) + show(greaterThan(u3, u3.yxx)) + show(greaterThan(u4, u4.yxyx))) * 0.25;\n}\n",
+   "sha256": "c2d975bf39ccab24852cbe84fe2961db2011a340d8ed2b1e5ea94d5e2a859c5b"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThanEqual-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThanEqual(v2, v2.yx)) + show(greaterThanEqual(v3, v3.yxx)) + show(greaterThanEqual(v4, v4.yxyx))) * 0.25;\n}\n",
+   "sha256": "f491b86643c8eb0144f027cd24e903e8024c95c0ce9e1fc1aa288a5339244a44"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThanEqual-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThanEqual(i2, i2.yx)) + show(greaterThanEqual(i3, i3.yxx)) + show(greaterThanEqual(i4, i4.yxyx))) * 0.25;\n}\n",
+   "sha256": "e6625b1d48a4fc0981fcc040cc5a06c5b23cce532ced5c1fe6fde5c2ff72aba2"
+  },
+  {
+   "id": "probe/builtin-relational/greaterThanEqual-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(greaterThanEqual(u2, u2.yx)) + show(greaterThanEqual(u3, u3.yxx)) + show(greaterThanEqual(u4, u4.yxyx))) * 0.25;\n}\n",
+   "sha256": "db70b91097eacf4a3e0cfd68b68f1fe7c3a61348886929158b89b62d30abe15c"
+  },
+  {
+   "id": "probe/builtin-relational/equal-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(equal(floor(v2 * 2.0), floor(v2.yx * 2.0))) + show(equal(floor(v3 * 2.0), floor(v3.yxx * 2.0))) + show(equal(floor(v4 * 2.0), floor(v4.yxyx * 2.0)))) * 0.25;\n}\n",
+   "sha256": "70ca6dbc096f5d5564cc34ef36348cfdd394a22efed4611be7f76712f2c5c3f1"
+  },
+  {
+   "id": "probe/builtin-relational/equal-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(equal(i2 / 16, i2.yx / 16)) + show(equal(i3 / 16, i3.yxx / 16)) + show(equal(i4 / 16, i4.yxyx / 16))) * 0.25;\n}\n",
+   "sha256": "d986476673eeb6e49e14382d368cf68ef8a2eb72377fcc8273371d38e87d9d36"
+  },
+  {
+   "id": "probe/builtin-relational/equal-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(equal(u2 >> 30u, u2.yx >> 30u)) + show(equal(u3 >> 30u, u3.yxx >> 30u)) + show(equal(u4 >> 30u, u4.yxyx >> 30u))) * 0.25;\n}\n",
+   "sha256": "dd0b1eab7e89330c07a8cb36958ee1edaaa897880f5df75226573a0f65bafe02"
+  },
+  {
+   "id": "probe/builtin-relational/equal-bool",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(equal(b2, b2.yx)) + show(equal(b3, b3.yxx)) + show(equal(b4, b4.yxyx))) * 0.25;\n}\n",
+   "sha256": "055599ac45968ced8bc65d6676bacc3dbc98f1ee79d1e77b857f1e6edb8119a1"
+  },
+  {
+   "id": "probe/builtin-relational/notEqual-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(notEqual(floor(v2 * 2.0), floor(v2.yx * 2.0))) + show(notEqual(floor(v3 * 2.0), floor(v3.yxx * 2.0))) + show(notEqual(floor(v4 * 2.0), floor(v4.yxyx * 2.0)))) * 0.25;\n}\n",
+   "sha256": "27034e7784f45ac034dab8bd5a69ebf6b4600850b07decd783f7afc30e81106c"
+  },
+  {
+   "id": "probe/builtin-relational/notEqual-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(notEqual(i2 / 16, i2.yx / 16)) + show(notEqual(i3 / 16, i3.yxx / 16)) + show(notEqual(i4 / 16, i4.yxyx / 16))) * 0.25;\n}\n",
+   "sha256": "6f4a67bd11554384e171195f7e046609e3f55756c390d5115fdac51f6d576cfd"
+  },
+  {
+   "id": "probe/builtin-relational/notEqual-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(notEqual(u2 >> 30u, u2.yx >> 30u)) + show(notEqual(u3 >> 30u, u3.yxx >> 30u)) + show(notEqual(u4 >> 30u, u4.yxyx >> 30u))) * 0.25;\n}\n",
+   "sha256": "a64480f2cacc32146eaeff2474ffc1cabbd95a2e6a119bae346df7ba5e6086b3"
+  },
+  {
+   "id": "probe/builtin-relational/notEqual-bool",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(notEqual(b2, b2.yx)) + show(notEqual(b3, b3.yxx)) + show(notEqual(b4, b4.yxyx))) * 0.25;\n}\n",
+   "sha256": "bcbe47cd17b3c407ea607704f5a0dfa53ed65ad86ac1554324a35245b9444029"
+  },
+  {
+   "id": "probe/builtin-relational/any-all-not",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(bvec2(any(b2), all(not(b2)))) + show(bvec2(any(b3), all(not(b3)))) + show(bvec2(any(b4), all(not(b4))))) * 0.25;\n}\n",
+   "sha256": "dd51b82f7f9e42c7b1ad50cf58c329d94ab30f748454513f0790faf58484567e"
+  },
+  {
+   "id": "probe/builtin-texture/texture",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = texture(u_tex, v_uv);\n}\n",
+   "sha256": "a12bf6e71c5a459930185004e12c81f8d5064d868f109c57fc75058af7e047c0"
+  },
+  {
+   "id": "probe/builtin-texture/texture-bias",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = texture(u_tex, v_uv, 1.5);\n}\n",
+   "sha256": "7b4a2f0c97c45a73ecd063884824c4d01b5430f442bdc97e99ee36aaa340c374"
+  },
+  {
+   "id": "probe/builtin-texture/textureProj-vec3",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProj(u_tex, vec3(v_uv * 1.7, 1.7));\n}\n",
+   "sha256": "edf15481544729deea12fed97eb7ccecd7e4ae8746ff6f165044aff097b5babf"
+  },
+  {
+   "id": "probe/builtin-texture/textureProj-vec4",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProj(u_tex, vec4(v_uv * 1.7, 0.3, 1.7));\n}\n",
+   "sha256": "0135cefa387a5919202422b3c8530b82576e50801b680cf1db2ee97c135522f5"
+  },
+  {
+   "id": "probe/builtin-texture/textureLod",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureLod(u_tex, v_uv * 1.3, 0.0) + textureLod(u_tex, v_uv, 2.5);\n}\n",
+   "sha256": "115b4b2bcd4590f667a3741f31ef3b0a96f5dfa30a50dc68096c9f289f146fb2"
+  },
+  {
+   "id": "probe/builtin-texture/textureOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureOffset(u_tex, v_uv, ivec2(3, -2));\n}\n",
+   "sha256": "ca8c30c51a935d579cc6b45e947d1de25956130301fcf16f189d4c3499c24103"
+  },
+  {
+   "id": "probe/builtin-texture/textureOffset-bias",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureOffset(u_tex, v_uv, ivec2(-8, 7), 0.5);\n}\n",
+   "sha256": "ad477a999efdb238ff16eb7de70a5160683fb8d239fe98acc863e6412aa28210"
+  },
+  {
+   "id": "probe/builtin-texture/texelFetch",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = texelFetch(u_tex, ivec2(gl_FragCoord.xy * 0.75), 0);\n}\n",
+   "sha256": "40fec06c098186861e4387a69cdc70d39b07f7293cd6576fbe72bc0a12c55f3e"
+  },
+  {
+   "id": "probe/builtin-texture/texelFetchOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = texelFetchOffset(u_tex, ivec2(gl_FragCoord.xy * 0.75), 0, ivec2(2, -3));\n}\n",
+   "sha256": "7c3490b96ac33eb1eaeaeb3f23af6de95b706e15310646f79917922f8802bc1c"
+  },
+  {
+   "id": "probe/builtin-texture/textureProjOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProjOffset(u_tex, vec3(v_uv * 1.7, 1.7), ivec2(1, 1));\n}\n",
+   "sha256": "e6e7a53645e5531bcb696c7a14766c935cc49132a173caf6bc11582bb69a8345"
+  },
+  {
+   "id": "probe/builtin-texture/textureLodOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureLodOffset(u_tex, v_uv, 0.0, ivec2(-1, 4));\n}\n",
+   "sha256": "90c0c3d595935e385bed601301a1b25bb69f7f96488c7d322ec2a8efe2fa156a"
+  },
+  {
+   "id": "probe/builtin-texture/textureProjLod",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProjLod(u_tex, vec4(v_uv * 1.7, 0.3, 1.7), 0.0);\n}\n",
+   "sha256": "8a4cf8bd806e589c0f1f619d20b87f561a40877f94caa3fa97cfd48729e223de"
+  },
+  {
+   "id": "probe/builtin-texture/textureProjLodOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProjLodOffset(u_tex, vec3(v_uv * 1.7, 1.7), 0.0, ivec2(2, 0));\n}\n",
+   "sha256": "549366edd74f1fee958510d6dd692c840e1b5305e7d9876822c24dd3ba4fea8d"
+  },
+  {
+   "id": "probe/builtin-texture/textureGrad",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureGrad(u_tex, v_uv, dFdx(v_uv), dFdy(v_uv));\n}\n",
+   "sha256": "f5bfe7c11bff850609832f2297072bb9ed06170dc1aed3402b51658fad991ef3"
+  },
+  {
+   "id": "probe/builtin-texture/textureGradOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureGradOffset(u_tex, v_uv, dFdx(v_uv), dFdy(v_uv), ivec2(0, 3));\n}\n",
+   "sha256": "6ca4ff982f5e121e4e07696a97dbf533e1c6fa4dea886c7ce48472da3133e4db"
+  },
+  {
+   "id": "probe/builtin-texture/textureProjGrad",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProjGrad(u_tex, vec3(v_uv * 1.7, 1.7), dFdx(v_uv), dFdy(v_uv));\n}\n",
+   "sha256": "67d56baf04c43dab74009c5fac0806b6acf43c7060f43470faffb62ad30ae1dd"
+  },
+  {
+   "id": "probe/builtin-texture/textureProjGradOffset",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = textureProjGradOffset(u_tex, vec4(v_uv * 1.7, 0.0, 1.7), dFdx(v_uv), dFdy(v_uv), ivec2(-2, 1));\n}\n",
+   "sha256": "adf9a061d23a1d2ce06ac96971eec70f8cac2beddd7d90b5cbeb5e6a9a9515f6"
+  },
+  {
+   "id": "probe/builtin-texture/textureSize",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  ivec2 z = textureSize(u_tex, 0); o = show(vec2(z) / 300.0);\n}\n",
+   "sha256": "37dbf34dec2e8d883883a21e17980b23c66c4dbb5286a2b4921db09ccee842c2"
+  },
+  {
+   "id": "probe/builtin-texture/sampler-function-argument",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvec4 tap(sampler2D s, vec2 uv){ return texture(s, uv); }\n@SHOW@void main(){@PRELUDE_TEX@  o = tap(u_tex, v_uv.yx);\n}\n",
+   "sha256": "f78d0d18733a393308d3e30759bfd3b786c44243b7ab07b8bbc2fd8f5a5d4f48"
+  },
+  {
+   "id": "probe/builtin-texture/sampler-in-loop",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  vec4 acc = vec4(0.0); for (int k = 0; k < 8; k++) acc += texture(u_tex, v_uv + vec2(float(k) * 0.01, 0.0)); o = acc / 8.0;\n}\n",
+   "sha256": "f50808ff64bfd2692ac8fa6f0d5533d53558f9eca709a4056bb6a566447e1ed8"
+  },
+  {
+   "id": "probe/samplers/sampler2D-array-constant-index",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform sampler2D u_extra[2];\n@SHOW@void main(){@PRELUDE_TEX@  o = texture(u_extra[0], v_uv) * 0.5 + texture(u_extra[1], v_uv.yx) * 0.5;\n}\n",
+   "sha256": "33ee63d918a7a37c790387337f61d9c444ef941b8bb08bfca6a0727748095527"
+  },
+  {
+   "id": "probe/samplers/sampler2D-array-const-expression",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform sampler2D u_extra[3];\n@SHOW@void main(){@PRELUDE_TEX@  const int K = 2; o = texture(u_extra[K - 1], v_uv) + texture(u_extra[K * 2 - 2], v_uv * 0.5);\n}\n",
+   "sha256": "3d429108a18a595fd90c4fbacda5c7fdf92ae5c941b1de61a70eb0b3cbf38524"
+  },
+  {
+   "id": "probe/samplers/sampler2D-array-function-argument",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform sampler2D u_extra[2];\nvec4 tap(sampler2D s, vec2 uv){ return texture(s, uv * 0.8); }\n@SHOW@void main(){@PRELUDE_TEX@  o = tap(u_extra[1], v_uv);\n}\n",
+   "sha256": "3a2eabacc4913bab8f6001860bd0a96010a1d92d32d71e47eac70b9229730d6a"
+  },
+  {
+   "id": "probe/samplers/sampler2D-array-unused-element",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform sampler2D u_extra[4];\n@SHOW@void main(){@PRELUDE_TEX@  o = texture(u_extra[1], v_uv);\n}\n",
+   "sha256": "5931cc1d2f68274371f360742f05d9764a6f9bad87b5b727bfa7121b3b49d21a"
+  },
+  {
+   "id": "probe/samplers/sampler3D-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler3D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = texture(u_s, vec3(v_uv, 0.5));\n}\n",
+   "sha256": "e96b05666c9dcd9a4baddcec7b98f3446b4f9925eaccb7a238650cbd962d578e"
+  },
+  {
+   "id": "probe/samplers/sampler3D-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler3D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + texture(u_s, vec3(v_uv, 0.5)) * 0.5;\n}\n",
+   "sha256": "f9b8009ddfbf73c931734903990f3b86ae35739f1c7912053415e25a7a63d713"
+  },
+  {
+   "id": "probe/samplers/samplerCube-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp samplerCube u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = texture(u_s, vec3(p, 1.0));\n}\n",
+   "sha256": "5bbab0daaaf696282c2d75deaac9ec8e5ab99eac0ef4ba90e9302dffebbbb443"
+  },
+  {
+   "id": "probe/samplers/samplerCube-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp samplerCube u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + texture(u_s, vec3(p, 1.0)) * 0.5;\n}\n",
+   "sha256": "bf7ca413c3141264ea80758074d7d8f3d90c98bd45b8209e7bc7fb0253d7ecb4"
+  },
+  {
+   "id": "probe/samplers/sampler2DArray-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DArray u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = texture(u_s, vec3(v_uv, 0.0));\n}\n",
+   "sha256": "acb2a0de0d7149fc1583a0b3b96b5c7de5a7be78d2030c048e81cb1406256966"
+  },
+  {
+   "id": "probe/samplers/sampler2DArray-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DArray u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + texture(u_s, vec3(v_uv, 0.0)) * 0.5;\n}\n",
+   "sha256": "3c7461fb1412433f2b668ae06757e469f30c7058502f8d49f7184c3d84f9f718"
+  },
+  {
+   "id": "probe/samplers/sampler2DShadow-alone",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DShadow u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec3(v_uv, 0.5)));\n}\n",
+   "sha256": "969802bdabe5b84973c1c2f42ba1ad798c8afe7099cbb654236adb3c9ec38a93"
+  },
+  {
+   "id": "probe/samplers/sampler2DShadow-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DShadow u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec3(v_uv, 0.5))) * 0.5;\n}\n",
+   "sha256": "8aba2754a7bdc6d8ef8be8a3c8350868e5b655818033bba38bd9bcaa1c89ebce"
+  },
+  {
+   "id": "probe/samplers/samplerCubeShadow-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp samplerCubeShadow u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec4(p, 1.0, 0.5)));\n}\n",
+   "sha256": "b1c98432d1293fd819a23ba4592748c674ac551fbe63f1f994dcc9efe6a3b848"
+  },
+  {
+   "id": "probe/samplers/samplerCubeShadow-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp samplerCubeShadow u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec4(p, 1.0, 0.5))) * 0.5;\n}\n",
+   "sha256": "02bd59074710e76fce5fa031e3ac1caa82078681833ccf097162f1884dd91080"
+  },
+  {
+   "id": "probe/samplers/sampler2DArrayShadow-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DArrayShadow u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec4(v_uv, 0.0, 0.5)));\n}\n",
+   "sha256": "13d528ec99053b25d8367016fe0a35207ab3c427e7c7f8211da3ec95b0cd8c8b"
+  },
+  {
+   "id": "probe/samplers/sampler2DArrayShadow-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler2DArrayShadow u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec4(v_uv, 0.0, 0.5))) * 0.5;\n}\n",
+   "sha256": "6cb6b006c2bfa62c74aae882d14ff1e50c65902f999236857efe9c85c13f2d7c"
+  },
+  {
+   "id": "probe/samplers/isampler2D-alone",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, v_uv)) / 255.0;\n}\n",
+   "sha256": "f0b4738074e5ebab2f06c8ed1f93e67a45ce0b681000ad488018e76b20513d23"
+  },
+  {
+   "id": "probe/samplers/isampler2D-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, v_uv)) / 255.0 * 0.5;\n}\n",
+   "sha256": "8ce25d1e10e742ef01d73ecc982a47d2197e37be8f5f58f656848cd74a5ed0b1"
+  },
+  {
+   "id": "probe/samplers/usampler2D-alone",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp usampler2D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, v_uv)) / 255.0;\n}\n",
+   "sha256": "a5aed2a80242bbd87888bb9c5bf3cadc7a1e00a0c31ff86c7822c95a5d71ed65"
+  },
+  {
+   "id": "probe/samplers/usampler2D-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp usampler2D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, v_uv)) / 255.0 * 0.5;\n}\n",
+   "sha256": "4a62623924c6439fb7f99b72bd6d6e68997bbdbc2a158d65df842a2cbea5fff5"
+  },
+  {
+   "id": "probe/samplers/isampler3D-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler3D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec3(v_uv, 0.5))) / 255.0;\n}\n",
+   "sha256": "2c7d56331ef0a765098aab3d38f93445a9c83ebd669d125ce180fd6a0778f498"
+  },
+  {
+   "id": "probe/samplers/isampler3D-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler3D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec3(v_uv, 0.5))) / 255.0 * 0.5;\n}\n",
+   "sha256": "2b430e5488722cf86fa77e5cedd7be06380c8e09a980f9c07e190c0929a68e94"
+  },
+  {
+   "id": "probe/samplers/usamplerCube-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp usamplerCube u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec3(p, 1.0))) / 255.0;\n}\n",
+   "sha256": "577c4af2f0e11e09cee47b884d2f2d15029ba64417badd4d71c04989b02bc5b9"
+  },
+  {
+   "id": "probe/samplers/usamplerCube-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp usamplerCube u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec3(p, 1.0))) / 255.0 * 0.5;\n}\n",
+   "sha256": "de886053bd5b689321dd26e5672bf7eda36b2b21b41d17909bcb5cef0714335a"
+  },
+  {
+   "id": "probe/samplers/isampler2DArray-alone",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2DArray u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texture(u_s, vec3(v_uv, 0.0))) / 255.0;\n}\n",
+   "sha256": "0aa4f686a9bac621765718026434b78130036f719cbd21b2ce4dd7bd077a97f4"
+  },
+  {
+   "id": "probe/samplers/isampler2DArray-with-u_tex",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2DArray u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * 0.5 + vec4(texture(u_s, vec3(v_uv, 0.0))) / 255.0 * 0.5;\n}\n",
+   "sha256": "5a8a46c40537e2044845d89f84df8f677cfebfc14ae22f1a179ed476e9a048d7"
+  },
+  {
+   "id": "probe/samplers/isampler2D-texelFetch-alone",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = vec4(texelFetch(u_s, ivec2(gl_FragCoord.xy), 0)) / 255.0;\n}\n",
+   "sha256": "f4ef0e08021451e9aac5a56b2dbd2fab44e3b8f470107ea838bcd42c89d7760e"
+  },
+  {
+   "id": "probe/samplers/isampler2D-textureSize-alone",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2D u_s;\n@SHOW@void main(){@PRELUDE_UV@  o = show(vec2(textureSize(u_s, 0)));\n}\n",
+   "sha256": "70404a8c91ea8044989babf524710642670f57b7a2b40301a01dda31ef72dcca"
+  },
+  {
+   "id": "probe/samplers/isampler2D-declared-unused",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp isampler2D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "bce6b224488d00403f8cee43ffc871ba93812a4a8d748c4b56412966bdb45950"
+  },
+  {
+   "id": "probe/samplers/sampler3D-declared-unused",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform highp sampler3D u_s;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "ce509a5020e5d1e97d1e442123acf56b3bb3e6d532df1b8ad93c5f81436d07db"
+  },
+  {
+   "id": "probe/builtin-derivative/dFdx",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(dFdx(s * s) * 50.0) + show(dFdx(v2 * v2) * 50.0) + show(dFdx(v3 * v3) * 50.0) + show(dFdx(v4 * v4) * 50.0)) * 0.25;\n}\n",
+   "sha256": "0fab1a83b2a23415a86c506b15a40ae32fb027e2e05eac1a3edfe77f98b527ce"
+  },
+  {
+   "id": "probe/builtin-derivative/dFdy",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(dFdy(s * s) * 50.0) + show(dFdy(v2 * v2) * 50.0) + show(dFdy(v3 * v3) * 50.0) + show(dFdy(v4 * v4) * 50.0)) * 0.25;\n}\n",
+   "sha256": "7adab5744a9e5e6acc651aa7a7f226bb3bf84da984dba74ecfcd003c6d7b3150"
+  },
+  {
+   "id": "probe/builtin-derivative/fwidth",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(fwidth(s * s) * 50.0) + show(fwidth(v2 * v2) * 50.0) + show(fwidth(v3 * v3) * 50.0) + show(fwidth(v4 * v4) * 50.0)) * 0.25;\n}\n",
+   "sha256": "a23d62353b245583387d30453d2f876140fa56f8a0e38929faa744f75ccc8471"
+  },
+  {
+   "id": "probe/variables/gl_FragCoord",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(gl_FragCoord * 0.01);\n}\n",
+   "sha256": "af9f1f27ee857488b67ecebed69cb4aa1dba9005853357486c1a20263ead4372"
+  },
+  {
+   "id": "probe/variables/gl_FrontFacing",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(gl_FrontFacing);\n}\n",
+   "sha256": "568d0bba667630f475a758b602b6a83d5700ad56bfd707e35eb48a10c8d902f9"
+  },
+  {
+   "id": "probe/variables/gl_PointCoord",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(gl_PointCoord) * 0.0 + t;\n}\n",
+   "sha256": "44f96e4ede5cdfb13a00dfd11fe2d23307f47f81fa8ee641d5f5140699efc736"
+  },
+  {
+   "id": "probe/variables/gl_FragDepth",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  gl_FragDepth = 0.25; o = t;\n}\n",
+   "sha256": "3162f802c747ec28821b59bf50b1b9d5ffb6fe184af0e9b09201ad56a36b3ea8"
+  },
+  {
+   "id": "probe/variables/output-vec3",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec3 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t.rgb;\n}\n",
+   "sha256": "46a888a45bb9071efac5bf571346786ef1ed1ac27576093bf6c5a62a2af94aba"
+  },
+  {
+   "id": "probe/variables/output-float",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout float o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t.g;\n}\n",
+   "sha256": "7286ff60bc97b565fb1901bb1dbe3704da56b15ea6603811fce46258fb02d1ee"
+  },
+  {
+   "id": "probe/variables/output-layout-location",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nlayout(location = 0) out vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "052fb9afb84aab0a10fa264adda08fac21a1ee869949ac0e614a60f3c1fecff2"
+  },
+  {
+   "id": "probe/variables/output-second-location",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nlayout(location = 0) out vec4 o;\nlayout(location = 1) out vec4 o2;\n@SHOW@void main(){@PRELUDE_TEX@  o = t; o2 = vec4(1.0);\n}\n",
+   "sha256": "5d6efcd873840636c3992a9e78876284ecbb855d294271fc6cfbc3baba7ac048"
+  },
+  {
+   "id": "probe/variables/output-ivec4",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout ivec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = ivec4(t * 255.0);\n}\n",
+   "sha256": "6cfa0dee8c4d94c09334ed2b12182b4b16cfe669c05ac12d3dfd713e13b61f7e"
+  },
+  {
+   "id": "probe/variables/output-array",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o[1];\n@SHOW@void main(){@PRELUDE_TEX@  o[0] = t;\n}\n",
+   "sha256": "42317a3f9c34ff857b6c5791c6a67b0089bce8be87faa0e2038b54ec668fa8e6"
+  },
+  {
+   "id": "probe/variables/gl_MaxDrawBuffers-constants",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(vec4(float(gl_MaxDrawBuffers), float(gl_MaxTextureImageUnits), float(gl_MaxFragmentUniformVectors), float(gl_MinProgramTexelOffset)) * 0.01);\n}\n",
+   "sha256": "d75c3ad60ac671fc9a80f1ebea45b646a4f6035276459335ed3726f5a080881b"
+  },
+  {
+   "id": "probe/variables/uniform-block",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform Params { float k; vec4 c; };\n@SHOW@void main(){@PRELUDE_TEX@  o = t * k + c;\n}\n",
+   "sha256": "8b9d8547a24d9f36eff043fb2d72dbd43fce3d9bf2d7a8778edf1721f7411fbb"
+  },
+  {
+   "id": "probe/variables/uniform-block-std140-instance",
+   "webgl": "drawError",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nlayout(std140) uniform Params { float k; vec4 c; } params;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * params.k + params.c;\n}\n",
+   "sha256": "5c0e873a46e64f95e0de545844d4b6aec3ba62bf2d42ea72f0ba9f67e58a9c04"
+  },
+  {
+   "id": "probe/variables/uniform-struct",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct P { float k; vec4 c; };\nuniform P st;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * st.k + st.c;\n}\n",
+   "sha256": "e8dbef401b4a42784ffe8a4ba40aa1fd48330dded4ff35ff1770c573b45b690f"
+  },
+  {
+   "id": "probe/variables/uniform-array-dynamic-index",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform vec4 ua[4];\n@SHOW@void main(){@PRELUDE_TEX@  o = t + ua[int(v_uv.x * 3.99)];\n}\n",
+   "sha256": "cda1a2dcf2bcb19ec30e9f331222cca1746ccee48a99f2b057921500f2f6a916"
+  },
+  {
+   "id": "probe/variables/uniform-int-uint-bool",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform int ui; uniform uint uu; uniform bool ub;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * float(ui) + vec4(float(uu), float(ub), 0.0, 0.0);\n}\n",
+   "sha256": "1bb4ac6bc857267064ed4e4e2ab1c03faf93078c8637eaee5edbbf86d0f59bc6"
+  },
+  {
+   "id": "probe/variables/uniform-matrices",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nuniform mat2 um2; uniform mat3 um3; uniform mat4 um4; uniform mat2x3 um23;\n@SHOW@void main(){@PRELUDE_TEX@  o = vec4(um2 * v2, 0.0, 1.0) + vec4(um3 * v3, 1.0) + um4 * v4 + vec4(um23 * v2, 0.0);\n}\n",
+   "sha256": "d07f026a3b19656b7790b7fa2947d0af7372e3fcd00d2a442e052dc221dc7afe"
+  },
+  {
+   "id": "probe/types/uint-literals",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  uint h = 0xFFFFFFFFu - 017u + 255u; o = show(h * u);\n}\n",
+   "sha256": "7cae8939b2fe5161842559e71557ad3af503cee9412114b188e7ec13423e83d8"
+  },
+  {
+   "id": "probe/types/int-literals",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  int a = 0x7fffffff; int c = 017; int d = -2147483647 - 1; o = show(ivec3(a + i, c, d / 3));\n}\n",
+   "sha256": "12db54f8c9049800d0294cead87cc5b5520e8b66e582a87e591c703da0ab8e89"
+  },
+  {
+   "id": "probe/types/float-literals",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = 1e-3 + 2.5E2 + .5 + 5. + 1.0e+1 + 3.0f + 2.0F; o = show(a * s * 0.01);\n}\n",
+   "sha256": "826e40a519d5a451c6b7ca4df18e6f0f04e319f958b7dba7662d0c5a0714923f"
+  },
+  {
+   "id": "probe/types/conversions",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(int(s * 10.0)) + show(uint(abs(s) * 1000.0)) + show(float(i) * 0.1) + show(float(u) * 1e-9) + show(bool(i)) + show(int(b)) + show(uint(b2.x)) + show(ivec2(u2)) + show(uvec3(i3)) + show(vec4(b4)) + show(bvec2(i2)) + show(int(-2.7))) * 0.0833;\n}\n",
+   "sha256": "0f7afd42d1936d0c42b76b1f34200f1e96c865de46598f783435d114094b5e63"
+  },
+  {
+   "id": "probe/types/swizzles",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  vec4 w = v4; w.zx = w.xz; w.yw += v2; vec2 r = w.rg + w.st + w.ba; ivec3 q = i4.wzy; o = show(vec4(r, w.ww)) * 0.5 + show(q) * 0.5;\n}\n",
+   "sha256": "07143f6a3348afbbe1112bf6a10ee521189f2906fba4f8a8fc34aece0481f2b7"
+  },
+  {
+   "id": "probe/types/arrays",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[5]; for (int k = 0; k < 5; k++) a[k] = s * float(k); float c[5] = a; c[2] = 1.0; o = show(vec4(a[4], c[2], float(a.length()), a[int(v_uv.x * 4.99)]));\n}\n",
+   "sha256": "4735e3543a1d771609fb771d81e5fee5c044a91624a5f2304cf414273a6b6b70"
+  },
+  {
+   "id": "probe/types/array-constructors",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[3] = float[3](s, s * 2.0, s * 3.0); vec2 c[] = vec2[](v2, v2.yx); o = show(vec4(a[1] + a[2], c[1], float(c.length())));\n}\n",
+   "sha256": "6ba4468a53e8bb21c08753d48d1b58f632b928eb98263b0e521ed1ab909b7d8a"
+  },
+  {
+   "id": "probe/types/array-equality",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[2] = float[2](s, 1.0); float c[2] = float[2](s, 1.0); o = show(bvec2(a == c, a != float[2](0.0, 1.0)));\n}\n",
+   "sha256": "6f142765d01b4eeb6c55ca54d7060400f1d9740c7e1c3a5cd150d616094e226a"
+  },
+  {
+   "id": "probe/types/const-arrays",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  const vec3 pal[4] = vec3[4](vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(1.0)); o = vec4(pal[int(v_uv.x * 3.99)], 1.0);\n}\n",
+   "sha256": "428ce71200bdce26582996d6b0d822a2da92ef1898f2a7b3d265582cc92f461a"
+  },
+  {
+   "id": "probe/types/global-const-array",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nconst float K[3] = float[3](0.25, 0.5, 1.0);\n@SHOW@void main(){@PRELUDE_TEX@  o = vec4(K[int(v_uv.y * 2.99)] * t.rgb, 1.0);\n}\n",
+   "sha256": "3b74f9ffb60c6c439e0f2cf383dbe1e93fd536439ae9a645d3f836e8a708b8f2"
+  },
+  {
+   "id": "probe/types/global-arrays-private",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvec4 G[8];\n@SHOW@void main(){@PRELUDE_TEX@  G[int(v_uv.x * 7.99)] = t; o = G[int(v_uv.y * 7.99)];\n}\n",
+   "sha256": "bfe9dd1f4c7e1347920f26eacad212108e136f996fb5a736169dd91be37b72ec"
+  },
+  {
+   "id": "probe/types/structs",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct S { float a; vec3 v; float c[2]; };\n@SHOW@void main(){@PRELUDE_TEX@  S x = S(s, v3, float[2](1.0, 2.0)); x.c[1] = s; S y = x; y.a += 1.0; o = show(vec4(y.v, y.a + y.c[1])) * 0.5 + show(x == y) * 0.5;\n}\n",
+   "sha256": "7b75feecca80d50f2d078f796648499b4fbec2d67d819c2671126268325c9d64"
+  },
+  {
+   "id": "probe/types/nested-structs",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct Inner { vec2 q; int n; };\nstruct Outer { Inner inner; Inner k[2]; };\n@SHOW@void main(){@PRELUDE_TEX@  Outer w; w.inner = Inner(v2, i); w.k[1] = w.inner; w.k[0] = Inner(v2.yx, -i); o = show(vec4(w.k[1].q + w.k[0].q, float(w.k[0].n), 0.0)) * 0.5 + show(w.inner.n) * 0.5;\n}\n",
+   "sha256": "66568f83a895d006f4ee1c684f407b0a872c8229944d4c7fb90f323044d4cc72"
+  },
+  {
+   "id": "probe/types/struct-function-io",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct S { float a; float b; };\nS make(float v){ return S(v, v * 2.0); }\nvoid bump(inout S x){ x.a += 1.0; x.b *= 0.5; }\n@SHOW@void main(){@PRELUDE_TEX@  S x = make(s); bump(x); o = show(vec2(x.a, x.b));\n}\n",
+   "sha256": "6a7f08bdd6d71850b6bdddbe88f43235eb1695c13fc900890199ac67f7b48356"
+  },
+  {
+   "id": "probe/types/array-function-io",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvoid fill(out float a[3], float v){ for (int k = 0; k < 3; k++) a[k] = v * float(k); }\nfloat sum(float a[3]){ return a[0] + a[1] + a[2]; }\n@SHOW@void main(){@PRELUDE_TEX@  float a[3]; fill(a, s); o = show(vec3(a[0], a[1], sum(a)));\n}\n",
+   "sha256": "68472c9b096c6494717d7fe29ffcf345aa6484d9baf52b4068681f00051b6874"
+  },
+  {
+   "id": "probe/types/struct-declared-in-function",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  struct L { vec2 a; }; L l = L(v2); o = show(l.a);\n}\n",
+   "sha256": "16eece6507958b48da74d9dc83727674b781fe795fb021b7dd4435807dc0c224"
+  },
+  {
+   "id": "probe/types/vector-length-method",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(vec3(float(v3.length()), float(m3.length()), float(i4.length())));\n}\n",
+   "sha256": "2e21a7174b9756c430e8480eaa14847b816bab79620138394fefb65c79f3f800"
+  },
+  {
+   "id": "probe/types/array-of-arrays",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[2][2]; a[0][1] = s; o = show(a[0][1]);\n}\n",
+   "sha256": "8517d24cb956bc2041c32f30543f5d83a69ed9bcf896c7e8fb99de7539f45ef0"
+  },
+  {
+   "id": "probe/types/bool-ops",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  bool c = b ^^ b2.x; bool d = !(b && b2.y) || c; o = show(bvec3(c, d, b == d));\n}\n",
+   "sha256": "ab4dd78b6d8f6ff61c174e5d27c723833aafd6e2eaeec068703b82cab41bac6e"
+  },
+  {
+   "id": "probe/operators/int-arithmetic",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show((i * 7 + 3) / 4 - i % 5) + show((i2 * 7 + 3) / 4 - i2 % 5) + show((i3 * 7 + 3) / 4 - i3 % 5) + show((i4 * 7 + 3) / 4 - i4 % 5)) * 0.25;\n}\n",
+   "sha256": "dbdbc412028f1df8177b90fb4365ef4bc56acf96a4985eec4213d16572e8ec55"
+  },
+  {
+   "id": "probe/operators/int-negative-division",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show((i - 50) / 7 * 1000 + (i - 50) % 7) + show((i2 - 50) / 7 * 1000 + (i2 - 50) % 7) + show((i3 - 50) / 7 * 1000 + (i3 - 50) % 7) + show((i4 - 50) / 7 * 1000 + (i4 - 50) % 7)) * 0.25;\n}\n",
+   "sha256": "126326f7241ad15c8cbf03b67cc267c36edaca24f5a91c1c86e86a6f5fa89ad4"
+  },
+  {
+   "id": "probe/operators/uint-arithmetic",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show((u * 7u + 3u) / 4u - u % 5u) + show((u2 * 7u + 3u) / 4u - u2 % 5u) + show((u3 * 7u + 3u) / 4u - u3 % 5u) + show((u4 * 7u + 3u) / 4u - u4 % 5u)) * 0.25;\n}\n",
+   "sha256": "6cc92cd7a77c249b490bfabdba1e6e472f03db6f6f3dd9e7489c8d48140cbc5a"
+  },
+  {
+   "id": "probe/operators/bitwise-int",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(((i << 3) ^ (i >> 1)) & ~(i | 12)) + show(((i2 << 3) ^ (i2 >> 1)) & ~(i2 | 12)) + show(((i3 << 3) ^ (i3 >> 1)) & ~(i3 | 12)) + show(((i4 << 3) ^ (i4 >> 1)) & ~(i4 | 12))) * 0.25;\n}\n",
+   "sha256": "f9bb0fcb339e45b7d8b18e2589de2f572738f5369077363900d172346cc3a4f1"
+  },
+  {
+   "id": "probe/operators/bitwise-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(((u << 13u) ^ (u >> 7u)) & ~(u | 12u)) + show(((u2 << 13u) ^ (u2 >> 7u)) & ~(u2 | 12u)) + show(((u3 << 13u) ^ (u3 >> 7u)) & ~(u3 | 12u)) + show(((u4 << 13u) ^ (u4 >> 7u)) & ~(u4 | 12u))) * 0.25;\n}\n",
+   "sha256": "dc77c103383b4cf5cfb4d0a7c0c76e0351870b672a17dfbf675907cee37d68ed"
+  },
+  {
+   "id": "probe/operators/shift-mixed-signedness",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(ivec2(i << 3u, i >> 2u)) * 0.5 + show(uvec2(u << 3, u >> 5)) * 0.5;\n}\n",
+   "sha256": "abf6a17fa77c356e01d70a19fef15e21354546c48bb534bcd81d29c0332f5f70"
+  },
+  {
+   "id": "probe/operators/vector-scalar-mixed",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(v3 * 2.0 + 1.0 - v3 / 3.0) * 0.5 + show(i3 * 2 + 1) * 0.25 + show(u2 / 3u) * 0.25;\n}\n",
+   "sha256": "4c58f3cbc36832aec47277d98a1789f70f9ffe5cff491bb39e3eab809c68e000"
+  },
+  {
+   "id": "probe/operators/increment-decrement",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  vec3 w = v3; w++; ++w; w--; int k = i; k++; ++k; float f = s; f--; o = show(vec4(w, f)) * 0.5 + show(k) * 0.5;\n}\n",
+   "sha256": "6e31c644ff54632b606a2088406fe606e293c37f4cfd6ca789570f260a16aa55"
+  },
+  {
+   "id": "probe/operators/compound-assign",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  int k = i; k += 3; k -= 1; k *= 2; k /= 3; k %= 7; k <<= 2; k >>= 1; k &= 255; k |= 3; k ^= 5; uint w = u; w %= 1000u; w <<= 2u; o = show(k) * 0.5 + show(w) * 0.5;\n}\n",
+   "sha256": "1a3670fd442fa855abfe35487f7eb83df2c3ce03493174431376974fc7a20966"
+  },
+  {
+   "id": "probe/operators/ternary-and-comma",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = b ? s : -s; vec3 w = b2.x ? v3 : v3.zyx; float c; c = (a += 1.0, a * 2.0); o = show(vec4(w, c));\n}\n",
+   "sha256": "415f0483d9e7e912ca9b188fb973e088b80d74b541bf160cffc09eddf5937ec8"
+  },
+  {
+   "id": "probe/operators/ternary-struct",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct S { float a; };\n@SHOW@void main(){@PRELUDE_TEX@  S x = b ? S(s) : S(-s); o = show(x.a);\n}\n",
+   "sha256": "4ec01a5bef4d568bcea97fe59c2474d645530d804ab83850fe6614db01e2506f"
+  },
+  {
+   "id": "probe/operators/ternary-array",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[2] = b ? float[2](s, 1.0) : float[2](0.0, s); o = show(a[0] + a[1]);\n}\n",
+   "sha256": "9b1634d250780573b61d988829e43deedded77d7577a094f92e741b46f43f7a4"
+  },
+  {
+   "id": "probe/operators/dynamic-vector-index",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  vec4 w = v4; int k = int(v_uv.x * 3.99); w[k] = 9.0; o = show(vec2(w[k], v4[3 - k]));\n}\n",
+   "sha256": "1caadf09a1e0df644f9a26ef902e952c6581795114a3cc7c926d46bd4a86a004"
+  },
+  {
+   "id": "probe/operators/dynamic-array-lvalue",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[8]; for (int k = 0; k < 8; k++) a[k] = 0.0; a[int(t.r * 7.99)] += 1.0; a[int(v_uv.x * 7.99)] = s; o = show(vec4(a[0], a[3], a[7], a[int(v_uv.y * 7.99)]));\n}\n",
+   "sha256": "b1c4fffec101aef3bb2c75d02d8f2192dd22ec5c1c24e257b61a5cc3a1c591b3"
+  },
+  {
+   "id": "probe/operators/short-circuit-side-effects",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float c = 0.0; bool r = b && (c += 1.0) > 0.0; bool q = b2.x || (c += 2.0) > 0.0; o = show(vec3(c, float(r), float(q)));\n}\n",
+   "sha256": "1ec5ce04c22bdc593e0e18002d0d0128d0da284df00ce18a1fe699e20780e696"
+  },
+  {
+   "id": "probe/operators/integer-overflow-wrap",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  int a = 2147483647; a += int(v_uv.x * 2.0) + 1; uint c = 0u; c -= uint(v_uv.y * 2.0) + 1u; o = show(ivec2(a, a >> 16)) * 0.5 + show(c) * 0.5;\n}\n",
+   "sha256": "95b721eadd25ccbb4285b5fcd92c0750e2126ab105a9171da8e5f91907c6d303"
+  },
+  {
+   "id": "probe/operators/unary-minus-uint",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  uint a = -u; o = show(a);\n}\n",
+   "sha256": "75d185c085c1c6ecbd779471924238096a5cdd45f14762748c3f3a85e09a2c09"
+  },
+  {
+   "id": "probe/control/switch",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  int k = int(v_uv.x * 6.0); float r = 0.0; switch (k) { case 0: r = 0.1; break; case 1: case 2: r = 0.4; break; case 3: r = 0.6; default: r += 0.3; break; } o = show(r);\n}\n",
+   "sha256": "d9a0ee036ef6b9341b539c2fd741d80a34671c400133eec9f32b208fc6e2b764"
+  },
+  {
+   "id": "probe/control/switch-uint-nested",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float r = 0.0; switch (u % 4u) { case 0u: switch (i & 1) { case 0: r = 1.0; break; default: r = 2.0; } break; case 1u: r = 3.0; break; default: r = 4.0; } o = show(r);\n}\n",
+   "sha256": "595ea9611d893e86a68bf274e7cdd453c25a9da41863f8cccf0aa501c1df4a54"
+  },
+  {
+   "id": "probe/control/switch-empty-default-fallthrough",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float r = 1.0; switch (i & 3) { case 0: r = 2.0; case 1: r *= 3.0; default: break; } o = show(r);\n}\n",
+   "sha256": "b5769821111c8bd37fec9d8518b8ff075742dc7ad905368a8417e8e0b4c476e2"
+  },
+  {
+   "id": "probe/control/do-while",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = s; int k = 0; do { a = a * 0.5 + 0.1; k++; } while (k < 5 && a > 0.0); o = show(vec2(a, float(k)));\n}\n",
+   "sha256": "6b0e42101bd5fb6e64d09af3e5b68b660b7837882f40c64c88a23847aed8e803"
+  },
+  {
+   "id": "probe/control/while-break-continue",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = 0.0; int k = 0; while (true) { k++; if (k > 20) break; if ((k & 1) == 0) continue; a += float(k) * t.r; } o = show(a * 0.1);\n}\n",
+   "sha256": "2aae729e5c8bf8349c90ba1f36d700a79b78d109913006400fc30a5975a719bb"
+  },
+  {
+   "id": "probe/control/for-float-counter",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = 0.0; for (float x = 0.0; x < 1.0; x += 0.125) a += sin(x + s); o = show(a);\n}\n",
+   "sha256": "cb52b9120e4714eefbff265baf4705a084248264582a92c1a7ca7d7ee870711b"
+  },
+  {
+   "id": "probe/control/for-dynamic-bound",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = 0.0; int n = int(v_uv.x * 20.0); for (int k = 0; k < n; k++) a += 0.05; o = show(a);\n}\n",
+   "sha256": "fc189ae2d5ba9090f07d6fb19568450bb79604a67d1c18f05a0e0f3436bdd6e4"
+  },
+  {
+   "id": "probe/control/nested-loops-break",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = 0.0; for (int x = 0; x < 6; x++) { for (int y = 0; y < 6; y++) { if (y > x) break; a += float(x * y); } if (a > 40.0 * v_uv.x) break; } o = show(a * 0.01);\n}\n",
+   "sha256": "069c9d3213c15c77e49680d2368a9c286ac662aef6f45d3d498021eadc739495"
+  },
+  {
+   "id": "probe/control/early-return-main",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t; if (v_uv.x > 0.5) return; o = 1.0 - t;\n}\n",
+   "sha256": "68defc08e462993aa0c3aacd51adcfd9f35ad23df68b9ba0a6f36c2d3f9518f0"
+  },
+  {
+   "id": "probe/control/discard-in-main",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  if (t.a < 0.5) discard; o = t;\n}\n",
+   "sha256": "577d8fdace18ed0df08f92802e81cf6643082be3d63181b78f06a0bbe5a4ac4d"
+  },
+  {
+   "id": "probe/control/discard-in-function",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvoid kill(float a){ if (a < 0.5) discard; }\n@SHOW@void main(){@PRELUDE_TEX@  kill(t.a); o = t;\n}\n",
+   "sha256": "6dd6b8d024146440ede59ce08c8bd51e5ac4d42d49ce22edaf1867521abf36d8"
+  },
+  {
+   "id": "probe/control/function-prototypes",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat g(float x);\nfloat f(float x){ return g(x) * 2.0; }\nfloat g(float x){ return x + 1.0; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(f(s));\n}\n",
+   "sha256": "c57f97999855cf68e5866149c4edcafb5bb93edea886bbdbbcd804d2769b6d66"
+  },
+  {
+   "id": "probe/control/overloads",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat h(float x){ return x * 2.0; }\nvec2 h(vec2 x){ return x.yx; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(h(s)) * 0.5 + show(h(v2)) * 0.5;\n}\n",
+   "sha256": "c277d351e3d8c22db22eedb4ace8ace3cf30e68dc5d38ed819e8694fbe0c484e"
+  },
+  {
+   "id": "probe/control/const-in-params",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat f(const in float a, in vec2 c){ return a * c.x; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(f(s, v2));\n}\n",
+   "sha256": "c74397938e26165e1f0be458c4ae883719c0613110c30c885df618fc9da9b654"
+  },
+  {
+   "id": "probe/control/out-param-aliasing",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvoid f(in float x, out float y){ y = x * 2.0 + 1.0; }\n@SHOW@void main(){@PRELUDE_TEX@  float a = s; f(a, a); o = show(a);\n}\n",
+   "sha256": "d90832dd139f07d6699ab43af85dedc5eeb03c0e3792b72a0261d5c3ccdebf6a"
+  },
+  {
+   "id": "probe/control/inout-swizzle-argument",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvoid f(inout vec2 c){ c = c * 2.0 + 1.0; }\n@SHOW@void main(){@PRELUDE_TEX@  vec3 w = v3; f(w.zx); o = show(w);\n}\n",
+   "sha256": "8309c0ec616b5248917a6641574122bd94e8f525c8f738e2fccdb41e5e4eaa69"
+  },
+  {
+   "id": "probe/control/void-function-early-return",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvoid f(inout float a, float x){ if (x < 0.0) return; a = x; }\n@SHOW@void main(){@PRELUDE_TEX@  float a = 0.0; f(a, s); o = show(a);\n}\n",
+   "sha256": "9e2cbca1086ea655bd04b510d10e8d2eef59d6b774fbb572e173508696e59e73"
+  },
+  {
+   "id": "probe/control/global-initializer-uniform",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat g = u_res.x / 512.0;\n@SHOW@void main(){@PRELUDE_TEX@  o = t * g;\n}\n",
+   "sha256": "723f8d74c4b5dc01ffae77938de9f66b160d474bf9ba23f237ef719b5d0e3d2a"
+  },
+  {
+   "id": "probe/control/global-mutable",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat counter = 1.0;\n@SHOW@void main(){@PRELUDE_TEX@  counter += s; o = show(counter);\n}\n",
+   "sha256": "5de04b4017860fd673288a94cc3e4daeac8876608b432460a5bb46642f2b5823"
+  },
+  {
+   "id": "probe/control/shadowed-names",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float s2 = s; { float s = 2.0; s2 += s; } o = show(s2);\n}\n",
+   "sha256": "044328a47322b7a98faf33bf5e47d6d08ab50efc401d03ed52bb48876d07cc2e"
+  },
+  {
+   "id": "probe/qualifiers/precision-mediump",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  mediump float a = s * 1.0001; lowp vec4 c = t; o = c * 0.5 + show(a) * 0.5;\n}\n",
+   "sha256": "06c1d177afb713f21d538c8f988adaa8eab9f04c6486dabbaab0b6b416360870"
+  },
+  {
+   "id": "probe/qualifiers/precision-statements",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision mediump float;\nprecision highp int;\nprecision lowp sampler2D;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform highp vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "535e9ed3be58af5a77eefeb9feeea65bd85fec413f262d355a799772a4d429d5"
+  },
+  {
+   "id": "probe/qualifiers/invariant-output",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\ninvariant o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "c22969ada5f816677521d673e2e842ce6895fba458d4886311f5972fc1872ea4"
+  },
+  {
+   "id": "probe/qualifiers/flat-input-unwritten",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nflat in int nope;\n@SHOW@void main(){@PRELUDE_TEX@  o = t + vec4(float(nope));\n}\n",
+   "sha256": "715cdb2f331b20276db17b574ed2008006b820b3466014c3ea82f56d0e9541b2"
+  },
+  {
+   "id": "probe/qualifiers/centroid-input-unwritten",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\ncentroid in vec2 nope;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "a62b9bab1b0cbb104f68abc6f8653f64ad4e2759d320fc667b117b87a1e5b80a"
+  },
+  {
+   "id": "probe/qualifiers/const-global-expression",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nconst float K = sqrt(4.0) * 0.25 + float(3 / 2);\n@SHOW@void main(){@PRELUDE_TEX@  o = t * K;\n}\n",
+   "sha256": "044f67883be833043ed19f7d404111df3f9f27d0bd32ad85cc5df3798c46fed1"
+  },
+  {
+   "id": "probe/preprocessor/function-macros",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#define SQ(x) ((x) * (x))\n#define ADD(a, b) ((a) + (b))\n@SHOW@void main(){@PRELUDE_TEX@  o = show(SQ(s) + ADD(s, 1.0));\n}\n",
+   "sha256": "687c75c7d4aa5da90cb2c0c197c25ab1f9c6ccf6bb1ec90501981d04b47e3ae2"
+  },
+  {
+   "id": "probe/preprocessor/conditionals",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#if defined(GL_ES) && __VERSION__ == 300\n#define V 1\n#elif 0\n#define V 2\n#else\n#define V 3\n#endif\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n#undef V\n#define V 4\n#endif\n@SHOW@void main(){@PRELUDE_TEX@  o = show(float(V));\n}\n",
+   "sha256": "d0a4a67428914364ff3b3de04d6c6059a414bdfa18a8e73a3a9689500570ee16"
+  },
+  {
+   "id": "probe/preprocessor/line-macro",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(float(__LINE__) * 0.01);\n}\n",
+   "sha256": "2036803fb4a4fd16d6ffef9c8253f99e4f010b32ff5a2a4e17ce99f1169c68ef"
+  },
+  {
+   "id": "probe/preprocessor/line-directive",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#line 100\n@SHOW@void main(){@PRELUDE_TEX@  o = show(float(__LINE__) * 0.01);\n}\n",
+   "sha256": "dcee2e5f8cfd003668f4ee4e7cbe1f3c343f61938e553e27da7337db396e1bef"
+  },
+  {
+   "id": "probe/preprocessor/token-pasting",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#define CAT(x, y) x ## y\n@SHOW@void main(){@PRELUDE_TEX@  float ab = 1.5; o = show(CAT(a, b));\n}\n",
+   "sha256": "97bc844ea4991349cff5554ee7c741cc4b136d85a585e67c103a6c37949e088c"
+  },
+  {
+   "id": "probe/preprocessor/pragmas",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#pragma optimize(off)\n#pragma debug(on)\n#pragma STDGL invariant(all)\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "4ca5961a7d51a9a27699621c42d1f9078040a020491f19c22d5aeb37553d2f3e"
+  },
+  {
+   "id": "probe/preprocessor/error-in-dead-branch",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#if 0\n#error unreachable\n#endif\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "1f2d5cd3a9afe3ca46da81922cc96edf3c5c385a9aead6ad14304388111cc489"
+  },
+  {
+   "id": "probe/preprocessor/error-directive",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#error refused on purpose\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "6efb1384259bfb6fe543685d6cac8bb9c8f6bfde6acec85a82d070dac4b66e6c"
+  },
+  {
+   "id": "probe/preprocessor/macro-name-double-underscore",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#define FOO__BAR 1\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "894ac28de2c126518f0806cbafec61f9f4ebeb08efa4fd64fc0f5169a6720321"
+  },
+  {
+   "id": "probe/preprocessor/macro-name-GL_",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#define GL_FOO 1\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "d5ad750f2fac0bb9eff6d817032ae8c58ca9525003b7090c0bc772ca0687821e"
+  },
+  {
+   "id": "probe/preprocessor/undef-GL_ES",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#undef GL_ES\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "1238c744c2f1fc8b5cc93fc2c7a4c8216340c38c1e09d5c920c4253958819d38"
+  },
+  {
+   "id": "probe/preprocessor/line-continuation",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a = s \\\n  * 2.0; o = show(a);\n}\n",
+   "sha256": "b343c2141f48f96ed633951d507084bca673cd448c89acfa6b09f02b2500bbe0"
+  },
+  {
+   "id": "probe/preprocessor/undefined-macro-in-if",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#if UNDEFINED_THING\n#define X 1\n#else\n#define X 2\n#endif\n@SHOW@void main(){@PRELUDE_TEX@  o = show(float(X));\n}\n",
+   "sha256": "16b8e8ad4511502dd7dcd391f226af764167f84b8d36af8682dc5d2a046a40a4"
+  },
+  {
+   "id": "probe/preprocessor/extension-standard-derivatives",
+   "webgl": "drawn",
+   "template": "#version 300 es\n#extension GL_OES_standard_derivatives : enable\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(dFdx(s) * 50.0);\n}\n",
+   "sha256": "3d50b549610b1c9dee2e44ad70db5157130ce8ba1553c172279953d306a62a07"
+  },
+  {
+   "id": "probe/preprocessor/extension-unknown-warn",
+   "webgl": "drawn",
+   "template": "#version 300 es\n#extension GL_EXT_not_a_real_extension : warn\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "d547d8b60e1f7204f2d1d60705e1e861a53db3ca5f0b7733104ce3f5fbe2e465"
+  },
+  {
+   "id": "probe/preprocessor/extension-unknown-require",
+   "webgl": "refused",
+   "template": "#version 300 es\n#extension GL_EXT_not_a_real_extension : require\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = t;\n}\n",
+   "sha256": "53a6063ebc3de53ae98744c977d53f1f7ffdd565264be8f97e1425e9d05ccca8"
+  },
+  {
+   "id": "probe/identifiers/local-input",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float input = s * 2.0; o = show(input);\n}\n",
+   "sha256": "3ae78075e3e2e0ce21418895c80a9b2e4d7d9303eb664640afac291a7e6b0488"
+  },
+  {
+   "id": "probe/identifiers/local-output",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float output = s * 2.0; o = show(output);\n}\n",
+   "sha256": "500d9494bff6e3128ab25679bc2ebf4205409798b42a461fc1c43fc567635f79"
+  },
+  {
+   "id": "probe/identifiers/local-filter",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float filter = s * 2.0; o = show(filter);\n}\n",
+   "sha256": "3c6038080e06585f2d4b81dd2a38c3482dc51291176f7e52cbc12ae3afb3546e"
+  },
+  {
+   "id": "probe/identifiers/local-sample",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sample = s * 2.0; o = show(sample);\n}\n",
+   "sha256": "01d87029ffcd8cde3f003c89e732f3b21ece1d448cfb68f19ba2089ff6c18f88"
+  },
+  {
+   "id": "probe/identifiers/local-buffer",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float buffer = s * 2.0; o = show(buffer);\n}\n",
+   "sha256": "747068d4ec9f6af7a3c690a7a63cc71f5c00c99159a526eaa04dfc6d2caf170c"
+  },
+  {
+   "id": "probe/identifiers/local-shared",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float shared = s * 2.0; o = show(shared);\n}\n",
+   "sha256": "c2fe34a4e173f782f4393e96c3d31efec6ad80dd95ed1531363606c64b1083d6"
+  },
+  {
+   "id": "probe/identifiers/local-coherent",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float coherent = s * 2.0; o = show(coherent);\n}\n",
+   "sha256": "7a25e13bf0e1090589e84b382cd67277acdfe82cefdc09474efa77bc946507ee"
+  },
+  {
+   "id": "probe/identifiers/local-volatile",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float volatile = s * 2.0; o = show(volatile);\n}\n",
+   "sha256": "b6d815b40ed0e486a9b72b344850018b42728e55f70cd88117e1c3e55953e9d1"
+  },
+  {
+   "id": "probe/identifiers/local-restrict",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float restrict = s * 2.0; o = show(restrict);\n}\n",
+   "sha256": "173c0274cda3c6e9d88718baa1b129333991d20ef41832a421850e49ddf74839"
+  },
+  {
+   "id": "probe/identifiers/local-readonly",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float readonly = s * 2.0; o = show(readonly);\n}\n",
+   "sha256": "264f656ed448f80f912e3336449e1eab02334e6b3a56afb8ae65ea5b1a96600f"
+  },
+  {
+   "id": "probe/identifiers/local-writeonly",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float writeonly = s * 2.0; o = show(writeonly);\n}\n",
+   "sha256": "ec1f6fd76c0f452ebfd7847bcb832817406cf3d1ddad7bb3bb8066f81d8974e3"
+  },
+  {
+   "id": "probe/identifiers/local-precise",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float precise = s * 2.0; o = show(precise);\n}\n",
+   "sha256": "93b57771d59cadfe1aaf839c1b6c2e5ff4a8a2282ad2b73bea5c864607530389"
+  },
+  {
+   "id": "probe/identifiers/local-subroutine",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float subroutine = s * 2.0; o = show(subroutine);\n}\n",
+   "sha256": "9b709825beaba581230490694c9822483d23503f7b915cb60024b8a8df54f17a"
+  },
+  {
+   "id": "probe/identifiers/local-patch",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float patch = s * 2.0; o = show(patch);\n}\n",
+   "sha256": "3f04dc56c1a648e80968ad085b1093be08c52b4c276caa8bf59f324a47cb47a7"
+  },
+  {
+   "id": "probe/identifiers/local-resource",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float resource = s * 2.0; o = show(resource);\n}\n",
+   "sha256": "40f13ee08cf1794d872961c9ba5589ef006ebabd5dbd89e762c3438fce930847"
+  },
+  {
+   "id": "probe/identifiers/local-smooth",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float smooth = s * 2.0; o = show(smooth);\n}\n",
+   "sha256": "5ad1791ac1dc7827e6dd0a544d5c55399885ef3d945f6d852807895808c4edf7"
+  },
+  {
+   "id": "probe/identifiers/local-noperspective",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float noperspective = s * 2.0; o = show(noperspective);\n}\n",
+   "sha256": "eb89e89b483d09e86718f0a216146947d32fc469dc71fb071cdd078b049d2442"
+  },
+  {
+   "id": "probe/identifiers/local-atomic_uint",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float atomic_uint = s * 2.0; o = show(atomic_uint);\n}\n",
+   "sha256": "4443add828cf60bf2b000f186783ca98555cd379b66a2b6162251e1e0816d9b0"
+  },
+  {
+   "id": "probe/identifiers/local-image2D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image2D = s * 2.0; o = show(image2D);\n}\n",
+   "sha256": "7228970985091918e08db87f808862409b927cd6b8b8be586ed60a7c1da458b3"
+  },
+  {
+   "id": "probe/identifiers/local-iimage2D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float iimage2D = s * 2.0; o = show(iimage2D);\n}\n",
+   "sha256": "14a50135f1bbaec9a5bc044c5ac82d2867f3984681d4074d9c0ebeccd39989cc"
+  },
+  {
+   "id": "probe/identifiers/local-sampler1D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler1D = s * 2.0; o = show(sampler1D);\n}\n",
+   "sha256": "3b3260ea0641fbe57d143eed43fe8a671da3cb9937839cd7c9f9d129af39596f"
+  },
+  {
+   "id": "probe/identifiers/local-samplerBuffer",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float samplerBuffer = s * 2.0; o = show(samplerBuffer);\n}\n",
+   "sha256": "e25bebc3d43d48783d2e02914642563f0eed4da006a9d2ee7aed954959be85b2"
+  },
+  {
+   "id": "probe/identifiers/local-sampler2DRect",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler2DRect = s * 2.0; o = show(sampler2DRect);\n}\n",
+   "sha256": "0edb6bd9875a8f94e16a3a5456bbe2d8b0109cb5c822aee367c74c2306d8c30c"
+  },
+  {
+   "id": "probe/identifiers/local-sampler2DMS",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler2DMS = s * 2.0; o = show(sampler2DMS);\n}\n",
+   "sha256": "7a8f9d61f25298d287f1c7b0e9fa6c6264b8ebab7f1cc627ab4ad1db6181a055"
+  },
+  {
+   "id": "probe/identifiers/local-dvec2",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dvec2 = s * 2.0; o = show(dvec2);\n}\n",
+   "sha256": "c8fb997c5d694469ada1da691e90dc8ea56e942f9356ff184a698a5fe76e91df"
+  },
+  {
+   "id": "probe/identifiers/local-dmat2",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dmat2 = s * 2.0; o = show(dmat2);\n}\n",
+   "sha256": "1ed6a2f6f297b0a4546d3d4b22a6fc0f8888e2c19664788b6f6d689c33f84d28"
+  },
+  {
+   "id": "probe/identifiers/local-double",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float double = s * 2.0; o = show(double);\n}\n",
+   "sha256": "346cbae099ad2a621354363e357a73b84dde82d681b9af150715ff8ea4a653a5"
+  },
+  {
+   "id": "probe/identifiers/local-half",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float half = s * 2.0; o = show(half);\n}\n",
+   "sha256": "03326a56d60497c1672166a26565c6f1c71a532f22869a8b2623a5749db26edc"
+  },
+  {
+   "id": "probe/identifiers/local-fixed",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float fixed = s * 2.0; o = show(fixed);\n}\n",
+   "sha256": "43470fdf39f352aa4a51b3334e50957fc6a466422492a25e11fd90b0e43eb512"
+  },
+  {
+   "id": "probe/identifiers/local-long",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float long = s * 2.0; o = show(long);\n}\n",
+   "sha256": "9b15cc6318b085b55cd836ee2424c2451eeb37746e7801fc3d2de147463ff9f5"
+  },
+  {
+   "id": "probe/identifiers/local-short",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float short = s * 2.0; o = show(short);\n}\n",
+   "sha256": "fc67ad1cea182f1ba40362e1c78eeb34e360bbfc5cc0f33865b71f286f498c7f"
+  },
+  {
+   "id": "probe/identifiers/local-unsigned",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float unsigned = s * 2.0; o = show(unsigned);\n}\n",
+   "sha256": "b61ea8f293efec8ed49b90943043d3ace33f44c01e8b6e6831345a99c374ef74"
+  },
+  {
+   "id": "probe/identifiers/local-superp",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float superp = s * 2.0; o = show(superp);\n}\n",
+   "sha256": "6c57bca265084f26e9615358afc26cb40c72de79483e2931534051e2dd08cb3c"
+  },
+  {
+   "id": "probe/identifiers/local-common",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float common = s * 2.0; o = show(common);\n}\n",
+   "sha256": "2e2388c48c7195f48b00c12cd2b945602b3a0cd48d4d727a000b037c2db79607"
+  },
+  {
+   "id": "probe/identifiers/local-partition",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float partition = s * 2.0; o = show(partition);\n}\n",
+   "sha256": "97e5f97c709417307bb7602d0d6732f3ead14babf18abe4d1ec51f8cb1d17b2a"
+  },
+  {
+   "id": "probe/identifiers/local-active",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float active = s * 2.0; o = show(active);\n}\n",
+   "sha256": "5336838a9b5cf60f3d009557c5301e0d9c64e98a5fe1541de175b464bee07a37"
+  },
+  {
+   "id": "probe/identifiers/local-goto",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float goto = s * 2.0; o = show(goto);\n}\n",
+   "sha256": "fb8fc86142dbac8174963a6284d4455a7d18ad5f39ed43c5c4be8c232c5fe5c6"
+  },
+  {
+   "id": "probe/identifiers/local-inline",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float inline = s * 2.0; o = show(inline);\n}\n",
+   "sha256": "3dd9109d460844c9901eaf9fc376a4233c20ef1039505210ed268e5cdecfa178"
+  },
+  {
+   "id": "probe/identifiers/local-noinline",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float noinline = s * 2.0; o = show(noinline);\n}\n",
+   "sha256": "2d67bdd70c02424f2b18edbd69c9f8138f78d2db6537084a282af3aef278822f"
+  },
+  {
+   "id": "probe/identifiers/local-public",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float public = s * 2.0; o = show(public);\n}\n",
+   "sha256": "15b1c2217b4c6aeb979aa681196dc40903b11cd09c1fa0e11e937c21dc9a528b"
+  },
+  {
+   "id": "probe/identifiers/local-static",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float static = s * 2.0; o = show(static);\n}\n",
+   "sha256": "e06382a37618b162e72bdd8f6a0f65e5e846490e8c1369a3d48042ff871e55c2"
+  },
+  {
+   "id": "probe/identifiers/local-extern",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float extern = s * 2.0; o = show(extern);\n}\n",
+   "sha256": "c4ad5081d176745fe307635c9c60dee34d73e602d38750d0864641763c697a09"
+  },
+  {
+   "id": "probe/identifiers/local-external",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float external = s * 2.0; o = show(external);\n}\n",
+   "sha256": "707f78e848d2f4605a8b4211c5ebb6764bb5470176baeaa7564f3fa355e340f8"
+  },
+  {
+   "id": "probe/identifiers/local-interface",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float interface = s * 2.0; o = show(interface);\n}\n",
+   "sha256": "1869d13056031ff87e757f920d2d5398964280930c3780dfd98a31a233453ace"
+  },
+  {
+   "id": "probe/identifiers/local-class",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float class = s * 2.0; o = show(class);\n}\n",
+   "sha256": "139358fbc8fb2bf1124d6a333be8bf68f871ae53f4bda286e65f7456f56d05f3"
+  },
+  {
+   "id": "probe/identifiers/local-union",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float union = s * 2.0; o = show(union);\n}\n",
+   "sha256": "54763bf526f47c893cdf8d55d753f0e5760912c105ed8f2f2f7d7ac767c5ab13"
+  },
+  {
+   "id": "probe/identifiers/local-enum",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float enum = s * 2.0; o = show(enum);\n}\n",
+   "sha256": "008c8e7d82fd9e54e52ad844a918a032ee645f874d95e70aee18cc16ff15990a"
+  },
+  {
+   "id": "probe/identifiers/local-typedef",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float typedef = s * 2.0; o = show(typedef);\n}\n",
+   "sha256": "c409c2eae44195fa7e037a0d8ad29b98fd01fbbebd725dfc0e8fc4450d3d046a"
+  },
+  {
+   "id": "probe/identifiers/local-template",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float template = s * 2.0; o = show(template);\n}\n",
+   "sha256": "eb7c80c9629a18f6dd27694bc2a31228f67e72b4786a0a27a483ab96b4ca2eea"
+  },
+  {
+   "id": "probe/identifiers/local-this",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float this = s * 2.0; o = show(this);\n}\n",
+   "sha256": "712f670b956cb98430ccb48d6cb70b7376ad919ed573896806a1a23b5ec8d7c1"
+  },
+  {
+   "id": "probe/identifiers/local-packed",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float packed = s * 2.0; o = show(packed);\n}\n",
+   "sha256": "5119a91323d2940bc5706564be9206ecdbc2de489cf51934ca09c48fb09d074e"
+  },
+  {
+   "id": "probe/identifiers/local-asm",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float asm = s * 2.0; o = show(asm);\n}\n",
+   "sha256": "3c4d81819be79d07048f9a7805bc72776470aee4e61573e65447bce6a2852323"
+  },
+  {
+   "id": "probe/identifiers/local-sizeof",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sizeof = s * 2.0; o = show(sizeof);\n}\n",
+   "sha256": "4177eca96f6b6581df2d7a085f0510ba343b908816e4ee265071a88011088ee3"
+  },
+  {
+   "id": "probe/identifiers/local-cast",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float cast = s * 2.0; o = show(cast);\n}\n",
+   "sha256": "7a73e2ce8a96971a9a85f91a73032f7297c4869740f236a8851fbfe1e6041647"
+  },
+  {
+   "id": "probe/identifiers/local-namespace",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float namespace = s * 2.0; o = show(namespace);\n}\n",
+   "sha256": "83d1b86d5a177976f359eb66787c1b4da31d223da467ebcd0959caf77d4734a7"
+  },
+  {
+   "id": "probe/identifiers/local-using",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float using = s * 2.0; o = show(using);\n}\n",
+   "sha256": "cd42c5dd18f74e9764d3e3ef7083c0ea78c757669223b45b2fb0e009a7bc85b5"
+  },
+  {
+   "id": "probe/identifiers/local-hvec2",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float hvec2 = s * 2.0; o = show(hvec2);\n}\n",
+   "sha256": "061e8500d8a638399cc1577d05ec876a1019dc8ed73415f3d6dc76c7e23b3e32"
+  },
+  {
+   "id": "probe/identifiers/local-fvec2",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float fvec2 = s * 2.0; o = show(fvec2);\n}\n",
+   "sha256": "f68ae84b9106b08ad249c84c542d84c6d57171a433634cd450853e746c42797c"
+  },
+  {
+   "id": "probe/identifiers/local-texture",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float texture = s * 2.0; o = show(texture);\n}\n",
+   "sha256": "066b309977d212d6f21fad05e3df0a1ce2242ffaa18e50e81d35baa4de4cbe25"
+  },
+  {
+   "id": "probe/identifiers/local-noise",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float noise = s * 2.0; o = show(noise);\n}\n",
+   "sha256": "49716a2168a63f234054301af8194c878ed38d737a946ba5826945c7531ecf6f"
+  },
+  {
+   "id": "probe/identifiers/local-fma",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float fma = s * 2.0; o = show(fma);\n}\n",
+   "sha256": "e950497a7aec47f9c831aeca462677b0bf613386cf1e948927d357857523ddf8"
+  },
+  {
+   "id": "probe/identifiers/local-frexp",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float frexp = s * 2.0; o = show(frexp);\n}\n",
+   "sha256": "62d60b5c0d1b171df1cff4fecb76cdbb4ecc9a5ae6286ab750ae3b06a172cdbb"
+  },
+  {
+   "id": "probe/identifiers/local-ldexp",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float ldexp = s * 2.0; o = show(ldexp);\n}\n",
+   "sha256": "644f936d88a8f84aa3afc433fc78934886f7b3aa2335033b56df700e2260693d"
+  },
+  {
+   "id": "probe/identifiers/local-bitCount",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float bitCount = s * 2.0; o = show(bitCount);\n}\n",
+   "sha256": "3dad868fc9de103193be8dc63b1aa07143a26deaa3b016b6318ad83c52f2c955"
+  },
+  {
+   "id": "probe/identifiers/local-findMSB",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float findMSB = s * 2.0; o = show(findMSB);\n}\n",
+   "sha256": "c8700c1c3e0b01a9d9938bbb33849f2de78ce94720a67ed5ba2283a1db9e6a83"
+  },
+  {
+   "id": "probe/identifiers/local-textureGather",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float textureGather = s * 2.0; o = show(textureGather);\n}\n",
+   "sha256": "aba6d20cf82411a0d591172536ca3b0efde9e61623a39f656a290cc1514c4744"
+  },
+  {
+   "id": "probe/identifiers/local-barrier",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float barrier = s * 2.0; o = show(barrier);\n}\n",
+   "sha256": "12cc91a7cecceec42f98e7380c55f61cc13635c846fa66cdd3ab42987f95f05f"
+  },
+  {
+   "id": "probe/identifiers/local-imageLoad",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float imageLoad = s * 2.0; o = show(imageLoad);\n}\n",
+   "sha256": "68476b47eaafdb299b577505f0794535f758ca56fa75e2739ca22009774a5718"
+  },
+  {
+   "id": "probe/identifiers/local-texture2D",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float texture2D = s * 2.0; o = show(texture2D);\n}\n",
+   "sha256": "642591ee9b34db29b5d91838a7411a26594cee2fb2f43217668b7f425733b72a"
+  },
+  {
+   "id": "probe/identifiers/local-shadow2D",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float shadow2D = s * 2.0; o = show(shadow2D);\n}\n",
+   "sha256": "febde048e93d0f02600366e09088b889ac773026bb2c047bd1bf48108b85253f"
+  },
+  {
+   "id": "probe/identifiers/local-mod",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float mod = s * 2.0; o = show(mod);\n}\n",
+   "sha256": "a4a7a05521c32b517004bf1fcc29b94c9e04c2a320260623e6313e5ad77c73b8"
+  },
+  {
+   "id": "probe/identifiers/local-step",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float step = s * 2.0; o = show(step);\n}\n",
+   "sha256": "d73cc2132e461f1e967eb9c60f84f97d9be801da139c0da77a4afa21e79c25b9"
+  },
+  {
+   "id": "probe/identifiers/local-a__b",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a__b = s * 2.0; o = show(a__b);\n}\n",
+   "sha256": "56d23029bdb2fbd83351198ad171f17732956609793cc049667e1ec79f261163"
+  },
+  {
+   "id": "probe/identifiers/local-_x",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float _x = s * 2.0; o = show(_x);\n}\n",
+   "sha256": "6acec14086b7f7b06e4aa99c227012dbb51383061e4c1b24557c98657ae4c5e3"
+  },
+  {
+   "id": "probe/identifiers/local-main2",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float main2 = s * 2.0; o = show(main2);\n}\n",
+   "sha256": "51965dd181be3162fd4d2c8978ee0221cbc3b5bafa33743f4af8a23ff4c8533d"
+  },
+  {
+   "id": "probe/identifiers/local-gl_custom",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float gl_custom = s * 2.0; o = show(gl_custom);\n}\n",
+   "sha256": "8cbbf8643d7137f9eb1c043f85f39fb6ca1143f92cb7c06cef628ffe0bbd0d99"
+  },
+  {
+   "id": "probe/identifiers/local-webgl_x",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float webgl_x = s * 2.0; o = show(webgl_x);\n}\n",
+   "sha256": "80b15617fbbef7673b8ae40712f7a12d3758addd034d7b097fb897d318c7fec9"
+  },
+  {
+   "id": "probe/identifiers/local-_webgl_x",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float _webgl_x = s * 2.0; o = show(_webgl_x);\n}\n",
+   "sha256": "1c885c939c86fa69713fc8cc5329b1e3a74c31ee2af012380770811e9358fdf1"
+  },
+  {
+   "id": "probe/identifiers/local-ANGLE_x",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float ANGLE_x = s * 2.0; o = show(ANGLE_x);\n}\n",
+   "sha256": "95d6fbafea1a1f922e6e6cacdb5745ee95eebdddf635b27cf2c79633ae77aaf9"
+  },
+  {
+   "id": "probe/identifiers/local-_ANGLE",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float _ANGLE = s * 2.0; o = show(_ANGLE);\n}\n",
+   "sha256": "974ecd87c90f5843965ed4ff27430db01f9dabbdf128fcb7d02c8a769c9f0637"
+  },
+  {
+   "id": "probe/identifiers/local-pm_inverse",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float pm_inverse = s * 2.0; o = show(pm_inverse);\n}\n",
+   "sha256": "71b3e1659ccfc509d7db881fefe314d98f40248b7e5961e5ffa8c5b620b9fda9"
+  },
+  {
+   "id": "probe/identifiers/local-pm_modf",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float pm_modf = s * 2.0; o = show(pm_modf);\n}\n",
+   "sha256": "88a31d5bdbf7a7a4dc5bc6ec2f90bb581d0f4a498fbd9aa3b32130c5df03e189"
+  },
+  {
+   "id": "probe/identifiers/local-attribute",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float attribute = s * 2.0; o = show(attribute);\n}\n",
+   "sha256": "7abe56b88f9a2e733950252284308dc55d44f4e7b8adb3d98783605e5aa98d3b"
+  },
+  {
+   "id": "probe/identifiers/local-varying",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float varying = s * 2.0; o = show(varying);\n}\n",
+   "sha256": "49ea865198a1c162df57dc4df6feb6e8e0318c803f529fc4b1761f7af2ad1336"
+  },
+  {
+   "id": "probe/identifiers/local-hvec3",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float hvec3 = s * 2.0; o = show(hvec3);\n}\n",
+   "sha256": "e819c7bfd8a4c7ad31dbe163b78a0190614bd57795eee8274a620a6bfd5d3ad3"
+  },
+  {
+   "id": "probe/identifiers/local-dvec3",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dvec3 = s * 2.0; o = show(dvec3);\n}\n",
+   "sha256": "ddb4ea9c4dbaffad7d3130cc6e016d3a376d90cc8147266da9bad55f766d2049"
+  },
+  {
+   "id": "probe/identifiers/local-dvec4",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dvec4 = s * 2.0; o = show(dvec4);\n}\n",
+   "sha256": "1e6d23b92333893e5dd656220a5e7148c5f2d0aba81ec127608affde940eb799"
+  },
+  {
+   "id": "probe/identifiers/local-fvec4",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float fvec4 = s * 2.0; o = show(fvec4);\n}\n",
+   "sha256": "cd1bd2ef31c352bfa44f7f7a3d3eec93da7f6ad3275a55043749f73a29293140"
+  },
+  {
+   "id": "probe/identifiers/local-sampler3DRect",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler3DRect = s * 2.0; o = show(sampler3DRect);\n}\n",
+   "sha256": "9ba0ddb6adfaf9f1e97718fce5e5dd5e3d3346d50799b2521d0441bf671bbb19"
+  },
+  {
+   "id": "probe/identifiers/local-image1D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image1D = s * 2.0; o = show(image1D);\n}\n",
+   "sha256": "ea2b11aa3814306b8d78da852abb471760186d36167433733ee02d646c35e659"
+  },
+  {
+   "id": "probe/identifiers/local-image3D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image3D = s * 2.0; o = show(image3D);\n}\n",
+   "sha256": "1566803ee7ec6c01931f5e50d81e3a78a96d525da1aba73e5fc6455b90aec339"
+  },
+  {
+   "id": "probe/identifiers/local-imageCube",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float imageCube = s * 2.0; o = show(imageCube);\n}\n",
+   "sha256": "bac18e278630603b60677e59ad1ecf18e1e3ca0573c5df547e3382f1e1e29428"
+  },
+  {
+   "id": "probe/identifiers/local-uimage2D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float uimage2D = s * 2.0; o = show(uimage2D);\n}\n",
+   "sha256": "2c84210d21425b52bfc94580a66dc35e2f4d65d50780cbe7ef2faa1c937108c2"
+  },
+  {
+   "id": "probe/identifiers/local-image1DArray",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image1DArray = s * 2.0; o = show(image1DArray);\n}\n",
+   "sha256": "99bd07388ff65ad4117c13cb798a014fbd2424bd43c416af88f12c4f3c130fd8"
+  },
+  {
+   "id": "probe/identifiers/local-image2DArray",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image2DArray = s * 2.0; o = show(image2DArray);\n}\n",
+   "sha256": "c88449acbac14b2bca64b36c1718d65742203ecdb90a4b8c1ec7d8017da16a2b"
+  },
+  {
+   "id": "probe/identifiers/local-imageBuffer",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float imageBuffer = s * 2.0; o = show(imageBuffer);\n}\n",
+   "sha256": "43de3f6ee64ba07ca47cf2935a159eca71b8a5e5c287a2dd65f8eade83ead710"
+  },
+  {
+   "id": "probe/identifiers/local-sampler1DShadow",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler1DShadow = s * 2.0; o = show(sampler1DShadow);\n}\n",
+   "sha256": "dae2502668e20f8751d82501884bb6267e2576e21fd98c8f03f4be28846fcfa7"
+  },
+  {
+   "id": "probe/identifiers/local-sampler1DArray",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler1DArray = s * 2.0; o = show(sampler1DArray);\n}\n",
+   "sha256": "5ebcffbb8677522d47178a3c94d447f4c65edb8addc1fcf19e76bc6ee361d9c5"
+  },
+  {
+   "id": "probe/identifiers/local-isampler1D",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float isampler1D = s * 2.0; o = show(isampler1D);\n}\n",
+   "sha256": "2f3e6bb5f27d2d3ce02c98b34b2dd450b05390b0a9e025b4bd4217a4caa63722"
+  },
+  {
+   "id": "probe/identifiers/local-usampler1DArray",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float usampler1DArray = s * 2.0; o = show(usampler1DArray);\n}\n",
+   "sha256": "8756af515cb7cb615182ff8999a058145c10015ccf293f5397bd747f2ee4b4e5"
+  },
+  {
+   "id": "probe/identifiers/local-sampler2DRectShadow",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler2DRectShadow = s * 2.0; o = show(sampler2DRectShadow);\n}\n",
+   "sha256": "9d8802a8bd43138c9352e132be02e2644422c9fdb7d6893a8a91f91a08c2523c"
+  },
+  {
+   "id": "probe/identifiers/local-isampler2DRect",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float isampler2DRect = s * 2.0; o = show(isampler2DRect);\n}\n",
+   "sha256": "1621f4fd7a6f6245c0a8e7f7a59fc53e1a689fec76a46c91ad824c7b456e2938"
+  },
+  {
+   "id": "probe/identifiers/local-isamplerBuffer",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float isamplerBuffer = s * 2.0; o = show(isamplerBuffer);\n}\n",
+   "sha256": "8d5850a48c2b8e81cf63a0bfb79a2fd98ffd13d3743e7d4f9f821f9188910ed3"
+  },
+  {
+   "id": "probe/identifiers/local-isampler2DMS",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float isampler2DMS = s * 2.0; o = show(isampler2DMS);\n}\n",
+   "sha256": "5eb30e30c66e7811e95279c8c135bafa4700a1fb4bcbf17112c95208e6245221"
+  },
+  {
+   "id": "probe/identifiers/local-sampler2DMSArray",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler2DMSArray = s * 2.0; o = show(sampler2DMSArray);\n}\n",
+   "sha256": "07f8c2c249d9970438cbad4c81bffbb5acceade7a94e98d43c87c3cd0f1d8e6d"
+  },
+  {
+   "id": "probe/identifiers/local-dmat3",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dmat3 = s * 2.0; o = show(dmat3);\n}\n",
+   "sha256": "51f3c9dd3c5768afe1839b03cd1107fcaec279abb548850a932942654d8d27e3"
+  },
+  {
+   "id": "probe/identifiers/local-dmat2x3",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float dmat2x3 = s * 2.0; o = show(dmat2x3);\n}\n",
+   "sha256": "90b488ab7f969394cac2a091172b6594f83b3165eebfefa464184d137fc29ff5"
+  },
+  {
+   "id": "probe/identifiers/local-samplerCubeArray",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float samplerCubeArray = s * 2.0; o = show(samplerCubeArray);\n}\n",
+   "sha256": "2596191e85b951686caf5aa0fe5f89442911bbbd60443fa70e8c759ddeae9178"
+  },
+  {
+   "id": "probe/identifiers/local-image2DMS",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float image2DMS = s * 2.0; o = show(image2DMS);\n}\n",
+   "sha256": "d82f98b0b7e5b6f59b756bd6a54550b14b7c6f6ddb82726251ff4fb980bdc09b"
+  },
+  {
+   "id": "probe/identifiers/local-sampler",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float sampler = s * 2.0; o = show(sampler);\n}\n",
+   "sha256": "35f8193afd095064d777be21c530c6c4a7c8d43cffc3c97246a5ed0b9e36ada3"
+  },
+  {
+   "id": "probe/identifiers/local-samplerShadow",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float samplerShadow = s * 2.0; o = show(samplerShadow);\n}\n",
+   "sha256": "a86cc2ec7bc356035bde0e45fed3c24efa524fa4002b413561b07b6eddf49d54"
+  },
+  {
+   "id": "probe/identifiers/local-texture3D",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float texture3D = s * 2.0; o = show(texture3D);\n}\n",
+   "sha256": "1433c890069a994b0131fd6187227b5b1dd335d62492aec11761f903565b33cc"
+  },
+  {
+   "id": "probe/identifiers/local-textureCube",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float textureCube = s * 2.0; o = show(textureCube);\n}\n",
+   "sha256": "cb23a493bbac1e8a94e2e87ba89217d3b1dd4ef7582c0b52162ee4cde030ca5b"
+  },
+  {
+   "id": "probe/identifiers/local-texture2DArray",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float texture2DArray = s * 2.0; o = show(texture2DArray);\n}\n",
+   "sha256": "00ee9f3877b4d5e946d4965a482300aa926f61f6de4ebabc6d0ee6bf099c1644"
+  },
+  {
+   "id": "probe/identifiers/local-itexture2D",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float itexture2D = s * 2.0; o = show(itexture2D);\n}\n",
+   "sha256": "9fcab745cbe80d8c5fd9e1c61e118702c6a9cad55b36fb82e3885d3244a48b82"
+  },
+  {
+   "id": "probe/identifiers/local-subpassInput",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float subpassInput = s * 2.0; o = show(subpassInput);\n}\n",
+   "sha256": "028b08e12f6e7c5c6f85b23bce465e716c28bd81c2c88f82ed6285e94c8c5337"
+  },
+  {
+   "id": "probe/identifiers/local-float16_t",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float float16_t = s * 2.0; o = show(float16_t);\n}\n",
+   "sha256": "c19319d0bc27134ee68a95c7beac7bd7437b9ccf00c9779d341599b40e57a4fa"
+  },
+  {
+   "id": "probe/identifiers/local-int64_t",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float int64_t = s * 2.0; o = show(int64_t);\n}\n",
+   "sha256": "2ac38bef9c24382d171ffccabf73fac2c36f5c15e10e9f348ac73509c6e5159c"
+  },
+  {
+   "id": "probe/identifiers/local-f16vec2",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float f16vec2 = s * 2.0; o = show(f16vec2);\n}\n",
+   "sha256": "dd2de2f7038f5971bf23596ed27cec667dad84e949a76c9d43670d476ee12979"
+  },
+  {
+   "id": "probe/identifiers/local-accelerationStructureEXT",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float accelerationStructureEXT = s * 2.0; o = show(accelerationStructureEXT);\n}\n",
+   "sha256": "50e44f8af73050a2652ff5c95324d979fa9f4e54fe5dab2205e74c9379225a10"
+  },
+  {
+   "id": "probe/identifiers/local-rayQueryEXT",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float rayQueryEXT = s * 2.0; o = show(rayQueryEXT);\n}\n",
+   "sha256": "67d075146a08279c1587d961641f9293107584273cf5036d15a32a9ae57dca66"
+  },
+  {
+   "id": "probe/identifiers/local-demote",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float demote = s * 2.0; o = show(demote);\n}\n",
+   "sha256": "4ffc57bfc7e601d7ae8e4d55ef9482265895d64b105d41db9dc48bb1fb0ff19b"
+  },
+  {
+   "id": "probe/identifiers/local-nonuniformEXT",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float nonuniformEXT = s * 2.0; o = show(nonuniformEXT);\n}\n",
+   "sha256": "b32e6066a733f70ea8892872f31c4f36000f6097888fb36616c3c50ef0e4d56f"
+  },
+  {
+   "id": "probe/identifiers/local-lowp_x",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float lowp_x = s * 2.0; o = show(lowp_x);\n}\n",
+   "sha256": "38eb70609b24b8242920c33670428041f4ed7c8e0c545f480e4a6df509376790"
+  },
+  {
+   "id": "probe/identifiers/local-highp",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float highp = s * 2.0; o = show(highp);\n}\n",
+   "sha256": "b94cd27358f4c5e585d8d0e889c110e3ebb8e14b9f928c96dba40f567c635795"
+  },
+  {
+   "id": "probe/identifiers/local-precision",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float precision = s * 2.0; o = show(precision);\n}\n",
+   "sha256": "d330b6023520900899649cfbcd7b985c0aaa80f0eaefcf6ce353253884d189b2"
+  },
+  {
+   "id": "probe/identifiers/local-invariant",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float invariant = s * 2.0; o = show(invariant);\n}\n",
+   "sha256": "7cdc99e4df01c43d2f731266068dee21989198e9b7cf9d6ac6e98d824f60e725"
+  },
+  {
+   "id": "probe/identifiers/local-flat",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float flat = s * 2.0; o = show(flat);\n}\n",
+   "sha256": "9c71217707d3786a65d2eb56ab7aeb10c3355c86314996eaca28aba5f8eca519"
+  },
+  {
+   "id": "probe/identifiers/local-centroid",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float centroid = s * 2.0; o = show(centroid);\n}\n",
+   "sha256": "bbf48492699f979d0d15df73b11214d9996fe1bf09d694a3fd0e359893376e42"
+  },
+  {
+   "id": "probe/identifiers/local-layout",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float layout = s * 2.0; o = show(layout);\n}\n",
+   "sha256": "ff8f67e09c107996cc012713d52366e70380f082605fc2eeb767d4eefbb8f223"
+  },
+  {
+   "id": "probe/identifiers/local-uniform",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float uniform = s * 2.0; o = show(uniform);\n}\n",
+   "sha256": "965e7c0804d82afb08ed3525afddc0c3713ae6a9c69f3cca4597b4e9382d834b"
+  },
+  {
+   "id": "probe/identifiers/local-switch",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float switch = s * 2.0; o = show(switch);\n}\n",
+   "sha256": "60d539ba46c1307713e648adc1c9b65e5e714e701c1a73e6efff59f40a9df8fc"
+  },
+  {
+   "id": "probe/identifiers/local-default",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float default = s * 2.0; o = show(default);\n}\n",
+   "sha256": "2349f8f4f281627acaf1d18e9e8ced52da9729d482518066b75021604a741350"
+  },
+  {
+   "id": "probe/identifiers/local-struct",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float struct = s * 2.0; o = show(struct);\n}\n",
+   "sha256": "b13ea429f1f5cd016cf7aeaf21259737f0a3af1469bb4f1ff6d8f10928806ff1"
+  },
+  {
+   "id": "probe/identifiers/user-function-fma",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat fma(float a, float b, float c){ return a * b + c; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(fma(s, 2.0, 1.0));\n}\n",
+   "sha256": "a9fc81a480388a9e3e7737d4a67fd2b04285ee9399e4b6630c48e191400f61f4"
+  },
+  {
+   "id": "probe/identifiers/user-function-noise",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat noise(vec2 x){ return fract(sin(dot(x, vec2(12.9898, 78.233))) * 43758.5453); }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(noise(v2));\n}\n",
+   "sha256": "0ccb397405f77557509ee816afd30d15f7c898b50e9685a629cc83bab2ce2dd2"
+  },
+  {
+   "id": "probe/identifiers/user-function-texture2D",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvec4 texture2D(sampler2D s, vec2 uv){ return texture(s, uv); }\n@SHOW@void main(){@PRELUDE_TEX@  o = texture2D(u_tex, v_uv);\n}\n",
+   "sha256": "c1c194de5baccb4728ea852876ff1092ebf95f2a11fb24bcc9984fe182b856ca"
+  },
+  {
+   "id": "probe/identifiers/define-texture2D-as-texture",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n#define texture2D texture\n@SHOW@void main(){@PRELUDE_TEX@  o = texture2D(u_tex, v_uv);\n}\n",
+   "sha256": "e0e82243154875a2c8228746f94b39ec47d9128d29f9ac31bb544bbb631c3299"
+  },
+  {
+   "id": "probe/identifiers/user-function-dFdxFine",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat dFdxFine(float x){ return x * 3.0; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(dFdxFine(s));\n}\n",
+   "sha256": "b6245ccd4098839836762b79a380ef4dc92f8c1ba65c0d1699ce9a7cba633a2f"
+  },
+  {
+   "id": "probe/identifiers/user-function-textureGather",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nvec4 textureGather(sampler2D s, vec2 uv){ return texture(s, uv).bgra; }\n@SHOW@void main(){@PRELUDE_TEX@  o = textureGather(u_tex, v_uv);\n}\n",
+   "sha256": "fc4854b0e9d4ed6fbd63465e6e9c259f2662521f39aa91914d9cf24cb35dd69c"
+  },
+  {
+   "id": "probe/identifiers/struct-field-keywords",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nstruct S { float shared; float buffer; float texture2D; };\n@SHOW@void main(){@PRELUDE_TEX@  S x; x.shared = s; x.buffer = s * 2.0; x.texture2D = 1.0; o = show(vec3(x.shared, x.buffer, x.texture2D));\n}\n",
+   "sha256": "1d4200e609fe708a13e7b635d854a638e9d3805475f973d2c2a06cbfed413f84"
+  },
+  {
+   "id": "probe/identifiers/redefine-builtin-sin",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat sin(float x){ return x; }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(sin(s));\n}\n",
+   "sha256": "925101fa16ed9186535dae473736c7be827a26f0286b55a9e8c452505f7fca09"
+  },
+  {
+   "id": "probe/identifiers/overload-builtin-sin",
+   "webgl": "refused",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\nfloat sin(int x){ return float(x); }\n@SHOW@void main(){@PRELUDE_TEX@  o = show(sin(i));\n}\n",
+   "sha256": "4186729856201f2581d31d7399298e12f5ad6d02617ab3130011865a4cbd209b"
+  },
+  {
+   "id": "probe/identifiers/long-identifier-1024",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = s; o = show(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);\n}\n",
+   "sha256": "19216154386758c9adfeac005d0953517bdfb4abbb435f587db8c510ec79996f"
+  },
+  {
+   "id": "probe/ub/int-division-by-zero",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = (show(i / (i - i)) + show(i2 / (i2 - i2)) + show(i3 / (i3 - i3)) + show(i4 / (i4 - i4))) * 0.25;\n}\n",
+   "sha256": "44556d434f092d91b68b640ac51f686f0d59f89c0edc7674f6d7dc578925bd90"
+  },
+  {
+   "id": "probe/ub/shift-by-32",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  o = show(ivec2(i << (31 + int(v_uv.x * 2.0)), 1 >> 33));\n}\n",
+   "sha256": "788fe87868183cce88ef958ac7ff05b01a181a06899753537b2516efe7504d6a"
+  },
+  {
+   "id": "probe/ub/out-of-bounds-dynamic-array",
+   "webgl": "drawn",
+   "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n@SHOW@void main(){@PRELUDE_TEX@  float a[4] = float[4](1.0, 2.0, 3.0, 4.0); o = show(a[int(v_uv.x * 8.0)]);\n}\n",
+   "sha256": "9f2f4a9d0a48a8ed3d97234c84933e7695b1c74785e3eff3e483fe1f13ec2eef"
+  }
+ ]
+}

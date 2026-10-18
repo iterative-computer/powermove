@@ -44,8 +44,9 @@ use std::time::{Duration, Instant};
 use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
-    ExportJob, JobError, MediaPaths, Progress, StillRouting, asset_records, encode_jpeg,
-    encode_png, plan_export, render_still, run_export_into, to_rgba8,
+    ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
+    encode_jpeg, encode_png, offline_media, plan_export, render_still, run_export_into, sink_for,
+    to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -56,8 +57,8 @@ use pm_protocol::host::{
 };
 use pm_protocol::priority::{
     AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AgentImageFormat, BlenderUse,
-    CancelJobs, ImagePayload, JobAccepted, JobSpec, JobState, JobStatus, JobsCancelled,
-    PriorityClass, SubmitJob,
+    CancelJobs, ExportFormat, ImagePayload, JobAccepted, JobPreview, JobSpec, JobState, JobStatus,
+    JobsCancelled, PriorityClass, SubmitJob,
 };
 use pm_protocol::slicing::{DeadlineSignal, SlicingPolicy};
 use pm_render::Renderer;
@@ -73,6 +74,9 @@ pub const AGENT_FRAMES_MAX_BYTES: usize = 14 << 20;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Unix mode of exported files (contract 14 invariant 4: owner-only).
 const OUTPUT_MODE: u32 = 0o600;
+/// How often a queued export waiting for offline media asks the host again
+/// (section 14.8: queued jobs wait).
+pub const OFFLINE_RECHECK: Duration = Duration::from_secs(2);
 
 /// Asks the engine's host thread to pump the engine (pm-node posts an empty
 /// action list through the utility process's threadsafe callback).
@@ -90,7 +94,7 @@ enum Work {
     Export {
         job: JobId,
         host: PortId,
-        submit: SubmitJob,
+        submit: Box<SubmitJob>,
         document: JobDocument,
         cancel: Arc<AtomicBool>,
     },
@@ -180,12 +184,29 @@ impl Shared {
     }
 
     fn status(&self, host: PortId, job: &JobId, update: impl FnOnce(&mut JobRecord)) {
+        self.status_with(host, job, None, None, update);
+    }
+
+    /// A status event, with a preview of the latest encoded frame or an
+    /// error that does not end the job (waiting for media).
+    fn status_with(
+        &self,
+        host: PortId,
+        job: &JobId,
+        preview: Option<JobPreview>,
+        note: Option<EngineError>,
+        update: impl FnOnce(&mut JobRecord),
+    ) {
         let mut st = self.lock();
         let Some(record) = st.jobs.get_mut(job) else {
             return;
         };
         update(record);
-        let status = status_of(job, record, None, None);
+        let mut status = status_of(job, record, None, None);
+        status.preview = preview;
+        if record.state == JobState::WaitingForMedia {
+            status.error = note;
+        }
         st.outbox.messages.push((host, status_event(status)));
         drop(st);
         (self.wake)();
@@ -275,6 +296,7 @@ fn status_of(
         progress: record.progress.clamp(0.0, 1.0),
         path: path.filter(|_| record.state == JobState::Done),
         error: error.filter(|_| record.state == JobState::Failed),
+        preview: None,
     }
 }
 
@@ -440,7 +462,7 @@ impl JobService for JobEngineService {
         let work = Work::Export {
             job: job.clone(),
             host,
-            submit,
+            submit: Box::new(submit),
             document,
             cancel,
         };
@@ -739,6 +761,8 @@ fn fail_work(shared: &Shared, work: Work, code: ErrorCode, message: &str) {
 /// The media of `document`'s assets, through host services. Paths are kept
 /// per session while the asset's record is unchanged: a relink or a replaced
 /// file changes the record, and the asset is resolved again.
+/// Assets without a path are asked again on every call (a waiting export sees
+/// a relink or a remounted volume).
 fn resolve_media(shared: &Shared, document: &JobDocument) -> MediaPaths {
     let session = document.session;
     let records = asset_records(&document.document);
@@ -973,6 +997,7 @@ fn destination(
     job: &JobId,
     session: SessionId,
     choice: &OutputChoice,
+    folder: bool,
 ) -> Result<Destination, EngineError> {
     let overwrite = match choice {
         OutputChoice::AgentAutomatic { .. } => OverwritePolicy::UniqueName,
@@ -985,6 +1010,7 @@ fn destination(
             job: job.clone(),
             choice: choice.clone(),
             overwrite,
+            folder,
         }),
         Some(session),
     )?;
@@ -1113,6 +1139,44 @@ fn run_job(
             h.finish()
         },
     };
+    // Offline media (section 14.8): agent exports go to the current exporter
+    // (`mediaOffline`), draft renders fail when even proxies are missing, and
+    // queued user jobs wait for the media.
+    let offline = offline_media(&document.document, composition.as_str(), &export.media);
+    if !offline.is_empty() {
+        let message = offline_message(&offline);
+        if submit.class == PriorityClass::AgentExport {
+            return finish(
+                JobState::Failed,
+                None,
+                Some(job_error(job, ErrorCode::MediaOffline, message)),
+            );
+        }
+        if settings.draft_from_proxies {
+            return finish(
+                JobState::Failed,
+                None,
+                Some(job_error(
+                    job,
+                    ErrorCode::MediaOffline,
+                    format!("{message} No proxies of them exist to export from."),
+                )),
+            );
+        }
+        match wait_for_media(
+            shared,
+            host,
+            job,
+            document,
+            composition.as_str(),
+            cancel,
+            &message,
+        ) {
+            Some(media) => export.media = Arc::new(media),
+            None => return finish(JobState::Cancelled, None, None),
+        }
+        shared.status(host, job, |r| r.state = JobState::Running);
+    }
     // Routing first: nothing is created for work the engine cannot do.
     let mut plan = match plan_export(&export) {
         Ok(plan) => plan,
@@ -1139,7 +1203,8 @@ fn run_job(
             )),
         );
     };
-    let dest = match destination(shared, job, session, choice) {
+    let folder = matches!(settings.format, ExportFormat::PngSequence { .. });
+    let dest = match destination(shared, job, session, choice, folder) {
         Ok(d) => d,
         Err(e) => {
             return finish(
@@ -1165,32 +1230,41 @@ fn run_job(
             Some(session),
         );
     };
-    let sink = match pm_export::mac::VideoToolboxSink::new(&plan.spec) {
+    let sink = match sink_for(&plan) {
         Ok(s) => s,
         Err(e) => {
             discard(shared);
-            return finish(
-                JobState::Failed,
-                None,
-                Some(engine_error(job, &JobError::Export(e))),
-            );
+            return finish(JobState::Failed, None, Some(engine_error(job, &e)));
         }
     };
     let mut last = Instant::now() - PROGRESS_EVERY;
     let mut last_fraction = 0.0;
     let mut progress = |p: Progress| {
         let f = p.fraction();
-        if f >= 1.0 || (last.elapsed() >= PROGRESS_EVERY && f - last_fraction >= 0.005) {
+        let preview = p.preview.as_ref().map(|v| JobPreview {
+            frame: v.frame.min(u64::from(u32::MAX)) as u32,
+            width: v.width,
+            height: v.height,
+            jpeg: pm_protocol::common::Bytes(v.jpeg.clone()),
+        });
+        if f >= 1.0
+            || preview.is_some()
+            || (last.elapsed() >= PROGRESS_EVERY && f - last_fraction >= 0.005)
+        {
             last = Instant::now();
             last_fraction = f;
-            shared.status(host, job, |r| r.progress = f.min(0.999));
+            shared.status_with(host, job, preview, None, |r| r.progress = f.min(0.999));
         }
     };
     let result = run_export_into(renderer, &export, plan, sink, gate, cancel, &mut progress);
     match result {
         Ok(delivered) => {
-            let bytes = std::fs::metadata(&dest.path).map(|m| m.len()).unwrap_or(0);
             let r = &delivered.report;
+            let bytes = if folder {
+                r.bytes
+            } else {
+                std::fs::metadata(&dest.path).map(|m| m.len()).unwrap_or(0)
+            };
             let verification = OutputVerification {
                 codec: r.codec.clone(),
                 frames: r.frames.min(u64::from(u32::MAX)) as u32,
@@ -1244,9 +1318,94 @@ fn run_job(
     }
 }
 
+/// "2 clips are offline: A001_C003.mov, Interview.wav." (appendix D).
+fn offline_message(offline: &[OfflineClip]) -> String {
+    let names: Vec<&str> = offline.iter().take(5).map(|c| c.name.as_str()).collect();
+    let more = offline.len().saturating_sub(names.len());
+    format!(
+        "{} {} offline: {}{}.",
+        offline.len(),
+        if offline.len() == 1 {
+            "clip is"
+        } else {
+            "clips are"
+        },
+        names.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    )
+}
+
+/// Waits until every clip the export needs is online again (section 14.8:
+/// "Waiting for media · 2 clips offline"), asking the host every
+/// [`OFFLINE_RECHECK`]. `None` when the job is cancelled while waiting.
+fn wait_for_media(
+    shared: &Shared,
+    host: PortId,
+    job: &JobId,
+    document: &JobDocument,
+    composition: &str,
+    cancel: &AtomicBool,
+    message: &str,
+) -> Option<MediaPaths> {
+    shared.status_with(
+        host,
+        job,
+        None,
+        Some(job_error(job, ErrorCode::MediaOffline, message)),
+        |r| r.state = JobState::WaitingForMedia,
+    );
+    let mut said = message.to_owned();
+    loop {
+        let deadline = Instant::now() + OFFLINE_RECHECK;
+        while Instant::now() < deadline {
+            if cancel.load(Ordering::Relaxed) || shared.lock().shutdown {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let media = resolve_media(shared, document);
+        let offline = offline_media(&document.document, composition, &media);
+        if offline.is_empty() {
+            return Some(media);
+        }
+        let now = offline_message(&offline);
+        if now != said {
+            shared.status_with(
+                host,
+                job,
+                None,
+                Some(job_error(job, ErrorCode::MediaOffline, now.clone())),
+                |_| {},
+            );
+            said = now;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_messages_name_the_clips() {
+        let clip = |n: &str| OfflineClip {
+            asset: n.into(),
+            name: n.into(),
+        };
+        assert_eq!(
+            offline_message(&[clip("A001_C003.mov")]),
+            "1 clip is offline: A001_C003.mov."
+        );
+        let many: Vec<_> = (0..7).map(|i| clip(&format!("c{i}.mov"))).collect();
+        assert_eq!(
+            offline_message(&many),
+            "7 clips are offline: c0.mov, c1.mov, c2.mov, c3.mov, c4.mov and 2 more."
+        );
+    }
 
     fn record(state: JobState) -> JobRecord {
         JobRecord {

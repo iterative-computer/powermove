@@ -26,7 +26,7 @@ mod support;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_render::parity::{bar_3d, dilate, msaa_edges};
-use pm_render::{RenderRequest, Renderer, unsupported_with_media};
+use pm_render::{RenderRequest, Renderer, builtin_definitions, unsupported_with_definitions};
 use support::*;
 
 /// `render/still-*` projects and whether the renderer draws them.
@@ -54,6 +54,72 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", false),
 ];
 
+/// The effects whose corpus frames are listed apart rather than failed:
+/// the part of `pm_render::effects::WEBGL_UNSTABLE` the app corpus has
+/// shown departing (Posterize's one-level boundary flips). Levels and Color
+/// are unstable at the shader level only; a corpus frame of theirs that
+/// departs fails.
+const CORPUS_UNSTABLE: &[&str] = &["posterize"];
+
+/// Whether any effect in the document is in [`CORPUS_UNSTABLE`].
+fn webgl_unstable(document: &pm_model::Document) -> bool {
+    fn walk(n: &pm_model::Node) -> bool {
+        match n.kind() {
+            pm_model::NodeKind::Object(map) => {
+                let unstable_fx = map.iter().any(|(k, v)| {
+                    k.to_string_lossy() == "fx"
+                        && matches!(v.kind(), pm_model::NodeKind::Array(items) if items.iter().any(|e| {
+                            e.get("type").is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s)
+                                if CORPUS_UNSTABLE.contains(&s.to_string_lossy().as_str())))
+                        }))
+                });
+                unstable_fx || map.iter().any(|(_, v)| walk(v))
+            }
+            pm_model::NodeKind::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    document.root().is_some_and(walk)
+}
+
+/// Pixels whose every channel is within 1 CV (float values, 8-bit scale).
+fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
+    let pixels = a.len() / 4;
+    let within = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .filter(|(x, y)| {
+            x.iter()
+                .zip(y.iter())
+                .all(|(p, q)| ((p - q).abs() * 255.0) <= 1.0 + 1e-3)
+        })
+        .count();
+    within as f64 / pixels.max(1) as f64
+}
+
+/// Frames where today's renderer departs from the exact composite and the
+/// engine does not follow (docs/engine/composite.md, "Today's composite
+/// drift"; proposed appendix A item): `FRAG_COMPOSITE` runs over the whole
+/// frame for every blend layer and sends every pixel through unpremultiply
+/// and re-premultiply, so on a translucent stack the half-float target loses
+/// up to a few code values over many blend layers. The engine passes pixels
+/// outside the layer through exactly. Bounds as measured on the capture
+/// (largest transparent-float and opaque differences, in CV); the rest of the
+/// class still applies.
+const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 5.0, 5)];
+
+/// Frames outside the render class by a measured, explained residual:
+/// (project, most pixels off by more than 1, largest difference). A frame
+/// within its pin is listed as known instead of failed; one beyond it fails.
+///
+/// - `composition/metadata`: the radius-24 rectangle's Canvas2D raster has
+///   two pixels where one of Chromium's four MSAA samples falls on the other
+///   side of a tessellated arc edge (0.15/256 px from it); the compat level 1
+///   emulation reproduces the raster otherwise exactly
+///   (docs/engine/vector.md, "Residuals"; `shape-corpus-rect-r24-s1` in
+///   pm-vector's Canvas2D parity test).
+const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[("composition/metadata", 6, 43)];
+
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -66,8 +132,16 @@ fn corpus_render_parity() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    // The built-in effects and transitions as the kernel snapshots them
+    // (the captures load only built-in and missing definitions).
+    renderer
+        .set_definitions(&builtin_definitions())
+        .expect("built-in definitions");
     let mut compared = 0;
     let mut failed = Vec::new();
+    // Frames of projects using a WebGL-unstable definition that fail only
+    // at isolated pixels (amendment 9; judged by review, listed apart).
+    let mut unstable: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = std::collections::BTreeMap::new();
     for (capture, dir) in captures
@@ -90,7 +164,12 @@ fn corpus_render_parity() {
             skipped.push((p.name.clone(), "text class: tests/text_corpus.rs".into()));
             continue;
         }
-        let issues = unsupported_with_media(&p.document, &p.composition, &p.resolver);
+        let issues = unsupported_with_definitions(
+            &p.document,
+            &p.composition,
+            Some(&p.resolver),
+            renderer.effects(),
+        );
         seen.insert(p.name.clone(), issues.is_empty());
         if !issues.is_empty() {
             let mut reasons: Vec<String> = issues.iter().map(|u| u.feature.to_string()).collect();
@@ -160,7 +239,10 @@ fn corpus_render_parity() {
             continue;
         }
         for s in &p.samples {
-            let request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            // The capture's motion blur: 16 samples opaque, 20 transparent.
+            let mut request =
+                RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,
                 &p.composition,
@@ -206,7 +288,7 @@ fn corpus_render_parity() {
             }
             // 3D class: the 3D pixels and MSAA edges, measured on our renders.
             let three_d = if support::has_3d_objects(&p.document) {
-                let mut with_ids = request;
+                let mut with_ids = request.clone();
                 with_ids.depth_id = true;
                 let ids = renderer
                     .render(
@@ -251,6 +333,7 @@ fn corpus_render_parity() {
             if let Some(float) = &s.float {
                 let mut request = request;
                 request.background = false;
+                request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
                 let frame = renderer
                     .render(
                         &p.document,
@@ -283,8 +366,18 @@ fn corpus_render_parity() {
                     ))
                 );
                 eprintln!("{line}");
-                if max > 1.0 || bar.is_some_and(|b| !b.pass()) {
-                    failed.push(line);
+                let drift = COMPOSITE_DRIFT.iter().find(|d| d.0 == p.name);
+                let bound = drift.map_or(1.0, |d| d.1);
+                if max > bound || bar.as_ref().is_some_and(|b| !b.pass()) {
+                    if bar.is_none()
+                        && drift.is_none()
+                        && webgl_unstable(&p.document)
+                        && float_fraction_within_one(&ours, &reference) >= 0.999
+                    {
+                        unstable.push(line);
+                    } else {
+                        failed.push(line);
+                    }
                 }
             }
             let (d, bar) = match &three_d {
@@ -316,7 +409,25 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            if !d.passes() || bar.is_some_and(|b| !b.pass()) {
+            let drift_max = COMPOSITE_DRIFT.iter().find(|x| x.0 == p.name).map(|x| x.2);
+            let class = match drift_max {
+                Some(m) => d.fraction_within_one() >= 0.999 && d.max <= m,
+                None => d.passes(),
+            };
+            let known = KNOWN_RESIDUALS.iter().any(|&(name, pixels, max)| {
+                p.name == name && bar.is_none() && d.pixels - d.within_one <= pixels && d.max <= max
+            });
+            if known && !class {
+                eprintln!("  known residual: {}", p.name);
+            } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
+                if bar.is_none()
+                    && drift_max.is_none()
+                    && webgl_unstable(&p.document)
+                    && d.fraction_within_one() >= 0.999
+                {
+                    unstable.push(line);
+                    continue;
+                }
                 failed.push(line);
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();
@@ -330,6 +441,13 @@ fn corpus_render_parity() {
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
+    }
+    eprintln!(
+        "\nWebGL-unstable class (amendment 9, judged by review): {} frames within 1 CV for 99.9% of pixels, over the maximum at isolated pixels",
+        unstable.len()
+    );
+    for u in &unstable {
+        eprintln!("  UNSTABLE {u}");
     }
     eprintln!("\ncompared {compared} frames; {} failed", failed.len());
     for f in &failed {

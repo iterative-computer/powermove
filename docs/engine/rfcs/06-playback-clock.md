@@ -23,6 +23,7 @@ from the renderer are notifications; the clock samples are the answer.
 | `TransportCommand` | Play at a rate, pause, seek (exact or scrub), step by whole frames, set the loop range, play around the current frame, audio scrub on or off |
 | `SeekMode` | Exact (original quality as soon as it decodes) or scrub (nearest fast frame, bypassing the jitter buffer) |
 | `JKL_RATES` | 1× and 2×, forward and reverse |
+| `AudioMessage` | One session-bound `audio` event between the renderer and the interactive engine: `monitor` (the mixer's monitor solo, renderer → engine), `levels` (`AudioLevels`: peak and RMS per bus channel of each strip and the master, with the media time heard; engine → renderer about 30 a second while playing, once silent when it stops), `peaksWanted` (renderer → engine) and `peaks` (`AudioPeaks`: an asset's 100-a-second envelope or why there is none) |
 | `HostMicros` (contract 9) | A monotonic host instant in microseconds shared by every process on the machine: `mach_absolute_time` converted to µs on macOS, `QueryPerformanceCounter` on Windows, `CLOCK_MONOTONIC` on Linux |
 
 ## Invariants
@@ -60,6 +61,27 @@ from the renderer are notifications; the clock samples are the answer.
 6. **Presentation** (section 15): the viewer presents the frame whose PTS
    interval contains the predicted display time, computed from the clock
    and the display link, not the rAF callback time.
+
+## Phase 3b decisions (Audio lane, 2026-10-16)
+
+- **J/K/L.** `Play { rate }` takes the four `JKL_RATES`; other rates are refused
+  (faster shuttles are after cutover). A new rate while playing is a discontinuity: a
+  new epoch from the media heard. Non-1× runs publish `Shuttling` samples at their rate
+  (−2/1, −1/1, 2/1); invariant 1 already covers negative rates. 2× keeps the mix's pitch
+  (one time stretch on the master); reverse plays the mix backwards (reverse audio).
+  Reverse runs stop after media 0 and wrap inside the loop from its start to its end
+  (invariant 1 wraps any line that carries a range, whatever the sign of its rate).
+- **Play around.** `PlayAround { pre_roll, post_roll }` is a 1× run from `pre_roll`
+  before the current media time to `post_roll` after it, carrying no loop range; when it
+  ends the clock stops back on the media time it started around.
+- **Open question 2 (scrub audio): decided.** Scrub audio rides on `Shuttling` samples:
+  with `AudioScrub { enabled: true }`, a scrub seek or a step while stopped plays a grain
+  (one frame or 60 ms, 4 ms fades) on a `Shuttling` line from the target, then a
+  stopped sample on it. Consumers that follow a stopped line ignore grain samples (the
+  viewer does not move).
+- **Audio panels.** `AudioMessage` (above) joins this contract; it is session-bound and
+  validated (`AudioMessage::validate`: finite non-negative levels per channel, at most
+  4,096 strips, at most 3.6 million peaks).
 
 ## Versioning
 

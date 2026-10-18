@@ -2,9 +2,12 @@ import { animationProjects } from './animation';
 import { parseRender3D } from '../catalog';
 import type { CorpusProject } from './common';
 import { compositingProjects } from './compositing';
+import { compositeProjects } from './composite';
 import { effectProjects } from './effects';
 import { layerProjects } from './layers';
+import { motionProjects } from './motion';
 import { renderProjects } from './render';
+import { renderEffectProjects } from './render-effects';
 import { shapeProjects } from './shapes';
 import { spaceProjects } from './space';
 import { textProjects } from './text';
@@ -16,7 +19,7 @@ export type { CorpusProject } from './common';
 export function allProjects(): CorpusProject[] {
   const projects = [
     ...layerProjects(), ...shapeProjects(), ...textProjects(), ...animationProjects(),
-    ...compositingProjects(), ...effectProjects(), ...timeProjects(), ...spaceProjects(), ...renderProjects(),
+    ...compositingProjects(), ...effectProjects(), ...timeProjects(), ...spaceProjects(), ...renderProjects(), ...renderEffectProjects(), ...compositeProjects(), ...motionProjects(),
   ];
   const ids = new Set<string>();
   for (const item of projects) {

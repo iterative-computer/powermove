@@ -12,8 +12,10 @@ import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWE
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE } from './install';
-import { DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
+import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
+import { createEngineDefinitions } from '../kernel/engine-definitions';
+import { createKernel } from '../kernel/registries';
 
 /** A port pair whose far end is a scripted engine. */
 class FakePort implements PortLike {
@@ -152,6 +154,123 @@ describe('the engine connection', () => {
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
+    // A frame of the routed revision or older, still in flight, is stale: it
+    // neither shows nor brings the engine back; a newer one does.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 6 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy']);
+    expect(messages).toEqual(['frame', 'routed']);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 7 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine']);
+    expect(messages).toEqual(['frame', 'routed', 'frame']);
+  });
+
+  it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {
+    const pushes: Array<{ generation: number; full: boolean; ids: string[] }> = [];
+    let refuseNext = false;
+    const base = engine();
+    const port = new FakePort((message, p) => {
+      const m = message.message;
+      if (m.kind === 'request' && (m.body as Request).type === 'pushDefinitions') {
+        const body = m.body as unknown as { generation: number; full: boolean; upserts: Array<{ id: string }> };
+        pushes.push({ generation: body.generation, full: body.full, ids: body.upserts.map((u) => u.id) });
+        const refuse = refuseNext;
+        refuseNext = false;
+        queueMicrotask(() =>
+          p.deliver(
+            refuse
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'gap', retry: { kind: 'afterResync' }, detail: null } } as never)
+              : envelope({ kind: 'response', id: m.id, body: { type: 'definitionsApplied', generation: body.generation, failures: body.upserts.some((u) => u.id === 'broken') ? [{ code: 'shaderCompile', scope: { kind: 'definition', definition: 'broken' }, message: 'The shader of broken does not compile.', retry: { kind: 'afterUserAction' }, detail: { kind: 'shaderCompile', diagnostics: [{ line: 2, column: null, message: 'syntax error' }] } }] : [] } } as never, 5)
+          )
+        );
+        return;
+      }
+      (base as unknown as { reply: (m: Envelope, p: FakePort) => void }).reply(message, p);
+    });
+    const { connection } = await connected(port);
+    const kernel = createKernel();
+    const PM: any = { GLSL_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', TRANSITION_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', SHADER_HEADER: '#version 300 es', proj: { layers: [], comps: {} }, UIState: { setShaderMeta: () => {} } };
+    kernel.registerEffect('local', { id: 'glow2', label: 'Glow', group: 'Light', params: [], frag: 'o = vec4(1.0);' });
+    const definitions = createEngineDefinitions(PM, kernel);
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} }, definitions: () => definitions });
+    await session.start();
+    await flush();
+    // The full update went before the document.
+    const order = port.sent.flatMap((e) => (e.message.kind === 'request' ? [(e.message.body as { type: string }).type] : []));
+    expect(order.indexOf('pushDefinitions')).toBeLessThan(order.indexOf('resync'));
+    expect(pushes).toEqual([{ generation: 1, full: true, ids: ['glow2'] }]);
+    // A registration is a delta; its compile failure comes back as a compile error.
+    kernel.registerEffect('local', { id: 'broken', label: 'Broken', group: 'X', params: [], frag: 'o = ;' });
+    await flush();
+    expect(pushes.at(-1)).toEqual({ generation: 2, full: false, ids: ['broken'] });
+    expect(definitions.meta.compileError('fx:broken')).toBe('The shader of broken does not compile.\nline 2: syntax error');
+    // A refused delta (an engine restart lost the generation): the next update is full.
+    refuseNext = true;
+    kernel.registerEffect('local', { id: 'third', label: 'Third', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    await flush();
+    expect(pushes.at(-2)).toEqual({ generation: 3, full: false, ids: ['third'] });
+    expect(pushes.at(-1)).toMatchObject({ generation: 4, full: true });
+    expect(pushes.at(-1)!.ids.sort()).toEqual(['broken', 'glow2', 'third']);
+    // Failure events reach the shader meta.
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 9, error: { code: 'watchdogTimeout', scope: { kind: 'effect', layer: 'L', effect: 'f', definition: 'glow2' }, message: 'glow2 took 300 ms.', retry: { kind: 'afterUserAction' }, detail: null } } } as never, 5));
+    expect(definitions.meta.compileError('fx:glow2')).toBeNull(); // no layer L in the document: ignored
+    session.close();
+    kernel.registerEffect('local', { id: 'late', label: 'Late', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    expect(pushes.at(-1)!.ids).not.toContain('late');
+  });
+
+  it('backs off from an engine that keeps refusing definitions, then waits for the next registration', async () => {
+    const pushes: Array<{ at: number; full: boolean }> = [];
+    let refuse = true;
+    const base = engine();
+    const port = new FakePort((message, p) => {
+      const m = message.message;
+      if (m.kind === 'request' && (m.body as Request).type === 'pushDefinitions') {
+        const body = m.body as unknown as { generation: number; full: boolean };
+        pushes.push({ at: Date.now(), full: body.full });
+        const refused = refuse;
+        queueMicrotask(() =>
+          p.deliver(
+            refused
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'bad snapshot', retry: { kind: 'afterResync' }, detail: null } } as never)
+              : envelope({ kind: 'response', id: m.id, body: { type: 'definitionsApplied', generation: body.generation, failures: [] } } as never, 5)
+          )
+        );
+        return;
+      }
+      (base as unknown as { reply: (m: Envelope, p: FakePort) => void }).reply(message, p);
+    });
+    const { connection } = await connected(port);
+    const kernel = createKernel();
+    const PM: any = { GLSL_PRE: '#version 300 es\nprecision highp float;\nout vec4 o;', TRANSITION_PRE: '', SHADER_HEADER: '', proj: { layers: [], comps: {} } };
+    kernel.registerEffect('local', { id: 'glow2', label: 'Glow', group: 'Light', params: [], frag: 'o = vec4(1.0);' });
+    const definitions = createEngineDefinitions(PM, kernel);
+    const logs: string[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: (_l, m) => logs.push(m), handlers: { message: () => {}, closed: () => {} }, definitions: () => definitions, definitionsRetryMs: 4 });
+    expect(definitions.sessionCount()).toBe(0);
+    await session.start();
+    expect(definitions.sessionCount()).toBe(1);
+    // The first push, an immediate full retry, then DEFINITIONS_RETRIES - 1
+    // retries backing off from 4 ms: 4, 8, 16, 32, 64 ms.
+    await vi.waitFor(() => expect(logs.some((l) => l.includes('times in a row'))).toBe(true), { timeout: 2000 });
+    const settled = pushes.length;
+    expect(settled).toBe(1 + DEFINITIONS_RETRIES);
+    expect(pushes.every((p) => p.full)).toBe(true);
+    const gaps = pushes.slice(2).map((p, i) => p.at - pushes[i + 1]!.at);
+    gaps.forEach((gap, i) => expect(gap).toBeGreaterThanOrEqual(4 * 2 ** i - 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(pushes.length).toBe(settled); // no endless loop
+    // The next registration sends the whole set again.
+    refuse = false;
+    kernel.registerEffect('local', { id: 'third', label: 'Third', group: 'X', params: [], frag: 'o = vec4(0.0);' });
+    await flush();
+    await flush();
+    expect(pushes.length).toBe(settled + 1);
+    expect(pushes.at(-1)!.full).toBe(true);
+    // A closed session leaves the kernel's list.
+    session.close();
+    expect(definitions.sessionCount()).toBe(0);
   });
 
   it('resyncs after a revision gap, a load batch, and a stale failure', async () => {
@@ -225,6 +344,8 @@ describe('the transport driver', () => {
     driver.play(1.5);
     const commands = port.events('transport').map((e) => (e.message as { body: { command: string } }).body);
     expect(commands).toEqual([
+      // A session the driver becomes active on learns the audio scrub switch.
+      { type: 'transport', command: 'audioScrub', enabled: false },
       { type: 'transport', command: 'setLoop', range: { start: 0, end: 2 * TICKS_PER_SECOND } },
       { type: 'transport', command: 'seek', time: ticks(1.5), mode: 'exact' },
       { type: 'transport', command: 'play', rate: { num: 1, den: 1 } }
@@ -248,6 +369,45 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 4, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'masks', retry: { kind: 'never' }, detail: null } } } as never, 5));
     driver.refresh();
     expect(changes).toEqual([true, false]);
+  });
+
+  it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    driver.refresh();
+    driver.setAudioScrub(true);
+    driver.shuttle(4, -1);
+    const sent = () => port.events('transport').map((e) => (e.message as { body: Record<string, unknown> }).body);
+    expect(sent()).toEqual([
+      { type: 'transport', command: 'audioScrub', enabled: false },
+      { type: 'transport', command: 'audioScrub', enabled: true },
+      { type: 'transport', command: 'seek', time: ticks(4), mode: 'exact' },
+      { type: 'transport', command: 'play', rate: { num: -1, den: 1 } }
+    ]);
+    // Backwards at 2×: the playhead runs back two seconds a second.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 2, state: 'shuttling', hostTime: 1_000_000, mediaTime: ticks(4), rate: { num: -2, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.rate()).toBe(-2);
+    expect(driver.now(1500)!.time).toBeCloseTo(3, 9);
+    // A new rate while the line moves continues from what is heard: no seek.
+    const before = sent().length;
+    driver.shuttle(3, 2);
+    expect(sent().slice(before)).toEqual([{ type: 'transport', command: 'play', rate: { num: 2, den: 1 } }]);
+    driver.playAround(2.5, 2, 1);
+    expect(sent().slice(-2)).toEqual([
+      { type: 'transport', command: 'seek', time: ticks(2.5), mode: 'exact' },
+      { type: 'transport', command: 'playAround', preRoll: ticks(2), postRoll: ticks(1) }
+    ]);
+    // The play around's run ends back on its frame.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 3, state: 'playing', hostTime: 2_000_000, mediaTime: ticks(0.5), rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.now(2100)!.time).toBeCloseTo(0.6, 9);
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 4, state: 'stopped', hostTime: 5_000_000, mediaTime: ticks(2.5), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(driver.now(5100)).toEqual({ time: 2.5, playing: false, ended: true });
+    expect(driver.rate()).toBe(0);
   });
 
   it('wraps a looping line as contract 6 does', () => {

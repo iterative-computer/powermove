@@ -22,6 +22,8 @@ pub struct FillUniform {
     pub stops: [[f32; 4]; 8],
     pub params: [f32; 4],
     pub view: [f32; 4],
+    /// x: 1 when the working encoding is linear light.
+    pub flags: [f32; 4],
 }
 
 /// `Params` in `source.wgsl`.
@@ -44,6 +46,15 @@ pub fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
 }
 
+/// How a pass blends its draws into the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassBlend {
+    /// Premultiplied source-over (`ONE, ONE_MINUS_SRC_ALPHA`).
+    Over,
+    /// Accumulation (`ONE, ONE`): motion-blur samples.
+    Additive,
+}
+
 /// Every 2D pipeline, for both working formats.
 pub struct Pipelines {
     pub quad_layout: wgpu::BindGroupLayout,
@@ -55,11 +66,17 @@ pub struct Pipelines {
     pub id_draw: wgpu::RenderPipeline,
     pub id_solid: wgpu::RenderPipeline,
     pub id_3d: wgpu::RenderPipeline,
+    /// The compositing passes (`crate::composite`).
+    pub(crate) ops: crate::composite::gpu::OpPipelines,
     draw: [wgpu::RenderPipeline; 3],
     solid: [wgpu::RenderPipeline; 3],
+    draw_add: [wgpu::RenderPipeline; 3],
+    solid_add: [wgpu::RenderPipeline; 3],
     background: [wgpu::RenderPipeline; 3],
     flip: [wgpu::RenderPipeline; 3],
     source: [wgpu::ComputePipeline; 2],
+    /// Level 2 sampling (`crate::sampling`).
+    pub(crate) resample: crate::sampling::gpu::Resampler,
 }
 
 /// Formats a 2D target can have: the two working formats, and 8-bit
@@ -81,7 +98,14 @@ impl Pipelines {
     pub fn new(device: &wgpu::Device) -> Pipelines {
         let composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render composite"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    pm_color::wgsl::COLOR,
+                    include_str!("shaders/composite.wgsl")
+                )
+                .into(),
+            ),
         });
         let uniform = |binding, visibility, dynamic, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
@@ -167,7 +191,22 @@ impl Pipelines {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipeline = |layout: &wgpu::PipelineLayout, entry: &str, format: wgpu::TextureFormat| {
+        let add = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let blended = |layout: &wgpu::PipelineLayout,
+                       entry: &str,
+                       format: wgpu::TextureFormat,
+                       blend: wgpu::BlendState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(layout),
@@ -190,7 +229,7 @@ impl Pipelines {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
-                        blend: Some(over),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -198,8 +237,13 @@ impl Pipelines {
                 cache: None,
             })
         };
+        let pipeline = |layout: &wgpu::PipelineLayout, entry: &str, format: wgpu::TextureFormat| {
+            blended(layout, entry, format, over)
+        };
         let draw = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw", f));
         let solid = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_solid", f));
+        let draw_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_draw", f, add));
+        let solid_add = TARGET_FORMATS.map(|f| blended(&solid_layout, "fs_solid", f, add));
         let background = TARGET_FORMATS.map(|f| pipeline(&background_layout, "fs_background", f));
         let flip_pipeline = |format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -361,7 +405,10 @@ impl Pipelines {
             &layout_with(&[&quad_layout, &texture_layout, &depth_layout]),
             "fs_id_3d",
         );
+        let resample = crate::sampling::gpu::Resampler::new(device, &quad_layout);
         Pipelines {
+            ops: crate::composite::gpu::OpPipelines::new(device),
+            resample,
             depth_layout,
             id_draw,
             id_solid,
@@ -373,6 +420,8 @@ impl Pipelines {
             linear,
             draw,
             solid,
+            draw_add,
+            solid_add,
             background,
             flip,
             source,
@@ -385,6 +434,30 @@ impl Pipelines {
 
     pub fn solid(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
         &self.solid[format_index(format)]
+    }
+
+    /// [`Self::draw`] with a pass's blending.
+    pub fn draw_with(
+        &self,
+        format: wgpu::TextureFormat,
+        blend: PassBlend,
+    ) -> &wgpu::RenderPipeline {
+        match blend {
+            PassBlend::Over => &self.draw[format_index(format)],
+            PassBlend::Additive => &self.draw_add[format_index(format)],
+        }
+    }
+
+    /// [`Self::solid`] with a pass's blending.
+    pub fn solid_with(
+        &self,
+        format: wgpu::TextureFormat,
+        blend: PassBlend,
+    ) -> &wgpu::RenderPipeline {
+        match blend {
+            PassBlend::Over => &self.solid[format_index(format)],
+            PassBlend::Additive => &self.solid_add[format_index(format)],
+        }
     }
 
     pub fn background(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
