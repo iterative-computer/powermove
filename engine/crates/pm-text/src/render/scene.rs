@@ -286,6 +286,8 @@ impl Painter<'_> {
         let mut images = Vec::new();
         // Platform masks of this call, at whole device pixels.
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>)> = Vec::new();
+        // Glyphs drawn as multisampled paths (sample counts per pixel).
+        let mut msaa_glyphs: Vec<(i64, i64, usize, usize, Vec<u8>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -392,6 +394,19 @@ impl Painter<'_> {
                     continue;
                 };
                 let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // Beyond the atlas, the GPU canvas draws a glyph as its path,
+                // 4× multisampled, at its exact position.
+                if as_path && self.masks.is_some() && !run.synthetic_bold {
+                    // Flattening tolerance closest to the GPU's tessellation
+                    // on the `large` cases (0.03 to 0.2 px tried).
+                    let tol = 0.12;
+                    let (px, py) = (p.x, p.y);
+                    let t = Affine::translate((px, py)) * place.residual;
+                    if let Some((x0, y0, w, h, counts)) = msaa_coverage(&(t * &*bare.path), tol) {
+                        msaa_glyphs.push((x0, y0, w, h, counts));
+                    }
+                    continue;
+                }
                 // Synthesized bold keeps the outline path: Skia's fake bold
                 // (a stroke-and-fill path) is not reproduced exactly yet
                 // (docs/engine/text-render.md, "Gaps").
@@ -471,6 +486,36 @@ impl Painter<'_> {
             out.extend(mask_image(
                 &platform,
                 masks.preblend([color[0], color[1], color[2]]),
+                color,
+                opacity,
+                blur,
+            ));
+        }
+        if !msaa_glyphs.is_empty() {
+            // Coverage quarters as masks (a linear table), composited like
+            // the glyph masks.
+            let quarters: Vec<(i64, i64, Arc<GlyphMask>)> = msaa_glyphs
+                .into_iter()
+                .map(|(x0, y0, w, h, counts)| {
+                    (
+                        x0,
+                        y0,
+                        Arc::new(GlyphMask {
+                            width: w as u32,
+                            height: h as u32,
+                            left: 0,
+                            top: 0,
+                            coverage: counts
+                                .iter()
+                                .map(|&n| (u32::from(n) * 255 / 4) as u8)
+                                .collect(),
+                        }),
+                    )
+                })
+                .collect();
+            out.extend(mask_image(
+                &quarters,
+                std::array::from_fn(|i| i as u8),
                 color,
                 opacity,
                 blur,
@@ -748,6 +793,81 @@ pub fn fill_rounded_rect_msaa(
         dx * dx + dy * dy <= r * r
     };
     msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
+}
+
+/// 4× multisampled coverage of a device-space path (nonzero winding), as
+/// sample counts 0 to 4 per pixel over the path's whole-pixel bounds: one
+/// scanline per sample row of the standard pattern (each sample has its own
+/// row), crossings of the flattened path sorted along it.
+pub fn msaa_coverage(path: &BezPath, tolerance: f64) -> Option<(i64, i64, usize, usize, Vec<u8>)> {
+    let b = path.bounding_box();
+    if !(b.width() > 0.0 && b.height() > 0.0 && b.x0.is_finite() && b.y1.is_finite()) {
+        return None;
+    }
+    let (x0, y0) = (b.x0.floor() as i64, b.y0.floor() as i64);
+    let (x1, y1) = (b.x1.ceil() as i64, b.y1.ceil() as i64);
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    // Line segments of the flattened path, (x0, y0, x1, y1), closing
+    // every subpath.
+    let mut lines: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let (mut start, mut last) = (kurbo::Point::ZERO, kurbo::Point::ZERO);
+    kurbo::flatten(path.iter(), tolerance, |el| match el {
+        kurbo::PathEl::MoveTo(p) => {
+            if last != start {
+                lines.push((last.x, last.y, start.x, start.y));
+            }
+            start = p;
+            last = p;
+        }
+        kurbo::PathEl::LineTo(p) => {
+            lines.push((last.x, last.y, p.x, p.y));
+            last = p;
+        }
+        kurbo::PathEl::ClosePath => {
+            if last != start {
+                lines.push((last.x, last.y, start.x, start.y));
+            }
+            last = start;
+        }
+        _ => {}
+    });
+    if last != start {
+        lines.push((last.x, last.y, start.x, start.y));
+    }
+    let mut counts = vec![0u8; w * h];
+    let mut crossings: Vec<(f64, i32)> = Vec::new();
+    for py in 0..h {
+        for (sx, sy) in MSAA4 {
+            let y = (y0 + py as i64) as f64 + sy;
+            crossings.clear();
+            for &(ax, ay, bx, by) in &lines {
+                // Half-open in y, so a vertex is crossed once.
+                let (lo, hi, dir) = if ay < by { (ay, by, 1) } else { (by, ay, -1) };
+                if y >= lo && y < hi {
+                    let t = (y - ay) / (by - ay);
+                    crossings.push((ax + t * (bx - ax), dir));
+                }
+            }
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut winding = 0;
+            for pair in crossings.windows(2) {
+                winding += pair[0].1;
+                if winding == 0 {
+                    continue;
+                }
+                // Samples at x = px + sx inside [pair[0].0, pair[1].0).
+                let first = ((pair[0].0 - sx - x0 as f64).ceil()).max(0.0) as i64;
+                let last = ((pair[1].0 - sx - x0 as f64).ceil() as i64 - 1).min(w as i64 - 1);
+                for px in first..=last {
+                    counts[py * w + px as usize] += 1;
+                }
+            }
+        }
+    }
+    Some((x0, y0, w, h, counts))
 }
 
 fn msaa_item(
