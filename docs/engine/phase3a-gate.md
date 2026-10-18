@@ -214,7 +214,7 @@ frame of the corpus's own H.264 media (the motion capture's
 | FFV1 | 4:2:0 8-bit, center | FFmpeg | 3.310 (146 px, border) | 0.000 | 0.000 |
 | FFV1 | 4:2:0 8-bit, top-left | FFmpeg | 1.009 (15 px, border) | 0.000 | 0.000 |
 | VP9 lossless | 4:2:0 8-bit, left | FFmpeg | 1.009 (14 px, border) | 0.000 | 0.000 |
-| AV1 (SVT, CRF 10) | 4:2:0 8-bit, left | dav1d | 1.135 (19 px, border) | 0.000 | 0.000 |
+| AV1 (SVT, CRF 10) | 4:2:0 8-bit, left | VideoToolbox where the hardware decodes AV1, else dav1d | 1.135 (19 px, border) | 0.000 | 0.000 |
 | H.264 (VideoToolbox encoder) | 4:2:0 8-bit, left | VideoToolbox | 1.009 (14 px, border) | 0.000 | 0.000 |
 | HEVC Main 10 (VideoToolbox encoder) | 4:2:0 10-bit, left | VideoToolbox | 1.040 (8 px, border) | 0.000 | 0.000 |
 | `corpus-frames-24.mp4`, 96 frames | 4:2:0 8-bit, left | VideoToolbox | 23.167 (174 px) | 23.167 (174 px) | 0.000 |
@@ -228,9 +228,10 @@ What the rows show:
 
 - **The chroma filter and siting are exact.** Every source FFmpeg decodes the
   way the engine's decoder does, 4:2:0, 4:2:2, and 4:4:4 with left, center,
-  and top-left siting, through FFmpeg, dav1d, and VideoToolbox (H.264 and HEVC
-  decoding is bit-exact), is within 0.000 CV of the reference that applies the
-  engine's edge rule.
+  and top-left siting, through FFmpeg and VideoToolbox (and dav1d or
+  VideoToolbox for AV1; H.264, HEVC, and AV1 decoding is bit-exact), is within 0.000 CV of the f64 reference, and of the
+  zimg reference with the engine's edge rule wherever zimg does not clip (all
+  but 368 pixels of the corpus H.264 frames, next bullet).
 - **zimg's edge extension differs from the engine's** (up to 3.31 CV, only in
   the 2-pixel border; 0.000 inside): a reference construction choice, not an
   engine difference. Judged with the engine's edge rule.
@@ -247,8 +248,8 @@ What the rows show:
   samples over 1 code in 24 frames at 4:2:2; FFV1 at the same 4:2:2 10-bit is
   exact). Against FFmpeg's VideoToolbox hwaccel decode with the same zimg
   chain the engine is within 0.000 CV (4444: 0.006, with alpha 0.012). The
-  engine decodes ProRes with VideoToolbox only (`pm-media` `decode/mod.rs`,
-  amendment 6), so its ProRes 422 frames are 2 CV from an FFmpeg reference at
+  engine decodes ProRes with VideoToolbox only (`pm-media` `decode/mod.rs`
+  `backends`), so its ProRes 422 frames are 2 CV from an FFmpeg reference at
   saturated chroma edges.
 
 Result: the matrix, range, siting, filter, and edge rule pass, on sources that
