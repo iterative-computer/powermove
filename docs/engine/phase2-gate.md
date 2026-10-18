@@ -78,7 +78,7 @@ The gate does not pass as rerun. The Phase 1 gate does not pass either
 |---|---|---|---|
 | D4 | With Use New Engine on, an export started right after an import asks "1 clip is offline" and, answered Cancel (the hidden test window), returns `{ cancelled: true }`. Main's offline check (`engine/index.ts` `checkOffline`, section 14.8) asks the media store (`resolveAsset`) before the import's binding exists | 7 flag-on tests: `export-mp4.spec.ts:7`, `export-webm.spec.ts:8`, `import-animated-image.spec.ts:15` (GIF, APNG, WebP stills), `import-converted-formats.spec.ts:21` (TIFF, HEIC stills). A probe (the export-mp4 setup, main's message box recorded): exported at once, the box reads "1 clip is offline … tone.wav" and the result is cancelled; the same export 8 s after the import shows no box and returns `{ cancelled: false }` | Export and agents (delivery), Media |
 | D5 | With Use New Engine on, one of two images imported together (`PM.importFiles`, the synthetic project of `native-engine-tracer-measure.spec.ts`) never becomes resolvable for the engine: the viewer logs "Drawn by the current engine: media offline: synthetic image a.png; … b.png", then the same with one of them, and the composition stays on the current engine for the spec's 90 to 120 s | 2 of 2 runs of the spec, 7 test runs (the routing test, the silent A/V sync row, cold start, the page edit row in the second run). The frame-bridge harness builds the same project through its own path and reaches the engine | Media, tracer (engine connection) |
-| D6 | Layer drag on the engine path regressed after the perf lane: the frame's way from the handled move to its arrival on the page is p50 26.1 ms (17.8 of it before the engine starts rendering; the render takes 8.0 ms), against 14.5 ms in `perf.md`'s `perf7` run of the perf lane's branch | `tracer-drag-engine-500-idle-regate.json` (load 5.2): p50 49.8 ms against 29.8 ms in `perf7` (load 9.6); input to handled unchanged (1.0 ms), received to presented 16.4 against 11.3 ms. Merged after the perf lane's measurement: gltf, blender, shaders, longgop (wave 3d and 4); not bisected here | GPU and render, perf, engine and platform |
+| D6 | Layer drag on the engine path regressed after the perf lane: the frame's way from the handled move to its arrival on the page is p50 26.1 ms (17.8 of it before the engine starts rendering; the render takes 8.0 ms), against 14.5 ms in `perf.md`'s `perf7` run of the perf lane's branch | `tracer-drag-engine-500-idle-regate.json` (load 5.2): p50 49.8 ms against 29.8 ms in `perf7` (load 9.6); input to handled unchanged (1.0 ms), received to presented 16.4 against 11.3 ms. Merged after the perf lane's measurement: gltf, blender, shaders, longgop (wave 3d and 4); not bisected (the A/B against `ce1541b8` did not run, see the performance rows) | GPU and render, perf, engine and platform |
 | R2 | `ae-audit-implementation.spec.ts:102` expects a saved render preset's format `prores`; the delivery lane's format ids save `prores-4444` (`shared/delivery.ts`, by design) | fails with the flag off, in `audit`, and on | Export and agents (the spec) |
 | R3 | `3d/legacy-scene` of the corpus: opened with the flag off, the loader fills in default keyframe fields on the scene object's `ry` keyframes (`autoBezier: false`, `continuous: false`, `inInterp`/`outInterp: "linear"`, ease influence 33.3, speed 0) that the stored baseline omits; nothing is removed or changed. Order-dependent: in 2 of 2 whole-corpus runs, not when the project runs alone (1 of 1) | `phase2-gate-measurements/engine-switch-corpus-regate.json` (`differences`) | 3D |
 | T-1 | `native-engine-transport.spec.ts` (added since the gate) is intermittent: `:91` (J/K/L, 2× reverse: 20 of the run's frames 8.8 to 12.5 ms off the audio line, against at most 1) failed 1 of 4 runs at load 10.3; `:184` (audio scrub: no grain at the scrub point) failed 1 of 3 runs at load 7 | the two runs' logs | Audio, tracer |
@@ -94,6 +94,15 @@ rows from `e2e/native-engine-tracer-measure.spec.ts` (the page's clock), the sam
 synthetic projects and clips as the first run. Round 1: 2026-10-18 00:13 to 00:29
 (perf) and 00:49 to 01:00 (page), the display awake and the session unlocked before and
 after every run. Load average per run as before → after.
+
+These rows were measured once. The machine's quietest periods of the night (load 2.3
+to 4.5 around 23:58 and from 05:15 to 07:45) fell while the display was asleep and the
+session locked, when the harness refuses to measure; the display stayed asleep from
+about 04:00 until at least 10:54, when this lane stopped waiting. A second round of
+the drag, edit, and cadence rows and of S1, and an A/B of the engine drag between the
+perf lane's merge (`ce1541b8`, built and ready) and this tip, were queued for the next
+awake display and did not run. So every number here is at load 4 to 19, against the
+first run's 8 to 24.
 
 | Run (`-regate`) | Load | Measured |
 |---|---|---|
@@ -229,6 +238,26 @@ reopen, as before.
 Pass (load 3.4): `render_frames` through the job engine, `export_video` H.264 (wait)
 and ProRes (async), a text project routed to the current exporter with the job engine
 still serving after it, 4 exports verified with our FFmpeg.
+
+#### Reproducing the rerun
+
+```sh
+source engine/env.sh
+cd apps/desktop && bun install && node scripts/build-engine-addon.mjs \
+  && node ../../engine/crates/pm-wasm/scripts/build.mjs && bun run build
+# the harnesses load pm-bridge with its harness feature; the addon build replaces it
+(cd ../../engine && cargo build --release --locked -p pm-bridge --lib --features harness)
+scripts/gate-rerun.sh ledger-off engine-specs engine-specs-new flag-on-specs audit-suite \
+  engine-host-integration test-mcp engine-switch-corpus pm-wasm-bench
+scripts/gate-rerun.sh perf s1 tracer-measure frame-bridge-integration transport-repeat
+node scripts/gate-summaries.mjs ../../docs/engine/tracer-measurements/*-regate.json
+# the bars and parity runs without Electron are the first run's commands below
+```
+
+`gate-rerun.sh` writes Playwright JSON, logs, and `steps.tsv` (each step's start, end,
+load before and after, exit status) to `~/Library/Caches/powermove-engine/regate`
+(`GATE_OUT`); `GATE_TAG` names the harness summaries, `GATE_RUNS` narrows the harness
+runs.
 
 The first run's report follows unchanged.
 
