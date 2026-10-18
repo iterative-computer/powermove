@@ -97,7 +97,7 @@ async function startElectron(
   normalWindow = false,
 ): Promise<{ app: ElectronApplication; page: Page }> {
   await ensureBuilt();
-  const launchEnv = {
+  const launchEnv: NodeJS.ProcessEnv = {
     ...process.env,
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
