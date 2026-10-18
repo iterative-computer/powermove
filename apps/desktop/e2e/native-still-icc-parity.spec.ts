@@ -36,9 +36,18 @@ async function capture(session: LaunchedApp, files: string[], output: string, la
       await writeFile(path.join(output, `${path.basename(file)}.rgba32f`), Buffer.from(raw.float));
       await writeFile(path.join(output, `${path.basename(file)}.document.json`), JSON.stringify(raw.document));
     }
+    await session.page.evaluate(() => {
+      const w = window as any; w.__iccJobs = [];
+      w.__iccOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__iccJobs.push(s));
+    });
     const outputFile = path.join(output, `${label}-${path.basename(file)}.png`);
     await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, outputFile);
     expect(await session.page.evaluate(async alpha => (window as any).PM.Export.run({ format: 'still', w: 96, h: 64, alpha, mblur: false }), transparent)).toEqual({ cancelled: false });
+    const jobs = await session.page.evaluate(() => { const w = window as any; w.__iccOff(); return w.__iccJobs; });
+    if (label === 'native') {
+      expect(jobs.some((j: any) => j.state === 'done' && !j.routed), file).toBe(true);
+      expect(jobs.some((j: any) => j.routed), file).toBe(false);
+    }
     frames.push(await session.page.evaluate(async bytes => {
       const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
       const canvas = new OffscreenCanvas(96, 64), ctx = canvas.getContext('2d')!; ctx.drawImage(image, 0, 0); image.close();
