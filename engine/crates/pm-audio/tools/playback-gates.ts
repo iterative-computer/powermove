@@ -4,7 +4,7 @@
  * measures edit-then-play rather than a simultaneous cold seek. Set
  * PM_AUDIO_START_EDIT=gain|speed|none, PM_AUDIO_LOOP_SECONDS (default 60),
  * PM_AUDIO_LOAD_THREADS (default 0), PM_AUDIO_START_VOICES (default 16).
- * PM_AUDIO_START_WAIT_MS=0 additionally tests a same-task cold seek.
+ * PM_AUDIO_START_WAIT_MS=0 alternates 2 s / 3 s same-task cold seeks.
  * All load processes are joined on exit. Run under pm-electron-lock.
  * bun engine/crates/pm-audio/tools/playback-gates.ts <wav> <outside-repo.json> [runs]
  * Build the app and native addons first. The corpus Node bridge hosts
@@ -24,7 +24,7 @@ const edit = process.env.PM_AUDIO_START_EDIT ?? 'gain';
 const loopSeconds = Number(process.env.PM_AUDIO_LOOP_SECONDS ?? 60);
 const stressThreads = Number(process.env.PM_AUDIO_LOAD_THREADS ?? 0);
 const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
-const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, voices, speed: 1.5, edit, loopSeconds, stressThreads };
+const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, targets: waitMs === 0 ? [2, 3] : [4] };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
@@ -110,7 +110,7 @@ for (const native of modes) {
       }
       const samples = [];
       for (let run = 0; run < Number(count); run++) {
-        const target = 4;
+        const target = waitMs === 0 ? (run % 2 === 0 ? 2 : 3) : 4;
         if (waitMs > 0) {
           await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
           await page.waitForTimeout(waitMs);
