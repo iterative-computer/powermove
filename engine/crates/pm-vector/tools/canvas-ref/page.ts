@@ -7,7 +7,7 @@
 import { shapeRasterGeometry, type RasterWindow } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/shape-raster-window';
 import { isUniformCircular, roundedRectPath } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/corner-geometry';
 import { rasterPaths } from '../../../../../apps/desktop/src/renderer/src/legacy/core/vector-paths';
-import { cases, type Case } from './cases';
+import { type Case } from './cases';
 
 function getCanvas(w: any, h: any) {
   const cv = window.document.createElement('canvas');
@@ -134,7 +134,8 @@ async function rasterize(c: Case): Promise<{ cv: HTMLCanvasElement; meta: Record
 
 (async () => {
   try {
-    const list = cases();
+    // The host serves the case list (the built-in cases or a custom file).
+    const list: Case[] = await (await fetch('/cases')).json();
     for (const c of list) {
       let result;
       try { result = await rasterize(c); } catch (e) {

@@ -165,7 +165,7 @@ impl SvgDocument {
 
         let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
         let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
-        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut |_, _, _, _| {
+        crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut |_, _, _, _| {
             Err(SvgError("SVG text needs pm-text".into()))
         })
     }
@@ -181,7 +181,7 @@ impl SvgDocument {
         let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
         let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
         let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
-        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
+        crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter

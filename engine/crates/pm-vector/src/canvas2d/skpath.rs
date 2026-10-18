@@ -27,6 +27,20 @@ pub struct SkPath {
     pub verbs: Vec<Verb>,
     pub pts: Vec<P>,
     last_move: Option<usize>,
+    /// What `SkPathBuilder::addOval`/`addRRect`/`addRect` recorded
+    /// (`SkPathIsAType`): Skia recognizes these shapes later without
+    /// inspecting the verbs.
+    is_a: IsA,
+}
+
+/// `SkPathIsAType` with the shape it records.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum IsA {
+    #[default]
+    General,
+    Oval([f32; 4]),
+    RRect(super::skrrect::SkRRect),
+    Rect,
 }
 
 /// `SK_ScalarNearlyZero`.
@@ -216,6 +230,63 @@ impl SkPath {
 
     pub fn last_pt(&self) -> Option<P> {
         self.pts.last().copied()
+    }
+
+    /// `SkPath::isOval`: the oval's bounds when the path was built by
+    /// `addOval` (and only that).
+    pub fn is_oval(&self) -> Option<[f32; 4]> {
+        match self.is_a {
+            IsA::Oval(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// `SkPath::isRRect`.
+    pub fn is_rrect(&self) -> Option<super::skrrect::SkRRect> {
+        match self.is_a {
+            IsA::RRect(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn mark_oval(&mut self, r: [f32; 4]) {
+        self.is_a = IsA::Oval(r);
+    }
+
+    pub(crate) fn mark_rrect(&mut self, r: super::skrrect::SkRRect) {
+        self.is_a = IsA::RRect(r);
+    }
+
+    pub(crate) fn mark_rect(&mut self, _r: bool) {
+        self.is_a = IsA::Rect;
+    }
+
+    /// `SkPathBuilder::transform` for an affine matrix: every point mapped
+    /// (`SkMatrix::mapPoints`), conic weights kept; the oval/rrect identity
+    /// survives a rect-stays-rect transform as Skia keeps it.
+    pub fn transform(&self, m: &Mat) -> SkPath {
+        if *m == Mat::IDENTITY || self.verbs.is_empty() {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        for p in &mut out.pts {
+            *p = m.map(*p);
+        }
+        let rect_stays_rect = (m.kx == 0.0 && m.ky == 0.0) || (m.sx == 0.0 && m.sy == 0.0);
+        out.is_a = match (rect_stays_rect, self.is_a) {
+            (true, IsA::Oval(r)) => {
+                let a = m.map([r[0], r[1]]);
+                let b = m.map([r[2], r[3]]);
+                IsA::Oval([a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])])
+            }
+            (true, IsA::RRect(rr)) => match rr.transform(m) {
+                Some(t) => IsA::RRect(t),
+                None => IsA::General,
+            },
+            (true, IsA::Rect) => IsA::Rect,
+            _ => IsA::General,
+        };
+        out
     }
 
     pub fn move_to(&mut self, p: P) {

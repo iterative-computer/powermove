@@ -1,13 +1,13 @@
-//! SVG paint records replayed by the Chromium/Graphite Canvas2D emulation.
-//! usvg resolves styles and paint servers; original element geometry is kept
-//! because Skia recognizes ovals/rrects and preserves SVG path conics.
-use super::{
-    analytic::Geometry,
-    context::{Context, LineCap, LineJoin},
-    msaa::Rule,
-    paint::{Paint, inverse},
-    skpath::{Mat, SkPath},
-};
+//! SVG paint records replayed by the Chromium/Graphite Canvas2D emulation:
+//! the usvg tree gives the render list and resolved styles, the raw document
+//! gives Blink's double-precision transforms and the original shapes
+//! (`blinksvg` builds the paint record, `svgrender` replays it).
+use super::blinksvg::{self, Affine, Flags, Geometry, Gradient, GradientKind, ImageDraw, ImageFilter, ItemState, Op, PaintResolver, RawElements, RecordBuilder, ShapeStyle, TextItem};
+use super::m44::M44;
+use super::msaa::Rule;
+use super::skpath::{Mat, SkPath};
+use super::skrrect::{SkRRect, oval_path, rect_path, rrect_path};
+use super::svgrender::Canvas;
 use crate::{canvas2d::shape::Bitmap, render::svg::SvgError};
 use std::collections::BTreeMap;
 
@@ -18,6 +18,8 @@ pub struct Element {
 }
 pub type Elements = BTreeMap<String, Element>;
 
+/// Injects ids on every element that lacks one so usvg's resolved nodes can
+/// be matched with the raw elements, and records the raw attributes.
 pub fn annotate(data: &[u8]) -> Result<(Vec<u8>, Elements), SvgError> {
     let text = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
     let doc = usvg::roxmltree::Document::parse(text).map_err(|e| SvgError(e.to_string()))?;
@@ -38,9 +40,6 @@ pub fn annotate(data: &[u8]) -> Result<(Vec<u8>, Elements), SvgError> {
     }
     for (i, n) in doc.descendants().filter(|n| n.is_element()).enumerate() {
         let kind = n.tag_name().name();
-        if !matches!(kind, "path" | "rect" | "circle" | "ellipse" | "line" | "polygon" | "polyline") {
-            continue;
-        }
         let id = n.attribute("id").map(str::to_string).unwrap_or_else(|| format!("{prefix}{i}"));
         if n.attribute("id").is_none() {
             let start = n.range().start;
@@ -64,71 +63,108 @@ pub fn annotate(data: &[u8]) -> Result<(Vec<u8>, Elements), SvgError> {
     }
     Ok((result.into_bytes(), elements))
 }
+
 fn mat(t: usvg::Transform) -> Mat {
-    Mat {
-        sx: t.sx,
-        kx: t.kx,
-        ky: t.ky,
-        sy: t.sy,
-        tx: t.tx,
-        ty: t.ty,
-    }
+    Mat { sx: t.sx, kx: t.kx, ky: t.ky, sy: t.sy, tx: t.tx, ty: t.ty }
 }
-fn coeff(m: Mat) -> [f64; 6] {
-    [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty].map(f64::from)
-}
+
 fn rule(r: usvg::FillRule) -> Rule {
     match r {
         usvg::FillRule::NonZero => Rule::NonZero,
         usvg::FillRule::EvenOdd => Rule::EvenOdd,
     }
 }
-fn path(p: &usvg::Path, elements: &Elements) -> (SkPath, Option<Geometry>) {
+
+/// A length attribute (user units; `px` allowed).
+fn number(e: &Element, name: &str) -> Option<f32> {
+    e.attrs.get(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+}
+
+/// Blink's geometry for a usvg path with its raw element: rects and
+/// ellipses keep their identity (`LayoutSVGRect`, `LayoutSVGEllipse`),
+/// rounded rects become `addRRect` paths, `<path>` data goes through
+/// Blink's SVG path parser, polylines/polygons/lines are line paths.
+fn geometry(p: &usvg::Path, elements: &Elements) -> Geometry {
     let source = elements.get(p.id());
-    let bounds = p.data().bounds();
-    let r = [bounds.left(), bounds.top(), bounds.right(), bounds.bottom()];
-    let mut out = SkPath::new();
     if let Some(e) = source {
-        let number = |name: &str| e.attrs.get(name).and_then(|v| v.trim_end_matches("px").parse::<f32>().ok());
         match e.kind.as_str() {
             "path" => {
                 if let Some(d) = e.attrs.get("d") {
-                    return (super::blink::path_from_svg(d), None);
+                    return Geometry::Path(super::blink::path_from_svg(d));
                 }
             }
             "circle" | "ellipse" => {
-                out.arc_to_oval(r, 0.0, 180.0, true);
-                out.arc_to_oval(r, 180.0, 180.0, false);
-                out.close();
-                return (
-                    out,
-                    Some(Geometry::FillRRect {
-                        rect: r,
-                        radii: [(r[2] - r[0]) * 0.5, (r[3] - r[1]) * 0.5],
-                    }),
-                );
+                let (cx, cy) = (number(e, "cx").unwrap_or(0.0), number(e, "cy").unwrap_or(0.0));
+                let (rx, ry) = if e.kind == "circle" {
+                    let r = number(e, "r").unwrap_or(0.0);
+                    (r, r)
+                } else {
+                    let rx = number(e, "rx");
+                    let ry = number(e, "ry");
+                    (rx.or(ry).unwrap_or(0.0), ry.or(rx).unwrap_or(0.0))
+                };
+                if rx > 0.0 && ry > 0.0 {
+                    return Geometry::Oval([cx - rx, cy - ry, cx + rx, cy + ry]);
+                }
             }
             "rect" => {
-                let rx = number("rx").or_else(|| number("ry")).unwrap_or(0.0).min((r[2] - r[0]) * 0.5);
-                let ry = number("ry").or_else(|| number("rx")).unwrap_or(0.0).min((r[3] - r[1]) * 0.5);
-                if rx > 0.0 && ry > 0.0 {
-                    out.move_to([r[0] + rx, r[1]]);
-                    out.line_to([r[2] - rx, r[1]]);
-                    out.arc_to_oval([r[2] - 2.0 * rx, r[1], r[2], r[1] + 2.0 * ry], 270.0, 90.0, false);
-                    out.line_to([r[2], r[3] - ry]);
-                    out.arc_to_oval([r[2] - 2.0 * rx, r[3] - 2.0 * ry, r[2], r[3]], 0.0, 90.0, false);
-                    out.line_to([r[0] + rx, r[3]]);
-                    out.arc_to_oval([r[0], r[3] - 2.0 * ry, r[0] + 2.0 * rx, r[3]], 90.0, 90.0, false);
-                    out.line_to([r[0], r[1] + ry]);
-                    out.arc_to_oval([r[0], r[1], r[0] + 2.0 * rx, r[1] + 2.0 * ry], 180.0, 90.0, false);
-                    out.close();
-                    return (out, Some(Geometry::FillRRect { rect: r, radii: [rx, ry] }));
+                let (x, y) = (number(e, "x").unwrap_or(0.0), number(e, "y").unwrap_or(0.0));
+                let (w, h) = (number(e, "width").unwrap_or(0.0), number(e, "height").unwrap_or(0.0));
+                if w > 0.0 && h > 0.0 {
+                    let rect = [x, y, x + w, y + h];
+                    let rx_attr = number(e, "rx");
+                    let ry_attr = number(e, "ry");
+                    // SVGRectElement::AsMutablePath radii rules.
+                    let mut rx = rx_attr.unwrap_or(-1.0);
+                    let mut ry = ry_attr.unwrap_or(-1.0);
+                    if rx_attr.is_none() || rx < 0.0 {
+                        rx = ry.max(0.0);
+                    }
+                    if ry_attr.is_none() || ry < 0.0 {
+                        ry = rx;
+                    }
+                    if rx > 0.0 || ry > 0.0 {
+                        rx = rx.min(w * 0.5);
+                        ry = ry.min(h * 0.5);
+                        let rr = SkRRect::make_rect_xy(rect, rx, ry);
+                        return Geometry::Path(rr.to_path(true, 0));
+                    }
+                    return Geometry::Rect(rect);
+                }
+            }
+            "line" => {
+                let mut path = SkPath::new();
+                path.move_to([number(e, "x1").unwrap_or(0.0), number(e, "y1").unwrap_or(0.0)]);
+                path.line_to([number(e, "x2").unwrap_or(0.0), number(e, "y2").unwrap_or(0.0)]);
+                return Geometry::Path(path);
+            }
+            "polyline" | "polygon" => {
+                if let Some(pts) = e.attrs.get("points") {
+                    let nums: Vec<f32> = pts
+                        .split(|c: char| c.is_whitespace() || c == ',')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    let mut path = SkPath::new();
+                    for (i, xy) in nums.chunks_exact(2).enumerate() {
+                        if i == 0 {
+                            path.move_to([xy[0], xy[1]]);
+                        } else {
+                            path.line_to([xy[0], xy[1]]);
+                        }
+                    }
+                    if e.kind == "polygon" && nums.len() >= 2 {
+                        path.close();
+                    }
+                    return Geometry::Path(path);
                 }
             }
             _ => {}
         }
     }
+    // Anything else: usvg's resolved path data.
     use usvg::tiny_skia_path::PathSegment;
+    let mut out = SkPath::new();
     for s in p.data().segments() {
         match s {
             PathSegment::MoveTo(a) => out.move_to([a.x, a.y]),
@@ -138,208 +174,336 @@ fn path(p: &usvg::Path, elements: &Elements) -> (SkPath, Option<Geometry>) {
             PathSegment::Close => out.close(),
         }
     }
-    (out, None)
+    Geometry::Path(out)
 }
-fn shader(p: &usvg::Paint, opacity: f32, m: Mat) -> Result<Paint, SvgError> {
-    let color = |c: usvg::Color, a: f32| [f32::from(c.red) / 255.0, f32::from(c.green) / 255.0, f32::from(c.blue) / 255.0, a];
-    let stops = |g: &usvg::BaseGradient| {
-        g.stops()
-            .iter()
-            .map(|s| (s.offset().get(), color(s.color(), s.opacity().get())))
-            .collect()
-    };
-    let spread = |g: &usvg::BaseGradient| match g.spread_method() {
-        usvg::SpreadMethod::Pad => 0,
-        usvg::SpreadMethod::Repeat => 1,
-        usvg::SpreadMethod::Reflect => 2,
-    };
-    let inv = |t| inverse(Mat::concat(&m, &mat(t))).ok_or_else(|| SvgError("singular SVG paint transform".into()));
-    Ok(match p {
-        usvg::Paint::Color(c) => Paint::Solid(color(*c, opacity).map_with_alpha()),
-        usvg::Paint::LinearGradient(g) => Paint::Linear {
-            inverse: inv(g.transform())?,
-            start: [g.x1(), g.y1()],
-            end: [g.x2(), g.y2()],
-            stops: stops(g),
-            spread: spread(g),
-            alpha: opacity,
-        },
-        usvg::Paint::RadialGradient(g) if g.fr().get() == 0.0 => Paint::Radial {
-            inverse: inv(g.transform())?,
-            center: [g.cx(), g.cy()],
-            focal: [g.fx(), g.fy()],
-            radius: g.r().get(),
-            stops: stops(g),
-            spread: spread(g),
-            alpha: opacity,
-        },
-        _ => return Err(SvgError("SVG paint server is not implemented by the compatibility canvas".into())),
-    })
+
+/// The object bounding box Blink computes for a shape (`ObjectBoundingBox`).
+fn object_bbox(g: &Geometry) -> Option<[f32; 4]> {
+    match g {
+        Geometry::Rect(r) | Geometry::Oval(r) => Some(*r),
+        Geometry::Path(p) => p.bounds(),
+    }
 }
-trait Premul {
-    fn map_with_alpha(self) -> Self;
+
+/// Paint servers resolved the way `LayoutSVGResourceGradient::BuildGradientData`
+/// and Blink's `Gradient` do.
+struct Resolver<'a> {
+    elements: &'a Elements,
+    /// The root viewport (user units) for percentage lengths.
+    viewport: [f32; 2],
 }
-impl Premul for [f32; 4] {
-    fn map_with_alpha(mut self) -> Self {
-        for i in 0..3 {
-            self[i] *= self[3]
+
+/// A gradient attribute resolved through the `href` chain
+/// (`SVGGradientElement::CollectCommonAttributes`).
+fn gradient_attr<'a>(elements: &'a Elements, id: &str, name: &str) -> Option<&'a str> {
+    let mut cur = id.to_string();
+    for _ in 0..32 {
+        let e = elements.get(&cur)?;
+        if let Some(v) = e.attrs.get(name) {
+            return Some(v.as_str());
         }
-        self
+        let href = e.attrs.get("href").or_else(|| e.attrs.get("xlink:href"))?;
+        cur = href.trim_start_matches('#').to_string();
+    }
+    None
+}
+
+/// An SVG length for gradient geometry: `SVGLengthContext` resolution
+/// against the unit box (objectBoundingBox) or the viewport.
+fn gradient_length(v: Option<&str>, default: f32, bbox_units: bool, viewport: f32) -> f32 {
+    let Some(v) = v else { return default };
+    let v = v.trim();
+    if let Some(p) = v.strip_suffix('%') {
+        let n: f32 = p.trim().parse().unwrap_or(0.0);
+        return n / 100.0 * if bbox_units { 1.0 } else { viewport };
+    }
+    v.trim_end_matches("px").parse().unwrap_or(default)
+}
+
+impl PaintResolver for Resolver<'_> {
+    fn gradient(&self, paint: &usvg::Paint, bbox: Option<[f32; 4]>) -> Result<Option<Gradient>, SvgError> {
+        let base: &usvg::BaseGradient = match paint {
+            usvg::Paint::Color(_) => return Ok(None),
+            usvg::Paint::LinearGradient(g) => g,
+            usvg::Paint::RadialGradient(g) => g,
+            usvg::Paint::Pattern(_) => return Err(SvgError("SVG pattern paint server is not implemented by the compatibility canvas".into())),
+        };
+        let id = base.id();
+        let attr = |name: &str| gradient_attr(self.elements, id, name);
+        let bbox_units = attr("gradientUnits").is_none_or(|u| u.trim() != "userSpaceOnUse");
+        let [vw, vh] = self.viewport;
+        let vdiag = ((vw * vw + vh * vh) / 2.0).sqrt();
+        let kind = match paint {
+            usvg::Paint::LinearGradient(_) => GradientKind::Linear {
+                p0: [gradient_length(attr("x1"), 0.0, bbox_units, vw), gradient_length(attr("y1"), 0.0, bbox_units, vh)],
+                p1: [gradient_length(attr("x2"), if bbox_units { 1.0 } else { vw }, bbox_units, vw), gradient_length(attr("y2"), 0.0, bbox_units, vh)],
+            },
+            _ => {
+                let cx = gradient_length(attr("cx"), if bbox_units { 0.5 } else { vw * 0.5 }, bbox_units, vw);
+                let cy = gradient_length(attr("cy"), if bbox_units { 0.5 } else { vh * 0.5 }, bbox_units, vh);
+                let r = gradient_length(attr("r"), if bbox_units { 0.5 } else { vdiag * 0.5 }, bbox_units, vdiag);
+                let fx = gradient_length(attr("fx"), cx, bbox_units, vw);
+                let fy = gradient_length(attr("fy"), cy, bbox_units, vh);
+                let fr = gradient_length(attr("fr"), 0.0, bbox_units, vdiag);
+                GradientKind::Conical { p0: [fx, fy], r0: fr, p1: [cx, cy], r1: r }
+            }
+        };
+        // userspace_transform: the object bounding box for objectBoundingBox
+        // units, then the gradientTransform (double).
+        let mut userspace = Affine::IDENTITY;
+        if bbox_units {
+            let Some(b) = bbox else { return Ok(None) };
+            if b[2] - b[0] <= 0.0 || b[3] - b[1] <= 0.0 {
+                return Ok(None);
+            }
+            userspace.translate(f64::from(b[0]), f64::from(b[1]));
+            userspace.scale(f64::from(b[2] - b[0]), f64::from(b[3] - b[1]));
+        }
+        let gradient_transform = blinksvg::element_transform(attr("gradientTransform"))?;
+        if !gradient_transform.is_invertible() {
+            return Ok(None);
+        }
+        userspace.pre_concat(&gradient_transform);
+        // Gradient::FillSkiaStops: pad to 0 and 1, colors as SkColor4f.
+        let mut colors = Vec::new();
+        let mut positions = Vec::new();
+        let stops = base.stops();
+        let color = |s: &usvg::Stop| [f32::from(s.color().red) / 255.0, f32::from(s.color().green) / 255.0, f32::from(s.color().blue) / 255.0, s.opacity().get()];
+        if stops.is_empty() {
+            positions.push(0.0);
+            colors.push([0.0, 0.0, 0.0, 0.0]);
+        } else if stops[0].offset().get() > 0.0 {
+            positions.push(0.0);
+            colors.push(color(&stops[0]));
+        }
+        for s in stops {
+            positions.push(s.offset().get());
+            colors.push(color(s));
+        }
+        if positions.last().is_some_and(|p| *p < 1.0) {
+            positions.push(1.0);
+            colors.push(*colors.last().unwrap());
+        }
+        let tile = match base.spread_method() {
+            usvg::SpreadMethod::Pad => 0,
+            usvg::SpreadMethod::Repeat => 1,
+            usvg::SpreadMethod::Reflect => 2,
+        };
+        Ok(Some(Gradient { kind, colors, positions, tile, local_matrix: userspace.to_mat() }))
     }
 }
-fn group(ctx: &mut Context, g: &usvg::Group, base: Mat, elements: &Elements, text: &mut TextDraw<'_>) -> Result<(), SvgError> {
-    if g.mask().is_some() || g.blend_mode() != usvg::BlendMode::Normal {
-        return Err(SvgError("SVG mask/blend paint record needs compatibility support".into()));
+
+/// The raw transform attribute of a usvg node's element, as Blink computes it.
+fn raw_transform(elements: &Elements, id: &str, fallback: usvg::Transform) -> Result<Affine, SvgError> {
+    match elements.get(id) {
+        Some(e) => blinksvg::element_transform(e.attrs.get("transform").map(String::as_str)),
+        None => {
+            let t = fallback;
+            Ok(Affine([t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f64::from)))
+        }
     }
-    ctx.save();
-    if let Some(clip) = g.clip_path() {
-        ctx.save();
-        ctx.transform(coeff(Mat::concat(&mat(g.abs_transform()), &mat(clip.transform()))));
-        let mut shapes = Vec::new();
+}
+
+struct Walk<'a> {
+    builder: RecordBuilder<'a>,
+    elements: &'a Elements,
+    resolver: Resolver<'a>,
+}
+
+impl Walk<'_> {
+    fn group(&mut self, g: &usvg::Group, parent: ItemState, is_root: bool) -> Result<(), SvgError> {
+        if g.mask().is_some() {
+            return Err(SvgError("SVG mask paint record needs compatibility support".into()));
+        }
+        if g.blend_mode() != usvg::BlendMode::Normal {
+            return Err(SvgError("SVG blend mode paint record needs compatibility support".into()));
+        }
+        let mut state = parent;
+        if !is_root {
+            // The element's own transform node (UpdateTransformForSVGChild).
+            let m = raw_transform(self.elements, g.id(), g.transform())?;
+            state.transform = self.builder.push_transform(parent.transform, m);
+            // clip-path (UpdateClipPathClip): the clip's path in the element's
+            // user space.
+            if let Some(clip) = g.clip_path() {
+                let path = self.clip_path(clip)?;
+                state.clip = self.builder.push_clip_path(state.clip, state.transform, &path.0, path.1);
+            }
+            // opacity (UpdateEffect), then filter (UpdateFilter) inside it.
+            let opacity = g.opacity().get();
+            if opacity != 1.0 {
+                state.effect = self.builder.push_effect(state.effect, state.transform, state.clip, Some(opacity), None);
+            }
+            for f in g.filters() {
+                let filter = self.filter(f, g)?;
+                state.effect = self.builder.push_effect(state.effect, state.transform, state.clip, None, Some(filter));
+            }
+        }
+        for n in g.children() {
+            match n {
+                usvg::Node::Group(c) => self.group(c, state, false)?,
+                usvg::Node::Path(p) => self.path(p, state)?,
+                usvg::Node::Text(t) => {
+                    let ops = vec![Op::DrawText(Box::new(TextItem { node: (**t).clone() }))];
+                    self.builder.push_item(state, ops);
+                }
+                usvg::Node::Image(_) => return Err(SvgError("embedded SVG image needs a decoded bitmap".into())),
+            }
+        }
+        Ok(())
+    }
+
+    fn path(&mut self, p: &usvg::Path, parent: ItemState) -> Result<(), SvgError> {
+        if !p.is_visible() {
+            return Ok(());
+        }
+        let mut state = parent;
+        // usvg folds a path's own `transform` into its abs_transform; Blink
+        // gives it its own transform node.
+        let own = match self.elements.get(p.id()) {
+            Some(e) => blinksvg::element_transform(e.attrs.get("transform").map(String::as_str))?,
+            None => Affine::IDENTITY,
+        };
+        state.transform = self.builder.push_transform(parent.transform, own);
+        let geometry = geometry(p, self.elements);
+        let bbox = object_bbox(&geometry);
+        let style = ShapeStyle {
+            fill: p.fill(),
+            stroke: p.stroke(),
+            paint_order: p.paint_order(),
+            anti_alias: !matches!(p.rendering_mode(), usvg::ShapeRendering::CrispEdges | usvg::ShapeRendering::OptimizeSpeed),
+        };
+        let fill_rule = p.fill().map_or(Rule::NonZero, |f| rule(f.rule()));
+        let ops = blinksvg::shape_ops(&geometry, &style, fill_rule, bbox, &self.resolver)?;
+        self.builder.push_item(state, ops);
+        Ok(())
+    }
+
+    /// `LayoutSVGResourceClipper::AsPath` for a clip path of shapes
+    /// (`ToClipPath`: each shape's path transformed by its own transform
+    /// and the clip's `transform`/`clipPathUnits`), unioned when several.
+    fn clip_path(&mut self, clip: &usvg::ClipPath) -> Result<(SkPath, Rule), SvgError> {
+        if clip.clip_path().is_some() {
+            return Err(SvgError("nested SVG clip-path needs compatibility support".into()));
+        }
+        let mut shapes: Vec<(SkPath, Rule)> = Vec::new();
         for n in clip.root().children() {
-            if let usvg::Node::Path(p) = n {
-                let (pth, geometry) = path(p, elements);
-                shapes.push((
-                    pth,
-                    Mat::concat(&ctx.matrix(), &mat(p.abs_transform())),
-                    p.fill().map_or(Rule::NonZero, |f| rule(f.rule())),
-                    geometry,
-                ));
-            } else {
-                return Err(SvgError("nested SVG clip record".into()));
-            }
-        }
-        ctx.clip_shapes(shapes);
-        // Keep clip state while restoring the matrix to the bucket transform.
-        ctx.set_transform(coeff(base));
-    }
-    let mut blur = [0.0; 2];
-    let mut linear = false;
-    for f in g.filters() {
-        for p in f.primitives() {
-            match p.kind() {
-                usvg::filter::Kind::GaussianBlur(b) => {
-                    linear = p.color_interpolation() == usvg::filter::ColorInterpolation::LinearRGB;
-                    let m = Mat::concat(&base, &mat(g.abs_transform()));
-                    blur = [
-                        f64::from(b.std_dev_x().get()) * f64::from(m.sx.hypot(m.ky)),
-                        f64::from(b.std_dev_y().get()) * f64::from(m.kx.hypot(m.sy)),
-                    ]
-                }
-                _ => return Err(SvgError("SVG filter is not a Gaussian blur".into())),
-            }
-        }
-    }
-    let layer = g.opacity().get() != 1.0 || blur != [0.0; 2];
-    if layer {
-        ctx.begin_layer()
-    }
-    for n in g.children() {
-        match n {
-            usvg::Node::Group(g) => group(ctx, g, base, elements, text)?,
-            usvg::Node::Path(p) if p.is_visible() => {
-                let (pth, geometry) = path(p, elements);
-                ctx.save();
-                ctx.transform(coeff(mat(p.abs_transform())));
-                let fill = |ctx: &mut Context| -> Result<(), SvgError> {
-                    if let Some(f) = p.fill() {
-                        ctx.set_fill_paint(shader(f.paint(), f.opacity().get(), ctx.matrix())?);
-                        if let Some(g) = geometry {
-                            ctx.fill_geometry(g)
-                        } else {
-                            ctx.fill_path_rule(&pth, rule(f.rule())).map_err(|e| SvgError(e.to_string()))?;
+            match n {
+                usvg::Node::Path(p) => {
+                    if !p.is_visible() {
+                        continue;
+                    }
+                    let own = match self.elements.get(p.id()) {
+                        Some(e) => blinksvg::element_transform(e.attrs.get("transform").map(String::as_str))?,
+                        None => Affine::IDENTITY,
+                    };
+                    let g = geometry(p, self.elements);
+                    let mut path = match g {
+                        Geometry::Rect(r) => rect_path(r, true, 0),
+                        Geometry::Oval(r) => oval_path(r, true, 1),
+                        Geometry::Path(p) => p,
+                    };
+                    let clip_transform = match self.elements.get(clip.id()).and_then(|e| e.attrs.get("transform")) {
+                        Some(t) => blinksvg::element_transform(Some(t))?,
+                        None => {
+                            let t = clip.transform();
+                            Affine([t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f64::from))
                         }
+                    };
+                    let mut m = own;
+                    if !clip_transform.is_identity() {
+                        m.post_concat(&clip_transform);
                     }
-                    Ok(())
-                };
-                let stroke = |ctx: &mut Context| -> Result<(), SvgError> {
-                    if let Some(s) = p.stroke() {
-                        ctx.set_stroke_paint(shader(s.paint(), s.opacity().get(), ctx.matrix())?);
-                        ctx.set_line_width(f64::from(s.width().get()));
-                        ctx.set_miter_limit(s.miterlimit().get());
-                        ctx.set_line_cap(match s.linecap() {
-                            usvg::LineCap::Butt => LineCap::Butt,
-                            usvg::LineCap::Round => LineCap::Round,
-                            usvg::LineCap::Square => LineCap::Square,
-                        });
-                        ctx.set_line_join(match s.linejoin() {
-                            usvg::LineJoin::Round => LineJoin::Round,
-                            usvg::LineJoin::Bevel => LineJoin::Bevel,
-                            _ => LineJoin::Miter,
-                        });
-                        let dashed;
-                        let draw = if let Some(d) = s.dasharray() {
-                            let b = crate::render::svg::bez(p.data());
-                            let ds: Vec<_> = d.iter().copied().map(f64::from).collect();
-                            let b: kurbo::BezPath = kurbo::dash(b.elements().iter().copied(), f64::from(s.dashoffset()), &ds).collect();
-                            dashed = super::blink::path_from_svg(&b.to_svg());
-                            &dashed
-                        } else {
-                            &pth
-                        };
-                        if s.dasharray().is_none()
-                            && let Some(Geometry::FillRRect { rect, radii }) = geometry
-                            && radii[0] == radii[1]
-                        {
-                            ctx.stroke_geometry(Geometry::StrokeRRect {
-                                rect,
-                                corner_radius: radii[0],
-                                radius: s.width().get() * 0.5,
-                                join: match s.linejoin() {
-                                    usvg::LineJoin::Round => -1.0,
-                                    usvg::LineJoin::Bevel => 0.0,
-                                    _ => s.miterlimit().get(),
-                                },
-                            });
-                        } else {
-                            ctx.stroke_path(draw).map_err(|e| SvgError(e.to_string()))?;
-                        }
+                    if !m.is_identity() {
+                        path = path.transform(&m.to_mat());
                     }
-                    Ok(())
-                };
-                match p.paint_order() {
-                    usvg::PaintOrder::FillAndStroke => {
-                        fill(ctx)?;
-                        stroke(ctx)?
-                    }
-                    usvg::PaintOrder::StrokeAndFill => {
-                        stroke(ctx)?;
-                        fill(ctx)?
-                    }
+                    let r = p.fill().map_or(Rule::NonZero, |f| rule(f.rule()));
+                    shapes.push((path, r));
                 }
-                ctx.restore();
+                _ => return Err(SvgError("nested SVG clip record".into())),
             }
-            usvg::Node::Path(_) => {}
-            usvg::Node::Text(t) => {
-                let m = Mat::concat(&base, &mat(t.abs_transform()));
-                let bitmap = text(t, m, ctx.width(), ctx.height())?;
-                ctx.draw_bitmap(bitmap.rgba);
-            }
-            usvg::Node::Image(_) => return Err(SvgError("embedded SVG image needs a decoded bitmap".into())),
+        }
+        match shapes.len() {
+            0 => Ok((SkPath::new(), Rule::NonZero)),
+            1 => Ok(shapes.pop().unwrap()),
+            _ => Err(SvgError("SVG clip-path with several shapes needs path ops".into())),
         }
     }
-    if layer {
-        ctx.end_layer(g.opacity().get(), blur, linear)
+
+    /// Blink's filter chain for a usvg filter: only a lone Gaussian blur.
+    fn filter(&self, f: &usvg::filter::Filter, _g: &usvg::Group) -> Result<ImageFilter, SvgError> {
+        let prims = f.primitives();
+        if prims.len() != 1 {
+            return Err(SvgError("SVG filter chain needs compatibility support".into()));
+        }
+        let p = &prims[0];
+        match p.kind() {
+            usvg::filter::Kind::GaussianBlur(b) => {
+                let region = f.rect();
+                let sub = p.rect();
+                let crop = [
+                    sub.x().max(region.x()),
+                    sub.y().max(region.y()),
+                    sub.right().min(region.right()),
+                    sub.bottom().min(region.bottom()),
+                ];
+                Ok(ImageFilter::GaussianBlur {
+                    sigma: [b.std_dev_x().get(), b.std_dev_y().get()],
+                    crop,
+                    linear: p.color_interpolation() == usvg::filter::ColorInterpolation::LinearRGB,
+                })
+            }
+            _ => Err(SvgError("SVG filter is not a Gaussian blur".into())),
+        }
     }
-    if g.clip_path().is_some() {
-        ctx.restore()
-    }
-    ctx.restore();
-    Ok(())
 }
+
 pub type TextDraw<'a> = dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Bitmap, SvgError> + 'a;
 
-pub fn raster(tree: &usvg::Tree, elements: &Elements, width: u32, height: u32, text: &mut TextDraw<'_>) -> Result<Bitmap, SvgError> {
-    let mut ctx = Context::new(width, height);
-    ctx.scale(
-        f64::from(width) / f64::from(tree.size().width()),
-        f64::from(height) / f64::from(tree.size().height()),
-    );
-    let base = ctx.matrix();
-    group(&mut ctx, tree.root(), base, elements, text)?;
-    Ok(Bitmap {
-        width,
-        height,
-        rgba: ctx.finish(),
-    })
+/// `drawImage(img, 0, 0, width, height)` of the SVG: Blink's layout and
+/// paint record, replayed by the Graphite emulation.
+pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, height: u32, text: &mut TextDraw<'_>) -> Result<Bitmap, SvgError> {
+    let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
+    let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;
+    let raw = RawElements::new(&doc);
+    let sizing = blinksvg::natural_sizing(&doc);
+    let draw: ImageDraw = blinksvg::image_draw(&sizing, [width, height]);
+    let builder = RecordBuilder::new(&raw, &draw);
+    let root_state = builder.root_state();
+    let viewport = match sizing.view_box {
+        Some(vb) => [vb[2], vb[3]],
+        None => [sizing.width.unwrap_or(draw.container[0]), sizing.height.unwrap_or(draw.container[1])],
+    };
+    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport } };
+    walk.group(tree.root(), root_state, true)?;
+    let record = walk.builder.finish();
+    // SVGImage::DrawInternal: save, clip to the enclosing destination rect,
+    // concat the source-to-destination matrix, play the record, restore.
+    let mut ops = Vec::with_capacity(record.len() + 4);
+    ops.push(Op::Save);
+    let c = draw.dst_clip;
+    ops.push(Op::ClipRect { rect: [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32], aa: false });
+    ops.push(Op::Concat(draw.src_to_dst));
+    ops.extend(record);
+    ops.push(Op::Restore);
+    if std::env::var_os("PM_SVG_DEBUG").is_some() {
+        for op in &ops {
+            match op {
+                Op::DrawPath { path, rule, flags } => eprintln!("DrawPath verbs={} rule={rule:?} stroke={:?} shader={}", path.verbs.len(), flags.stroke.as_ref().map(|s| s.width), flags.shader.is_some()),
+                Op::DrawText(_) => eprintln!("DrawText"),
+                other => eprintln!("{other:?}"),
+            }
+        }
+    }
+    let mut canvas = Canvas::new(width, height);
+    let tree_size = (tree.size().width(), tree.size().height());
+    let _ = tree_size;
+    canvas.text = Some(Box::new(|t: &usvg::Text, m: Mat, w: u32, h: u32| text(t, m, w, h).map(|b| b.rgba)));
+    canvas.replay(&ops)?;
+    Ok(Bitmap { width, height, rgba: canvas.finish() })
+}
+
+#[allow(dead_code)]
+fn unused(_: &M44, _: &Flags) {
+    let _ = rrect_path;
 }

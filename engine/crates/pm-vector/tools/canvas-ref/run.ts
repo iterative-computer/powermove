@@ -23,7 +23,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { cases } from './cases';
+import { cases, type Case } from './cases';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
@@ -47,8 +47,12 @@ const legacyCopy = between(raster, 'function rr(', '/* ── captions');
 const pageCopy = between(page, 'function rr(', '// END VERBATIM');
 if (legacyCopy.trim() !== pageCopy.trim()) throw new Error('page.ts rasterShape differs from legacy/gl/raster.ts; update the verbatim copy');
 
-const list = cases();
-writeFileSync(path.join(crate, 'tests/fixtures/canvas-cases.json'), JSON.stringify({ cases: list }, null, 1) + '\n');
+// `--cases <file.json>` runs a custom case list ({ cases: [...] }) for
+// experiments against Chromium; the fixture is only rewritten for the
+// built-in list.
+const custom = flag('--cases');
+const list: Case[] = custom ? JSON.parse(readFileSync(custom, 'utf8')).cases : cases();
+if (!custom) writeFileSync(path.join(crate, 'tests/fixtures/canvas-cases.json'), JSON.stringify({ cases: list }, null, 1) + '\n');
 
 const crcTable = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc = (b: Uint8Array) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 255]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
@@ -81,6 +85,7 @@ const server = Bun.serve({
     const q = url.searchParams;
     if (url.pathname === '/') return new Response('<!doctype html><meta charset=utf-8><body><script src="/bundle.js"></script>', { headers: { 'content-type': 'text/html' } });
     if (url.pathname === '/bundle.js') return new Response(bundle, { headers: { 'content-type': 'text/javascript' } });
+    if (url.pathname === '/cases') return new Response(JSON.stringify(list), { headers: { 'content-type': 'application/json' } });
     const body = new Uint8Array(await req.arrayBuffer());
     if (url.pathname === '/gpu') { manifest.gpu = JSON.parse(new TextDecoder().decode(body)); return new Response('ok'); }
     if (url.pathname === '/case') {
