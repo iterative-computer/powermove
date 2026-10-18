@@ -139,3 +139,48 @@ fn stretch_preroll_prefetch_includes_zero_gain_history() {
     );
     assert!(report.errors.is_empty());
 }
+
+/// Playback retries a starved render; the meters take each block once,
+/// when it renders completely, so a retried block reads as if it had never
+/// missed (no silent block in the window).
+#[test]
+fn a_retried_render_meters_once() {
+    let dir = temp_dir("readiness-meters");
+    let file = dir.join("tone.wav");
+    let rate = 48_000;
+    // A rising level, so a silent block in the window changes the reading.
+    let swell: Vec<f32> = tone(rate, 4.0, 997.0, 0.2)
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * (i as f32 / (4 * rate) as f32))
+        .collect();
+    write_wav(&file, rate, &[swell]);
+    let doc = || project(30.0, 4.0, &[audio("A", "s", 0.0, 4.0, "", "")], &[], "");
+    let at = pm_audio::source::BLOCK as i64;
+    let metered = |wait: bool| RenderOptions {
+        wait,
+        meters: true,
+        ..RenderOptions::default()
+    };
+    let mut out = vec![vec![]; 2];
+
+    let rig = Rig::new(&[("s", &file)]);
+    let mut played = rig.mixer(doc(), "C", MixFormat::stereo(rate));
+    for start in (at - 2048..at).step_by(256) {
+        let report = played.render(start, 256, &mut out, &metered(true)).unwrap();
+        assert_eq!(report.starved, 0);
+    }
+    let report = played.render(at, 256, &mut out, &metered(false)).unwrap();
+    assert_eq!(report.starved, 1, "the next decode block is cold");
+    let report = played.render(at, 256, &mut out, &metered(true)).unwrap();
+    assert_eq!(report.starved, 0, "the retry completes");
+
+    let rig = Rig::new(&[("s", &file)]);
+    let mut reference = rig.mixer(doc(), "C", MixFormat::stereo(rate));
+    for start in (at - 2048..=at).step_by(256) {
+        reference
+            .render(start, 256, &mut out, &metered(true))
+            .unwrap();
+    }
+    assert_eq!(played.meters(at + 256), reference.meters(at + 256));
+}

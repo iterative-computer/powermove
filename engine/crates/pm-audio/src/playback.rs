@@ -50,6 +50,10 @@ use crate::transport::{Effect, Transport};
 /// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
 /// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
+/// A source miss stalls playback (the segment is retried, the ring may
+/// underrun) rather than play undecoded samples; a stall this long is
+/// reported through [`Playback::take_errors`].
+const STALL_REPORT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct PlaybackConfig {
@@ -109,6 +113,12 @@ impl DeviceSide {
     pub fn queued_chunks(&self) -> usize {
         self.consumer.ring().queued()
     }
+
+    /// Frames of the current epoch queued for the device: what the next
+    /// callback can play without an underrun.
+    pub fn queued_frames(&self) -> usize {
+        self.consumer.queued_frames()
+    }
 }
 
 /// Reads the output device's id and presentation latency (µs).
@@ -136,6 +146,7 @@ struct Shared {
     meters: Mutex<VecDeque<Meters>>,
     errors: Mutex<Vec<String>>,
     starved: AtomicU64,
+    starve_retries: AtomicU64,
     device_rate: u32,
 }
 
@@ -172,7 +183,12 @@ pub struct Playback {
 pub struct PlaybackStats {
     pub underruns: u64,
     pub played_frames: u64,
+    /// Segments a source miss stopped (each counted once, however often
+    /// it was retried).
     pub starved_renders: u64,
+    /// Renders of a stopped segment that were still missing a source block
+    /// (playback retries every turn of its render loop, about 2 ms).
+    pub starve_retries: u64,
 }
 
 impl Playback {
@@ -233,6 +249,7 @@ impl Playback {
             meters: Mutex::new(VecDeque::new()),
             errors: Mutex::new(Vec::new()),
             starved: AtomicU64::new(0),
+            starve_retries: AtomicU64::new(0),
             device_rate,
         });
         let (tx, rx) = channel();
@@ -258,6 +275,7 @@ impl Playback {
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
             pending_segment: None,
+            stalled_since: None,
             mixer,
             config,
             solo: None,
@@ -400,6 +418,7 @@ impl Playback {
             underruns: self.ring.underruns(),
             played_frames: self.ring.played_frames(),
             starved_renders: self.shared.starved.load(Ordering::Relaxed),
+            starve_retries: self.shared.starve_retries.load(Ordering::Relaxed),
         }
     }
 
@@ -756,6 +775,9 @@ struct RenderThread {
     /// An undecoded segment is retried before advancing the transport.
     /// Never feed its zero-filled samples into the shuttle or converter.
     pending_segment: Option<crate::transport::Segment>,
+    /// When the pending segment first starved, and whether that stall has
+    /// been reported as an error (after [`STALL_REPORT`]).
+    stalled_since: Option<(std::time::Instant, bool)>,
     mixer: Mixer,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
@@ -917,6 +939,11 @@ impl RenderThread {
                         true
                     }
                     Ok(Effect::Stopped) => {
+                        // A stop drops the run's starved segment: the next
+                        // run renders from its own position.
+                        self.pending_segment = None;
+                        self.stalled_since = None;
+                        self.mixer.abandon_retries();
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
                         self.stop_pending = false;
@@ -1022,8 +1049,11 @@ impl RenderThread {
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
-        // A seek or a new run starts on the current mix.
+        self.stalled_since = None;
+        // A seek or a new run starts on the current mix, and its first
+        // render is a new request, not a retry of a starved one.
         self.mixer.end_glides();
+        self.mixer.abandon_retries();
         let position = self.transport.position();
         let rate = self.transport.rate() as i64;
         let speed = self.transport.play_rate();
@@ -1056,6 +1086,7 @@ impl RenderThread {
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
         while self.ring.queued() < target {
+            let retry = self.pending_segment.is_some();
             let Some(seg) = self
                 .pending_segment
                 .take()
@@ -1086,7 +1117,23 @@ impl RenderThread {
             match self.mixer.render(lo, n, &mut planar, &options) {
                 Ok(report) => {
                     if report.starved > 0 {
-                        self.shared.starved.fetch_add(1, Ordering::Relaxed);
+                        let counter = if retry {
+                            &self.shared.starve_retries
+                        } else {
+                            &self.shared.starved
+                        };
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        // Playback waits for the source rather than play
+                        // wrong samples; a wait that goes on is surfaced.
+                        let now = std::time::Instant::now();
+                        let (since, reported) = self.stalled_since.get_or_insert((now, false));
+                        if !*reported && now.duration_since(*since) >= STALL_REPORT {
+                            *reported = true;
+                            self.error(format!(
+                                "playback waited over {} s for a source to decode",
+                                STALL_REPORT.as_secs()
+                            ));
+                        }
                         // SourceCache queued the missing blocks. Preserve
                         // this segment and all valid DSP history until a
                         // later turn can render it completely. A real-time
@@ -1098,11 +1145,13 @@ impl RenderThread {
                         }
                         return;
                     }
+                    self.stalled_since = None;
                     for (id, e) in report.errors {
                         self.error(format!("{id}: {e}"));
                     }
                 }
                 Err(e) => {
+                    self.stalled_since = None;
                     self.error(e.to_string());
                     for c in &mut planar {
                         c.clear();
