@@ -9,8 +9,11 @@ test('measured still classes match the legacy composition before gates retire', 
   test.setTimeout(600_000);
   const root = process.env.PM_SVGSTILLS_EVIDENCE;
   expect(root).toBeTruthy();
-  const names = ['bmp24.bmp', 'bmp32.bmp', 'icon.ico', 'gif-still.gif', 'jpeg-gray.jpg',
+  const names: string[] = process.env.PM_SVGSTILLS_PARITY_CASES
+    ? JSON.parse(await readFile(process.env.PM_SVGSTILLS_PARITY_CASES, 'utf8'))
+    : ['bmp24.bmp', 'bmp32.bmp', 'icon.ico', 'gif-still.gif', 'jpeg-gray.jpg',
     'jpeg-progressive.jpg', 'progressive-gray.jpg', 'gray-1.png', 'gray-2.png', 'gray-4.png', 'gamma-only.png', 'tiff8-palette.tiff', 'avif-10bit.avif', 'avif-10bit-color.avif', 'palette-1.png', 'palette-2.png', 'palette-4.png', 'gamma-ramp.png', 'tiff32f-rgb.tiff', 'late-exif.png'];
+  const manifest: Array<{ name: string; file: string }> = JSON.parse(await readFile(path.join(root!, 'manifest.json'), 'utf8'));
   const out = path.join(root!, 'composition'); await mkdir(out, { recursive: true });
   const frames: number[][][] = [];
   for (const native of [false, true]) {
@@ -26,7 +29,7 @@ test('measured still classes match the legacy composition before gates retire', 
         });
         const chooser = session.page.waitForEvent('filechooser');
         await session.page.evaluate(() => (window as any).PM.pickFiles());
-        await (await chooser).setFiles(path.join(root!, 'sources', name));
+        await (await chooser).setFiles(manifest.find(row => row.name === name)?.file || path.join(root!, 'sources', name));
         await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'image'));
         // Exercise filtering and transformed edges, rather than only an
         // unscaled decoder upload. The dimensions differ from every source.
@@ -38,9 +41,21 @@ test('measured still classes match the legacy composition before gates retire', 
         if (native) await expect.poll(() => session.page.evaluate(() => {
           const s = (window as any).PM.EngineConnection.status(); return { route: s.route, reason: s.routeReason };
         })).toEqual({ route: 'engine', reason: null });
+        await session.page.evaluate(() => {
+          const w = window as any; w.__svgstillsJobs = [];
+          w.__svgstillsOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__svgstillsJobs.push(s));
+        });
         const file = path.join(out, `${native ? 'native' : 'legacy'}-${name}.png`);
         await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, file);
         expect(await session.page.evaluate(async () => (window as any).PM.Export.run({ format: 'still', w: 160, h: 120, alpha: false, mblur: false }))).toEqual({ cancelled: false });
+        const jobs = await session.page.evaluate(() => {
+          const w = window as any; w.__svgstillsOff(); return w.__svgstillsJobs;
+        });
+        await writeFile(path.join(out, `${native ? 'native' : 'legacy'}-${name}.jobs.json`), JSON.stringify(jobs, null, 2));
+        if (native) {
+          expect(jobs.some((j: any) => j.state === 'done' && !j.routed), `native export must finish in engine: ${name}`).toBe(true);
+          expect(jobs.some((j: any) => j.routed), `native export must not route: ${name}`).toBe(false);
+        }
         capture.push(await session.page.evaluate(async bytes => {
           const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
           const c = new OffscreenCanvas(160, 120), ctx = c.getContext('2d')!; ctx.drawImage(image, 0, 0); image.close();

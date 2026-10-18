@@ -243,6 +243,26 @@ fn interpreted_color(
     })
 }
 
+/// Keep native-depth sources unchanged. At level 1, a file Chromium can
+/// decode must not depend on ImageIO accepting the same AVIF container.
+fn image_source(
+    path: &Path,
+    pool: &FramePool,
+    compat: bool,
+) -> pm_media::Result<pm_media::image::StillImage> {
+    pm_media::image::read(path, pool).or_else(|error| {
+        if compat {
+            use std::io::Read;
+            let mut head = [0; 512];
+            let n = std::fs::File::open(path)?.read(&mut head)?;
+            if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Avif {
+                return pm_media::image::avif_compat::read_bitmap(path, pool);
+            }
+        }
+        Err(error)
+    })
+}
+
 /// Whether an image file can be drawn: readable, not animated, in a tested
 /// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
@@ -254,7 +274,7 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         let pool = FramePool::new(0);
-        let still = pm_media::image::read(path, &pool)
+        let still = image_source(path, &pool, true)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
         // Chromium cannot show an AVIF its decoder cannot parse, whatever
         // ImageIO reads: a named failure, not a class.
@@ -845,7 +865,7 @@ impl MediaCache {
             None => probe_image(path),
         }
         .map_err(issue)?;
-        let mut still = pm_media::image::read(path, &self.pool)
+        let mut still = image_source(path, &self.pool, compat && interpret.is_none())
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
             still = pm_media::image::avif_compat::read(path, &still, &self.pool)

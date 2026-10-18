@@ -51,6 +51,9 @@ test('record reachable still decoder classes through the shipped importer', asyn
   };
   try {
     await session.openEditor();
+    const supplied = process.env.PM_SVGSTILLS_CASES;
+    if (supplied) cases.push(...JSON.parse(await readFile(supplied, 'utf8')));
+    else {
     for (const [name, mime] of [
       ['bmp24.bmp', 'image/bmp'], ['bmp32.bmp', 'image/bmp'], ['icon.ico', 'image/x-icon'], ['gif-still.gif', 'image/gif'],
       ['jpeg-gray.jpg', 'image/jpeg'], ['jpeg-progressive.jpg', 'image/jpeg'], ['jpeg-12bit.jpg', 'image/jpeg'], ['jpeg-lossless16.jpg', 'image/jpeg'], ['cmyk.jpg', 'image/jpeg'],
@@ -111,6 +114,7 @@ exit(CGImageDestinationFinalize(dst) ? 0 : 1)
       const file = path.join(sources, name!); execFileSync('/usr/bin/swift', [writer, path.join(corpus, src!), file, uti!, mode!]);
       cases.push({ name: name!, file, mime: uti === 'public.tiff' ? 'image/tiff' : 'image/jpeg' });
     }
+    }
     const rows: unknown[] = [];
     await session.page.evaluate(() => {
       const input = document.createElement('input'); input.type = 'file'; input.id = 'svgstills-source'; input.hidden = true; document.body.append(input);
@@ -145,6 +149,6 @@ exit(CGImageDestinationFinalize(dst) ? 0 : 1)
       // A decoded float ImageBitmap can itself fail today's RGBA8 WebGL
       // upload. Record that outcome; it is not a usable pixel reference.
     }
-    expect(rows).toHaveLength(40);
+    expect(rows).toHaveLength(cases.length);
   } finally { await session.close(); }
 });

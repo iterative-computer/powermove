@@ -43,6 +43,7 @@ pub enum ImageBackend {
     OpenExr,
     Ffmpeg,
     Resvg,
+    CrabbyAvif,
 }
 
 /// Formats recognized from the first bytes of a file.

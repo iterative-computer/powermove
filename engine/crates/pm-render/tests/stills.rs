@@ -605,7 +605,9 @@ fn avif_container_transforms_follow_blink() {
 /// The level-1 AVIF bitmap, tightly packed.
 fn avif_compat_rgba8(path: &Path) -> Vec<u8> {
     let pool = pm_media::pool::FramePool::new(0);
-    let original = pm_media::image::read(path, &pool).unwrap();
+    let original = pm_media::image::read(path, &pool)
+        .or_else(|_| pm_media::image::avif_compat::read_bitmap(path, &pool))
+        .unwrap();
     assert!(
         pm_media::image::avif_compat::applies(&original),
         "{}",
@@ -1064,4 +1066,66 @@ fn wide_gamut_alpha_and_opaque_rgba_are_supported() {
         }
     }
     std::fs::remove_dir_all(d).unwrap();
+}
+
+/// SHA-256 references are Chromium 152 ImageBitmap uploads, captured through
+/// the app under the Electron lock. All 39 SDR AVIFs also pass transformed
+/// composition parity; these redistributable synthetic fixtures pin decoding.
+#[test]
+fn avif_sdr_chroma_depth_and_icc_match_chromium_uploads() {
+    use sha2::{Digest, Sha256};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    for (name, expected) in [
+        (
+            "still-avif-400-full.avif",
+            "bad584762d7c9d8faba67b0eeeacc4d76e29ada8517af647df4ff1c832732ee7",
+        ),
+        (
+            "still-avif-422-full.avif",
+            "db4a34ff6a6b35bd140be7fa8c0b5dde82e1c6fd8bd90965f5a799612447b528",
+        ),
+        (
+            "still-avif-444-full.avif",
+            "97761dacec6a1eb2fc102a190c54831d9811df51f6221a0b61a93be3e7c95302",
+        ),
+        (
+            "still-avif-icc-adobe-alpha.avif",
+            "34520f1c8e1c576fc24ad32bfc7fa082dc2e4b30c33d0fbeef8307b724247e97",
+        ),
+        (
+            "still-avif-icc-p3-alpha.avif",
+            "d9131d331c26ea078e851a65426ee99f98a70d9e325b780ce5f380c921103416",
+        ),
+        (
+            "still-red-limited-range-420-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-422-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-limited-range-444-12bpc.avif",
+            "0f2e6f6c1edb6eabc544d0ef46973dce7b1b154700972f69adadd4f4461475a2",
+        ),
+        (
+            "still-red-with-alpha-12bpc.avif",
+            "efb2a3897a86e2b25d51f66e9bbeaf6f4329c82bd86a35d1718016bbbd5863a4",
+        ),
+        (
+            "still-red-with-profile-12bpc.avif",
+            "d7b8eab2c246b0cbc1e10701de7cc2412f7055bfa95967d023a7d101699340f4",
+        ),
+    ] {
+        let path = fixtures.join(name);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let rgba = avif_compat_rgba8(&path);
+        assert_eq!(format!("{:x}", Sha256::digest(&rgba)), expected, "{name}");
+        // ImageIO rejects the valid deep-alpha container; level 1 must
+        // decode it independently. Other native-depth sources stay deep.
+        if name.contains("12bpc") && name.contains("limited-range") {
+            let native = pm_media::image::read(&path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert!(native.bit_depth > 8, "{name}: level 2 source precision");
+        }
+    }
 }

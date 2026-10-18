@@ -23,7 +23,13 @@ fn main() {
         }
         let path = PathBuf::from(row["file"].as_str().unwrap());
         let attempt = (|| -> pm_media::Result<_> {
-            let original = image::read(&path, &pool)?;
+            let original = image::read(&path, &pool).or_else(|error| {
+                if path.extension().is_some_and(|e| e == "avif") {
+                    image::avif_compat::read_bitmap(&path, &pool)
+                } else {
+                    Err(error)
+                }
+            })?;
             if original.float
                 || original.color.icc_class == Some(image::icc::IccClass::ConvertedToSrgb)
             {

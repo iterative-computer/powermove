@@ -10,7 +10,7 @@
 //! All 21 detailed still corpus cases pass the 2D/alpha classes. Container
 //! checks keep other structures explicit (HDR/chromaticity-only PNG, RGB/CMYK
 //! JPEG, TIFF tiles/compressed float/other models, and AVIF outside the
-//! 8/10-bit 4:2:0 SDR class).
+//! measured SDR classes).
 //!
 //! Container transforms are drawn only as Chromium shows them, each
 //! compared in the app (`e2e/native-still-orientation-parity.spec.ts`):
@@ -137,7 +137,7 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
             };
         }
         ImageFormat::Avif => {
-            return unsupported("AVIF stills outside the tested 8/10-bit SDR class");
+            return unsupported("AVIF stills outside the tested SDR classes");
         }
         ImageFormat::Bmp | ImageFormat::Ico | ImageFormat::Gif => return Ok(()),
         ImageFormat::Exr => return unsupported("OpenEXR stills"),
