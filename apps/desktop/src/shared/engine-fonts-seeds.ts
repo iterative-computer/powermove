@@ -5,18 +5,25 @@
  * Chromium's renderer-wide font cache keys platform data by family,
  * effective size, and weight/width/slope, not by specified size, and the
  * first description that creates an entry fixes its optical size. The app's
- * own UI text (system-ui at --fs-sm and --fs-md, 12 and 13 px, weight 400)
- * is laid out at the window's device scale factor, so on a 2x display it
- * creates the 24 and 26 px entries with opsz 12 and 13, and every later
- * canvas that measures 24 or 26 px system-ui text at weight 400 gets the
- * text-size advances. pm-wasm and the engines measure as that renderer
- * does when they are told these entries.
+ * own UI text is laid out in the system font (`--f-ui`: "SF Pro Text" when
+ * installed, else -apple-system) at its CSS size times the window's device
+ * pixel ratio, so on a 2x display 12 px UI text creates the 24 px entry with
+ * opsz 12, and every later canvas that measures 24 px system-ui text at that
+ * weight gets the text-size advances. pm-wasm and the engines measure as
+ * that renderer does when they are told these entries.
  *
- * A window keeps the entries of every scale factor it has been on (moving
- * to a 1x display adds the 12 and 13 px entries; the 24 and 26 px ones stay).
+ * Which entries a renderer has depends on what its UI has laid out: the
+ * density setting (`--fs-md` is 12, 13 or 14 px), the panels and menus
+ * shown (11, 15 and 18 px; weights 400, 500, 600), page zoom, and every
+ * display the window has been on. The renderer reports what it lays out
+ * (`UiFontCensus`, renderer engine-doc/ui-font-census.ts); main resolves
+ * each family stack as Chromium does (`uiFontSeed`) and keeps each
+ * window's seeds in the order its renderer created them (`FontSeedTracker`).
  * Each window is its own renderer with its own cache: the engines measure a
  * view with the seeds of its window, never another window's.
- * `appUiFontCacheSeeds` equals pm-text's `app_ui_font_cache_seeds`.
+ * `appUiFontCacheSeeds` (equal to pm-text's `app_ui_font_cache_seeds`) is
+ * the startup model at the default density, for tools with no window
+ * (corpus tests, parity).
  */
 
 /** pm-text's `FontCacheSeed`. */
@@ -30,7 +37,8 @@ export interface FontCacheSeed {
   specified: number;
 }
 
-/** The CSS sizes of the UI text that creates system-ui entries (pm-text `APP_UI_TEXT_SIZES`). */
+/** The CSS sizes of the default-density UI text at startup (`--fs-sm`,
+ *  `--fs-md`; pm-text `APP_UI_TEXT_SIZES`), for tools with no window. */
 export const APP_UI_TEXT_SIZES = [12, 13] as const;
 
 /** Blink's `FontDescription::EffectiveFontSize`: `floorf(size × 100) / 100` in float. */
@@ -39,7 +47,8 @@ export function effectiveFontSize(size: number): number {
   return f(Math.floor(f(f(size) * 100)) / 100);
 }
 
-/** The seeds of a renderer whose window has been on displays with these scale factors, in that order. */
+/** The startup seeds of a default-density renderer whose window has been on
+ *  displays with these scale factors, in that order (no window to ask). */
 export function appUiFontCacheSeeds(scaleFactors: readonly number[]): FontCacheSeed[] {
   const out: FontCacheSeed[] = [];
   for (const scale of scaleFactors) {
@@ -77,50 +86,147 @@ export function engineSeedsJson(table: EngineSeedTable, sessions: readonly Sessi
   return JSON.stringify(sessions.length ? { ...table, sessions } : table);
 }
 
+/** One description of system-font text a renderer laid out (renderer
+ *  engine-doc/ui-font-census.ts). */
+export interface UiFontUse {
+  /** The computed `font-family`, lower-cased and unquoted, in order. */
+  families: string[];
+  /** The computed font size in CSS px (before zoom). */
+  size: number;
+  weight: number;
+  italic: boolean;
+}
+
+/** What a renderer reports: text it laid out at this device pixel ratio
+ *  (the display's scale factor times page zoom). */
+export interface UiFontCensus {
+  dpr: number;
+  uses: UiFontUse[];
+}
+
+/** The names Blink resolves to the system font on macOS: one cache key. */
+export const SYSTEM_FONT_ALIASES: ReadonlySet<string> = new Set(['system-ui', '-apple-system', 'blinkmacsystemfont']);
+
+/** Generic families that resolve to a named font (Helvetica, Times,
+ *  Courier, ...), never the system font, so a stack stops at them. The
+ *  `ui-*` generics are counted here too: they never reach `system-ui`. */
+const NAMED_GENERICS: ReadonlySet<string> = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'math', 'emoji', 'fangsong', 'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded']);
+
+/** Splits a computed `font-family` into lower-cased, unquoted names. */
+export function parseFontFamilies(css: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | null = null;
+  for (const ch of css) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === ',') {
+      if (cur.trim()) out.push(cur.trim().toLowerCase());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur.trim().toLowerCase());
+  return out;
+}
+
 /**
- * Scale factors each window has been on, in order (main tracks its editor
- * windows; Electron-free so it is testable).
+ * The font cache entry a use creates in the system font, or null when its
+ * stack reaches another font first: the first family that is a system font
+ * alias wins; an installed family (`installed`, the registry's family names
+ * as Chromium sees them) or a named generic before it means the text is not
+ * in the system font. Only the system font's entries change later canvas
+ * measurement (amendment 19).
+ */
+export function uiFontSeed(use: UiFontUse, dpr: number, installed: (family: string) => boolean): FontCacheSeed | null {
+  if (!(Number.isFinite(dpr) && dpr > 0 && Number.isFinite(use.size) && use.size > 0 && Number.isFinite(use.weight))) return null;
+  for (const family of use.families) {
+    if (SYSTEM_FONT_ALIASES.has(family)) {
+      return { family: 'system-ui', weight: use.weight, italic: use.italic, size: effectiveFontSize(Math.fround(Math.fround(use.size) * Math.fround(dpr))), specified: Math.fround(use.size) };
+    }
+    if (NAMED_GENERICS.has(family) || installed(family)) return null;
+  }
+  return null;
+}
+
+const seedKey = (s: FontCacheSeed) => `${s.size}|${s.weight}|${s.italic}`;
+
+/**
+ * Each window's renderer font cache, as its UI text created it (main tracks
+ * its editor windows; Electron-free so it is testable). Censuses are kept
+ * raw, in order, so the seeds follow a change of installed fonts.
  */
 export class FontSeedTracker {
-  private readonly factors = new Map<number, number[]>();
+  private readonly reports = new Map<number, UiFontCensus[]>();
   private readonly listeners = new Set<(owner: number | null) => void>();
+  private installed: (family: string) => boolean = () => false;
 
-  /** The window `owner` (a webContents id) is on a display with this scale factor. */
-  observe(owner: number, scaleFactor: number): void {
-    if (!(Number.isFinite(scaleFactor) && scaleFactor > 0)) return;
-    const seen = this.factors.get(owner) ?? [];
-    if (seen.includes(scaleFactor)) {
-      if (!this.factors.has(owner)) this.factors.set(owner, seen);
-      return;
-    }
-    seen.push(scaleFactor);
-    this.factors.set(owner, seen);
-    for (const l of this.listeners) l(owner);
+  /** The renderer of window `owner` (a webContents id) laid this text out.
+   *  Uses that add no entry change nothing. */
+  report(owner: number, census: UiFontCensus): void {
+    const before = this.seedsFor(owner).length;
+    const list = this.reports.get(owner) ?? [];
+    list.push({ dpr: census.dpr, uses: census.uses.map((u) => ({ ...u, families: [...u.families] })) });
+    this.reports.set(owner, list);
+    if (this.seedsFor(owner).length !== before) for (const l of this.listeners) l(owner);
+  }
+
+  /** The families installed as Chromium sees them changed (a font was
+   *  installed or removed): every window's stacks resolve again. */
+  setInstalled(installed: (family: string) => boolean): void {
+    const before = [...this.reports.keys()].map((o) => JSON.stringify(this.seedsFor(o)));
+    this.installed = installed;
+    [...this.reports.keys()].forEach((o, i) => {
+      if (JSON.stringify(this.seedsFor(o)) !== before[i]) for (const l of this.listeners) l(o);
+    });
   }
 
   /** The window closed: its renderer and its cache are gone. */
   forget(owner: number): void {
-    if (this.factors.delete(owner)) for (const l of this.listeners) l(null);
+    if (this.reports.delete(owner)) for (const l of this.listeners) l(null);
   }
 
-  /** The seeds of one window's renderer (pm-wasm in that window). */
+  /** The seeds of one window's renderer (pm-wasm in that window): the first
+   *  description to create a key fixes it. */
   seedsFor(owner: number): FontCacheSeed[] {
-    return appUiFontCacheSeeds(this.factors.get(owner) ?? []);
+    const out: FontCacheSeed[] = [];
+    const keys = new Set<string>();
+    for (const census of this.reports.get(owner) ?? []) {
+      for (const use of census.uses) {
+        const seed = uiFontSeed(use, census.dpr, this.installed);
+        if (seed && !keys.has(seedKey(seed))) {
+          keys.add(seedKey(seed));
+          out.push(seed);
+        }
+      }
+    }
+    return out;
   }
 
-  /** The seeds of all windows' renderers, windows in the order they were
-   *  first seen (identical for windows that were only ever on the same kind
-   *  of display): the engines' fallback for work of no known window. */
+  /** The seeds of all windows' renderers, windows in the order they first
+   *  reported: the engines' fallback for work of no known window. */
   allSeeds(): FontCacheSeed[] {
-    const scales: number[] = [];
-    for (const seen of this.factors.values()) for (const s of seen) if (!scales.includes(s)) scales.push(s);
-    return appUiFontCacheSeeds(scales);
+    const out: FontCacheSeed[] = [];
+    const keys = new Set<string>();
+    for (const owner of this.reports.keys()) {
+      for (const seed of this.seedsFor(owner)) {
+        if (!keys.has(seedKey(seed))) {
+          keys.add(seedKey(seed));
+          out.push(seed);
+        }
+      }
+    }
+    return out;
   }
 
   /** What the engines measure with: every window's own seeds, and all of
    *  them for work of no known window. */
   engineSeeds(): EngineSeedTable {
-    return { seeds: this.allSeeds(), owners: [...this.factors.keys()].map((owner) => ({ owner, seeds: this.seedsFor(owner) })) };
+    return { seeds: this.allSeeds(), owners: [...this.reports.keys()].map((owner) => ({ owner, seeds: this.seedsFor(owner) })) };
   }
 
   /** Called with the owner whose seeds changed (null: a window went away). */
@@ -128,4 +234,27 @@ export class FontSeedTracker {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
+}
+
+/** Parses a renderer's census message; null when it is malformed. */
+export function parseUiFontCensus(json: unknown, limits = { uses: 4096, families: 32, chars: 256 }): UiFontCensus | null {
+  if (typeof json !== 'string' || json.length > limits.uses * (limits.families * limits.chars)) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const { dpr, uses } = value as { dpr?: unknown; uses?: unknown };
+  if (typeof dpr !== 'number' || !Number.isFinite(dpr) || dpr <= 0 || !Array.isArray(uses) || uses.length > limits.uses) return null;
+  const out: UiFontUse[] = [];
+  for (const u of uses) {
+    if (!u || typeof u !== 'object') return null;
+    const { families, size, weight, italic } = u as Record<string, unknown>;
+    if (!Array.isArray(families) || families.length > limits.families || !families.every((f) => typeof f === 'string' && f.length <= limits.chars)) return null;
+    if (typeof size !== 'number' || typeof weight !== 'number' || typeof italic !== 'boolean') return null;
+    out.push({ families: families as string[], size, weight, italic });
+  }
+  return { dpr, uses: out };
 }

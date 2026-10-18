@@ -48,7 +48,9 @@ export const ENGINE_FONTS_LIMITS = {
   descriptorChars: 128,
   /** Large CJK collections run to about 70 MB. */
   fontBytes: 128 * 1024 * 1024,
-  faceIndex: 0xffff
+  faceIndex: 0xffff,
+  /** A renderer's UI font census message. */
+  censusJsonChars: 1024 * 1024
 } as const;
 
 /** pm-bridge's `FontRegistry`. */
@@ -109,6 +111,9 @@ export interface EngineFontsContext {
   /** The sender window's font cache seeds as `{ seeds }` JSON
    *  (engine-fonts-seeds.ts); without it every renderer is fresh. */
   seedsFor?(sender: number): string;
+  /** The sender renderer's UI font census (`engine-fonts:ui-fonts`,
+   *  engine-fonts-seeds.ts): false when the message is malformed. */
+  reportUiFonts?(sender: number, json: unknown): Promise<boolean>;
 }
 
 export function engineFontsEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -222,6 +227,9 @@ export function registerEngineFontsIpc(ipc: IpcLike, ctx: EngineFontsContext, so
   handle(ENGINE_FONTS_IPC.clearProjectFonts, () => run(() => provider.clearProjectFonts()));
   handle(ENGINE_FONTS_IPC.generation, () => run(() => provider.generation()));
   handle(ENGINE_FONTS_IPC.seeds, (sender) => run(() => ctx.seedsFor?.(sender) ?? '{"seeds":[]}'));
+  handle(ENGINE_FONTS_IPC.uiFonts, (sender, json) => (isText(json, ENGINE_FONTS_LIMITS.censusJsonChars)
+    ? run(async () => (ctx.reportUiFonts ? ctx.reportUiFonts(sender, json) : false))
+    : invalid('census')));
 }
 
 export interface EngineFontsSetup {
@@ -515,8 +523,10 @@ export class EngineFontClient implements FontsProvider {
   /** The window a session of this client's engine is for (`null`: none, or
    *  the session closed): the engine measures its text with that window's
    *  seeds. Resolves once the engine has them (after the next port's replay
-   *  when none is open), or after `timeoutMs` (the session then measures
-   *  with every window's seeds). */
+   *  when none is open). Naming a window rejects after `timeoutMs` without
+   *  an answer: its session would otherwise measure with every window's
+   *  seeds, which can lay text out differently from that window. Forgetting
+   *  one (`null`) resolves then. */
   setSessionOwner(session: number, owner: number | null, timeoutMs = 5_000): Promise<void> {
     if (owner === null ? !this.sessions.delete(session) : this.sessions.get(session) === owner) return Promise.resolve();
     if (owner !== null) this.sessions.set(session, owner);
@@ -526,14 +536,21 @@ export class EngineFontClient implements FontsProvider {
         this.seeds = this.composedSeeds();
         this.seedWaiters.push(resolve);
       });
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const timer = this.schedule(() => {
-        this.log('warn', `[engine-fonts] the engine did not take the seeds of session ${session} in time`);
-        resolve();
+        if (owner === null) {
+          resolve();
+          return;
+        }
+        reject(new Error(`the engine did not take the font cache seeds of window ${owner} for session ${session} in time`));
       }, timeoutMs);
-      void sent.then(() => {
+      sent.then(() => {
         timer.cancel();
         resolve();
+      }, (error: unknown) => {
+        timer.cancel();
+        if (owner === null) resolve();
+        else reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }

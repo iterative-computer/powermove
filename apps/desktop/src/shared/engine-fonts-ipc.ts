@@ -21,7 +21,10 @@ export const ENGINE_FONTS_IPC = {
   generation: 'engine-fonts:generation',
   /** → `{ seeds: FontCacheSeed[] }` JSON: the asking window's renderer font
    *  cache seeds (shared/engine-fonts-seeds.ts). */
-  seeds: 'engine-fonts:seeds'
+  seeds: 'engine-fonts:seeds',
+  /** `UiFontCensus` JSON → whether main took it: system-font text the
+   *  asking window's renderer laid out (shared/engine-fonts-seeds.ts). */
+  uiFonts: 'engine-fonts:ui-fonts'
 } as const;
 
 /** Main → renderer messages on the font channels. */
@@ -54,4 +57,6 @@ export interface EngineFontsBridge {
   seeds?(): Promise<EngineFontsResult<string>>;
   /** Calls `listener` with the window's seeds whenever they change. */
   onSeedsChanged?(listener: (json: string) => void): () => void;
+  /** Reports UI text this window's renderer laid out (`UiFontCensus` JSON). */
+  reportUiFonts?(json: string): Promise<EngineFontsResult<boolean>>;
 }

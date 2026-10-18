@@ -66,10 +66,11 @@ pub struct FontCacheSeed {
 }
 
 /// The CSS sizes of the app's own UI text that create `system-ui` entries in
-/// the editor renderer's font cache before any canvas measures (`--fs-sm`
-/// and `--fs-md`, weight 400, upright; `docs/engine/text.md`, "The
-/// renderer's font cache"). Main sends these as seeds (`engine-fonts:seeds`)
-/// to pm-wasm and to the engines.
+/// a default-density editor renderer's font cache at startup (`--fs-sm` and
+/// `--fs-md`, weight 400, upright; `docs/engine/text.md`, "The renderer's
+/// font cache"): the model for tools with no window to ask (corpus tests,
+/// parity, `pm-cli`). In the app, main sends each window's seeds as its
+/// renderer reports the UI text it laid out (the UI font census).
 pub const APP_UI_TEXT_SIZES: [f32; 2] = [12.0, 13.0];
 
 /// The seeds of an editor renderer whose window has been on displays with
@@ -102,9 +103,20 @@ pub fn app_ui_font_cache_seeds(scale_factors: &[f32]) -> Vec<FontCacheSeed> {
     out
 }
 
+/// The names Blink resolves to the system font on macOS. They share one
+/// font cache key: the app's UI text in `-apple-system` (`--f-ui`) creates
+/// the entries a canvas measuring `system-ui` finds (the real project's
+/// capture, `docs/engine/text.md`), so a seed named by one matches them all.
+const SYSTEM_FONT_ALIASES: [&str; 3] = ["system-ui", "-apple-system", "blinkmacsystemfont"];
+
+fn same_cache_family(a: &str, b: &str) -> bool {
+    let system = |n: &str| SYSTEM_FONT_ALIASES.iter().any(|s| n.eq_ignore_ascii_case(s));
+    a.eq_ignore_ascii_case(b) || (system(a) && system(b))
+}
+
 impl FontCacheSeed {
     fn matches(&self, family: &str, desc: &FontDesc) -> bool {
-        self.family.eq_ignore_ascii_case(family)
+        same_cache_family(&self.family, family)
             && self.weight == desc.weight
             && self.italic == desc.italic
             && self.size == desc.size
@@ -458,5 +470,13 @@ mod seed_tests {
         // Fractional scale factors floor as Blink's effective size does.
         assert_eq!(app_ui_font_cache_seeds(&[1.1])[0].size, 13.2);
         assert_eq!(app_ui_font_cache_seeds(&[]).len(), 0);
+    }
+
+    #[test]
+    fn system_font_aliases_share_a_cache_key() {
+        assert!(same_cache_family("system-ui", "-apple-system"));
+        assert!(same_cache_family("BlinkMacSystemFont", "system-ui"));
+        assert!(same_cache_family("Helvetica", "helvetica"));
+        assert!(!same_cache_family("system-ui", "Helvetica"));
     }
 }

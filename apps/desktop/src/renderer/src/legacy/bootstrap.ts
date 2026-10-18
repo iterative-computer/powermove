@@ -28,6 +28,7 @@ import { install as installHistory } from './core/history';
 import { installEngineDoc } from '../engine-doc/install';
 import { rendererMode, withNewEngine } from '../engine-doc/flags';
 import { installEngineConnection } from '../engine-connection/install';
+import { installUiFontCensus } from '../engine-doc/ui-font-census';
 import { install as installLibrary } from './core/library';
 import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
@@ -125,6 +126,9 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The kernel's engine connection (behind "Use New Engine"): the viewer's
      engine frames, the patch stream, and the transport (section 18). */
   ['engine/connection', (PM) => void installEngineConnection(PM, hostBridge() as never)],
+  /* The UI text this renderer lays out, for its font cache seeds (with
+     "Use New Engine" on; docs/engine/text.md). */
+  ['engine/ui-font-census', () => void installUiFontCensus(hostBridge() as never)],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],

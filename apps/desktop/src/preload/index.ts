@@ -93,6 +93,7 @@ function engineFontsBridge(): EngineFontsBridge {
     clearProjectFonts: () => invoke(ENGINE_FONTS_IPC.clearProjectFonts),
     generation: () => invoke(ENGINE_FONTS_IPC.generation),
     seeds: () => invoke(ENGINE_FONTS_IPC.seeds),
+    reportUiFonts: (json) => invoke(ENGINE_FONTS_IPC.uiFonts, String(json)),
     onSeedsChanged: (listener) => {
       const handler = (_event: unknown, json: unknown) => listener(String(json));
       ipcRenderer.on(ENGINE_FONTS_EVENTS.seedsChanged, handler);

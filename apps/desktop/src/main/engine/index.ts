@@ -325,8 +325,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const fontClient = new EngineFontClient({ log });
   const jobFontClient = new EngineFontClient({ log });
   fontClient.mirror(jobFontClient);
-  const fontSeeds = startEngineFontSeeds(fontClient, log);
-  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender, seedsFor: fontSeeds.seedsFor }, fontClient);
+  const fontSeeds = startEngineFontSeeds(fontClient, log, options.windows);
+  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender, seedsFor: fontSeeds.seedsFor, reportUiFonts: fontSeeds.reportUiFonts }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
   engine.addClient(JOB_FONT_CLIENT_ID, (_info, port) => jobFontClient.connect(port), { peer: 'fonts', processes: ['job'] });
 
