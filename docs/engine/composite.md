@@ -247,11 +247,12 @@ matte passes render over the pass rectangle.
 | `tests/composite.rs` | Blend modes (5 color pairs, 9 modes, 2 opacities, 3 color setups, 2 precisions), styled groups, mask coverage, matte modes and visibility, matte depth and cycles, group matte sources, adjustment layers, isolation, regions with padding, determinism, project settings | Pass |
 | `tests/linear.rs` | 50% white over black and a 2× downscaled checkerboard: 188 with linear blending, 128 without | Pass |
 | `tests/color.rs` | Invariant (2), pipeline transparency (ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`), and invariant (1) for 4:2:0, each with linear blending on too | Pass: 0 samples differ |
-| `tests/corpus.rs` | Every supported corpus project (v1, render, effects, composite, motion, and closure captures) | See the lane report for the latest whole-corpus figures |
+| `tests/corpus.rs` | Every supported corpus project of the default captures (v1, render, effects, composite, motion, compclose, compclose2, compclose3) | 2026-10-18: 339 frames, 5 failures, all video class (`motion/blur-video`, the appendix A item; `retime/speed` and `space25d/precomps`, the media lane's chroma-edge decode); skips: SVG images, animated images, playback proxies, `space25d/vector` (level 1 shapes on planes) |
+| `tests/text_corpus.rs` | Text and captions projects of the same captures, with the built-in definitions | 2026-10-18: 143 frames, 0 failures; `space/groups-25d` skipped (level 1 shapes on planes) |
 | `tests/path_masks.rs` | 54 path mask coverage canvases against today's (`pm-vector/tools/mask-ref`) | Pass: bit-exact |
 | `pm-vector` `tests/mask_coverage.rs`, `canvas2d::filter` unit tests | Item rasters exact where nothing is blurred; the CPU model of the blur within 2 CV; Skia's step counts and kernels | Pass |
 | `tests/half_store.rs` | `rgba16float` stores truncate on this GPU, and the renderer's probe agrees | Pass |
-| `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | See motion.md |
+| `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | Pass: 338,211 drawn pixels, all picked; level 2 placement 0 misses (motion.md) |
 | `pm-color` unit tests | Composite and matte references | Pass |
 | App: `project-settings.test.ts`, `settings/project-color.test.ts`, `shared/project-color.test.ts`, `engine-stamp.test.ts`, `e2e/project-color.spec.ts` | The Color rows, Undo, the stamp, hidden without the new engine | Pass |
 
