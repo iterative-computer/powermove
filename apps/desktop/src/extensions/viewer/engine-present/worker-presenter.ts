@@ -173,6 +173,8 @@ export type WorkerPresenterOptions = {
 
 export class WorkerPresenter implements Presenter {
   private generation: number;
+  /** The depth and object-id pool's generation (`role: depthId`). */
+  private depthGeneration = 0;
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private parkTimer = 0;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
@@ -260,6 +262,16 @@ export class WorkerPresenter implements Presenter {
       if (this.options.hostOffsetUs) this.options.host.post({ type: 'hostOffset', session, us: this.options.hostOffsetUs() });
     } else if (message.type === 'surfacePool') {
       const pool = message.pool;
+      if (pool.role === 'depthId') {
+        // The depth and object-id pool: the worker's presenter tags frames
+        // with it; the imports are read on this side (`depthFrame`).
+        if (pool.generation <= this.depthGeneration) return;
+        const previous = this.depthGeneration;
+        this.depthGeneration = pool.generation;
+        this.options.host.post({ type: 'pool', session, pool });
+        if (previous) this.options.source.retire(previous);
+        return;
+      }
       if (pool.generation <= this.generation) return;
       const previous = this.generation;
       this.generation = pool.generation;

@@ -175,6 +175,8 @@ impl PresenterControl {
 /// What the JavaScript side remembers per viewer.
 struct Meta {
     pool: Option<(PoolSpec, u64)>,
+    /// The depth and object-id pool (`ViewerState::depth_id`), and its bytes.
+    depth: Option<(PoolSpec, u64)>,
 }
 
 pub struct BridgePresenter {
@@ -347,13 +349,65 @@ impl BridgePresenter {
             format,
             count,
         };
+        let depth = self.views.get(&key).and_then(|m| m.depth);
         self.views.insert(
             key,
             Meta {
                 pool: Some((spec, bytes)),
+                depth,
             },
         );
         Some(spec)
+    }
+
+    /// The depth and object-id pool for `state` (plan section 8; the Phase
+    /// 3c render transport): `rgbaf16` surfaces at the viewer's size, as
+    /// many as the color pool, made only while the viewer asks for them.
+    /// Returns `Some(Some(spec))` for a new pool, `Some(None)` to retire the
+    /// current one, `None` when nothing changes.
+    fn plan_depth(
+        &mut self,
+        ctx: &mut PresentContext<'_>,
+        key: Key,
+        state: &ViewerState,
+    ) -> Option<Option<PoolSpec>> {
+        let wanted =
+            state.depth_id == Some(true) && self.config.source == Some(FrameSource::Document);
+        let size = Size::new(state.size.width, state.size.height);
+        let count = pool_size(RING, self.config.thread.lead);
+        let meta = self.views.get_mut(&key)?;
+        let current = meta.depth;
+        if let Some((spec, _)) = current
+            && wanted
+            && spec.size == size
+            && spec.count == count
+        {
+            return None;
+        }
+        if let Some((_, bytes)) = current {
+            ctx.release_pool(bytes);
+            meta.depth = None;
+        }
+        if !wanted {
+            return current.map(|_| None);
+        }
+        let bytes = estimated_bytes(size, SurfaceFormat::Rgba16Float, count);
+        if !ctx.charge_pool(bytes) {
+            // The chrome asked for it; the pool is the last thing evicted.
+            ctx.charge_over(bytes);
+            ctx.log(
+                LogLevel::Warn,
+                format!("viewer depth pool: {bytes} bytes charged past the lease"),
+            );
+        }
+        let spec = PoolSpec {
+            generation: self.generations.next(),
+            size,
+            format: SurfaceFormat::Rgba16Float,
+            count,
+        };
+        self.views.get_mut(&key)?.depth = Some((spec, bytes));
+        Some(Some(spec))
     }
 
     /// Sizes the viewer's frame cache from the lease and reserves it there
@@ -379,11 +433,10 @@ impl BridgePresenter {
     }
 
     fn forget(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
-        if let Some(Meta {
-            pool: Some((_, bytes)),
-        }) = self.views.remove(&key)
-        {
-            ctx.release_pool(bytes);
+        if let Some(meta) = self.views.remove(&key) {
+            for (_, bytes) in meta.pool.into_iter().chain(meta.depth) {
+                ctx.release_pool(bytes);
+            }
         }
     }
 }
@@ -413,12 +466,14 @@ impl FramePresenter for BridgePresenter {
         ctx.release_frame_cache(self.frame_cache_reserved);
         self.frame_cache_reserved = 0;
         let pool = self.plan_pool(ctx, key, &state);
+        let depth = self.plan_depth(ctx, key, &state);
         self.sync_frame_cache(ctx);
         self.send(Command::Configure {
             key,
             state: Box::new(state),
             revision,
             pool,
+            depth,
         });
     }
 

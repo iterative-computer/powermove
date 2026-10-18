@@ -165,6 +165,8 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
+    /// The region's depth and object-id surface (`compose_with_depth`).
+    depth_scratch: Option<Target>,
     /// The viewer is playing: today's playing motion-blur count and the
     /// playback resampler (`set_playing`).
     playing: bool,
@@ -275,6 +277,7 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
+            depth_scratch: None,
             definitions: None,
             parked: HashMap::new(),
             blender: pm_render::blender::BlenderRender::Native,
@@ -357,6 +360,89 @@ impl Composer {
         self.blender = blender;
     }
 
+    /// Places the rendered region (`source`) where `place` puts it in a
+    /// `size` target (`view`), cleared to transparent around it. `exact`:
+    /// always nearest sampling (depth and ids must not be filtered).
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        size: Size,
+        place: &Placement,
+        source: Option<&Target>,
+        exact: bool,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewer placement"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        let (Some(dst), Some(source)) = (place.region_rect(), source) else {
+            return;
+        };
+        if place.region.is_none() {
+            return;
+        }
+        let x0 = dst.x.max(0.0).floor() as u32;
+        let y0 = dst.y.max(0.0).floor() as u32;
+        let x1 = ((dst.x + dst.width).ceil().max(0.0) as u32).min(size.width);
+        let y1 = ((dst.y + dst.height).ceil().max(0.0) as u32).min(size.height);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let u = [
+            dst.x as f32,
+            dst.y as f32,
+            dst.width as f32,
+            dst.height as f32,
+        ];
+        let mut bytes = [0u8; 16];
+        for (i, v) in u.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        // Both placements of a frame write the same rectangle.
+        queue.write_buffer(&self.uniforms, 0, &bytes);
+        let source_view = source.texture.create_view(&Default::default());
+        let sampler = if exact || place.resolution == 1.0 {
+            &self.nearest
+        } else {
+            &self.linear
+        };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewer placement"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+        pass.draw(0..3, 0..1);
+    }
+
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
     /// On an error the working texture is left as it was.
     #[allow(clippy::too_many_arguments)]
@@ -368,6 +454,24 @@ impl Composer {
         time: Ticks,
         state: &ViewerState,
         working: &WorkingTexture,
+    ) -> Result<Composed, RenderError> {
+        self.compose_with_depth(doc, composition, media, time, state, working, None)
+    }
+
+    /// [`Self::compose`], also writing the frame's depth and object-id
+    /// surface (r depth, g/b id − 1, a coverage; plan section 8) into
+    /// `depth`, a `rgbaf16` texture of the working texture's size, placed
+    /// like the color (never filtered: ids must stay exact).
+    #[allow(clippy::too_many_arguments)]
+    pub fn compose_with_depth(
+        &mut self,
+        doc: &pm_model::Document,
+        composition: &str,
+        media: &MediaMap,
+        time: Ticks,
+        state: &ViewerState,
+        working: &WorkingTexture,
+        depth: Option<&wgpu::TextureView>,
     ) -> Result<Composed, RenderError> {
         let start = super::render::now_us();
         let comp = pm_eval::Comp::resolve(doc, composition)
@@ -389,7 +493,7 @@ impl Composer {
                 scale: None,
                 region: Some(region),
                 precision: Precision::Float16,
-                depth_id: false,
+                depth_id: depth.is_some(),
                 background: true,
                 export: false,
                 // The viewer's override: editor camera, Wireframe and
@@ -425,6 +529,24 @@ impl Composer {
                 ));
             }
             let scratch = self.scratch.as_ref().expect("made above");
+            if depth.is_some()
+                && !self
+                    .depth_scratch
+                    .as_ref()
+                    .is_some_and(|t| t.width() == region.width && t.height() == region.height)
+            {
+                self.depth_scratch = Some(Target::new(
+                    &device,
+                    "viewer depth and id",
+                    region.width,
+                    region.height,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                ));
+            }
+            let depth_target = depth.and(self.depth_scratch.as_ref());
             let rendered = self.renderer.render_into(
                 doc,
                 composition,
@@ -432,7 +554,7 @@ impl Composer {
                 &request,
                 media,
                 scratch,
-                None,
+                depth_target,
             )?;
             failures = rendered.failures;
             quads = rendered.quads;
@@ -442,69 +564,27 @@ impl Composer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer placement"),
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewer placement"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &working.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            if let (Some(dst), Some(scratch)) = (place.region_rect(), self.scratch.as_ref())
-                && place.region.is_some()
-            {
-                let x0 = dst.x.max(0.0).floor() as u32;
-                let y0 = dst.y.max(0.0).floor() as u32;
-                let x1 = ((dst.x + dst.width).ceil().max(0.0) as u32).min(working.size.width);
-                let y1 = ((dst.y + dst.height).ceil().max(0.0) as u32).min(working.size.height);
-                if x1 > x0 && y1 > y0 {
-                    let u = [
-                        dst.x as f32,
-                        dst.y as f32,
-                        dst.width as f32,
-                        dst.height as f32,
-                    ];
-                    let mut bytes = [0u8; 16];
-                    for (i, v) in u.iter().enumerate() {
-                        bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-                    }
-                    queue.write_buffer(&self.uniforms, 0, &bytes);
-                    let view = scratch.texture.create_view(&Default::default());
-                    let sampler = if place.resolution == 1.0 {
-                        &self.nearest
-                    } else {
-                        &self.linear
-                    };
-                    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("viewer placement"),
-                        layout: &self.layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: self.uniforms.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(sampler),
-                            },
-                        ],
-                    });
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, &group, &[]);
-                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-                    pass.draw(0..3, 0..1);
-                }
-            }
+        self.place(
+            &mut encoder,
+            &device,
+            &queue,
+            &working.view,
+            working.size,
+            &place,
+            self.scratch.as_ref(),
+            false,
+        );
+        if let Some(view) = depth {
+            self.place(
+                &mut encoder,
+                &device,
+                &queue,
+                view,
+                working.size,
+                &place,
+                self.depth_scratch.as_ref(),
+                true,
+            );
         }
         queue.submit([encoder.finish()]);
         Ok(Composed {
@@ -621,6 +701,7 @@ mod tests {
             edr: false,
             view_seq: Seq::new(1).unwrap(),
             vsync: None,
+            depth_id: None,
         }
     }
 

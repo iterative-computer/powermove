@@ -273,6 +273,20 @@ export class ViewerPresentation {
     return this.latestFrame;
   }
 
+  /**
+   * The depth and object-id surface of a frame on screen (plan section 8:
+   * r depth, g/b object id − 1, a coverage; `rgba16float`, the frame's size
+   * and placement), for the 3D viewport chrome's occlusion and outlines.
+   * Ask for it with `ViewParams.depthId`. Null when the frame has none or
+   * its import has not arrived. Close it after reading; it stays valid
+   * while its frame is the one on screen.
+   */
+  depthFrame(frame: PresentedFrame | null = this.latestFrame): VideoFrame | null {
+    const depth = frame?.depthId;
+    if (!depth) return null;
+    return this.options.service.source.videoFrame(depth.poolGeneration, depth.poolIndex);
+  }
+
   get state(): ViewerState | null {
     return this.sequencer.current;
   }

@@ -116,6 +116,11 @@ fn snapshots_that_need_the_renderer_name_what_it_draws() {
     run_child("child_fallback");
 }
 
+#[test]
+fn frames_carry_their_depth_and_id_surface_when_the_viewer_asks() {
+    run_child("child_depth");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -621,6 +626,7 @@ fn viewer_state() -> ViewerState {
         edr: false,
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 
@@ -850,5 +856,104 @@ fn child_fallback() {
     // binary16 0x3400 = 0.25 → 64, where the layer moved.
     assert_eq!(at(&px, 320, 200, 20), [64, 64, 64, 255]);
     assert_eq!(at(&px, 320, 40, 20), BACKGROUND);
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by frames_carry_their_depth_and_id_surface_when_the_viewer_asks"]
+fn child_depth() {
+    use pm_protocol::interop::PoolRole;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &project(100.0));
+    // Without the ask: one color pool, frames without depth.
+    c.event(Event::Viewer(viewer_state()));
+    let pool = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::SurfacePool(p),
+            } if port == WINDOW => Some(p.clone()),
+            _ => None,
+        });
+    assert_ne!(pool.role, Some(PoolRole::DepthId));
+    let first = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW => Some(d.clone()),
+            _ => None,
+        });
+    assert!(first.depth_id.is_none());
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: first.pool_index,
+        seq: first.seq,
+    }));
+    // The 3D chrome asks: a depth pool (rgbaf16, as many surfaces as the
+    // color pool) is announced, and each frame names its surface in it.
+    let mut asking = viewer_state();
+    asking.view_seq = Seq::new(2).unwrap();
+    asking.depth_id = Some(true);
+    c.event(Event::Viewer(asking));
+    let depth_pool = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::SurfacePool(p),
+            } if port == WINDOW && p.role == Some(PoolRole::DepthId) => Some(p.clone()),
+            _ => None,
+        });
+    assert_eq!(depth_pool.surfaces.len(), pool.surfaces.len());
+    assert!(
+        depth_pool
+            .surfaces
+            .iter()
+            .all(|s| s.format == pm_protocol::interop::SurfaceFormat::Rgba16Float)
+    );
+    assert_eq!(depth_pool.surfaces[0].size, pool.surfaces[0].size);
+    let framed = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW && d.view_seq.get() == 2 => Some(d.clone()),
+            _ => None,
+        });
+    let depth = framed
+        .depth_id
+        .expect("a frame of a view that asks names its depth surface");
+    assert_eq!(depth.pool_generation, depth_pool.generation);
+    assert_eq!(depth.seq, framed.seq);
+    assert_eq!(
+        u64::from(depth.pool_index),
+        framed.seq.get() % depth_pool.surfaces.len() as u64
+    );
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: framed.pool_index,
+        seq: framed.seq,
+    }));
+    // Asking no more: frames go on without depth.
+    let mut done = viewer_state();
+    done.view_seq = Seq::new(3).unwrap();
+    c.event(Event::Viewer(done));
+    let plain = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW && d.view_seq.get() == 3 => Some(d.clone()),
+            _ => None,
+        });
+    assert!(plain.depth_id.is_none());
+    let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+    assert_eq!(
+        status["presenter"]["depthPools"], 1,
+        "{}",
+        status["presenter"]
+    );
+    assert!(status["presenter"]["depthFrames"].as_u64().unwrap() >= 1);
     println!("CHILD-OK");
 }

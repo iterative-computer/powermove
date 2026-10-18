@@ -230,8 +230,9 @@ pub fn frame_descriptor() -> FrameDescriptor {
             }),
         }),
         depth_id: Some(DepthIdSurface {
-            pool_index: 9,
+            pool_index: 3,
             seq: seq(11),
+            pool_generation: seq(4),
         }),
         view_seq: seq(17),
         duration: Some(ticks(11_760_000)),
@@ -1181,6 +1182,7 @@ pub fn events() -> Vec<Envelope> {
                     },
                 })
                 .collect(),
+            role: Some(crate::interop::PoolRole::DepthId),
         })),
         event(Event::Viewer(ViewerState {
             composition: "main".into(),
@@ -1199,6 +1201,7 @@ pub fn events() -> Vec<Envelope> {
                 host_time: HostMicros::new(123_456_700_000).expect("micros"),
                 period_us: 8_333.333_333_333_334,
             }),
+            depth_id: Some(true),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),

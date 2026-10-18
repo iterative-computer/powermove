@@ -137,6 +137,9 @@ pub enum Command {
         state: Box<ViewerState>,
         revision: Option<Revision>,
         pool: Option<PoolSpec>,
+        /// `Some(Some)`: a new depth and object-id pool; `Some(None)`:
+        /// retire it; `None`: unchanged.
+        depth: Option<Option<PoolSpec>>,
     },
     Release {
         key: Key,
@@ -386,6 +389,9 @@ pub struct Stats {
     /// Compatibility rasters (the `raster` override, compatibility
     /// contexts): complete ones received, held per view, and bytes held.
     pub compat_rasters_received: u64,
+    /// Depth and object-id pools made, and frames that carried a surface.
+    pub depth_pools: u64,
+    pub depth_frames: u64,
     pub compat_rasters: BTreeMap<String, usize>,
     pub compat_bytes: u64,
     #[serde(skip)]
@@ -421,6 +427,15 @@ struct Live {
     remote: Option<RemoteLayer>,
 }
 
+/// A view's depth and object-id surfaces (plan section 8). Frame `seq`
+/// writes slot `seq % count`, so a slot is reused only after `count`
+/// newer frames: more than the frames in flight (ring + render-ahead), so
+/// the surface of the frame on screen is never overwritten.
+struct DepthPool {
+    spec: PoolSpec,
+    pool: SurfacePool,
+}
+
 struct View {
     key: Key,
     state: ViewerState,
@@ -454,6 +469,8 @@ struct View {
     stand_in: Option<u64>,
     /// What presenting this session costs (`RenderStats`).
     costs: super::stats::ViewStats,
+    /// The depth and object-id pool, while the viewer asks for it.
+    depth: Option<DepthPool>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -706,7 +723,12 @@ impl Thread {
         self.stats().device_losses += 1;
         let keys: Vec<Key> = self.views.keys().copied().collect();
         let mut remake = Vec::new();
+        let mut remake_depth = Vec::new();
         for key in keys {
+            if let Some(depth) = self.views.get_mut(&key).and_then(|v| v.depth.take()) {
+                self.retire_generation(key, depth.spec.generation);
+                remake_depth.push((key, depth.spec));
+            }
             if let Some(live) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
                 let spec = live.spec;
                 self.retire_pool(key, live);
@@ -744,6 +766,13 @@ impl Thread {
             };
             self.make_pool(key, spec, 0, None);
         }
+        for (key, spec) in remake_depth {
+            let spec = PoolSpec {
+                generation: self.generations.next(),
+                ..spec
+            };
+            self.configure_depth(key, Some(spec));
+        }
     }
 
     /// Sends one envelope on a port.
@@ -777,7 +806,13 @@ impl Thread {
                 state,
                 revision,
                 pool,
-            } => self.configure(key, *state, revision, pool),
+                depth,
+            } => {
+                self.configure(key, *state, revision, pool);
+                if let Some(depth) = depth {
+                    self.configure_depth(key, depth);
+                }
+            }
             Command::Release { key, release } => {
                 let ok = self
                     .views
@@ -1367,6 +1402,55 @@ impl Thread {
         if let Some(live) = view.pool.take() {
             self.retire_pool(view.key, live);
         }
+        if let Some(depth) = view.depth.take() {
+            self.retire_generation(view.key, depth.spec.generation);
+        }
+    }
+
+    /// Tells main to let go of a generation's surfaces.
+    fn retire_generation(&self, key: Key, generation: u32) {
+        if let Some(bridge) = &self.bridge
+            && let Err(error) = bridge.retire(key.0.0, generation)
+        {
+            self.log(
+                LogLevel::Warn,
+                format!("frame bridge: could not retire generation {generation}: {error}"),
+            );
+        }
+    }
+
+    /// Makes, hands off, and announces the view's depth pool, or retires it
+    /// (`spec` `None`). A pool that cannot be made is logged: frames go on
+    /// without depth (the chrome draws without occlusion), never stop.
+    fn configure_depth(&mut self, key: Key, spec: Option<PoolSpec>) {
+        if let Some(old) = self.views.get_mut(&key).and_then(|v| v.depth.take()) {
+            self.retire_generation(key, old.spec.generation);
+        }
+        let Some(spec) = spec else {
+            return;
+        };
+        match self.create_surfaces(key, spec) {
+            Ok(pool) => {
+                let mut descriptor = pool.descriptor();
+                descriptor.role = Some(pm_protocol::interop::PoolRole::DepthId);
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.depth = Some(DepthPool { spec, pool });
+                    view.dirty = true;
+                }
+                self.stats().depth_pools += 1;
+                self.event(key, Event::SurfacePool(descriptor), None);
+            }
+            Err(error) => {
+                self.stats().pool_failures += 1;
+                self.log(
+                    LogLevel::Error,
+                    format!(
+                        "frame bridge: depth pool generation {} ({}x{}) failed: {error}",
+                        spec.generation, spec.size.width, spec.size.height
+                    ),
+                );
+            }
+        }
     }
 
     /// Tells main to stop hosting the viewer's remote layer (C′ prototype).
@@ -1429,6 +1513,7 @@ impl Thread {
             scrub: false,
             stand_in: None,
             costs: Default::default(),
+            depth: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -1556,6 +1641,59 @@ impl Thread {
             ..retry.spec
         };
         self.make_pool(key, spec, retry.failures, None);
+    }
+
+    /// Makes a pool's surfaces and sends each to main once (the depth pool;
+    /// the color pool adds its working texture and ledger).
+    fn create_surfaces(&mut self, key: Key, spec: PoolSpec) -> Result<SurfacePool, String> {
+        if self.bridge.is_none() {
+            return Err("the frame bridge did not check in with main".into());
+        }
+        let gpu = self.gpu().ok_or("no GPU device")?;
+        let pool = SurfacePool::new(
+            &gpu.device,
+            spec.generation,
+            spec.size,
+            spec.format,
+            spec.count,
+        )
+        .map_err(|e| e.to_string())?;
+        let bridge = self.bridge.as_ref().ok_or("no bridge")?;
+        let format = match spec.format {
+            SurfaceFormat::Bgra8Unorm => PixelFormat::Bgra8,
+            _ => PixelFormat::Rgba16F,
+        };
+        for (index, surface) in pool.surfaces.iter().enumerate() {
+            let port = surface
+                .iosurface
+                .mach_port()
+                .ok_or("IOSurfaceCreateMachPort failed")?;
+            let info = SurfaceInfo {
+                client_port: key.0.0,
+                generation: spec.generation,
+                pool_index: index as u32,
+                pool_size: spec.count,
+                width: spec.size.width,
+                height: spec.size.height,
+                format,
+                bytes_per_row: surface.iosurface.bytes_per_row(),
+            };
+            if let Err(e) = bridge.send_surface(SendRight::from_raw(port), &info) {
+                if index > 0
+                    && let Err(retire) = bridge.retire(key.0.0, spec.generation)
+                {
+                    return Err(format!(
+                        "sending surface {index}: {e}; retiring the {index} sent: {retire}"
+                    ));
+                }
+                return Err(format!("sending surface {index}: {e}"));
+            }
+        }
+        let mut stats = self.stats();
+        stats.pools += 1;
+        stats.surfaces_sent += u64::from(spec.count);
+        drop(stats);
+        Ok(pool)
     }
 
     fn create_pool(
@@ -2341,6 +2479,7 @@ impl Thread {
         let seq = view.next_seq;
         let start = now();
         let overlay;
+        let mut depth_surface: Option<(u32, u32)> = None;
         let mut cpu_us = 0i64;
         let mut failures_n = 0usize;
         let mut stand_in = false;
@@ -2374,14 +2513,28 @@ impl Thread {
             let scrub = view.scrub && timing.is_none() && !view.clock.is_playing();
             composer.renderer().set_scrub(scrub);
             let landed_before = composer.renderer().media_landed();
-            let composed = composer.compose(
+            // The depth and object-id surface of this frame, when the
+            // viewer asks for it: slot `seq % count` of the depth pool.
+            let depth_slot = view.depth.as_ref().and_then(|d| {
+                let index = (seq % u64::from(d.spec.count.max(1))) as usize;
+                d.pool.surfaces.get(index).map(|s| {
+                    (
+                        index as u32,
+                        d.spec.generation,
+                        s.texture.create_view(&Default::default()),
+                    )
+                })
+            });
+            let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
                 doc.media(),
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &view.state,
                 &live.working,
+                depth_slot.as_ref().map(|(_, _, v)| v),
             );
+            depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a
             // frame that failed to render changes nothing.
@@ -2595,10 +2748,20 @@ impl Thread {
                 stand_in,
             },
             overlay: Some(overlay),
-            depth_id: None,
+            depth_id: depth_surface.map(|(index, generation)| pm_protocol::frame::DepthIdSurface {
+                pool_index: index,
+                seq: seq_value,
+                pool_generation: Seq::new(u64::from(generation)).unwrap_or(Seq::MAX),
+            }),
             view_seq: view.state.view_seq,
             duration,
         };
+        if depth_surface.is_some() {
+            self.stats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .depth_frames += 1;
+        }
         view.costs.frame(
             timing.is_some(),
             cpu_us,

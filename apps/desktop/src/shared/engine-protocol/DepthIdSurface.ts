@@ -2,6 +2,11 @@
 import type { Seq } from "./Seq";
 
 /**
- * The depth and object-id surface (`rgbaf16`) for frames with 3D layers.
+ * The depth and object-id surface (`rgbaf16`: r depth, g and b the object
+ * id minus one, a coverage) of a viewer frame, in the depth pool
+ * (`SurfacePool::role` `depthId`) of `pool_generation`, at the frame's own
+ * size and placement. It holds this frame's surface while the frame is on
+ * screen: the engine reuses a depth slot only after `pool size − 2` newer
+ * frames were rendered, more than a viewer holds.
  */
-export type DepthIdSurface = { poolIndex: number, seq: Seq, };
+export type DepthIdSurface = { poolIndex: number, seq: Seq, poolGeneration: Seq, };

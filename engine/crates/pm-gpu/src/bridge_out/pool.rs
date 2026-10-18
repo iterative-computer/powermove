@@ -97,6 +97,7 @@ impl SurfacePool {
                     },
                 })
                 .collect(),
+            role: None,
         }
     }
 }

@@ -40,4 +40,10 @@ viewSeq: Seq,
  * `None`, and a change of the hint alone is not a new view (it keeps
  * `view_seq`).
  */
-vsync?: VsyncHint | null, };
+vsync?: VsyncHint | null, 
+/**
+ * The 3D viewport chrome wants each frame's depth and object-id
+ * surface (plan section 8; the Phase 3c render transport). Absent or
+ * false: no depth pool. A change of it is a new view.
+ */
+depthId?: boolean | null, };

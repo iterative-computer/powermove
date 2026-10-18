@@ -65,6 +65,9 @@ export type PresentedFrame = {
    *  it with the audio clock); null for frames drawn on arrival or before
    *  the host clock is known. */
   displayUs: number | null;
+  /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
+   *  when the viewer asked for it and its pool arrived. */
+  depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
 };
 
 export type PresenterOptions = {
@@ -298,7 +301,19 @@ export class EnginePresenter implements Presenter {
     return offset === null ? null : ms * 1000 + offset;
   }
 
+  /** The depth and object-id pool's generation (`role: depthId`). */
+  private depthGeneration = 0;
+
   private onPool(pool: SurfacePool): void {
+    if (pool.role === 'depthId') {
+      // A depth pool never replaces the frames' pool: its surfaces are read
+      // by the 3D chrome for the frame on screen.
+      if (pool.generation <= this.depthGeneration) return;
+      const previous = this.depthGeneration;
+      this.depthGeneration = pool.generation;
+      if (previous) this.options.source.retire(previous);
+      return;
+    }
     if (pool.generation <= this.generation) return;
     const previous = this.generation;
     this.generation = pool.generation;
@@ -472,7 +487,8 @@ export class EnginePresenter implements Presenter {
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
-      displayUs
+      displayUs,
+      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null
     };
     for (const listener of this.listeners) listener(presented);
   }

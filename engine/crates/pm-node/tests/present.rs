@@ -231,6 +231,7 @@ fn state(view_seq: u64, edr: bool, pan: [f64; 2]) -> ViewerState {
         edr,
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 
