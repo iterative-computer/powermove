@@ -121,9 +121,14 @@ pub struct StretchRun {
     live: Option<Live>,
     /// A spare stretcher, reset, from the last run.
     spare: Option<Stretcher>,
-    /// A missing read stopped production. Keep the valid history so the
-    /// next render can catch up once that input has decoded.
-    pending: bool,
+    /// A missing read stopped the render of output samples `[a, end)`.
+    /// Keep the valid history so the next request can catch up once the
+    /// input has decoded, when it continues that render: a retry of it, or
+    /// a request starting inside it or where it ended (the continuation
+    /// rule, for a caller that moves on past the miss). Any other request
+    /// (a seek, a loop wrap, a direction change) starts fresh by the
+    /// pre-roll rules, so it never walks the run over the gap.
+    pending: Option<(i64, i64)>,
     scratch_in: Vec<Vec<f32>>,
     scratch_out: Vec<Vec<f32>>,
     /// Map points evaluated (diagnostics).
@@ -151,7 +156,7 @@ impl StretchRun {
             pos: i64::MIN,
             live: None,
             spare: None,
-            pending: false,
+            pending: None,
             scratch_in: vec![Vec::new(); channels],
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
@@ -165,6 +170,18 @@ impl StretchRun {
 
     pub fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// Forgets a starved request, so the next render is judged by the
+    /// pre-roll rules alone (playback calls this when it seeks or starts a
+    /// run: what it renders next is a new request, not a retry).
+    pub fn abandon_retry(&mut self) {
+        self.pending = None;
+    }
+
+    /// The output range of a starved render the next request may continue.
+    pub fn pending_retry(&self) -> Option<(i64, i64)> {
+        self.pending
     }
 
     /// Offers map points the mixer already evaluated (control indexes from
@@ -244,19 +261,21 @@ impl StretchRun {
             o.clear();
             o.resize(n, 0.0);
         }
-        let continues =
-            self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || self.pending);
+        let resumes = self
+            .pending
+            .take()
+            .is_some_and(|(from, to)| (from..=to).contains(&a));
+        let continues = self.pos != i64::MIN && a >= self.buf_start && (a <= self.pos || resumes);
         if !continues {
-            self.pending = false;
             self.fresh_starts += 1;
             if !self.fresh(a, map, read)? {
-                self.pending = true;
+                self.pending = Some((a, end));
                 return Ok(false);
             }
         }
         while self.pos < end {
             if !self.produce(end, map, read)? {
-                self.pending = true;
+                self.pending = Some((a, end));
                 return Ok(false);
             }
         }
@@ -280,7 +299,6 @@ impl StretchRun {
             self.points.pop_front();
             self.points_from += 1;
         }
-        self.pending = false;
         Ok(true)
     }
 
@@ -564,5 +582,157 @@ mod tests {
                 assert_eq!(misses, 1, "the missing input is reported, then recovered");
             }
         }
+    }
+
+    fn sine(lo: i64, n: usize, out: &mut [Vec<f32>]) {
+        for (c, channel) in out.iter_mut().enumerate() {
+            channel.clear();
+            channel.extend(
+                (lo..lo + n as i64)
+                    .map(|s| ((s as f64 * (0.057 + c as f64 * 0.013)).sin() * 0.2) as f32),
+            );
+        }
+    }
+
+    /// A render that does not continue a starved one is a new request: it
+    /// starts by the pre-roll rules (as an offline render from there does)
+    /// and reads only that pre-roll, never the gap since the starve.
+    #[test]
+    fn a_seek_after_a_starve_starts_fresh() {
+        let rate = 48_000;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let starve_at = 48_000;
+        let n = 512;
+        // Past wherever the run's read-ahead lets the starve land.
+        let past = starve_at + 2 * GRID;
+        for target in [
+            // 60 s forward (the reviewer's probe), just past the starved
+            // request, a grid step forward, and backward.
+            starve_at + 60 * rate as i64,
+            past + CONTROL,
+            past + GRID,
+            starve_at - GRID,
+        ] {
+            for abandoned in [false, true] {
+                let reads = std::cell::Cell::new(0usize);
+                let mut counted = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+                    reads.set(reads.get() + len);
+                    sine(lo, len, out);
+                    Ok(true)
+                };
+                let mut fresh = StretchRun::new(2, rate, 0);
+                let mut reference = vec![Vec::new(); 2];
+                assert!(
+                    fresh
+                        .render(target, n, &mut map, &mut counted, &mut reference)
+                        .unwrap()
+                );
+                let fresh_reads = reads.replace(0);
+
+                let mut run = StretchRun::new(2, rate, 0);
+                let mut out = vec![Vec::new(); 2];
+                // Play a while, then starve.
+                for start in (starve_at - 4 * n as i64..starve_at).step_by(n) {
+                    assert!(
+                        run.render(start, n, &mut map, &mut counted, &mut out)
+                            .unwrap()
+                    );
+                }
+                // Nothing new decodes during the starved render.
+                let mut missing = |_: i64, len: usize, out: &mut [Vec<f32>]| {
+                    for channel in out.iter_mut() {
+                        channel.clear();
+                        channel.resize(len, 0.0);
+                    }
+                    Ok(false)
+                };
+                // Play on (from what was produced ahead) until a render
+                // needs new input.
+                let mut at = starve_at;
+                while run.render(at, n, &mut map, &mut missing, &mut out).unwrap() {
+                    at += n as i64;
+                    assert!(at < starve_at + 4 * GRID);
+                }
+                assert_eq!(run.pending_retry(), Some((at, at + n as i64)));
+                assert!(target < at || target > at + n as i64);
+                if abandoned {
+                    run.abandon_retry();
+                }
+                reads.set(0);
+                let starts = run.fresh_starts;
+                assert!(
+                    run.render(target, n, &mut map, &mut counted, &mut out)
+                        .unwrap()
+                );
+                assert_eq!(
+                    run.fresh_starts,
+                    starts + 1,
+                    "{target}: a new request starts fresh"
+                );
+                assert_eq!(
+                    reads.get(),
+                    fresh_reads,
+                    "{target}: reads only the pre-roll, not the gap"
+                );
+                assert_eq!(out, reference, "{target}: equals a render from the target");
+            }
+        }
+    }
+
+    /// Playback retries a starved request (or a caller moves on to where it
+    /// ended): either continues the run and equals an unstarved render.
+    #[test]
+    fn a_retry_after_a_starve_continues_the_run() {
+        let rate = 48_000;
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let n = 512;
+        let starve_at = 48_000 + 3 * n as i64;
+        let mut expected = StretchRun::new(2, rate, 0);
+        let mut run = StretchRun::new(2, rate, 0);
+        let mut reference = vec![Vec::new(); 2];
+        let mut out = vec![Vec::new(); 2];
+        let mut whole = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+            sine(lo, len, out);
+            Ok(true)
+        };
+        let mut missed = false;
+        let mut once = |lo: i64, len: usize, out: &mut [Vec<f32>]| {
+            if !missed && lo + len as i64 > starve_at + CONTROL {
+                missed = true;
+                for channel in out.iter_mut() {
+                    channel.clear();
+                    channel.resize(len, 0.0);
+                }
+                return Ok(false);
+            }
+            sine(lo, len, out);
+            Ok(true)
+        };
+        let mut start = 48_000;
+        let mut retries = 0;
+        while start < 48_000 + 12 * n as i64 {
+            if run.render(start, n, &mut map, &mut once, &mut out).unwrap() {
+                expected
+                    .render(start, n, &mut map, &mut whole, &mut reference)
+                    .unwrap();
+                assert_eq!(out, reference, "at {start}");
+                start += n as i64;
+            } else {
+                retries += 1;
+                assert!(retries < 3, "a retry with the input decoded completes");
+            }
+        }
+        assert_eq!(retries, 1);
+        assert_eq!(run.fresh_starts, 1, "the retry continued the run");
     }
 }
