@@ -203,4 +203,40 @@ describe('engine shader meta', () => {
     expect(m.compileError('fx:blur')).toBe('blur took 300 ms.');
     expect(describeError({ code: 'internal', scope: { kind: 'connection' }, message: 'x', retry: { kind: 'never' }, detail: null })).toBe('x');
   });
+
+  it('holds layer reports for their revision and clears the ones a later frame did not repeat', () => {
+    const meta: any[] = [];
+    const layers = [{ id: 'S', type: 'shader', d: {} }, { id: 'X', type: 'extension', d: { definition: 'gen.orb' } }, { id: 'Y', type: 'extension', d: { definition: 'gen.bars' } }];
+    const PM: any = { proj: { layers, comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
+    const m = new EngineShaderMeta(PM);
+    const compile = (revision: number) => m.failure({ revision, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics } });
+    const missing = (revision: number, layer: string) => m.failure({ revision, error: { code: 'definitionMissing', scope: { kind: 'layer', layer }, message: `Extension layer ${layer} is missing.`, retry: { kind: 'never' }, detail: null } });
+    compile(3);
+    missing(3, 'X');
+    missing(3, 'Y');
+    m.frame(3);
+    // A frame at the reports' own revision keeps them.
+    expect(m.compileError('engine:S')).toContain('line 3');
+    expect(meta.filter(([, p]) => p.missing === false && p.missingAsset === null)).toEqual([]);
+    // Revision 4 repeats S and X before its frame; Y was not repeated.
+    compile(4);
+    missing(4, 'X');
+    m.frame(4);
+    expect(m.compileError('engine:S')).toContain('line 3');
+    expect(meta.at(-1)).toEqual(['Y', { missing: false, missingAsset: null }]);
+    // Revision 5 repeats nothing: the code compiles again, X is cleared.
+    m.frame(5);
+    expect(m.compileError('engine:S')).toBeNull();
+    expect(meta.at(-1)).toEqual(['X', { missing: false, missingAsset: null }]);
+    // A pushed definition clears the missing state of the layers drawn from it.
+    missing(6, 'Y');
+    const before = meta.length;
+    m.pushed({ generation: 9, full: false, upserts: [{ id: 'gen.bars' } as any], removals: [] });
+    expect(meta.slice(before)).toEqual([['Y', { missing: false, missingAsset: null }]]);
+    // A report of another kind replaces the one in force.
+    missing(7, 'S');
+    compile(8);
+    expect(meta.at(-2)).toEqual(['S', { missing: false, missingAsset: null }]);
+    expect(meta.at(-1)).toEqual(['S', { shaderKey: 'engine:S', definition: null, missing: false }]);
+  });
 });
