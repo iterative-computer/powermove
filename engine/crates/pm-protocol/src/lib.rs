@@ -25,6 +25,8 @@
 //! | 15 | The headless document host | [`document_host`] |
 //!
 //! [`media`] (Interpret Footage's media facts) extends contract 14.
+//! [`snapshot`] (engine snapshots, compatibility pixels, presentation
+//! stats: the Phase 3c render transport) extends contracts 2 and 14.
 
 pub mod blender;
 pub mod clock;
@@ -45,6 +47,7 @@ pub mod priority;
 pub mod scene;
 pub mod shader_fallback;
 pub mod slicing;
+pub mod snapshot;
 pub mod validate;
 pub mod version;
 

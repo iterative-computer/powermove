@@ -65,6 +65,12 @@ export type PresentedFrame = {
    *  it with the audio clock); null for frames drawn on arrival or before
    *  the host clock is known. */
   displayUs: number | null;
+  /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
+   *  when the viewer asked for it and its pool arrived. */
+  depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  /** The frame's size in pixels (the canvas takes it when the frame lands). */
+  width?: number;
+  height?: number;
 };
 
 export type PresenterOptions = {
@@ -154,6 +160,8 @@ export interface Presenter {
   setViewerState(state: ViewerState): void;
   receive(message: EngineFrameMessage, arrivedMs?: number): void;
   onPresented(listener: (frame: PresentedFrame) => void): () => void;
+  /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
+  onDone?(listener: (seq: number) => void): () => void;
   /** Moves the loop to another window's animation frames (main thread only). */
   retarget(requestFrame: (cb: (t: number) => void) => number, cancelFrame: (id: number) => void, displayHz?: number | null): void;
   start(): void;
@@ -250,7 +258,19 @@ export class EnginePresenter implements Presenter {
     return () => this.listeners.delete(listener);
   }
 
-  /** Sends a viewer state (the caller numbers it, see `ViewSequencer`). */
+  private readonly doneListeners = new Set<(seq: number) => void>();
+
+  onDone(listener: (seq: number) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
+  private done(seq: number): void {
+    if (this.disposed) return;
+    for (const listener of this.doneListeners) listener(seq);
+  }
+
+  /** Sends a viewer state (the caller numbers it, see `ViewerSequencer`). */
   setViewerState(state: ViewerState): void {
     this.options.link.sendViewerState(state);
   }
@@ -298,7 +318,19 @@ export class EnginePresenter implements Presenter {
     return offset === null ? null : ms * 1000 + offset;
   }
 
+  /** The depth and object-id pool's generation (`role: depthId`). */
+  private depthGeneration = 0;
+
   private onPool(pool: SurfacePool): void {
+    if (pool.role === 'depthId') {
+      // A depth pool never replaces the frames' pool: its surfaces are read
+      // by the 3D chrome for the frame on screen.
+      if (pool.generation <= this.depthGeneration) return;
+      const previous = this.depthGeneration;
+      this.depthGeneration = pool.generation;
+      if (previous) this.options.source.retire(previous);
+      return;
+    }
     if (pool.generation <= this.generation) return;
     const previous = this.generation;
     this.generation = pool.generation;
@@ -453,6 +485,7 @@ export class EnginePresenter implements Presenter {
       throw error;
     }
     const submitMs = this.now();
+    const width = frame.codedWidth, height = frame.codedHeight;
     frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
@@ -460,8 +493,12 @@ export class EnginePresenter implements Presenter {
       () => {
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
+        this.done(desc.seq);
       },
-      () => this.release(desc)
+      () => {
+        this.release(desc);
+        this.done(desc.seq);
+      }
     );
     const presented: PresentedFrame = {
       seq: desc.seq,
@@ -472,7 +509,10 @@ export class EnginePresenter implements Presenter {
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
-      displayUs
+      displayUs,
+      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null,
+      width,
+      height
     };
     for (const listener of this.listeners) listener(presented);
   }

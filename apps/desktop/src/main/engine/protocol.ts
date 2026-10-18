@@ -174,7 +174,9 @@ export const RESPONSE_FOR: Readonly<Record<Request['type'], Response['type'] | r
   persist: 'persisted',
   registerExtension: 'extensionRegistered',
   toolCall: 'toolResult',
-  probeMedia: 'mediaFacts'
+  probeMedia: 'mediaFacts',
+  snapshot: 'snapshot',
+  compatFrame: 'compatFrame'
 };
 
 type Pending = { expects: readonly Response['type'][]; resolve: (response: Response) => void; reject: (error: Error) => void };

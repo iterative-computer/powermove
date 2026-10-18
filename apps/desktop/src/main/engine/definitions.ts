@@ -112,6 +112,12 @@ export class DefinitionRelay {
     return this.windows.get(windowId)?.fullUpdate(generation) ?? null;
   }
 
+  /** The window's own definitions generation (it changes with every
+   *  update the window pushes), or null before its first. */
+  generationOf(windowId: number): number | null {
+    return this.windows.get(windowId)?.generation ?? null;
+  }
+
   forget(windowId: number): void {
     this.windows.delete(windowId);
   }

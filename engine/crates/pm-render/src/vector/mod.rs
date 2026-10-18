@@ -265,7 +265,7 @@ pub fn plan_shape<'d>(
 }
 
 /// A layer's editable paths: nodes, colors, and geometry.
-fn paths<'d>(
+pub(crate) fn paths<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
