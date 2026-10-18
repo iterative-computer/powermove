@@ -527,6 +527,11 @@ fn changed_pixels(with: &[f32], without: &[f32]) -> Vec<bool> {
 /// WebGL-unstable effects change: the frame must pass its class on every
 /// other pixel. `ours` and `reference` are the class's view (8-bit for
 /// Standard, float for alpha); `changed` comes from [`changed_pixels`].
+///
+/// Only the `standard` and `alpha` classes can move to review. A
+/// `standard+3d` frame (judged with the 3D bar's own object and edge masks)
+/// and a `video` frame always stay failures: the confinement is not
+/// defined against those masks, so the rule stays conservative there.
 fn confined_to_unstable(class: &str, ours: &Views, reference: &Views, changed: &[bool]) -> bool {
     let rest: Vec<bool> = changed.iter().map(|c| !c).collect();
     match (class, ours, reference) {
@@ -545,7 +550,14 @@ enum Views {
 /// Re-renders a failing frame of a project with WebGL-unstable effects,
 /// with and without those effects, and reports whether its difference from
 /// the capture is confined to the pixels the effects change (then it goes
-/// to review; otherwise it stays a failure).
+/// to review; otherwise it stays a failure). Classes other than `standard`
+/// and `alpha` answer false without rendering ([`confined_to_unstable`]).
+///
+/// The "with" frame is rendered again rather than kept from
+/// [`compare_sample`], whose results hold no frames (keeping every frame
+/// for the few failing unstable ones would hold the whole corpus's frames).
+/// The same request renders the same pixels (the `--determinism` run: every
+/// re-render bit-identical), so the frame equals the one judged.
 fn unstable_confined(
     renderer: &mut Renderer,
     p: &Project,
@@ -977,12 +989,21 @@ mod tests {
             &Views::Float(reference),
             &changed
         ));
-        // Other classes are never moved to review.
-        assert!(!confined_to_unstable(
-            "video",
-            &Views::Eight(vec![0; 12]),
-            &Views::Eight(vec![0; 12]),
-            &changed
-        ));
+        // Other classes are never moved to review, even when identical
+        // outside the effect: 3D frames are judged with the 3D bar's masks.
+        for class in ["video", "standard+3d"] {
+            assert!(!confined_to_unstable(
+                class,
+                &Views::Eight(vec![0; 12]),
+                &Views::Eight(vec![0; 12]),
+                &changed
+            ));
+            assert!(!confined_to_unstable(
+                class,
+                &Views::Float(vec![0.0; 12]),
+                &Views::Float(vec![0.0; 12]),
+                &changed
+            ));
+        }
     }
 }
