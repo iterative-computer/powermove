@@ -35,6 +35,11 @@ import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, RevisionVersions, emitPresented } from './presentation-events';
+import { EngineCanvasBinding } from './canvas-binding';
+// The presentation is platform code hosted in the viewer's folder; the
+// kernel's `render.gl.init` binding uses it for viewers that do not present
+// by themselves (old forks of the viewer).
+import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { ShaderFallbackRunner } from './shader-fallback';
 import { EngineTransport } from './transport';
 
@@ -376,8 +381,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     }
   });
-  let registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
+  let service = makeService();
+  let registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
   target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+  // `render.gl.init` / `resize` bind engine presentation to the caller's
+  // canvas (canvas-binding.ts; also `PM.EngineCanvas`).
+  const canvasBinding = new EngineCanvasBinding({
+    service: () => service,
+    composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
+    quality: () => Number(PM.quality ?? 1),
+    present: (options) => new ViewerPresentation({ ...options, log: (level, message) => log(level, message) })
+  });
+  (PM as any).EngineCanvas = canvasBinding;
 
   const handle: EngineConnectionHandle = {
     hostClock,
@@ -389,7 +404,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (on === trace) return;
       trace = on;
       registration.dispose();
-      registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
+      service = makeService();
+      registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
       target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
     },
     onClock: (listener) => {
@@ -429,6 +445,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
+      canvasBinding.unbind();
+      if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;
       hostClock.stop();

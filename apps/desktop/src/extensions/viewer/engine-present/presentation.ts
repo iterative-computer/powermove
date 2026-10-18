@@ -103,6 +103,9 @@ export interface EngineViewerService {
   presented?(frame: PresentedFrame, quality: number): void;
 }
 
+/** Dispatched (bubbling) by a viewer's own presentation on its stage. */
+export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
+
 /** The visible states of an exclusive presentation without a frame to show. */
 export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
@@ -130,6 +133,11 @@ export type PresentationOptions = {
    * sizes at once.
    */
   sizeSettleMs?: number;
+  /** `viewer`: the viewer presents by itself (the default); `binding`: the
+   *  kernel's `render.gl.init` binding presents for a viewer that does not
+   *  (engine-connection/canvas-binding.ts). The stage is marked with it
+   *  (`data-engine-stage`), so the two never present over one stage. */
+  role?: 'viewer' | 'binding';
   /** Timers for the size settle (tests); the hosting window's otherwise. */
   timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
   /** Records per-frame timings (the S1 measurement harness). */
@@ -202,6 +210,9 @@ export class ViewerPresentation {
     this.canvasElement = this.makeCanvas(options.stage.ownerDocument);
     const before = options.before && options.before.parentElement === options.stage ? options.before : null;
     options.stage.insertBefore(this.canvasElement, before);
+    options.stage.dataset['engineStage'] = options.role ?? 'viewer';
+    // A `render.gl.init` binding over a canvas in this stage yields to it.
+    if ((options.role ?? 'viewer') === 'viewer') options.stage.dispatchEvent(new Event(ENGINE_STAGE_EVENT, { bubbles: true }));
     if (options.service.exclusive) this.setStatus(PRESENTATION_STATUS.starting);
     this.offReady = options.service.onReady(() => void this.open());
     void this.open();
@@ -662,6 +673,7 @@ export class ViewerPresentation {
     this.hiddenListeners.clear();
     this.canvasElement.remove();
     this.setStatus(null);
+    if (this.options.stage.dataset['engineStage'] === (this.options.role ?? 'viewer')) delete this.options.stage.dataset['engineStage'];
   }
 }
 

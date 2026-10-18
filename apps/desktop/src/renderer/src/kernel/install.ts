@@ -388,8 +388,19 @@ function makeRender(PM: LegacyPM): RenderAPI {
     gl: {
       bounds: (layer, time) => { const n = native(PM); return (n ? n.bounds(layer, time) : PM?.GL?.bounds?.(layer, time)) ?? null; },
       pick: (x, y, time, options) => { const n = native(PM); return (n ? n.pick(x, y, time, options) : PM?.GL?.pick?.(x, y, time, options)) ?? null; },
-      init: (...args) => !!PM?.GL?.init?.(...args),
-      resize: (...args) => !!PM?.GL?.resize?.(...args),
+      /* With the new engine on, engine presentation is bound to the canvas
+         the caller passes (engine-connection/canvas-binding.ts); the
+         compositor keeps its context for capability routing, scaffolding
+         until it is removed. */
+      init: (canvas, options) => {
+        const legacy = !!PM?.GL?.init?.(canvas, options);
+        return PM?.EngineCanvas?.bind?.(canvas) === true || legacy;
+      },
+      resize: (width, height, viewport) => {
+        const legacy = !!PM?.GL?.resize?.(width, height, viewport);
+        PM?.EngineCanvas?.resize?.();
+        return legacy || !!PM?.EngineCanvas?.bound;
+      },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       get context() { return PM?.GL?.gl ?? null; }
