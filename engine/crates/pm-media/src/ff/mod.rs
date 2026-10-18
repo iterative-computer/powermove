@@ -39,7 +39,7 @@ pub(crate) fn check(e: c_int, what: &str) -> Result<c_int> {
 /// reports it through its own channels, so FFmpeg logs only fatal errors
 /// unless `PM_FFMPEG_LOG` names another level (`error`, `warning`, `info`,
 /// `debug`).
-pub(crate) fn init() {
+pub fn init() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let level = match std::env::var("PM_FFMPEG_LOG").as_deref() {

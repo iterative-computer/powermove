@@ -70,6 +70,8 @@ export type NativeEngineOptions = {
   /** Resolves an asset to the file the engine may read (the media store
    *  lane provides it); `null` when the asset is offline. */
   resolveAsset?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  /** A generated proxy of an offline asset, for draft renders. */
+  resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
 };
@@ -165,6 +167,7 @@ export class NativeEngine {
       automaticOutputDirectory: options.automaticOutputDirectory,
       physicalMemory: options.physicalMemory,
       ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
+      ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
       ...(options.now ? { now: options.now } : {})
     });
     const make = (process: EngineProcess): EngineSupervisor => {
@@ -344,10 +347,15 @@ export class NativeEngine {
   /** A destination the user chose for a job, as a write handle bound to the
    *  job engine session that renders it and the current launch's host port
    *  (contract 14: the engine never sees the path). */
-  chooseOutput(file: string, job: string, session: number): string {
+  chooseOutput(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string {
     const launch = this.supervisors.job.current;
     if (!launch) throw new Error('the job engine is not running');
-    return this.outputs.chooseDestination(file, job, session, launch.hostPort);
+    return this.outputs.chooseDestination(file, job, session, launch.hostPort, overwrite);
+  }
+
+  /** Marks a job session as a draft render: offline media resolves to proxies. */
+  setDraftSession(session: number, draft: boolean): void {
+    this.services.setDraftSession(session, draft);
   }
 
   /** Interpret Footage's facts of an asset's file. Main resolves the asset

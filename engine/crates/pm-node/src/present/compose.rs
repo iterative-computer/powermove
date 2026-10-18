@@ -13,11 +13,15 @@
 //! opaque black inside the rectangle (today's WebGL canvas is opaque) and
 //! transparent around it, where the viewer's stage shows through.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use pm_gpu::Target;
 use pm_gpu::bridge_out::display::{WORKING_FORMAT, WorkingTexture};
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Mat3, PixelRect, Rect, Size, Ticks};
 use pm_protocol::frame::{OverlayGeometry, OverlayLayer, PreviewResolution, ViewerState};
+use pm_render::effects::Effects;
 use pm_render::{LayerFailure, RenderError, RenderRequest, Renderer};
 
 use super::document::MediaMap;
@@ -158,6 +162,21 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
+    /// The viewer is playing: today's playing motion-blur count and the
+    /// playback resampler (`set_playing`).
+    playing: bool,
+    /// The view (hashed) whose definition set is in the renderer, and the
+    /// identity and version of the set it was loaded from.
+    definitions: Option<(u64, Option<(usize, u64)>)>,
+    /// Every other view's definition set, kept while another view draws:
+    /// each view keeps its own programs and watchdog state, so views
+    /// sharing the device never reset each other's.
+    parked: HashMap<u64, (Effects, Option<(usize, u64)>)>,
+}
+
+fn owner_hash(owner: impl std::hash::Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    BuildHasherDefault::<DefaultHasher>::default().hash_one(owner)
 }
 
 impl Composer {
@@ -251,11 +270,79 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
+            definitions: None,
+            parked: HashMap::new(),
+            playing: false,
         }
     }
 
     pub fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
+    }
+
+    /// Puts `owner`'s definition set in the renderer (parking the one it
+    /// held) and brings it up to `definitions` when that set changed: a
+    /// changed set translates only definitions whose source changed, and
+    /// keeps the programs and watchdog records of the rest (an effect the
+    /// watchdog turned off stays off). Returns the translation failures
+    /// when it loaded a changed set.
+    pub fn use_definitions(
+        &mut self,
+        owner: impl std::hash::Hash,
+        definitions: Option<&(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
+        registered: &[(
+            pm_protocol::definitions::DefinitionKind,
+            pm_protocol::common::DefinitionId,
+        )],
+    ) -> Option<Vec<pm_protocol::error::EngineError>> {
+        let owner = owner_hash(owner);
+        let version = definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version));
+        if self.definitions.map(|d| d.0) != Some(owner) {
+            if let Some((previous, loaded)) = self.definitions.take() {
+                let mut out = self.renderer.effects().sibling();
+                self.renderer.swap_effects(&mut out);
+                self.parked.insert(previous, (out, loaded));
+            }
+            let (mut set, loaded) = self
+                .parked
+                .remove(&owner)
+                .unwrap_or_else(|| (self.renderer.effects().sibling(), None));
+            self.renderer.swap_effects(&mut set);
+            self.definitions = Some((owner, loaded));
+        }
+        // Registered again (a register or hot reload of the id, even with
+        // the same source): the watchdog starts over for it.
+        for (kind, id) in registered {
+            self.renderer.effects_mut().watchdog.forget(*kind, id);
+        }
+        let current = self.definitions.as_mut().expect("set above");
+        if current.1 == version {
+            return None;
+        }
+        current.1 = version;
+        match definitions {
+            Some((set, _)) => Some(self.renderer.set_definitions(set).unwrap_or_default()),
+            None => {
+                self.renderer.clear_definitions();
+                Some(Vec::new())
+            }
+        }
+    }
+
+    /// Drops `owner`'s definition set (its session closed).
+    pub fn forget_definitions(&mut self, owner: impl std::hash::Hash) {
+        let owner = owner_hash(owner);
+        self.parked.remove(&owner);
+        if self.definitions.map(|d| d.0) == Some(owner) {
+            self.definitions = None;
+            let mut empty = self.renderer.effects().sibling();
+            self.renderer.swap_effects(&mut empty);
+        }
+    }
+
+    /// Whether the next frames are playback frames (timed) or paused ones.
+    pub fn set_playing(&mut self, playing: bool) {
+        self.playing = playing;
     }
 
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
@@ -293,6 +380,18 @@ impl Composer {
                 background: true,
                 export: false,
                 view: None,
+                // Today's viewer: 6 samples while playing, 12 when paused;
+                // the playback resampler while playing.
+                motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
+                    pm_protocol::frame::MotionBlurKind::PreviewPlaying
+                } else {
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused
+                }),
+                sampling: if self.playing {
+                    pm_render::sampling::Sampling::Playback
+                } else {
+                    pm_render::sampling::Sampling::Final
+                },
             };
             let reuse = self
                 .scratch

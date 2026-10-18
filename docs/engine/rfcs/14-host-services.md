@@ -103,6 +103,14 @@ connection's process, port, and envelope session). The shared sequence
 (invariant 9). Output handles without an envelope session bind to session
 0. Notes: `docs/engine/host-processes.md`.
 
+Phase 3b (delivery): `OutputDestinationRequest.folder` (optional, default
+false) asks for an owner-only temporary folder instead of a file, for PNG
+sequences. The engine writes frames into a work folder beside it and
+renames it over the temporary folder; `commitOutput` moves the folder into
+place (unique names keep both; replace merges frames into the existing
+folder) and reports the sum of the frames' bytes. `pm_host` and main's
+`outputs.ts` implement it; the shared host contract sequence is unchanged.
+
 ## Versioning
 
 `ResolveHandle` and `HandleResolved` were added in the draft (Phase 2

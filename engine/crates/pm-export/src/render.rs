@@ -33,7 +33,8 @@ use pm_model::{Document, Node, NodeKind};
 use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
 use pm_protocol::common::{PixelRect, Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::priority::{
-    AlphaOutput as WireAlpha, ExportFormat, ExportSettings, ProResProfile as WireProRes,
+    AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
+    ExportSettings, ProResProfile as WireProRes, WebmCodec,
 };
 use pm_render::{RenderError, RenderRequest, Renderer};
 use pm_time::Rate;
@@ -42,7 +43,7 @@ use crate::Error;
 use crate::convert::WorkingFrame;
 use crate::pipeline::{Pipeline, Sink};
 use crate::settings::{
-    AlphaOutput, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec, Overwrite,
+    AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec, Overwrite,
     ProResProfile, WorkingEncoding,
 };
 
@@ -483,10 +484,9 @@ fn rate_of(settings: &ExportSettings) -> Result<Rate, JobError> {
         .map_err(|e| JobError::Invalid(format!("frame rate {}/{}: {e}", fr.num, fr.den)))
 }
 
-/// The encoder spec for `settings` (formats the job engine encodes at
-/// Phase 2: ProRes in MOV and H.264 in MP4 through VideoToolbox). Other
-/// formats are routed to the legacy exporter.
+/// The encoder and container for `settings` (section 17, "Formats at cutover").
 pub fn codec_of(settings: &ExportSettings) -> Result<(Codec, Container), JobError> {
+    let bitrate_bps = settings.quality.bitrate_mbps() * 1_000_000;
     Ok(match settings.format {
         ExportFormat::ProRes { profile } => (
             Codec::ProRes(match profile {
@@ -499,17 +499,28 @@ pub fn codec_of(settings: &ExportSettings) -> Result<(Codec, Container), JobErro
             }),
             Container::Mov,
         ),
-        ExportFormat::H264 => (
-            Codec::H264 {
-                bitrate_bps: settings.quality.bitrate_mbps() * 1_000_000,
+        ExportFormat::H264 => (Codec::H264 { bitrate_bps }, Container::Mp4),
+        ExportFormat::Hevc { ten_bit, container } => (
+            Codec::Hevc {
+                bitrate_bps,
+                ten_bit,
             },
-            Container::Mp4,
+            match container {
+                WireContainer::Mp4 => Container::Mp4,
+                WireContainer::Mov => Container::Mov,
+            },
         ),
-        other => {
-            return Err(JobError::Unsupported(vec![format!(
-                "export format {other:?} (Phase 3b)"
-            )]));
+        ExportFormat::Webm { codec } => (
+            match codec {
+                WebmCodec::Vp9 => Codec::Vp9 { bitrate_bps },
+                WebmCodec::Vp8 => Codec::Vp8 { bitrate_bps },
+            },
+            Container::Webm,
+        ),
+        ExportFormat::PngSequence { sixteen_bit } => {
+            (Codec::Png { sixteen_bit }, Container::PngSequence)
         }
+        ExportFormat::PngStill { sixteen_bit } => (Codec::Png { sixteen_bit }, Container::PngStill),
     })
 }
 
@@ -519,10 +530,52 @@ fn tags_of(color: OutputColor) -> Result<ColorTags, JobError> {
         OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
         } => Ok(ColorTags::Rec709QuickTime),
-        other => Err(JobError::Unsupported(vec![format!(
-            "output color {other:?}"
-        )])),
+        OutputColor::SrgbImage => Ok(ColorTags::SrgbImage),
+        OutputColor::Rec709Image => Ok(ColorTags::Rec709Image),
+        other => Err(JobError::Invalid(format!(
+            "output color {other:?} is not an export tag at cutover"
+        ))),
     }
+}
+
+/// The audio coding of an export: the delivery option, or today's audio for
+/// the container (24-bit PCM in MOV, AAC in MP4, Opus in WebM).
+pub fn audio_codec_of(settings: &ExportSettings, container: Container) -> AudioCodec {
+    match (container, settings.delivery.audio_coding) {
+        (Container::Webm, _) => AudioCodec::Opus,
+        (_, Some(AudioCoding::Pcm16)) => AudioCodec::Pcm16,
+        (_, Some(AudioCoding::Pcm24)) => AudioCodec::Pcm24,
+        (_, Some(AudioCoding::PcmFloat)) => AudioCodec::PcmF32,
+        (_, Some(AudioCoding::Aac)) => AudioCodec::Aac,
+        (Container::Mov, None) => AudioCodec::Pcm24,
+        _ => AudioCodec::Aac,
+    }
+}
+
+/// The `tmcd` track of a MOV export: the start timecode and reel the user
+/// chose (section 17, "Comfort"), or the composition's own timecode at the
+/// first frame ([`start_timecode`]).
+pub fn timecode_of(
+    settings: &ExportSettings,
+    timeline: &Timeline,
+) -> Result<crate::settings::TimecodeSpec, JobError> {
+    let Some(tc) = &settings.delivery.timecode else {
+        return Ok(start_timecode(timeline));
+    };
+    let format = if tc.drop_frame {
+        pm_time::TimecodeFormat::drop_frame(timeline.rate)
+            .map_err(|_| JobError::Invalid("drop-frame timecode needs 29.97 or 59.94 fps".into()))?
+    } else {
+        pm_time::TimecodeFormat::non_drop(timeline.rate)
+    };
+    let start_frame = format
+        .parse(&tc.start)
+        .map_err(|e| JobError::Invalid(format!("start timecode {:?}: {e}", tc.start)))?;
+    Ok(crate::settings::TimecodeSpec {
+        start_frame: start_frame.rem_euclid(format.frames_per_day()),
+        format,
+        reel: tc.reel.clone().filter(|r| !r.is_empty()),
+    })
 }
 
 /// One export as the job engine runs it.
@@ -550,6 +603,13 @@ pub struct ExportPlan {
     /// The audio graph, when the export has audio and the composition has
     /// audible layers (today's exporter: `hasAudibleLayers`).
     pub audio: Option<AudioPlan>,
+    /// The document rendered: the job's, or a copy without captions when they
+    /// are delivered as a file instead of burned in.
+    pub document: Arc<Document>,
+    /// PNG sequences: the name frame files start with.
+    pub sequence_name: Option<String>,
+    /// Encoded-frame previews for the progress sheet.
+    pub preview: bool,
 }
 
 pub struct AudioPlan {
@@ -565,13 +625,141 @@ fn evaluator() -> pm_eval::Evaluator {
     pm_eval::Evaluator::new().with_expressions(Arc::new(pm_render::expr::PmExprEngine))
 }
 
+// ---------------------------------------------------------------------------
+// Captions and offline media
+// ---------------------------------------------------------------------------
+
+/// `document` with every captions layer drawing nothing (its type becomes
+/// `null`, keeping ids, order, and parenting), as today's exporter skips
+/// captions when they are delivered as a caption file (`PM.captionsHidden`).
+/// `None` when the document has no captions layers.
+pub fn without_captions(document: &Document) -> Option<Document> {
+    use pm_model::json::Value;
+    fn hide(layers: &mut Value) -> bool {
+        let Value::Array(items) = layers else {
+            return false;
+        };
+        let mut changed = false;
+        for layer in items {
+            if let Value::Object(map) = layer {
+                let captions = map.get("type").is_some_and(
+                    |t| matches!(t, Value::String(s) if s.to_string_lossy() == "captions"),
+                );
+                if captions {
+                    map.insert("type", Value::from("null"));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+    let mut root = document.to_value()?;
+    let Value::Object(map) = &mut root else {
+        return None;
+    };
+    let mut changed = map.get_mut("layers").is_some_and(hide);
+    if let Some(Value::Object(comps)) = map.get_mut("comps") {
+        for (_, comp) in comps.iter_mut() {
+            if let Value::Object(c) = comp
+                && let Some(layers) = c.get_mut("layers")
+            {
+                changed |= hide(layers);
+            }
+        }
+    }
+    changed.then(|| Document::new(Some(root), document.revision()))
+}
+
+/// A clip the export needs whose file the host could not resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineClip {
+    pub asset: String,
+    /// The asset's name, for messages ("2 clips are offline").
+    pub name: String,
+}
+
+/// The media of `composition` (and every composition it nests) that is
+/// offline: video, image, and audio layers whose asset record exists but has
+/// no file in `media`. Assets without a record draw nothing, as today, and
+/// are not listed.
+pub fn offline_media(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+) -> Vec<OfflineClip> {
+    use pm_eval::node;
+    let Some(root) = document.root() else {
+        return vec![];
+    };
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp_node = |id: &str| -> Option<&Node> {
+        if open.as_deref() == Some(id) && node::member(Some(root), "layers").is_some() {
+            return Some(root);
+        }
+        node::member(node::member(Some(root), "comps"), id)
+    };
+    let assets = node::member(Some(root), "assets");
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out: Vec<OfflineClip> = vec![];
+    let mut stack = vec![composition.to_owned()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(comp) = comp_node(&id) else {
+            continue;
+        };
+        for layer in node::array(node::member(Some(comp), "layers")).unwrap_or(&[]) {
+            let d = node::member(Some(layer), "d");
+            match pm_render::js::layer_type(layer).as_str() {
+                "precomp" => {
+                    if let Some(c) = node::member(d, "comp").filter(|c| node::truthy(Some(c))) {
+                        let c = string(Some(c));
+                        if open.as_deref() != Some(c.as_str())
+                            || node::member(Some(root), "layers").is_none()
+                        {
+                            stack.push(c);
+                        }
+                    }
+                }
+                "video" | "image" | "audio" => {
+                    let Some(asset) = node::member(d, "asset").map(|a| string(Some(a))) else {
+                        continue;
+                    };
+                    let Some(record) = node::member(assets, &asset) else {
+                        continue;
+                    };
+                    if !media.paths.contains_key(&asset) && !out.iter().any(|c| c.asset == asset) {
+                        let name = node::member(Some(record), "name")
+                            .map(|n| string(Some(n)))
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| asset.clone());
+                        out.push(OfflineClip { asset, name });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Validates `job` and builds its plan: capability routing (pm-render's
-/// `unsupported_with_media`, media the host could not resolve, audio sources
-/// pm-audio cannot open), the encoder spec, and the audio graph.
+/// `unsupported_with_media`, audio sources pm-audio cannot open), the encoder
+/// spec, and the audio graph. Offline media is not checked here; the job
+/// engine asks [`offline_media`] first (queued jobs wait for it, section 14.8).
 pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
-    let doc = &*job.document;
     let s = &job.settings;
     pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
+    let document = if s.delivery.hide_captions {
+        without_captions(&job.document).map_or_else(|| job.document.clone(), Arc::new)
+    } else {
+        job.document.clone()
+    };
+    let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
     let mut problems: Vec<String> =
@@ -580,13 +768,18 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
             .map(ToString::to_string)
             .collect();
     let rate = rate_of(s)?;
-    let timeline = Timeline::new(s.range.start, s.range.end, rate)?;
+    let mut timeline = Timeline::new(s.range.start, s.range.end, rate)?;
+    if container == Container::PngStill {
+        // A still is the range's first frame.
+        timeline.frames = 1;
+    }
     let alpha = match s.alpha {
         WireAlpha::None => AlphaOutput::None,
         WireAlpha::Straight => AlphaOutput::Straight,
         WireAlpha::Premultiplied => AlphaOutput::Premultiplied,
     };
-    let audio = if s.audio {
+    let audio_codec = audio_codec_of(s, container);
+    let audio = if s.audio && !s.format.is_image() {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
         let graph =
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
@@ -598,7 +791,12 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
             None
         } else {
             Some(AudioPlan {
-                sample_rate: pm_audio::mixer::project_sample_rate(doc),
+                // Opus is written at 48 kHz: the mix runs at 48 kHz for WebM.
+                sample_rate: if audio_codec == AudioCodec::Opus {
+                    crate::settings::OPUS_SAMPLE_RATE
+                } else {
+                    pm_audio::mixer::project_sample_rate(doc)
+                },
                 graph: Arc::new(graph),
                 cache,
             })
@@ -623,8 +821,13 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         audio: audio.as_ref().map(|a| AudioSpec {
             sample_rate: a.sample_rate,
             channels: 2,
+            codec: audio_codec,
         }),
-        timecode: (container == Container::Mov).then(|| start_timecode(&timeline)),
+        timecode: if container == Container::Mov {
+            Some(timecode_of(s, &timeline)?)
+        } else {
+            None
+        },
         destination: job.destination.clone(),
         overwrite: job.overwrite,
         mode: job.mode,
@@ -640,20 +843,93 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
         background: alpha == AlphaOutput::None,
         export: true,
         view: None,
+        // Today's export counts: 16 samples opaque, 20 with alpha (the
+        // composition's `motionBlurSamples` when set).
+        motion_blur: if s.motion_blur {
+            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
+                pm_protocol::frame::MotionBlurKind::Export
+            } else {
+                pm_protocol::frame::MotionBlurKind::AlphaExport
+            })
+        } else {
+            pm_render::motion::MotionBlur::Off
+        },
+        sampling: pm_render::sampling::Sampling::Final,
     };
     Ok(ExportPlan {
         spec,
         timeline,
         request,
         audio,
+        document,
+        sequence_name: s.delivery.sequence_name.clone(),
+        preview: s.delivery.preview,
     })
 }
 
+/// A small JPEG of an encoded frame for the export progress sheet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewFrame {
+    pub frame: u64,
+    pub width: u32,
+    pub height: u32,
+    pub jpeg: Vec<u8>,
+}
+
+/// Previews at most this often.
+pub const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A box-filtered preview of a premultiplied working frame, at most
+/// `max_edge` pixels on its long edge, over black, as JPEG.
+pub fn preview_jpeg(
+    rgba: &[f32],
+    width: u32,
+    height: u32,
+    max_edge: u32,
+) -> Result<(u32, u32, Vec<u8>), JobError> {
+    let scale = (f64::from(max_edge) / f64::from(width.max(height))).min(1.0);
+    let (pw, ph) = (
+        ((f64::from(width) * scale).round() as u32).max(1),
+        ((f64::from(height) * scale).round() as u32).max(1),
+    );
+    let mut out = vec![0u8; pw as usize * ph as usize * 4];
+    let (w, h) = (width as usize, height as usize);
+    for py in 0..ph as usize {
+        let y0 = py * h / ph as usize;
+        let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
+        for px in 0..pw as usize {
+            let x0 = px * w / pw as usize;
+            let x1 = ((px + 1) * w / pw as usize).max(x0 + 1);
+            let mut sum = [0f32; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 4;
+                    for k in 0..3 {
+                        sum[k] += rgba[i + k];
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as f32;
+            let o = (py * pw as usize + px) * 4;
+            for k in 0..3 {
+                let v = sum[k] / n;
+                out[o + k] =
+                    (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
+            }
+            out[o + 3] = 255;
+        }
+    }
+    Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
+}
+
 /// Progress of a running export.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     pub frames_done: u64,
     pub frames: u64,
+    /// A preview of the frame just encoded (plans that ask for previews, at
+    /// most every [`PREVIEW_EVERY`], and the last frame).
+    pub preview: Option<Arc<PreviewFrame>>,
 }
 
 impl Progress {
@@ -691,6 +967,9 @@ where
         timeline,
         request,
         audio,
+        document,
+        preview: wants_preview,
+        ..
     } = plan;
     let frames = spec.frames;
     let pass = pass_key(job.seed, request.output_size);
@@ -699,7 +978,7 @@ where
         (
             pm_audio::Mixer::new(
                 pm_audio::MixFormat::stereo(a.sample_rate),
-                job.document.clone(),
+                document.clone(),
                 a.graph,
                 evaluator(),
                 a.cache,
@@ -712,6 +991,7 @@ where
     std::thread::scope(|scope| {
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
             crate::par::apply_qos(qos);
+            let mut last_preview: Option<Instant> = None;
             for expected in 0..frames {
                 let (n, rgba) = match rx.recv() {
                     Ok(Rendered::Frame(n, rgba)) => (n, rgba),
@@ -719,11 +999,28 @@ where
                     Err(_) => return Err(JobError::Cancelled),
                 };
                 debug_assert_eq!(n, expected);
+                let (w, h) = (request.output_size.width, request.output_size.height);
                 pipeline.push_frame(&WorkingFrame {
-                    width: request.output_size.width,
-                    height: request.output_size.height,
+                    width: w,
+                    height: h,
                     rgba: &rgba,
                 })?;
+                let due = wants_preview
+                    && (n + 1 == frames
+                        || last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_EVERY));
+                let preview = if due {
+                    last_preview = Some(Instant::now());
+                    let (pw, ph, jpeg) =
+                        preview_jpeg(&rgba, w, h, pm_protocol::priority::JOB_PREVIEW_MAX_EDGE)?;
+                    Some(Arc::new(PreviewFrame {
+                        frame: n,
+                        width: pw,
+                        height: ph,
+                        jpeg,
+                    }))
+                } else {
+                    None
+                };
                 drop(rgba);
                 if let Some((mixer, rate)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
@@ -743,6 +1040,7 @@ where
                 progress(Progress {
                     frames_done: n + 1,
                     frames,
+                    preview,
                 });
             }
             Ok(pipeline.finish()?)
@@ -755,7 +1053,7 @@ where
             }
             let rendered = render_frame(
                 renderer,
-                &job.document,
+                &document,
                 &job.composition,
                 timeline.tick(n),
                 &request,
@@ -802,9 +1100,18 @@ where
     })
 }
 
-/// Plans and runs an export through VideoToolbox and AVAssetWriter, with
-/// verification and the atomic move (macOS).
-#[cfg(target_os = "macos")]
+/// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
+/// FFmpeg (WebM), or the engine's PNG writer.
+pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
+    let mut sink = crate::OutputSink::new(&plan.spec)?;
+    if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
+        png.set_stem(name);
+    }
+    Ok(sink)
+}
+
+/// Plans and runs an export of any format, with verification and the atomic
+/// move.
 pub fn run_export(
     renderer: &mut Renderer,
     job: &ExportJob,
@@ -813,7 +1120,7 @@ pub fn run_export(
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<crate::Delivered, JobError> {
     let plan = plan_export(job)?;
-    let sink = crate::mac::VideoToolboxSink::new(&plan.spec)?;
+    let sink = sink_for(&plan)?;
     run_export_into(renderer, job, plan, sink, gate, cancel, progress)
 }
 

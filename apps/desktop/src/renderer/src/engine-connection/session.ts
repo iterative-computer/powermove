@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, Envelope, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
@@ -40,7 +40,28 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+
+/** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
+export interface DefinitionsSource {
+  session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
+  applied(applied: DefinitionsApplied): void;
+  failure(report: FailureReport): void;
+}
+
+/** One session's definition stream (`SessionDefinitions`). */
+export interface DefinitionStream {
+  /** Sends the whole set now. */
+  full(): void;
+  /** Makes the next registry change send the whole set. */
+  stale(): void;
+  dispose(): void;
+}
+
+/** A refused definitions push is retried as a full update: at once the first time, then after this delay, doubling per refusal in a row. */
+export const DEFINITIONS_RETRY_MS = 250;
+/** Refusals in a row before the session stops retrying until the next registry change. */
+export const DEFINITIONS_RETRIES = 6;
 
 export type SessionHandlers = {
   message(message: ViewerMessage, arrivedMs: number): void;
@@ -63,6 +84,10 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
+  /** Definition snapshots for the session (with "Use New Engine" on). */
+  definitions?: () => DefinitionsSource | null;
+  /** The first backoff after a second refused definitions push (ms; doubles per refusal). */
+  definitionsRetryMs?: number;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -115,6 +140,14 @@ export class DocumentSession {
   private resyncAgain = false;
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
+  /** This session's definition stream. */
+  private definitions: DefinitionStream | null = null;
+  /** Definitions pushes the engine refused in a row, and the pending retry. */
+  private definitionRefusals = 0;
+  private definitionRetry: ReturnType<typeof setTimeout> | null = null;
+  /** The revision the engine routed the composition to the legacy viewer at:
+   *  frames of that revision or older, still in flight, are stale. */
+  private legacyRevision: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -134,12 +167,60 @@ export class DocumentSession {
     this.id = opened.session;
     this.unlisten = connection.listen(opened.session, (message, arrived) => this.receive(message, arrived));
     this.unsubscribe = this.options.stream.subscribe((batch) => this.onBatch(batch));
+    // Definitions before the document, so the first frame has them
+    // (contract 10, read-your-registrations).
+    this.startDefinitions();
     await this.resync('open');
     if (this.pendingState && !this.closed) {
       const state = this.pendingState;
       this.pendingState = null;
       this.sendViewerState(state);
     }
+  }
+
+  /**
+   * The kernel's winning registrations as this session's stream: a full
+   * update, then a delta per register, dispose, and hot reload. A refused
+   * update (a generation gap after a restart) makes the next one full.
+   */
+  private startDefinitions(): void {
+    const source = this.options.definitions?.();
+    if (!source || this.id === null) return;
+    const id = this.id;
+    this.definitions = source.session((update) => {
+      if (this.closed) return false;
+      void this.options.connection.request({ type: 'pushDefinitions', ...update } as Request, id).then(
+        (response) => {
+          if ((response as { type?: string }).type !== 'definitionsApplied') return;
+          this.definitionRefusals = 0;
+          source.applied(response as unknown as DefinitionsApplied);
+        },
+        (error) => {
+          if (this.closed) return;
+          this.definitionRefusals += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          if (this.definitionRefusals > DEFINITIONS_RETRIES) {
+            // An engine that keeps refusing (a snapshot it cannot validate,
+            // an engine-side bug): stop until the registries change.
+            this.options.log('warn', `engine definitions refused ${this.definitionRefusals - 1} times in a row; retrying on the next registration (${message})`);
+            this.definitionRefusals = 0;
+            this.definitions?.stale();
+            return;
+          }
+          this.options.log('warn', `engine definitions refused: ${message}`);
+          // The first refusal (a generation gap after an engine restart)
+          // resends the whole set at once; later ones back off.
+          if (this.definitionRefusals === 1) return this.definitions?.full();
+          if (this.definitionRetry) return;
+          const delay = (this.options.definitionsRetryMs ?? DEFINITIONS_RETRY_MS) * 2 ** (this.definitionRefusals - 2);
+          this.definitionRetry = setTimeout(() => {
+            this.definitionRetry = null;
+            if (!this.closed) this.definitions?.full();
+          }, delay);
+        }
+      );
+      return true;
+    });
   }
 
   /** Replaces the engine's document with the current one. */
@@ -238,6 +319,9 @@ export class DocumentSession {
     switch (event.type) {
       case 'frame': {
         const { type: _t, ...frame } = event;
+        const revision = Number((frame as { revision?: unknown }).revision) || 0;
+        if (this.legacyRevision !== null && revision <= this.legacyRevision) return;
+        this.legacyRevision = null;
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
@@ -267,12 +351,16 @@ export class DocumentSession {
       case 'failure': {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
+          const revision = Number(event['revision']) || 0;
+          this.legacyRevision = revision;
           this.setRoute('legacy', error.message);
-          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message }, arrivedMs);
+          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
           return;
         }
         this.failures.push(`${error.code}: ${error.message}`);
         if (this.failures.length > 32) this.failures.shift();
+        // Shader meta and compile errors at the report's revision.
+        this.options.definitions?.()?.failure(event as unknown as FailureReport);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
           void this.resync(error.code);
           return;
@@ -324,6 +412,10 @@ export class DocumentSession {
 
   private dispose(): void {
     this.closed = true;
+    this.definitions?.dispose();
+    this.definitions = null;
+    if (this.definitionRetry) clearTimeout(this.definitionRetry);
+    this.definitionRetry = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.unlisten?.();

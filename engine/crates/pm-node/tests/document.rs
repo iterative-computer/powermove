@@ -10,7 +10,8 @@
 //!   with the edit's revision, the overlay following the layer;
 //! * capability routing: an effect routes the composition to the legacy
 //!   viewer (a session `unsupported` failure, no frames); removing it
-//!   brings engine frames back;
+//!   brings engine frames back; with the kernel's definitions pushed to the
+//!   session the engine draws the effect and an adjustment layer;
 //! * playback on the host clock at the composition's rate;
 //! * a GPU device loss: the device and pool are rebuilt as a new
 //!   generation and the paused frame is drawn again.
@@ -374,6 +375,87 @@ fn child_engine() {
         frame(m).filter(|d| d.revision.get() == r)
     });
     release(&mut host, &back);
+
+    // With the kernel's definitions (contract 10) the engine draws the same
+    // effect: the session's set reaches the presenter's renderer.
+    let builtins = pm_render::builtin_definitions();
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(3).unwrap(),
+            body: Request::PushDefinitions(pm_protocol::definitions::DefinitionsUpdate {
+                generation: Seq::new(1).unwrap(),
+                full: true,
+                upserts: builtins.definitions,
+                removals: vec![],
+            }),
+        })
+        .with_session(session),
+    );
+    let applied = inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::DefinitionsApplied(applied),
+            ..
+        } => Some(applied.clone()),
+        _ => None,
+    });
+    assert_eq!(applied.generation, Seq::new(1).unwrap());
+    let blurred =
+        json!([{ "id": "fx1", "type": "blur", "on": true, "p": { "amount": ch(json!(8)) } }]);
+    let r = edit(&mut host, project(solid(130.0, blurred)), &mut doc);
+    let drawn = inbox.wait(Duration::from_secs(20), |m| {
+        frame(m).filter(|d| d.revision.get() == r)
+    });
+    release(&mut host, &drawn);
+    // An adjustment layer with effects is drawn too (not routed).
+    let mut adjusted = project(solid(130.0, json!([])));
+    let mut adjustment = solid(
+        0.0,
+        json!([{ "id": "fx2", "type": "invert", "on": true, "p": { "amount": ch(json!(100)) } }]),
+    );
+    adjustment["id"] = json!("adj");
+    adjustment["type"] = json!("adjustment");
+    adjustment["d"] = json!({});
+    adjusted["layers"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, adjustment);
+    let r = edit(&mut host, adjusted, &mut doc);
+    let inverted = inbox.wait(Duration::from_secs(20), |m| {
+        frame(m).filter(|d| d.revision.get() == r)
+    });
+    release(&mut host, &inverted);
+    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    let plain = inbox.wait(Duration::from_secs(10), |m| {
+        frame(m).filter(|d| d.revision.get() == r)
+    });
+    release(&mut host, &plain);
+    // A definition that does not compile is reported for the shader UI.
+    let source = "#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main(){ o = nope; }\n";
+    let broken: pm_protocol::definitions::DefinitionSnapshot = serde_json::from_value(json!({
+        "id": "broken", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+        "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.len(), "bodyUtf8Len": source.len() },
+        "params": [],
+        "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+    }))
+    .unwrap();
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(4).unwrap(),
+            body: Request::PushDefinitions(pm_protocol::definitions::DefinitionsUpdate {
+                generation: Seq::new(2).unwrap(),
+                full: false,
+                upserts: vec![broken],
+                removals: vec![],
+            }),
+        })
+        .with_session(session),
+    );
+    let code = inbox.wait(Duration::from_secs(10), |m| {
+        failure(m).filter(|c| *c == ErrorCode::ShaderCompile)
+    });
+    assert_eq!(code, ErrorCode::ShaderCompile);
 
     // Playback on the host clock at 30 fps.
     send(

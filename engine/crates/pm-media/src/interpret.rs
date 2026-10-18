@@ -19,7 +19,7 @@
 //!   "siting": "left" | "center" | "topLeft" | "top" | "bottomLeft" | "bottom",
 //!   "alpha": "ignore" | "straight" | "premultiplied" | "premultipliedWithColor",
 //!   "alphaMatte": "#RRGGBB",
-//!   "frameRate": 23.976, "frameRateRational": [24000, 1001],
+//!   "frameRate": 23.976, "frameRateRational": [24000, 1001],  (or "frameRate": [24000, 1001])
 //!   "fieldOrder": "topFirst" | "bottomFirst" | "progressive",
 //!   "pixelAspect": [10, 11],
 //!   "cleanAperture": true
@@ -177,11 +177,25 @@ impl Interpretation {
             Some([a.first()?.as_i64()?, a.get(1)?.as_i64()?])
         });
         if let Some(f) = obj.get("frameRate").filter(|v| !v.is_null()) {
-            match f
-                .as_f64()
-                .and_then(|fps| pm_time::rate_from_document(rational, fps).ok())
-            {
-                Some(r) => out.frame_rate = Some(r.rate),
+            // A number (with `frameRateRational` beside it, as the sheet
+            // writes) or an exact `[num, den]` of positive integers.
+            let rate = match f.as_array() {
+                Some(pair) => match pair.as_slice() {
+                    [num, den] => num
+                        .as_u64()
+                        .zip(den.as_u64())
+                        .filter(|&(n, d)| n >= 1 && d >= 1)
+                        .and_then(|(n, d)| Some((u32::try_from(n).ok()?, u32::try_from(d).ok()?)))
+                        .and_then(|(n, d)| Rate::new(i64::from(n), i64::from(d)).ok()),
+                    _ => None,
+                },
+                None => f
+                    .as_f64()
+                    .and_then(|fps| pm_time::rate_from_document(rational, fps).ok())
+                    .map(|r| r.rate),
+            };
+            match rate {
+                Some(r) => out.frame_rate = Some(r),
                 None => issues.push(InterpretIssue {
                     member: "frameRate".into(),
                     message: format!("{f} is not a frame rate"),
@@ -808,6 +822,15 @@ mod tests {
         assert_eq!(i.frame_rate, Some(Rate::FPS_29_97));
         let (i, _) = Interpretation::from_json(&json!({ "frameRate": 25 }));
         assert_eq!(i.frame_rate, Some(Rate::FPS_25));
+        // The exact pair form (`[num, den]` of positive integers).
+        let (i, issues) = Interpretation::from_json(&json!({ "frameRate": [24000, 1001] }));
+        assert_eq!(i.frame_rate, Some(Rate::FPS_23_976));
+        assert!(issues.is_empty());
+        for bad in [json!([0, 1]), json!([24.5, 1]), json!([24]), json!("24")] {
+            let (i, issues) = Interpretation::from_json(&json!({ "frameRate": bad }));
+            assert_eq!(i.frame_rate, None, "{bad}");
+            assert_eq!(issues.len(), 1, "{bad}");
+        }
     }
 
     #[test]

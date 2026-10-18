@@ -81,7 +81,7 @@ impl<S: Sink> Pipeline<S> {
             dither: self.spec.dither_enabled(),
             frame: index as u32,
         };
-        let input = convert(frame, self.spec.codec.input_format(), &params)?;
+        let input = convert(frame, self.spec.input_format(), &params)?;
         self.sink.video(index, &input)?;
         self.next += 1;
         Ok(())
@@ -92,7 +92,7 @@ impl<S: Sink> Pipeline<S> {
     pub fn push_encoder_input(&mut self, input: &EncoderInput) -> Result<(), Error> {
         let index = self.admit()?;
         input.validate()?;
-        if input.format != self.spec.codec.input_format()
+        if input.format != self.spec.input_format()
             || input.width != self.spec.width
             || input.height != self.spec.height
         {
@@ -306,6 +306,7 @@ mod tests {
             audio: Some(AudioSpec {
                 sample_rate: 48_000,
                 channels: 2,
+                codec: AudioCodec::Aac,
             }),
             timecode: None,
             destination: PathBuf::from("/tmp/unused.mov"),
@@ -452,7 +453,7 @@ mod tests {
             }
             let (written, n) = raw.finish().unwrap();
             assert_eq!(n, 2);
-            let back = read_raw(&written, codec.input_format(), 32, 16).unwrap();
+            let back = read_raw(&written, codec.input_format(false), 32, 16).unwrap();
             assert_eq!(back, memory.finish().unwrap().frames);
             std::fs::remove_file(written).unwrap();
         }

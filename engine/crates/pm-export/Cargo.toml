@@ -20,6 +20,10 @@ pm-eval = { path = "../pm-eval" }
 # pm-audio's offline API (section 17).
 pm-render = { path = "../pm-render" }
 pm-audio = { path = "../pm-audio" }
+# FFmpeg (libvpx, libopus, the WebM muxer) through pm-media's bindings to
+# Powermove's LGPL build.
+pm-media = { path = "../pm-media" }
+png = "0.18"
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror.workspace = true
@@ -44,5 +48,4 @@ objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc
 [dev-dependencies]
 sha2.workspace = true
 serde_json.workspace = true
-pm-media = { path = "../pm-media" }
 pm-export = { path = ".", features = ["test-sinks"] }

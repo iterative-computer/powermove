@@ -100,6 +100,14 @@ the highest runnable class first, generation and background paused during
 playback, every job-engine class sliced during playback, work for the other
 process refused, and the queue time reported with each item.
 
+Phase 3b (delivery, `docs/engine/export.md`): `ExportSettings.delivery`
+(`DeliveryOptions`: audio coding, start timecode with drop-frame and reel,
+hide captions, live preview, PNG sequence name) and `JobStatus.preview` (a
+JPEG of the latest encoded frame, at most `JOB_PREVIEW_MAX_EDGE` = 640 px).
+Both are optional on the wire (serde defaults, optional in TypeScript), so
+Phase 2 peers decode them. Queued user jobs whose media is offline report
+`waitingForMedia` and recheck every 2 s; agent exports fail `mediaOffline`.
+
 ## Versioning
 
 Version 0 until Phase 2 starts. New export formats after cutover (DNxHR,
@@ -143,3 +151,7 @@ in the order is part of the contract.
    name tokens, and the overwrite policy (section 17, "Comfort"). Today the
    overwrite policy is in contract 14's destination request and the rest
    belongs to `pm-export`'s preset model; decided with Phase 3b presets.
+   Decided (Phase 3b): start timecode, drop-frame, and reel travel in
+   `ExportSettings.delivery`; file name tokens are expanded by the sheet before
+   the save panel opens, and the overwrite policy stays in contract
+   14's destination request.

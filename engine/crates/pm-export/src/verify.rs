@@ -11,7 +11,7 @@
 use crate::convert::{EncoderInput, sample_ycbcra};
 use crate::mp4box::Movie;
 use crate::settings::{
-    AlphaOutput, AudioSpec, Codec, Container, ExportSpec, ProResProfile, TimecodeSpec,
+    AlphaOutput, AudioCodec, AudioSpec, Codec, Container, ExportSpec, TimecodeSpec,
 };
 use crate::timescale::VideoTiming;
 
@@ -111,6 +111,8 @@ pub struct AudioReport {
     pub codec: String,
     pub sample_rate: f64,
     pub channels: u32,
+    pub bits_per_channel: u32,
+    pub float: bool,
     pub timescale: u32,
     /// Presented sample frames (after the edit list).
     pub samples: u64,
@@ -155,6 +157,8 @@ pub struct VerifyReport {
     pub pixels: Vec<PixelCheck>,
     /// Whether VideoToolbox reported a hardware encoder.
     pub hardware_encoder: Option<bool>,
+    /// Bytes delivered (every file of a PNG sequence).
+    pub bytes: u64,
 }
 
 impl VerifyReport {
@@ -163,28 +167,122 @@ impl VerifyReport {
     }
 }
 
-/// Block-mean tolerance in code values at the codec's depth.
+/// Block-mean tolerance in code values at the codec's depth: lossless PNG is
+/// exact; ProRes is within 4 CV; the long-GOP codecs within 6 CV at 8 bits (24
+/// at 10 bits).
 pub fn pixel_tolerance(codec: Codec) -> f64 {
     match codec {
+        Codec::Png { .. } => 0.0,
         Codec::ProRes(_) => 4.0,
-        Codec::H264 { .. } => 6.0,
+        Codec::Hevc { ten_bit: true, .. } => 24.0,
+        Codec::H264 { .. } | Codec::Hevc { .. } | Codec::Vp9 { .. } | Codec::Vp8 { .. } => 6.0,
     }
 }
 
-fn profile_name(codec: Codec) -> &'static str {
-    match codec {
-        Codec::ProRes(ProResProfile::Proxy) => "ProRes 422 Proxy",
-        Codec::ProRes(ProResProfile::Lt) => "ProRes 422 LT",
-        Codec::ProRes(ProResProfile::Standard) => "ProRes 422",
-        Codec::ProRes(ProResProfile::Hq) => "ProRes 422 HQ",
-        Codec::ProRes(ProResProfile::P4444) => "ProRes 4444",
-        Codec::ProRes(ProResProfile::P4444Xq) => "ProRes 4444 XQ",
-        Codec::H264 { .. } => "H.264 High",
+/// Code values per unit of each normalized channel (Y′, Cb, Cr, A; or R, G, B, A
+/// for RGB codecs) at the codec's depth.
+pub fn channel_scale(codec: Codec, k: usize) -> f64 {
+    let d = codec.depth() as i32;
+    if !codec.is_ycbcr() {
+        return 2f64.powi(d) - 1.0;
     }
+    match k {
+        0 => 219.0 * 2f64.powi(d - 8),
+        1 | 2 => 224.0 * 2f64.powi(d - 8),
+        // Alpha is 8-bit in HEVC with alpha and libvpx; 16-bit in ProRes.
+        _ => match codec {
+            Codec::ProRes(_) => 65535.0,
+            _ => 255.0,
+        },
+    }
+}
+
+fn profile_name(codec: Codec) -> String {
+    codec.name()
 }
 
 fn fourcc(b: [u8; 4]) -> String {
     String::from_utf8_lossy(&b).into_owned()
+}
+
+/// The pixel format the codec's stream is expected to carry.
+pub fn expected_pixel_format(codec: Codec, alpha: bool) -> &'static str {
+    match codec {
+        Codec::ProRes(p) if p.is_4444() => {
+            if alpha {
+                "4:4:4:4"
+            } else {
+                "4:4:4"
+            }
+        }
+        Codec::ProRes(_) => "4:2:2",
+        Codec::H264 { .. } | Codec::Hevc { .. } | Codec::Vp9 { .. } | Codec::Vp8 { .. } => {
+            if alpha { "4:2:0:4" } else { "4:2:0" }
+        }
+        Codec::Png { .. } => {
+            if alpha {
+                "RGBA"
+            } else {
+                "RGB"
+            }
+        }
+    }
+}
+
+/// Compares sampled decoded frames with the encoder input's block means.
+pub fn check_pixels(
+    codec: Codec,
+    blocks: &[BlockSample],
+    decoded: &[(u64, EncoderInput)],
+    problems: &mut Vec<String>,
+) -> Vec<PixelCheck> {
+    let mut pixels = vec![];
+    for (frame, input) in decoded {
+        for got in block_means(input, *frame) {
+            let Some(want) = blocks
+                .iter()
+                .find(|b| b.frame == *frame && b.x == got.x && b.y == got.y)
+            else {
+                continue;
+            };
+            let error_cv = (0..4)
+                .map(|k| (got.mean[k] - want.mean[k]).abs() * channel_scale(codec, k))
+                .fold(0.0, f64::max);
+            pixels.push(PixelCheck {
+                frame: *frame,
+                x: got.x,
+                y: got.y,
+                expected: want.mean,
+                decoded: got.mean,
+                error_cv,
+            });
+        }
+    }
+    if pixels.len() != blocks.len() {
+        problems.push(format!(
+            "checked {} of {} pixel blocks",
+            pixels.len(),
+            blocks.len()
+        ));
+    }
+    // Rounding of the block mean itself (lossless outputs compare exactly).
+    let tolerance = pixel_tolerance(codec) + 1e-9;
+    for p in pixels.iter().filter(|p| p.error_cv > tolerance) {
+        problems.push(format!(
+            "frame {} block ({}, {}) differs by {:.2} CV ({:?} vs {:?})",
+            p.frame, p.x, p.y, p.error_cv, p.decoded, p.expected
+        ));
+    }
+    pixels
+}
+
+fn chroma_name(idc: u32) -> &'static str {
+    match idc {
+        0 => "4:0:0",
+        1 => "4:2:0",
+        2 => "4:2:2",
+        _ => "4:4:4",
+    }
 }
 
 /// Compares the probed file with the expectation. `decoded` holds the sampled frames
@@ -217,7 +315,7 @@ pub fn check(
                 "4:2:2"
             };
             (
-                profile_name(expected.codec).to_string(),
+                profile_name(expected.codec),
                 fmt.to_string(),
                 expected.codec.depth(),
                 alpha,
@@ -231,15 +329,9 @@ pub fn check(
                         sps.profile_idc
                     ));
                 }
-                let fmt = match sps.chroma_format_idc {
-                    0 => "4:0:0",
-                    1 => "4:2:0",
-                    2 => "4:2:2",
-                    _ => "4:4:4",
-                };
                 (
                     format!("H.264 profile {} level {}", sps.profile_idc, sps.level_idc),
-                    fmt.to_string(),
+                    chroma_name(sps.chroma_format_idc).to_string(),
                     sps.bit_depth_luma,
                     false,
                 )
@@ -249,18 +341,66 @@ pub fn check(
                 (String::new(), String::new(), 0, false)
             }
         },
-    };
-    let want_format = match expected.codec {
-        Codec::ProRes(p) if p.is_4444() => {
-            if want_alpha {
-                "4:4:4:4"
-            } else {
-                "4:4:4"
+        Codec::Hevc { ten_bit, .. } => match &visual.hevc {
+            Some(h) => {
+                let want_profile = if ten_bit { 2 } else { 1 };
+                if h.profile_idc != want_profile {
+                    fail(format!(
+                        "HEVC general_profile_idc {}, expected {want_profile}",
+                        h.profile_idc
+                    ));
+                }
+                if h.bit_depth_chroma != h.bit_depth_luma {
+                    fail(format!(
+                        "HEVC chroma depth {}, luma {}",
+                        h.bit_depth_chroma, h.bit_depth_luma
+                    ));
+                }
+                // HEVC with alpha: a 32-bit sample description with an `almo`
+                // box whose last byte is the alpha mode (measured on macOS 27:
+                // 0 straight, 2 premultiplied).
+                let alpha = visual.depth == 32;
+                if alpha {
+                    let mode = visual.alpha_mode.as_ref().and_then(|m| m.last().copied());
+                    let want = match expected.alpha {
+                        AlphaOutput::Premultiplied => Some(2),
+                        _ => Some(0),
+                    };
+                    if mode != want {
+                        fail(format!(
+                            "HEVC alpha mode {:?}, expected {want:?} ({:?})",
+                            visual.alpha_mode, expected.alpha
+                        ));
+                    }
+                }
+                let mut fmt = chroma_name(u32::from(h.chroma_format_idc)).to_string();
+                if alpha {
+                    fmt.push_str(":4");
+                }
+                (
+                    format!(
+                        "HEVC {} level {}",
+                        if h.profile_idc == 2 { "Main10" } else { "Main" },
+                        f64::from(h.level_idc) / 30.0
+                    ),
+                    fmt,
+                    u32::from(h.bit_depth_luma),
+                    alpha,
+                )
             }
+            None => {
+                fail("HEVC track has no parsable hvcC".into());
+                (String::new(), String::new(), 0, false)
+            }
+        },
+        Codec::Vp9 { .. } | Codec::Vp8 { .. } | Codec::Png { .. } => {
+            return Err(crate::Error::Verify(format!(
+                "{} is not a QuickTime-family codec",
+                expected.codec.name()
+            )));
         }
-        Codec::ProRes(_) => "4:2:2",
-        Codec::H264 { .. } => "4:2:0",
     };
+    let want_format = expected_pixel_format(expected.codec, want_alpha);
     if pixel_format != want_format {
         fail(format!(
             "pixel format {pixel_format}, expected {want_format}"
@@ -274,9 +414,11 @@ pub fn check(
     }
     if alpha != want_alpha {
         fail(format!(
-            "alpha channel {}, expected {}",
+            "alpha channel {}, expected {} (depth {}, sample entry boxes {:?})",
             if alpha { "present" } else { "absent" },
-            if want_alpha { "present" } else { "absent" }
+            if want_alpha { "present" } else { "absent" },
+            visual.depth,
+            visual.boxes.iter().map(|b| fourcc(*b)).collect::<Vec<_>>()
         ));
     }
     // Tags and range.
@@ -357,6 +499,8 @@ pub fn check(
             codec: fourcc(a.sample_entry),
             sample_rate: entry.as_ref().map(|e| e.sample_rate).unwrap_or(0.0),
             channels: entry.as_ref().map(|e| e.channels).unwrap_or(0),
+            bits_per_channel: entry.as_ref().map(|e| e.bits_per_channel).unwrap_or(0),
+            float: entry.as_ref().is_some_and(|e| e.float),
             timescale: a.media_timescale,
             samples: presented,
         }
@@ -366,14 +510,30 @@ pub fn check(
         (None, Some(_)) => fail("unexpected audio track".into()),
         (Some(_), None) => fail("audio track missing".into()),
         (Some((spec, pushed)), Some(got)) => {
-            let want_codec = match expected.container {
-                Container::Mov => "lpcm",
-                Container::Mp4 => "mp4a",
+            let want_codec = match spec.codec {
+                AudioCodec::Aac => "mp4a",
+                _ => "lpcm",
             };
             if got.codec != want_codec {
                 fail(format!(
                     "audio codec '{}', expected '{want_codec}'",
                     got.codec
+                ));
+            }
+            let want_bits = match spec.codec {
+                AudioCodec::Pcm16 => Some((16, false)),
+                AudioCodec::Pcm24 => Some((24, false)),
+                AudioCodec::PcmF32 => Some((32, true)),
+                _ => None,
+            };
+            if let Some((bits, float)) = want_bits
+                && (got.bits_per_channel != bits || got.float != float)
+            {
+                fail(format!(
+                    "audio is {}-bit{}, expected {bits}-bit{}",
+                    got.bits_per_channel,
+                    if got.float { " float" } else { "" },
+                    if float { " float" } else { "" }
                 ));
             }
             if got.sample_rate != spec.sample_rate as f64 || got.timescale != spec.sample_rate {
@@ -449,51 +609,7 @@ pub fn check(
         }
     }
     // Pixels.
-    let scale = |k: usize| -> f64 {
-        let d = expected.codec.depth() as i32;
-        match k {
-            0 => 219.0 * 2f64.powi(d - 8),
-            1 | 2 => 224.0 * 2f64.powi(d - 8),
-            _ => 2f64.powi(d) - 1.0,
-        }
-    };
-    let mut pixels = vec![];
-    for (frame, input) in decoded {
-        for got in block_means(input, *frame) {
-            let Some(want) = expected
-                .blocks
-                .iter()
-                .find(|b| b.frame == *frame && b.x == got.x && b.y == got.y)
-            else {
-                continue;
-            };
-            let error_cv = (0..4)
-                .map(|k| (got.mean[k] - want.mean[k]).abs() * scale(k))
-                .fold(0.0, f64::max);
-            pixels.push(PixelCheck {
-                frame: *frame,
-                x: got.x,
-                y: got.y,
-                expected: want.mean,
-                decoded: got.mean,
-                error_cv,
-            });
-        }
-    }
-    if pixels.len() != expected.blocks.len() {
-        fail(format!(
-            "checked {} of {} pixel blocks",
-            pixels.len(),
-            expected.blocks.len()
-        ));
-    }
-    let tolerance = pixel_tolerance(expected.codec);
-    for p in pixels.iter().filter(|p| p.error_cv > tolerance) {
-        fail(format!(
-            "frame {} block ({}, {}) differs by {:.2} CV (Y′CbCrA {:?} vs {:?})",
-            p.frame, p.x, p.y, p.error_cv, p.decoded, p.expected
-        ));
-    }
+    let pixels = check_pixels(expected.codec, &expected.blocks, decoded, &mut problems);
     if !problems.is_empty() {
         return Err(crate::Error::Verify(problems.join("; ")));
     }
@@ -513,6 +629,7 @@ pub fn check(
         timecode,
         pixels,
         hardware_encoder: None,
+        bytes: 0,
     })
 }
 

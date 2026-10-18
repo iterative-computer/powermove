@@ -1,6 +1,7 @@
 import { agentExportDestination } from './agent-export';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 
 import {
   BrowserWindow,
@@ -17,6 +18,7 @@ import { isBytes, isRecord, isString, IpcValidationError } from '../shared/guard
 import { IPC, LIMITS, PROJECT_ID, type FileSaveResult, type ProjectOpenResult, type CloseDecision, type ProjectSaveBeginResult } from '../shared/ipc';
 import { atomicWrite, type ProjectFiles } from './project-files';
 import { rememberExport } from './export-sidecar';
+import { takeRoutedDestination } from './render-encoder';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
 import { validateLinkedRecords, type LinkedRecord } from '../shared/project-incremental';
@@ -269,12 +271,20 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     watchOwner(event.sender);
     try {
       let selectedPath: string | undefined;
+      // An export sheet job the job engine routed here writes where the user
+      // already chose (the PNG sequence's folder is named, not yet made).
+      const routed = takeRoutedDestination(event.sender.id, request.directory ? '' : path.extname(name).slice(1).toLowerCase());
       if (request.directory) {
-        const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
-        if (!result.canceled) selectedPath = result.filePaths[0];
+        if (routed) {
+          await mkdir(routed, { recursive: true });
+          selectedPath = routed;
+        } else {
+          const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
+          if (!result.canceled) selectedPath = result.filePaths[0];
+        }
       } else {
         const options = { defaultPath: name, filters: saveFiltersForName(name) };
-        selectedPath = await agentExportDestination(event.sender, name);
+        selectedPath = await agentExportDestination(event.sender, name) ?? routed;
         if (!selectedPath) {
           const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
           if (!result.canceled) selectedPath = result.filePath;

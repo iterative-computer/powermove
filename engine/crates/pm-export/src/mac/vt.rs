@@ -1,5 +1,6 @@
-//! VTCompressionSession: ProRes and H.264 encode from engine encoder input, with color
-//! tags as session properties (amendment 7) and properties set before the first frame.
+//! VTCompressionSession: ProRes, H.264, and HEVC (with alpha at 8 bits) encode from
+//! engine encoder input, with color tags as session properties (amendment 7; HEVC
+//! with alpha drops buffer attachments, S2) and properties set before the first frame.
 
 #![allow(deprecated)]
 
@@ -77,9 +78,108 @@ fn copy_bool(session: &VTCompressionSession, key: &CFString) -> Option<bool> {
     Some(cf::describe(&cf::any_cf(&v)) == "1")
 }
 
+/// The CMVideoCodecType of an export: HEVC with alpha is its own codec type
+/// (`kCMVideoCodecType_HEVCWithAlpha`); every other codec is its sample entry.
+pub fn codec_type(spec: &ExportSpec) -> u32 {
+    match spec.codec {
+        Codec::Hevc { .. } if spec.alpha != AlphaOutput::None => u32::from_be_bytes(*b"muxa"),
+        codec => u32::from_be_bytes(codec.fourcc()),
+    }
+}
+
+fn set_alpha_mode(session: &VTCompressionSession, alpha: AlphaOutput) -> Result<(), Error> {
+    unsafe {
+        match alpha {
+            // Opaque: y416's alpha is all ones, which the ProRes encoder
+            // would still code as a 16-bit alpha channel (alpha_info 2) in
+            // every frame. Discarding it keeps opaque 4444 opaque in the
+            // bitstream too, as NLEs expect.
+            AlphaOutput::None => set(
+                session,
+                kVTCompressionPropertyKey_PreserveAlphaChannel,
+                &any_bool(false),
+                true,
+            ),
+            AlphaOutput::Straight => set(
+                session,
+                kVTCompressionPropertyKey_AlphaChannelMode,
+                &any_str(kVTAlphaChannelMode_StraightAlpha),
+                true,
+            ),
+            AlphaOutput::Premultiplied => set(
+                session,
+                kVTCompressionPropertyKey_AlphaChannelMode,
+                &any_str(kVTAlphaChannelMode_PremultipliedAlpha),
+                true,
+            ),
+        }
+    }
+}
+
+/// Rate control and GOP of the long-GOP codecs: variable bit rate at today's
+/// quality tiers, B-frames, and a keyframe at least every two seconds so
+/// exports stay seekable.
+///
+/// VBR, not `AverageBitRate`: with an average target the hardware encoder
+/// undershoots badly on easy and grainy content (measured on this Mac, 1080p
+/// H.264: 0.72 Mbps for a 4 Mbps tier, VMAF 93.4 against x264's 95.1), while
+/// VBR lands on the tier and matches or beats x264 (VMAF 95.6 at 4.16 Mbps;
+/// `tests/measure_delivery.rs`). Encoders without VBR (before macOS 15) take
+/// the average target, and so does HEVC with alpha: its encoder accepts the
+/// VBR property and then fails every frame (-12912, macOS 27).
+fn set_long_gop(
+    session: &VTCompressionSession,
+    bitrate_bps: u32,
+    alpha: AlphaOutput,
+) -> Result<(), Error> {
+    unsafe {
+        let rate = any_num_i64(bitrate_bps as i64);
+        let st = if alpha == AlphaOutput::None {
+            VTSessionSetProperty(
+                session,
+                kVTCompressionPropertyKey_VariableBitRate,
+                Some(&*(&*rate as *const AnyObject as *const CFType)),
+            )
+        } else {
+            PROPERTY_NOT_SUPPORTED
+        };
+        if st == PROPERTY_NOT_SUPPORTED {
+            set(
+                session,
+                kVTCompressionPropertyKey_AverageBitRate,
+                &rate,
+                false,
+            )?;
+        } else {
+            cf::check(st, "VTSessionSetProperty VariableBitRate")?;
+        }
+        set(
+            session,
+            kVTCompressionPropertyKey_AllowFrameReordering,
+            &any_bool(true),
+            true,
+        )?;
+        set(
+            session,
+            kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+            &any_num_f64(2.0),
+            true,
+        )
+    }
+}
+
 impl Encoder {
     pub fn new(spec: &ExportSpec, timing: VideoTiming) -> Result<Self, Error> {
-        let codec_type = u32::from_be_bytes(spec.codec.fourcc());
+        if !matches!(
+            spec.codec,
+            Codec::ProRes(_) | Codec::H264 { .. } | Codec::Hevc { .. }
+        ) {
+            return Err(Error::InvalidSpec(format!(
+                "{} is not a VideoToolbox codec",
+                spec.codec.name()
+            )));
+        }
+        let codec_type = codec_type(spec);
         let mut sess: *mut VTCompressionSession = std::ptr::null_mut();
         let st = unsafe {
             VTCompressionSession::create(
@@ -151,41 +251,29 @@ impl Encoder {
                         &any_str(kVTH264EntropyMode_CABAC),
                         true,
                     )?;
+                    set_long_gop(&session, bitrate_bps, AlphaOutput::None)?;
+                }
+                Codec::Hevc {
+                    bitrate_bps,
+                    ten_bit,
+                } => {
                     set(
                         &session,
-                        kVTCompressionPropertyKey_AverageBitRate,
-                        &any_num_i64(bitrate_bps as i64),
+                        kVTCompressionPropertyKey_ProfileLevel,
+                        &any_str(if ten_bit {
+                            kVTProfileLevel_HEVC_Main10_AutoLevel
+                        } else {
+                            kVTProfileLevel_HEVC_Main_AutoLevel
+                        }),
                         false,
                     )?;
-                    set(
-                        &session,
-                        kVTCompressionPropertyKey_AllowFrameReordering,
-                        &any_bool(true),
-                        true,
-                    )?;
-                    // A keyframe at least every two seconds keeps exports seekable.
-                    set(
-                        &session,
-                        kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
-                        &any_num_f64(2.0),
-                        true,
-                    )?;
+                    set_long_gop(&session, bitrate_bps, spec.alpha)?;
+                    set_alpha_mode(&session, spec.alpha)?;
                 }
-                Codec::ProRes(_) => match spec.alpha {
-                    AlphaOutput::None => {}
-                    AlphaOutput::Straight => set(
-                        &session,
-                        kVTCompressionPropertyKey_AlphaChannelMode,
-                        &any_str(kVTAlphaChannelMode_StraightAlpha),
-                        true,
-                    )?,
-                    AlphaOutput::Premultiplied => set(
-                        &session,
-                        kVTCompressionPropertyKey_AlphaChannelMode,
-                        &any_str(kVTAlphaChannelMode_PremultipliedAlpha),
-                        true,
-                    )?,
-                },
+                Codec::ProRes(_) => set_alpha_mode(&session, spec.alpha)?,
+                Codec::Vp9 { .. } | Codec::Vp8 { .. } | Codec::Png { .. } => {
+                    unreachable!("checked above")
+                }
             }
             VTCompressionSession::prepare_to_encode_frames(&session);
         }

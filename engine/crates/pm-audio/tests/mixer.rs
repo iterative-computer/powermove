@@ -555,6 +555,57 @@ fn animated_clips_start_on_their_sample() {
     assert!((out[0][4805] - 0.5).abs() < 1e-7, "{}", out[0][4805]);
 }
 
+/// A clip whose in-point is a frame start that falls on or between samples
+/// plays its first source sample at the rounded project sample, never one
+/// later: `sample_at` treats a time within amendment 1's tolerance of a sample
+/// as that sample (frame 7 of 25 fps is 0.28000000000000003 s in f64), and a
+/// copy reader's window is measured on its whole-sample shift (frame 7 of
+/// 29.97 fps is 11,211.2 samples). Both used to drop the first sample.
+#[test]
+fn clips_on_frame_starts_keep_their_first_sample() {
+    use pm_audio::mixer::sample_at;
+    assert_eq!(sample_at(7.0 / 25.0, 48_000.0), 13_440);
+    assert_eq!(
+        sample_at(0.280_000_1, 48_000.0),
+        13_441,
+        "off the tolerance: ceil"
+    );
+    assert_eq!(sample_at(13_439.5 / 48_000.0, 48_000.0), 13_440);
+    assert_eq!(sample_at(0.0, 48_000.0), 0);
+    assert_eq!(sample_at(-7.0 / 25.0, 48_000.0), -13_440);
+    // The tolerance scales with n: an hour in, f64 error is still absorbed.
+    assert_eq!(sample_at(3_600.0 + 7.0 / 25.0, 48_000.0), 172_813_440);
+
+    let dir = temp_dir("first-sample");
+    let file = dir.join("click.wav");
+    let mut click = vec![0f32; SR as usize];
+    click[0] = 0.9;
+    click[1] = 0.45;
+    write_wav(&file, SR, &[click]);
+    for (fps, frame, from) in [
+        (25.0, 7, 7.0 / 25.0),
+        (29.97, 7, 7.0 * 1001.0 / 30_000.0),
+        (23.976, 5, 5.0 * 1001.0 / 24_000.0),
+        (30.0, 11, 11.0 / 30.0),
+    ] {
+        let doc = project(fps, 2.0, &[audio("A", "click", from, 1.0, "", "")], &[], "");
+        let rig = Rig::new(&[("click", &file)]);
+        let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        let out = rig.render(&mut m, 0, SR as i64 * 2, 1024);
+        let at = (from * SR as f64).round() as usize;
+        assert_eq!(
+            out[0][at - 1],
+            0.0,
+            "{fps} fps frame {frame}: nothing before the clip"
+        );
+        assert!(
+            (out[0][at] - 0.9).abs() < 1e-6 && (out[0][at + 1] - 0.45).abs() < 1e-6,
+            "{fps} fps frame {frame}: first source samples at {at}: {:?}",
+            &out[0][at - 1..at + 3]
+        );
+    }
+}
+
 /// A live edit during playback glides into the new mix over 12 ms
 /// (`RETUNE_GLIDE` today): a level change ramps linearly, overlapping edits
 /// (a fader dragged at 60 Hz) stay continuous, a monitor solo crossfades, and

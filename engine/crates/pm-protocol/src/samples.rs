@@ -60,9 +60,10 @@ use crate::patch::{
     PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
 };
 use crate::priority::{
-    AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, BlenderUse,
-    CancelJobs, ExportFormat, ExportSettings, ImagePayload, JobAccepted, JobSpec, JobState,
-    JobStatus, JobsCancelled, PriorityClass, ProResProfile, QualityTier, SubmitJob,
+    AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, AudioCoding,
+    BlenderUse, CancelJobs, DeliveryOptions, ExportFormat, ExportSettings, ExportTimecode,
+    ImagePayload, JobAccepted, JobPreview, JobSpec, JobState, JobStatus, JobsCancelled,
+    PriorityClass, ProResProfile, QualityTier, SubmitJob,
 };
 use crate::scene::{
     Background, Camera3d, Compat, DepthSet, EvaluatedEffect, EvaluatedLayer, EvaluatedMask,
@@ -521,6 +522,17 @@ pub fn export_settings() -> ExportSettings {
         precision: Precision::Float32,
         dither: false,
         draft_from_proxies: false,
+        delivery: DeliveryOptions {
+            audio_coding: Some(AudioCoding::Pcm24),
+            timecode: Some(ExportTimecode {
+                start: "01:00:00:00".into(),
+                drop_frame: false,
+                reel: Some("A001".into()),
+            }),
+            hide_captions: false,
+            preview: true,
+            sequence_name: None,
+        },
     }
 }
 
@@ -703,6 +715,7 @@ pub fn requests() -> Vec<Envelope> {
                     extension: "mov".into(),
                 },
                 overwrite: OverwritePolicy::UniqueName,
+                folder: false,
             }),
         ),
         request(
@@ -1207,6 +1220,12 @@ pub fn events() -> Vec<Envelope> {
             progress: 0.25,
             path: None,
             error: None,
+            preview: Some(JobPreview {
+                frame: 24,
+                width: 640,
+                height: 360,
+                jpeg: Bytes(vec![0xFF, 0xD8, 0xFF, 0xD9]),
+            }),
         })),
         event(Event::BlenderProgress(BlenderProgress {
             job: "blender-1".into(),
