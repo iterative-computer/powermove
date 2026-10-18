@@ -1015,22 +1015,6 @@ impl Mixer {
         frames: usize,
         budget: usize,
     ) -> (Vec<(Arc<Source>, i64, i64)>, bool) {
-        let (spans, complete) = self.voice_source_spans_within(start, frames, budget);
-        (
-            spans
-                .into_iter()
-                .map(|(_, source, lo, hi)| (source, lo, hi))
-                .collect(),
-            complete,
-        )
-    }
-
-    fn voice_source_spans_within(
-        &mut self,
-        start: i64,
-        frames: usize,
-        budget: usize,
-    ) -> (Vec<(usize, Arc<Source>, i64, i64)>, bool) {
         let p = self.format.sample_rate as f64;
         let graph = self.graph.clone();
         let doc = self.doc.clone();
@@ -1056,7 +1040,7 @@ impl Mixer {
             };
             let s0 = ((a as f64 / p - o) * rate).floor() as i64 - pad;
             let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + pad;
-            out.push((vi, plan.source.clone(), s0, s1));
+            out.push((plan.source.clone(), s0, s1));
         }
         if mapped.is_empty() || frames == 0 {
             return (out, true);
@@ -1123,11 +1107,7 @@ impl Mixer {
                         s
                     }
                 };
-                out.extend(
-                    spans
-                        .iter()
-                        .map(|&(lo, hi)| (vi, plan.source.clone(), lo, hi)),
-                );
+                out.extend(spans.iter().map(|&(lo, hi)| (plan.source.clone(), lo, hi)));
             }
         }
         (out, complete)
@@ -1150,22 +1130,8 @@ impl Mixer {
         complete
     }
 
-    /// Whether startup has a voice whose complete read support is ready.
-    /// Keep spans keyed by voice, even when two clips share one source.
-    pub fn has_ready_source(&mut self, start: i64, frames: usize) -> bool {
-        let (spans, _) = self.voice_source_spans_within(start, frames, usize::MAX);
-        if spans.is_empty() {
-            return true;
-        }
-        let mut ready = HashMap::new();
-        for (vi, source, lo, hi) in spans {
-            *ready.entry(vi).or_insert(true) &=
-                self.cache.is_ready(&source, lo, (hi - lo).max(0) as usize);
-        }
-        ready.into_values().any(|ready| ready)
-    }
-
-    /// Whether every source span in the range is decoded.
+    /// Whether the source blocks for `[start, start + frames)` of every voice
+    /// are decoded (playback waits for this before it starts).
     pub fn is_ready(&mut self, start: i64, frames: usize) -> bool {
         self.source_spans(start, frames)
             .iter()

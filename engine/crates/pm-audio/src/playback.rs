@@ -60,8 +60,9 @@ pub struct PlaybackConfig {
     pub ahead_ms: u32,
     /// Audio decoded before a play or seek starts.
     pub preroll_ms: u32,
-    /// Wall-time ceiling for an entirely cold startup pre-roll. Zero leaves
-    /// only the device-time source budget. Ready voices never wait here.
+    /// The longest a start waits for that pre-roll in wall time. Device
+    /// time bounds it to [`SOURCE_WAIT_MS`] as well; zero leaves only that
+    /// device-time hold.
     pub preroll_wait_ms: u32,
     /// Source decoded ahead of the playhead.
     pub lookahead_ms: u32,
@@ -152,21 +153,38 @@ struct Shared {
     device_rate: u32,
 }
 
-/// Pending diagnostics. Render failures and decode stalls are reported once
-/// per episode, independently of how often the host drains this log.
+/// Pending diagnostics, each reported once per episode however often the
+/// host drains this log. Per-voice render errors form an episode while they
+/// recur on consecutive renders; decode stalls while their voice is missing
+/// (see `VoiceStall`). Whole-mix failures (a render, the converter, the 2x
+/// shuttle) form an episode within a run: a play or seek starts a new one,
+/// and a whole render that fails again after a successful one is reported
+/// again.
 #[derive(Default)]
 struct ErrorLog {
     pending: Vec<String>,
-    reported: HashSet<String>,
+    /// Whole-mix failures already reported in this run.
+    episode: HashSet<String>,
+    /// Per-voice render errors met by the latest render.
     render_active: HashSet<String>,
 }
 
 impl ErrorLog {
     fn push(&mut self, message: String) {
-        if !self.reported.contains(&message) {
-            self.reported.insert(message.clone());
+        if self.episode.insert(message.clone()) {
             self.pending.push(message);
         }
+    }
+
+    /// A whole-mix failure stopped recurring: a later one is a new episode.
+    fn end(&mut self, message: &str) {
+        self.episode.remove(message);
+    }
+
+    /// A play, seek or stop: every ongoing episode ends.
+    fn new_run(&mut self) {
+        self.episode.clear();
+        self.render_active.clear();
     }
 
     fn take(&mut self) -> Vec<String> {
@@ -308,6 +326,7 @@ impl Playback {
             pending_segment: None,
             stalls: HashMap::new(),
             startup: None,
+            render_failure: None,
             mixer,
             config,
             solo: None,
@@ -807,9 +826,38 @@ impl Converter {
     }
 }
 
+/// The ring depth `fill` keeps, in chunks: `ahead` frames, and at least
+/// half of that beyond the refill reserve (two of the largest device
+/// callbacks), so large callbacks (2,048-frame Bluetooth or AirPlay buffers
+/// against the 3,840-frame default) still leave a transient decode miss a
+/// wait before it drops. Bounded by the ring's capacity.
+fn fill_target(ahead: usize, reserve: usize, capacity: usize) -> usize {
+    let frames = ahead.max(reserve + ahead / 2);
+    (frames / CHUNK).max(2).min(capacity - 1)
+}
+
+/// One voice's missing-input episode, in device frames
+/// ([`Ring::played_frames`]).
 struct VoiceStall {
+    /// When the episode began: the miss, or the pre-roll of a cold start.
+    start: u64,
+    /// When the voice drops. Never later than `start` plus
+    /// [`SOURCE_WAIT_MS`] (the A3 hold).
     deadline: u64,
+    /// Committed as silence: stays dropped until the voice renders whole.
+    dropped: bool,
     reported: bool,
+}
+
+/// Why a voice's wait ended, for its diagnostic.
+fn stall_message(id: &str, by_reserve: bool) -> String {
+    if by_reserve {
+        format!(
+            "Audio decode fell behind the output buffer; missing voice plays as silence so the others keep playing: {id}"
+        )
+    } else {
+        format!("Audio decode exceeded {SOURCE_WAIT_MS} ms; missing voice plays as silence: {id}")
+    }
 }
 
 struct RenderThread {
@@ -822,9 +870,13 @@ struct RenderThread {
     pending_segment: Option<crate::transport::Segment>,
     /// Each voice owns its deadline and notification until it recovers.
     stalls: HashMap<String, VoiceStall>,
-    /// Before the first callback, an entirely cold mix may decode without
-    /// spending device time or delaying any ready voice.
-    startup: Option<(u64, std::time::Instant)>,
+    /// The device frame a play or seek began pre-rolling, until its first
+    /// segment commits. Nothing of the run is queued yet, so holding for a
+    /// cold voice is start latency, not a gap: every missing voice gets the
+    /// whole A3 hold from here.
+    startup: Option<u64>,
+    /// The whole-render failure of the latest render, if it failed.
+    render_failure: Option<String>,
     mixer: Mixer,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
@@ -1006,12 +1058,12 @@ impl RenderThread {
                         self.pending_segment = None;
                         self.stalls.clear();
                         self.startup = None;
+                        self.render_failure = None;
                         self.shared
                             .errors
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .render_active
-                            .clear();
+                            .new_run();
                         self.mixer.abandon_retries();
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
@@ -1119,12 +1171,12 @@ impl RenderThread {
     fn preroll(&mut self) {
         self.pending_segment = None;
         self.stalls.clear();
+        self.render_failure = None;
         self.shared
             .errors
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .render_active
-            .clear();
+            .new_run();
         // A seek or a new run starts on the current mix, and its first
         // render is a new request, not a retry of a starved one.
         self.mixer.end_glides();
@@ -1140,16 +1192,19 @@ impl RenderThread {
         };
         let frames = frames as usize;
         self.mixer.prefetch(from, frames);
-        let started = self.ring.played_frames();
-        let wall = std::time::Instant::now();
-        self.startup = Some((started, wall));
-        // Pre-roll only an entirely cold start. As soon as any input is
-        // ready, fill decides per voice rather than holding that voice
-        // behind an unrelated decoder. Callback time also ends this poll.
-        while wall.elapsed() < Duration::from_millis(self.config.preroll_wait_ms as u64)
-            && self.ring.played_frames() == started
-            && !self.mixer.is_ready(from, frames)
-            && !self.mixer.has_ready_source(from, frames)
+        // The A3 start hold: wait for every voice's pre-roll, for at most
+        // `preroll_wait_ms` of wall time and SOURCE_WAIT_MS of device time.
+        // Nothing of this run is queued, so no ready voice goes silent while
+        // it waits. `fill` keeps holding a still-missing first segment by
+        // device time from the same frame.
+        let device_start = self.ring.played_frames();
+        self.startup = Some(device_start);
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
+        while !self.mixer.is_ready(from, frames)
+            && std::time::Instant::now() < deadline
+            && self.ring.played_frames().saturating_sub(device_start)
+                < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
         {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1163,9 +1218,11 @@ impl RenderThread {
 
     /// Renders until the ring holds `ahead_ms`.
     fn fill(&mut self) {
-        let target =
-            ((self.config.ahead_ms as usize * self.device_rate as usize / 1000) / CHUNK).max(2);
-        let target = target.min(self.ring.capacity() - 1);
+        let target = fill_target(
+            self.config.ahead_ms as usize * self.device_rate as usize / 1000,
+            self.ring.refill_reserve() as usize,
+            self.ring.capacity(),
+        );
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
         while self.ring.queued() < target {
@@ -1197,7 +1254,7 @@ impl RenderThread {
                 drop_voices: self
                     .stalls
                     .iter()
-                    .filter(|(_, stall)| now >= stall.deadline)
+                    .filter(|(_, stall)| stall.dropped || now >= stall.deadline)
                     .map(|(id, _)| id.clone())
                     .collect(),
                 monitor_solo: self.solo.clone(),
@@ -1208,33 +1265,35 @@ impl RenderThread {
             let mut result = self.mixer.render(lo, n, &mut planar, &options);
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
+                let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
+                // A4.1: the reserve bounds a wait only while it protects a
+                // voice that is sounding. At a start nothing of the run plays
+                // yet, and with every voice missing nothing would be heard
+                // by dropping: both keep the A3 hold.
+                let protects = self.startup.is_none() && report.voices > report.starved;
                 let reserve = self
                     .ring
                     .buffered_frames()
                     .saturating_sub(self.ring.refill_reserve());
-                let cold_start = report.voices == report.starved
-                    && self.startup.is_some_and(|(at, wall)| {
-                        at == now
-                            && (self.config.preroll_wait_ms == 0
-                                || wall.elapsed()
-                                    < Duration::from_millis(self.config.preroll_wait_ms as u64))
-                    });
-                let budget = if cold_start {
-                    self.device_rate as u64 * SOURCE_WAIT_MS / 1000
-                } else {
-                    reserve.min(self.device_rate as u64 * SOURCE_WAIT_MS / 1000)
-                };
                 self.stalls
                     .retain(|id, _| report.starved_voices.contains(id));
                 for id in &report.starved_voices {
+                    let start = self.startup.unwrap_or(now);
                     let stall = self.stalls.entry(id.clone()).or_insert(VoiceStall {
-                        deadline: now.saturating_add(budget),
+                        start,
+                        deadline: start.saturating_add(hold),
+                        dropped: false,
                         reported: false,
                     });
-                    // The device reserve can shrink faster than the initial
-                    // estimate (large callbacks / downstream DSP latency).
-                    stall.deadline = stall.deadline.min(now.saturating_add(budget));
-                    if now >= stall.deadline {
+                    let hard = stall.start.saturating_add(hold);
+                    stall.deadline = if protects {
+                        // The reserve can shrink faster than first estimated
+                        // (large callbacks / downstream DSP latency).
+                        stall.deadline.min(now.saturating_add(reserve)).min(hard)
+                    } else {
+                        hard
+                    };
+                    if stall.dropped || now >= stall.deadline {
                         options.drop_voices.insert(id.clone());
                     }
                 }
@@ -1250,6 +1309,13 @@ impl RenderThread {
             }
             match result {
                 Ok(report) => {
+                    if let Some(failure) = self.render_failure.take() {
+                        self.shared
+                            .errors
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .end(&failure);
+                    }
                     self.report_render_errors(report.errors);
                     if report.starved > 0 {
                         let counter = if retry {
@@ -1263,14 +1329,16 @@ impl RenderThread {
                             return;
                         }
                         let mut notifications = Vec::new();
+                        let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
                         for id in &report.starved_voices {
-                            if let Some(stall) = self.stalls.get_mut(id)
-                                && !stall.reported
-                            {
-                                stall.reported = true;
-                                notifications.push(format!(
-                                    "Audio decode wait exhausted (up to {SOURCE_WAIT_MS} ms, bounded by device reserve); missing voice plays as silence: {id}"
-                                ));
+                            if let Some(stall) = self.stalls.get_mut(id) {
+                                stall.dropped = true;
+                                if !stall.reported {
+                                    stall.reported = true;
+                                    let by_reserve =
+                                        stall.deadline < stall.start.saturating_add(hold);
+                                    notifications.push(stall_message(id, by_reserve));
+                                }
                             }
                         }
                         let mut errors =
@@ -1286,13 +1354,17 @@ impl RenderThread {
                 }
                 Err(e) => {
                     self.stalls.clear();
-                    self.error(e.to_string());
+                    let message = e.to_string();
+                    self.error(message.clone());
+                    self.render_failure = Some(message);
                     for c in &mut planar {
                         c.clear();
                         c.resize(n, 0.0);
                     }
                 }
             }
+            // The run's first segment commits: its start hold is over.
+            self.startup = None;
             if seg.rate < 0 {
                 for c in &mut planar {
                     c.reverse();
@@ -1454,5 +1526,47 @@ impl RenderThread {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_mix_failures_are_reported_once_per_episode() {
+        let mut log = ErrorLog::default();
+        log.push("mix: broken".into());
+        log.push("mix: broken".into());
+        assert_eq!(log.take(), ["mix: broken"]);
+        // Still failing on later renders and drains: nothing new.
+        log.push("mix: broken".into());
+        assert!(log.take().is_empty());
+        // A successful render ends the episode; a later failure reports.
+        log.end("mix: broken");
+        log.push("mix: broken".into());
+        assert_eq!(log.take(), ["mix: broken"]);
+        // So does a new run (converter and shuttle failures included).
+        log.push("shuttle: x".into());
+        log.new_run();
+        log.push("shuttle: x".into());
+        log.push("mix: broken".into());
+        assert_eq!(log.take(), ["shuttle: x", "shuttle: x", "mix: broken"]);
+    }
+
+    #[test]
+    fn large_callbacks_keep_a_decode_wait_budget() {
+        // 48 kHz, 80 ms ahead (3,840 frames), a 30-chunk ring.
+        let (ahead, capacity) = (3_840, 30);
+        // 512-frame callbacks: the target is unchanged.
+        assert_eq!(fill_target(ahead, 1_024, capacity), 15);
+        // 2,048-frame callbacks reserve 4,096 frames, more than the 80 ms
+        // target: the ring keeps 40 ms beyond the reserve instead.
+        let target = fill_target(ahead, 4_096, capacity);
+        assert_eq!(target, 23);
+        assert!(target * CHUNK - 4_096 >= 1_664);
+        // Never past the ring.
+        assert_eq!(fill_target(ahead, 16_384, capacity), 29);
+        assert_eq!(fill_target(100, 0, capacity), 2);
     }
 }
