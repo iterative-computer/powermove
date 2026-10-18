@@ -28,19 +28,22 @@ today, and what is not done.
 | Linear blending, HDR-safe and run-in-E blend domains | Drawn | `tests/linear.rs` (section 2 bar), `tests/color.rs` (invariants with linear blending), `tests/composite.rs` |
 | 16- and 32-bit precision, project precision as a floor | Drawn | `tests/composite.rs` |
 | Region of interest with effect padding | Drawn | `tests/composite.rs`: regions equal the full frame bit for bit with masks, mattes, blends, adjustments, and padded effects |
-| Bezier path masks | Routed (`Feature::PathMasks`) | Gaps |
+| Bezier path masks: today's Canvas2D coverage route with every other mask of the layer, feather (Chromium's blur), add, subtract, subtract-only, animated vertices, transforms, and modes, masks switching off, on solids, images, shapes, text, captions, groups, precomps, adjustment layers, 3D planes, layers in 3D groups, 3D object layers, and with motion blur | Drawn (below) | `tests/path_masks.rs`: 54 coverage canvases bit-exact; `composite/path-masks`, `composite/path-masks-nested`, `composite/path-masks-more`: bit-exact opaque and float (3D object: 3D class, max 1 CV); `composite/path-masks-text`: text class |
 | Masks on 3D object layers, animated and keyed | Drawn | `composite/3d-mask`, `composite/3d-blend-mask`, v1 `3d/transparency`, `motion/blur-3d`: 3D class, max 1 CV (below) |
 | Masks that are not an array | A named layer failure, as today's `.some` throws | `tests/composite.rs` |
 | Motion blur with masks, blend modes, mattes, effects, styled groups | Drawn (the accumulated samples are the layer target) | `motion/blur-slow`: bit-exact float, opaque ≤ 1 CV |
 
 Corpus figures are from captures `composite-20261016-042859-be1e4467`,
-`compclose-20261018-121218-230f9731`, and `compclose2-20261018-124247-4857382c`
+`compclose-20261018-121218-230f9731`, `compclose2-20261018-124247-4857382c`, and
+`compclose3-20261018-174842-bcfa91ad`
 (Chromium, ANGLE Metal, Apple M4 Max), compared by `tests/corpus.rs` under
 section 25's Standard class (≤ 1 CV for 99.9% of pixels, ≤ 4 CV anywhere) and,
 for transparent captures, the float frames within 1 CV. The corpus tests fail
 any project routed for masks, motion blur, 2.5D, `compat` level 2, the
-`requiresEngine` stamp, or project color (`support::routing_forbidden`); path
-masks are the one compositing reason still listed as a skip.
+`requiresEngine` stamp, or project color (`support::routing_forbidden`). Bezier
+path masks no longer have a routing reason (`Feature::PathMasks` is removed).
+Level 1 shape layers on 2.5D planes keep one (`Feature::PlaneShapeRaster`,
+under 2.5D below), listed as a skip.
 
 ## Graph
 
@@ -90,8 +93,13 @@ today's frames.
 
 The engine now evaluates the formula literally at every pixel, as today's
 program does; its targets are the same `rgba16float` with the same rounding, so
-the drift is reproduced. Fused mask and matte steps round toward zero as well
-(`half_rtz` in `ops.wgsl`), as today's separate passes store them. The residual
+the drift is reproduced. Fused mask and matte steps round as today's separate
+passes store them: the renderer probes how the device stores an `f32` output
+into `rgba16float` on first use (`composite/half_store.rs`: 0.75 + ¾ of an f16
+ulp) and the fused steps truncate (`half_rtz`) or round to nearest (`half_rne`)
+to match. Today's compositor on another GPU family stores with that GPU's
+rounding, so the probe, not a constant, decides; `tests/half_store.rs` checks
+that the probe agrees with the measured truncation on this GPU. The residual
 that remained on the rotated soft-alpha images came from image sampling: today's
 image layers sample Blink's 8-bit premultiplied bitmap as an `RGBA8` texture,
 and the GPU's bilinear filter weighs 8-bit texels differently from half float
@@ -100,6 +108,66 @@ ones. Level 1 stills in the display encoding are now uploaded and sampled as
 texture). With both, `composite/blend-modes-alpha` is bit-exact in the opaque
 and transparent float frames (was 252 float pixels over 1 CV, max 4.61 CV), and
 the corpus test's drift exemption is removed.
+
+## Path masks (today's Canvas2D coverage route)
+
+When any enabled mask of a layer has a path, today's `applyPathMasks` takes
+every enabled mask (parametric ones too, with no count limit): each is filled
+white on its own canvas of the output size (the item) through the layer's
+`scaledWorld` and the mask's `translate`/`rotate` (and the path's own
+`translate`/`rotate`/`scale`, then `tracePath` closed and untrimmed; a
+parametric mask as `ellipse` or signed `rect`), and drawn onto one coverage
+canvas with `ctx.filter = blur(max(0, feather) · |world x| / 2 px)` and
+`source-over` (add) or `destination-out` (subtract); the canvas starts white when
+no mask adds. The layer is multiplied by the canvas's alpha, sampled with
+`texFor`'s linear filtering at each output pixel (through the inverse plane
+composed with the world matrix for a 3D layer, `u_covTransform`), zero outside
+the canvas.
+
+The engine (`composite/path_masks.rs`, `path_masks.wgsl`;
+`pm_vector::canvas2d::{mask, filter}`):
+
+- **Items** are filled by pm-vector's Canvas2D emulation on the CPU (the same
+  path, `rect`, and `ellipse` calls; Blink's `rect` was added to it) and kept
+  across frames (least recently used dropped past 192 MB), so a static mask is
+  filled once.
+- **The blur** is Chromium 152's Skia Graphite blur image filter
+  (`b6d106297ff9ef2ff8094033695d045e87775581`), planned pass for pass in `f32`
+  by `pm_vector::canvas2d::filter::BlurPlan` and run on the GPU in 8-bit
+  single-channel images with a transparent 1-pixel border: the save layer
+  (the canvas outset by ⌈3σ⌉), `IsEffectivelyIdentity` (σ ≤ 0.03), the
+  downscale steps of `FilterResult::rescale` about the layer's center
+  (`downscale_step_count`, `scale_about_center`, `RoundOut` with
+  `kRoundEpsilon`), the low resolution σ, the single 2D pass (nearest, area ≤
+  28) or two 1D passes with `Compute1DBlurLinearKernel`'s paired bilinear taps
+  (padded to the effect's loop count), the output bounds and their 1-pixel
+  outset, and the final draw (pixel aligned, or bilinear back up). The SkSL
+  effects declare `half` sums, weights, and offsets, but Graphite evaluates
+  them at full precision on Metal: `f32` sums are bit-exact with today's
+  canvases, `f16` sums leave thousands of pixels 1 code value off.
+- **The composite** onto the coverage canvas is hardware blending into an 8-bit
+  target (`One`/`OneMinusSrcAlpha` or `Zero`/`OneMinusSrcAlpha`), as Graphite's.
+- **The apply** is the composite op's `FLAG_PATH_MASKS` step, fused with the
+  matte as the parametric masks are (rounded between steps as today's separate
+  passes store them).
+
+Measured: `tests/path_masks.rs` compares 54 coverage canvases captured from
+today's code by `pm-vector/tools/mask-ref` (the coverage half of
+`applyPathMasks`, sliced verbatim from `compositor.ts` and run in the app's
+Electron; capture `masks-20261018-171840-8e3cd12e`): a feather sweep from 0 to
+160 across every pass structure (identity, one 2D pass, 1D passes, 1 to 5
+downscale steps), odd canvas sizes and fractional placement, masks crossing the
+canvas edges, rotated and scaled worlds, add, subtract, and subtract-only
+combinations, 10 parametric masks with a path, signed rectangles, and 1920 ×
+1080 and 3840 × 2160 canvases: **every case bit-exact**. The corpus cases
+`composite/path-masks` (3 samples), `composite/path-masks-nested` (2) and
+`composite/path-masks-more` (2: motion blur, a 3D group member, an adjustment
+layer, a 3D object) are bit-exact in opaque and transparent float frames (the 3D
+object within the 3D class, max 1 CV); `composite/path-masks-text` (text and
+captions) is within the text class with every other pixel exact. v1
+`masks/path` holds an SVG image (the media lane's routing) and is not compared.
+`pm-vector`'s `tests/mask_coverage.rs` runs the same plan on the CPU with exact
+bilinear weights as a model: within 2 CV (the GPU's filter weights differ).
 
 ## Masks on 3D object layers
 
@@ -179,7 +247,11 @@ matte passes render over the pass rectangle.
 | `tests/composite.rs` | Blend modes (5 color pairs, 9 modes, 2 opacities, 3 color setups, 2 precisions), styled groups, mask coverage, matte modes and visibility, matte depth and cycles, group matte sources, adjustment layers, isolation, regions with padding, determinism, project settings | Pass |
 | `tests/linear.rs` | 50% white over black and a 2× downscaled checkerboard: 188 with linear blending, 128 without | Pass |
 | `tests/color.rs` | Invariant (2), pipeline transparency (ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`), and invariant (1) for 4:2:0, each with linear blending on too | Pass: 0 samples differ |
-| `tests/corpus.rs` | Every supported corpus project (v1, render, composite captures) | Pass |
+| `tests/corpus.rs` | Every supported corpus project (v1, render, effects, composite, motion, and closure captures) | See the lane report for the latest whole-corpus figures |
+| `tests/path_masks.rs` | 54 path mask coverage canvases against today's (`pm-vector/tools/mask-ref`) | Pass: bit-exact |
+| `pm-vector` `tests/mask_coverage.rs`, `canvas2d::filter` unit tests | Item rasters exact where nothing is blurred; the CPU model of the blur within 2 CV; Skia's step counts and kernels | Pass |
+| `tests/half_store.rs` | `rgba16float` stores truncate on this GPU, and the renderer's probe agrees | Pass |
+| `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | See motion.md |
 | `pm-color` unit tests | Composite and matte references | Pass |
 | App: `project-settings.test.ts`, `settings/project-color.test.ts`, `shared/project-color.test.ts`, `engine-stamp.test.ts`, `e2e/project-color.spec.ts` | The Color rows, Undo, the stamp, hidden without the new engine | Pass |
 
@@ -188,35 +260,23 @@ Recapture the corpus cases with
 
 ## Gaps
 
-- **Bezier path masks** are routed (`Feature::PathMasks`; `composite/path-masks`,
-  `composite/path-masks-nested`, v1 `masks/path`). Today's `applyPathMasks`
-  rasterizes every enabled mask of the layer into its own Canvas2D canvas
-  (Graphite) and draws it onto one coverage canvas with `source-over` or
-  `destination-out` through `ctx.filter = blur(feather · hypot(a, b) / 2 px)`.
-  The fill is the vector lane's Canvas2D emulation (`pm_vector::canvas2d`); the
-  blur is Skia's GPU image filter at Chromium 152's Skia
-  (`b6d106297ff9ef2ff8094033695d045e87775581`), which must be reproduced pass
-  for pass on the GPU to stay within 1 CV:
-  - `SkBlurEngine::SigmaToRadius` = ⌈3σ⌉, identity at σ ≤ 0.03;
-  - `FilterResult::Builder::blur`: σ above `kMaxLinearSigma` (4) is reached by
-    `FilterResult::rescale` (`downscale_step_count`: ½ steps then one final
-    step between ½ and 1, centered, bilinear, `kSrc`, decal edges, 8-bit
-    intermediates), the blur runs at the low resolution, and the result is
-    drawn back up with bilinear filtering under the paint's blend mode;
-  - `SkShaderBlurAlgorithm::blur`: a single 2D pass with nearest sampling when
-    (2r + 1)² ≤ 28, otherwise two 1D passes with the linear-filtering kernel
-    (`Compute1DBlurLinearKernel`, pairs of taps merged into one bilinear
-    sample), `half4` accumulation and `half4` uniforms, 8-bit outputs, the
-    fast interior and strict (shader-clamped) border draws of `renderBlur`,
-    and `makePixelOutset` with clamp tiling.
-  No part of this is implemented; reference captures of the coverage canvas
-  (the vector lane's `tools/canvas-ref` page can take them) are the next step.
-- **Text and shape residuals on 2.5D planes** (`space/groups-25d`, v1): the text
-  class passes (SSIM ≥ 0.999) but 0.004% of non-text pixels differ by up to
-  47 CV: the corners of the radius-24 rectangles (the vector lane's pinned
-  Canvas2D MSAA residual for `rect r24`, magnified through the plane) and caption
-  glyph pixels outside the 3-pixel text mask (the text lane's raster). Evidence:
-  `/tmp/ne-compclose/evidence/groups-25d-t0-engine-left-legacy-right.png`.
+- **Level 1 shapes on 2.5D planes stay routed** (`Feature::PlaneShapeRaster`).
+  A shape's Canvas2D raster is drawn through the plane, and the plane magnifies
+  the vector lane's pinned single-sample MSAA residuals: v1 `space/groups-25d`
+  differs at 6 to 11 rounded-corner pixels per frame (max 47, 40, 32 CV at t =
+  0, 1.25, 2.5) while its text is within the text class. The cause is the raster
+  itself: today's `rasterShape` of those cards (130 × 140, radius 24, scale 1)
+  differs from pm-vector's emulation at 2 pixels each, max 64
+  (`pm-vector/tests/canvas2d.rs`, `shape-groups25d-card-*`, pinned with
+  `shape-corpus-rect-r24-s1`). Drawing the planes otherwise matches today
+  (`space25d/vector`, with shapes, a path, a masked shape, shapes in a 3D group,
+  and a blurred 3D shape, was bit-exact), so the route can go when the
+  emulation's residuals close; level 2 shapes on planes are drawn. Evidence:
+  `/tmp/ne-compclose/evidence/r2/groups-25d/`.
+- **Level 2 text the text lane does not lay out yet** (animators, range styles,
+  typography anchoring) is reported as `Feature::Text` (`capability.rs`,
+  `level2_text_gap`), which `support::routing_forbidden` does not cover: the text
+  lane owns it.
 - **The run-in-E option** has no UI (the plan names only the two rows).
 - Today's masks have no expansion, opacity, or inversion; there is nothing to port.
 
@@ -235,10 +295,27 @@ Recapture the corpus cases with
   variants, `corpus.rs` and `support/mod.rs` (composite captures; the drift
   entry, since removed; `routing_forbidden`), `text_corpus.rs` (the capture's
   16 motion-blur samples, routing forbidden).
-- Phase 3c closure (lane compclose): `media.rs` (`rgba8_bitmap`: level 1 stills
-  sampled as `Rgba8Unorm`), `pm-node` `present/document.rs` (the two removed
-  reasons), `capability.rs` (the `requiresEngine` stamp, 3D masks, non-array
-  masks, `TrackMatte` and `BlendMode` removed).
+- Phase 3c closure (lane compclose). Outside `composite/`, `motion/`,
+  `space25d/`, `sampling/`, `vector/`, and pm-vector, with the reason:
+  - `plan.rs` (about 300 lines): the blurred slow path, per-sample 3D state of
+    blurred 3D objects, level 2 on planes, the path mask route through
+    `layer_masks` (now given the output size);
+  - `capability.rs`: the `requiresEngine` stamp, 3D masks, non-array masks,
+    `TrackMatte`, `BlendMode`, and `PathMasks` removed, motion blur, 2.5D, and
+    level 2 for every type, `PlaneShapeRaster` added,
+    `unsupported_with_definitions_and_fonts` (for the text corpus test);
+  - `scene3d/layers.rs` (about 130 lines): `Pass3d::at_time` and depth sets for
+    blurred 3D objects;
+  - `media.rs`: `rgba8_bitmap`. This changes sampling for every level 1 still in
+    the Standard encoding (the media lane's still class, not only compositing);
+    the texture is `Rgba8Unorm` and sample-only whatever the precision, which
+    `MediaCache::image` documents and a debug assertion checks;
+  - `exec.rs`, `shader_layers/plan.rs`: level 2 pyramids and target sizes;
+  - `pm-node` `present/document.rs`: the removed reasons' and the new reason's
+    descriptions;
+  - tests outside the lane: `text_corpus.rs` (built-in definitions, the
+    fonts-and-definitions check, failure images of the "rest" pixels),
+    `support/mod.rs` (closure captures in the default set), `headless.rs`.
 - `engine/corpus/src/projects/composite.ts` (new) and `index.ts`.
 - App: `legacy/ui/project-settings.ts` (Color section), `settings/install.ts`,
   `settings/project-color.ts` (new), `shared/project-color.ts` (new),

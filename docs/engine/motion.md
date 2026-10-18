@@ -53,7 +53,13 @@ effects, and matte apply at the center time, as today's slow path does.
 Measured (compclose capture): `motion/blur-vector`, `motion/blur-slow` bit-exact
 in float frames at 20, 3, and 6 samples, opaque within 1 CV; `motion/blur-3d`,
 `motion/blur-3d-group`, and v1 `3d/motion-blur` within the 3D class;
-`motion/blur-text` within the text class.
+`motion/blur-text` within the text class. Generated layers (compclose3 capture
+`compclose3-20261018-174842-bcfa91ad`): `motion/blur-generated` (a translucent
+shader layer, an extension fragment layer moving and spinning, a shader in a
+blurred group, a shader and an extension in a blurred precomp) within 1 CV
+opaque, 0.25 CV in float frames; `motion/blur-captions` (captions blurred, in a
+blurred group, in a blurred precomp) within the text class, every other pixel
+exact; `composite/path-masks-more` (a blurred path-masked layer) bit-exact.
 
 `motionBlurSamples` (section 6, additive) is an object keyed by contract 2's
 `MotionBlurKind` names: `{"export": 16, "alphaExport": 20, "previewPlaying": 6,
@@ -130,12 +136,16 @@ timeline order; surfaces sort by their first layer's anchor depth), 2D layers an
 object blocks are barriers. The 3D scene lane's `order_pass` does the same for
 non-model blocks and supersedes this call when the lanes merge.
 
-Drawn for every layer type: solids, images, video, precomps, groups, shapes and
-editable paths, text and captions, shader and extension layers, and masked
-adjustment layers inside 3D groups. Level 1 shapes and text keep today's raster
+Drawn for every layer type: solids, images, video, precomps, groups, level 2
+shapes and editable paths, text and captions, shader and extension layers, and
+masked adjustment layers inside 3D groups. Level 1 text keeps today's raster
 density (the continuous raster scale of the 2D world matrix, as `contentQuad`
-computes it for a 3D layer outside the preview's clipping) and draw through the
-plane. 3D object, light, and camera layers draw in screen space, as today, also
+computes it for a 3D layer outside the preview's clipping) and draws through the
+plane. **Level 1 shapes on planes stay routed** (`Feature::PlaneShapeRaster`):
+the plane magnifies the Canvas2D emulation's pinned MSAA residuals, which v1
+`space/groups-25d` shows at its rounded corners (up to 47 CV; composite.md,
+Gaps). The engine draws them correctly otherwise (`space25d/vector` was
+bit-exact), so the route goes when the vector residuals close. 3D object, light, and camera layers draw in screen space, as today, also
 inside 3D groups (`space25d/others`).
 
 **Level 2 content on planes** (`space25d/local.rs`; no legacy reference): level 2
@@ -151,9 +161,26 @@ level 2 resampler.
 
 Measured on `compclose-20261018-121218-230f9731`: `space25d/vector` (shapes, a
 path, a masked shape, shapes in a 3D group, a blurred 3D shape) bit-exact in
-opaque and float frames; `space25d/text` within the text class (SSIM ≥ 0.9975,
-other pixels exact); `space25d/others` within the 3D class; v1 `space/groups-25d`
-is now drawn (composite.md, Gaps, for its residual).
+opaque and float frames when drawn (now routed, above); `space25d/text` within
+the text class (SSIM ≥ 0.9975, other pixels exact); `space25d/others` within the
+3D class. On `compclose3-20261018-174842-bcfa91ad`: `space25d/generated` (a
+shader layer turned in Y, an extension layer turned in X and moving in Z, a
+shader and a blurred extension in a 3D group) within 1 CV opaque and 0.25 CV
+float; `space25d/captions` (captions oriented in Y, captions in a 3D group)
+within the text class, every other pixel exact.
+
+**Bounds and picks against the display** (`tests/space25d_picks.rs`): pm-eval's
+`bounds` and `pick` are ports of `GL.bounds` and `GL.pick` checked against the
+TypeScript (pm-eval's layer parity vectors, 3D layers of every type among them).
+The test closes the loop with what the engine draws: for every 2.5D layer of
+`space25d/vector`, `text`, `captions`, and `generated` at every captured time,
+each pixel the layer draws (its frame against the frame with the layer at
+opacity 0, away from the antialiased edge) is picked as the layer or a layer
+drawn over it; what it draws lies inside the region picked as it; and shader and
+extension layers, which fill their bounds, draw exactly the picked region's
+box. A smoke test of level 2 text on planes (no legacy reference) checks that an
+unturned plane draws what the flat layer draws and that a turned one draws
+inside its pick region, at two scales.
 
 ## Retiming
 
@@ -334,13 +361,16 @@ unchanged, continuous precomp rasterization, level 2 routing.
   level 2 draws, the frame-rate override in `MediaCache::video`, routing).
 - `engine/corpus/src/{capture,page,verify,media}.ts`, `projects/{common,index}.ts`,
   `test/corpus.test.ts`: `blurSamples` captures, the generated videos, the cases.
-- Phase 3c closure (lane compclose): `scene3d/layers.rs` (`Pass3d::at_time`, the
-  depth sets factored into `depth_sets`), `shader_layers/plan.rs` (level 2
-  target size), `exec.rs` (level 2 pyramids for vector, text, and shader
-  sources), `plan.rs` (blurred slow path, 3D samples, level 2 on planes),
-  `engine/corpus/src/projects/compclose.ts` (new cases), and
-  `apps/desktop/e2e/legacy-blurred-video-export.spec.ts` (today's export and
-  preview of blurred video).
+- Phase 3c closure (lane compclose): `scene3d/layers.rs` (about 130 lines:
+  `Pass3d::at_time`, the depth sets factored into `depth_sets`),
+  `shader_layers/plan.rs` (level 2 target size), `exec.rs` (level 2 pyramids for
+  vector, text, and shader sources), `plan.rs` (about 300 lines: blurred slow
+  path, 3D samples, level 2 on planes, path masks), `capability.rs` (every
+  routing change of the lane), `media.rs` (level 1 stills sampled as today's
+  8-bit texture: a behaviour change for every level 1 still in the Standard
+  encoding), `engine/corpus/src/projects/compclose.ts` and `compclose3.ts` (new
+  cases), and `apps/desktop/e2e/legacy-blurred-video-export.spec.ts` (today's
+  export and preview of blurred video, VP9, H.264, and ProRes sources).
 
 ## Gaps
 
@@ -350,7 +380,9 @@ unchanged, continuous precomp rasterization, level 2 routing.
   fidelity to each path's declared kernel (see above). Anisotropic minification
   beyond 4 texels per kernel unit along the major axis reads a box-filtered level
   that also blurs the minor axis. Level 2 text and resvg rasters on planes are
-  resampled from a layer-space raster rather than projected analytically.
+  resampled from a layer-space raster rather than projected analytically (a smoke
+  test covers level 2 text's placement; resvg rasters on planes have none).
+- Level 1 shapes on 2.5D planes stay routed (`Feature::PlaneShapeRaster`, above).
 - Video decode differences at saturated chroma edges (up to 9 CV at a few pixels)
   belong to the media lane's decode path; an H.264 file tagged only with a BT.709
   matrix (no primaries or transfer) is read with BT.601 coefficients by Chromium and
