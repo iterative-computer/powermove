@@ -2419,6 +2419,7 @@ dependencies = [
  "kurbo",
  "libm",
  "peniko",
+ "pm-text",
  "png",
  "resvg",
  "ryu-js",

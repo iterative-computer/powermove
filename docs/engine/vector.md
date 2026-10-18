@@ -173,9 +173,9 @@ except one pixel, by 1/255.
 
 ## SVG images
 
-`pm_vector::render::svg::SvgDocument` parses with usvg 0.48 without its
-`text` feature; as in an `<img>`, only `data:` URLs resolve (no file or
-network loads).
+`pm_vector::render::svg::SvgDocument` parses with usvg 0.48; as in an
+`<img>`, only `data:` URLs resolve (no file or network loads). Text is parsed
+for the pm-text diagnostic below; the production SVG text gate remains.
 
 - **Level 1** (today's buckets): `svg_raster_dimensions` ports
   `svgRasterDimensions`, and `raster` draws the bucket as `drawImage(img, 0,
@@ -204,8 +204,40 @@ network loads).
   the viewport is drawn by resvg into the device rectangle with the box and
   viewport as an antialiased clip. Where today's quad would clamp the
   texture's edge texels over a `contain` box, level 2 draws nothing.
-- **Text**: SVGs with `<text>` stay routed at every level until SVG text is
-  laid out through `pm-text`.
+- **Text**: SVGs with `<text>` stay routed at every level until the pm-text
+  diagnostic below meets SVG’s 2D parity class.
+
+### Chromium SVG paint-record replay (media closure round 2)
+
+Chromium **152.0.7977.54** is the version in the canvas reference manifest.
+Its [SVGImage::DrawInternal](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/third_party/blink/renderer/core/svg/graphics/svg_image.cc)
+saves the Canvas2D canvas, applies the destination clip and source-to-destination
+matrix, and replays `PaintRecordForCurrentFrame` with `drawPicture`. It does
+not pre-rasterize SVG with Skia's CPU scan converter. With Graphite enabled
+in the capture, that means the same analytic and MSAA paint pipeline the
+vector lane emulates. Skia is pinned by Chromium's DEPS to
+`b6d106297ff9ef2ff8094033695d045e87775581`.
+
+`SvgDocument::raster_compat` is a separate, unenabled bucket diagnostic.
+It associates original element geometry with the resolved usvg tree so oval,
+rounded-rectangle and conic SkPath identities survive parsing. The Canvas2D
+context now records gradient paint, fill rules, analytic rounded rectangles,
+clip unions/intersections and opacity/linear-RGB blur layers. SVG text uses
+`raster_compat_with_text` and a caller-owned `pm_text::Compat` resolver; usvg
+text outlines are never used by that path. Unsupported text positioning,
+paint servers, masks, filters and embedded bitmap records return explicit
+errors. Original parsing for the existing level-2 scene is unchanged.
+
+The diagnostic compares **all 27** retained source references and writes
+side-by-sides outside the repository. Invoke `svg_compat_compare` with
+`PM_MEDIA_EVIDENCE` and `--expect-parity` to enforce the 2D bar. The current
+result is **15/27**, so `SvgImage` is retained: opacity, even-odd and transform
+cases pass at all three sizes; solid passes at 64²/200²; stroke at 200²; clip
+at 64²/200²; blur at 64². Remaining maxima are solid 44, stroke 19, gradient
+3 (too many pixels over 1), non-square clip 103, larger blur 7, and pm-text
+text 157 CV. These are blockers, not accepted differences. The 34-project
+composition gate cannot pass while its source raster fails. No production
+level-1 bucket/cache hook is enabled from these measurements.
 
 ## Memory
 
