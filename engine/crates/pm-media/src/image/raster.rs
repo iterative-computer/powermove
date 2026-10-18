@@ -97,7 +97,13 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
     } else {
         profile
     };
-    let orientation = decoder.orientation().map(exif_number).unwrap_or(1);
+    // Blink's WebP decoder reads no EXIF: a WebP is shown as stored, in
+    // the box today's import measured. Other formats apply it as Blink does.
+    let orientation = if format == ImageFormat::WebP {
+        1
+    } else {
+        decoder.orientation().map(exif_number).unwrap_or(1)
+    };
     let color_type = decoder.color_type();
     let img = DynamicImage::from_decoder(decoder).map_err(err)?;
     let (w, h) = (img.width() as usize, img.height() as usize);

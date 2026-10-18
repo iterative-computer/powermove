@@ -10,7 +10,16 @@
 //! All 21 detailed still corpus cases pass the 2D/alpha classes. Container
 //! checks keep other structures explicit (HDR/gamma-only PNG, progressive
 //! gray JPEG, TIFF tiles/float/other models, and AVIF outside the tested
-//! SDR class). Late PNG EXIF is gated if the decoder did not apply it.
+//! 8-bit 4:2:0 SDR class).
+//!
+//! Container transforms are drawn only as Chromium shows them, each
+//! compared in the app (`e2e/native-still-orientation-parity.spec.ts`):
+//! EXIF orientation the decoder applied from PNG `eXIf` before the image
+//! data, JPEG APP1 and TIFF tag 274; HEIF `irot`/`imir`/`clap` (ImageIO, as
+//! the `sips` rendition Chromium shows); AVIF `irot`/`imir`/`clap` as Blink
+//! interprets them (`avif_compat`); WebP EXIF, which Blink ignores (so does
+//! pm-media). Anything else (late PNG `eXIf` the decoder did not apply, a
+//! decoder disagreeing with the header) stays explicit.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -40,6 +49,8 @@ struct Header {
     /// A geometric transform the container asks for: EXIF orientation
     /// other than 1, HEIF `irot`/`imir`/`clap`.
     transform: Option<String>,
+    /// The first EXIF orientation other than 1.
+    exif: Option<u16>,
 }
 
 impl Header {
@@ -47,8 +58,23 @@ impl Header {
         if let Some(o) = orientation.filter(|&o| o != 1) {
             self.transform
                 .get_or_insert(format!("EXIF orientation {o}"));
+            self.exif.get_or_insert(o);
         }
     }
+}
+
+/// Whether the drawn still shows the container's transform as Chromium
+/// shows it (module notes).
+fn transform_matches(still: &StillImage, header: &Header, compat: bool) -> bool {
+    compat
+        && match still.format {
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Tiff => {
+                header.exif == Some(u16::from(still.orientation))
+            }
+            ImageFormat::WebP => still.orientation == 1,
+            ImageFormat::Heif => true,
+            _ => false,
+        }
 }
 
 /// Whether a decoded still is in a tested class.
@@ -61,8 +87,10 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
             "wide-gamut ICC stills with alpha (Chromium ImageBitmap conversion differs)",
         );
     }
-    // Compatibility classes consume the decoder-applied orientation.
-    let compat = pm_media::image::compat::applies(still);
+    // Compatibility classes consume the decoder-applied orientation (the
+    // container check below decides whether it is Chromium's).
+    let compat =
+        pm_media::image::compat::applies(still) || pm_media::image::avif_compat::applies(still);
     if still.orientation != 1 && !compat {
         return unsupported(orientation_message(&format!(
             "EXIF orientation {}",
@@ -100,7 +128,16 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
                 );
             }
         }
-        ImageFormat::Avif if pm_media::image::avif_compat::applies(still) => return Ok(()),
+        ImageFormat::Avif if pm_media::image::avif_compat::applies(still) => {
+            // Container transforms follow Blink in `avif_compat`.
+            return match pm_media::image::avif_compat::unmeasured(path) {
+                Ok(None) => Ok(()),
+                Ok(Some(what)) => {
+                    unsupported(format!("{what} (not compared with the legacy renderer)"))
+                }
+                Err(e) => unsupported(format!("AVIF stills Chromium's decoder cannot parse ({e})")),
+            };
+        }
         ImageFormat::Avif => return unsupported("AVIF stills outside the tested 8-bit sRGB class"),
         ImageFormat::Bmp => return unsupported("BMP stills"),
         ImageFormat::Ico => return unsupported("ICO stills"),
@@ -125,11 +162,10 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     } else {
         parse(&mut BufReader::new(file), still.format)?
     };
-    if let Some(t) = header
-        .transform
-        .filter(|_| !compat || (still.format == ImageFormat::Png && still.orientation == 1))
+    if let Some(t) = &header.transform
+        && !transform_matches(still, &header, compat)
     {
-        return unsupported(orientation_message(&t));
+        return unsupported(orientation_message(t));
     }
     match still.format {
         ImageFormat::Png if still.bit_depth != 8 && !compat => unsupported("16-bit PNG stills"),

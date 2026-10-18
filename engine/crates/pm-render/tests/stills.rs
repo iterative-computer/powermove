@@ -325,8 +325,11 @@ fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
     b[at + 8..at + 10].copy_from_slice(&v);
 }
 
-/// The compatibility bitmap consumes the decoder's applied orientation.
-/// Late PNG eXIf is still gated when the decoder did not apply it.
+/// The compatibility bitmap consumes the decoder's applied orientation
+/// where Chromium applies it (PNG eXIf before the image data, JPEG, TIFF,
+/// HEIF; compared in `e2e/native-still-orientation-parity.spec.ts`). WebP
+/// EXIF is ignored, as Blink ignores it. Late PNG eXIf is still gated when
+/// the decoder did not apply it.
 #[test]
 fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
     let d = dir().join("oriented");
@@ -376,7 +379,24 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
         probe_image(&write("exif1.webp", &webp_with_exif(&webp, 1))),
         Ok(())
     );
-    cases.push(write("exif6.webp", &webp_with_exif(&webp, 6)));
+    let exif6_webp = write("exif6.webp", &webp_with_exif(&webp, 6));
+    cases.push(exif6_webp.clone());
+    // Chromium shows a WebP as stored whatever its EXIF says.
+    let plain_webp = write("plain.webp", &webp);
+    assert!(
+        compat_rgba8(&exif6_webp) == compat_rgba8(&plain_webp),
+        "WebP EXIF orientation must not be applied"
+    );
+    {
+        let pool = pm_media::pool::FramePool::new(0);
+        let s = pm_media::image::read(&exif6_webp, &pool).unwrap();
+        assert_eq!(s.orientation, 1);
+        assert_eq!(
+            (s.frame.format.width, s.frame.format.height),
+            (160, 90),
+            "the box today's import measured"
+        );
+    }
 
     // 8-bit opaque TIFF and HEIC written by ImageIO. The TIFF is an
     // untagged device RGB image (ImageIO embeds a profile otherwise, which
@@ -434,6 +454,146 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
             assert_eq!(probe_image(p), Ok(()), "{}", p.display());
         }
     }
+    // Applied orientations are pixel permutations of the unoriented
+    // bitmap (so is Chromium's oriented ImageBitmap; media.md).
+    let plain_rgba = compat_rgba8(&plain);
+    for (name, o) in [("exif6.png", 6u8), ("exif2.png", 2)] {
+        let expect = orient_rgba8(&plain_rgba, 96, 54, o);
+        assert!(compat_rgba8(&d.join(name)) == expect, "{name}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// EXIF orientation applied to packed RGBA8, placing each source pixel as
+/// the EXIF definitions (and Chromium's `ImageOrientation`) do.
+fn orient_rgba8(px: &[u8], w: usize, h: usize, o: u8) -> Vec<u8> {
+    let (ow, oh) = if o >= 5 { (h, w) } else { (w, h) };
+    let mut out = Vec::with_capacity(px.len());
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (sx, sy) = match o {
+                2 => (w - 1 - ox, oy),
+                3 => (w - 1 - ox, h - 1 - oy),
+                4 => (ox, h - 1 - oy),
+                5 => (oy, ox),
+                6 => (oy, h - 1 - ox),
+                7 => (w - 1 - oy, h - 1 - ox),
+                8 => (w - 1 - oy, ox),
+                _ => (ox, oy),
+            };
+            let i = (sy * w + sx) * 4;
+            out.extend_from_slice(&px[i..i + 4]);
+        }
+    }
+    out
+}
+
+/// The level-1 AVIF bitmap follows Blink's `AVIFImageDecoder`: `irot` and
+/// `imir` become the orientation (`kAxisAngleToOrientation`), a valid
+/// `clap` at (0, 0) crops, any other `clap` shows the whole image; 8-bit
+/// 4:2:0 at either range is the compared class (app comparison:
+/// `e2e/native-still-orientation-parity.spec.ts`).
+#[test]
+fn avif_container_transforms_follow_blink() {
+    let d = dir().join("avif");
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("src.png");
+    ffmpeg(&src, &["-pix_fmt", "rgb24"]); // 96x54
+    let odd_src = d.join("odd.png");
+    // ImageIO codes 95x63 as 96x64 with a clean aperture.
+    ffmpeg(
+        &odd_src,
+        &["-pix_fmt", "rgb24", "-vf", "scale=96:64,crop=95:63:0:0"],
+    );
+    let plain = d.join("plain.avif");
+    imageio_write(&src, &plain, "public.avif", &ImageIo::default());
+    let odd = d.join("odd.avif");
+    imageio_write(&odd_src, &odd, "public.avif", &ImageIo::default());
+    let bytes = std::fs::read(&plain).unwrap();
+    // A property box by its size and type (`irot` 9 bytes, `clap` 40).
+    let find = |b: &[u8], size: u8, ty: &[u8]| {
+        let mut head = vec![0, 0, 0, size];
+        head.extend_from_slice(ty);
+        4 + b.windows(8).position(|w| w == &head[..]).expect("box")
+    };
+    let patch = |name: &str, f: &dyn Fn(&mut Vec<u8>)| {
+        let mut b = bytes.clone();
+        f(&mut b);
+        let p = d.join(name);
+        std::fs::write(&p, b).unwrap();
+        p
+    };
+    let compat = |p: &Path| {
+        let pool = pm_media::pool::FramePool::new(0);
+        let original = pm_media::image::read(p, &pool).unwrap();
+        assert!(
+            pm_media::image::avif_compat::applies(&original),
+            "{}",
+            p.display()
+        );
+        let s = pm_media::image::avif_compat::read(p, &original, &pool).unwrap();
+        let (w, h) = (s.frame.format.width, s.frame.format.height);
+        let px = s
+            .frame
+            .with_planes(|planes| {
+                let p = &planes[0];
+                let mut out = Vec::new();
+                for y in 0..h {
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
+                    });
+                }
+                out
+            })
+            .unwrap();
+        (px, w, h, s.orientation)
+    };
+    assert_eq!(probe_image(&plain), Ok(()));
+    let (base, w, h, o) = compat(&plain);
+    assert_eq!((w, h, o), (96, 54, 1));
+    let irot = find(&bytes, 9, b"irot");
+    for (angle, exif) in [(1u8, 8u8), (2, 3), (3, 6)] {
+        let p = patch(&format!("irot{angle}.avif"), &|b| b[irot + 4] = angle);
+        assert_eq!(probe_image(&p), Ok(()), "irot {angle}");
+        let (px, ..) = compat(&p);
+        assert!(px == orient_rgba8(&base, w, h, exif), "irot {angle}");
+    }
+    for (axis, exif) in [(0u8, 4u8), (1, 2)] {
+        let p = patch(&format!("imir{axis}.avif"), &|b| {
+            b[irot..irot + 4].copy_from_slice(b"imir");
+            b[irot + 4] = axis;
+        });
+        assert_eq!(probe_image(&p), Ok(()), "imir {axis}");
+        let (px, ..) = compat(&p);
+        assert!(px == orient_rgba8(&base, w, h, exif), "imir {axis}");
+    }
+    // ImageIO writes a clap anchored at (0, 0) for odd sizes.
+    assert_eq!(probe_image(&odd), Ok(()));
+    let (_, cw, ch, _) = compat(&odd);
+    assert_eq!((cw, ch), (95, 63), "clap crops");
+    let mut shifted = std::fs::read(&odd).unwrap();
+    let clap = find(&shifted, 40, b"clap") + 4;
+    let n = i32::from_be_bytes(shifted[clap + 16..clap + 20].try_into().unwrap());
+    let den = i32::from_be_bytes(shifted[clap + 20..clap + 24].try_into().unwrap());
+    shifted[clap + 16..clap + 20].copy_from_slice(&(n + den).to_be_bytes());
+    let shifted_path = d.join("clap-shifted.avif");
+    std::fs::write(&shifted_path, shifted).unwrap();
+    assert_eq!(probe_image(&shifted_path), Ok(()));
+    let (_, sw, sh, _) = compat(&shifted_path);
+    assert_eq!(
+        (sw, sh),
+        (96, 64),
+        "an off-origin clap shows the whole image"
+    );
+
+    // Limited range (the app fixture) is in the class.
+    let limited = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/still-limited-range.avif");
+    assert_eq!(probe_image(&limited), Ok(()));
+    assert_eq!(
+        pm_media::image::avif_compat::unmeasured(&plain).unwrap(),
+        None
+    );
     std::fs::remove_dir_all(&d).ok();
 }
 
