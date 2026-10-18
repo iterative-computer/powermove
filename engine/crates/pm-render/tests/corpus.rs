@@ -438,6 +438,27 @@ fn corpus_render_parity() {
                     && d.fraction_within_one() >= 0.999
                 {
                     unstable.push(line);
+                    // Side by side for the review (amendment 22): the
+                    // engine's frame, today's, and the differing pixels
+                    // in red over a dimmed copy of today's.
+                    if let Some(dir) = &diffs {
+                        std::fs::create_dir_all(dir).unwrap();
+                        let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
+                        write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
+                        write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                        let marked: Vec<u8> = ours
+                            .chunks_exact(4)
+                            .zip(reference.chunks_exact(4))
+                            .flat_map(|(a, b)| {
+                                if a.iter().zip(b).any(|(x, y)| x.abs_diff(*y) > 1) {
+                                    [255, 0, 0, 255]
+                                } else {
+                                    [b[0] / 3, b[1] / 3, b[2] / 3, 255]
+                                }
+                            })
+                            .collect();
+                        write_png(&dir.join(format!("{stem}-diff.png")), w, h, &marked);
+                    }
                     continue;
                 }
                 failed.push(line);

@@ -28,6 +28,8 @@
 //! scaled by max(1, |reference|) for values above 1.0. Without a corpus the
 //! test reports and passes vacuously.
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -462,6 +464,9 @@ fn every_shader_matches_webgl() {
                         let unstable = (!m.pass())
                             .then(|| webgl_unstable(&dir, &folder, name, width))
                             .flatten();
+                        if unstable.is_some() {
+                            dump_unstable(shown, name, &pixels, &reference, width, false);
+                        }
                         record(tally, shown, id, name, m, false, unstable);
                     }
                     Err(e) => tally.failures.push(format!("{shown} {name}: {e}")),
@@ -538,6 +543,9 @@ fn every_shader_matches_webgl() {
                     let unstable = (!m.pass())
                         .then(|| webgl_unstable(&dir, &folder, name, width))
                         .flatten();
+                    if unstable.is_some() {
+                        dump_unstable(shown, name, &pixels, &reference, width, true);
+                    }
                     record(tally, shown, id, name, m, via_fallback, unstable);
                 }
                 Outcome::Refused(_) if !webgl_draws => tally.both_refuse += 1,
@@ -622,6 +630,64 @@ fn webgl_unstable(dir: &Path, folder: &str, name: &str, width: usize) -> Option<
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Side-by-side images of a WebGL-unstable variant for review (amendment
+/// 22: escalated with a comparison), written only when
+/// `PM_SHADER_GATE_DIFFS` names a folder outside the repository: the
+/// engine's output, WebGL's, and the differing pixels in red over a dimmed
+/// copy of WebGL's, each opaque over black.
+fn dump_unstable(
+    shown: &str,
+    name: &str,
+    engine: &[f32],
+    reference: &[u16],
+    width: usize,
+    flip: bool,
+) {
+    let Some(dir) = std::env::var_os("PM_SHADER_GATE_DIFFS").map(PathBuf::from) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let height = engine.len() / 4 / width.max(1);
+    // Both top-down: the engine's layer frames are top-down; WebGL's targets
+    // (and the effect passes) are in GL row order.
+    let row = |y: usize| if flip { height - 1 - y } else { y };
+    let opaque = |r: f32, g: f32, b: f32| {
+        [
+            (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+            255,
+        ]
+    };
+    let (mut ours, mut theirs, mut diff) = (Vec::new(), Vec::new(), Vec::new());
+    for y in 0..height {
+        for x in 0..width {
+            let e = &engine[(y * width + x) * 4..][..4];
+            let i = (row(y) * width + x) * 4;
+            let w: Vec<f32> = reference[i..i + 4]
+                .iter()
+                .map(|h| pm_gpu::readback::half_to_f32(*h))
+                .collect();
+            ours.extend(opaque(e[0], e[1], e[2]));
+            theirs.extend(opaque(w[0], w[1], w[2]));
+            let differs = e
+                .iter()
+                .zip(&w)
+                .any(|(a, b)| ((a.clamp(0.0, 1.0) - b.clamp(0.0, 1.0)) * 255.0).abs() > 1.0);
+            diff.extend(if differs {
+                [255, 0, 0, 255]
+            } else {
+                opaque(w[0] * 0.3, w[1] * 0.3, w[2] * 0.3)
+            });
+        }
+    }
+    let stem = format!("{}-{name}", shown.replace('/', "_"));
+    let (w, h) = (width as u32, height as u32);
+    support::write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
+    support::write_png(&dir.join(format!("{stem}-webgl.png")), w, h, &theirs);
+    support::write_png(&dir.join(format!("{stem}-diff.png")), w, h, &diff);
+}
+
 fn record(
     tally: &mut Tally,
     shown: &str,
