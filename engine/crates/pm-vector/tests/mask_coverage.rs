@@ -11,11 +11,13 @@ use pm_vector::LayerMasks;
 use pm_vector::canvas2d::filter::{BlurPlan, Image, Rect};
 use pm_vector::canvas2d::mask;
 
-fn coverage_cpu(c: &mask_cases::Case) -> Vec<u8> {
+fn coverage_cpu(c: &mask_cases::Case, fill: &mut std::time::Duration) -> Vec<u8> {
     let LayerMasks::Path(masks) = LayerMasks::new(&c.masks) else { panic!("{}: not a path route", c.id) };
     let mut cov = mask::start(&masks, c.width, c.height);
     for m in &masks.masks {
+        let started = std::time::Instant::now();
         let item = mask::item(m, c.world, c.width, c.height).unwrap();
+        *fill += started.elapsed();
         let op = mask::Composite::from(m.mode);
         match BlurPlan::new(c.width, c.height, mask::sigma(m, c.world)) {
             None => mask::composite(&mut cov, &item.alpha, op),
@@ -52,11 +54,20 @@ fn coverage_model_against_chromium() {
         if c.width * c.height > 2_100_000 {
             continue;
         }
-        let ours = coverage_cpu(&c);
+        let mut fill = std::time::Duration::ZERO;
+        let ours = coverage_cpu(&c, &mut fill);
         let (_, _, reference) = mask_cases::read_coverage(&dir.join(format!("{}.png", c.id)));
         let (over1, max, any) = mask_cases::diff(&ours, &reference);
         let blurred = c.masks.iter().any(|m| m.feather * (c.world[0].hypot(c.world[1])) / 2.0 > 0.03);
-        eprintln!("{:<32} off {:>6} >1 {:>6} max {:>3}{}", c.id, any, over1, max, if blurred { "" } else { "  (sharp)" });
+        eprintln!(
+            "{:<32} off {:>6} >1 {:>6} max {:>3}  item fill {:>7.1} ms{}",
+            c.id,
+            any,
+            over1,
+            max,
+            fill.as_secs_f64() * 1000.0,
+            if blurred { "" } else { "  (sharp)" }
+        );
         if !blurred && max > 0 {
             sharp_failures.push(c.id.clone());
         }

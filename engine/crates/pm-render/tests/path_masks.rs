@@ -38,12 +38,21 @@ fn path_mask_coverage_matches_chromium() {
             world: c.world,
             masks,
         };
+        let started = std::time::Instant::now();
         let ours = coverage_bytes(&gpu.device, &gpu.queue, &cov).unwrap();
+        let elapsed = started.elapsed();
         let (_, _, reference) = mask_cases::read_coverage(&dir.join(format!("{}.png", c.id)));
         let (over1, max, any) = mask_cases::diff(&ours, &reference);
         total_off += any;
         cases += 1;
-        eprintln!("{:<32} off {:>6} >1 {:>4} max {:>3}", c.id, any, over1, max);
+        eprintln!(
+            "{:<32} off {:>6} >1 {:>4} max {:>3}  {:>7.1} ms (first fill, pipelines included)",
+            c.id,
+            any,
+            over1,
+            max,
+            elapsed.as_secs_f64() * 1000.0
+        );
         if let Ok(out) = std::env::var("PM_MASK_DIFFS") {
             let out = std::path::Path::new(&out);
             std::fs::create_dir_all(out).unwrap();
