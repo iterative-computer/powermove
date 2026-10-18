@@ -128,6 +128,7 @@ fn export_window(dir: &Path, num: u32, den: u32, first: u64, count: u64) -> (Vec
         precision: Precision::Float32,
         dither: false,
         draft_from_proxies: false,
+        delivery: Default::default(),
     };
     let destination = dir.join(format!("code-{num}-{den}-{first}.mov"));
     let job = ExportJob {

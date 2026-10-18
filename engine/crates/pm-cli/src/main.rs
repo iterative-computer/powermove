@@ -5,6 +5,7 @@
 //! pm-cli render <project.pmv|.json> -o <out.mov|.mp4> [options]
 //! pm-cli parity render [--capture <dir>]... [--only <prefix>] [--diffs <dir>] [--json <file>]
 //! pm-cli parity eval [options]
+//! pm-cli scope <project.pmv|.json> -o <dir> [options] | --frame <file> -o <dir>
 //! ```
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
@@ -18,6 +19,7 @@ mod corpus;
 mod parity;
 mod render;
 mod render_parity;
+mod scope;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -53,21 +55,33 @@ wasm identical; 1 a mismatch or an identity difference; 2 only tolerance
 questions; 64 usage; 70 the run failed.";
 
 const USAGE: &str = "usage:
-  pm-cli render <project.pmv|.json> -o <out.mov|.mp4> [options]
-      --preset master|master-alpha|web     (default master: ProRes 422 HQ)
-      --format prores-proxy|prores-lt|prores|prores-hq|prores-4444|prores-4444xq|h264
-      --quality draft|high|max             H.264 at 4, 16, or 40 Mbps
-      --alpha none|straight|premultiplied  ProRes 4444 only
+  pm-cli render <project.pmv|.json> -o <out.mov|.mp4|.webm|.png|folder> [options]
+      --preset master|master-alpha|web|web-hevc|png   (default master: ProRes 422 HQ)
+      --format prores-proxy|prores-lt|prores|prores-hq|prores-4444|prores-4444xq|
+               h264|hevc|hevc10|vp9|vp8|png|png16|still|still16
+               (HEVC goes in MOV when the output ends in .mov; PNG sequences
+               are written to a new folder)
+      --quality draft|high|max             H.264, HEVC, and WebM at 4, 16, or 40 Mbps
+      --alpha none|straight|premultiplied  ProRes 4444, HEVC 8-bit, WebM, PNG
       --range all|work|START:END           seconds (default all)
       --fps N | N/D | 23.976 | 29.97 | ...  (default the composition's rate)
       --scale S | --size WxH               (default the composition's size)
-      --no-audio  --color quicktime|broadcast  --dither on|off  --precision 16|32
+      --audio pcm16|pcm24|float|aac        (default 24-bit PCM in MOV, AAC in MP4)
+      --timecode HH:MM:SS:FF  --reel NAME  start timecode (`;` for drop-frame), MOV
+      --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
+      --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
       compares engine renders with the legacy captures of the parity corpus
       (default: the newest v1-* and render-* captures)
   pm-cli parity eval [options]
-      evaluation parity against the corpus (see pm-cli parity eval --help)";
+      evaluation parity against the corpus (see pm-cli parity eval --help)
+  pm-cli scope <project.pmv|.json> -o <dir> [options]
+  pm-cli scope --frame <capture.rgba32f|frame.png> -o <dir>
+      waveform, RGB parade, and vectorscope of a 32-bit working render (or a
+      captured frame): waveform.png, parade.png, vectorscope.png, scope.json
+      --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
+      --motion-blur off|export|N (default export)  --transparent  --columns N";
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -193,6 +207,10 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
                 o.media.push((asset.into(), PathBuf::from(file)));
             }
             "--force" => o.force = true,
+            "--audio" => o.audio = Some(value(args, &mut i, a)?.into()),
+            "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
+            "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
+            "--no-captions" => o.no_captions = true,
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {
@@ -205,6 +223,62 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
     o.input = input.ok_or("no project file")?;
     if o.output.as_os_str().is_empty() {
         return Err("no output (-o)".into());
+    }
+    Ok(o)
+}
+
+fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
+    let mut o = scope::Options::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-o" | "--output" => o.output = PathBuf::from(value(args, &mut i, a)?),
+            "--frame" => o.frame = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--time" => {
+                let v = value(args, &mut i, a)?;
+                o.time = v.parse().map_err(|_| format!("time {v:?}"))?;
+            }
+            "--composition" => o.composition = Some(value(args, &mut i, a)?.into()),
+            "--size" => {
+                let v = value(args, &mut i, a)?;
+                let (w, h) = v
+                    .split_once('x')
+                    .ok_or_else(|| format!("size {v:?} (WxH)"))?;
+                let p = |s: &str| s.parse::<u32>().map_err(|_| format!("size {v:?}"));
+                o.size = Some((p(w)?, p(h)?));
+            }
+            "--scale" => {
+                let v = value(args, &mut i, a)?;
+                o.scale = Some(v.parse().map_err(|_| format!("scale {v:?}"))?);
+            }
+            "--media" => {
+                let v = value(args, &mut i, a)?;
+                let (asset, file) = v
+                    .split_once('=')
+                    .ok_or_else(|| format!("media {v:?} (ASSET=FILE)"))?;
+                o.media.push((asset.into(), PathBuf::from(file)));
+            }
+            "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
+            "--transparent" => o.transparent = true,
+            "--columns" => {
+                let v = value(args, &mut i, a)?;
+                o.columns = Some(v.parse().map_err(|_| format!("columns {v:?}"))?);
+            }
+            other if other.starts_with('-') => return Err(format!("unknown option {other}")),
+            other => {
+                if o.input.replace(PathBuf::from(other)).is_some() {
+                    return Err("one project at a time".into());
+                }
+            }
+        }
+        i += 1;
+    }
+    if o.output.as_os_str().is_empty() {
+        return Err("no output directory (-o)".into());
+    }
+    if o.input.is_some() == o.frame.is_some() {
+        return Err("a project or --frame (not both)".into());
     }
     Ok(o)
 }
@@ -313,6 +387,33 @@ fn main() -> ExitCode {
             }
             _ => fail_usage("parity takes `render` or `eval`"),
         },
+        Some("scope") => {
+            let options = match parse_scope(&args[1..]) {
+                Ok(o) => o,
+                Err(e) => return fail_usage(&e),
+            };
+            match scope::run(&options) {
+                Ok(stats) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&stats).unwrap_or_default()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(render::Failure::Usage(m)) => fail_usage(&m),
+                Err(render::Failure::Unsupported(reasons)) => {
+                    eprintln!("pm-cli: the new engine cannot render this project yet:");
+                    for r in reasons {
+                        eprintln!("  {r}");
+                    }
+                    ExitCode::from(3)
+                }
+                Err(render::Failure::Failed(m)) => {
+                    eprintln!("pm-cli: {m}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -392,6 +493,54 @@ mod tests {
         assert!(parse_render(&s(&["-o", "x.mov"])).is_err(), "no input");
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--bogus"])).is_err());
         assert!(parse_render(&s(&["p.pmv", "-o", "x.mov", "--size", "12"])).is_err());
+        let o = parse_render(&s(&[
+            "p.pmv",
+            "-o",
+            "x.mov",
+            "--format",
+            "hevc10",
+            "--audio",
+            "float",
+            "--timecode",
+            "01:00:00;00",
+            "--reel",
+            "A001",
+            "--no-captions",
+        ]))
+        .unwrap();
+        assert_eq!(o.format.as_deref(), Some("hevc10"));
+        assert_eq!(o.audio.as_deref(), Some("float"));
+        assert_eq!(o.timecode.as_deref(), Some("01:00:00;00"));
+        assert_eq!(o.reel.as_deref(), Some("A001"));
+        assert!(o.no_captions);
+    }
+
+    #[test]
+    fn scope_options_parse() {
+        let o = parse_scope(&s(&[
+            "p.pmv",
+            "-o",
+            "/tmp/s",
+            "--time",
+            "1.5",
+            "--size",
+            "640x360",
+            "--motion-blur",
+            "off",
+            "--columns",
+            "320",
+        ]))
+        .unwrap();
+        assert_eq!(o.input, Some(PathBuf::from("p.pmv")));
+        assert_eq!(o.time, 1.5);
+        assert_eq!(o.size, Some((640, 360)));
+        assert_eq!(o.columns, Some(320));
+        let f = parse_scope(&s(&["--frame", "t1.rgba32f", "-o", "/tmp/s"])).unwrap();
+        assert_eq!(f.frame, Some(PathBuf::from("t1.rgba32f")));
+        assert!(parse_scope(&s(&["p.pmv"])).is_err(), "no output");
+        assert!(parse_scope(&s(&["-o", "/tmp/s"])).is_err(), "no input");
+        assert!(parse_scope(&s(&["p.pmv", "--frame", "f.png", "-o", "/tmp/s"])).is_err());
+        assert!(parse_scope(&s(&["p.pmv", "-o", "/tmp/s", "--bogus"])).is_err());
     }
 
     #[test]

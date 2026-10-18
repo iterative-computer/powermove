@@ -169,6 +169,9 @@ impl Exec<'_> {
                         encoded: false,
                         uv: [0.0, 0.0, 1.0, 1.0],
                         layer: n.layer.clone(),
+                        plane: None,
+                        level2: None,
+                        pyramid: None,
                     };
                     if let Some(transition) = &n.transition {
                         // `withLayer`: the stack with the layer, then the

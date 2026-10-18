@@ -155,6 +155,7 @@ fn settings(format: ExportFormat, alpha: WireAlpha, dur: f64) -> ExportSettings 
         precision: Precision::Float32,
         dither: matches!(format, ExportFormat::H264),
         draft_from_proxies: false,
+        delivery: Default::default(),
     }
 }
 
@@ -377,7 +378,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
     let job = job(&doc, media.clone(), s, PathBuf::from("/unused.mp4"));
     let plan = plan_export(&job).unwrap();
     let timeline = plan.timeline;
-    let request = plan.request;
+    let request = plan.request.clone();
     let out = run_export_into(
         &mut renderer,
         &job,
@@ -486,10 +487,8 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
     s.format = ExportFormat::Webm {
         codec: pm_protocol::priority::WebmCodec::Vp9,
     };
-    assert!(matches!(
-        plan_export(&job(&doc, media, s, destination.clone())),
-        Err(JobError::Unsupported(_))
-    ));
+    // WebM is a job engine format since Phase 3b; planning writes nothing.
+    assert!(plan_export(&job(&doc, media, s, destination.clone())).is_ok());
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         0,

@@ -505,6 +505,7 @@ fn settings(format: ExportFormat) -> ExportSettings {
         precision: Precision::Float32,
         dither: matches!(format, ExportFormat::H264),
         draft_from_proxies: false,
+        delivery: Default::default(),
     }
 }
 

@@ -64,13 +64,17 @@ export function verifyCapture(dir: string): VerifyResult {
       checkPng(sample.png, `${at} png`, sample.width, sample.height);
       if (sample.alphaPng) bytes += sample.alphaPng.bytes;
       checkPng(sample.alphaPng, `${at} alpha png`, sample.width, sample.height);
-      if (sample.float) {
+      const floats = [
+        ...(sample.float ? [{ float: sample.float, at }] : []),
+        ...((sample.blur ?? []) as Array<{ samples: number; float: any }>).map(b => ({ float: b.float, at: `${at} (${b.samples} blur samples)` })),
+      ];
+      for (const { float, at } of floats) {
         floatFrames++;
-        bytes += sample.float.data.bytes + sample.float.header.bytes;
-        const data = check(sample.float.data, `${at} float data`), header = check(sample.float.header, `${at} float header`);
+        bytes += float.data.bytes + float.header.bytes;
+        const data = check(float.data, `${at} float data`), header = check(float.header, `${at} float header`);
         if (data && header) {
           try {
-            const read = readFloat(path.join(dir, sample.float.header.file));
+            const read = readFloat(path.join(dir, float.header.file));
             if (read.header.width !== sample.width || read.header.height !== sample.height) problems.push(`${at}: float header is ${read.header.width}x${read.header.height}`);
             if (read.header.time !== sample.time) problems.push(`${at}: float header time ${read.header.time}`);
             let nonFinite = 0;

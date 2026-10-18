@@ -9,7 +9,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IPC, type AgentToolRequestEvent } from '../../shared/ipc';
-import { PowermoveAgentToolBridge } from './bridge';
+import { exportVideoInput, legacyExportArgs, PowermoveAgentToolBridge } from './bridge';
 import { resolveFfmpeg } from '../ffmpeg-binary';
 
 class FakeIpcMain extends EventEmitter {}
@@ -66,12 +66,42 @@ describe('native Powermove agent tool bridge', () => {
       await bridge.callTool(session, 'save_project', {});
       await bridge.callTool(session, 'export_video', { audio: true });
       expect(owner.requests.map(request => request.tool)).toEqual(['get_project_state', '__mcp_save_project', 'get_project_state', '__mcp_export_video']);
-      expect(owner.requests.at(-1)?.arguments).toEqual({ audio: true });
+      // The current exporter gets the normalized arguments it understands.
+      expect(owner.requests.at(-1)?.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
       expect(session.mcpConfig.toolTimeoutSec).toBeGreaterThanOrEqual(3600);
       const planning = await bridge.openSession({ runId: 'delivery-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
       await expect(bridge.callTool(planning, 'export_video', {})).rejects.toThrow('only inspect');
     } finally { await bridge.shutdown(); }
   });
+  it('resolves export_video presets, their alpha, and the current exporter\'s arguments for them', () => {
+    const base = { range: 'all', audio: true, motionBlur: true, mode: 'wait' } as const;
+    expect(exportVideoInput({})).toEqual({ ...base, format: 'mp4', alpha: false });
+    expect(exportVideoInput({ preset: 'web-h264' })).toEqual({ ...base, format: '', preset: 'web-h264', alpha: false });
+    expect(exportVideoInput({ preset: 'master-alpha' })).toEqual({ ...base, format: '', preset: 'master-alpha', alpha: true });
+    expect(exportVideoInput({ preset: 'png' })).toEqual({ ...base, format: '', preset: 'png', alpha: true });
+    // An explicit format overrides the preset's, alpha included: no alpha
+    // where the format cannot keep it, the preset's where it can.
+    expect(exportVideoInput({ preset: 'master-alpha', format: 'h264' })).toEqual({ ...base, format: 'h264', preset: 'master-alpha', alpha: false });
+    expect(exportVideoInput({ preset: 'master-alpha', format: 'prores-4444xq' }).alpha).toBe(true);
+    expect(exportVideoInput({ preset: 'master-alpha', format: 'hevc' }).alpha).toBe(true);
+    expect(() => exportVideoInput({ preset: 'master-alpha', format: 'h264', alpha: true })).toThrow('Transparent video');
+    expect(() => exportVideoInput({ preset: 'bogus' })).toThrow('preset is one of');
+
+    // The current exporter writes MP4 (H.264) and ProRes 4444.
+    const legacy = (args: Record<string, unknown>): Record<string, unknown> => legacyExportArgs(exportVideoInput(args));
+    const out = { range: 'all', audio: true, motionBlur: true };
+    expect(legacy({})).toEqual({ ...out, format: 'mp4', alpha: false });
+    expect(legacy({ preset: 'web-h264' })).toEqual({ ...out, format: 'mp4', alpha: false });
+    expect(legacy({ preset: 'web-h264', name: 'Web', range: 'work', audio: false })).toEqual({ name: 'Web', range: 'work', audio: false, motionBlur: true, format: 'mp4', alpha: false });
+    expect(legacy({ preset: 'master-alpha' })).toEqual({ ...out, format: 'prores', alpha: true });
+    expect(legacy({ preset: 'master-alpha', alpha: false })).toEqual({ ...out, format: 'prores', alpha: false });
+    expect(legacy({ preset: 'master-alpha', format: 'h264' })).toEqual({ ...out, format: 'mp4', alpha: false });
+    expect(legacy({ preset: 'png', format: 'prores' })).toEqual({ ...out, format: 'prores', alpha: true });
+    expect(legacy({ format: 'prores-4444' })).toEqual({ ...out, format: 'prores', alpha: false });
+    for (const preset of ['master', 'web-hevc', 'png']) expect(() => legacy({ preset })).toThrow(`not preset ${preset}`);
+    expect(() => legacy({ format: 'webm-vp9' })).toThrow('not format webm-vp9');
+  });
+
   it('routes export_video and render_frames through the job engine and falls back when it routes', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);
@@ -119,7 +149,14 @@ describe('native Powermove agent tool bridge', () => {
       await bridge.callTool(session, 'export_video', { audio: true, mode: 'async' });
       await bridge.callTool(session, 'render_frames', { times: [0] });
       expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__mcp_export_video', '__engine_frames_plan', 'render_frames']);
-      expect(owner.requests[2]!.arguments).toEqual({ audio: true });
+      expect(owner.requests[2]!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
+      // Presets the current exporter writes fall back to it too.
+      owner.requests.length = 0;
+      await bridge.callTool(session, 'export_video', { preset: 'web-h264' });
+      expect(owner.requests.at(-1)!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
+      await bridge.callTool(session, 'export_video', { preset: 'master-alpha', name: 'Key' });
+      expect(owner.requests.at(-1)!.arguments).toEqual({ name: 'Key', format: 'prores', range: 'all', audio: true, motionBlur: true, alpha: true });
+      await expect(bridge.callTool(session, 'export_video', { preset: 'web-hevc' })).rejects.toThrow('not preset web-hevc');
       await expect(bridge.callTool(session, 'export_video', { alpha: true })).rejects.toThrow('ProRes');
       await expect(bridge.callTool(session, 'export_video', { codec: 'x' })).rejects.toThrow('does not take codec');
       // Rolling back the run cancels its jobs.

@@ -4,11 +4,32 @@
  * The Export dialog opens with these values, and the Settings › Project tab
  * edits them, so a project remembers how it is meant to be delivered instead of
  * relying on one global preference shared by every project.
+ *
+ * Formats, delivery options, presets, and estimates come from
+ * `shared/delivery.ts` (plan section 17). Today's stored format ids migrate:
+ * `prores` is ProRes 4444, `mp4` H.264, and `webm` and the realtime capture
+ * `rec` the frame-exact VP9 export.
  */
+import {
+  DEFAULT_DELIVERY,
+  estimateBytes,
+  fieldSupport,
+  formatBytes,
+  FORMATS,
+  formatInfo,
+  isRenderFormat,
+  migrateFormat,
+  normalizeDelivery,
+  type DeliveryOptions,
+  type ExportQuality as SharedQuality,
+  type ExportRange as SharedRange,
+  type FieldSupport,
+  type SheetFormat
+} from '../../../shared/delivery';
 
-export type ExportFormat = 'prores' | 'mp4' | 'webm' | 'rec' | 'png' | 'still' | 'json' | 'web';
-export type ExportQuality = 'draft' | 'high' | 'max';
-export type ExportRange = 'work' | 'all';
+export type ExportFormat = SheetFormat;
+export type ExportQuality = SharedQuality;
+export type ExportRange = SharedRange;
 
 export interface ExportDefaults {
   format: ExportFormat;
@@ -20,6 +41,9 @@ export interface ExportDefaults {
   mblur: boolean;
   audio: boolean;
   alpha: boolean;
+  /** Format-specific delivery options (depth, container, audio coding,
+   *  timecode, reel, tags, file name, overwrite policy). */
+  delivery: DeliveryOptions;
 }
 
 export interface ExportOption<T> {
@@ -27,16 +51,15 @@ export interface ExportOption<T> {
   label: string;
 }
 
-export const EXPORT_FORMAT_OPTIONS: Array<ExportOption<ExportFormat>> = [
-  { v: 'prores', label: 'QuickTime · ProRes 4444' },
-  { v: 'mp4', label: 'MP4 · H.264' },
-  { v: 'webm', label: 'WebM · VP9' },
-  { v: 'rec', label: 'WebM · realtime capture' },
-  { v: 'png', label: 'PNG sequence' },
-  { v: 'still', label: 'Still frame (PNG)' },
-  { v: 'web', label: 'Web animation · Code + assets (.zip)' },
-  { v: 'json', label: 'Project file (.pmv)' }
-];
+/** Every format the sheet offers; formats only the native engine writes are
+ *  filtered with `exportFormatOptions(engine)`. */
+export const EXPORT_FORMAT_OPTIONS: Array<ExportOption<ExportFormat>> = FORMATS.map((f) => ({ v: f.id, label: f.label }));
+
+/** The formats this launch can write: all of them with the native engine, and
+ *  today's otherwise. */
+export function exportFormatOptions(engine: boolean): Array<ExportOption<ExportFormat>> {
+  return FORMATS.filter((f) => engine || !f.engine).map((f) => ({ v: f.id, label: f.label }));
+}
 
 export const EXPORT_SCALE_OPTIONS: Array<ExportOption<number>> = [
   { v: 0.5, label: 'Half' },
@@ -58,33 +81,12 @@ export const EXPORT_RANGE_OPTIONS: Array<ExportOption<ExportRange>> = [
 export const EXPORT_FRAME_RATES = [24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, 60];
 
 /** Which delivery settings a format actually reads; the rest are noise. */
-export interface ExportFieldSupport {
-  scale: boolean;
-  fps: boolean;
-  range: boolean;
-  quality: boolean;
-  mblur: boolean;
-  audio: boolean;
-  alpha: boolean;
-}
+export type ExportFieldSupport = FieldSupport;
 
-const NO_FIELDS: ExportFieldSupport = {
-  scale: false, fps: false, range: false, quality: false, mblur: false, audio: false, alpha: false
-};
-
-const FIELD_SUPPORT: Record<ExportFormat, ExportFieldSupport> = {
-  prores: { ...NO_FIELDS, scale: true, fps: true, range: true, mblur: true, audio: true, alpha: true },
-  mp4: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
-  webm: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
-  rec: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
-  png: { ...NO_FIELDS, scale: true, fps: true, range: true, mblur: true, alpha: true },
-  still: { ...NO_FIELDS, scale: true, mblur: true, alpha: true },
-  json: NO_FIELDS,
-  web: NO_FIELDS
-};
-
-export function exportFieldSupport(format: ExportFormat): ExportFieldSupport {
-  return FIELD_SUPPORT[format] ?? FIELD_SUPPORT.webm;
+/** The settings `format` reads; with `engine` off only today's settings
+ *  (the current exporter ignores the delivery options). */
+export function exportFieldSupport(format: ExportFormat, delivery: Pick<DeliveryOptions, 'container' | 'highDepth'> = DEFAULT_DELIVERY, engine = false): ExportFieldSupport {
+  return fieldSupport(format, delivery, engine);
 }
 
 /** Video bitrate each quality tier encodes at, in Mbps. */
@@ -119,36 +121,51 @@ export interface ExportPlan {
   frames: number;
   /** Format-specific line: estimated size, file count, or what gets packed. */
   note: string;
+  /** Estimated bytes of a render format (section 17, "Comfort"). */
+  bytes: number | null;
 }
 
 /** The headline numbers the Export dialog shows before committing to a render. */
 export function planExport(opts: ExportDefaults, comp: ExportCompositionInfo): ExportPlan {
-  const width = Math.max(2, Math.round(comp.w * opts.scale / 2) * 2);
-  const height = Math.max(2, Math.round(comp.h * opts.scale / 2) * 2);
+  const image = opts.format === 'png' || opts.format === 'still';
+  // Video is even-sized (subsampled chroma); PNG takes any size.
+  const width = image ? Math.max(1, Math.round(comp.w * opts.scale)) : Math.max(2, Math.round(comp.w * opts.scale / 2) * 2);
+  const height = image ? Math.max(1, Math.round(comp.h * opts.scale)) : Math.max(2, Math.round(comp.h * opts.scale / 2) * 2);
   const work = comp.work;
   const useWork = opts.range === 'work' && !!work && work[1] > work[0];
   const seconds = Math.round(((useWork ? work![1] - work![0] : comp.dur)) * 1000) / 1000;
   const frames = opts.format === 'still' ? 1 : Math.max(1, Math.round(seconds * opts.fps));
+  const delivery = opts.delivery ?? DEFAULT_DELIVERY;
+  const bytes = isRenderFormat(opts.format)
+    ? estimateBytes({ format: opts.format, delivery, width, height, fps: opts.fps, seconds, frames, quality: opts.quality, alpha: opts.alpha, audio: opts.audio })
+    : null;
   let note = '';
-  if (opts.format === 'mp4' || opts.format === 'webm' || opts.format === 'rec') {
-    const mb = exportBitrateMbps(opts.quality) * seconds / 8;
-    const codec = opts.format === 'mp4' ? 'H.264' : 'VP9/VP8';
-    note = `≈ ${Math.round(mb * 10) / 10} MB · ${exportBitrateMbps(opts.quality)} Mbps ${codec}`;
-  } else if (opts.format === 'prores') {
-    note = 'ProRes 4444 · sRGB primaries/transfer · full range RGB to limited range YUV · '+(opts.alpha?'straight alpha':'opaque');
-  } else if (opts.format === 'png') {
-    note = `${frames} PNG file${frames === 1 ? '' : 's'}${opts.alpha ? ' · transparent' : ''}`;
-  } else if (opts.format === 'still') {
-    note = `Single PNG${opts.alpha ? ' · transparent' : ''}`;
-  } else if (opts.format === 'web') {
-    note = 'Live animation · JavaScript player, React component, assets and agent handoff · full composition';
-  } else {
-    note = 'Packs the composition and its media into one .pmv file';
+  const size = bytes === null ? '' : formatBytes(bytes);
+  switch (opts.format) {
+    case 'h264': case 'hevc': case 'webm-vp9': case 'webm-vp8': {
+      const codec = opts.format === 'h264' ? 'H.264' : opts.format === 'hevc' ? `HEVC${delivery.highDepth ? ' 10-bit' : ''}` : opts.format === 'webm-vp9' ? 'VP9' : 'VP8';
+      note = `${size} · ${exportBitrateMbps(opts.quality)} Mbps ${codec}`;
+      break;
+    }
+    case 'png':
+      note = `${frames} PNG file${frames === 1 ? '' : 's'}${opts.alpha ? ' · transparent' : ''} · ${size}`;
+      break;
+    case 'still':
+      note = `Single PNG${opts.alpha ? ' · transparent' : ''}`;
+      break;
+    case 'web':
+      note = 'Live animation · JavaScript player, React component, assets and agent handoff · full composition';
+      break;
+    case 'json':
+      note = 'Packs the composition and its media into one .pmv file';
+      break;
+    default:
+      // ProRes.
+      note = `${size} · ${formatInfo(opts.format).label.replace('QuickTime · ', '')}${opts.alpha ? ' · alpha' : ''}`;
   }
-  return { width, height, seconds, frames, note };
+  return { width, height, seconds, frames, note, bytes };
 }
 
-const FORMATS = new Set(EXPORT_FORMAT_OPTIONS.map((option) => option.v));
 const QUALITIES = new Set(EXPORT_QUALITY_OPTIONS.map((option) => option.v));
 const RANGES = new Set(EXPORT_RANGE_OPTIONS.map((option) => option.v));
 
@@ -176,13 +193,14 @@ export function normalizeExportDefaults(raw: unknown, fallbackFps = 30): ExportD
   const fps = Number(source.fps);
   const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? Math.min(240, fallbackFps) : 30;
   return {
-    format: pick(FORMATS, source.format, 'mp4'),
+    format: migrateFormat(source.format, 'h264'),
     scale: clampExportScale(source.scale),
     fps: Number.isFinite(fps) && fps > 0 ? Math.min(240, fps) : baseFps,
     range: pick(RANGES, source.range, 'work'),
     quality: pick(QUALITIES, source.quality, 'high'),
     mblur: bool(source.mblur, true),
     audio: bool(source.audio, true),
-    alpha: bool(source.alpha, false)
+    alpha: bool(source.alpha, false),
+    delivery: normalizeDelivery(source.delivery)
   };
 }

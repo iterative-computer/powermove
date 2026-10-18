@@ -75,10 +75,14 @@ fn fs_id_draw(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // A 3D layer: its own alpha decides coverage, its depth texture (linear
-// view depth, +inf where it drew nothing) gives r.
+// view depth, +inf where it drew nothing) gives r. Both are in GL row order
+// (`fromFbo`), like any target.
 @fragment
 fn fs_id_3d(in: VsOut) -> @location(0) vec4<f32> {
-    let uv = in.uv;
+    var uv = in.uv;
+    if (q.color.w > 0.5) {
+        uv = vec2<f32>(uv.x, 1.0 - uv.y);
+    }
     let a = textureSampleLevel(tex, smp, uv, 0.0).a * q.color.x;
     let dims = vec2<f32>(textureDimensions(depth));
     let texel = vec2<i32>(clamp(uv * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));

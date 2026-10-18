@@ -159,6 +159,11 @@ fn corpus_render_parity() {
             ));
             continue;
         }
+        // Text and captions are judged by the text class (tests/text_corpus.rs).
+        if support::text::has_text(&p.document) {
+            skipped.push((p.name.clone(), "text class: tests/text_corpus.rs".into()));
+            continue;
+        }
         let issues = unsupported_with_definitions(
             &p.document,
             &p.composition,
@@ -234,7 +239,10 @@ fn corpus_render_parity() {
             continue;
         }
         for s in &p.samples {
-            let request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            // The capture's motion blur: 16 samples opaque, 20 transparent.
+            let mut request =
+                RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,
                 &p.composition,
@@ -280,7 +288,7 @@ fn corpus_render_parity() {
             }
             // 3D class: the 3D pixels and MSAA edges, measured on our renders.
             let three_d = if support::has_3d_objects(&p.document) {
-                let mut with_ids = request;
+                let mut with_ids = request.clone();
                 with_ids.depth_id = true;
                 let ids = renderer
                     .render(
@@ -325,6 +333,7 @@ fn corpus_render_parity() {
             if let Some(float) = &s.float {
                 let mut request = request;
                 request.background = false;
+                request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
                 let frame = renderer
                     .render(
                         &p.document,

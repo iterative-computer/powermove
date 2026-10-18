@@ -82,6 +82,9 @@ pub enum Feature {
     /// A definition WebGL draws but the native pipeline cannot translate:
     /// it needs the decision 19 fallback runner.
     ShaderFallback(String),
+    /// Text content this renderer does not draw (color vector glyphs, no
+    /// configured fonts).
+    Text(String),
 }
 
 impl Unsupported {
@@ -127,6 +130,7 @@ impl fmt::Display for Feature {
             Feature::Request(r) => write!(f, "request: {r}"),
             Feature::Definition(d) => write!(f, "no definition for {d}"),
             Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
+            Feature::Text(t) => write!(f, "text: {t}"),
         }
     }
 }
@@ -142,8 +146,12 @@ impl fmt::Display for Unsupported {
     }
 }
 
-/// Layer types this renderer draws (or knows draw nothing).
-const DRAWN: [&str; 6] = ["solid", "image", "video", "precomp", "group", "shape"];
+/// Layer types this renderer draws (or knows draw nothing). Text and
+/// captions need fonts (`Renderer::set_text_fonts`); without them a render
+/// fails with `RenderError::Unsupported`.
+const DRAWN: [&str; 8] = [
+    "solid", "image", "video", "precomp", "group", "shape", "text", "captions",
+];
 const NOT_VISUAL: [&str; 2] = ["null", "audio"];
 
 /// The open composition's id: `compId`, else `id`.
@@ -189,9 +197,11 @@ fn is_property(v: Option<&Node>) -> bool {
     node::is_property(v)
 }
 
-/// Static check of `composition` and everything it nests.
+/// Static check of `composition` and everything it nests, for a renderer
+/// without fonts (text and captions layers are listed: they need
+/// `Renderer::set_text_fonts`).
 pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
-    check(document, composition, None, None)
+    check(document, composition, None, None, false)
 }
 
 /// [`unsupported`] (with media facts when `assets` is given) for a renderer
@@ -199,13 +209,14 @@ pub fn unsupported(document: &Document, composition: &str) -> Vec<Unsupported> {
 /// those with no definition that is not marked missing
 /// ([`Feature::Definition`]) and definitions that need the fallback runner
 /// ([`Feature::ShaderFallback`]), on layers and adjustment layers alike.
+/// Text and captions are listed as for a renderer without fonts.
 pub fn unsupported_with_definitions(
     document: &Document,
     composition: &str,
     assets: Option<&dyn AssetResolver>,
     effects: &crate::effects::Effects,
 ) -> Vec<Unsupported> {
-    check(document, composition, assets, Some(effects))
+    check(document, composition, assets, Some(effects), false)
 }
 
 /// [`unsupported`] plus facts read from media headers through `assets`
@@ -216,7 +227,18 @@ pub fn unsupported_with_media(
     composition: &str,
     assets: &dyn AssetResolver,
 ) -> Vec<Unsupported> {
-    check(document, composition, Some(assets), None)
+    check(document, composition, Some(assets), None, false)
+}
+
+/// [`unsupported_with_media`] for a renderer with fonts configured
+/// (`Renderer::set_text_fonts`): text and captions layers are drawn
+/// (`Renderer::unsupported_with_media` picks the right check).
+pub fn unsupported_with_fonts(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, None, true)
 }
 
 fn check(
@@ -224,6 +246,7 @@ fn check(
     composition: &str,
     assets: Option<&dyn AssetResolver>,
     effects: Option<&crate::effects::Effects>,
+    fonts: bool,
 ) -> Vec<Unsupported> {
     let mut out = BTreeSet::new();
     let Some(root) = document.root() else {
@@ -246,34 +269,41 @@ fn check(
             feature: Feature::RequiresEngine,
         });
     }
+    // Each composition is checked once per context: `sampled` is true when
+    // it is reached through a blurred precomp or a precomp inside a blurred
+    // group, so its layers are drawn at every shutter sample time.
     let mut seen = BTreeSet::new();
-    let mut stack = vec![composition.to_owned()];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) {
+    let mut stack = vec![(composition.to_owned(), false)];
+    while let Some((id, sampled)) = stack.pop() {
+        if !seen.insert((id.clone(), sampled)) {
             continue;
         }
         let Some(comp) = composition_node(root, &id) else {
             continue;
         };
-        check_composition(root, &id, comp, assets, effects, &mut out, &mut stack);
+        check_composition(
+            root, &id, comp, sampled, assets, effects, fonts, &mut out, &mut stack,
+        );
     }
     out.into_iter().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_composition(
     root: &Node,
     comp_id: &str,
     comp: &Node,
+    sampled: bool,
     assets: Option<&dyn AssetResolver>,
     effects: Option<&crate::effects::Effects>,
+    fonts: bool,
     out: &mut BTreeSet<Unsupported>,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<(String, bool)>,
 ) {
     let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
     let mut add = |layer: &Node, feature: Feature| {
         out.insert(Unsupported::layer(comp_id, layer, feature));
     };
-    let mut objects = 0usize;
     let mut has_3d = false;
     for layer in layers {
         let ty = js::layer_type(layer);
@@ -285,12 +315,20 @@ fn check_composition(
                         .unwrap_or_default();
                     match def.as_str() {
                         pm_eval::parenting::Role3d::OBJECT => {
-                            objects += 1;
                             has_3d = true;
                         }
                         pm_eval::parenting::Role3d::LIGHT | pm_eval::parenting::Role3d::CAMERA => {
                             has_3d = true;
                         }
+                        // Legacy scene layers: the 3D pass renders them whole,
+                        // so their embedded scene meets the 3D checks.
+                        crate::scene3d::legacy::SCENE3D_DEFINITION => {
+                            for why in crate::scene3d::check_legacy_scene(root, layer, assets) {
+                                add(layer, Feature::Scene3d(why));
+                            }
+                        }
+                        // The built-in OBJ model layer, with its fixed shading.
+                        crate::scene3d::legacy::OBJ_MODEL_DEFINITION => {}
                         _ => add(layer, Feature::ExtensionDefinition(def)),
                     }
                 }
@@ -349,43 +387,74 @@ fn check_composition(
                 }
             }
         }
+        // Motion blur and 2.5D planes are drawn for the layer types their
+        // parity cases cover (`crate::motion`, `crate::space25d`;
+        // docs/engine/motion.md); other types keep routing until their own
+        // renderers are compared with them.
         let mblur = node::member(Some(layer), "mblur");
-        if is_property(mblur) || node::truthy(mblur) {
+        let own_blur = is_property(mblur) || node::truthy(mblur);
+        if own_blur && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
             add(layer, Feature::MotionBlur);
         }
         // 3D object, light, and camera layers draw in screen space; their
         // 3D switch does not make them 2.5D planes. Nulls and audio draw
-        // nothing (a 3D null only places its children). A 3D group is
-        // listed itself, which covers its members.
+        // nothing (a 3D null only places its children). A 3D group's
+        // members are planes of its space; each member is checked itself.
         if js::flag(layer, "threeD")
             && pm_eval::parenting::Role3d::of(layer).is_none()
             && !NOT_VISUAL.contains(&ty.as_str())
+            && !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
         {
             add(layer, Feature::TwoAndAHalfD);
         }
+        // Members of a 3D group are placed in its space, members of a
+        // blurred group are sampled with it, and the layers of a composition
+        // reached through a blurred precomp are drawn at every sample time:
+        // other types keep routing. That includes 3D object, light, and
+        // camera layers, whose scene pass is built at the center time and
+        // whose placement inside a 3D group has no parity case.
+        let (three_d, blurred) = enclosing_groups(layers, layer);
+        if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
+            && !NOT_VISUAL.contains(&ty.as_str())
+        {
+            if three_d {
+                add(layer, Feature::TwoAndAHalfD);
+            }
+            if blurred || sampled {
+                add(layer, Feature::MotionBlur);
+            }
+        }
         // Level 2 shape, solid, and SVG image content is drawn
-        // (crate::vector); other level 2 content keeps routing.
+        // (`crate::vector`), and other level 2 raster content (image,
+        // video, precomp) is resampled by `crate::sampling`; other level 2
+        // content keeps routing.
         if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
             && !matches!(ty.as_str(), "shape" | "solid")
-            && !(ty == "image" && asset_format(root, layer).as_deref() == Some("svg"))
+            && !crate::sampling::samples_layer_type(&ty)
         {
             add(layer, Feature::CompatLevel2);
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
             add(layer, Feature::Scene3d("model groups".into()));
         }
+        if !fonts && matches!(ty.as_str(), "text" | "captions") {
+            add(
+                layer,
+                Feature::Text(format!("{ty} layers without the engine's fonts")),
+            );
+        }
         match ty.as_str() {
             "image" | "video" => check_media(root, layer, &ty, assets, &mut add),
             "precomp" => {
                 if let Some((id, _)) = precomp_target(root, layer) {
-                    stack.push(id);
+                    stack.push((id, sampled || own_blur || blurred));
                 }
             }
             _ => {}
         }
     }
     if has_3d {
-        for issue in crate::scene3d::check(root, comp, layers, objects) {
+        for issue in crate::scene3d::check(root, comp, layers, assets) {
             out.insert(Unsupported {
                 composition: Some(comp_id.to_owned()),
                 layer: issue.0,
@@ -405,6 +474,32 @@ fn check_composition(
     }
 }
 
+/// Whether any group enclosing `layer` (its `group` chain within `layers`)
+/// has the 3D switch, and whether any has motion blur (on or animated).
+fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
+    let id_of = |n: Option<&Node>| {
+        n.filter(|g| node::truthy(Some(g)))
+            .map(|g| node::js_value_opt(Some(g)).to_js_string().to_string_lossy())
+    };
+    let (mut three_d, mut blurred) = (false, false);
+    let mut next = id_of(node::member(Some(layer), "group"));
+    // A cycle in group membership ends at the layer count.
+    for _ in 0..layers.len() {
+        let Some(id) = next else { break };
+        let Some(group) = layers
+            .iter()
+            .find(|l| js::layer_id(l) == id && js::layer_type(l) == "group")
+        else {
+            break;
+        };
+        three_d |= js::flag(group, "threeD");
+        let mblur = node::member(Some(group), "mblur");
+        blurred |= is_property(mblur) || node::truthy(mblur);
+        next = id_of(node::member(Some(group), "group"));
+    }
+    (three_d, blurred)
+}
+
 /// `L.fx` holds an effect that is not marked missing (enabled or not: the
 /// enable is animatable).
 fn has_effects(layer: &Node) -> bool {
@@ -416,20 +511,6 @@ fn has_effects(layer: &Node) -> bool {
             )
         })
     })
-}
-
-/// The lowercase `format` of a layer's asset record, if it has one.
-fn asset_format(root: &Node, layer: &Node) -> Option<String> {
-    let asset = node::member(node::member(Some(layer), "d"), "asset")?;
-    let asset_id = node::js_value_opt(Some(asset))
-        .to_js_string()
-        .to_string_lossy();
-    let record = node::member(node::member(Some(root), "assets"), &asset_id)?;
-    Some(
-        js::member_string(record, "format")
-            .unwrap_or_default()
-            .to_ascii_lowercase(),
-    )
 }
 
 fn check_media(

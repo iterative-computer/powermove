@@ -6,4 +6,9 @@ import type { OverwritePolicy } from "./OverwritePolicy";
 /**
  * Engine (job) to host: where should this job's output go?
  */
-export type OutputDestinationRequest = { job: JobId, choice: OutputChoice, overwrite: OverwritePolicy, };
+export type OutputDestinationRequest = { job: JobId, choice: OutputChoice, overwrite: OverwritePolicy, 
+/**
+ * The output is a folder of files (PNG sequences): the host creates an
+ * empty owner-only temporary folder instead of a file.
+ */
+folder?: boolean, };

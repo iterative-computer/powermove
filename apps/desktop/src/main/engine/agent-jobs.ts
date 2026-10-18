@@ -24,8 +24,28 @@
  * legacy exporter or capture instead.
  */
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 import { canonicalHash, canonicalProject, canonicalStringify } from '../../shared/canonical-json';
+import {
+  BUILT_IN_PRESETS,
+  extensionOf,
+  formatInfo,
+  type DeliveryFormat,
+  type DeliveryOptions,
+  type ExportPreset,
+  isDropFrameTimecode,
+  isMov,
+  isRenderFormat,
+  migrateFormat,
+  normalizeDelivery,
+  outputDepth,
+  supportsAlpha,
+  wireAlpha,
+  wireAudioCoding,
+  wireColor,
+  wireFormat
+} from '../../shared/delivery';
 import type {
   AgentFrameOutcome,
   EngineError,
@@ -37,6 +57,7 @@ import type {
   Request,
   Response
 } from '../../shared/engine-protocol';
+import { type SheetExportOptions, validSheetExportOptions } from '../../shared/engine-ipc';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../shared/frame-rate';
 import { RemoteError } from './protocol';
 
@@ -46,8 +67,11 @@ export interface AgentJobsEngine {
   stageDocument(process: EngineProcess, session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   listen(listener: { jobStatus?(status: JobStatus): void; status?(status: unknown): void }): () => void;
   isReady(process: EngineProcess): boolean;
-  /** A user-chosen destination as a write handle for `job` on `session`. */
-  chooseOutput?(file: string, job: string, session: number): string;
+  /** A user-chosen destination as a write handle for `job` on `session`,
+   *  placed under `overwrite` (the engine's default for chosen files is replace). */
+  chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
+  /** Marks a job session as a draft render (offline media from proxies). */
+  setDraftSession?(session: number, draft: boolean): void;
 }
 
 /** Decision 1: Standard color, linear blending off (pm_protocol `ProjectColor::DEFAULT`). */
@@ -60,12 +84,20 @@ export const INLINE_DOCUMENT_BYTES = 4 * 1024 * 1024;
 /** Finished jobs kept for `get_render_status`. */
 const FINISHED_KEPT = 64;
 
+/** The owner of render queue jobs (no window). */
+export const QUEUE_OWNER = -1;
+
 /** Error codes that send work to the legacy engine instead of failing it. */
 const ROUTED_CODES = new Set<EngineError['code']>(['unsupported', 'mediaOffline']);
 
 export type ExportVideoInput = {
   name?: string;
-  format: 'mp4' | 'prores';
+  /** `mp4` (H.264) and `prores` (ProRes 4444) as before, or any delivery
+   *  format id (`prores-hq`, `hevc`, `webm-vp9`, `png`, …). */
+  format: string;
+  /** A built-in preset (`master`, `master-alpha`, `web-h264`, `web-hevc`,
+   *  `png`); an explicit format overrides its format. */
+  preset?: string;
   range: 'all' | 'work';
   audio: boolean;
   motionBlur: boolean;
@@ -80,25 +112,16 @@ export type ExportVideoResult =
 
 export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
 
-/** An export from the export sheet (exporter.ts), as the renderer asks for it. */
-export type UserExportOptions = {
-  format: 'mp4' | 'prores';
-  alpha: boolean;
-  /** Export frame rate (may differ from the composition's). */
-  fps: number;
-  /** Output scale (0.01 to 16): size `round(w × scale / 2) × 2`. */
-  scale: number;
-  /** Composition seconds. */
-  start: number;
-  end: number;
-  audio: boolean;
-  motionBlur: boolean;
-  quality: 'draft' | 'high' | 'max';
-};
+/** An export from the export sheet or the render queue, as the renderer asks
+ *  for it (shared/engine-ipc.ts `SheetExportOptions`). */
+export type UserExportOptions = SheetExportOptions;
+
+/** A preview of the latest encoded frame, for the progress sheet. */
+export type ExportPreviewFrame = { frame: number; width: number; height: number; jpeg: Uint8Array };
 
 /** A user export job's status as the window sees it; `routed` when the
  *  engine cannot render the project and the current exporter should. */
-export type UserExportStatus = RenderStatus & { routed?: boolean };
+export type UserExportStatus = RenderStatus & { routed?: boolean; preview?: ExportPreviewFrame; waiting?: string };
 
 export type AgentFrameImage = { time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number };
 export type AgentFramesResult =
@@ -128,13 +151,87 @@ function asProject(value: unknown): Project {
 const evenSize = (value: number): number => Math.max(2, Math.round(value / 2) * 2);
 const toTicks = (seconds: number): number => Math.round(seconds * TICKS_PER_SECOND);
 
+/** Agent preset names (`export_video` `preset`). */
+export const AGENT_PRESETS: Readonly<Record<string, string>> = {
+  master: 'builtin:master',
+  'master-alpha': 'builtin:master-alpha',
+  'web-h264': 'builtin:web-h264',
+  'web-hevc': 'builtin:web-hevc',
+  png: 'builtin:png'
+};
+
+/** An agent preset's built-in preset, or undefined for an unknown name. */
+export function agentPreset(name: string): ExportPreset | undefined {
+  const id = Object.prototype.hasOwnProperty.call(AGENT_PRESETS, name) ? AGENT_PRESETS[name] : undefined;
+  return id ? BUILT_IN_PRESETS.find((p) => p.id === id) : undefined;
+}
+
+/** The format an agent export writes: the preset's, unless a format is given. */
+function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; delivery: DeliveryOptions } {
+  const preset = input.preset ? agentPreset(input.preset) : undefined;
+  if (input.preset && !preset) throw new AgentJobError(`Unknown export preset ${input.preset}.`);
+  const delivery = normalizeDelivery(preset?.options.delivery ?? {});
+  const format = input.format ? migrateFormat(input.format, 'h264') : preset?.options.format ?? 'h264';
+  if (!isRenderFormat(format)) throw new AgentJobError('export_video writes video or image files; use save_project for a project file.');
+  return { format, delivery };
+}
+
+/** The job engine's settings for a format and the sheet's delivery options:
+ *  tags, audio coding, start timecode and reel, precision (exports render at
+ *  32-bit, amendment 8), and dither (on for 8-bit outputs, section 17). */
+export function wireSettings(input: {
+  format: DeliveryFormat;
+  delivery: DeliveryOptions;
+  alpha: boolean;
+  quality: 'draft' | 'high' | 'max';
+  size: { width: number; height: number };
+  rate: { num: number; den: number };
+  start: number;
+  end: number;
+  audio: boolean;
+  motionBlur: boolean;
+  hideCaptions?: boolean;
+  draft?: boolean;
+  preview?: boolean;
+  sequenceName?: string;
+}): ExportSettings {
+  const { format, delivery } = input;
+  const image = format === 'png' || format === 'still';
+  const coding = input.audio && !image ? wireAudioCoding(format, delivery) : null;
+  const timecode = isMov(format, delivery) && delivery.timecode
+    ? { start: delivery.timecode, dropFrame: isDropFrameTimecode(delivery.timecode), reel: delivery.reel || null }
+    : null;
+  return {
+    format: wireFormat(format, delivery),
+    alpha: wireAlpha(format, input.alpha, delivery),
+    quality: input.quality,
+    size: input.size,
+    frameRate: { num: input.rate.num, den: input.rate.den },
+    range: { start: toTicks(Math.max(0, input.start)), end: toTicks(input.end) },
+    audio: input.audio && !image,
+    motionBlur: input.motionBlur,
+    color: wireColor(format, delivery),
+    precision: 'float32',
+    dither: outputDepth(format, delivery) <= 8,
+    draftFromProxies: input.draft === true,
+    delivery: {
+      audioCoding: coding,
+      timecode,
+      hideCaptions: input.hideCaptions === true,
+      preview: input.preview === true,
+      sequenceName: format === 'png' ? input.sequenceName ?? null : null
+    }
+  };
+}
+
 /** `export_video`'s settings as the legacy exporter applies them (exporter.ts
  *  `run`, render-encoder.ts): the composition size at scale 1 rounded to even
  *  pixels, the composition rate, all or the work area, ProRes 4444 (straight
  *  alpha when asked) or H.264 at the High tier (16 Mbps), Rec.709 (QuickTime
- *  and Safari) tags. Exports render at 32-bit precision (amendment 8 asks for
- *  it whenever a source exceeds 10 bits; agent exports do not inspect
- *  sources first), and H.264's 8-bit output is dithered (section 17). */
+ *  and Safari) tags; or a preset's or another delivery format's. Exports
+ *  render at 32-bit precision (amendment 8 asks for it whenever a source
+ *  exceeds 10 bits; agent exports do not inspect sources first), and 8-bit
+ *  outputs are dithered (section 17). */
 export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput): ExportSettings {
   const project = asProject(projectValue);
   const rate = resolveFrameRate(project['fps'], project['fpsRational']);
@@ -145,41 +242,47 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
   const [start, end] = input.range === 'work' && Array.isArray(work) && Number(work[1]) > Number(work[0])
     ? [Number(work[0]), Number(work[1])]
     : [0, dur];
-  const prores = input.format === 'prores';
-  if (input.alpha && !prores) throw new AgentJobError('Transparent video requires ProRes.');
-  return {
-    format: prores ? { kind: 'proRes', profile: 'p4444' } : { kind: 'h264' },
-    alpha: prores && input.alpha ? 'straight' : 'none',
-    quality: 'high',
+  // `input.alpha` already holds the preset's default (exportVideoInput).
+  const { format, delivery } = agentFormat(input);
+  const alpha = input.alpha;
+  if (alpha && !supportsAlpha(format, delivery)) {
+    throw new AgentJobError('Transparent video requires ProRes 4444, HEVC (8-bit), WebM, or PNG.');
+  }
+  return wireSettings({
+    format, delivery, alpha, quality: 'high',
     size: { width: evenSize(width), height: evenSize(height) },
-    frameRate: { num: rate.num, den: rate.den },
-    range: { start: toTicks(Math.max(0, start)), end: toTicks(end) },
-    audio: input.audio,
-    motionBlur: input.motionBlur,
-    color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' },
-    precision: 'float32',
-    dither: !prores,
-    draftFromProxies: false
-  };
+    rate, start, end, audio: input.audio, motionBlur: input.motionBlur,
+    sequenceName: suggestedName(project, input.name)
+  });
 }
 
-/** The export sheet's settings: today's native exporter (exporter.ts `run`,
- *  render-encoder.ts) at the chosen rate, scale, range, quality tier, and
- *  alpha, with the same tags, precision, and dither rules as agent exports. */
-export function userExportSettings(projectValue: unknown, options: UserExportOptions): ExportSettings {
+/** The export sheet's and render queue's settings: the chosen format, size
+ *  (scale or exact pixels; PNG takes odd sizes, video even), rate, range,
+ *  quality tier, alpha, and delivery options. */
+export function userExportSettings(projectValue: unknown, options: UserExportOptions, extra: { sequenceName?: string; preview?: boolean } = {}): ExportSettings {
   const project = asProject(projectValue);
   const o = options;
-  const valid = (o.format === 'mp4' || o.format === 'prores') && Number.isFinite(o.fps) && o.fps > 0 && o.fps <= 240 &&
-    Number.isFinite(o.scale) && o.scale >= 0.01 && o.scale <= 16 && Number.isFinite(o.start) && Number.isFinite(o.end) &&
-    o.start >= 0 && o.end > o.start && ['draft', 'high', 'max'].includes(o.quality) &&
-    typeof o.audio === 'boolean' && typeof o.alpha === 'boolean' && typeof o.motionBlur === 'boolean';
-  if (!valid) throw new AgentJobError('Invalid export settings.');
-  const base = exportSettingsFor(project, { format: o.format, range: 'all', audio: o.audio, motionBlur: o.motionBlur, alpha: o.alpha && o.format === 'prores' });
+  if (!validSheetExportOptions(o)) throw new AgentJobError('Invalid export settings.');
+  const format = migrateFormat(o.format);
+  if (!isRenderFormat(format)) throw new AgentJobError('Code and project exports are not render jobs.');
+  const delivery = normalizeDelivery(o.delivery ?? {});
   const rate = resolveFrameRate(o.fps, Number(project['fps']) === o.fps ? project['fpsRational'] : undefined);
   if (!rate) throw new AgentJobError('Invalid export frame rate.');
-  const size = { width: evenSize(Number(project['w']) * o.scale), height: evenSize(Number(project['h']) * o.scale) };
-  if (size.width > 8192 || size.height > 8192) throw new AgentJobError('The export is larger than 8192 pixels.');
-  return { ...base, quality: o.quality, size, frameRate: { num: rate.num, den: rate.den }, range: { start: toTicks(o.start), end: toTicks(o.end) } };
+  const image = format === 'png' || format === 'still';
+  const round = (v: number) => image ? Math.max(1, Math.round(v)) : evenSize(v);
+  const size = o.width && o.height
+    ? { width: round(o.width), height: round(o.height) }
+    : { width: round(Number(project['w']) * o.scale), height: round(Number(project['h']) * o.scale) };
+  const limit = image ? 16384 : 8192;
+  if (size.width > limit || size.height > limit) throw new AgentJobError(`The export is larger than ${limit} pixels.`);
+  if (o.alpha && !supportsAlpha(format, delivery)) throw new AgentJobError('This format cannot carry transparency.');
+  return wireSettings({
+    format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
+    start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
+    audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    ...(extra.preview ? { preview: true } : {}),
+    ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
+  });
 }
 
 /** The file name the agent asked for, or the project's, as a bare name part. */
@@ -204,6 +307,8 @@ type JobRecord = {
   jobId: string;
   /** An export sheet job: its statuses go to the window. */
   user?: boolean;
+  /** A render queue job: its statuses go to the queue. */
+  queue?: boolean;
   owner: number;
   run: string;
   session: number;
@@ -225,6 +330,10 @@ export type AgentJobsOptions = {
   engine: AgentJobsEngine;
   /** Status of an export sheet job, for its window. */
   onUserStatus?(owner: number, status: UserExportStatus): void;
+  /** Status of a render queue job (`exportQueued`). */
+  onQueueStatus?(jobId: string, status: UserExportStatus): void;
+  /** An agent export was submitted or changed (the render queue lists them). */
+  onAgentJob?(job: { jobId: string; owner: number; name: string; summary: string; status: RenderStatus }): void;
   /** A job finished with a file at `path` (export sidecars remember it). */
   onDelivered?(owner: number, path: string): void;
   queueBoundMs?: number;
@@ -268,7 +377,10 @@ export class AgentJobs {
   async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult> {
     const project = asProject(projectValue);
     const settings = exportSettingsFor(project, input);
-    const extension = input.format === 'prores' ? 'mov' : 'mp4';
+    const { format, delivery } = agentFormat(input);
+    // PNG sequences are folders (`png` names the frames' extension); the job
+    // engine asks for a folder destination by the format.
+    const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
     const session = await this.openSnapshot(project, `agent-export-${jobId}`);
     const record: JobRecord = {
@@ -297,6 +409,7 @@ export class AgentJobs {
       if (e && ROUTED_CODES.has(e.code)) return { status: 'routed', reason: e.message };
       throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
     }
+    this.announceAgent(record, `${formatInfo(format).label} · ${settings.size.width}×${settings.size.height}`);
     return this.reply(record, input.mode ?? 'wait');
   }
 
@@ -358,6 +471,14 @@ export class AgentJobs {
     }
   }
 
+  /** Agent jobs the render queue lists, with their summaries. */
+  private readonly agentSummaries = new Map<string, string>();
+
+  private announceAgent(record: JobRecord, summary: string): void {
+    this.agentSummaries.set(record.jobId, summary);
+    this.options.onAgentJob?.({ jobId: record.jobId, owner: record.owner, name: record.name, summary, status: this.status(record.owner, record.jobId) });
+  }
+
   private onStatus(status: JobStatus): void {
     const record = this.jobs.get(status.job);
     if (!record) return;
@@ -370,12 +491,27 @@ export class AgentJobs {
       }
     }
     record.status = status;
-    if (status.state === 'done' && status.path) this.options.onDelivered?.(record.owner, status.path);
-    if (record.user) {
+    if (status.state === 'done' && status.path && !record.queue) this.options.onDelivered?.(record.owner, status.path);
+    if (record.user || record.queue) {
       const routed = status.state === 'failed' && !!status.error && ROUTED_CODES.has(status.error.code);
-      this.options.onUserStatus?.(record.owner, { ...this.status(record.owner, record.jobId), ...(routed ? { routed: true } : {}) });
+      const preview = status.preview
+        ? { frame: status.preview.frame, width: status.preview.width, height: status.preview.height, jpeg: new Uint8Array(status.preview.jpeg) }
+        : undefined;
+      const waiting = status.state === 'waitingForMedia' ? status.error?.message : undefined;
+      const view: UserExportStatus = {
+        ...this.status(record.owner, record.jobId),
+        ...(routed ? { routed: true } : {}),
+        ...(preview ? { preview } : {}),
+        ...(waiting ? { waiting } : {})
+      };
+      if (record.queue) this.options.onQueueStatus?.(record.jobId, view);
+      else this.options.onUserStatus?.(record.owner, view);
+    } else if (this.agentSummaries.has(record.jobId)) {
+      this.options.onAgentJob?.({ jobId: record.jobId, owner: record.owner, name: record.name, summary: this.agentSummaries.get(record.jobId)!, status: this.status(record.owner, record.jobId) });
+      if (terminal(status.state)) this.agentSummaries.delete(record.jobId);
     }
     if (terminal(status.state)) {
+      this.options.engine.setDraftSession?.(record.session, false);
       void this.closeSession(record.session);
       this.finished.push(record.jobId);
       while (this.finished.length > FINISHED_KEPT) this.jobs.delete(this.finished.shift()!);
@@ -406,19 +542,31 @@ export class AgentJobs {
   /* ── export sheet ──────────────────────────────────────────────────── */
 
   /** Starts an export the user asked for in the export sheet, to the file
-   *  they chose (replaced if it exists: the save panel confirmed that).
-   *  Statuses go to `onUserStatus`; an `unsupported` or `mediaOffline`
-   *  failure arrives as `routed`, and the window runs the current exporter
-   *  to the same file. */
-  async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string): Promise<{ jobId: string; frames: number }> {
+   *  (or, for PNG sequences, folder) they chose, replaced if it exists (the
+   *  save panel confirmed that). Statuses go to `onUserStatus` with previews;
+   *  an `unsupported` or `mediaOffline` failure arrives as `routed`, and the
+   *  window runs the current exporter to the same file. */
+  async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, extra: { draft?: boolean } = {}): Promise<{ jobId: string; frames: number }> {
+    return this.submitUser(owner, projectValue, { ...options, ...(extra.draft ? { draft: true } : {}) }, destination, 'replace', false);
+  }
+
+  /** Starts a render queue job (unattended, from its stored snapshot) to its
+   *  destination under its overwrite policy. Statuses go to `onQueueStatus`. */
+  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }> {
+    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true);
+  }
+
+  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean): Promise<{ jobId: string; frames: number }> {
     const project = asProject(projectValue);
-    const settings = userExportSettings(project, options);
+    const format = migrateFormat(options.format);
+    const sequenceName = format === 'png' ? path.basename(destination) : undefined;
+    const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
-    const jobId = `user-export-${randomUUID()}`;
-    const session = await this.openSnapshot(project, `user-export-${jobId}`);
+    const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
+    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`);
     const record: JobRecord = {
-      jobId, owner, run: '', session, user: true,
-      status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null },
+      jobId, owner, run: '', session, ...(queue ? { queue: true } : { user: true }),
+      status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null, preview: null },
       queuedAt: this.now(), startedAt: null,
       name: suggestedName(project, undefined),
       size: settings.size,
@@ -427,7 +575,8 @@ export class AgentJobs {
     };
     this.jobs.set(jobId, record);
     try {
-      const handle = this.options.engine.chooseOutput(destination, jobId, session);
+      if (settings.draftFromProxies) this.options.engine.setDraftSession?.(session, true);
+      const handle = this.options.engine.chooseOutput(destination, jobId, session, overwrite);
       await this.options.engine.request('job', {
         type: 'submitJob',
         job: jobId,
@@ -442,8 +591,13 @@ export class AgentJobs {
       const e = remote(error);
       throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
     }
-    const frames = Math.max(1, Math.round((options.end - options.start) * settings.frameRate.num / settings.frameRate.den));
+    const frames = format === 'still' ? 1 : Math.max(1, Math.round((options.end - options.start) * settings.frameRate.num / settings.frameRate.den));
     return { jobId, frames };
+  }
+
+  /** Cancels a render queue job. */
+  async cancelQueued(jobId: string): Promise<void> {
+    await this.cancelJob(QUEUE_OWNER, jobId);
   }
 
   /** Cancels one job of this window. */
