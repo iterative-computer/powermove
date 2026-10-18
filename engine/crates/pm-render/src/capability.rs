@@ -261,8 +261,12 @@ fn check(
             feature: Feature::ProjectColor,
         });
     }
+    // The stamp (section 6) marks native-only features. The ones this
+    // renderer draws are linked media and Interpret Footage overrides; a
+    // stamp with neither stands for a feature it does not know.
     if let Some(r) = node::member(Some(root), "requiresEngine")
         && node::truthy(Some(r))
+        && !native_features_drawn(root)
     {
         out.insert(Unsupported {
             composition: None,
@@ -494,6 +498,80 @@ fn check_composition(
     }
 }
 
+/// Whether the document's native-only features (the `requiresEngine`
+/// stamp's reasons, `shared/engine-stamp.ts`; the section 6 field table,
+/// [`pm_protocol::patch::FIELD_TABLE`]) are all ones this engine draws, and
+/// at least one is present. The stamp carries no reasons, so each field
+/// that stamps is classified ([`STAMP_FIELDS`]):
+///
+/// - drawn here: linked media (`storage: "linked"` or `link`) and Interpret
+///   Footage overrides (`interpret`);
+/// - judged elsewhere, never enough on its own: the project `color`
+///   ([`Feature::ProjectColor`]) and clip `pitch` (audio, `pm-audio`);
+/// - not drawn: precomp `keepFrameRate` — a stamp that may carry it routes
+///   the project away.
+fn native_features_drawn(root: &Node) -> bool {
+    // Every stamping field not drawn here is set (`true`, or any value
+    // other than absent, false, or null) nowhere in the document.
+    let set = |v: &Node| !matches!(v.kind(), NodeKind::Null | NodeKind::Bool(false));
+    if STAMP_FIELDS
+        .iter()
+        .any(|&(_, field, class)| class == StampField::NotDrawn && any_member(root, field, &set))
+    {
+        return false;
+    }
+    let Some(assets) = node::member(Some(root), "assets") else {
+        return false;
+    };
+    let mut any = false;
+    let mut visit = |asset: &Node| {
+        let linked = js::member_string(asset, "storage").as_deref() == Some("linked")
+            || node::member(Some(asset), "link").is_some_and(|l| node::truthy(Some(l)));
+        let interpreted =
+            node::member(Some(asset), "interpret").is_some_and(|i| node::truthy(Some(i)));
+        any |= linked || interpreted;
+    };
+    match assets.kind() {
+        NodeKind::Object(map) => map.values().for_each(&mut visit),
+        NodeKind::Array(list) => list.iter().for_each(&mut visit),
+        _ => {}
+    }
+    any
+}
+
+/// How [`native_features_drawn`] treats each field of the section 6 table
+/// that stamps the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampField {
+    Drawn,
+    JudgedElsewhere,
+    NotDrawn,
+}
+
+/// Every stamping field of [`pm_protocol::patch::FIELD_TABLE`], classified
+/// (a test keeps the two lists equal, so a new native-only field must be
+/// classified here before a stamp carrying it is accepted).
+const STAMP_FIELDS: [(&str, &str, StampField); 6] = [
+    ("asset", "link", StampField::Drawn),
+    ("asset", "interpret", StampField::Drawn),
+    ("asset", "storage", StampField::Drawn),
+    ("precomp", "keepFrameRate", StampField::NotDrawn),
+    ("clip", "pitch", StampField::JudgedElsewhere),
+    ("project", "color", StampField::JudgedElsewhere),
+];
+
+/// Whether any object member named `name` anywhere under `n` satisfies
+/// `test`.
+fn any_member(n: &Node, name: &str, test: &dyn Fn(&Node) -> bool) -> bool {
+    match n.kind() {
+        NodeKind::Object(map) => map
+            .iter()
+            .any(|(k, v)| (k.to_string_lossy() == name && test(v)) || any_member(v, name, test)),
+        NodeKind::Array(list) => list.iter().any(|v| any_member(v, name, test)),
+        _ => false,
+    }
+}
+
 /// Whether any group enclosing `layer` (its `group` chain within `layers`)
 /// has the 3D switch, and whether any has motion blur (on or animated).
 fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
@@ -589,15 +667,79 @@ fn check_media(
         return;
     };
     match ty {
-        "image" => match crate::media::probe_image(&path) {
+        "image" => match crate::footage::interpretation(record).map_or_else(
+            || crate::media::probe_image(&path),
+            |i| crate::media::probe_interpreted_image(&path, &i),
+        ) {
             Ok(()) => {}
             Err(crate::media::ProbeIssue::Unsupported(f)) => add(layer, f),
             Err(crate::media::ProbeIssue::Unreadable(m)) => add(layer, Feature::Media(m)),
         },
         _ => {
-            if let Err(m) = crate::media::probe_video(&path) {
+            let probed = match crate::footage::interpretation(record) {
+                Some(i) => crate::media::probe_interpreted_video(&path, &i),
+                None => crate::media::probe_video(&path),
+            };
+            if let Err(m) = probed {
                 add(layer, Feature::Media(m));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_protocol::patch::{FIELD_TABLE, LegacyBehavior};
+
+    #[test]
+    fn every_stamping_field_is_classified() {
+        let mut table: Vec<(&str, &str)> = FIELD_TABLE
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.legacy,
+                    LegacyBehavior::RequiresNative | LegacyBehavior::RequiresNativeWhen
+                )
+            })
+            .map(|e| (e.owner, e.field))
+            .collect();
+        let mut ours: Vec<(&str, &str)> = STAMP_FIELDS.iter().map(|&(o, f, _)| (o, f)).collect();
+        table.sort();
+        ours.sort();
+        assert_eq!(ours, table);
+    }
+
+    fn stamped(extra: serde_json::Value) -> Document {
+        let mut doc = serde_json::json!({
+            "id": "root", "w": 64, "h": 64, "fps": 25, "dur": 1, "layers": [],
+            "requiresEngine": "native",
+            "assets": { "a": { "type": "video", "interpret": { "fieldOrder": "topFirst" } } },
+        });
+        if let (Some(d), serde_json::Value::Object(e)) = (doc.as_object_mut(), extra) {
+            d.extend(e);
+        }
+        Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1)
+    }
+
+    #[test]
+    fn a_stamp_is_accepted_only_when_every_reason_is_drawn() {
+        let drawn = |doc: &Document| native_features_drawn(doc.root().unwrap());
+        assert!(drawn(&stamped(serde_json::json!({}))));
+        // A native-only feature this renderer does not draw, next to one it
+        // does, routes the project away.
+        let precomp = serde_json::json!({ "comps": { "c": { "layers": [
+            { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": true } }
+        ] } } });
+        assert!(!drawn(&stamped(precomp)));
+        let off = serde_json::json!({ "comps": { "c": { "layers": [
+            { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": false } }
+        ] } } });
+        assert!(drawn(&stamped(off)));
+        // Without a reason drawn here, the stamp stands for something else.
+        let mut plain = stamped(serde_json::json!({ "assets": {} }));
+        assert!(!drawn(&plain));
+        plain = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
+        assert!(!drawn(&plain));
     }
 }

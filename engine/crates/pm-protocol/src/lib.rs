@@ -23,6 +23,8 @@
 //! | 13 | GPU time slicing | [`slicing`] |
 //! | 14 | Host services | [`host`] |
 //! | 15 | The headless document host | [`document_host`] |
+//!
+//! [`media`] (Interpret Footage's media facts) extends contract 14.
 
 pub mod blender;
 pub mod clock;
@@ -37,6 +39,7 @@ pub mod frame;
 pub mod host;
 pub mod interop;
 pub mod lease;
+pub mod media;
 pub mod patch;
 pub mod priority;
 pub mod scene;

@@ -29,6 +29,7 @@ pub mod effects;
 mod error;
 mod exec;
 pub mod expr;
+pub mod footage;
 pub mod js;
 pub mod media;
 pub mod motion;

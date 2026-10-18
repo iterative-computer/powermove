@@ -128,6 +128,10 @@ struct State {
     media: HashMap<SessionId, HashMap<String, ([u8; 32], PathBuf)>>,
     /// The run of each queued or running frame batch, for run cancels.
     frame_runs: Vec<(AgentRunId, Arc<AtomicBool>)>,
+    /// `probeMedia` requests, answered in order by one probe lane (each
+    /// opens and indexes a file; main sends at most one per asset at a
+    /// time).
+    probes: VecDeque<(PortId, RequestId, pm_protocol::media::ProbeMedia)>,
     shutdown: bool,
     stats: ServiceStats,
     /// Blender surfaces received for the lanes' Blender requests.
@@ -434,6 +438,13 @@ impl JobEngineService {
             .map_err(|e| format!("could not start the {name} lane: {e}"))?;
             threads.push(handle);
         }
+        let probes = shared.clone();
+        let handle =
+            pm_engine::qos::spawn_engine_thread(EngineProcess::Job, "pm-job-probes", move || {
+                run_probes(&probes)
+            })
+            .map_err(|e| format!("could not start the pm-job-probes lane: {e}"))?;
+        threads.push(handle);
         Ok(JobEngineService { shared, threads })
     }
 
@@ -650,6 +661,19 @@ impl JobService for JobEngineService {
             cancel,
         });
         drop(st);
+        self.shared.work.notify_all();
+        Ok(())
+    }
+
+    fn probe_media(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        probe: pm_protocol::media::ProbeMedia,
+    ) -> Result<(), Box<EngineError>> {
+        // Probing opens and indexes the file: off the engine thread, on the
+        // probe lane.
+        self.shared.lock().probes.push_back((port, id, probe));
         self.shared.work.notify_all();
         Ok(())
     }
@@ -1485,6 +1509,92 @@ fn lane_blender<'b>(
         ));
     }
     Ok(blender.stage.as_mut())
+}
+
+/// The probe lane: answers `probeMedia` requests in order until shutdown.
+/// Requests still queued at shutdown are answered as cancelled.
+fn run_probes(shared: &Shared) {
+    loop {
+        let next = {
+            let mut st = shared.lock();
+            loop {
+                if st.shutdown {
+                    let left: Vec<_> = st.probes.drain(..).collect();
+                    drop(st);
+                    for (port, id, _) in left {
+                        let error = EngineError::new(
+                            ErrorCode::Cancelled,
+                            ErrorScope::Request { id },
+                            "The job engine is shutting down.",
+                        );
+                        let mut envelope = Envelope::new(Message::Error { id, error });
+                        envelope.session = None;
+                        shared.send(port, envelope);
+                    }
+                    return;
+                }
+                if let Some(p) = st.probes.pop_front() {
+                    break p;
+                }
+                // Every push and the shutdown flag notify `work` under this
+                // lock, so the lane sleeps until there is something to do.
+                st = shared.work.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let (port, id, probe) = next;
+        probe_media(shared, port, id, probe);
+    }
+}
+
+/// Interpret Footage's facts of the file a `mediaRead` handle names: the
+/// handle resolves through the host (session 0: no engine session), then
+/// `pm_media::facts` reads the file with the asset's `interpret` member.
+fn probe_media(
+    shared: &Shared,
+    port: PortId,
+    id: RequestId,
+    probe: pm_protocol::media::ProbeMedia,
+) {
+    let fail = |code: ErrorCode, message: String| {
+        let mut envelope = Envelope::new(pm_protocol::envelope::Message::Error {
+            id,
+            error: EngineError::new(code, ErrorScope::Request { id }, message),
+        });
+        envelope.session = None;
+        shared.send(port, envelope);
+    };
+    let resolved = shared.call(
+        Request::ResolveHandle(ResolveHandle {
+            handle: probe.handle.clone(),
+            session: SessionId::ZERO,
+        }),
+        None,
+    );
+    let path = match resolved {
+        Ok(Response::HandleResolved(r))
+            if r.access == HandleAccess::Read
+                && matches!(r.kind, CapabilityKind::MediaRead { .. }) =>
+        {
+            PathBuf::from(r.path)
+        }
+        Ok(_) => {
+            return fail(
+                ErrorCode::CapabilityRejected,
+                "The handle does not name media to read.".into(),
+            );
+        }
+        Err(e) => return fail(e.code, e.message),
+    };
+    match pm_media::facts::media_facts(&path, probe.interpret.as_deref()) {
+        Ok(facts) => shared.send(
+            port,
+            Envelope::new(pm_protocol::envelope::Message::Response {
+                id,
+                body: Response::MediaFacts(Box::new(facts)),
+            }),
+        ),
+        Err(e) => fail(ErrorCode::DecodeFailed, format!("{}: {e}", path.display())),
+    }
 }
 
 /// "2 clips are offline: A001_C003.mov, Interview.wav." (appendix D).

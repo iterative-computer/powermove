@@ -4,10 +4,13 @@
 //!   at `PM_FFMPEG_DIR` (`engine/env.sh` sets it), linked as dylibs. Bindings
 //!   come from that build's headers, so struct layouts are exact for the
 //!   version that ships.
-//! * **dav1d and OpenEXRCore**: static libraries from `native/build.sh`
-//!   (pinned, checksummed sources) at `PM_MEDIA_NATIVE_DIR`. When the staged
-//!   build is missing or older than `native/sources.lock` and `native/build.sh`,
-//!   this script runs `native/build.sh` (about a minute; downloads are cached).
+//! * **dav1d, OpenEXRCore, and libjpeg-turbo**: static libraries from
+//!   `native/build.sh` (pinned, checksummed sources) at `PM_MEDIA_NATIVE_DIR`,
+//!   by default a directory named after the stamp (the checksum of
+//!   `native/sources.lock` and `native/build.sh`), so worktrees on different
+//!   versions of the script never replace each other's build. When the staged
+//!   build is missing, this script runs `native/build.sh` (about a minute;
+//!   downloads are cached).
 //! * **Apple frameworks**: VideoToolbox, CoreMedia, CoreVideo, CoreFoundation,
 //!   ImageIO, CoreGraphics.
 
@@ -45,20 +48,25 @@ fn native_dir(manifest: &Path) -> PathBuf {
     h.update(std::fs::read(&lock).expect("native/sources.lock"));
     h.update(std::fs::read(&script).expect("native/build.sh"));
     let stamp: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let cache = home().join("Library/Caches/powermove-engine/media-native");
     let dir = std::env::var_os("PM_MEDIA_NATIVE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join("Library/Caches/powermove-engine/media-native/out"));
+        .unwrap_or_else(|| cache.join(format!("out-{}", &stamp[..16])));
     let current = std::fs::read_to_string(dir.join("stamp"))
         .map(|s| s.trim() == stamp)
         .unwrap_or(false);
     if !current {
         println!(
-            "cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore) into {}",
+            "cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore, libjpeg-turbo) into {}",
             dir.display()
         );
         let status = Command::new("bash")
             .arg(&script)
             .env("PM_MEDIA_NATIVE_DIR", &dir)
+            .env(
+                "PM_MEDIA_NATIVE_WORK",
+                cache.join(format!("work-{}", &stamp[..16])),
+            )
             .status()
             .expect("run native/build.sh");
         assert!(
@@ -161,6 +169,7 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=dav1d");
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");
+    println!("cargo:rustc-link-lib=static=turbojpeg");
     println!("cargo:rustc-link-lib=dylib=c++");
     let inc = native.join("include");
     bindings(
@@ -175,6 +184,14 @@ fn main() {
         "#include <openexr/openexr.h>\n",
         &[&inc, &inc.join("openexr")],
         &["exr_.*", "EXR_.*", "_priv_exr.*"],
+        &out,
+    );
+
+    bindings(
+        "turbojpeg",
+        "#include <stddef.h>\n#include <turbojpeg/turbojpeg.h>\n",
+        &[&inc],
+        &["tj.*", "TJ.*"],
         &out,
     );
 

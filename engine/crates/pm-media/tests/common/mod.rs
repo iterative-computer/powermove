@@ -267,21 +267,32 @@ fn reference_for(src: &MediaSource, run: &BackendRun) -> Option<(String, usize, 
                 "y416" => "ayuv64le",
                 _ => return None,
             };
-            let vf = format!("hwdownload,format={fmt}");
-            let r = framemd5(&[
-                "-hwaccel",
-                "videotoolbox",
-                "-hwaccel_output_format",
-                "videotoolbox_vld",
-                "-i",
-                file,
-                "-map",
-                "0:v:0",
-                "-vf",
-                &vf,
-                "-fps_mode",
-                "passthrough",
-            ]);
+            let download = |vf: &str| {
+                framemd5(&[
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-hwaccel_output_format",
+                    "videotoolbox_vld",
+                    "-noautorotate",
+                    "-apply_cropping",
+                    "codec",
+                    "-i",
+                    file,
+                    "-map",
+                    "0:v:0",
+                    "-vf",
+                    vf,
+                    "-fps_mode",
+                    "passthrough",
+                ])
+            };
+            let mut r = download(&format!("hwdownload,format={fmt}"));
+            // FFmpeg's hwaccel asks VideoToolbox for `p416` (biplanar 4:4:4
+            // 16-bit) when ProRes 4444 has no alpha; the engine asks for
+            // `y416`. The same 16-bit samples repacked compare exactly.
+            if fmt == "ayuv64le" && !matches!(&r, Ok(h) if !h.is_empty()) {
+                r = download("hwdownload,format=p416le,format=ayuv64le");
+            }
             return Some(compare(
                 format!("ffmpeg -hwaccel videotoolbox ({fmt})"),
                 r,
@@ -302,7 +313,20 @@ fn reference_for(src: &MediaSource, run: &BackendRun) -> Option<(String, usize, 
     if run.copied_frames > 0 && run.backend == Backend::Ffmpeg && run.name.contains("converted") {
         return None;
     }
-    args.extend(["-i", file, "-map", "0:v:0", "-fps_mode", "passthrough"]);
+    // Frames as decoded: no display-matrix rotation and no container
+    // cropping (clap), which FFmpeg 7.1+ applies by default; the renderer
+    // applies both.
+    args.extend([
+        "-noautorotate",
+        "-apply_cropping",
+        "codec",
+        "-i",
+        file,
+        "-map",
+        "0:v:0",
+        "-fps_mode",
+        "passthrough",
+    ]);
     Some(compare(
         "ffmpeg software framemd5".into(),
         framemd5(&args),

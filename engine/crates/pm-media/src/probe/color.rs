@@ -2,6 +2,7 @@
 //! section 9's rules for sources that are untagged.
 
 use crate::ff::CodecInfo;
+use crate::interpret::Origin;
 use crate::sys::ffmpeg as ff;
 use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Primaries, Range, Subsampling,
@@ -44,7 +45,7 @@ pub struct ContentLight {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum HdrFormat {
     Hdr10,
     Hlg,
@@ -66,11 +67,26 @@ pub struct ColorInfo {
     pub interpreted: ColorDescription,
     /// One line per rule that filled in an untagged value.
     pub defaults_applied: Vec<String>,
+    /// Where each value of `interpreted` came from (Interpret Footage shows
+    /// values with their origin).
+    pub origins: ColorOrigins,
     pub mastering: Option<MasteringDisplay>,
     pub content_light: Option<ContentLight>,
     /// Size of an embedded ICC profile and its BLAKE3 hash.
     pub icc: Option<IccProfile>,
     pub hdr: Option<HdrFormat>,
+}
+
+/// The origin of each value of [`ColorInfo::interpreted`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorOrigins {
+    pub primaries: Origin,
+    pub transfer: Origin,
+    pub matrix: Origin,
+    pub range: Origin,
+    pub siting: Origin,
+    pub alpha: Origin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -117,9 +133,17 @@ pub fn interpret(
         },
         source: vec![],
     };
+    const FFMPEG: &str = "bitstream or container";
     if tagged.primaries.is_some() || tagged.transfer.is_some() || tagged.matrix.is_some() {
         tagged.source.push("bitstream or container (FFmpeg)".into());
     }
+    let file = |s: &str| Origin::File { source: s.into() };
+    let mut from = [
+        tagged.primaries.map(|_| file(FFMPEG)),
+        tagged.transfer.map(|_| file(FFMPEG)),
+        tagged.matrix.map(|_| file(FFMPEG)),
+        tagged.full_range.map(|_| file(FFMPEG)),
+    ];
     // FFmpeg reports matrix 0 (RGB) for untagged RGB codecs too; only an
     // RGB pixel format keeps it.
     let rgb_format = info.pix_fmt.starts_with("gbr")
@@ -127,6 +151,7 @@ pub fn interpret(
         || info.pix_fmt.starts_with("bgr");
     if tagged.matrix == Some(0) && !rgb_format {
         tagged.matrix = None;
+        from[2] = None;
     }
     if let Some(c) = colr
         && c.len() >= 10
@@ -136,13 +161,23 @@ pub fn interpret(
             let p = u16::from_be_bytes([c[4], c[5]]);
             let t = u16::from_be_bytes([c[6], c[7]]);
             let m = u16::from_be_bytes([c[8], c[9]]);
-            tagged.primaries = tagged.primaries.or(tag(p, &[2, 0]));
-            tagged.transfer = tagged.transfer.or(tag(t, &[2, 0]));
-            tagged.matrix = tagged
-                .matrix
-                .or(tag(m, &[2]).filter(|&m| m != 0 || rgb_format));
-            if kind == b"nclx" && c.len() >= 11 {
-                tagged.full_range = tagged.full_range.or(Some(c[10] & 0x80 != 0));
+            let atom = format!("colr {}", String::from_utf8_lossy(kind));
+            let mut fill = |slot: &mut Option<u8>, i: usize, v: Option<u8>| {
+                if slot.is_none() && v.is_some() {
+                    *slot = v;
+                    from[i] = Some(file(&atom));
+                }
+            };
+            fill(&mut tagged.primaries, 0, tag(p, &[2, 0]));
+            fill(&mut tagged.transfer, 1, tag(t, &[2, 0]));
+            fill(
+                &mut tagged.matrix,
+                2,
+                tag(m, &[2]).filter(|&m| m != 0 || rgb_format),
+            );
+            if kind == b"nclx" && c.len() >= 11 && tagged.full_range.is_none() {
+                tagged.full_range = Some(c[10] & 0x80 != 0);
+                from[3] = Some(file(&atom));
             }
             tagged
                 .source
@@ -169,6 +204,16 @@ pub fn interpret(
                 Primaries::Bt601_525
             };
             defaults.push(format!("untagged primaries: {p:?} (height {h})"));
+            from[0] = Some(Origin::Default {
+                rule: if sd {
+                    format!(
+                        "Untagged video {h} lines high reads as BT.601 {}-line",
+                        if h > 480 { 625 } else { 525 }
+                    )
+                } else {
+                    "Untagged HD and larger video reads as BT.709".into()
+                },
+            });
             p
         }
     };
@@ -181,10 +226,14 @@ pub fn interpret(
         Some(_) => Transfer::DisplayE,
         None => {
             defaults.push("untagged transfer: display encoding E".into());
+            from[1] = Some(Origin::Default {
+                rule: "Untagged video reads with the display encoding (sRGB curve)".into(),
+            });
             Transfer::DisplayE
         }
     };
     let matrix = if rgb_format {
+        from[2] = Some(file("RGB pixel format"));
         MatrixCoefficients::Identity
     } else {
         match tagged.matrix {
@@ -198,6 +247,13 @@ pub fn interpret(
                     MatrixCoefficients::Bt709
                 };
                 defaults.push(format!("untagged matrix: {m:?} (height {h})"));
+                from[2] = Some(Origin::Default {
+                    rule: if sd {
+                        format!("Untagged video {h} lines high uses BT.601 coefficients")
+                    } else {
+                        "Untagged HD and larger video uses BT.709 coefficients".into()
+                    },
+                });
                 m
             }
         }
@@ -210,6 +266,13 @@ pub fn interpret(
                 "{} reads as full range",
                 if rgb_format { "RGB" } else { "MJPEG/yuvj" }
             ));
+            from[3] = Some(Origin::Default {
+                rule: if rgb_format {
+                    "RGB video is full range".into()
+                } else {
+                    "MJPEG video is full range".into()
+                },
+            });
         }
         Range::Full
     } else {
@@ -218,6 +281,9 @@ pub fn interpret(
             Some(false) => Range::Limited,
             None => {
                 defaults.push("untagged range: limited".into());
+                from[3] = Some(Origin::Default {
+                    rule: "Untagged Y′CbCr video is limited range".into(),
+                });
                 Range::Limited
             }
         }
@@ -230,6 +296,17 @@ pub fn interpret(
     if info.log2_chroma_w == 2 {
         defaults.push("4:1:1 chroma has no contract 4 subsampling value; reported as 4:2:2 (the frame format carries the exact factors)".into());
     }
+    let mut siting_origin = if tagged.chroma_location.is_some() {
+        file(FFMPEG)
+    } else if subsampling == Subsampling::S444 {
+        Origin::Default {
+            rule: "4:4:4 has no chroma siting".into(),
+        }
+    } else {
+        Origin::Default {
+            rule: "Untagged chroma is sited left (type 0)".into(),
+        }
+    };
     let siting = match tagged.chroma_location {
         Some(0) => ChromaSiting::Left,
         Some(1) => ChromaSiting::Center,
@@ -240,11 +317,33 @@ pub fn interpret(
         _ => {
             if subsampling != Subsampling::S444 {
                 defaults.push("untagged chroma siting: left (type 0)".into());
+            } else {
+                siting_origin = Origin::Default {
+                    rule: "4:4:4 has no chroma siting".into(),
+                };
             }
             ChromaSiting::Left
         }
     };
+    let alpha_origin = match alpha {
+        Some(_) => file("alpha channel"),
+        None => Origin::Default {
+            rule: "No alpha channel".into(),
+        },
+    };
     let alpha = alpha.unwrap_or(AlphaMode::Opaque);
+    let unknown = || Origin::Default {
+        rule: "A code point the engine reads as the nearest supported value".into(),
+    };
+    let [p0, t0, m0, r0] = from;
+    let origins = ColorOrigins {
+        primaries: p0.unwrap_or_else(unknown),
+        transfer: t0.unwrap_or_else(unknown),
+        matrix: m0.unwrap_or_else(unknown),
+        range: r0.unwrap_or_else(unknown),
+        siting: siting_origin,
+        alpha: alpha_origin,
+    };
     let hdr = match (&side.dovi, transfer) {
         (Some(d), _) => Some(*d),
         (None, Transfer::Pq) => Some(HdrFormat::Hdr10),
@@ -264,6 +363,7 @@ pub fn interpret(
             bit_depth: info.bit_depth,
         },
         defaults_applied: defaults,
+        origins,
         mastering: side.mastering.clone(),
         content_light: side.content_light,
         icc: side.icc.as_ref().map(|d| IccProfile {

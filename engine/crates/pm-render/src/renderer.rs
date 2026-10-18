@@ -972,7 +972,15 @@ impl Renderer {
         let plan::Content::Texture { source, uv, alpha } = &draw.content else {
             return Ok(None);
         };
-        let plan::Source::Video { path, time, .. } = source else {
+        // An interpreted source is read differently from its file (color,
+        // geometry, or frame timing), so its planes are never copied.
+        let plan::Source::Video {
+            path,
+            time,
+            interpret: None,
+            ..
+        } = source
+        else {
             return Ok(None);
         };
         let (w, h) = (request.output_size.width, request.output_size.height);

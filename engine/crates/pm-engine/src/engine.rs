@@ -330,6 +330,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Persist(_) => "persist",
         Request::RegisterExtension(_) => "registerExtension",
         Request::ToolCall(_) => "toolCall",
+        Request::ProbeMedia(_) => "probeMedia",
     }
 }
 
@@ -964,11 +965,22 @@ impl Engine {
             Request::AgentFrames(request) if self.jobs.is_some() && kind == PeerKind::Host => {
                 self.agent_frames(port, id, session, revision, request, now, out)
             }
+            Request::ProbeMedia(probe) if self.jobs.is_some() && kind == PeerKind::Host => {
+                let result = self
+                    .jobs
+                    .as_mut()
+                    .expect("checked")
+                    .probe_media(port, id, probe);
+                if let Err(error) = result {
+                    self.send_error(port, id, *error, out);
+                }
+            }
             Request::RenderFrame(_)
             | Request::Evaluate(_)
             | Request::AgentFrames(_)
             | Request::SubmitJob(_)
-            | Request::CancelJobs(_) => {
+            | Request::CancelJobs(_)
+            | Request::ProbeMedia(_) => {
                 let name = request_name(&body);
                 let error = request_error(
                     id,
