@@ -385,7 +385,11 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   (effects.md, "Transient failures").
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
   readback, and upload per frame shown; there is no render-ahead for it (a
-  static one is uploaded once).
+  static one is uploaded once). The runner reads its target as half floats
+  since 2026-10-19 (25 ms per full-HD request with two textures, from 2.7
+  s); an animated fallback program still plays and exports below today's
+  rate (effects.md, Gaps: a full-HD fallback effect export took 7.0 s
+  against today's 1.1 s).
 - **Not run:** the full pm-render suite (targeted tests only, per the machine
   limits).
 - **Watchdog tests** (issue A2): fixed 2026-10-18 with the watchdog's

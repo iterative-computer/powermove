@@ -825,12 +825,27 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   differences. The engine binds uniforms from its own exact port of
   `parseUniforms` (`shader_layers::uniforms`, `parse_uniforms_matches_the_app`).
   `sceneWarnings` and `sceneError` for 3D scene layers are the 3D lane's.
-- **Fallback runner throughput.** Each fallback step reads its textures back
-  and sends them to the renderer and the pixels back (binary16: 8 bytes per
-  pixel each way, about 16 MB per full-HD texture); results are cached by
-  content key (512 MB), so a still frame costs one round trip, but an
-  animated fallback effect does one per frame. Not measured against
-  today's playback rate.
+- **Fallback runner throughput is below today's** (measured 2026-10-19, M4
+  Max, needs Jude's call). Each fallback step reads its textures back and
+  sends them to the renderer and the pixels back (binary16, about 16 MB per
+  full-HD texture each way); results are cached by content key (512 MB), so
+  a still frame costs one round trip, but an animated fallback effect does
+  one per frame. Two costs were fixed: the engine keyed the request with
+  SHA-256 one value at a time (139 ms of engine time per full-HD frame with
+  two textures, now 20 ms: BLAKE3 in parts on up to four threads;
+  `fallback_step_cost_at_full_hd`, release, the native Invert 1.0 ms), and
+  the runner converted its float readback to binary16 one value at a time
+  with an allocation per value (2.7 s per full-HD request, now 25 ms: it
+  reads RGBA16F as half floats; headless Chromium, ANGLE Metal). Exporting
+  a 2 s, 30 fps, 1920 × 1080 project whose only effect is a sampler3D
+  effect only the runner draws took 7.0 and 7.2 s through the job engine
+  (the same project with the built-in Invert: 1.1 and 1.6 s); today's
+  exporter takes 1.1 s for both. About 100 ms per frame remain in the job
+  path (the scratch files, main's relay, the IPC copies to and from the
+  window); the viewer's path (texture bands over the session's port) was
+  not timed in the app, and an animated fallback effect at full HD there
+  is expected to play well below today's frame rate. Pixels are identical;
+  the time is the difference.
 - **Translation in a helper process** not built: a crash inside glslang or naga takes
   the engine process (the fuzz runs found none; limits stop every bomb found); a hang
   costs one leaked thread past the deadline. The job engine's compile worker
