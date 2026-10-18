@@ -208,6 +208,8 @@ pub struct ThreadConfig {
     pub extra_passes: u32,
     /// Keep a per-frame trace for the S1 harness.
     pub trace: bool,
+    /// Keep [`Stats::stand_in_log`] (measurements only).
+    pub stand_in_log: bool,
     /// Fraction of a refresh after the viewer's BeginFrame at which timed
     /// frames start rendering, once the viewer sent its vsync hint; `None`
     /// renders at the due time.
@@ -334,7 +336,8 @@ pub struct Stats {
     pub stand_in_redraws: u64,
     /// Stand-in frames sent: (seq, the source frame the first stand-in
     /// layer shows), for measurements that count the distinct frames a
-    /// drag showed.
+    /// drag showed. Kept only with [`ThreadConfig::stand_in_log`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stand_in_log: Vec<(u64, usize)>,
     /// The display decode workers (scrubbing, look-ahead, cancellation).
     pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
@@ -2232,6 +2235,7 @@ impl Thread {
             stats.immediate_frames += 1;
         }
         if let Some(shown) = stand_in_shown
+            && self.config.stand_in_log
             && stats.stand_in_log.len() < STAND_IN_LOG_CAP
         {
             stats.stand_in_log.push((seq, shown));

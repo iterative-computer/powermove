@@ -55,6 +55,9 @@ pub const LEAD_ENV: &str = "POWERMOVE_BRIDGE_LEAD";
 pub const FPS_ENV: &str = "POWERMOVE_BRIDGE_TEST_FPS";
 pub const LOAD_ENV: &str = "POWERMOVE_BRIDGE_TEST_LOAD";
 pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
+/// `1`: keep the stand-in log in the presenter's status (scrub
+/// measurements, docs/engine/scrub.md).
+pub const STAND_IN_LOG_ENV: &str = "POWERMOVE_ENGINE_STAND_IN_LOG";
 /// Where timed frames start on the viewer's refresh grid, in thousandths of
 /// a refresh after it (`off` renders at the due time, as before the hint).
 pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
@@ -123,6 +126,7 @@ impl PresenterConfig {
                 fps: number(FPS_ENV, 60, 240).max(1),
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
+                stand_in_log: env(STAND_IN_LOG_ENV).as_deref() == Some("1"),
                 phase: match env(PHASE_ENV).as_deref() {
                     Some("off") => None,
                     Some(v) => v

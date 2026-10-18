@@ -24,7 +24,8 @@ import type { Page } from 'playwright';
 import { buildSyntheticProject, type SyntheticSummary } from '../src/main/engine/integration/synthetic-project';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
 
-const ON = { POWERMOVE_NEW_ENGINE: '1' };
+// The stand-in log tells which frame each stand-in showed (drag counts).
+const ON = { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_STAND_IN_LOG: '1' };
 const OUT = process.env.PM_TRACER_MEASURE_OUT ?? path.join(os.tmpdir(), 'powermove-tracer-measure.jsonl');
 const TICKS = 705_600_000;
 const MEDIA = process.env.PM_TRACER_MEDIA ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/tracer-media');
