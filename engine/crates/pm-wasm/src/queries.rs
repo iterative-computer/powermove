@@ -346,10 +346,6 @@ pub(crate) fn dispatch<'d>(
         }
         "compositionScene" => {
             let scene = try_js!(scope.composition_scene(t));
-            if !scene.recipe_parts.is_empty() {
-                // Model group recipes need pm-geom3d (Phase 3c).
-                return Some(Err(Unanswered::Host));
-            }
             out.value(&scene.scene);
         }
         "expressionError" => {

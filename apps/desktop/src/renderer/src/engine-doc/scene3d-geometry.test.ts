@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode } from './flags';
-import { LAYER3D_DEFINITIONS } from '../core/scene3d/layers';
+import { LAYER3D_DEFINITIONS, compositionScene } from '../core/scene3d/layers';
 import { createScene, parseScene, SCENE3D_DEFINITION } from '../core/scene3d/schema';
 import { editScene } from '../core/scene3d/operations';
 import { setViewportMode, orbitViewStep, enterLocalView, exitLocalView, toggleViewProjection } from '../core/scene3d/viewport';
@@ -236,6 +236,61 @@ function exercise(PM: any, doc: EngineDoc, random: () => number, picks = 120) {
 }
 
 let lastKhronos: string[] = [];
+/** Animated model-group recipes: a rocket and a staircase whose parts are stored at the recipe's parameters. */
+function addModelGroups(PM: any) {
+  const zero = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
+  const part = (id: string, groupId: string, partId: string, source: any, base: any, x: number) => {
+    const ok = editScene(PM, { operation: 'add_object', object: { id, source, p: { x: base.x + x, y: base.y, z: base.z } } });
+    expect(ok.ok, ok.message).toBe(true);
+    PM.L(id).d.data.object.generation = { groupId, partId };
+    return { layerId: id, base };
+  };
+  const radius = 0.6, length = 2.8, nose = 1;
+  const rocketParts: Record<string, any> = {
+    body: part('rbody', 'rocket', 'body', { primitive: 'cylinder', parameters: { radius, height: length } }, zero, -1.6),
+    nose: part('rnose', 'rocket', 'nose', { primitive: 'cone', parameters: { radius, height: nose } }, { ...zero, y: length / 2 + nose / 2 }, -1.6),
+    engine: part('rengine', 'rocket', 'engine', { primitive: 'cylinder', parameters: { radiusTop: radius * 0.75, radiusBottom: radius * 0.55, height: radius * 0.7 } }, { ...zero, y: -length / 2 - radius * 0.35 }, -1.6),
+    fin_01: part('rfin1', 'rocket', 'fin_01', { primitive: 'box', parameters: { width: 0.1, height: 0.5, depth: 0.5 } }, zero, -1.6)
+  };
+  const rocket = PM.groupLayers(['rbody', 'rnose', 'rengine', 'rfin1'], 'Rocket');
+  rocket.id = 'rocket';
+  for (const l of PM.proj.layers) if (l.group === rocket.id || ['rbody', 'rnose', 'rengine', 'rfin1'].includes(l.id)) l.group = 'rocket';
+  rocket.d = { ...(rocket.d || {}), modeling: { version: 1, recipe: { kind: 'rocket', parameters: { length, radius, nose, fins: 4, finSize: 0.8 }, modifiers: [] },
+    p: { length: PM.P(length, { kf: [PM.KF(0, length), PM.KF(3, 4.2)] }), nose: PM.P(nose, { kf: [PM.KF(1, nose), PM.KF(3, 1.6)] }), finSize: PM.P(0.8, { kf: [PM.KF(0, 0.8), PM.KF(2, 1.4)] }) },
+    parts: rocketParts, retired: [] } };
+  const stairs: Record<string, any> = {};
+  const ids: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const angle = i * 30 * Math.PI / 180, id = `step${i}`;
+    stairs[`step_00${i}`] = part(id, 'stairs', `step_00${i}`, { primitive: 'box', parameters: { width: 1, height: 0.132, depth: 0.45 } }, { ...zero, x: 1.2 * Math.cos(angle), y: i * 0.22, z: 1.2 * Math.sin(angle) }, 1.6);
+    ids.push(id);
+  }
+  const group = PM.groupLayers(ids, 'Staircase');
+  for (const l of PM.proj.layers) if (l.group === group.id) l.group = 'stairs';
+  group.id = 'stairs';
+  group.d = { ...(group.d || {}), modeling: { version: 1, recipe: { kind: 'staircase', parameters: { steps: 4, radius: 1.2, rise: 0.22, turn: 30, width: 1, depth: 0.45 }, modifiers: [] },
+    p: { rise: PM.P(0.22, { kf: [PM.KF(0, 0.22), PM.KF(3, 0.32)] }), turn: PM.P(30, { kf: [PM.KF(0, 30), PM.KF(3, 45)] }) },
+    parts: stairs, retired: [] } };
+  PM.ProjectIndex?.invalidate?.();
+  PM.touch();
+}
+
+/** Structural difference with exact numbers (key order ignored), or null. */
+function sceneDiff(a: any, b: any, path = ''): string | null {
+  if (typeof a === 'number' && typeof b === 'number') return Object.is(a, b) || a === b ? null : `${path}: ${a} != ${b}`;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return `${path}: array shape`;
+    for (let i = 0; i < a.length; i++) { const d = sceneDiff(a[i], b[i], `${path}[${i}]`); if (d) return d; }
+    return null;
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)].filter(k => a[k] !== undefined || b[k] !== undefined));
+    for (const k of keys) { const d = sceneDiff(a[k], b[k], `${path}.${k}`); if (d) return d; }
+    return null;
+  }
+  return a === b ? null : `${path}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`;
+}
+
 const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
 const fellBack = (doc: EngineDoc) => Object.entries(doc.api!.stats.fallbacks).filter(([k]) => /^(gl\.pick|gl\.bounds|groups\.bounds):/.test(k));
 
@@ -270,6 +325,29 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     expect(hits.scene).toBeGreaterThan(20);
     expect(hits.threw).toBeGreaterThan(0);
   }, 600_000);
+
+  it('evaluates animated model-group recipes like compositionScene and picks their parts', async () => {
+    const { PM, doc } = await editor();
+    await addModels(PM);
+    addModelGroups(PM);
+    editScene(PM, { operation: 'add_light', light: { id: 'sun', type: 'sun', p: { x: 1, y: 4, z: 3 } } });
+    PM.touch();
+    doc.barrier!.flush();
+    const c = (doc.api as any).comps();
+    for (const t of [0, 0.5, 1.25, 2, 3]) {
+      const native = doc.wasm!.query({ op: 'compositionScene', comp: c.comp, open: c.open, t });
+      expect(native.ok, JSON.stringify(native)).toBeDefined();
+      const legacy = JSON.parse(JSON.stringify(compositionScene(PM, t)));
+      expect(sceneDiff(native.ok, legacy), `t ${t}`).toBeNull();
+    }
+    exercise(PM, doc, rng(21), 200);
+    setViewportMode(PM, 'editor');
+    orbitViewStep(PM, -25, 10);
+    exercise(PM, doc, rng(22), 120);
+    expect(mismatches(doc)).toEqual([]);
+    expect(fellBack(doc)).toEqual([]);
+    expect(hits.object).toBeGreaterThan(0);
+  }, 300_000);
 
   it('asks the renderer for model assets once and follows a relinked asset', async () => {
     const { PM, doc } = await editor();

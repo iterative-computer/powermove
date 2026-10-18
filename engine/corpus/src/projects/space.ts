@@ -225,6 +225,57 @@ function special(): CorpusProject[] {
   ];
 }
 
+/**
+ * Generated model groups whose recipe parameters are animated
+ * (`animatedPart`): the parts draw the recipe's parametric geometry for
+ * the evaluated parameters and move by their new base. Parts are stored
+ * as the recipe built them at the stored parameters.
+ */
+function modelGroups(): CorpusProject {
+  const b = newProject('3d/model-group', { name: 'Animated model-group recipes', backgroundFill: BLACK });
+  const zero = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
+  const rocket = b.layer('group', { name: 'Rocket', threeD: true, p: { 'rotation.y': b.ch(0, [[0, 0], [3, 90]]) } });
+  const radius = .6, length = 2.8, nose = 1;
+  const rocketParts: Array<[string, Doc, Doc]> = [
+    ['body', { primitive: 'cylinder', parameters: { radius, height: length } }, zero],
+    ['nose', { primitive: 'cone', parameters: { radius, height: nose } }, { ...zero, y: length / 2 + nose / 2 }],
+    ['engine', { primitive: 'cylinder', parameters: { radiusTop: radius * .75, radiusBottom: radius * .55, height: radius * .7 } }, { ...zero, y: -length / 2 - radius * .35 }],
+  ];
+  const rocketMeta: Doc = {};
+  for (const [part, source, base] of rocketParts) {
+    const layer = b.object3d({ source, material: material(part === 'nose' ? '#FF6B1A' : '#E8E2CF', { metalness: .4 }), generation: { groupId: rocket.id, partId: part } },
+      { name: `Rocket ${part}`, group: rocket.id, position: [base.x - 1.6, base.y, base.z] });
+    rocketMeta[part] = { layerId: layer.id, base };
+    b.add(layer);
+  }
+  rocket.d = { ...rocket.d, modeling: {
+    version: 1, recipe: { kind: 'rocket', parameters: { length, radius, nose, fins: 4, finSize: .8 }, modifiers: [] },
+    p: { length: b.ch(length, [[0, length], [3, 4.2]]), nose: b.ch(nose, [[1, nose], [3, 1.6]]) },
+    parts: rocketMeta, retired: [],
+  } };
+  b.add(rocket);
+  const stairs = b.layer('group', { name: 'Staircase', threeD: true });
+  const stairMeta: Doc = {};
+  const steps = 6, sr = 1.2, rise = .22, turn = 30;
+  for (let i = 0; i < steps; i++) {
+    const part = `step_${String(i).padStart(3, '0')}`, angle = i * turn * Math.PI / 180;
+    const base = { ...zero, x: sr * Math.cos(angle), y: i * rise, z: sr * Math.sin(angle) };
+    const layer = b.object3d({ source: { primitive: 'box', parameters: { width: 1, height: rise * .6, depth: .45 } }, material: material('#4C8DFF', { roughness: .6 }), generation: { groupId: stairs.id, partId: part } },
+      { name: `Step ${i}`, group: stairs.id, position: [base.x + 1.6, base.y - 1, base.z], rotation: [0, i ? -turn * i : 0, 0] });
+    stairMeta[part] = { layerId: layer.id, base };
+    b.add(layer);
+  }
+  stairs.d = { ...stairs.d, modeling: {
+    version: 1, recipe: { kind: 'staircase', parameters: { steps, radius: sr, rise, turn, width: 1, depth: .45 }, modifiers: [] },
+    p: { rise: b.ch(rise, [[0, rise], [3, .32]]), turn: b.ch(turn, [[0, turn], [3, 45]]), radius: b.ch(sr, [[1.5, sr], [3, 1.6]]) },
+    parts: stairMeta, retired: [],
+  } };
+  b.add(stairs);
+  b.add(b.light3d({ type: 'sun', p: { intensity: 2.5 } }, { position: [-3, 5, 4] }));
+  b.add(camera(b, {}, [0, .8, 7]));
+  return project(b, { group: '3D', title: 'Animated model-group recipes (rocket, staircase)', covers: ['model groups', 'animated recipe parameters', 'recipe part geometry', 'recipe part base offsets'], samples: [0, 1.5, 3] });
+}
+
 export function spaceProjects(): CorpusProject[] {
-  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), gltfMaterials(), meshSlots(), ...special()];
+  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), gltfMaterials(), meshSlots(), ...special(), modelGroups()];
 }

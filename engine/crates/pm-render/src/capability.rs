@@ -458,9 +458,6 @@ fn check_composition(
         {
             add(layer, Feature::CompatLevel2);
         }
-        if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
-            add(layer, Feature::Scene3d("model groups".into()));
-        }
         if !fonts && matches!(ty.as_str(), "text" | "captions") {
             add(
                 layer,

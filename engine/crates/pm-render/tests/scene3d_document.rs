@@ -679,20 +679,6 @@ fn the_static_check_looks_inside_legacy_scenes() {
             true,
         ),
         (
-            "3D: model-group recipe parts (legacy scene object cube)",
-            Box::new(move |doc: &mut Value| {
-                doc.pointer_mut(&format!("{scene}/objects/0"))
-                    .unwrap()
-                    .as_object_mut()
-                    .unwrap()
-                    .insert(
-                        "generation".into(),
-                        json!({ "groupId": "g", "partId": "p" }),
-                    );
-            }),
-            false,
-        ),
-        (
             "3D: SVG texture maps (legacy scene object ring)",
             Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))

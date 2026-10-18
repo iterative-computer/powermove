@@ -31,7 +31,7 @@ use pm_geom3d::query::{
 };
 use pm_geom3d::{Group, MeshSource, Parameters, Source};
 use pm_model::json::{Map, Value};
-use pm_model::{JsString, Node, NodeKind};
+use pm_model::{JsString, Node};
 
 use crate::bounds::{Bounds, LayerHost};
 use crate::js_sem::{JsResult, JsThrow, JsValue};
@@ -673,153 +673,7 @@ fn lens<'d>(
     Ok((lens, position, target))
 }
 
-// ── recipe parts ────────────────────────────────────────────────────────
-
-/// `RECIPE_PARAMETERS` defaults and ranges for animatable parameters.
-fn recipe_field(kind: &str, key: &str) -> Option<(f64, f64, f64, bool)> {
-    Some(match (kind, key) {
-        ("rocket", "length") => (2.8, 0.1, 50.0, false),
-        ("rocket", "radius") => (0.6, 0.05, 10.0, false),
-        ("rocket", "nose") => (1.0, 0.05, 20.0, false),
-        ("rocket", "fins") => (4.0, 0.0, 16.0, true),
-        ("rocket", "finSize") => (0.8, 0.05, 10.0, false),
-        ("staircase", "steps") => (12.0, 1.0, 128.0, true),
-        ("staircase", "radius") => (1.5, 0.1, 30.0, false),
-        ("staircase", "rise") => (0.22, 0.01, 5.0, false),
-        ("staircase", "turn") => (30.0, -180.0, 180.0, false),
-        ("staircase", "width") => (1.2, 0.05, 10.0, false),
-        ("staircase", "depth") => (0.5, 0.05, 10.0, false),
-        ("text", "size") => (1.0, 0.01, 50.0, false),
-        ("text", "depth") => (0.12, 0.0, 5.0, false),
-        ("text", "bevel") => (0.02, 0.0, 1.0, false),
-        ("lathe", "segments") => (48.0, 3.0, 128.0, true),
-        ("extrude", "depth") => (0.2, 0.001, 50.0, false),
-        _ => return None,
-    })
-}
-
-/// `recipeParts(recipe).get(part).base` (x, y, z) for a recipe's
-/// parameters (`n(key, default)`: the parameter when it is a number).
-fn recipe_base(kind: &str, params: &HashMap<String, JsValue>, part: &str) -> Option<Vec3> {
-    let n = |k: &str, d: f64| match params.get(k) {
-        Some(JsValue::Number(v)) => *v,
-        _ => d,
-    };
-    match kind {
-        "rocket" => {
-            let (radius, length, nose) = (n("radius", 0.6), n("length", 2.8), n("nose", 1.0));
-            let fins = n("fins", 4.0).floor();
-            match part {
-                "body" => Some([0.0; 3]),
-                "nose" => Some([0.0, length / 2.0 + nose / 2.0, 0.0]),
-                "engine" => Some([0.0, -length / 2.0 - radius * 0.35, 0.0]),
-                p => {
-                    let i: f64 = p.strip_prefix("fin_")?.parse().ok()?;
-                    (i < fins && format!("fin_{:02}", i as u32) == p).then_some([0.0; 3])
-                }
-            }
-        }
-        "staircase" => {
-            let count = n("steps", 12.0).floor();
-            let (radius, rise, turn) = (n("radius", 1.5), n("rise", 0.22), n("turn", 30.0));
-            let i: f64 = part.strip_prefix("step_")?.parse().ok()?;
-            if i >= count || count.is_nan() || format!("step_{:03}", i as u32) != part {
-                return None;
-            }
-            let angle = (i * turn * std::f64::consts::PI) / 180.0;
-            Some([
-                radius * libm::cos(angle),
-                i * rise,
-                radius * libm::sin(angle),
-            ])
-        }
-        "lathe" | "extrude" => (part == "model").then_some([0.0; 3]),
-        _ => None,
-    }
-}
-
 impl<'d> Scope<'_, 'd> {
-    /// `animatedPart`'s offset for a generated recipe part, in world units
-    /// (`parent3D` applied), or `None` when the recipe is not animated.
-    fn recipe_offset(&mut self, layer: &'d Node, time: f64) -> JsResult<Option<Vec3>> {
-        let object = node::member(
-            node::member(node::member(Some(layer), "d"), "data"),
-            "object",
-        );
-        let Some(generation) = node::member(object, "generation").filter(|g| node::truthy(Some(g)))
-        else {
-            return Ok(None);
-        };
-        let group_id = node::get(generation, b"groupId");
-        let Some(group) = self.layer_by_id(&group_id) else {
-            return Ok(None);
-        };
-        let modeling = node::member(node::member(Some(group), "d"), "modeling");
-        if !node::truthy(modeling) {
-            return Ok(None);
-        }
-        let recipe = node::member(modeling, "recipe");
-        let kind = node::string(node::member(recipe, "kind"))
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        // The recipe's stored parameters, then the evaluated model channels.
-        let mut params: HashMap<String, JsValue> = HashMap::new();
-        if let Some(NodeKind::Object(map)) = node::member(recipe, "parameters").map(Node::kind) {
-            for (k, v) in map {
-                params.insert(k.to_string_lossy(), node::js_value_opt(Some(v)));
-            }
-        }
-        let original = params.clone();
-        let mut changed = false;
-        if let Some(p) = node::member(modeling, "p")
-            && let NodeKind::Object(map) = p.kind()
-        {
-            for (k, prop) in map {
-                let key = k.to_string_lossy();
-                let v = self.channel_p(group, Some(prop), time, &format!("model.{key}"))?;
-                // `recipeSchema`'s parameter checks (a ZodError in today's app).
-                let valid = match (recipe_field(&kind, &key), &v) {
-                    (Some((_, lo, hi, integer)), JsValue::Number(n)) => {
-                        n.is_finite() && *n >= lo && *n <= hi && (!integer || n.fract() == 0.0)
-                    }
-                    _ => false,
-                };
-                if !valid {
-                    return Err(JsThrow {
-                        kind: "ZodError",
-                        message: format!("Invalid model parameter: {key}"),
-                    });
-                }
-                if original.get(&key) != Some(&v) {
-                    changed = true;
-                }
-                params.insert(key, v);
-            }
-        }
-        if !changed {
-            return Ok(None);
-        }
-        let part_id =
-            node::to_js_string(node::member(Some(generation), "partId")).to_string_lossy();
-        let prior = node::member(
-            node::member(node::member(modeling, "parts"), &part_id),
-            "base",
-        );
-        if prior.is_none() {
-            return Ok(None);
-        }
-        let Some(base) = recipe_base(&kind, &params, &part_id) else {
-            return Ok(None);
-        };
-        let pb = |k: &str| node::number(node::member(prior, k)).unwrap_or(f64::NAN);
-        let delta = [base[0] - pb("x"), base[1] - pb("y"), base[2] - pb("z")];
-        // `delta.applyMatrix4(parent).sub(origin)`.
-        let parent = self.parent3d(layer, time, None)?;
-        let a = m3::apply(&parent, delta);
-        let o = m3::apply(&parent, [0.0; 3]);
-        Ok(Some([a[0] - o[0], a[1] - o[1], a[2] - o[2]]))
-    }
-
     /// `compositionRuntime(PM, time)` of the current composition.
     pub fn composition_scene3d(
         &mut self,
@@ -843,7 +697,8 @@ impl<'d> Scope<'_, 'd> {
                 Some(Role3d::Object) if self.active(l, time)? => {
                     let id = node::to_js_string(node::member(Some(l), "id")).to_string_lossy();
                     let mut world = self.world3d(l, time, false)?;
-                    if let Some(d) = self.recipe_offset(l, time)? {
+                    if let Some(part) = self.animated_part(l, time)? {
+                        let d = self.recipe_world_offset(l, time, &part)?;
                         world[12] += d[0];
                         world[13] += d[1];
                         world[14] += d[2];

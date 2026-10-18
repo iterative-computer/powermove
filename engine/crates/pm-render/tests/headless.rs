@@ -593,7 +593,8 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["layers"][i]["d"]["data"]["object"]["generation"] =
             json!({ "groupId": "g", "partId": "p" });
     });
-    assert!(scene(&f, "recipe parts"), "{f:?}");
+    // Recipe parts draw natively (`pm_eval::recipe`, the 3D lane's).
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });

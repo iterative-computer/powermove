@@ -190,10 +190,9 @@ pub(crate) fn composition_scene<'d>(
     view: Option<&View3d>,
     root_comp: bool,
 ) -> JsResult<Result<Scene3d, String>> {
+    // Recipe parts of an animated model group carry the recipe's geometry
+    // and base offset (`animatedPart`, `pm_eval::recipe`).
     let evaluated = scope.composition_scene(time)?;
-    if !evaluated.recipe_parts.is_empty() {
-        return Ok(Err("model-group recipe parts".into()));
-    }
     let Value::Object(scene) = &evaluated.scene else {
         return Ok(Err("the evaluated 3D scene".into()));
     };
@@ -205,7 +204,16 @@ pub(crate) fn composition_scene<'d>(
         match Role3d::of(l) {
             Some(Role3d::Object) if scope.active(l, time)? => {
                 let id = js::layer_id(l);
-                objects.insert(id.clone(), scope.world3d(l, time, false)?);
+                let mut world = scope.world3d(l, time, false)?;
+                // `compositionRuntime` moves an animated recipe part by its
+                // base offset through its parent space.
+                if let Some(part) = scope.animated_part(l, time)? {
+                    let d = scope.recipe_world_offset(l, time, &part)?;
+                    world[12] += d[0];
+                    world[13] += d[1];
+                    world[14] += d[2];
+                }
+                objects.insert(id.clone(), world);
                 facts.insert(
                     id,
                     LayerFacts {
@@ -574,9 +582,6 @@ fn check_object(
         )
     {
         out.push(format!("{p} primitives"));
-    }
-    if node::truthy(node::member(object, "generation")) {
-        out.push("model-group recipe parts".to_owned());
     }
     // Map images outside the drawn still classes.
     let mut materials: Vec<Option<&Node>> = vec![node::member(object, "material")];
