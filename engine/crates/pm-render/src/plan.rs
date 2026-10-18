@@ -1173,19 +1173,18 @@ fn native_content_quad<'d>(
                             return Ok(None);
                         }
                     };
-                    if doc.compat_supported().is_err() {
+                    let (sw, sh) = crate::vector::svg::source_size(record);
+                    if doc.compat_supported(sw, sh).is_err() {
                         b.unsupported
                             .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
                         return Ok(None);
                     }
-                    let sw = js::or_number(&rec("w"), 1.0);
-                    let sh = js::or_number(&rec("h"), 1.0);
                     let bw = js::or_number(js::get(&d, "w"), wf);
                     let bh = js::or_number(js::get(&d, "h"), hf);
                     let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
                     let world = scaled_world(scope, layer, time, scale)?;
                     let (width, height, _) =
-                        pm_vector::render::svg::svg_raster_dimensions(sw, sh, bw, bh, &world, 8192.0);
+                        pm_vector::render::svg::svg_raster_dimensions(sw, sh, bw, bh, &world, pm_vector::render::svg::SVG_MAX_DIMENSION);
                     return Ok(Some(Quad::Texture {
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgBucket {
                             path: path.clone(),

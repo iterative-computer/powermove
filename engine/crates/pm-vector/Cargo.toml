@@ -70,3 +70,7 @@ required-features = ["render"]
 [[example]]
 name = "svg_debug"
 required-features = ["svg-diagnostics"]
+
+[[example]]
+name = "svg_gate"
+required-features = ["render"]

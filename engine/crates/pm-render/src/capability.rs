@@ -637,8 +637,8 @@ fn check_media(
             // Level 1 draws Chromium's Canvas2D replay of the `<img>`
             // bucket. A document Chromium shows as a broken <img> paints
             // nothing (XML/image-document errors only); a document the
-            // replay cannot paint yet (text, masks, patterns, embedded
-            // images, other filters) stays routed.
+            // replay does not paint as Chromium does at every bucket
+            // (`SvgDocument::compat_supported`) stays routed.
             let Some(assets) = assets else {
                 // Without media the document cannot be inspected.
                 add(layer, Feature::SvgImage);
@@ -658,8 +658,11 @@ fn check_media(
             }
             // A document Chromium paints but usvg/roxmltree reject (external
             // DTD subsets, parameter entities) stays routed, never a failure.
+            // The verdict covers every bucket the asset's size can request,
+            // so it holds at every frame.
+            let (sw, sh) = crate::vector::svg::source_size(record);
             match crate::vector::svg::document(&path) {
-                Ok((doc, _)) if doc.compat_supported().is_ok() => {}
+                Ok((doc, _)) if doc.compat_supported(sw, sh).is_ok() => {}
                 _ => add(layer, Feature::SvgImage),
             }
             return;

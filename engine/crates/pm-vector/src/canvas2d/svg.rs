@@ -2,11 +2,10 @@
 //! the usvg tree gives the render list and resolved styles, the raw document
 //! gives Blink's double-precision transforms and the original shapes
 //! (`blinksvg` builds the paint record, `svgrender` replays it).
-use super::blinksvg::{self, Affine, Flags, Geometry, Gradient, GradientKind, ImageDraw, ImageFilter, ItemState, Op, PaintResolver, RawElements, RecordBuilder, ShapeStyle, TextItem};
-use super::m44::M44;
+use super::blinksvg::{self, Affine, Geometry, Gradient, GradientKind, ImageDraw, ImageFilter, ItemState, Op, PaintResolver, RawElements, RecordBuilder, ShapeStyle, TextItem};
 use super::msaa::Rule;
 use super::skpath::{Mat, SkPath};
-use super::skrrect::{SkRRect, oval_path, rect_path, rrect_path};
+use super::skrrect::{SkRRect, oval_path, rect_path};
 use super::svgrender::Canvas;
 use crate::{canvas2d::shape::Bitmap, render::svg::SvgError};
 use std::collections::BTreeMap;
@@ -457,19 +456,11 @@ impl Walk<'_> {
 
 pub type TextDraw<'a> = dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Bitmap, SvgError> + 'a;
 
-/// `drawImage(img, 0, 0, width, height)` of the SVG: Blink's layout and
-/// paint record, replayed by the Graphite emulation.
-/// Whether the paint record of this document can be built: the walk
-/// reports unsupported features (masks, patterns, embedded images, nested
-/// or multi-shape clip paths, filters other than a lone Gaussian blur,
-/// blend modes) as errors, independent of the bucket size.
-pub fn supported(data: &[u8], tree: &usvg::Tree, elements: &Elements) -> Result<(), SvgError> {
-    let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
-    let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;
-    let raw = RawElements::new(&doc);
-    let sizing = blinksvg::natural_sizing(&doc);
-    let draw: ImageDraw = blinksvg::image_draw(&sizing, [64, 64]);
-    let builder = RecordBuilder::new(&raw, &draw);
+/// Blink's paint record of the document laid out for `draw` (the content
+/// `PaintRecordForCurrentFrame` returns; it depends on the bucket only
+/// through the layout container and root transform).
+fn content_record(raw: &RawElements, sizing: &blinksvg::NaturalSizing, draw: &ImageDraw, tree: &usvg::Tree, elements: &Elements) -> Result<Vec<Op>, SvgError> {
+    let builder = RecordBuilder::new(raw, draw);
     let root_state = builder.root_state();
     let viewport = match sizing.view_box {
         Some(vb) => [vb[2], vb[3]],
@@ -477,33 +468,226 @@ pub fn supported(data: &[u8], tree: &usvg::Tree, elements: &Elements) -> Result<
     };
     let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport } };
     walk.group(tree.root(), root_state, true)?;
+    Ok(walk.builder.finish())
+}
+
+/// `SVGImage::DrawInternal` around the record: save, clip to the enclosing
+/// destination rect, concat the source-to-destination matrix (the record
+/// in between), restore.
+fn draw_internal_prefix(draw: &ImageDraw) -> [Op; 3] {
+    let c = draw.dst_clip;
+    [
+        Op::Save,
+        Op::ClipRect { rect: [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32], aa: false },
+        Op::Concat(draw.src_to_dst),
+    ]
+}
+
+/// Blink's paint record for `drawImage(img, 0, 0, width, height)`.
+fn image_record(doc: &usvg::roxmltree::Document<'_>, tree: &usvg::Tree, elements: &Elements, width: u32, height: u32) -> Result<Vec<Op>, SvgError> {
+    let raw = RawElements::new(doc);
+    let sizing = blinksvg::natural_sizing(doc);
+    let draw: ImageDraw = blinksvg::image_draw(&sizing, [width, height]);
+    let record = content_record(&raw, &sizing, &draw, tree, elements)?;
+    let mut ops = Vec::with_capacity(record.len() + 4);
+    ops.extend(draw_internal_prefix(&draw));
+    ops.extend(record);
+    ops.push(Op::Restore);
+    Ok(ops)
+}
+
+/// Whether the replay paints this document as Chromium does at every
+/// bucket in `sizes` (the sizes `svgRasterDimensions` can choose for it).
+///
+/// Only what the canvas references measure inside the 2D class is
+/// accepted (docs/engine/vector.md, "What level 1 draws"):
+///
+/// - the source uses only the elements and attributes of [`check_source`];
+/// - the record has no text, strokes, filters, non-antialiased shapes, or
+///   gradients other than padded linear and centered radial gradients of
+///   at most four stops ([`check_record`]);
+/// - at every bucket, every draw pass is one the emulation reproduces
+///   (`svgrender::pass_verdict`): analytic draws never share a
+///   multisampled pass with tessellated draws, and no clip is drawn into
+///   the depth attachment. Which renderer a draw or clip gets depends on
+///   the bucket (pixel alignment, the destination's aspect), so each
+///   bucket is classified with the replay's own renderer choice.
+pub fn supported(data: &[u8], tree: &usvg::Tree, elements: &Elements, sizes: &[(u32, u32)]) -> Result<(), SvgError> {
+    let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
+    let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;
+    check_source(&doc)?;
+    let raw = RawElements::new(&doc);
+    let sizing = blinksvg::natural_sizing(&doc);
+    // The content record is rebuilt only when the layout changes (a
+    // document without a natural size is laid out in the bucket).
+    let mut content: Option<(LayoutKey, Vec<Op>)> = None;
+    for &(width, height) in sizes {
+        let draw = blinksvg::image_draw(&sizing, [width, height]);
+        let key = (draw.container.map(f32::to_bits), draw.rounded, draw.root_transform);
+        if content.as_ref().is_none_or(|(k, _)| *k != key) {
+            let record = content_record(&raw, &sizing, &draw, tree, elements)?;
+            check_record(&record)?;
+            content = Some((key, record));
+        }
+        let record = &content.as_ref().unwrap().1;
+        let mut canvas = Canvas::classifier(width, height);
+        canvas.replay(&draw_internal_prefix(&draw))?;
+        canvas.replay(record)?;
+        canvas.replay(&[Op::Restore])?;
+        canvas.finish();
+        canvas.verdict().map_err(|e| SvgError(format!("{} (at a {width} × {height} bucket)", e.0)))?;
+    }
+    Ok(())
+}
+
+/// What the content record depends on in an `ImageDraw`: the container
+/// (bits), its rounded size and the root transform.
+type LayoutKey = ([u32; 2], [i32; 2], Option<Affine>);
+
+/// The SVG namespace.
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// Elements whose painting the canvas references cover (or that paint
+/// nothing).
+const ELEMENTS: &[&str] = &[
+    "svg", "g", "defs", "path", "rect", "circle", "ellipse", "polygon", "polyline", "line",
+    "linearGradient", "radialGradient", "stop", "clipPath", "title", "desc", "metadata",
+];
+
+/// Presentation properties (attributes and `style` declarations) whose
+/// painting the references cover. Stroke properties are inert without a
+/// stroke; a stroke itself is refused by [`check_record`].
+const PROPERTIES: &[&str] = &[
+    "fill", "fill-opacity", "fill-rule", "opacity", "clip-path", "clip-rule", "color", "display",
+    "shape-rendering", "stop-color", "stop-opacity", "stroke", "stroke-width", "stroke-opacity",
+    "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset",
+    // Illustrator's root `enable-background` is ignored by Blink and usvg.
+    "enable-background",
+];
+
+/// Non-presentation attributes, with what their values may be.
+fn attribute_ok(element: &str, name: &str, value: &str) -> Result<bool, SvgError> {
+    let v = value.trim();
+    let number = |v: &str| v.trim_end_matches("px").trim().parse::<f64>().is_ok_and(f64::is_finite);
+    let gradient = matches!(element, "linearGradient" | "radialGradient");
+    Ok(match name {
+        "id" | "class" | "version" | "baseProfile" | "viewBox" | "preserveAspectRatio" | "transform" | "style" => true,
+        // The root's size: numbers, px, percentages or auto
+        // (`natural_sizing`).
+        "width" | "height" if element == "svg" => v.is_empty() || v == "auto" || number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok()),
+        "x" | "y" if element == "svg" => true,
+        "x" | "y" | "width" | "height" | "rx" | "ry" | "cx" | "cy" | "r" | "x1" | "y1" | "x2" | "y2" if !gradient => number(v) || v == "auto" && matches!(name, "rx" | "ry"),
+        "x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "r" | "fx" | "fy" | "fr" if gradient => {
+            number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok())
+        }
+        "gradientUnits" | "gradientTransform" | "spreadMethod" | "href" if gradient => true,
+        "offset" if element == "stop" => number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok()),
+        "clipPathUnits" if element == "clipPath" => v == "userSpaceOnUse",
+        "d" if element == "path" => !v.contains(['A', 'a']),
+        "points" if matches!(element, "polygon" | "polyline") => true,
+        _ => false,
+    })
+}
+
+/// The document's elements and attributes, against what the references
+/// cover. Elements outside the SVG namespace (editor metadata) are not
+/// rendered by Blink or usvg and are skipped with their content.
+pub fn check_source(doc: &usvg::roxmltree::Document<'_>) -> Result<(), SvgError> {
+    let root = doc.root_element();
+    if root.tag_name().namespace() != Some(SVG_NS) || root.tag_name().name() != "svg" {
+        return Err(SvgError("the root element is not an SVG <svg>".into()));
+    }
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let name = n.tag_name().name();
+        if n.tag_name().namespace() != Some(SVG_NS) {
+            continue;
+        }
+        if !ELEMENTS.contains(&name) || (name == "svg" && n != root) {
+            return Err(SvgError(format!("SVG <{name}> needs compatibility support")));
+        }
+        if matches!(name, "title" | "desc" | "metadata") {
+            continue;
+        }
+        for a in n.attributes() {
+            let ok = match a.namespace() {
+                None => PROPERTIES.contains(&a.name()) || attribute_ok(name, a.name(), a.value())?,
+                Some(XML_NS) => true,
+                Some(XLINK_NS) => a.name() == "href" && matches!(name, "linearGradient" | "radialGradient"),
+                // Editor namespaces (Inkscape, Sodipodi, Illustrator) are
+                // not SVG properties.
+                Some(_) => true,
+            };
+            if !ok {
+                return Err(SvgError(format!("SVG <{name} {}=\"{}\"> needs compatibility support", a.name(), a.value())));
+            }
+            if a.namespace().is_none() && a.name() == "style" {
+                for decl in a.value().split(';') {
+                    let Some((prop, _)) = decl.split_once(':') else {
+                        if decl.trim().is_empty() {
+                            continue;
+                        }
+                        return Err(SvgError(format!("SVG style declaration {decl:?} needs compatibility support")));
+                    };
+                    let prop = prop.trim();
+                    if !PROPERTIES.contains(&prop) {
+                        return Err(SvgError(format!("SVG style property {prop} needs compatibility support")));
+                    }
+                }
+            }
+        }
+        stack.extend(n.children().filter(|c| c.is_element()));
+    }
+    Ok(())
+}
+
+/// The record's paint, against what the references cover.
+pub fn check_record(ops: &[Op]) -> Result<(), SvgError> {
+    for op in ops {
+        let flags = match op {
+            Op::DrawText(_) => return Err(SvgError("SVG text needs pm-text".into())),
+            Op::SaveLayer { .. } => return Err(SvgError("SVG filters need compatibility support".into())),
+            Op::DrawRect { flags, .. } | Op::DrawOval { flags, .. } | Op::DrawPath { flags, .. } => flags,
+            _ => continue,
+        };
+        if flags.stroke.is_some() {
+            return Err(SvgError("SVG strokes need compatibility support".into()));
+        }
+        if !flags.anti_alias {
+            return Err(SvgError("non-antialiased SVG shapes (shape-rendering) need compatibility support".into()));
+        }
+        if let Some(g) = &flags.shader {
+            check_gradient(g)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_gradient(g: &Gradient) -> Result<(), SvgError> {
+    if g.tile != 0 {
+        return Err(SvgError("SVG gradients with repeat or reflect spread need compatibility support".into()));
+    }
+    if let GradientKind::Conical { p0, r0, p1, .. } = g.kind
+        && (p0 != p1 || r0 != 0.0)
+    {
+        return Err(SvgError("focal SVG radial gradients need compatibility support".into()));
+    }
+    let shader = super::gradient::Shader::from_blink(g);
+    if shader.solid.is_some() {
+        return Err(SvgError("degenerate SVG gradients need compatibility support".into()));
+    }
+    if shader.num_stops > 4 {
+        return Err(SvgError("SVG gradients of more than four stops need compatibility support".into()));
+    }
     Ok(())
 }
 
 pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, height: u32, text: &mut TextDraw<'_>) -> Result<Bitmap, SvgError> {
     let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
     let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;
-    let raw = RawElements::new(&doc);
-    let sizing = blinksvg::natural_sizing(&doc);
-    let draw: ImageDraw = blinksvg::image_draw(&sizing, [width, height]);
-    let builder = RecordBuilder::new(&raw, &draw);
-    let root_state = builder.root_state();
-    let viewport = match sizing.view_box {
-        Some(vb) => [vb[2], vb[3]],
-        None => [sizing.width.unwrap_or(draw.container[0]), sizing.height.unwrap_or(draw.container[1])],
-    };
-    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport } };
-    walk.group(tree.root(), root_state, true)?;
-    let record = walk.builder.finish();
-    // SVGImage::DrawInternal: save, clip to the enclosing destination rect,
-    // concat the source-to-destination matrix, play the record, restore.
-    let mut ops = Vec::with_capacity(record.len() + 4);
-    ops.push(Op::Save);
-    let c = draw.dst_clip;
-    ops.push(Op::ClipRect { rect: [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32], aa: false });
-    ops.push(Op::Concat(draw.src_to_dst));
-    ops.extend(record);
-    ops.push(Op::Restore);
+    let ops = image_record(&doc, tree, elements, width, height)?;
     if super::diagnostic("PM_SVG_DEBUG").is_some() {
         for op in &ops {
             match op {
@@ -514,14 +698,8 @@ pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, h
         }
     }
     let mut canvas = Canvas::new(width, height);
-    let tree_size = (tree.size().width(), tree.size().height());
-    let _ = tree_size;
     canvas.text = Some(Box::new(|t: &usvg::Text, m: Mat, w: u32, h: u32| text(t, m, w, h).map(|b| b.rgba)));
     canvas.replay(&ops)?;
     Ok(Bitmap { width, height, rgba: canvas.finish() })
 }
 
-#[allow(dead_code)]
-fn unused(_: &M44, _: &Flags) {
-    let _ = rrect_path;
-}

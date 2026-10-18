@@ -42,11 +42,17 @@ impl core::fmt::Display for SvgError {
 
 impl std::error::Error for SvgError {}
 
+/// A cached gate verdict: the source size (bits) and the result.
+type CompatVerdict = ((u64, u64), Result<(), SvgError>);
+
 /// A parsed SVG.
 pub struct SvgDocument {
     tree: usvg::Tree,
     has_text: bool,
     data: Vec<u8>,
+    /// [`SvgDocument::compat_supported`] verdicts by source size (the
+    /// bucket ladder depends only on it).
+    compat: std::sync::Mutex<Vec<CompatVerdict>>,
 }
 
 impl core::fmt::Debug for SvgDocument {
@@ -174,11 +180,18 @@ fn with_document_stack<T: Send>(data: &[u8], f: impl FnOnce() -> Result<T, SvgEr
     with_document_stack_depth(element_depth(data), f)
 }
 
+/// Documents nested at most this deep parse on the caller's stack (2 MiB
+/// engine workers; `shallow_documents_parse_on_a_small_stack` checks it).
+const INLINE_DEPTH: usize = 64;
+
 fn with_document_stack_depth<T: Send>(depth: usize, f: impl FnOnce() -> Result<T, SvgError> + Send) -> Result<T, SvgError> {
     if depth > MAX_ELEMENT_DEPTH {
         return Err(SvgError(format!(
             "elements nest {depth} deep; Chromium's XML parser stops at {MAX_ELEMENT_DEPTH}"
         )));
+    }
+    if depth <= INLINE_DEPTH {
+        return f();
     }
     // 16 MiB plus 64 KiB per level (at most ~330 MiB of reserved, lazily
     // committed address space).
@@ -208,6 +221,7 @@ impl SvgDocument {
             tree,
             has_text,
             data: data.to_vec(),
+            compat: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -276,17 +290,34 @@ impl SvgDocument {
         }
     }
 
-    /// Whether [`SvgDocument::raster_compat`] can draw this document: text
-    /// (which needs a pm-text resolver) and the paint features the record
-    /// builder does not emulate are errors naming the feature.
-    pub fn compat_supported(&self) -> Result<(), SvgError> {
+    /// Whether [`SvgDocument::raster_compat`] paints this document as
+    /// Chromium does at every bucket `svgRasterDimensions` can choose for an
+    /// asset of `source_width` × `source_height` (the asset record's `w`
+    /// and `h`; see [`svg_bucket_ladder`]). The error names what is not
+    /// emulated yet (docs/engine/vector.md, "What level 1 draws"). The
+    /// verdict is computed once per source size and kept with the document.
+    pub fn compat_supported(&self, source_width: f64, source_height: f64) -> Result<(), SvgError> {
+        let key = (source_width.to_bits(), source_height.to_bits());
+        let mut cache = self.compat.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, v)) = cache.iter().find(|(k, _)| *k == key) {
+            return v.clone();
+        }
+        let sizes = svg_bucket_ladder(source_width, source_height, SVG_MAX_DIMENSION);
+        let verdict = self.compat_supported_at(&sizes);
+        cache.push((key, verdict.clone()));
+        verdict
+    }
+
+    /// Whether [`SvgDocument::raster_compat`] paints this document as
+    /// Chromium does at each of `sizes` (uncached).
+    pub fn compat_supported_at(&self, sizes: &[(u32, u32)]) -> Result<(), SvgError> {
         if self.has_text {
             return Err(SvgError("SVG text needs pm-text".into()));
         }
         with_document_stack(&self.data, || {
             let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
             let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
-            crate::canvas2d::svg::supported(&annotated, &tree, &elements)
+            crate::canvas2d::svg::supported(&annotated, &tree, &elements, sizes)
         })
     }
 
@@ -495,6 +526,9 @@ fn push_path(p: &usvg::Path, transform: Affine, scene: &mut CoverageScene) -> Op
 /// matrix, maxDimension = 8192)` (legacy/gl/compositor.ts): the bucket a
 /// layer's SVG is rasterized at, keeping the source aspect ratio. Returns
 /// `(width, height, scale)`.
+/// The largest bucket dimension the compositor asks for (`compositor.ts`).
+pub const SVG_MAX_DIMENSION: f64 = 8192.0;
+
 pub fn svg_raster_dimensions(
     source_width: f64,
     source_height: f64,
@@ -513,6 +547,33 @@ pub fn svg_raster_dimensions(
     let box_density = js::max(bw / sw, bh / sh);
     let max_scale = js::max(0.25, limit / js::max(sw, sh));
     let requested = continuous_raster_scale(matrix, box_density, max_scale);
+    bucket_at_scale(sw, sh, limit, requested)
+}
+
+/// Every bucket [`svg_raster_dimensions`] can return for a source size,
+/// whatever the box and matrix: the requested scale is a multiple of 0.25
+/// between 0.25 and the bound, so the ladder is finite. Ordered by scale,
+/// without repeats.
+pub fn svg_bucket_ladder(source_width: f64, source_height: f64, max_dimension: f64) -> Vec<(u32, u32)> {
+    use crate::js;
+    let num = |v: f64, d: f64| if v.is_nan() || v == 0.0 { d } else { v };
+    let sw = js::max(1.0, num(source_width, 1.0));
+    let sh = js::max(1.0, num(source_height, 1.0));
+    let limit = js::max(1.0, num(max_dimension, 8192.0));
+    let max_scale = js::max(0.25, limit / js::max(sw, sh));
+    let steps = libm::ceil(js::max(0.25, max_scale) * 4.0 - 1e-9) as u32;
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(steps as usize);
+    for k in 1..=steps {
+        let (w, h, _) = bucket_at_scale(sw, sh, limit, f64::from(k) / 4.0);
+        if out.last() != Some(&(w, h)) {
+            out.push((w, h));
+        }
+    }
+    out
+}
+
+fn bucket_at_scale(sw: f64, sh: f64, limit: f64, requested: f64) -> (u32, u32, f64) {
+    use crate::js;
     let mut width = js::max(1.0, libm::ceil(sw * requested));
     let mut height = js::max(1.0, libm::ceil(sh * requested));
     if js::max(width, height) > limit {
@@ -598,5 +659,125 @@ mod tests {
         // The left half is covered: the 10 × 10 user space spans 40 × 10.
         assert_eq!(b.rgba[(5 * 40 + 10) * 4 + 3], 255);
         assert_eq!(b.rgba[(5 * 40 + 30) * 4 + 3], 0);
+    }
+
+    /// Every bucket `svgRasterDimensions` returns for a source size is on
+    /// that size's ladder, whatever the box and matrix.
+    #[test]
+    fn the_bucket_ladder_covers_every_requested_bucket() {
+        for (sw, sh) in [(100.0, 50.0), (24.0, 24.0), (320.0, 180.0), (1.0, 1.0), (3000.0, 7.0)] {
+            let ladder = svg_bucket_ladder(sw, sh, SVG_MAX_DIMENSION);
+            assert!(ladder.windows(2).all(|w| w[0] != w[1]));
+            let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+            let mut rand = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 11) as f64 / (1u64 << 53) as f64
+            };
+            for _ in 0..2000 {
+                let s = rand() * 300.0;
+                let a = rand() * 6.3;
+                let m = [s * a.cos(), s * a.sin() * (rand() - 0.5), -s * a.sin(), s * a.cos() * 2.0 * rand(), 0.0, 0.0];
+                let (bw, bh) = (rand() * 4000.0, rand() * 4000.0);
+                let (w, h, _) = svg_raster_dimensions(sw, sh, bw, bh, &m, SVG_MAX_DIMENSION);
+                assert!(ladder.contains(&(w, h)), "{sw}x{sh}: {w}x{h} not on the ladder");
+            }
+        }
+        assert_eq!(svg_bucket_ladder(100.0, 50.0, SVG_MAX_DIMENSION)[0], (25, 13));
+        assert!(svg_bucket_ladder(100.0, 50.0, SVG_MAX_DIMENSION).contains(&(800, 400)));
+    }
+
+    const NS: &str = r#"xmlns="http://www.w3.org/2000/svg" width="80" height="60" viewBox="0 0 80 60""#;
+
+    fn gate(body: &str) -> Result<(), SvgError> {
+        let svg = format!("<svg {NS}>{body}</svg>");
+        SvgDocument::parse(svg.as_bytes()).unwrap().compat_supported(80.0, 60.0)
+    }
+
+    /// The level 1 gate admits what the canvas references measure inside
+    /// the 2D class and names everything else (docs/engine/vector.md, "What
+    /// level 1 draws").
+    #[test]
+    fn the_level1_gate_admits_only_measured_paint() {
+        let admitted = [
+            // Analytic draws only: rects, a round rect, ovals.
+            r##"<rect x="4.5" y="4" width="40" height="30" fill="#A73366"/><rect width="10" height="10" rx="3" fill="#123"/><circle cx="50" cy="30" r="12" fill="#4C8DFF" fill-opacity="0.5"/><ellipse cx="20" cy="40" rx="9" ry="5" fill="red"/>"##,
+            // Tessellated draws only, either fill rule.
+            r##"<path d="M10 10 L70 20 L40 55 Z" fill="#4C8DFF"/><path fill-rule="evenodd" d="M5 5 H75 V55 H5 Z M20 20 H60 V40 H20 Z" fill="#E8E2CF"/><polygon points="1,1 9,1 5,9" fill="blue"/>"##,
+            // Curves are tessellated wedges.
+            r##"<path d="M0 50 C 20 10, 40 70, 80 30 S 60 10, 40 5 Q 20 0 0 50 Z" fill="#0C0D12"/>"##,
+            // Padded linear and centered radial gradients of up to four stops.
+            r##"<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B2A4A"/><stop offset="60%" stop-color="#4C8DFF"/><stop offset="1" stop-color="#FFD66B"/></linearGradient><radialGradient id="r" href="#g" cx="0.5" cy="0.5" r="0.5"/></defs><rect width="80" height="60" rx="8" fill="url(#g)"/><circle cx="40" cy="30" r="20" fill="url(#r)"/>"##,
+            // Group opacity over analytic draws; a circle clip at the
+            // source's aspect.
+            r##"<g opacity="0.6"><rect x="4" y="4" width="40" height="40" fill="#A73366"/></g><defs><clipPath id="c"><circle cx="40" cy="30" r="25"/></clipPath></defs><g clip-path="url(#c)"><rect width="80" height="30" fill="#3FCF8E"/><rect y="30" width="80" height="30" fill="#1B2A4A"/></g>"##,
+            // Metadata, editor namespaces, inline style, display none.
+            r##"<title>t</title><desc>d</desc><metadata><x xmlns="urn:x"><y/></x></metadata><g xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" inkscape:label="layer"><rect width="10" height="10" style="fill:#fff; fill-opacity:0.5"/><path d="M0 0 L5 5" display="none"/></g>"##,
+            // A stroke property without a stroke paints nothing.
+            r##"<circle cx="10" cy="10" r="5" fill="red" stroke-width="3" stroke="none"/>"##,
+        ];
+        for body in admitted {
+            assert_eq!(gate(body), Ok(()), "{body}");
+        }
+        let routed = [
+            (r##"<style>rect{fill:red}</style><rect width="10" height="10"/>"##, "<style>"),
+            (r##"<defs><rect id="a" width="5" height="5"/></defs><use href="#a"/>"##, "<use>"),
+            (r##"<svg width="10" height="10"><rect width="5" height="5"/></svg>"##, "<svg>"),
+            (r##"<path d="M10 10 A 5 5 0 0 1 20 20 Z" fill="red"/>"##, "d="),
+            (r##"<rect width="50%" height="10" fill="red"/>"##, "width="),
+            (r##"<rect width="10" height="10" fill="red" mask="url(#m)"/>"##, "mask="),
+            (r##"<defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs><rect width="10" height="10" filter="url(#f)"/>"##, "filter"),
+            (r##"<rect width="10" height="10" fill="red" stroke="blue"/>"##, "strokes"),
+            (r##"<rect x="0.5" width="10" height="10" fill="red" shape-rendering="crispEdges"/>"##, "non-antialiased"),
+            (r##"<defs><linearGradient id="g" spreadMethod="repeat" x2="0.5"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient></defs><rect width="10" height="10" fill="url(#g)"/>"##, "spread"),
+            (r##"<defs><radialGradient id="g" fx="0.3"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs><rect width="10" height="10" fill="url(#g)"/>"##, "focal"),
+            (r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="0.25" stop-color="#0f0"/><stop offset="0.5" stop-color="#00f"/><stop offset="0.75" stop-color="#ff0"/><stop offset="1" stop-color="#0ff"/></linearGradient></defs><rect width="10" height="10" fill="url(#g)"/>"##, "four stops"),
+            (r##"<defs><clipPath id="c" clipPathUnits="objectBoundingBox"><circle cx="0.5" cy="0.5" r="0.5"/></clipPath></defs><rect width="10" height="10" clip-path="url(#c)"/>"##, "clipPathUnits"),
+            // A tessellated path next to an analytic oval in one pass.
+            (r##"<path d="M10 10 L70 20 L40 55 Z" fill="#4C8DFF"/><circle cx="56" cy="21" r="11" fill="#FF6B1A"/>"##, "multisampled pass"),
+            // An analytic clip over a tessellated path.
+            (r##"<defs><clipPath id="c"><circle cx="40" cy="30" r="25"/></clipPath></defs><path clip-path="url(#c)" d="M10 10 L70 20 L40 55 Z" fill="#4C8DFF"/>"##, "multisampled pass"),
+            // A path clip is drawn into the depth attachment.
+            (r##"<defs><clipPath id="c"><path d="M0 0 L80 0 L40 60 Z"/></clipPath></defs><rect clip-path="url(#c)" width="80" height="60" fill="red"/>"##, "depth attachment"),
+            (r##"<text x="1" y="9">a</text>"##, "text"),
+        ];
+        for (body, why) in routed {
+            let e = gate(body).expect_err(body);
+            assert!(e.0.contains(why), "{body}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_gate_verdict_is_kept_with_the_document() {
+        let svg = format!(r##"<svg {NS}><rect width="10" height="10" fill="red"/></svg>"##);
+        let doc = SvgDocument::parse(svg.as_bytes()).unwrap();
+        assert_eq!(doc.compat_supported(80.0, 60.0), Ok(()));
+        assert_eq!(doc.compat_supported(80.0, 60.0), Ok(()));
+        assert_eq!(doc.compat_supported(1.0, 1.0), Ok(()));
+        assert_eq!(doc.compat.lock().unwrap().len(), 2);
+    }
+
+    /// Documents up to the inline depth parse, judge and raster on a stack
+    /// as small as the engine's worker threads.
+    #[test]
+    fn shallow_documents_parse_on_a_small_stack() {
+        let svg = format!(
+            r##"<svg {NS}>{}<rect x="1.5" width="10" height="10" fill="red"/>{}</svg>"##,
+            "<g>".repeat(INLINE_DEPTH - 2),
+            "</g>".repeat(INLINE_DEPTH - 2)
+        );
+        assert_eq!(element_depth(svg.as_bytes()), INLINE_DEPTH);
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let doc = SvgDocument::parse(svg.as_bytes()).unwrap();
+                assert_eq!(doc.compat_supported(80.0, 60.0), Ok(()));
+                let b = doc.raster_compat(80, 60).unwrap();
+                assert_eq!(b.rgba[(5 * 80 + 5) * 4 + 3], 255);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

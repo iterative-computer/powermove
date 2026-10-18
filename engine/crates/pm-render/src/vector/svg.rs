@@ -5,10 +5,11 @@
 //! (Vello coverage, the float paint pass) when the SVG is solid fills and
 //! strokes inside its box, otherwise by resvg into the device rectangle
 //! with the box and viewport as an antialiased clip. Level 1 SVG images
-//! (today's `<img>` per size bucket) stay routed: resvg's bucket rasters
-//! are outside the 2D parity class against Chromium's
-//! (`pm-vector/tests/svg.rs`). SVGs with text stay routed at every level
-//! (usvg's text feature is off; SVG text goes through `pm-text`).
+//! (today's `<img>` per size bucket) are Chromium's Canvas2D replay
+//! (`VectorSource::SvgBucket`) when `SvgDocument::compat_supported` accepts
+//! the document at every bucket its size can request, and stay routed
+//! otherwise (docs/engine/vector.md, "What level 1 draws"). SVGs with text
+//! stay routed at every level (SVG text goes through `pm-text`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,16 @@ pub fn document(path: &Path) -> Result<(Arc<SvgDocument>, Stamp), String> {
         doc: doc.clone(),
     });
     Ok((doc, stamp))
+}
+
+/// The asset record's natural size (`w`, `h`; 1 when missing), as the
+/// compositor passes it to `svgRasterDimensions`.
+pub fn source_size(record: &pm_model::Node) -> (f64, f64) {
+    let rec = |k: &str| pm_eval::node::js_value_opt(pm_eval::node::member(Some(record), k));
+    (
+        crate::js::or_number(&rec("w"), 1.0),
+        crate::js::or_number(&rec("h"), 1.0),
+    )
 }
 
 /// How a level 2 SVG image layer is drawn.
