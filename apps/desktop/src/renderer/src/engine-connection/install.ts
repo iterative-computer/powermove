@@ -238,6 +238,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     standbyReady = s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
     return standbyReady;
   };
+  const documentEncoder = new TextEncoder();
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
@@ -253,6 +254,23 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     viewSeq: () => current?.viewSeq ?? null,
     fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
     wake: wakeStandby,
+    // A sync snapshot the window's session cannot serve carries the
+    // document to main's session for the window (main/engine/window-sessions.ts).
+    windowDocument: () => {
+      const doc = PM.EngineDoc;
+      const barrier = doc?.barrier;
+      if (!doc?.enabled || !barrier || typeof doc.snapshot !== 'function') return null;
+      barrier.flush();
+      return {
+        id: documentId(PM.proj?.id),
+        revision: barrier.revision,
+        full: () => {
+          const snapshot = doc.snapshot();
+          if (!snapshot) throw new Error('the document mirror has no snapshot');
+          return { json: documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
+        }
+      };
+    },
     log
   });
   (PM as any).EngineRender = renderTransport;

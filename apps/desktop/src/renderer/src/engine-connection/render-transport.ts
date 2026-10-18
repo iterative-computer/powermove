@@ -114,6 +114,8 @@ export interface TransportSession {
   readonly closed: boolean;
   readonly generation: number;
   readonly resyncPending: boolean;
+  /** The revision the engine has applied (0: the document has not arrived). */
+  readonly applied?: number;
   uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void;
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
@@ -148,11 +150,15 @@ export type RenderTransportOptions = {
   /** Opens a session to take snapshots of when none is open (the
    *  connection's standby); resolves once it has the document. */
   wake?: () => Promise<void>;
+  /** The window's document for a sync snapshot its session cannot serve
+   *  (none yet, the document not arrived, or a staged resync in flight):
+   *  main serves it from a session of its own. `full` serializes it. */
+  windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
   log: (level: 'info' | 'warn' | 'error', message: string) => void;
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
 };
 
-export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number };
+export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number; documentSync: number };
 
 function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): EngineSnapshotError {
   return new EngineSnapshotError(reply.code, reply.message);
@@ -161,7 +167,7 @@ function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): Eng
 export class EngineRenderTransport {
   private readonly producers = new Map<CompatSource, CompatProducer>();
   private readonly offAsk: () => void;
-  readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0 };
+  readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
   readonly thumbnails: EngineThumbnails;
 
@@ -188,9 +194,9 @@ export class EngineRenderTransport {
   }
 
   /** The request main forwards, or why there is none. */
-  private request(options: EngineSnapshotOptions, cls: SnapshotClass, uploaded: string[]): EngineSnapshotRequest {
+  private request(options: EngineSnapshotOptions, cls: SnapshotClass, uploaded: string[], detached = false): EngineSnapshotRequest {
     const session = this.options.session();
-    if (!session || session.id === null || session.closed) {
+    if (!detached && (!session || session.id === null || session.closed)) {
       // A blocked thread cannot wait for one to open: start it for the next call.
       if (cls === 'sync') void this.options.wake?.();
       throw new EngineSnapshotError('noSession', 'The window has no engine session yet.');
@@ -214,7 +220,7 @@ export class EngineRenderTransport {
       waitMs: Math.max(1, Math.min(120_000, Math.round(wait))),
       uploaded
     };
-    return { generation: session.generation, session: session.id, revision: this.options.revision(), snapshot };
+    return { generation: session?.generation ?? 0, session: session?.id ?? null, revision: this.options.revision(), snapshot };
   }
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
@@ -245,6 +251,22 @@ export class EngineRenderTransport {
     const started = performance.now();
     const native = this.options.native;
     if (!native.snapshotSync) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no synchronous engine snapshots.'), 'snapshot');
+    // This thread blocks until the answer: the window's own session serves
+    // it only when it has the document and no staged resync is on its way
+    // (the resync's next step would need this thread). Otherwise main serves
+    // it from a session of its own, with the document sent along.
+    const session = this.options.session();
+    const direct = !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
+    if (!direct && this.options.windowDocument?.()) {
+      // The window's own session (the standby) serves later ones.
+      if (!session || session.closed) void this.options.wake?.();
+      try {
+        return this.documentSnapshotSync(options, started);
+      } catch (error) {
+        if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
+        throw this.fail(error, 'snapshot');
+      }
+    }
     const uploaded: string[] = [];
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -273,6 +295,59 @@ export class EngineRenderTransport {
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
+  }
+
+  /** The last document revision main's session for this window has. */
+  private sentToMain: { id: string; revision: number } | null = null;
+
+  /** A sync snapshot main serves from its own session for this window. */
+  private documentSnapshotSync(options: EngineSnapshotOptions, started: number): EngineSnapshot {
+    const native = this.options.native;
+    const doc = this.options.windowDocument!()!;
+    const revision = this.options.revision() ?? doc.revision;
+    const uploaded: string[] = [];
+    let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
+    let body: { json: Uint8Array; hash: string; revision: number } | null = null;
+    for (let round = 0; round < MAX_ROUNDS + 1; round++) {
+      if (send && !body) body = doc.full();
+      const request = this.request(options, 'sync', uploaded, true);
+      const reply = native.snapshotSync!({
+        ...request,
+        session: null,
+        revision,
+        document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
+        ...(fallbackPixels.length ? { fallbackPixels } : {})
+      });
+      fallbackPixels = [];
+      if (reply.status === 'failed' && reply.code === 'needsDocument' && !send) {
+        // Main's session lost that revision (an engine restart): send it.
+        send = true;
+        continue;
+      }
+      if (send && body && reply.status !== 'failed') this.sentToMain = { id: doc.id, revision: body.revision };
+      send = false;
+      if (reply.status === 'rendered') {
+        this.stats.sync++;
+        this.stats.documentSync++;
+        this.stats.slowestSyncMs = Math.max(this.stats.slowestSyncMs, performance.now() - started);
+        return this.result(reply);
+      }
+      if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
+      if (reply.status === 'failed') throw failure(reply);
+      this.stats.rounds++;
+      const unmet = this.compatUnmet(reply.compat);
+      if (unmet) throw unmet;
+      const runner = this.options.fallbackRunner();
+      if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
+      for (const r of reply.fallback) {
+        if (uploaded.includes(r.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${r.key.slice(0, 12)}.`);
+        const pixels = runner.renderSync(r);
+        fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height, rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength) });
+        uploaded.push(r.key);
+      }
+    }
+    throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
   }
 
   /** The same, asynchronously (`async` or `idle` class). */

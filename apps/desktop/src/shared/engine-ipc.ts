@@ -232,10 +232,22 @@ export type EngineProbeResult =
  *  `revision` is the document revision the caller has (read-your-writes). */
 export type EngineSnapshotRequest = {
   generation: number;
-  session: number;
+  /** The window's engine session, or null with `document` (main serves the
+   *  snapshot from a session of its own for the window). */
+  session: number | null;
   revision: number | null;
   snapshot: import('./engine-protocol').SnapshotRequest;
+  /** The window's document, for a sync snapshot its own session cannot
+   *  serve (none yet, or a staged resync in flight). `json` is left out
+   *  when main already has this revision; main answers `needsDocument`
+   *  when it does not. */
+  document?: EngineSnapshotDocument;
+  /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
+   *  a `document` snapshot (a window's own session gets them on its port). */
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
 };
+
+export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
 
 /** What a snapshot came back with. `data` is RGBA8, rows top-down, in
  *  `pixels`'s encoding. `empty`: a layer target that draws nothing then

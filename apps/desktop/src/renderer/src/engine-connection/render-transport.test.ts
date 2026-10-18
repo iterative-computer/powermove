@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void> } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -44,8 +44,10 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number }
       onCompatAsk: (listener) => { askListener = listener; return () => { askListener = null; }; },
       answerCompat: (answer) => answers.push(answer)
     },
-    session: () => s,
+    session: () => ('session' in options ? options.session! : s),
     revision: options.flush ?? (() => 12),
+    windowDocument: options.windowDocument,
+    wake: options.wake,
     composition: () => 'comp-1',
     document: () => 'doc-1',
     viewSeq: () => 4,
@@ -174,6 +176,70 @@ describe('EngineRenderTransport', () => {
     expect(() => transport.renderFrameToCanvasSync(0, 64, 36)).toThrow(EngineSnapshotError);
     // Other failures keep today's '' for render.snapshot.
     expect(transport.snapshotDataUrlSync(0, 320, { w: 640, h: 360 })).toBe('');
+  });
+
+  describe('sync snapshots the window’s session cannot serve go to main’s session with the document', () => {
+    const doc = () => {
+      let serialized = 0;
+      return {
+        get serialized() { return serialized; },
+        windowDocument: () => ({ id: 'doc-1', revision: 12, full: () => { serialized++; return { json: new TextEncoder().encode('{"a":1}'), hash: 'ab'.repeat(32), revision: 12 }; } })
+      };
+    };
+
+    it('a staged resync in flight: the document goes along once, then only its revision', () => {
+      const d = doc();
+      const pending = { ...session(), resyncPending: true };
+      const { transport, asked } = setup([rendered(2, 2), rendered(2, 2)], { session: pending, windowDocument: d.windowDocument });
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(asked[0]).toMatchObject({ session: null, revision: 12, document: { id: 'doc-1', revision: 12, hash: 'ab'.repeat(32) } });
+      expect((asked[0] as any).document.json).toBeTruthy();
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(asked[1]!.document).toEqual({ id: 'doc-1', revision: 12 });
+      expect(d.serialized).toBe(1);
+      expect(transport.stats.documentSync).toBe(2);
+    });
+
+    it('no session yet (boot): pixels, not \'\', and the standby wakes for the next call', () => {
+      const d = doc();
+      const wake = vi.fn(async () => {});
+      const { transport, asked } = setup([rendered(2, 2)], { session: null, windowDocument: d.windowDocument, wake });
+      expect(transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 })).toMatch(/^data:image\/jpeg/);
+      expect(asked[0]).toMatchObject({ session: null });
+      expect(wake).toHaveBeenCalled();
+    });
+
+    it('main without that revision (an engine restart) gets the document on the next round', () => {
+      const d = doc();
+      const pending = { ...session(), resyncPending: true };
+      const { transport, asked } = setup([rendered(2, 2), { status: 'failed', code: 'needsDocument', message: 'send it' }, rendered(2, 2)], { session: pending, windowDocument: d.windowDocument });
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(asked[1]!.document!.json).toBeUndefined();
+      expect(asked[2]!.document!.json).toBeTruthy();
+      expect(d.serialized).toBe(2);
+    });
+
+    it('programs only this renderer draws go along with the next round', () => {
+      const d = doc();
+      const { transport, asked, runner } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('c'.repeat(64))], compat: [] },
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument });
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(runner.renderSync).toHaveBeenCalledTimes(1);
+      expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: ['c'.repeat(64)] } });
+      expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
+    });
+
+    it('a session with the document and no resync on its way serves it directly', () => {
+      const d = doc();
+      const { transport, asked } = setup([rendered(2, 2)], { session: { ...session(), applied: 12 }, windowDocument: d.windowDocument });
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(asked[0]).toMatchObject({ session: 5 });
+      expect(asked[0]!.document).toBeUndefined();
+      expect(d.serialized).toBe(0);
+    });
   });
 
   it('unpremultiplies like a canvas', () => {

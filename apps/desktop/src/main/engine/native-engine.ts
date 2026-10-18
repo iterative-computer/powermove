@@ -127,6 +127,10 @@ interface ProbeSlot {
   waiting: { interpret: string | null; resolve: (facts: MediaFacts) => void; reject: (cause: unknown) => void } | null;
 }
 
+/** Events the engine sends for a session, which main ignores for the
+ *  sessions it opened itself. */
+const SESSION_EVENTS: ReadonlySet<string> = new Set(['patchesApplied', 'renderStats', 'failure', 'shaderFallback', 'compat', 'audio', 'clock', 'surfacePool', 'frame']);
+
 export class NativeEngine {
   readonly services: HostServicesCore;
   /** Blender supervision for both engines (contract 11, `blender.ts`). */
@@ -317,6 +321,17 @@ export class NativeEngine {
   }
 
   /** The port a client holds to an engine (for handle binding by clients). */
+  /** Main's own host port on the current launch of `process`. */
+  hostPort(process: EngineProcess): { port: number; generation: number } | null {
+    const launch = this.supervisors[process].current;
+    return launch && !launch.exiting ? { port: launch.hostPort, generation: launch.generation } : null;
+  }
+
+  /** Posts an event to `process` for a session main opened. */
+  event(process: EngineProcess, body: Event, session: number | null): void {
+    this.supervisors[process].event(body, session);
+  }
+
   clientPort(id: number, process: EngineProcess): { port: number; generation: number } | null {
     return this.clients.get(id)?.ports.get(process) ?? null;
   }
@@ -571,7 +586,10 @@ export class NativeEngine {
     };
   }
 
-  private onEvent(process: EngineProcess, body: Event, _session: number | null): void {
+  private onEvent(process: EngineProcess, body: Event, session: number | null): void {
+    // What a session main opened itself reports (window snapshot sessions,
+    // window-sessions.ts): main only snapshots them.
+    if (session !== null && SESSION_EVENTS.has(body.type)) return;
     switch (body.type) {
       case 'inFlight':
         if (!validInFlight(body)) throw new Error('a breadcrumb lists at most 256 attributable items');

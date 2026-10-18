@@ -32,6 +32,7 @@ import { askAboutOfflineMedia, offlineClips } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
+import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
 import type { ChildLike, PortLike } from './ports';
 
@@ -361,9 +362,17 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     crash: (report) => broadcast(ENGINE_IPC.crash, report),
     status: (status) => broadcast(ENGINE_IPC.status, statusMessage(true, status))
   });
+  // Sync snapshots a window's own session cannot serve (none yet, or a
+  // staged resync in flight) come from a session main opens for the window.
+  const windowSessions = new WindowSnapshotSessions(
+    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
+    engine.definitions,
+    log
+  );
   snapshots = new SnapshotService({
     engine,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
+    windowSessions,
     log
   });
 
@@ -593,6 +602,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     // A page load (first load or reload) gets fresh ports; ports given to
     // a page die with it.
     contents.on('did-finish-load', () => {
+      // A new page starts its document revisions again.
+      windowSessions.forget(id);
       if (!engine) return;
       if (attached) engine.reconnectClient(id);
       else engine.addClient(id, deliver);
@@ -600,6 +611,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     });
     window.once('closed', () => {
       engine?.removeClient(id);
+      windowSessions.forget(id);
       compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
     });
@@ -624,6 +636,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     dispose: async () => {
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
+      windowSessions.dispose();
       snapshots = null;
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
       options.ipc.removeHandler(ENGINE_IPC.probeMedia);

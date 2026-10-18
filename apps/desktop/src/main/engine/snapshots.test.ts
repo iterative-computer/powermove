@@ -170,3 +170,44 @@ describe('SnapshotService', () => {
     expect(await service.snapshot(9, { hello: 'world' })).toMatchObject({ status: 'failed', code: 'invalidMessage' });
   });
 });
+
+describe('sync snapshots served by main’s session for the window', () => {
+  const doc = { id: 'doc', revision: 41, hash: 'ab'.repeat(32), json: new TextEncoder().encode('{}') };
+
+  it('accept a document in place of the session, never neither', () => {
+    expect(validSnapshotRequest(request({}, { session: null, document: doc }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { session: null, document: { id: 'doc', revision: 41 } }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { session: null }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: { id: 'doc', revision: 41, json: new Uint8Array(2) } }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { fallbackPixels: [] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }] }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(4) }] }))).toBe(false);
+  });
+
+  it('snapshot main’s session, the host naming itself, with no renderer session or launch match needed', async () => {
+    const e = engine(async () => rendered({ kind: 'inline', bytes: new Uint8Array(32) }));
+    const prepare = vi.fn(async () => ({ port: 3, session: 77 }));
+    const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
+    const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
+    expect(reply.status).toBe('rendered');
+    expect(prepare).toHaveBeenCalledWith(12, doc, []);
+    expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
+    expect(service.status().windowSessions).toBe(1);
+  });
+
+  it('answer needsDocument, and a bounded failure when main’s session is not ready in time', async () => {
+    const e = engine(async () => rendered({ kind: 'inline', bytes: new Uint8Array(32) }));
+    const needs = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare: async () => 'needsDocument' as const }, log: () => {} });
+    expect(await needs.snapshot(12, request({}, { session: null, document: { id: 'doc', revision: 41 } }))).toMatchObject({ status: 'failed', code: 'needsDocument' });
+    vi.useFakeTimers();
+    try {
+      const stuck = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare: () => new Promise(() => {}) }, log: () => {} });
+      const pending = stuck.snapshot(12, request({ waitMs: 50 }, { session: null, document: doc }));
+      await vi.advanceTimersByTimeAsync(50 + RENDER_ALLOWANCE_MS + 1);
+      expect(await pending).toMatchObject({ status: 'failed', code: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

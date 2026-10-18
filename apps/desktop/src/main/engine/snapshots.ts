@@ -28,6 +28,7 @@ import type { EngineSnapshotReply, EngineSnapshotRequest } from '../../shared/en
 import type { Request, Response, SnapshotOutcome, SnapshotRequest } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { RemoteError } from './protocol';
+import type { WindowSnapshotSessions } from './window-sessions';
 
 /** What the service needs of the engine (NativeEngine). */
 export interface SnapshotEngine {
@@ -63,7 +64,12 @@ const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 &&
 export function validSnapshotRequest(value: unknown): value is EngineSnapshotRequest {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
-  if (!safeUint(v['generation']) || !safeUint(v['session'])) return false;
+  if (!safeUint(v['generation'])) return false;
+  const document = v['document'];
+  if (document !== undefined && !validDocument(document)) return false;
+  if (v['session'] === null ? document === undefined : !safeUint(v['session'])) return false;
+  const fallback = v['fallbackPixels'];
+  if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -94,10 +100,42 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   return false;
 }
 
+/** Largest document a window may send with a snapshot (canonical JSON). */
+export const MAX_DOCUMENT_BYTES = 512 * 1024 * 1024;
+/** Most fallback programs one request carries, and their bytes. */
+export const MAX_FALLBACK_PIXELS = 16;
+export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
+
+function validDocument(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const d = value as Record<string, unknown>;
+  if (!id(d['id']) || !safeUint(d['revision'])) return false;
+  const json = d['json'];
+  if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
+  // A document's body comes with its canonical hash.
+  return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
+}
+
+function validFallback(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_FALLBACK_PIXELS) return false;
+  let bytes = 0;
+  for (const p of value as Record<string, unknown>[]) {
+    if (!p || typeof p !== 'object' || typeof p['key'] !== 'string' || p['key'].length === 0 || p['key'].length > 512) return false;
+    if (!safeUint(p['width']) || !safeUint(p['height']) || (p['width'] as number) < 1 || (p['height'] as number) < 1) return false;
+    const data = p['rgba16f'];
+    if (!(data instanceof Uint8Array) || data.byteLength !== (p['width'] as number) * (p['height'] as number) * 8) return false;
+    bytes += data.byteLength;
+  }
+  return bytes <= MAX_FALLBACK_BYTES;
+}
+
 const failed = (code: string, message: string): EngineSnapshotReply => ({ status: 'failed', code, message });
 
 export type SnapshotServiceOptions = {
   engine: SnapshotEngine;
+  /** Main's sessions for windows whose own session cannot serve a sync
+   *  snapshot (window-sessions.ts). Absent: such requests fail. */
+  windowSessions?: Pick<WindowSnapshotSessions, 'prepare'> | null;
   /** Absent when the pm-bridge addon did not load (then shared-memory results fail). */
   takePixels: TakePixels | null;
   log: Log;
@@ -105,12 +143,12 @@ export type SnapshotServiceOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-export type SnapshotStats = { served: number; failed: number; needsRenderer: number; shared: number; refused: number; outstanding: number; outstandingBytes: number };
+export type SnapshotStats = { served: number; failed: number; needsRenderer: number; shared: number; refused: number; outstanding: number; outstandingBytes: number; windowSessions: number; needsDocument: number };
 
 export class SnapshotService {
   private readonly perWindow = new Map<number, number>();
   private outstandingBytes = 0;
-  private readonly stats: SnapshotStats = { served: 0, failed: 0, needsRenderer: 0, shared: 0, refused: 0, outstanding: 0, outstandingBytes: 0 };
+  private readonly stats: SnapshotStats = { served: 0, failed: 0, needsRenderer: 0, shared: 0, refused: 0, outstanding: 0, outstandingBytes: 0, windowSessions: 0, needsDocument: 0 };
 
   constructor(private readonly options: SnapshotServiceOptions) {}
 
@@ -158,14 +196,53 @@ export class SnapshotService {
       }
       await sleep(READY_POLL_MS);
     }
-    const client = this.options.engine.clientPort(windowId, 'interactive');
-    if (!client || client.generation !== request.generation) {
-      this.stats.failed++;
-      return failed('unknownSession', 'That engine session belongs to an earlier engine launch.');
+    let owner: { port: number; session: number };
+    if (request.document) {
+      // The window's own session cannot serve it: main's session for the
+      // window, at the document the window sent (window-sessions.ts).
+      const sessions = this.options.windowSessions;
+      if (!sessions) {
+        this.stats.failed++;
+        return failed('unavailable', 'This host has no snapshot sessions of its own.');
+      }
+      let prepared: Awaited<ReturnType<WindowSnapshotSessions['prepare']>> | 'timeout';
+      let prepareTimer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        // Bounded like the snapshot itself: a blocked window always gets a reply.
+        prepared = await Promise.race([
+          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p }))),
+          new Promise<'timeout'>((resolve) => {
+            prepareTimer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
+          })
+        ]);
+      } catch (error) {
+        this.stats.failed++;
+        if (error instanceof RemoteError) return failed(error.error.code, error.error.message);
+        return failed('unavailable', error instanceof Error ? error.message : String(error));
+      } finally {
+        if (prepareTimer) clearTimeout(prepareTimer);
+      }
+      if (prepared === 'timeout') {
+        this.stats.failed++;
+        return failed('timeout', `Main's session for the window was not ready within ${snapshot.waitMs + RENDER_ALLOWANCE_MS} ms.`);
+      }
+      if (prepared === 'needsDocument') {
+        this.stats.needsDocument++;
+        return failed('needsDocument', 'Main has no copy of that document revision; send it with the request.');
+      }
+      owner = prepared;
+      this.stats.windowSessions++;
+    } else {
+      const client = this.options.engine.clientPort(windowId, 'interactive');
+      if (!client || client.generation !== request.generation || request.session === null) {
+        this.stats.failed++;
+        return failed('unknownSession', 'That engine session belongs to an earlier engine launch.');
+      }
+      owner = { port: client.port, session: request.session };
     }
     const answer = this.options.engine.request(
       'interactive',
-      { type: 'snapshot', renderer: client.port, session: request.session, snapshot } as Request,
+      { type: 'snapshot', renderer: owner.port, session: owner.session, snapshot } as Request,
       null,
       request.revision
     );
