@@ -262,17 +262,17 @@ fn degenerate(g: &Gradient) -> Shader {
                 let p1 = g.positions[i + 1].clamp(p0, 1.0);
                 let w = p1 - p0;
                 if i == 0 && p0 > 0.0 {
-                    for c in 0..4 {
-                        blend[c] += p0 * g.colors[0][c];
+                    for (b, c) in blend.iter_mut().zip(g.colors[0]) {
+                        *b += p0 * c;
                     }
                 }
                 if i == n - 2 && p1 < 1.0 {
-                    for c in 0..4 {
-                        blend[c] += (1.0 - p1) * g.colors[n - 1][c];
+                    for (b, c) in blend.iter_mut().zip(g.colors[n - 1]) {
+                        *b += (1.0 - p1) * c;
                     }
                 }
-                for c in 0..4 {
-                    blend[c] += 0.5 * w * (g.colors[i + 1][c] + g.colors[i][c]);
+                for (k, b) in blend.iter_mut().enumerate() {
+                    *b += 0.5 * w * (g.colors[i + 1][k] + g.colors[i][k]);
                 }
             }
             blend

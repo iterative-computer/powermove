@@ -16,7 +16,7 @@ const MAX_T_VALUE: f32 = 0x3FFF_FFFF as f32;
 
 /// `SkDashPath::InternalFilter` for intervals and a phase at `res_scale`.
 pub fn dash_path(path: &SkPath, intervals: &[f32], phase: f32, res_scale: f32) -> Result<SkPath, SvgError> {
-    if intervals.len() < 2 || intervals.len() % 2 != 0 {
+    if intervals.len() < 2 || !intervals.len().is_multiple_of(2) {
         return Ok(path.clone());
     }
     let mut length = 0.0f32;
@@ -228,6 +228,7 @@ impl Measurer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn conic_segs(&mut self, p: &[P; 3], w: f32, distance: f32, mint: f32, min_pt: P, maxt: f32, max_pt: P, idx: usize) -> f32 {
         let halft = (mint + maxt) * 0.5;
         let half_pt = eval_conic(p, w, halft);
@@ -363,6 +364,8 @@ impl Contour {
     fn segment(&self, start_d: f32, stop_d: f32, move_to: bool, dst: &mut SkPath) {
         let start_d = start_d.max(0.0);
         let stop_d = stop_d.min(self.length);
+        // NaN-aware: `!(a <= b)` also catches unordered inputs.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(start_d <= stop_d) || start_d == stop_d {
             return;
         }

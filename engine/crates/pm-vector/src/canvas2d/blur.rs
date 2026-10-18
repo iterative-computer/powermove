@@ -150,8 +150,8 @@ fn new_img(w: usize, h: usize, origin: [i32; 2]) -> Img {
 
 fn put(img: &mut Img, x: usize, y: usize, c: [f32; 4]) {
     let i = ((y + 1) * img.w + x + 1) * 4;
-    for k in 0..4 {
-        img.rgba[i + k] = super::msaa::unorm8(c[k]);
+    for (dst, v) in img.rgba[i..i + 4].iter_mut().zip(c) {
+        *dst = super::msaa::unorm8(v);
     }
 }
 
@@ -439,6 +439,9 @@ fn rescale(src: &Img, src_rect: [i32; 4], scale: [f32; 2], linear: bool) -> (Img
     (image, step_bounds)
 }
 
+/// A composite of a filtered layer: its device rect and image.
+pub type LayerDraw = ([f32; 4], Arc<LayerImage>);
+
 /// Evaluates the blur filter on the rendered layer and returns the draws
 /// (device rect, geometry) that composite its result into the parent.
 pub fn filter_layer(
@@ -449,7 +452,7 @@ pub fn filter_layer(
     height: u32,
     image: &[u8],
     parent: &DeviceInfo,
-) -> Result<Vec<([f32; 4], Arc<LayerImage>)>, SvgError> {
+) -> Result<Vec<LayerDraw>, SvgError> {
     let ImageFilter::GaussianBlur { sigma, crop, linear } = f;
     let sigma = layer_sigma(*sigma, ltd);
     // The source: the layer without its padding pixel.

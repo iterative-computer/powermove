@@ -1462,8 +1462,6 @@ struct Mc {
 
 /// The replayed canvas.
 pub struct Canvas<'a> {
-    width: u32,
-    height: u32,
     mc: Vec<Mc>,
     devices: Vec<Device>,
     clip: ClipStack,
@@ -1474,8 +1472,6 @@ pub struct Canvas<'a> {
 impl<'a> Canvas<'a> {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            width,
-            height,
             mc: vec![Mc { matrix: M44::IDENTITY, layer: false }],
             devices: vec![Device {
                 origin: [0, 0],

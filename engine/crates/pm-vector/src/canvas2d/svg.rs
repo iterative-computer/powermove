@@ -64,9 +64,6 @@ pub fn annotate(data: &[u8]) -> Result<(Vec<u8>, Elements), SvgError> {
     Ok((result.into_bytes(), elements))
 }
 
-fn mat(t: usvg::Transform) -> Mat {
-    Mat { sx: t.sx, kx: t.kx, ky: t.ky, sy: t.sy, tx: t.tx, ty: t.ty }
-}
 
 fn rule(r: usvg::FillRule) -> Rule {
     match r {

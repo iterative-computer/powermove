@@ -375,8 +375,8 @@ impl PreserveAspectRatio {
         let physical_ratio = pw / ph;
         let x_min = matches!(self.align, 1 | 4 | 7);
         let x_mid = matches!(self.align, 2 | 5 | 8);
-        let y_min = matches!(self.align, 1 | 2 | 3);
-        let y_mid = matches!(self.align, 4 | 5 | 6);
+        let y_min = matches!(self.align, 1..=3);
+        let y_mid = matches!(self.align, 4..=6);
         if (logical_ratio < physical_ratio && !self.slice) || (logical_ratio >= physical_ratio && self.slice) {
             t.scale(ph / lh, ph / lh);
             if x_min {

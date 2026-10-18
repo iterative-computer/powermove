@@ -660,14 +660,23 @@ an explicit `Feature::SvgImage` gate, never an empty paint:
 - A well-formed document whose root is not `svg` in the SVG namespace is
   broken, unless the internal subset declares attribute defaults (a defaulted
   `xmlns` paints).
-- Undecided: errors inside the DOCTYPE, entity depth and reference limits,
-  roxmltree resource limits, markup-bearing entities, SVGZ, and prologs the
+- An XML declaration whose version is not `1.x`, a processing-instruction
+  target spelled `xml` in any letter case (a longer `xml-` prefix is only a
+  warning), a `PUBLIC` DOCTYPE without a system literal, anything but a markup
+  declaration or parameter-entity reference in the internal subset,
+  `xmlns:xmlns` and empty prefixed namespace declarations, and an entity
+  reference loop reached from content are libxml2 errors: broken. Attribute
+  defaults only bind a namespace when they default `xmlns`/`xmlns:*`
+  (`#IMPLIED` does not), and element depth counts the markup general entities
+  expand to.
+- Undecided: errors inside the DOCTYPE, roxmltree resource limits,
+  markup-bearing entities within the depth limit, SVGZ, and prologs the
   scanner cannot read.
 
 89 probe documents were measured in Electron 44 (Blob `<img>` and Canvas2D
-`drawImage`): 80 agree, 9 Chromium-broken documents stay gated, and no
-document Chromium paints is classified broken (`svg_broken::tests` pins every
-case; `examples/svg_broken_compare.rs` replays a probe directory). Results are
+`drawImage`): all 89 agree (`svg_broken::tests` pins every case plus
+painted variants of each new rule; `examples/svg_broken_compare.rs` replays a
+probe directory). Results are
 cached per path, size and modification time for plan builds.
 Missing/unreadable files keep named media failures. Valid SVG with text,
 unsupported paint, or other usvg limitations retains its original gate.
@@ -684,15 +693,15 @@ renderer, plus nesting at and past the depth limit). The Rust media-error
 integration checks empty pixels and no layer failure for these corrupt
 level-1 documents. Valid declared-encoding SVGs remain separately gated.
 
-`import-svg.spec.ts:7` passed with the engine flag on at the reviewed tip.
-On 2026-10-18 it fails on this machine with the flag on at its legacy
-high-zoom viewport assertion (`previewViewport.width` 640, expected below
-640), identically with the engine built from the previous lane tip
-(d185f65a), so the failure is not from the broken-SVG or PNG gamma changes;
-it passes with the flag off. It now explicitly waits
-for the imported editable shape's native route before undoing the import,
-while keeping its original durable source, vertex edit, viewport allocation
-and exported-player pixel assertions.
+`import-svg.spec.ts:7` passes with the engine flag on (2026-10-18, this
+worktree, after `bun run build:wasm`; without `pm_wasm.wasm` the route stays
+`pending` and the spec fails at its route poll). Its high-zoom assertions
+read the legacy compositor's `previewViewport`, `stats.viewportVectors` and
+viewport-path texture; while the engine presents, the viewer skips the
+compositor's resize (`viewer.ts`, "While the engine presents"), so those
+values are stale whenever the engine route is active before the measurement.
+The assertion is legacy-GL state, recorded for the consumers lane; it is not
+SVG rendering.
 
 Additional explicit gaps: a Display P3 `cHRM`/`gAMA` PNG differs by up to
 117 CV when its chromaticities are ignored, and a Y'CbCr/JPEG-compressed

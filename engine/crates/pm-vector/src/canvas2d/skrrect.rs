@@ -261,19 +261,6 @@ impl SkRRect {
         Some(Self::make_rect_radii(new_rect, radii))
     }
 
-    fn are_rect_and_radii_valid(&self) -> bool {
-        let r = self.rect;
-        for i in 0..4 {
-            if !(self.radii[i][0] >= 0.0 && self.radii[i][1] >= 0.0) {
-                return false;
-            }
-        }
-        let (w, h) = (r[2] - r[0], r[3] - r[1]);
-        self.radii[0][0] + self.radii[1][0] <= w
-            && self.radii[2][0] + self.radii[3][0] <= w
-            && self.radii[0][1] + self.radii[3][1] <= h
-            && self.radii[1][1] + self.radii[2][1] <= h
-    }
 
     /// `SkRRectPriv::InnerBounds`: the largest axis-aligned rectangle inside.
     pub fn inner_bounds(&self) -> [f32; 4] {
