@@ -241,6 +241,15 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     log
   });
   (PM as any).EngineRender = renderTransport;
+  // The app's own still captures (the Library's section thumbnails, the
+  // agent's look and observe) draw through the engine too: with the new
+  // engine on, nothing asks the current engine for pixels.
+  const exporter = (PM as any).Export as { snapshot?: unknown; snapshotAsync?: unknown } | undefined;
+  const legacyCapture = exporter ? { snapshot: exporter.snapshot, snapshotAsync: exporter.snapshotAsync } : null;
+  if (exporter) {
+    exporter.snapshot = (time: number, maxWidth = 480) => renderTransport.snapshotDataUrlSync(Number(time) || 0, maxWidth, PM.proj);
+    exporter.snapshotAsync = (time: number, maxWidth = 480) => renderTransport.snapshotDataUrl(Number(time) || 0, maxWidth, PM.proj);
+  }
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
@@ -442,6 +451,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       sessions.clear();
       current = null;
       closeStandby();
+      if (exporter && legacyCapture) Object.assign(exporter, legacyCapture);
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;

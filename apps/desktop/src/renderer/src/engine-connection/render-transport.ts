@@ -277,6 +277,11 @@ export class EngineRenderTransport {
 
   /* ── today's render API shapes (apiVersion 1 to 3 and the async siblings) ── */
 
+  /** A snapshot as a canvas (today's capture shapes build on it). */
+  toCanvas(snapshot: EngineSnapshot): HTMLCanvasElement {
+    return this.canvas(snapshot);
+  }
+
   private canvas(snapshot: EngineSnapshot): HTMLCanvasElement {
     const out = this.options.createCanvas?.(snapshot.width, snapshot.height) ?? document.createElement('canvas');
     out.width = snapshot.width;

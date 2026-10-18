@@ -74,6 +74,17 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     return canvas.toDataURL('image/jpeg', .8);
   }
 
+  /** With the new engine on, the engine draws it (an idle snapshot: it
+   *  waits out playback and gestures; a stale result comes back null). */
+  async function renderWithEngine(engine: any, id: string): Promise<string | null> {
+    const project = PM.proj;
+    const comp = project?.compId === id ? project : PM.Comps?.get?.(id);
+    if (!comp || !Array.isArray(comp.layers)) return null;
+    const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
+    const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true });
+    return snapshot ? engine.toCanvas(snapshot).toDataURL('image/jpeg', .8) : null;
+  }
+
   function step() {
     timer = 0;
     if (disposed || !PM.proj) return;
@@ -83,6 +94,14 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     const next = ids.find((id) => rendered.get(id) !== key);
     if (!next) return;
     const renderedKey = key;
+    const engine = PM.EngineRender;
+    if (engine?.ready) {
+      void renderWithEngine(engine, next)
+        .then((url) => { if (url && !disposed) urls[next] = url; })
+        .catch((error) => console.warn('Composition thumbnail failed', error))
+        .finally(() => { rendered.set(next, renderedKey); schedule(0); });
+      return;
+    }
     try {
       const url = render(next);
       if (url) urls[next] = url;

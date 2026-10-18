@@ -636,6 +636,21 @@ function projectThumb() {
   }
   window.clearTimeout(thumbRetry); thumbRetry = 0;
   lastThumbAt = now;
+  // With the new engine on, the engine draws it: an idle snapshot of the
+  // frame on screen (it waits out playback and gestures), never the
+  // current engine's canvas, which no longer shows.
+  const engine = PM.EngineRender;
+  if (engine?.ready) {
+    const project = PM.proj;
+    const height = Math.max(1, Math.round(320 * (Number(project.h) || 1) / (Number(project.w) || 1)));
+    void engine.thumbnails.request({ key: `project-thumbnail:${project.id}`, time: PM.time, width: 320, height, draft3d: true })
+      .then((snapshot: any) => {
+        if (!snapshot || !canFinishThumbnail(project)) return;
+        PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb: engine.toCanvas(snapshot).toDataURL('image/jpeg', .7) });
+      })
+      .catch(() => undefined);
+    return undefined;
+  }
   // Never render a second composition or synchronously readPixels for recovery.
   // Capture the already-presented canvas asynchronously; metadata can arrive later.
   const canvas = PM.GL?.canvas, project = PM.proj;
