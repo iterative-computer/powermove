@@ -589,7 +589,7 @@ mod tests {
                 self.0.store(true, Ordering::SeqCst);
             }
         }
-        struct WithDrop(Registry, Tracked);
+        struct WithDrop(Registry, #[allow(dead_code)] Tracked);
         impl FontResolver for WithDrop {
             fn face(&self, id: FaceId) -> &FaceInfo {
                 self.0.face(id)
