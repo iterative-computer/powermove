@@ -275,7 +275,7 @@ export class ViewerPresentation {
 
   /** Whether engine frames are on screen now. */
   get presenting(): boolean {
-    return this.canvasElement.style.visibility === 'visible' && this.revealing === null && this.latestFrame !== null;
+    return this.canvasElement.style.visibility === 'visible' && this.latestFrame !== null;
   }
 
   /** The newest frame drawn, with its tags and overlay geometry. */
@@ -321,8 +321,9 @@ export class ViewerPresentation {
     return () => this.hiddenListeners.delete(listener);
   }
 
-  /** The newest frame drawn while the canvas becomes visible (not on screen yet). */
+  /** The newest frame drawn while the canvas waits to show (not on screen yet). */
   private revealing: PresentedFrame | null = null;
+  private revealFor: Presenter | null = null;
   private revealToken = 0;
 
   /**
@@ -336,12 +337,17 @@ export class ViewerPresentation {
    */
   private reveal(presenter: Presenter): void {
     const token = ++this.revealToken;
+    this.revealFor = presenter;
     const view = this.options.stage.ownerDocument.defaultView;
     const done = (): void => {
       if (token !== this.revealToken || this.disposed || this.presenter !== presenter) return;
       const frame = this.revealing;
       this.revealing = null;
-      if (frame && this.canvasElement.style.visibility === 'visible') this.show(frame);
+      this.revealFor = null;
+      if (!frame) return;
+      this.canvasElement.style.visibility = 'visible';
+      if (this.statusElement) this.setStatus(null);
+      this.show(frame);
     };
     const least = Math.max(0, Math.floor(this.options.service.revealFrames ?? 2));
     // 0: frames run by hand (tests): a shown frame counts at once.
@@ -381,6 +387,7 @@ export class ViewerPresentation {
     canvas.style.visibility = 'hidden';
     if (canvas === this.canvasElement) {
       this.revealing = null;
+      this.revealFor = null;
       this.revealToken++;
     }
     if ((was || always) && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
@@ -650,22 +657,18 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
       this.routedRevision = null;
-      if (this.statusElement) this.setStatus(null);
-      // A canvas that was hidden shows its first frame at one of the
-      // display's next frames, not when the drawing submitted it (the
-      // worker's canvas and this page commit separately): until then the
-      // frame is not on screen, so `latest`, `presenting`, and the frame
-      // events wait for it (`reveal`).
+      // A hidden canvas shows a frame only once the GPU finished it and the
+      // page's compositor has it (the drawing's canvas and this page commit
+      // separately): it stays hidden until then (`reveal`), so what shows
+      // is never an empty canvas, and `latest`, `presenting`, and the
+      // frame events wait for it.
       if (this.canvasElement.style.visibility !== 'visible') {
-        this.canvasElement.style.visibility = 'visible';
+        const start = this.revealing === null || this.revealFor !== presenter;
         this.revealing = frame;
-        this.reveal(presenter);
+        if (start) this.reveal(presenter);
         return;
       }
-      if (this.revealing) {
-        this.revealing = frame;
-        return;
-      }
+      if (this.statusElement) this.setStatus(null);
       this.show(frame);
     });
     this.host = null;
