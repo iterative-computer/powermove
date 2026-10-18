@@ -15,6 +15,8 @@ import path from 'node:path';
 
 import { build } from 'esbuild';
 
+import { rawText } from './esbuild-raw-text.mjs';
+
 const desktop = path.resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
 const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
@@ -36,7 +38,8 @@ try {
     format: 'cjs',
     target: 'node22',
     external: ['electron'],
-    logLevel: 'warning'
+    logLevel: 'warning',
+    plugins: [rawText]
   });
   const electron = createRequire(path.join(desktop, 'package.json'))('electron');
   const env = {
