@@ -162,6 +162,22 @@ fn main() {
                         let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
                         write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
                         write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                        // Pixels the "rest" check compares that differ by
+                        // more than 1 code value, magnified in red.
+                        let mut rest_diff = vec![0u8; wu * hu * 4];
+                        for i in 0..wu * hu {
+                            let d = (0..3)
+                                .map(|c| ours[i * 4 + c].abs_diff(reference[i * 4 + c]))
+                                .max()
+                                .unwrap_or(0);
+                            rest_diff[i * 4 + 3] = 255;
+                            if rest[i] && d > 1 {
+                                rest_diff[i * 4] = d.saturating_mul(5).max(64);
+                            } else if mask[i] {
+                                rest_diff[i * 4 + 2] = 48;
+                            }
+                        }
+                        write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
                     }
                 }
             }

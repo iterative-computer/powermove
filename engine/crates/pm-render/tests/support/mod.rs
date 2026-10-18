@@ -38,16 +38,28 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
 /// or the newest `v1-*` corpus capture, the newest `render-*` capture (the
 /// render parity cases, `engine/corpus/src/projects/render.ts`), the
-/// newest `effects-*` capture (`render-effects.ts`), and the newest
-/// `composite-*` capture (`engine/corpus/src/projects/composite.ts`).
+/// newest `effects-*` capture (`render-effects.ts`), the newest
+/// `composite-*` capture (`engine/corpus/src/projects/composite.ts`), the
+/// newest `motion-*` capture (`motion.ts`), and the compositing closure
+/// captures `compclose-*`, `compclose2-*` and `compclose3-*`
+/// (`compclose.ts`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
     }
-    ["v1-", "render-", "effects-", "composite-"]
-        .iter()
-        .filter_map(|p| newest_capture(p))
-        .collect()
+    [
+        "v1-",
+        "render-",
+        "effects-",
+        "composite-",
+        "motion-",
+        "compclose-",
+        "compclose2-",
+        "compclose3-",
+    ]
+    .iter()
+    .filter_map(|p| newest_capture(p))
+    .collect()
 }
 
 fn dirs_home() -> Option<PathBuf> {
