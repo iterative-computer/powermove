@@ -13,8 +13,11 @@
 
      node engine/crates/pm-cli/scripts/wasm-budget-3d.mjs [capture dir]
 
-   Prints one JSON line per project and a summary, with the number of
-   queries that answered an error (counted per op). */
+   Prints one JSON line per project and a summary, with every reply's kind
+   counted per op: `ok`, `error` (a malformed request), `throw` (where the
+   legacy code throws), and the unanswered kinds `host` (only today's 3D
+   runtime answers it), `fonts`, `ink`, and `legacy`. An unanswered query
+   does no work in the module, so its memory is not measured. */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -59,14 +62,23 @@ for (const [name, dir] of dirs) {
   const open = doc.compId ?? doc.id;
   const times = (record.samples ?? []).map((s) => s.time);
   let queries = 0;
-  // Every reply is read: an error reply (`{"error":…}`) is counted, so a
-  // failing query cannot pass for a cheap one and understate memory.
-  const errors = {};
+  // Every reply's kind is counted (its one top-level key), so a failing or
+  // unanswered query cannot pass for a cheap answered one and understate
+  // memory.
+  const kinds = {};
   const query = (request) => {
     const text = out(x.pm_query(put(JSON.stringify(request))));
     queries++;
-    if (text.startsWith('{"error"')) errors[request.op] = (errors[request.op] ?? 0) + 1;
+    let kind;
+    try {
+      kind = Object.keys(JSON.parse(text))[0] ?? 'empty';
+    } catch {
+      kind = 'unparsed';
+    }
+    const byOp = (kinds[request.op] ??= {});
+    byOp[kind] = (byOp[kind] ?? 0) + 1;
   };
+  const total = (pick) => Object.values(kinds).reduce((a, byOp) => a + Object.entries(byOp).filter(([k]) => pick(k)).reduce((b, [, n]) => b + n, 0), 0);
   for (const [comp, layers] of comps) {
     layers.forEach((layer, index) => {
       for (const t of times) {
@@ -84,8 +96,10 @@ for (const [name, dir] of dirs) {
     layers: comps.reduce((a, [, l]) => a + l.length, 0),
     documentBytes: text.length,
     queries,
-    queryErrors: Object.values(errors).reduce((a, n) => a + n, 0),
-    queryErrorsByOp: errors,
+    answered: total((k) => k === 'ok'),
+    queryErrors: total((k) => k === 'error' || k === 'throw' || k === 'unparsed' || k === 'empty'),
+    unanswered: total((k) => ['host', 'fonts', 'ink', 'legacy'].includes(k)),
+    replyKindsByOp: kinds,
     heapLiveAfterLoad: loadedLive,
     heapLive: x.pm_heap_live(),
     heapPeak: x.pm_heap_peak(),
@@ -103,7 +117,17 @@ console.log(JSON.stringify({
   heapPeakMax: max('heapPeak'),
   linearMax: max('linearBytes'),
   budget: { heapLive: LIVE_BUDGET, linear: LINEAR_BUDGET },
+  queries: rows.reduce((a, r) => a + r.queries, 0),
+  answered: rows.reduce((a, r) => a + r.answered, 0),
   queryErrors: rows.reduce((a, r) => a + r.queryErrors, 0),
+  unanswered: rows.reduce((a, r) => a + r.unanswered, 0),
+  replyKindsByOp: rows.reduce((acc, r) => {
+    for (const [op, byOp] of Object.entries(r.replyKindsByOp)) {
+      const into = (acc[op] ??= {});
+      for (const [k, n] of Object.entries(byOp)) into[k] = (into[k] ?? 0) + n;
+    }
+    return acc;
+  }, {}),
   within: max('heapLive') <= LIVE_BUDGET && max('linearBytes') <= LINEAR_BUDGET,
   real: rows.find((r) => r.project.startsWith('real/')) ?? null
 }));
