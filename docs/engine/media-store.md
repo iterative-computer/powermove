@@ -272,6 +272,24 @@ project) reads the stored copy: content identity, not location, names it.
 
 ## The engine (contract 14)
 
+Import completion is also a host-binding barrier: `ingestAsset` awaits
+`HostMedia.flushBindings(project)` before returning. The debounced binding on
+asset/project events remains useful for later document edits, but is too late
+for an immediate export or a frame of a parallel image import. This is the
+shared cause of rerun defects D4 and D5, fixed by `6a2f9587` before this lane.
+Removing only the import's acknowledgement reproduces a cancelled immediate
+MP4 export, both generated image assets resolving to null immediately, and
+41 layer failures in the synthetic 500-layer project. With it restored those
+three checks pass (zero render/layer failures). The new
+`e2e/media-import-readiness.spec.ts` checks both engine settings, every image's
+host resolution before any polling/extra flush, immediate export without an
+offline prompt, and both images' exact exported pixels.
+
+`import-converted-formats.spec.ts` now checks the original-preservation contract
+in native mode: TIFF, HEIC and Matroska bytes hash exactly to the source fixture,
+with separate PNG/WebM browser renditions. Legacy mode still checks stored
+conversions. These storage assertions do not change the existing pixel checks.
+
 Each window binds its open project's media in main (`mediaStore.bind`:
 asset id → store key and hash, or link). `HostServicesCore` resolves
 `mintHandle { mediaRead { asset } }` through `MediaStoreService.resolveAsset`:

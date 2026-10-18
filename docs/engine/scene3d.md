@@ -156,6 +156,16 @@ pass") into the full pass. The plan stays the authority.
 
 ## Integration notes
 
+Legacy `powermove.3d.scene` animation channels are hydrated on project open,
+including nested compositions. Previously the legacy renderer adopted their
+temporal-ease fields only when it evaluated a frame; the native renderer did
+not write them, so switching off could change a saved document depending on
+which frames had drawn. Hydration adopts the scene's existing linear defaults
+before general keyframe normalization, preserving old handles and numeric
+interpolation. The regression in `legacy/app.test.ts` checks all scene channel
+groups, nested scenes, quarter/midpoint values, evaluation without a document
+write, and idempotent reopen. It fails before this fix.
+
 - The view override travels with each render: `RenderRequest::view`
   (contract 2's `FrameRequest.view`). `RenderRequest::from_frame_request`
   carries it for viewer frames and drops it for exports and agent captures
