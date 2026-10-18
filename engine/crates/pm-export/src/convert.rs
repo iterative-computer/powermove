@@ -151,6 +151,9 @@ pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
     pub dither: bool,
+    /// Reproduce the legacy PNG byte boundaries for documents containing
+    /// level-1 layers. All-level-2 documents retain straight-alpha precision.
+    pub legacy_png: bool,
     /// Frame index: the dither seed.
     pub frame: u32,
 }
@@ -457,7 +460,8 @@ pub fn convert(
             };
             let quant = |x: usize, y: usize| -> [f64; 4] {
                 let p = pixel(frame, x, y);
-                if !wide
+                if params.legacy_png
+                    && !wide
                     && params.working == WorkingEncoding::Standard
                     && params.alpha == AlphaOutput::Straight
                 {
@@ -612,6 +616,26 @@ mod tests {
         assert_eq!(wide.planes[0].u16().unwrap(), [26214, 13107, 0, 32768]);
     }
 
+    #[test]
+    fn level2_png_unpremultiplies_before_byte_quantization() {
+        let values = [0.0003, 0.0006, 0.0009, 0.003];
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            rgba: &values,
+        };
+        let mut p = params(AlphaOutput::Straight, false);
+        let legacy = convert(&frame, InputFormat::Rgba8, &p).unwrap();
+        p.legacy_png = false;
+        let precise = convert(&frame, InputFormat::Rgba8, &p).unwrap();
+        assert_eq!(precise.planes[0].u8().unwrap(), [26, 51, 76, 1]);
+        assert_ne!(precise, legacy);
+        // The flag is irrelevant to native-depth PNG output.
+        let wide = convert(&frame, InputFormat::Rgba16, &p).unwrap();
+        p.legacy_png = true;
+        assert_eq!(convert(&frame, InputFormat::Rgba16, &p).unwrap(), wide);
+    }
+
     fn frame(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Vec<f32> {
         let f = &f;
         (0..h)
@@ -621,6 +645,7 @@ mod tests {
 
     fn params(alpha: AlphaOutput, dither: bool) -> ConvertParams {
         ConvertParams {
+            legacy_png: true,
             working: WorkingEncoding::Standard,
             alpha,
             dither,

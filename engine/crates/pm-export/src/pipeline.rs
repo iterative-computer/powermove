@@ -28,6 +28,7 @@ pub struct Pipeline<S: Sink> {
     sink: S,
     next: u64,
     audio_frames: u64,
+    legacy_png: bool,
 }
 
 impl<S: Sink> Pipeline<S> {
@@ -38,7 +39,13 @@ impl<S: Sink> Pipeline<S> {
             sink,
             next: 0,
             audio_frames: 0,
+            legacy_png: false,
         })
+    }
+
+    /// Select the PNG boundary from the frozen document, once per job.
+    pub fn set_legacy_png(&mut self, legacy_png: bool) {
+        self.legacy_png = legacy_png;
     }
 
     pub fn spec(&self) -> &ExportSpec {
@@ -76,6 +83,7 @@ impl<S: Sink> Pipeline<S> {
             )));
         }
         let params = ConvertParams {
+            legacy_png: self.legacy_png,
             working: self.spec.working,
             alpha: self.spec.alpha,
             dither: self.spec.dither_enabled(),
@@ -403,6 +411,7 @@ mod tests {
             },
             InputFormat::Y416,
             &ConvertParams {
+                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: false,

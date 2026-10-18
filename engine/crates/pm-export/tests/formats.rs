@@ -310,6 +310,7 @@ fn png_sequences_and_stills_at_8_and_16_bits() {
         // Lossless: the file equals a fresh conversion of the same frame.
         let px = picture(33, 17, 3, alpha);
         let params = pm_export::convert::ConvertParams {
+            legacy_png: false,
             working: WorkingEncoding::Standard,
             alpha: s.alpha,
             dither: !sixteen_bit,
