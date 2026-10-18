@@ -1,10 +1,12 @@
 /* Oriented and container-transformed stills (EXIF orientation in PNG, JPEG,
-   WebP and TIFF; HEIF irot/imir/clap; AVIF irot/imir/clap, alpha and range)
-   imported the way users import them, drawn by the legacy viewer and by the
-   native engine over an opaque background. Every case the native engine
-   draws must match the legacy export and keep the box today's import
-   measured; the cases it still routes must name their reason. Set
-   PM_MEDIA_EVIDENCE to keep fixtures, exports and metrics. */
+   WebP and TIFF; HEIF irot/imir/clap; AVIF irot/imir/clap, alpha, range and
+   color description) imported the way users import them, drawn by the
+   legacy viewer and by the native engine over an opaque background. Every
+   case the native engine draws must match the legacy export, which is what
+   proves its draw geometry (the asset box compared is the one Chromium's
+   import measured in each session); the cases it still routes must name
+   their reason. Set PM_MEDIA_EVIDENCE to keep fixtures, exports and
+   metrics. */
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -196,6 +198,13 @@ async function fixtures(session: LaunchedApp, dir: string): Promise<Case[]> {
   await writeFile(out('avif-alpha-irot3.avif'), withIrot(await readFile(out('avif-alpha.avif')), 3)); add(out('avif-alpha-irot3.avif'), true);
   // Limited range (FFmpeg/SVT-AV1); ImageIO writes full range.
   add(fixturePath('still-limited-range.avif'), true);
+  // Color descriptions Blink reads as sRGB (BT.709 or unspecified primaries
+  // with the sRGB, BT.709, SMPTE 170M or BT.2020 transfer; any matrix), and
+  // one it converts, which routes with its reason (FFmpeg/SVT-AV1).
+  for (const cicp of ['1-1-1', '1-6-1', '1-6-6', '1-14-9', '2-1-2']) add(fixturePath(`still-cicp-${cicp}.avif`), true);
+  add(fixturePath('still-cicp-9-1-9.avif'), false);
+  // An AV1 item without `pixi` (libheif 1.11 and older), which Blink accepts.
+  add(fixturePath('still-no-pixi.avif'), true);
   return cases;
 }
 
