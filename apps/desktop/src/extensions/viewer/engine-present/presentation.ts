@@ -101,6 +101,11 @@ export interface EngineViewerService {
   /** Each new frame on screen, with the quality it was rendered at (the
    *  kernel emits `frame:rendered` and `overlay` from it). */
   presented?(frame: PresentedFrame, quality: number): void;
+  /** Animation frames a canvas that was hidden waits after its first frame
+   *  before that frame counts as on screen (default 2: the drawing's canvas
+   *  and the page commit separately, so a frame just submitted is not shown
+   *  yet). Tests that run frames by hand set 0. */
+  readonly revealFrames?: number;
 }
 
 /** Dispatched (bubbling) by a viewer's own presentation on its stage. */
@@ -266,7 +271,7 @@ export class ViewerPresentation {
 
   /** Whether engine frames are on screen now. */
   get presenting(): boolean {
-    return this.canvasElement.style.visibility === 'visible';
+    return this.canvasElement.style.visibility === 'visible' && this.revealing === null && this.latestFrame !== null;
   }
 
   /** The newest frame drawn, with its tags and overlay geometry. */
@@ -312,12 +317,47 @@ export class ViewerPresentation {
     return () => this.hiddenListeners.delete(listener);
   }
 
+  /** The newest frame drawn while the canvas becomes visible (not on screen yet). */
+  private revealing: PresentedFrame | null = null;
+  private revealToken = 0;
+
+  /** Two animation frames after the canvas became visible its first frame
+   *  is on screen: the newest frame drawn since is shown (announced). */
+  private reveal(presenter: Presenter): void {
+    const token = ++this.revealToken;
+    const view = this.options.stage.ownerDocument.defaultView;
+    const done = (): void => {
+      if (token !== this.revealToken || this.disposed || this.presenter !== presenter) return;
+      const frame = this.revealing;
+      this.revealing = null;
+      if (frame && this.canvasElement.style.visibility === 'visible') this.show(frame);
+    };
+    const wait = (left: number): void => {
+      if (left <= 0) return done();
+      if (view?.requestAnimationFrame) view.requestAnimationFrame(() => wait(left - 1));
+      else setTimeout(() => wait(left - 1), 16);
+    };
+    wait(Math.max(0, Math.floor(this.options.service.revealFrames ?? 2)));
+  }
+
+  /** A frame is on screen: the newest frame, listeners, and the service. */
+  private show(frame: PresentedFrame): void {
+    const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
+    this.latestFrame = frame;
+    for (const listener of this.listeners) listener(frame);
+    if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
+  }
+
   /** Hides the canvas; tells `onHidden` listeners when it was showing. An
    *  exclusive presentation never hands the stage back: what is under the
    *  canvas is not another engine's frame to show. */
   private hide(canvas: HTMLCanvasElement, handBack = !this.exclusive, always = false): void {
     const was = canvas.style.visibility === 'visible';
     canvas.style.visibility = 'hidden';
+    if (canvas === this.canvasElement) {
+      this.revealing = null;
+      this.revealToken++;
+    }
     if ((was || always) && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
   }
 
@@ -585,12 +625,23 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
       this.routedRevision = null;
-      const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
-      this.latestFrame = frame;
-      if (this.canvasElement.style.visibility !== 'visible') this.canvasElement.style.visibility = 'visible';
       if (this.statusElement) this.setStatus(null);
-      for (const listener of this.listeners) listener(frame);
-      if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
+      // A canvas that was hidden shows its first frame at one of the
+      // display's next frames, not when the drawing submitted it (the
+      // worker's canvas and this page commit separately): until then the
+      // frame is not on screen, so `latest`, `presenting`, and the frame
+      // events wait for it (`reveal`).
+      if (this.canvasElement.style.visibility !== 'visible') {
+        this.canvasElement.style.visibility = 'visible';
+        this.revealing = frame;
+        this.reveal(presenter);
+        return;
+      }
+      if (this.revealing) {
+        this.revealing = frame;
+        return;
+      }
+      this.show(frame);
     });
     this.host = null;
     if (!this.follow()) presenter.start();

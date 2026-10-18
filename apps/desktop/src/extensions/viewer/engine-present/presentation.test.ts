@@ -74,6 +74,8 @@ class Channel implements EngineViewerChannel {
 
 class Service implements EngineViewerService {
   readonly source = new Source();
+  /** Frames run by hand: a shown frame counts at once (the reveal is tested on its own). */
+  revealFrames = 0;
   connected = true;
   channels: Channel[] = [];
   private ready = new Set<() => void>();
@@ -254,6 +256,41 @@ describe('ViewerPresentation', () => {
     expect(channel.closed).toBe(true);
     expect(painter.disposed).toBe(true);
     expect(stage.contains(presentation.canvas)).toBe(false);
+  });
+
+  it('a canvas that was hidden counts its first frame as on screen only after the display shows it', async () => {
+    const service = new Service();
+    service.revealFrames = 2;
+    const painter = new Painter();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => painter });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const presented: number[] = [];
+    presentation.onPresented((frame) => presented.push(frame.seq));
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    // Drawn and visible, but not on screen yet: no events, no `latest`.
+    expect(painter.draws).toBe(1);
+    expect(presentation.canvas.style.visibility).toBe('visible');
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presented).toEqual([]);
+    // A newer frame drawn meanwhile is the one that counts.
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 16);
+    expect(presented).toEqual([]);
+    runFrames(rafs, performance.now() + 33);
+    expect(presented).toEqual([2]);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest).toMatchObject({ seq: 2 });
+    // While shown, later frames count at once.
+    channel.handlers.message({ type: 'frame', frame: desc(3, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 50);
+    expect(presented).toEqual([2, 3]);
+    presentation.dispose();
   });
 
   it('re-sends the current view with the vsync hint (same viewSeq) and keeps the hint on later states', async () => {
