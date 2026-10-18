@@ -683,6 +683,88 @@ pm-electron-lock cargo run --release -p pm-audio --example device_probe   # open
   read the tone while playing and silence under a monitor solo of another strip;
   `asset.peaks` came from the engine (150 buckets for the 1.5 s tone).
 
+## Decode starvation recovery (wave 5, 2026-10-18)
+
+A nonblocking source read must never become input to stateful DSP until every
+sample has decoded. Previously `StretchRun::stream` fed a cache miss's zeroes
+into Signalsmith and `render` cleared its incomplete flag at the end of that
+call. The next call could report complete while its phase history still came
+from missing input. The deterministic regression
+`stretch::tests::missing_input_never_poison_stretch_history` fails on the old
+implementation at sample 48,256 after a miss in `output_seek`: that call reports
+complete but differs from the fully decoded run. A miss during later analysis
+has the same defect.
+
+`StretchRun` now suspends before `output_seek` or `process` consumes incomplete
+input. It returns silence with an incomplete result, retains its valid history,
+and catches up through the missing output range after decoding completes. It
+never resets the history to a different seek origin merely because a decoder
+was late. Forward and reverse runs, initial pre-roll, and later analysis reads
+are covered; every recovered complete chunk is compared bit for bit in both
+channels with the uninterrupted offline run.
+
+The rest of the path follows the same rule:
+
+- `Playback::fill` counts a missing segment and retries it before advancing to
+  another segment. It queues no incomplete PCM and never feeds undecoded silence
+  into the master 2x shuttle or the device-rate converter. The ring can underrun
+  while waiting, which its separate counter reports. A new pre-roll discards the
+  pending segment from the previous epoch.
+- Retune glides include outgoing voices' starvation and errors in the returned
+  report and advance their envelope only after a complete render. A shared
+  stretch can be retried at the same range without changing the envelope.
+- Read-ahead bounds include zero-gain portions of a stretched voice: a fresh
+  vocoder still needs that input as its pre-roll history. The readiness regression
+  fills exactly the advertised spans before rendering just after a muted region.
+- Copy, exact-phase and free-position readers have no persistent sample history;
+  their missing reads already return incomplete. The retry at playback also
+  protects the downstream converter and shuttle when those readers miss.
+  Constant and animated speeds, reverse remaps, trims, preserve/follow pitch,
+  conformed footage, and existing stretch determinism tests are exercised.
+
+The reported wave-5 playback A1 pattern (79,744 of 80,000 different, decoder
+starvation zero) also has a distinct possible cause: the first 256-frame ring chunk plays, the second
+half of the device callback underruns, and subsequent media is displaced by 256
+samples. `a_partial_callback_underrun_is_reported_and_recovers_in_order`
+reproduces exactly that mismatch count without any decoder, and checks that the
+ring counts the underrun and resumes the correct source order. The mapped
+playback comparisons now print and assert both counters, compare both channels,
+and retain the original 40 ms simulated-device patience and bit equality. The
+original failure did not record its ring-underrun counter, so this reproduction
+is evidence for the signature, not proof of that original run's cause.
+
+`time_mapped_clips_play_as_rendered_offline_under_load` adds 8 ms per cold decode
+block and two shared CPU contention threads. `PM_AUDIO_PLAYBACK_STRESS=1` applies
+that load and delay to every simulated-device test. The contention threads stop
+and join when their last device/test owner drops. The forced-starvation playback
+regression uses 20 ms cold decode delay and no pre-roll wait; a cold run must count
+source starvation and produce exactly the same recovered stereo samples as a
+warm run at 1x/48 kHz, 2x/44.1 kHz and -2x/44.1 kHz.
+
+Reproduce the repetition gate with `source engine/env.sh`, then 30 iterations of
+`nice -n 15 cargo test --manifest-path engine/Cargo.toml --release -p pm-audio
+--test playback -- --test-threads=4 --nocapture`, and another 30 iterations with
+`PM_AUDIO_PLAYBACK_STRESS=1`. Direct regressions and existing quality checks:
+`nice -n 15 cargo test --manifest-path engine/Cargo.toml --release -p pm-audio
+--lib --test decode_readiness --test mixer --test stretch -- --test-threads=4`.
+
+Measured on the final implementation: **30/30 plain suites and 30/30 stressed
+suites**, 20 tests each (1,200 playback test executions, no failures or ignored
+tests), with `nice -n 15` and four test threads. Both mapped tests in each suite
+compare three clips over 80,000 frames per channel: 360 stereo comparisons,
+57,600,000 samples, no differing samples and no mapped decoder starvations or
+ring underruns. The final direct run also passes all 61 tests: 38 library,
+3 decode-readiness, 14 mixer, and 6 stretch tests. No audio tolerance, callback
+patience, or corpus coverage was changed.
+
+**Remaining evidence gap for wave-5 A1.** The original intermittent failure did
+not recur with both counters recorded in these 60 suites. Its exact mismatch
+signature is reproduced by a counted ring underrun; the independent decoder/DSP
+corruption is fixed and covered by regressions that fail on the old code. The
+original failure's attribution remains unconfirmed until its reproducer records
+both counters. Keep that attribution open rather than inferring a silent decoder
+race from `starved_renders == 0` alone.
+
 ## Gaps
 
 - **J/K/L keys** need Jude's sign-off. Powermove's keymap is After Effects's, where J and K
