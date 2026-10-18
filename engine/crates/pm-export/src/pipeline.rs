@@ -39,11 +39,15 @@ impl<S: Sink> Pipeline<S> {
             sink,
             next: 0,
             audio_frames: 0,
-            legacy_png: false,
+            // Level 1's PNG bytes unless the job's document has only level
+            // 2 content (`render.rs`): a caller that never selects keeps
+            // today's E1 conversion.
+            legacy_png: true,
         })
     }
 
-    /// Select the PNG boundary from the frozen document, once per job.
+    /// Select the PNG boundary from the frozen document, once per job
+    /// (default true: the E1 8-bit straight-alpha conversion of level 1).
     pub fn set_legacy_png(&mut self, legacy_png: bool) {
         self.legacy_png = legacy_png;
     }

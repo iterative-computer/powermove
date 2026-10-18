@@ -309,8 +309,10 @@ fn png_sequences_and_stills_at_8_and_16_bits() {
         assert_eq!(info.cicp, Some((1, 13, 0, 1)));
         // Lossless: the file equals a fresh conversion of the same frame.
         let px = picture(33, 17, 3, alpha);
+        // `export()` keeps level 1's E1 PNG conversion unless a job selects
+        // otherwise (`Pipeline::set_legacy_png`).
         let params = pm_export::convert::ConvertParams {
-            legacy_png: false,
+            legacy_png: true,
             working: WorkingEncoding::Standard,
             alpha: s.alpha,
             dither: !sixteen_bit,
