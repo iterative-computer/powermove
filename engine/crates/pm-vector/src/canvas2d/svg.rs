@@ -462,6 +462,27 @@ pub type TextDraw<'a> = dyn FnMut(&usvg::Text, Mat, u32, u32) -> Result<Bitmap, 
 
 /// `drawImage(img, 0, 0, width, height)` of the SVG: Blink's layout and
 /// paint record, replayed by the Graphite emulation.
+/// Whether the paint record of this document can be built: the walk
+/// reports unsupported features (masks, patterns, embedded images, nested
+/// or multi-shape clip paths, filters other than a lone Gaussian blur,
+/// blend modes) as errors, independent of the bucket size.
+pub fn supported(data: &[u8], tree: &usvg::Tree, elements: &Elements) -> Result<(), SvgError> {
+    let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
+    let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;
+    let raw = RawElements::new(&doc);
+    let sizing = blinksvg::natural_sizing(&doc);
+    let draw: ImageDraw = blinksvg::image_draw(&sizing, [64, 64]);
+    let builder = RecordBuilder::new(&raw, &draw);
+    let root_state = builder.root_state();
+    let viewport = match sizing.view_box {
+        Some(vb) => [vb[2], vb[3]],
+        None => [sizing.width.unwrap_or(draw.container[0]), sizing.height.unwrap_or(draw.container[1])],
+    };
+    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport } };
+    walk.group(tree.root(), root_state, true)?;
+    Ok(())
+}
+
 pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, height: u32, text: &mut TextDraw<'_>) -> Result<Bitmap, SvgError> {
     let text_doc = std::str::from_utf8(data).map_err(|e| SvgError(e.to_string()))?;
     let doc = usvg::roxmltree::Document::parse(text_doc).map_err(|e| SvgError(e.to_string()))?;

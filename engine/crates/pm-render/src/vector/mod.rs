@@ -52,6 +52,15 @@ pub enum VectorSource {
         rect: PixelRect,
         clip: [[f64; 2]; 4],
     },
+    /// Level 1: today's SVG `<img>` bucket (`rasterSvgAsset(a, width,
+    /// height)`), painted as Chromium 152 paints it into Canvas2D
+    /// (`SvgDocument::raster_compat`).
+    SvgBucket {
+        path: std::path::PathBuf,
+        stamp: svg::Stamp,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl VectorSource {
@@ -107,6 +116,20 @@ impl VectorSource {
                     h.update(v.to_bits().to_le_bytes());
                 }
                 h.update(format!("{rect:?}").as_bytes());
+            }
+            VectorSource::SvgBucket {
+                path,
+                stamp,
+                width,
+                height,
+            } => {
+                h.update(b"svg-bucket");
+                h.update(path.to_string_lossy().as_bytes());
+                h.update([0]);
+                h.update(stamp.0.to_le_bytes());
+                h.update(stamp.1.to_le_bytes());
+                h.update(width.to_le_bytes());
+                h.update(height.to_le_bytes());
             }
         }
         h.finalize().into()

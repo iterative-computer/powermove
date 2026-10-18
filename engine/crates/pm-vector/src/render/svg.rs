@@ -276,6 +276,20 @@ impl SvgDocument {
         }
     }
 
+    /// Whether [`SvgDocument::raster_compat`] can draw this document: text
+    /// (which needs a pm-text resolver) and the paint features the record
+    /// builder does not emulate are errors naming the feature.
+    pub fn compat_supported(&self) -> Result<(), SvgError> {
+        if self.has_text {
+            return Err(SvgError("SVG text needs pm-text".into()));
+        }
+        with_document_stack(&self.data, || {
+            let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
+            let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
+            crate::canvas2d::svg::supported(&annotated, &tree, &elements)
+        })
+    }
+
     pub fn raster_compat(&self, width: u32, height: u32) -> Result<Bitmap, SvgError> {
         if self.has_text {
             return Err(SvgError("SVG text needs pm-text".into()));

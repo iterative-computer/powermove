@@ -349,6 +349,19 @@ impl VectorCache {
                     u64::from(b.width) * u64::from(b.height) * 4,
                 )
             }
+            VectorSource::SvgBucket {
+                path,
+                width,
+                height,
+                ..
+            } => {
+                let (doc, _) = super::svg::document(path)?;
+                let b = doc.raster_compat(*width, *height).map_err(|e| e.to_string())?;
+                (
+                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+                    u64::from(b.width) * u64::from(b.height) * 4,
+                )
+            }
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         // Make room before inserting: earlier frames' entries go first, so

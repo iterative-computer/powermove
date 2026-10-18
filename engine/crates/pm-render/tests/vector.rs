@@ -582,12 +582,25 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "{:?}",
         &rgba[center..center + 4]
     );
-    // Level 1 SVG images stay routed.
+    // Level 1 SVG images draw today's bucket (Chromium's Canvas2D replay
+    // of the <img>) as the image quad: the circle is black and opaque at
+    // the center, the rect white around it.
     let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
-    let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
     assert_eq!(
-        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-        vec![Feature::SvgImage]
+        unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
+        vec![]
+    );
+    let rgba1 = render_rgba(&mut renderer, doc1, &resolver1);
+    assert!(
+        rgba1[center] < 1e-3 && (rgba1[center + 3] - 1.0).abs() < 1e-3,
+        "{:?}",
+        &rgba1[center..center + 4]
+    );
+    let white = (128 * W + 128 + 40) as usize * 4;
+    assert!(
+        rgba1[white] > 0.99 && rgba1[white + 3] > 0.99,
+        "{:?}",
+        &rgba1[white..white + 4]
     );
 }
 
@@ -634,9 +647,9 @@ fn level2_svg_fallbacks_and_text() {
 }
 
 /// SVG bytes in another encoding Chromium honors (an XML declaration's
-/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images: level
-/// 1 routes them without reading them (no layer failure), level 2 decodes
-/// them as Chromium does and draws the same pixels as the UTF-8 file.
+/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images: both
+/// levels decode them as Chromium does and draw the same pixels as the
+/// UTF-8 file (no layer failure).
 #[test]
 fn svg_images_in_declared_encodings_are_not_failures() {
     let mut renderer = Renderer::headless().unwrap();
@@ -657,26 +670,20 @@ fn svg_images_in_declared_encodings_are_not_failures() {
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
     let (doc, resolver) = svg_project(utf8, "declared-utf8.svg", 100, 50, d.clone(), 2, 0.0);
     let reference = render_rgba(&mut renderer, doc, &resolver);
+    let (doc, resolver) = svg_project(utf8, "declared-utf8-l1.svg", 100, 50, d.clone(), 1, 0.0);
+    let reference1 = render_rgba(&mut renderer, doc, &resolver);
     for (name, bytes) in [("latin1.svg", &latin1), ("utf16.svg", &utf16)] {
         let (doc1, resolver1) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
         std::fs::write(resolver1.paths["art"].clone(), bytes).unwrap();
-        let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
         assert_eq!(
-            u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-            vec![Feature::SvgImage],
+            unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
+            vec![],
             "{name}"
         );
-        // Rendering reports the route, not a corrupt file.
-        let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
-        match renderer.render(&load(&doc1), "Ptest-root", ticks(0.0), &request, &resolver1) {
-            Err(pm_render::RenderError::Unsupported(u)) => assert_eq!(
-                u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-                vec![Feature::SvgImage],
-                "{name}"
-            ),
-            Err(e) => panic!("{name}: {e}"),
-            Ok(frame) => panic!("{name}: drawn with failures {:?}", frame.failures),
-        }
+        assert!(
+            render_rgba(&mut renderer, doc1, &resolver1) == reference1,
+            "{name}"
+        );
 
         let (doc2, resolver2) = svg_project(utf8, name, 100, 50, d.clone(), 2, 0.0);
         std::fs::write(resolver2.paths["art"].clone(), bytes).unwrap();

@@ -1145,20 +1145,60 @@ fn native_content_quad<'d>(
                 // XML/image document paints nothing, as Chromium's <img>
                 // does. usvg paint support does not determine corruption.
                 if !crate::vector::level2(layer) {
+                    // Level 1: today's `<img>` bucket. A document Chromium
+                    // shows as a broken image paints nothing; a document the
+                    // Canvas2D replay cannot paint yet (text, masks, ...)
+                    // stays routed; the rest is `rasterSvgAsset` at
+                    // `svgRasterDimensions`, drawn as the image quad.
                     match pm_media::image::svg::broken_image_file(&path) {
-                        Err(e) => b.failures.push(LayerFailure {
-                            composition: comp_id,
-                            layer: js::layer_id(layer),
-                            message: format!("{}: {e}", path.display()),
-                        }),
-                        Ok(true) => {}
-                        Ok(false) => b.unsupported.push(Unsupported::layer(
-                            &comp_id,
-                            layer,
-                            Feature::SvgImage,
-                        )),
+                        Err(e) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message: format!("{}: {e}", path.display()),
+                            });
+                            return Ok(None);
+                        }
+                        Ok(true) => return Ok(None),
+                        Ok(false) => {}
                     }
-                    return Ok(None);
+                    let (doc, stamp) = match crate::vector::svg::document(&path) {
+                        Ok(d) => d,
+                        Err(_) => {
+                            // Readable (the broken-image check read it) but
+                            // not parsed by usvg: Chromium paints it, the
+                            // replay cannot; routed, not failed.
+                            b.unsupported
+                                .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                            return Ok(None);
+                        }
+                    };
+                    if doc.compat_supported().is_err() {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                        return Ok(None);
+                    }
+                    let sw = js::or_number(&rec("w"), 1.0);
+                    let sh = js::or_number(&rec("h"), 1.0);
+                    let bw = js::or_number(js::get(&d, "w"), wf);
+                    let bh = js::or_number(js::get(&d, "h"), hf);
+                    let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                    let world = scaled_world(scope, layer, time, scale)?;
+                    let (width, height, _) =
+                        pm_vector::render::svg::svg_raster_dimensions(sw, sh, bw, bh, &world, 8192.0);
+                    return Ok(Some(Quad::Texture {
+                        source: Source::Vector(Box::new(crate::vector::VectorSource::SvgBucket {
+                            path: path.clone(),
+                            stamp,
+                            width,
+                            height,
+                        })),
+                        w: bw,
+                        h: bh,
+                        ax: bw / 2.0,
+                        ay: bh / 2.0,
+                        uv,
+                    }));
                 }
                 if let Err(message) = crate::vector::svg::document(&path) {
                     b.failures.push(LayerFailure {

@@ -633,28 +633,35 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Valid level 1 SVG paint records still need Chromium parity.
-        // Only XML/image-document errors establish a broken <img>;
-        // usvg's unsupported paint features do not establish corruption.
         if !crate::vector::level2(layer) {
+            // Level 1 draws Chromium's Canvas2D replay of the `<img>`
+            // bucket. A document Chromium shows as a broken <img> paints
+            // nothing (XML/image-document errors only); a document the
+            // replay cannot paint yet (text, masks, patterns, embedded
+            // images, other filters) stays routed.
+            let Some(assets) = assets else {
+                // Without media the document cannot be inspected.
+                add(layer, Feature::SvgImage);
+                return;
+            };
             // Offline media is a named layer failure at execution.
-            if let Some(assets) = assets
-                && assets
-                    .path(&asset_id, Some(record))
-                    .is_none_or(|p| std::fs::metadata(p).is_err())
-            {
+            let Some(path) = assets.path(&asset_id, Some(record)) else {
+                return;
+            };
+            if std::fs::metadata(&path).is_err() {
                 return;
             }
-            if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
-                // Only a document Chromium is known to show as a broken
-                // <img> draws nothing; every other one stays gated.
-                match pm_media::image::svg::broken_image_file(&path) {
-                    Ok(true) => return,
-                    Err(_) => return, // Execution names the unreadable source.
-                    Ok(false) => {}
-                }
+            match pm_media::image::svg::broken_image_file(&path) {
+                Ok(true) => return,
+                Err(_) => return, // Execution names the unreadable source.
+                Ok(false) => {}
             }
-            add(layer, Feature::SvgImage);
+            // A document Chromium paints but usvg/roxmltree reject (external
+            // DTD subsets, parameter entities) stays routed, never a failure.
+            match crate::vector::svg::document(&path) {
+                Ok((doc, _)) if doc.compat_supported().is_ok() => {}
+                _ => add(layer, Feature::SvgImage),
+            }
             return;
         }
         // Level 2: unreadable SVGs are named layer failures at execution.
