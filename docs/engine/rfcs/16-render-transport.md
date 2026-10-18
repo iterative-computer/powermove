@@ -28,7 +28,7 @@ for all of that.
 | Message | Direction | Meaning |
 |---|---|---|
 | `Request::Snapshot(HostSnapshot)` | main → interactive engine, on main's host port only | One frame (or one layer's raster) of the document of `session`, which the window port `renderer` owns. The envelope's revision is the minimum to render (read-your-writes). Answer: `Response::Snapshot` |
-| `Response::Snapshot(SnapshotOutcome)` | engine → main | `rendered` (pixels and tags) or `needsRenderer` (what only the renderer can draw: fallback programs, compatibility rasters) |
+| `Response::Snapshot(SnapshotOutcome)` | engine → main | `rendered` (pixels and tags), `needsRenderer` (what only the renderer can draw: fallback programs, compatibility rasters), or `empty` (a layer target that draws nothing then: today's `raster()` returns null) |
 | `Event::Compat(CompatMessage)` | renderer → interactive engine (session-bound) | `pixels`: one row band of a compatibility raster; `forget`: drop a layer's rasters |
 | `Request::CompatFrame(CompatFrameRequest)` | job engine → host | A layer's compatibility pixels for an export frame (the host asks the editor windows). Answer: `Response::CompatFrame` |
 | `Event::RenderStats(RenderStats)` | interactive engine → renderer (session-bound) | What presenting the session costs, at most 2 Hz while presenting and once after idle |
@@ -58,7 +58,11 @@ class, viewSeq, waitMs, uploaded }`:
 ### Snapshot result
 
 `SnapshotResult { revision, viewSeq, width, height, pixels, payload, origin,
-quality, waitedUs, renderUs }`. `revision` is the exact revision rendered;
+layerBox, quality, waitedUs, renderUs }`. For a layer target `origin` is the
+anchor and `layerBox` the raster's box in layer pixels (today's
+`RasterSurface` `anchorX`, `anchorY`, `w`, `h`); pm-render paints the
+rasters of text and captions layers (`Renderer::text_raster`), any other
+layer is refused `unsupported` with its kind. `revision` is the exact revision rendered;
 `viewSeq` echoes the request. `payload` is `inline { bytes }` up to 1 MiB,
 otherwise `sharedMemory { name, length }`: a POSIX segment the engine created
 exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
@@ -115,6 +119,22 @@ window declined the last reason is the answer (`notHeadlessRenderable`).
 One answer per ask, 30 s per ask, 32 asks in flight, segments the engine
 does not take unlinked after a minute.
 
+### Depth and object-id surfaces
+
+`ViewerState.depthId: true` (the 3D viewport chrome) makes the interactive
+engine create a depth pool for the view: `rgbaf16` surfaces at the
+viewer's size, as many as the frame pool, handed to main and the window
+like the frame pool and announced as `SurfacePool { role: depthId }` (a
+depth pool never replaces the frame pool). Each frame renders its depth
+and object-id surface (r depth, g and b the object id minus one, a
+coverage) with its color, placed exactly like it and never filtered, into
+slot `seq % count`, and names it in `FrameDescriptor.depthId { poolIndex,
+seq, poolGeneration }`. A slot is reused only after `count` newer frames,
+more than are ever in flight, so the surface of the frame on screen is not
+overwritten while it shows; no release message is needed. The pool is
+charged to the lease, retired when the viewer stops asking, and remade
+after a GPU loss.
+
 ### Stats
 
 `RenderStats { frames, timedFrames, lateSkipped, cpuUs, gpuUs, layers,
@@ -136,6 +156,7 @@ type EngineSnapshotRequest = { generation: number; session: number; revision: nu
 type EngineSnapshotReply =
   | { status: 'rendered'; revision; viewSeq; width; height; pixels; data: Uint8Array; origin: [number, number]; quality: FrameQuality; waitedUs; renderUs; mainMs }
   | { status: 'needsRenderer'; revision; fallback: ShaderFallbackRequest[]; compat: CompatNeed[] }
+  | { status: 'empty'; revision }
   | { status: 'failed'; code: string; message: string };
 ```
 
@@ -151,6 +172,9 @@ renderFrameToSync(time, width, height, options?): HTMLCanvasElement | null; // t
 renderFrameTo(time, width, height, options?): Promise<HTMLCanvasElement>;
 snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure
 snapshotDataUrl(time, maxWidth, size): Promise<string>;
+rasterSync(layer, scale, time, crop?, maxEdge?): EngineSnapshot | null;  // null: draws nothing then
+raster(layer, scale, time, crop?, maxEdge?): Promise<EngineSnapshot | null>;
+toCanvas(snapshot: EngineSnapshot): HTMLCanvasElement;
 readonly thumbnails: EngineThumbnails;                                  // idle class, stale-rejecting
 uploadCompat(upload): boolean;
 forgetCompat(layer, composition?): boolean;
@@ -159,7 +183,7 @@ readonly stats: TransportStats;
 
 type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; background?; draft3d?; waitMs?;
   layer?: { id: string; scale: number; crop?: { x; y; width; height } | null } };
-type EngineSnapshot = { width; height; data: Uint8ClampedArray; pixels; revision; viewSeq; origin; quality; waitedUs; renderUs; mainMs };
+type EngineSnapshot = { width; height; data: Uint8ClampedArray; pixels; revision; viewSeq; origin; layerBox: [number, number] | null; quality; waitedUs; renderUs; mainMs };
 class EngineSnapshotError extends Error { code: string }
 
 EngineThumbnails.request({ key, ...EngineSnapshotOptions, minRevision? }, revision?): Promise<EngineSnapshot | null>; // null: stale or superseded
@@ -173,7 +197,7 @@ the engine through `snapshotSync`; `project.snapshot` through `snapshot`.
 apiVersion 4's async siblings are on the render object:
 `snapshotAsync(time, maxWidth = 480): Promise<string>`,
 `renderFrameToAsync(time, w, h, options?): Promise<HTMLCanvasElement>`,
-`rasterAsync(layer, scale = 1, time?, crop?): Promise<EngineSnapshot>`.
+`rasterAsync(layer, scale = 1, time?, crop?): Promise<EngineSnapshot | null>`.
 Their typings in `kernel/api.ts` belong to the extcompat lane.
 `render.raster` itself stays on today's rasterizer until pm-render draws
 layer rasters (see Open).
@@ -192,7 +216,10 @@ the frame's revision), then `overlay`. `PM.EngineStats.perf()` gives today's
 
 ### Viewer service (`EngineViewerService`, engine-present)
 
-Added members: `exclusive?: boolean` (the kernel's connection sets it: the
+`ViewParams.depthId?: boolean` asks for the depth and object-id surfaces;
+`ViewerPresentation.depthFrame(frame?)` returns the surface of a frame on
+screen as a `VideoFrame` (close it after reading). Added service members:
+`exclusive?: boolean` (the kernel's connection sets it: the
 viewer never hands the stage, transport, or audio back to the current
 engine) and `presented?(frame, quality)`. `ViewerPresentation` gains
 `exclusive`, `status`, `role` (`viewer` | `binding`), marks its stage
@@ -207,11 +234,13 @@ TypeScript and rebuild their addons when this lands.
 
 ## Open
 
-- **Depth and ID surface delivery** aligned to a presented frame (contract
-  2's `FrameDescriptor.depthId`): not delivered yet; see bridge.md gaps.
-- **Layer rasters**: the engine answers `layer` targets `unsupported` until
-  pm-render draws single-layer rasters; the compatibility lane builds
-  `render.raster` on it.
+- **Depth and ID consumers**: the surfaces are delivered
+  (`ViewerPresentation.depthFrame`); the 3D viewport chrome reading them is
+  the 3D lane's.
+- **Layer rasters** of text and captions need render fonts in the
+  interactive engine (until then they are refused naming that); other layer
+  kinds have no raster pass in pm-render. `render.raster` itself stays on
+  today's rasterizer until the compatibility lane switches it.
 - **Compatibility rasters in frames**: the store holds them; pm-render does
   not draw a layer from them yet, so `needsRenderer.compat` is always empty.
 - **Snapshots before the window's first engine session** (during boot) fail

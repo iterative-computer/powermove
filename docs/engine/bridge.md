@@ -1133,10 +1133,13 @@ e2e proves both).
 
 ### What remains
 
-- **Layer rasters.** `render.raster` stays on today's rasterizer: pm-render
-  has no single-layer raster pass, so the engine answers `layer` snapshot
-  targets `unsupported` (named). `rasterAsync` exists and fails with that
-  reason until pm-render draws them (lanes L1 and extcompat).
+- **Layer rasters.** The engine paints text and captions layer rasters
+  (`Renderer::text_raster`, with anchor and box), but the interactive
+  engine's renderer has no render fonts yet (text-render.md, "render-thread
+  fonts"), so today they are refused naming that; other layer kinds have no
+  raster pass in pm-render. `render.raster` stays on today's rasterizer;
+  `rasterAsync`/`rasterSync` are the engine path the compatibility lane
+  switches it to once fonts reach the engine (lanes L1 and extcompat).
 - **Compatibility rasters in frames.** The interactive engine assembles and
   holds uploaded compatibility rasters, and main serves the job engine's
   `compatFrame`, but pm-render does not draw a layer from them yet and
@@ -1152,9 +1155,11 @@ e2e proves both).
 - **`FX passes`** in the performance panel reads 0 with the engine (the
   engine counts no effect passes); the other fields come from
   `RenderStats`.
-- **Depth and id consumers.** The 3D viewport chrome does not read
-  `depthFrame` yet (the 3D lane): the viewer asks with
-  `ViewParams.depthId`, which the 3D lane sets.
+- **Depth and id consumers.** The surfaces are delivered with each
+  frame (`child_depth` proves the pool, the per-frame tag, and the slot
+  rule; `presenter.test.ts` the viewer side), but nothing reads
+  `depthFrame` yet and no test reads the surface's values back through the
+  bridge: the 3D lane's chrome sets `ViewParams.depthId` and samples it.
 - **Old custom viewers** are covered by unit tests of the binding; no e2e
   loads a frozen viewer fork yet (the extcompat lane's fork corpus).
 - Capability routing (`routed`) still hands the stage, transport, and audio
