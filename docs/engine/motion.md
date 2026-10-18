@@ -105,13 +105,16 @@ The engine draws the frame selected at the center time (what the viewer shows at
 the playhead) with the transform sampled across the shutter.
 
 **Today's export and preview, measured** (`e2e/legacy-blurred-video-export.spec.ts`,
-legacy engine, a 64² VP9 clip whose frames are flat levels 20 + 10i, 20 frames
-at 30 fps, MP4 export with motion blur on):
+legacy engine, clips whose frames are flat levels 20 + 10i, 20 frames at 30 fps:
+64² lossless VP9 in WebM, and 128² H.264 in MP4 and ProRes 422 in MOV encoded
+through VideoToolbox; MP4 export with motion blur on; 2026-10-18 for all three):
 
 - the sharp export holds each frame (levels 20, 30, …, 210, within 1 code
   value of H.264);
-- **the blurred export holds frame 0 in every frame** (level 20 twenty times):
-  users' exports today contain the stale frame;
+- **the blurred export holds frame 0 in every frame** (level 20 twenty times)
+  for every source, VP9, H.264, and ProRes alike: users' exports today contain
+  the stale frame (levels:
+  `/tmp/ne-compclose/evidence/r2/blur-video/legacy-export-levels-vp9-h264-prores.jsonl`);
 - the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
   50, 100, 170, the same as without blur).
 
