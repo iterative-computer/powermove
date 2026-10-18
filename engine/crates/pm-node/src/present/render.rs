@@ -1135,6 +1135,7 @@ impl Thread {
             TransportCommand::Seek { time, mode } => {
                 let playing = view.clock.following() && view.clock.is_playing();
                 let awaiting = view.awaiting;
+                let engine = view.reported == Some(Route::Engine);
                 view.scrub = mode == SeekMode::Scrub && !playing && awaiting.is_none();
                 view.clock.apply(TransportCommand::Seek { time, mode }, at);
                 if playing || awaiting.is_some() {
@@ -1155,7 +1156,10 @@ impl Thread {
                     }
                 } else if mode == SeekMode::Scrub {
                     self.scrub_grain(key, time.get());
-                } else if !host_clock && let Some(audio) = self.audio_for(key) {
+                } else if !host_clock
+                    && engine
+                    && let Some(audio) = self.audio_for(key)
+                {
                     // Paused exact seeks prepare the next audio start too.
                     audio.send(AudioCtl::Seek(time.get()));
                 }
@@ -1259,6 +1263,12 @@ impl Thread {
                     let prefs = self.audio_prefs.get(&key).cloned().unwrap_or_default();
                     link.send(AudioCtl::AudioScrub(prefs.scrub));
                     link.send(AudioCtl::Solo(prefs.solo));
+                    // Whichever control creates the link (a paused seek can
+                    // precede the first document), it warms like
+                    // `warm_audio`; a Play right after opens the device anyway.
+                    if self.config.document {
+                        link.send(AudioCtl::Warm);
+                    }
                     self.audio.insert(key, link);
                 }
                 Err(error) => {
@@ -1295,8 +1305,9 @@ impl Thread {
         }
         let ready =
             self.views.contains_key(&key) && self.docs.get(&key).is_some_and(|d| d.has_document());
-        if ready && let Some(link) = self.audio_for(key) {
-            link.send(AudioCtl::Warm);
+        if ready {
+            // A new link is sent AudioCtl::Warm by `audio_for`.
+            self.audio_for(key);
         }
     }
 
