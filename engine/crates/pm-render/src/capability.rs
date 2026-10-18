@@ -44,9 +44,6 @@ pub enum Feature {
     Effects,
     /// Layer masks.
     Masks,
-    /// Bezier path masks (today's Canvas2D coverage route, which also takes
-    /// every other mask of the layer).
-    PathMasks,
     /// Transitions.
     Transition,
     /// Layer or group motion blur.
@@ -110,7 +107,6 @@ impl fmt::Display for Feature {
             Feature::Scene3d(s) => write!(f, "3D: {s}"),
             Feature::Effects => write!(f, "effects"),
             Feature::Masks => write!(f, "masks"),
-            Feature::PathMasks => write!(f, "path masks"),
             Feature::Transition => write!(f, "transitions"),
             Feature::MotionBlur => write!(f, "motion blur"),
             Feature::TwoAndAHalfD => write!(f, "2.5D layers"),
@@ -377,18 +373,11 @@ fn check_composition(
                 }
             }
         }
-        // Parametric masks (also on 3D object layers), track mattes, and
-        // blend modes are drawn (`crate::composite`); bezier path masks are
-        // not. Masks that are not an array fail the layer as today's
+        // Parametric and bezier path masks (also on 3D object layers),
+        // track mattes, and blend modes are drawn (`crate::composite`).
+        // Masks that are not an array fail the layer as today's
         // `(L.masks || []).some(…)` does (a named layer failure, not a
         // route).
-        let masks = node::member(Some(layer), "masks");
-        if node::array(masks).is_some_and(|m| {
-            m.iter()
-                .any(|mask| node::truthy(node::member(Some(mask), "path")))
-        }) {
-            add(layer, Feature::PathMasks);
-        }
         if js::flag(layer, "transitionIn") || js::flag(layer, "transitionOut") {
             match effects {
                 None => add(layer, Feature::Transition),

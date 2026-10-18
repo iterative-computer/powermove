@@ -401,8 +401,8 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
             .any(|u| matches!(u.feature, Feature::Text(_))),
         "{with_fonts:?}"
     );
-    // Blend modes, parametric masks, and track mattes are drawn
-    // (`pm_render::composite`); bezier path masks are not.
+    // Blend modes, parametric and bezier path masks, and track mattes are
+    // drawn (`pm_render::composite`).
     let f = variant(|d| {
         let i = layer_at(d, "back");
         d["layers"][i]["blend"] = json!("multiply");
@@ -490,7 +490,7 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["layers"][i]["masks"] =
             json!([{ "id": "m1", "on": true, "path": { "id": "p", "vertices": [], "p": {} } }]);
     });
-    assert!(f.contains(&Feature::PathMasks), "{f:?}");
+    assert!(f.is_empty(), "path masks are drawn: {f:?}");
     // Linear blending and 32-bit precision are drawn; unknown settings are not.
     let f = variant(|d| {
         d["color"] = json!({ "mode": "standard", "linearBlending": true, "precision": "float32" })

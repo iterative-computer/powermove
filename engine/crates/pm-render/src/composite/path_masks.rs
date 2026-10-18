@@ -60,6 +60,8 @@ struct PassUniform {
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 pub(crate) struct PathMaskPipelines {
+    /// Item rasters across frames.
+    items: std::sync::Mutex<ItemCache>,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     rescale: wgpu::RenderPipeline,
@@ -165,6 +167,7 @@ impl PathMaskPipelines {
             blur2d: pipeline("fs_blur2d", None),
             over: pipeline("fs_draw", Some(blend(wgpu::BlendFactor::One))),
             out: pipeline("fs_draw", Some(blend(wgpu::BlendFactor::Zero))),
+            items: Default::default(),
             layout,
             sampler,
         }
@@ -210,29 +213,38 @@ impl Image {
     }
 }
 
-/// Item rasters keyed by their mask, world, and canvas, kept for the next
-/// frame (a static mask is rasterized once).
+/// Item rasters keyed by their mask, world, and canvas, kept across frames
+/// (a static mask is filled once), least recently used dropped past
+/// [`ITEM_CACHE_BYTES`].
 #[derive(Default)]
 pub(crate) struct ItemCache {
-    items: HashMap<String, std::sync::Arc<mask::Item>>,
-    used: Vec<String>,
+    items: HashMap<String, (std::sync::Arc<mask::Item>, u64)>,
+    tick: u64,
+    bytes: usize,
 }
+
+/// The item cache's budget.
+const ITEM_CACHE_BYTES: usize = 192 << 20;
 
 impl ItemCache {
     fn item(&mut self, m: &PathMask, world: [f64; 6], w: u32, h: u32) -> Result<std::sync::Arc<mask::Item>, String> {
         let key = format!("{w}x{h} {world:?} {:?} {:?} {:?}", m.ops, m.outline, m.path);
-        self.used.push(key.clone());
-        if let Some(i) = self.items.get(&key) {
+        self.tick += 1;
+        if let Some((i, used)) = self.items.get_mut(&key) {
+            *used = self.tick;
             return Ok(i.clone());
         }
         let item = std::sync::Arc::new(mask::item(m, world, w, h).map_err(|u| format!("path mask: {u}"))?);
-        self.items.insert(key, item.clone());
+        self.bytes += item.alpha.len();
+        self.items.insert(key, (item.clone(), self.tick));
+        while self.bytes > ITEM_CACHE_BYTES && self.items.len() > 1 {
+            let oldest = self.items.iter().min_by_key(|(_, (_, u))| *u).map(|(k, _)| k.clone());
+            let Some(k) = oldest else { break };
+            if let Some((i, _)) = self.items.remove(&k) {
+                self.bytes -= i.alpha.len();
+            }
+        }
         Ok(item)
-    }
-    /// Drops items no frame used since the last call.
-    pub fn end_frame(&mut self) {
-        let used: std::collections::HashSet<String> = self.used.drain(..).collect();
-        self.items.retain(|k, _| used.contains(k));
     }
 }
 
@@ -309,7 +321,6 @@ impl PathMaskPipelines {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        items: &mut ItemCache,
         cov: &PathCoverage,
     ) -> Result<wgpu::Texture, String> {
         let (w, h) = (cov.width.max(1), cov.height.max(1));
@@ -339,7 +350,7 @@ impl PathMaskPipelines {
             multiview_mask: None,
         });
         for m in &cov.masks.masks {
-            let item = items.item(m, cov.world, w, h)?;
+            let item = self.items.lock().unwrap_or_else(|e| e.into_inner()).item(m, cov.world, w, h)?;
             let mut img = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 1);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -464,9 +475,8 @@ impl PathMaskPipelines {
 /// for parity tests and diagnostics.
 pub fn coverage_bytes(device: &wgpu::Device, queue: &wgpu::Queue, cov: &PathCoverage) -> Result<Vec<u8>, String> {
     let pipelines = PathMaskPipelines::new(device);
-    let mut items = ItemCache::default();
     let mut encoder = device.create_command_encoder(&Default::default());
-    let texture = pipelines.coverage(device, queue, &mut encoder, &mut items, cov)?;
+    let texture = pipelines.coverage(device, queue, &mut encoder, cov)?;
     let (w, h) = (texture.width(), texture.height());
     let row = w.div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {

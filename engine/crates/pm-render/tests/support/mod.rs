@@ -466,8 +466,8 @@ pub fn extension_definitions(document: &Document) -> Vec<String> {
 /// Routing reasons of the compositing and motion classes, which the
 /// renderer draws for every layer type (docs/engine/composite.md and
 /// motion.md): a corpus project routed for one of them fails the corpus
-/// tests. Bezier path masks are not drawn yet (`Feature::PathMasks`, a
-/// recorded gap) and stay listed as skips.
+/// tests. Bezier path masks are drawn on today's Canvas2D coverage route
+/// and no longer have a routing reason of their own.
 #[allow(dead_code)]
 pub fn routing_forbidden(feature: &pm_render::Feature) -> bool {
     use pm_render::Feature;

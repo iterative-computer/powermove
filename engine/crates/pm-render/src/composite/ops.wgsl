@@ -42,10 +42,16 @@ const FLAG_BLEND_IN_E: i32 = 32;
 // Intermediates are stored at half precision (each legacy pass writes an
 // RGBA16F target): round between fused steps.
 const FLAG_HALF: i32 = 64;
+// Bezier path masks: the layer times today's coverage canvas (`tcov`).
+const FLAG_PATH_MASKS: i32 = 128;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
 @group(0) @binding(2) var tb: texture_2d<f32>;
+// The path mask coverage canvas (top-down, output size) and today's
+// `texFor` filtering (linear, clamp to edge).
+@group(0) @binding(3) var tcov: texture_2d<f32>;
+@group(0) @binding(4) var scov: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -158,7 +164,21 @@ fn coverage(px: vec2<f32>) -> f32 {
     return cov;
 }
 
-// Masks (`FRAG_MASK` then `FRAG_MASK_APPLY`) and the track matte
+// `pathMaskApply`: the coverage canvas sampled through `u_covTransform`
+// (output pixels to canvas pixels; `inv` holds it on this route), zero
+// outside the canvas.
+fn path_coverage(px: vec2<f32>) -> f32 {
+    let t = mat3x3<f32>(op.inv0.xyz, op.inv1.xyz, op.inv2.xyz);
+    let q = t * vec3<f32>(px, 1.0);
+    let uv = q.xy / q.z / op.res.xy;
+    let c = textureSampleLevel(tcov, scov, uv, 0.0).r;
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+        return 0.0;
+    }
+    return c;
+}
+
+// Masks (`FRAG_MASK` then `FRAG_MASK_APPLY`, or `pathMaskApply`) and the track matte
 // (`applyTrackMatte`), in that order, on the layer in `ta`; the matte pass
 // is in `tb`.
 @fragment
@@ -167,8 +187,11 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     if (has(FLAG_MASKS)) {
         c = c * half(coverage(in.px));
     }
+    if (has(FLAG_PATH_MASKS)) {
+        c = c * path_coverage(in.px);
+    }
     if (has(FLAG_MATTE)) {
-        if (has(FLAG_MASKS)) {
+        if (has(FLAG_MASKS) || has(FLAG_PATH_MASKS)) {
             c = half4(c);
         }
         var m = load_b(in.pos);

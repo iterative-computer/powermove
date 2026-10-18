@@ -670,9 +670,7 @@ fn draw_layer<'d>(
         let Some(effects) = effects else {
             return Ok(None);
         };
-        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
-            return Ok(None);
-        };
+        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
         return Ok(Some(vec![node(composite::Node::Adjustment(
             composite::AdjustmentNode {
                 layer: id.clone(),
@@ -700,9 +698,7 @@ fn draw_layer<'d>(
                 content: Vec<Draw>,
                 composite_alpha: f64|
      -> JsResult<Option<Vec<Draw>>> {
-        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
-            return Ok(None);
-        };
+        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
         let matte = if matted {
             layer_matte(scope, b, layer, time, width, height, scale)?
         } else {
@@ -923,18 +919,19 @@ fn placed(
     }))
 }
 
-/// The layer's masks for its node: `Some(None)` when nothing is masked,
-/// `None` when the masks are unsupported (recorded).
+/// The layer's masks for its node (`None` when nothing is masked). The
+/// path route's coverage canvas is the `width × height` output.
 fn layer_masks<'d>(
     scope: &mut Scope<'_, 'd>,
-    b: &mut Build<'_>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    width: u32,
+    height: u32,
     has_masks: bool,
-) -> JsResult<Option<Option<composite::Masks>>> {
+) -> JsResult<Option<composite::Masks>> {
     if !has_masks {
-        return Ok(Some(None));
+        return Ok(None);
     }
     let world = scaled_world(scope, layer, time, scale)?;
     let plane = if scope.is_3d_layer(layer)? {
@@ -954,14 +951,10 @@ fn layer_masks<'d>(
     } else {
         None
     };
-    match composite::build::masks(scope, layer, time, world, plane)? {
-        composite::build::MaskRoute::Unmasked => Ok(Some(None)),
-        composite::build::MaskRoute::Parametric(m) => Ok(Some(Some(m))),
-        composite::build::MaskRoute::Path => {
-            let comp_id = scope.comp.id().to_string_lossy();
-            b.unsupported
-                .push(Unsupported::layer(&comp_id, layer, Feature::PathMasks));
-            Ok(None)
+    match composite::build::masks(scope, layer, time, world, plane, width, height)? {
+        composite::build::MaskRoute::Unmasked => Ok(None),
+        composite::build::MaskRoute::Parametric(m) | composite::build::MaskRoute::Path(m) => {
+            Ok(Some(m))
         }
     }
 }
