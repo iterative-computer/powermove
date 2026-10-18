@@ -254,8 +254,8 @@ pub(crate) struct PrepareVoice {
     run: Arc<std::sync::Mutex<StretchRun>>,
 }
 impl PrepareVoice {
-    pub(crate) fn id(&self) -> usize {
-        Arc::as_ptr(&self.run) as usize
+    pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
+        self.run.clone()
     }
     pub(crate) fn run(
         self,
@@ -278,6 +278,71 @@ impl PrepareVoice {
                 .then(|| crate::graph::StaticMap::new(plan, &comps, ev, a as f64 / p))
                 .transpose()?
                 .flatten();
+            // Queue the whole bounded deterministic prefix before consuming
+            // its first block. Discovering later blocks only after earlier
+            // reads complete serializes decode latency across the pre-roll.
+            let source = &plan.source;
+            let block = (p * pm_stretch::DEFAULT_BLOCK_SECONDS).ceil();
+            let lo = (a.div_euclid(stretch::GRID) * stretch::GRID - stretch::preroll(self.rate))
+                .max(first);
+            let hi = (b + 2 * block as i64).min(last);
+            if let Some(fixed) = &fixed {
+                // A constant map is monotone. Two exact endpoint evaluations
+                // bound it without resolving thousands of control points or
+                // requiring an entire long source to be decoded.
+                if plan.static_point.is_some_and(|pt| pt.active) {
+                    let rate = source.sample_rate() as f64;
+                    let x0 = fixed.evaluate(plan, lo as f64 / p).source_time * rate;
+                    let x1 = fixed.evaluate(plan, hi as f64 / p).source_time * rate;
+                    if x0.is_finite() && x1.is_finite() {
+                        let step = plan.constant_rate.unwrap().abs() * rate / p;
+                        let taps = match &self.project_reader {
+                            Reader::Copy { .. } => 1,
+                            Reader::Grid { bank, .. } => bank.taps,
+                            Reader::Free => kernel::free_bank(rate / p).taps,
+                        };
+                        // The stretch reads through the linear project-rate
+                        // reader. Its taps plus a rounding margin are enough;
+                        // no speed-specific resampling bank needs building.
+                        let pad = (2.0 * block * step.max(rate / p)).ceil() as i64
+                            + (2 * kernel::TAPS + taps) as i64;
+                        let from = (x0.min(x1).floor() as i64).saturating_sub(pad);
+                        let to = (x0.max(x1).ceil() as i64).saturating_add(pad);
+                        if !self.cache.is_ready(source, from, (to - from) as usize) {
+                            self.cache.prefetch_span(source, from, (to - from) as usize);
+                        }
+                    }
+                }
+            } else {
+                let cached = source
+                    .length()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .is_some_and(|n| self.cache.is_ready(source, 0, n));
+                if !cached {
+                    let _timing = crate::profile::timer(crate::profile::Kind::Bounds);
+                    let span = CONTROL * READ_GROUP;
+                    for group in lo.div_euclid(span)..=(hi - 1).div_euclid(span) {
+                        if cancelled() {
+                            return Err(crate::error::AudioError::Device(
+                                "superseded preparation".into(),
+                            ));
+                        }
+                        for (lo, hi) in group_spans(
+                            plan,
+                            None,
+                            ev,
+                            &mut retime,
+                            &comps,
+                            group,
+                            p,
+                            (first, last),
+                            Some(block),
+                        )? {
+                            self.cache.prefetch_span(source, lo, (hi - lo) as usize);
+                        }
+                    }
+                }
+            }
             let (ev, retime) = (ev, &mut retime);
             let mut map = |c: i64| -> Result<MapPoint> {
                 if cancelled() {

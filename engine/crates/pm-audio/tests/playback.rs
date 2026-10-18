@@ -732,6 +732,79 @@ fn a_partial_callback_underrun_is_reported_and_recovers_in_order() {
     );
 }
 
+/// Both input blocks for a fresh mapped start must be queued while decode
+/// is blocked; discovering the second only after the first decodes serializes
+/// the artificial/real decode latency and can miss the first callback.
+#[test]
+fn a_cold_mapped_start_queues_its_preroll_blocks_together() {
+    let dir = temp_dir("mapped-preroll-prefetch");
+    let file = dir.join("tone.m4a");
+    generate(
+        &file,
+        "aevalsrc=0.125*sin(2*PI*441*t)|0.125*sin(2*PI*660*t):s=44100:d=20",
+        &["-c:a", "aac", "-b:a", "160k"],
+    );
+    let cache = SourceCache::new(64 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    cache.set_decode_blocked(&source, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_wait_ms: 4000,
+            ..Default::default()
+        },
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    // Set the target before Project can launch an obsolete start at zero.
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(2.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    let remap = keys(&[(0.0, 2.0), (6.0, 10.0)]);
+    let clip = layer(
+        "V",
+        "video",
+        0.0,
+        6.0,
+        &format!(r#"{{"asset":"s","timeRemap":true,"sourceTime":{remap},"embeddedAudio":true}}"#),
+        "",
+    );
+    playback
+        .set_project(
+            Arc::new(project(30.0, 12.0, &[clip], &[], "")),
+            "C",
+            &|_: &str| Some(file.clone()),
+        )
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while cache.blocked_decoders() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let blocked = cache.blocked_decoders();
+    cache.set_decode_blocked(&source, false);
+    until(|| side.queued_frames() >= BUFFER);
+    let mut out = vec![0.0; BUFFER * 2];
+    side.callback(&mut out, 2, host_now_us());
+    assert!(out.iter().any(|v| *v != 0.0));
+    drop(playback);
+    cache.shutdown();
+    assert_eq!(
+        blocked, 2,
+        "both decode workers must receive needed pre-roll blocks before either finishes"
+    );
+}
+
 fn time_mapped_playback(loaded: bool) {
     let _load = loaded.then(CpuContention::start);
     let dir = temp_dir(if loaded {
@@ -791,6 +864,7 @@ fn time_mapped_playback(loaded: bool) {
             .unwrap();
         dev.run(200);
         let stats = playback.stats();
+        let playback_timing = playback.start_timing();
         drop(playback);
         let played: Vec<f32> = dev
             .log
@@ -830,6 +904,11 @@ fn time_mapped_playback(loaded: bool) {
         eprintln!(
             "{name}: stats {stats:?}, first difference {:?}",
             played.iter().zip(&offline[0]).position(|(a, b)| a != b)
+        );
+        eprintln!(
+            "{name}: first program frame {start}, offline lead {lead}, expired callbacks {}, first queued after control {:?} ms",
+            dev.expired,
+            playback_timing.map(|t| (t.queued_us - t.applied_us) as f64 / 1000.0)
         );
         assert_eq!(stats.starved_renders, 0, "{name}: starved renders");
         assert_eq!(stats.underruns, 0, "{name}: device ring underruns");

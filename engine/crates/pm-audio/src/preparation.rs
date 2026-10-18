@@ -100,7 +100,9 @@ struct Done {
     generation: u64,
     start: i64,
     voice: usize,
-    run_id: usize,
+    // Pin the allocation until acceptance, preventing pointer reuse after
+    // a start is evicted and recreated while its result is in transit.
+    history: Arc<Mutex<crate::stretch::StretchRun>>,
     ready: crate::Result<bool>,
     profile: crate::profile::Profile,
 }
@@ -155,7 +157,7 @@ impl Preparation {
                     continue;
                 }
                 let voice = work.vi;
-                let run_id = work.id();
+                let history = work.history();
                 let generation = self.generation.load(Ordering::Relaxed);
                 let current = self.generation.clone();
                 let make = self.make.clone();
@@ -172,7 +174,7 @@ impl Preparation {
                         generation,
                         start,
                         voice,
-                        run_id,
+                        history,
                         ready,
                         profile: crate::profile::snapshot(),
                     });
@@ -183,7 +185,11 @@ impl Preparation {
     fn accept(&mut self, mixer: &mut Mixer, done: Done) {
         if done.generation == self.generation.load(Ordering::Relaxed) {
             self.pending.remove(&(done.start, done.voice));
-            if !mixer.preparation_matches(done.start, done.voice, done.run_id) {
+            if !mixer.preparation_matches(
+                done.start,
+                done.voice,
+                Arc::as_ptr(&done.history) as usize,
+            ) {
                 return;
             }
             match done.ready {
