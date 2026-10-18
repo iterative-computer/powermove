@@ -125,6 +125,15 @@ function diffPaths(a, b, at = '', out = []) {
   return out;
 }
 
+/** The first differing paths with both values (JSON, shortened), for the report. */
+function diffValues(a, b, at = '', out = []) {
+  if (out.length >= 12 || JSON.stringify(a) === JSON.stringify(b)) return out;
+  if (a && b && typeof a === 'object' && typeof b === 'object' && Array.isArray(a) === Array.isArray(b)) {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) diffValues(a[k], b[k], Array.isArray(a) ? `${at}[${k}]` : at ? `${at}.${k}` : k, out);
+  } else out.push([at || '(root)', JSON.stringify(a)?.slice(0, 120) ?? 'undefined', JSON.stringify(b)?.slice(0, 120) ?? 'undefined']);
+  return out;
+}
+
 const projects = index.projects.filter((p) => !only || p.id.startsWith(only));
 const results = Object.fromEntries(projects.map((p) => [p.id, { id: p.id, media: p.media, problems: [] }]));
 const pageErrors = [];
@@ -212,7 +221,10 @@ try {
           else if (now !== r.baseline) {
             const paths = diffPaths(JSON.parse(r.baseline), JSON.parse(now));
             if (phase === 'on (control)') r.unstable = paths;
-            else if (!r.unstable || paths.some((p) => !r.unstable.includes(p))) r.problems.push(`${phase}: stored project differs at ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` and ${paths.length - 4} more` : ''}`);
+            else if (!r.unstable || paths.some((p) => !r.unstable.includes(p))) {
+              r.problems.push(`${phase}: stored project differs at ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` and ${paths.length - 4} more` : ''}`);
+              (r.differences ??= {})[phase] = diffValues(JSON.parse(r.baseline), JSON.parse(now));
+            }
             else r.differsLikeControl = (r.differsLikeControl ?? 0) + 1;
           }
           if (!flag) await s.page.evaluate(async () => { await window.PM.Projects.put(window.PM.proj); await window.PM.store.flush?.(); });
@@ -232,7 +244,7 @@ const summary = {
   withMedia: list.filter((r) => r.stored && r.media.length).length,
   assets: list.reduce((n, r) => n + (r.assets ?? 0), 0),
   compared,
-  failed: list.filter((r) => r.problems.length).map((r) => ({ id: r.id, problems: r.problems })),
+  failed: list.filter((r) => r.problems.length).map((r) => ({ id: r.id, problems: r.problems, differences: r.differences })),
   skipped: list.filter((r) => r.skipped).map((r) => ({ id: r.id, reason: r.skipped })),
   stamped: list.filter((r) => r.requiresEngine).map((r) => r.id),
   // Projects whose stored document changes on any reopen (the control), with

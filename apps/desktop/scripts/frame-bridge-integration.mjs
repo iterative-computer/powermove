@@ -19,6 +19,8 @@ import path from 'node:path';
 
 import { build } from 'esbuild';
 
+import { rawText } from './esbuild-raw-text.mjs';
+
 const desktop = path.resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
 const jsonOut = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
@@ -29,7 +31,7 @@ if (!args.includes('--skip-build')) {
 
 const out = mkdtempSync(path.join(os.tmpdir(), 'pm-frame-bridge-it-'));
 try {
-  const common = { bundle: true, target: 'es2023', logLevel: 'warning', alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
+  const common = { bundle: true, target: 'es2023', logLevel: 'warning', plugins: [rawText], alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
   await build({
     ...common,
     entryPoints: {
