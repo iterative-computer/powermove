@@ -55,7 +55,8 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
             PM.touch(); PM.assets.clear(); await PM.assets.restoreProject(PM.proj); await PM.prepareFrame(0);
             return { stored: Boolean(stored), live: PM.assets.map.has(id) };
           }, { name, source });
-          expect(facts).toEqual({ stored: true, live: false });
+          // Today's <img> loads only the documents Chromium paints.
+          expect(facts).toEqual({ stored: true, live: valid });
           const status = () => app.page.evaluate(() => {
             const s = (window as any).PM.EngineConnection.status(); return { route: s.route, reason: s.routeReason };
           });
@@ -72,6 +73,8 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
           const result = await app.page.evaluate(async () => (window as any).PM.Export.run({ format: 'still', w: 64, h: 64, alpha: true, mblur: false }));
           const jobs = await app.page.evaluate(() => { const w = window as any; w.__brokenOff(); return w.__brokenJobs; });
           await writeFile(path.join(out, `${native ? 'native' : 'legacy'}-${name}.json`), JSON.stringify({ facts, result, jobs, diagnostics: app.diagnostics }, null, 2));
+          // Valid documents name the gate; the export shows today's paint.
+          if (native && valid) expect(jobs.some((j: any) => j.routed && /SVG images/.test(j.error ?? '')), name).toBe(true);
           if (native && !valid) {
             expect(jobs.some((j: any) => j.state === 'done' && !j.routed), name).toBe(true);
             expect(jobs.some((j: any) => j.routed), name).toBe(false);
