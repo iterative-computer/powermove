@@ -61,7 +61,7 @@ impl Disposable {
                 (Framing::Length((c[4] & 3) as usize + 1), 0)
             }
             (NalCodec::Hevc, Some(c)) if c.len() > 22 && c[0] == 1 => {
-                (Framing::Length((c[21] & 3) as usize + 1), (c[21] >> 3) & 7)
+                (Framing::Length((c[21] & 3) as usize + 1), hevc_layers(c))
             }
             // No decoder configuration record: parameter sets travel in band.
             (NalCodec::H264, None) => (Framing::AnnexB, 0),
@@ -116,6 +116,42 @@ impl Disposable {
         };
         complete && vcl > 0 && all
     }
+}
+
+/// The temporal sub-layers of an HEVC stream from its `hvcC` record, when
+/// the record's numTemporalLayers agrees with every SPS it carries
+/// (`sps_max_sub_layers_minus1 + 1`, the bound on every picture's
+/// TemporalId); otherwise 0 (unknown: nothing is left out). A record that
+/// under-reports its sub-layers would make referenced pictures look like
+/// top-layer ones.
+fn hevc_layers(c: &[u8]) -> u8 {
+    let layers = (c[21] >> 3) & 7;
+    let mut sps = 0usize;
+    let mut p = 23usize;
+    for _ in 0..c[22] {
+        let Some(h) = c.get(p..p + 3) else { return 0 };
+        let (kind, count) = (h[0], u16::from_be_bytes([h[1], h[2]]));
+        p += 3;
+        for _ in 0..count {
+            let Some(l) = c.get(p..p + 2) else { return 0 };
+            let len = u16::from_be_bytes([l[0], l[1]]) as usize;
+            p += 2;
+            let Some(nal) = c.get(p..p + len) else {
+                return 0;
+            };
+            p += len;
+            if kind & 0x3F == 33 {
+                // The byte after the NAL header: sps_video_parameter_set_id
+                // (4 bits), sps_max_sub_layers_minus1 (3), nesting (1).
+                let Some(&b) = nal.get(2) else { return 0 };
+                if (b >> 1) & 7 != layers.wrapping_sub(1) {
+                    return 0;
+                }
+                sps += 1;
+            }
+        }
+    }
+    if sps == 0 { 0 } else { layers }
 }
 
 /// Calls `f` with each NAL unit; false when the sample is malformed.
@@ -201,6 +237,38 @@ mod tests {
             ..one
         };
         assert!(!unknown.disposable(&sample(&[&[0x00, 0x01, 0xaf]])));
+    }
+
+    /// An `hvcC` with numTemporalLayers `layers` and one SPS per entry of
+    /// `sps` (its sps_max_sub_layers_minus1 + 1).
+    fn hvcc(layers: u8, sps: &[u8]) -> Vec<u8> {
+        let mut c = vec![0u8; 23];
+        c[0] = 1;
+        c[21] = (layers << 3) | 3;
+        c[22] = 2;
+        // A VPS array, then the SPS array.
+        c.extend_from_slice(&[0x80 | 32, 0, 1, 0, 4, 0x40, 0x01, 0x0c, 0x01]);
+        c.extend_from_slice(&[0x80 | 33]);
+        c.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        for &m in sps {
+            c.extend_from_slice(&[0, 4, 0x42, 0x01, ((m - 1) << 1) | 1, 0x01]);
+        }
+        c
+    }
+
+    #[test]
+    fn hevc_sub_layers_must_agree_with_the_sps() {
+        assert_eq!(hevc_layers(&hvcc(1, &[1])), 1);
+        assert_eq!(hevc_layers(&hvcc(3, &[3, 3])), 3);
+        // The record under-reports (TemporalId 1 pictures may exist):
+        // TRAIL_N pictures at TemporalId 0 may be referenced.
+        assert_eq!(hevc_layers(&hvcc(1, &[2])), 0);
+        assert_eq!(hevc_layers(&hvcc(2, &[2, 1])), 0);
+        // No SPS in the record (parameter sets in band), or a cut record.
+        assert_eq!(hevc_layers(&hvcc(1, &[])), 0);
+        let mut cut = hvcc(1, &[1]);
+        cut.truncate(cut.len() - 2);
+        assert_eq!(hevc_layers(&cut), 0);
     }
 
     #[test]
