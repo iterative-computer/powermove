@@ -184,8 +184,15 @@ Each effect instance and transition is timed between two marker dispatches: one-
 compute passes whose end-of-pass sample is the timestamp, the first reading a texel of
 the effect's input, the second a texel of its output (as `pm-export`'s `GpuSpan`). One
 query set and readback per renderer; a frame encoded while the previous timed frame is
-unread is not timed. Readback is never waited for during rendering: the next frame
-collects it (`Watchdog::collect`). A definition over the budget (default 250 ms per
+unread is not timed. The timestamps are resolved in a submission of their own once the
+frame's command buffer has completed (`Queue::on_submitted_work_done`): resolved inside the
+frame's own command buffer, Metal returned the previous frame's end sample, so every span
+after a renderer's first read as ending before it began and went unjudged (found
+2026-10-17; `the_watchdog_judges_every_timed_frame_not_only_the_first` judged 1 of 8
+frames before the fix, 8 of 8 after; `pm-export`'s `GpuSpan` resolves the same way).
+Nothing is waited for during rendering: each frame's start advances the timed frame
+(`Watchdog::collect`: completed → resolve submitted → readback mapped → judged), so a frame
+is judged two frames after it was drawn at the earliest. A definition over the budget (default 250 ms per
 instance per frame) is disabled from the next frame, skipped with its data kept, and
 reported (`WatchdogTimeout`, effect scope) until it is registered again: a kernel delta
 that upserts it (a register or hot reload of that id, even with the same source), a
@@ -196,16 +203,18 @@ interactive engine loads full sets per view, so pm-engine passes a delta's upser
 to `FramePresenter::definitions` and pm-node's `Composer::use_definitions` forgets them.
 
 Measured: with eleven test renderers busy in one process, Metal left pass-boundary
-samples of render passes unwritten (zeros) in 4 of 10 spans, and end-of-pass samples of
-the marker dispatches stale; such spans are not judged (a sample at or before the newest
+samples of render passes unwritten (zeros) in 4 of 10 spans (the stale end-of-pass
+samples of the marker dispatches seen then were the same-command-buffer resolve above);
+such spans are still not judged (a sample at or before the newest
 valid one, or an end not after its begin). The effect tests take turns on the GPU; the
 engines have one device per process.
 
 Built-in GPU times at UHD (3840 × 2160, defaults, a 3000 × 1700 image, release, M4 Max,
-the longest of 5 frames): Gaussian Blur 13.4 ms, Glow 12.2, Drop Shadow 11.2, Turbulent
-Displace 3.9, Directional Blur 2.0, every other built-in 0.5 to 0.8 ms. Translating the
-20 built-ins in a cold process: 154 ms; from the cache: 0.27 ms. First frame per effect,
-pipeline build included: 92 to 142 ms.
+the longest of 5 frames, measured again 2026-10-17 with every frame judged): Gaussian Blur
+14.4 ms, Glow 12.0, Drop Shadow 10.2, Turbulent Displace 5.3, Directional Blur 2.9,
+Sharpen 0.95, every other built-in 0.66 to 0.77 ms. Translating the 20 built-ins in a cold
+process: 149 ms; from the in-memory cache: 0.10 ms. First frame per effect, pipeline build
+included: 63 to 112 ms.
 
 Not built: device-loss recovery (a true hang). The device's owner (pm-node, pm-export)
 rebuilds the device; see Gaps.
@@ -305,7 +314,9 @@ content over transparency, an adjustment inside a precomp). Capture
 frame), measured 2026-10-17: 84 samples within 1 CV everywhere (max 1 CV; their float
 frames within 0.63 CV), the 3 Posterize samples in the WebGL-unstable class (below), 0
 failures. With the newest v1, render, and composite captures, `corpus.rs` compares 202
-frames: 0 failed, 6 (the 3 Posterize samples, opaque and float) listed apart.
+frames: 0 failed, 6 (the 3 Posterize samples, opaque and float) listed apart. Again
+after the wave 4 merges (text, motion, 3D), 2026-10-17: 228 frames compared, 0 failed,
+the same 6 listed apart.
 
 **Linear blending** (`tests/effects_linear.rs`, no WebGL reference exists): each of the
 16 built-in effects (the corpus's non-trivial parameters for Color, Levels, and
