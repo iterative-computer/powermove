@@ -15,13 +15,16 @@ anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
 | Text layers, `compat` level 1: every text property (font, weight, size, tracking, leading, alignment, italic, color, paragraph boxes, `fontAxis.*` variable axes, project fonts, synthesized bold and italic) | Drawn | `tests/text_raster.rs`, `tests/text_corpus.rs` |
 | Text animators (stagger, range, wave; characters, words, lines; position, scale, rotation, skew, opacity, blur, color, tracking) and range styles | Drawn | `tests/text_corpus.rs` (`text/animator-*`, `text/range-styles`) |
 | Captions: every preset, box, stroke, highlight, highlight scale, pop and fade word animations, text case | Drawn | `tests/text_raster.rs` (`caption-*`), `tests/text_corpus.rs` (`captions/*`) |
-| Apple Color Emoji (`sbix`), placed as Canvas2D places it | Drawn | `fit-emoji` (6 to 64 px), `emoji` group |
+| Level 1 glyphs on macOS from CoreGraphics masks, as Canvas2D draws them (below, "Glyph masks"): every axis-aligned glyph below the large-text size, synthesized italic included | Drawn, pixel-identical on the corpus | `tests/text_raster.rs` (`families`, `weights`, `italic`, `scripts`, `tracking`, `paragraph`, `colors`, `sizes`), `tests/text_corpus.rs` |
+| Apple Color Emoji (`sbix`), drawn by CoreGraphics and placed as Canvas2D places it | Drawn, pixel-identical | `emoji` group (6 to 160 px) |
+| Caption boxes, 4× multisampled as the GPU canvas fills paths | Drawn (3 to 9 pixels per case still differ at the corners) | `caption-boxed`, `caption-paper` |
 | RTL and complex scripts the level 1 layout shapes (Arabic, Hebrew, Devanagari, Thai, CJK) | Drawn | `scripts` group |
 | `compat` level 2 text and captions, at output resolution | Drawn when the host gives level 2 fonts; still routed by the static check (below) | `tests/text_level2.rs` |
 | Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
 | Valid CSS colors the engine does not reproduce (`lab()`, `lch()`, `oklab()`, `oklch()`, `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`, system colors, any functional notation that does not parse) | Refused (`Feature::Text`), not drawn with a fallback | `tests/text_colors.rs` |
 | Color vector glyphs (`COLR`) | Refused (`Feature::Text`), not drawn wrong | `scene::tests::color_vector_glyphs_are_refused_not_drawn` |
-| Text and captions without configured fonts | Refused (`Feature::Text`) | `tests/text_gpu.rs` |
+| Text and captions without configured fonts | Refused (`Feature::Text`). The interactive engine, the job engine, and `pm-cli` give their renderers fonts (`docs/engine/text.md`, "Fonts on render threads") | `tests/text_gpu.rs`, `pm-node/tests/fonts.rs` |
+| A registry question the host's font service left unanswered | Refused (`Feature::Text`, "the font registry did not answer"), never drawn in another font | `pm_text::served` tests |
 
 Text and captions have no shadow property today (drop shadow is an effect).
 
@@ -180,12 +183,68 @@ Canvas2D placement is the rule for both levels (amendment 10). Measured on
   linear, Mitchell, Lanczos-2, and Lanczos-3: SSIM ≥ 0.98 from 10 px; 0.92 to
   0.96 at 6 to 9 px.
 
+## Glyph masks (level 1, macOS)
+
+Measured on 2026-10-18 and now the level 1 path: Canvas2D's glyph masks are
+CoreGraphics' own coverage, mapped through a per-color table. pm-text draws
+the same masks (`render::cgmask`, feature `cg-masks`, on by default in
+pm-render on macOS):
+
+- **Masks.** Each glyph is drawn by CoreGraphics (`CTFontDrawGlyphs`) into a
+  32-bit RGB bitmap, black on white, antialiased, with subpixel positioning
+  on and quantization off, at the glyph's quarter-pixel offset (Skia's
+  subpixel positioning: x to the nearest quarter, y rounded), and the mask
+  is `255 − luminance`. The CTFont is the face's own bytes at the device
+  size with its variation coordinates (`opsz` included). Placed 1:1 at the
+  whole device pixel, the masks equal Canvas2D's: on every capture case
+  the map from our raw coverage to Canvas2D's is a function (each raw value
+  gives one value), so geometry, smoothing, and positions match exactly.
+  An alpha-only context gives the same coverage (smoothing has no effect on
+  macOS 27).
+- **Tables.** That function depends on the paint color through four tables
+  (`render::mask_tables`, measured: every coverage value 1 to 255 seen on
+  the fit capture's 10 colors, no ambiguous entry, monotonic). The table is
+  picked by Skia's Mac luminance rule (`luminance_bucket`): the paint color
+  canonicalized (top 3 bits replicated per channel), halved (the Mac scaler
+  for smoothed text without subpixel coverage), canonicalized again,
+  reduced to one luminance (`(54r + 183g + 19b) >> 8`), canonicalized; its
+  top bits are the bucket, 0 to 3 (halving leaves no higher bucket).
+  Verified on 14 colors (black, primaries, grays, yellow, cyan, the
+  captions' gold and red). Skia's `SkMaskGamma` correcting LUT does not fit
+  the tables for any gamma and contrast tried, so they are kept as data and
+  must be measured again if an Electron update changes them
+  (`tests/text_raster.rs` fails then).
+- **Compositing.** A `fillText` call's masks become one premultiplied image
+  item, each glyph composited source-over on the earlier ones (Skia draws
+  glyph quads one by one), in the fill color through the table.
+- **Color glyphs.** Color bitmap faces (`sbix`, `CBDT`; not monochrome
+  `EBDT`, which draw as masks) are drawn by CoreGraphics into a
+  premultiplied RGBA bitmap at the em size CoreText uses for the strike
+  (`FontResolver::em_advance`), then moved down by the measured whole-pixel
+  shift for Apple Color Emoji (`apple_emoji_shift`): every emoji case from
+  6 to 160 px is pixel-identical.
+- **Synthesized italic** is Skia's text-matrix shear, drawn by CoreGraphics
+  about the glyph origin: exact.
+- **Caption boxes** are filled with 4× multisampled coverage (the capture's
+  box edges take only quarter values), with the standard 4-sample pattern
+  and exact circular corners.
+
+The outline path with the Canvas2D profile (below) remains for what the
+masks do not cover yet: glyphs under a non-axis-aligned transform (rotated,
+skewed, or non-uniformly scaled animator glyphs), glyphs at the large-text
+size (162 px device and up) or drawn as paths, synthesized bold, caption
+strokes, and platforms without CoreGraphics.
+
 ## Routing
 
 `pm_render::unsupported` and `unsupported_with_media` describe a renderer
 without fonts and list text and captions layers (`Feature::Text`).
 `unsupported_with_fonts` and `Renderer::unsupported_with_media` describe a
-renderer with fonts (`Renderer::set_text_fonts`), where they are drawn.
+renderer with fonts (`Renderer::set_text_fonts`), where they are drawn. The
+viewer presenter (`ViewDocument::set_fonts`), the job engine
+(`StillRouting::with_fonts`, `plan_export_with_fonts`), and `pm-cli` use the
+check with fonts when their renderers have them, so text and captions no
+longer route there.
 `compat` level 2 content stays routed (`Feature::CompatLevel2`) until level 2
 layer semantics (bounds, picks, anchors) exist in `pm-eval`; the renderer
 draws it when asked. `Renderer::set_captions_hidden` is `PM.captionsHidden`
@@ -193,8 +252,50 @@ draws it when asked. `Renderer::set_captions_hidden` is `PM.captionsHidden`
 
 ## Measurements
 
-Apple M4 Max, macOS 27, Electron 44 (Chromium 152) for references,
-2026-10-16, machine load 9 to 20. Captures (private, not in the
+**2026-10-18, glyph masks and fonts on render threads** (Apple M4 Max,
+macOS 27, references from Electron 44 / Chromium 152).
+
+Level 1 rasters against Canvas2D (`tests/text_raster.rs`, 495 cases;
+"exact" is every channel of every pixel within 1 code value):
+
+| Group | Cases | Exact | Max Δ | Min ink SSIM | Before (min SSIM) |
+|---|---:|---:|---:|---:|---:|
+| families | 102 | 102 | 0 | 1.0000 | 0.94 to 1.0 |
+| weights | 108 | 108 | 0 | 1.0000 | |
+| italic (real faces) | 16 | 16 | 0 | 1.0000 | |
+| scripts (RTL, complex, CJK) | 42 | 42 | 0 | 1.0000 | |
+| tracking, paragraph | 14 | 14 | 0 | 1.0000 | |
+| emoji (6 to 160 px) | 20 | 20 | 0 | 1.0000 | 0.92 to 0.965 |
+| colors | 21 | 19 | 8 | 1.0000 | |
+| sizes, sizes-regular (8 to 200 px) | 48 | 46 | 148 | 0.9835 | 0.871 (small text) |
+| variable (`fontAxis.*`) | 27 | 21 | 6 | 1.0000 | |
+| density (0.25 to 4) | 24 | 23 | 126 | 0.9921 | |
+| synthetic (italic, bold) | 6 | 3 (italic) | 220 | 0.9288 (bold) | 0.9288 |
+| large (200, 300 px) | 2 | 0 | 173 | 0.9933 | 0.9933 |
+| captions (all presets, strokes) | 65 | 0 | 170 | 0.9881 | 0.985 |
+| **All** | **495** | **414** | | | 0 exact |
+
+Every case at or below 18 px device size is exact (the cases that are not
+are the 200 px sizes and the 192 px density case, which draw in the
+large-text regime). Colors and variable fonts differ by at most 8 and 6
+code values on 2 to 448 pixels (premultiplied rounding at alpha 0x80;
+CoreText's own variation instancing in Chromium's CTFont).
+
+Whole frames (`tests/text_corpus.rs`, served fonts with the capture's
+seeds, built-in definitions, text routing forbidden): 126 frames, 0 failed;
+static text frames text-pixel SSIM 1.0000 with every other pixel exact;
+captions 0.9892 to 0.9999 (strokes) and animator frames with rotated or
+scaled glyphs 0.9978 to 0.9999 (outline path); projects not compared are
+refused only for features outside text (SVG images, path masks, motion
+blur, 2.5D, one extension effect with no definition).
+
+Evaluation (`pm-cli parity eval --wasm`, corpus v1): native and pm-wasm
+1,891,448 values compared, 0 mismatched, 0 tolerance questions (810 in the
+variable-font ink class, max 1.191e-4 px); text sub-gate 6,162 layouts,
+identical breaks, max advance error 0.000000 px.
+
+Earlier measurements (2026-10-16), before the glyph masks: Apple M4 Max,
+macOS 27, Electron 44 (Chromium 152) for references, machine load 9 to 20. Captures (private, not in the
 repository): `text-raster-20261016-061928` (495 cases),
 `text-fit-20261016-062639` (700), `text-probe-20261016-065257` and
 `text-probe-20261016-072821` (194), corpus `v1-20261012-230504`.
@@ -311,39 +412,76 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
 
 ## Gaps
 
-- **Small text (≤ 18 px device size) at level 1:** 113 of 190 cases reach
-  0.98 (mean 0.979, min 0.871). CoreGraphics smoothing moves the top edges
-  of glyphs by font- and size-dependent amounts at small sizes (Menlo's block
-  top departs from the trend by −0.6 to +0.4 px at some sizes; Avenir Next
-  Bold's cap tops show no upward growth at 16 px), which one dilation per
-  size cannot reproduce. The profile is the best fit found (mean from 0.95
-  to 0.98); the review sheets show the differences.
-- **Engine hosts do not give their renderers fonts yet.** `pm-node`'s
-  interactive and job engines create `Renderer`s without `set_text_fonts`;
-  the registry lives on the utility process's main thread (`FontService`),
-  and a render-thread `TextFonts` needs recorded registry answers over full
-  fonts (`ReplayResolver`) plus a way to answer misses. Until then routing
-  keeps text and captions on the legacy renderer (the static check lists
-  them).
-- Synthesized bold: 0.93 to 0.96 at 36 and 80 px.
-- Emoji below 10 px: 0.92 to 0.96 (resampling). CoreText's own emoji
-  placement (6 px higher at 48 px) is not the rule, so level 2 emoji are not
-  compared with CoreText.
-- `COLR` color fonts are refused rather than drawn.
-- Level 2: animated and range-styled text and typography anchoring are
-  refused; routing keeps `compat` level 2 content on the legacy path.
-- Routing does not yet separate the measured sub-gate classes (level 1 text
-  at 18 px and below, synthesized bold, emoji below 10 px):
-  `unsupported_with_fonts` treats all level 1 text as drawn. This has no
-  effect while hosts give no fonts; whether to gate those classes before
-  fonts are wired is a plan-owner decision.
-- Animated text evaluates its posed glyphs twice per frame (inside
-  `Scope::text_raster` for the placement and again through
-  `animated_raster_glyphs` for the draws). Typing stays at p95 ≤ 4.4 ms for
-  the engine's share, so this is left to a `pm-eval` change that returns
-  both at once.
+Each of these is a visible difference on level 1 content today (amendment
+22), measured on the capture; none is accepted, each is open work:
+
+- **Synthesized bold** (fonts without a bold face asked for weight 700):
+  ink SSIM 0.9288 to 0.9561 (unchanged; outline path with the fitted
+  outset). Skia's fake bold strokes and fills the outline with `size ×
+  interp(size, {9, 36}, {1/24, 1/32})`; CoreGraphics' fill-and-stroke at
+  that width gives 0.905 to 0.961, a separately rasterized path union is
+  worse, and no width reaches 1.0, so the exact construction (Skia's
+  stroker and rasterizer over the one stroke-and-fill path) is not
+  reproduced yet.
+- **Large text** (162 px device and up: `large`, 200 px `sizes`, the 192 px
+  density case): SSIM 0.9835 to 0.9940, max Δ up to 173. Chromium's GPU
+  canvas draws these glyphs another way (exact positions, slightly dilated
+  edges; likely Skia's distance-field text above its 162 px limit). Needs a
+  port of that path.
+- **Caption strokes** (every stroked preset): SSIM 0.9881 to 0.9969, max Δ
+  up to 159 (the fitted stroke profile). Skia renders stroked glyph images
+  from paths with its own stroker and rasterizer; a `vello_cpu` stroke
+  through the mask tables scored lower (0.9812), so the fitted profile
+  stays.
+- **Caption box corners**: 3 to 9 pixels per box differ at the arcs (the GPU
+  tessellates the conic corners).
+- **Animated glyphs under rotation, skew, or non-uniform scale** use the
+  outline path: frame SSIM 0.9978 to 0.9999.
+- **Colors with alpha** (`#FFFFFF80`): 2 pixels off by up to 8 (8-bit
+  premultiplied rounding order). **Variable fonts**: 8 to 448 pixels off by 2
+  to 6 (Chromium's CTFont carries its variations differently from ours).
+- **`COLR` color fonts** are still refused rather than drawn (Chromium may
+  rasterize them through FreeType's COLRv1 path; not investigated).
+- **Level 2**: animated and range-styled text and typography anchoring are
+  still refused, and `compat` level 2 content still routes
+  (`Feature::CompatLevel2`); level 2 layer semantics (bounds, picks,
+  anchors in `pm-eval`) are not built.
+- **`Feature::Text`** stays in `pm_render::unsupported`: it is the reason a
+  renderer without fonts, an unsupported color, a `COLR` glyph, or an
+  unanswered registry question refuses a layer. Hosts with fonts no longer
+  emit it for ordinary text; the derouter lane retires the routing.
+- The tables and the emoji shift are data measured from one Electron
+  (Chromium 152) on macOS 27; an update that changes Skia's tables or
+  CoreText's emoji placement needs them measured again.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts):
+
+- `engine/crates/pm-node/src/present/{render,document,mod}.rs`: the
+  presenter's renderer gets the engine's fonts (`ThreadConfig::fonts`,
+  `TextFontsHub`), and the view's capability check uses fonts
+  (`ViewDocument::set_fonts`).
+- `engine/crates/pm-node/src/jobs/mod.rs`: lanes' renderers get fonts
+  (`JobEngineService::start_with_fonts`); stills and exports route with
+  fonts.
+- `engine/crates/pm-node/src/lib.rs`: the font hub, the service created
+  with the host, both engines serving fonts, shutdown order.
+- `engine/crates/pm-export/src/render.rs`: `plan_export_with_fonts`,
+  `StillRouting::with_fonts`.
+- `engine/crates/pm-cli/src/{fonts,render,scope,main}.rs`: fonts for
+  `render` and `scope`, `--ui-scale`; `src/parity/*` and
+  `scripts/parity-wasm.mjs`: pm-wasm gets the seeds, the variable-font ink
+  tolerance class.
+- `engine/crates/pm-wasm/src/{engine,abi}.rs`: `pm_fonts_seeds`.
+- `apps/desktop/src/main/engine/index.ts` (small): the job engine's font
+  client and the seeds tracker.
+- `apps/desktop/src/preload/index.ts` (bridge's file, small): `seeds` and
+  `onSeedsChanged` on `engineFonts`.
+- `apps/desktop/src/renderer/src/engine-doc/{install,fonts,wasm}.ts`: the
+  window's seeds into pm-wasm.
+
+Earlier:
 
 - `engine/crates/pm-eval/src/text_geom.rs`: `animated_raster_glyphs`
   exposes the glyphs and canvas box `rasterAnimatedText` paints (the raster

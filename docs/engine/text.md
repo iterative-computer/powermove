@@ -16,6 +16,7 @@ into the engine". Spike: `docs/engine/spikes/S4.md`.
 | `level2` (feature `level2`) | Level 2 layout on Parley: grapheme-aware breaking, font-metric baselines, fallback from the registry's manifest |
 | `registry` (feature `system`, macOS) | `CoreTextRegistry`: Blink's macOS font matching, enumeration, project fonts (Blink's font selection algorithm), variable-font sources, the fallback manifest, subsets |
 | `answers` | The registry boundary as data (`Query`, `Answers`, `ReplayResolver`, `Recorder`, `answer_batch`) |
+| `served` | `ServedResolver`: a resolver answered synchronously by a registry on another thread, over full fonts (`FontServer`, `Served`, `DirectServer`) |
 | `subset` | Metrics-and-shaping subsets with the amended table list (adds `maxp`, `feat`, `STAT`, `ankr`; synthesizes `HVAR` for `gvar`-only fonts) |
 | `corpus` | The S4 corpus, its Canvas2D fixture, and the comparison |
 
@@ -101,13 +102,52 @@ was found on the corpus's real project and checked against Chromium itself
    seeds pm-text measures as a fresh renderer. The corpus test seeds the
    capture's renderer from its device pixel ratio. Today's layout of such
    text therefore depends on the display and on what the UI drew before;
-   the engine has to pick one answer for documents (open question for Jude:
-   fresh renderer, or the app's own UI state at 2x).
+   the decision below picks the app's own state.
 
    Not modelled: when a canvas itself first creates an entry at a specified
    size off the 1/100 px grid between 17 and 28 px, later canvas text in the
    same 1/100 px bucket inherits that `opsz` (a difference below 0.01 px of
    optical size).
+
+   **Decided (Phase 1 T1, by the orchestrator under amendment 22): measure
+   as the running app's renderer does.** The app's UI text (`system-ui` at
+   12 and 13 px, weight 400, upright: `--fs-sm` and `--fs-md`) is laid out at
+   the window's device scale factor, so its entries are seeds:
+   `app_ui_font_cache_seeds(scale factors)` (pm-text) and
+   `appUiFontCacheSeeds` (`shared/engine-fonts-seeds.ts`, equal by test).
+   A window keeps every scale factor's entries it has been on, in order.
+   Main tracks each window's displays (`main/engine-fonts-seeds.ts`:
+   `browser-window-created`, `moved`, `resized`, display changes) and
+   - answers `engine-fonts:seeds` with that window's seeds and sends
+     `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
+     takes them through the new `pm_fonts_seeds` export (kept across
+     registry generation changes, applied to a revived instance);
+   - sends the seeds of all windows to both engines' font services
+     (`Op::Seeds`, replayed last on every port).
+   Text layer weights default to 500, so only weight 400 `system-ui` text at
+   24 and 26 px (2x) or 12 and 13 px (1x, no change) is affected. Not
+   modelled: other UI text (11, 15, 18 px; weights 500 and 600) and page
+   zoom, which the decision does not cover; windows on different kinds of
+   display share the union of their seeds in the engines (pm-wasm in each
+   window has its own).
+
+   Measured (`pm-cli parity eval --wasm`, corpus v1, 2026-10-18): pm-wasm
+   in Node with the seeds main sends gives 1,891,448 compared, 0
+   mismatched, exactly as natively; before, 1,260 `system-ui` layouts of the
+   real project differed (up to 18.2 px). Native and wasm32 replies: 0 of
+   1,815,420 differ.
+
+4. **Variable-font ink (Phase 1 T2, decided by the orchestrator).**
+   CoreText instances variable outlines with its own variation arithmetic;
+   skrifa's ink boxes differ by at most 1.19e-4 px (relative 4.3e-6) on the
+   real project. That is a named bounds tolerance class, "variable-font ink
+   (CoreText instances outlines)", bound 2e-4 px absolute: `pm-cli parity
+   eval` counts values within it as matched in the class and reports them
+   apart (`toleranceClasses` in the JSON; 405 text bounds and 405 raster
+   selections, max 1.191e-4 px), never as mismatches or questions;
+   pm-eval's corpus test uses the same bound (`VARIABLE_INK`). It covers
+   bounds and raster boxes of text in a variable font only, never positions
+   or advances.
 
 ## The engine's font service (Phase 2, "Use New Engine")
 
@@ -118,16 +158,17 @@ below are unchanged. Main relays them:
 - `installNativeEngine` registers the `engine-fonts:*` channels over an
   `EngineFontClient` and adds main as a client of every interactive launch
   with the `fonts` peer (`NativeEngine.addClient(FONT_CLIENT_ID, …, { peer:
-  'fonts', processes: ['interactive'] })`). The job engine gets no font
-  port. Main never loads a registry of its own on this path.
+  'fonts', processes: ['interactive'] })`), and a second client for the job
+  engine (`JOB_FONT_CLIENT_ID`, "Fonts on render threads"). Main never loads
+  a registry of its own on this path.
 - The font port is not a protocol peer. Each message is one request or one
   reply (`fonts::wire`): `id u32 LE | op u8 | json length u32 LE | JSON |
   binary tail` and `id u32 LE | status u8 | payload`, with status JSON,
   bytes, or error. Registry answers stay pm-text's JSON strings end to end;
   fonts and subsets travel as raw bytes.
-- The service is created on the first font port, on the utility process's
+- The service is created with the engine host on the utility process's
   JavaScript thread (the process main thread, which AppKit's font manager
-  needs), and lives for the launch. Requests run synchronously on that
+  needs), or on the first font port, and lives for the launch. Requests run synchronously on that
   thread, the one that also runs the engine protocol, so a slow request
   holds the engine's message handling: the first fallback manifest takes
   about 0.6 s. Only CoreText matching needs AppKit's thread; moving the
@@ -165,6 +206,61 @@ Measured through the real utility process
 manifest loads every CoreText substitute); after SIGKILL the restarted
 engine had a new font port, the replayed project font, and a higher
 generation 0.31 s later.
+
+## Fonts on render threads (Phase 3c)
+
+The engines draw text on render threads (the viewer presenter, the job
+engine's export, agent frame, and snapshot lanes), but the registry runs on
+the utility process's main thread (AppKit). Both meet in
+`pm_node::fonts::hub::FontHub`:
+
+- A render thread's renderer holds `pm_render::text::served::ServedFonts`:
+  level 1 layout (`Compat`, `CompatMeasure`) over a `ServedResolver`. A
+  query the resolver has not seen goes to the hub with its siblings (the
+  other families of the canvas font list and the standard font at the same
+  description, so an animated font size costs one round trip, not five);
+  the hub queues it and wakes the JavaScript thread through the action sink
+  (an empty action list makes `engine-process.ts` call `pump`).
+- `EngineHost::pump` and `tick` drain the queue: `FontService::serve`
+  answers each batch with the registry's `Answers` and the full bytes of
+  every face named (shared `FontBytes`, no copy), so outlines, color glyphs,
+  variable axes, hidden system fonts, and project fonts reach the renderer.
+  The render thread waits (30 s at most once open); nothing is guessed: an
+  unanswered query is a failure the layer reports (`Feature::Text`), never a
+  layout in another font.
+- Requests wait until main has finished its replay on a port: the open, the
+  project fonts, then the seeds, which go last (20 s at most; a host that
+  never opens a font port makes them fail). A frame is never laid out
+  without the project fonts and seeds main is about to send.
+- The hub's generation moves when the registry's does (project fonts,
+  sources, a new generation base after a restart) or when the seeds change.
+  `ServedFonts::sync`, called before each text layer, then starts over with
+  a fresh resolver and measurer, and the generation enters every raster's
+  content key.
+- `EngineHost` drops the hub's waits before the presenter and job lanes are
+  joined (shutdown never hangs on a render thread waiting for fonts).
+- Only a host whose registry starts (macOS, on the main thread) gives its
+  render threads fonts; elsewhere text stays unsupported, as before.
+
+Both engines host a registry now. Main keeps one `EngineFontClient` per
+engine: the job engine's (`JOB_FONT_CLIENT_ID`) mirrors every project font
+change and the seeds of the interactive one's, joining its replay directly
+while the job engine is down, so a restarted job engine replays them too.
+
+`pm-cli` renders on its main thread: `pm_cli::fonts::install` serves its
+renderer from a `DirectServer` over the CoreText registry, with the seeds of
+an editor at `--ui-scale` (default 2) on `render` and `scope`.
+
+Tests: `cargo test -p pm-node --test fonts` (the hub, on the main thread:
+three layouts on a render thread equal the registry's glyph for glyph,
+including the seeded `system-ui` case, a mixed-script line, and a hidden
+system font; a whole frame rendered on a render thread equals one rendered
+on the main thread; a project font changes the frame through the
+generation; new seeds move the generation; a restarted engine with main's
+replay lays text out the same; shutdown ends a waiting render thread), the
+hub's and `served`'s unit tests, and main's (`engine-fonts.test.ts`: seeds
+replayed last, mirrors while down; `engine-fonts-seeds.test.ts`;
+`shared/engine-fonts-seeds.test.ts`).
 
 ## Main's registry ("Use New Engine" off)
 
