@@ -1,0 +1,581 @@
+{
+ "note": "Phase 3a app rows (docs/engine/phase3a-gate.md): e2e/native-engine-p3a-measure.spec.ts, Use New Engine on, M4 Max; clips copied into the profile media store. linkedRun: the same with the clips linked (PM_P3A_LINK=1), which the engine read as offline.",
+ "rows": [
+  {
+   "row": "uhd-prores-3-blur-23.976",
+   "at": "2026-10-18T05:21:02.995Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    4.46240234375,
+    6.697265625,
+    6.7890625
+   ],
+   "value": {
+    "seconds": 60.00160000002384,
+    "expectedFrames": 1439,
+    "compositionFrames": 96,
+    "shownFrames": 1438,
+    "skippedFrames": 1,
+    "skippedAt": [
+     1
+    ],
+    "repeatedFrames": 0,
+    "presenterDropped": 0,
+    "presenterDroppedByReason": {},
+    "displayIntervalMs": {
+     "n": 1437,
+     "p50": 41.5,
+     "p99": 49.8,
+     "max": 49.8
+    },
+    "engine": {
+     "lateSkipped": 0,
+     "renderErrors": 0,
+     "layerFailures": 0,
+     "composeUsMax": 202462,
+     "composeUsMean": 1825
+    },
+    "importSeconds": 143.2,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    }
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-23.976-linear",
+   "at": "2026-10-18T05:21:09.023Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    4.26513671875,
+    6.619140625,
+    6.7607421875
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a9mjp8rc"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 143.2,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: native-only features.",
+    "failures": []
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-29.97",
+   "at": "2026-10-18T05:24:52.241Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    3.1728515625,
+    5.3603515625,
+    6.21533203125
+   ],
+   "value": {
+    "seconds": 60.00169999998808,
+    "expectedFrames": 1798,
+    "compositionFrames": 120,
+    "shownFrames": 1799,
+    "skippedFrames": 2,
+    "skippedAt": [
+     1,
+     1
+    ],
+    "repeatedFrames": 0,
+    "presenterDropped": 0,
+    "presenterDroppedByReason": {},
+    "displayIntervalMs": {
+     "n": 1798,
+     "p50": 33.2,
+     "p99": 41.5,
+     "max": 41.5
+    },
+    "engine": {
+     "lateSkipped": 0,
+     "renderErrors": 0,
+     "layerFailures": 0,
+     "composeUsMax": 196543,
+     "composeUsMean": 1650
+    },
+    "importSeconds": 156.12,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      }
+     ],
+     "fps": 29.97002997002997,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    }
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-29.97-linear",
+   "at": "2026-10-18T05:24:58.269Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    3.15869140625,
+    5.32080078125,
+    6.1962890625
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "ar8q7gv0"
+      }
+     ],
+     "fps": 29.97002997002997,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 156.12,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: native-only features.",
+    "failures": []
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-59.94",
+   "at": "2026-10-18T05:31:17.778Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    5.40478515625,
+    5.48193359375,
+    5.931640625
+   ],
+   "value": {
+    "seconds": 60.000600000023844,
+    "expectedFrames": 3596,
+    "compositionFrames": 240,
+    "shownFrames": 3597,
+    "skippedFrames": 4,
+    "skippedAt": [
+     1,
+     1,
+     1,
+     1
+    ],
+    "repeatedFrames": 0,
+    "presenterDropped": 0,
+    "presenterDroppedByReason": {},
+    "displayIntervalMs": {
+     "n": 3596,
+     "p50": 16.6,
+     "p99": 19.2,
+     "max": 24.9
+    },
+    "engine": {
+     "lateSkipped": 1,
+     "renderErrors": 0,
+     "layerFailures": 0,
+     "composeUsMax": 208695,
+     "composeUsMean": 1281
+    },
+    "importSeconds": 312.454,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      }
+     ],
+     "fps": 59.94005994005994,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    }
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-59.94-linear",
+   "at": "2026-10-18T05:31:23.803Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    5.0517578125,
+    5.4072265625,
+    5.90234375
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "awsk0ltd"
+      }
+     ],
+     "fps": 59.94005994005994,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 312.454,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: native-only features.",
+    "failures": []
+   }
+  },
+  {
+   "row": "route-canvas-text",
+   "at": "2026-10-18T05:31:28.178Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    4.80712890625,
+    5.3505859375,
+    5.87939453125
+   ],
+   "value": {
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: text: text layers without the engine's fonts (layer p3a-title in C8euii8t).",
+    "failures": []
+   }
+  }
+ ],
+ "linkedRun": [
+  {
+   "row": "uhd-prores-3-blur-23.976",
+   "at": "2026-10-18T05:15:33.125Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    12.56640625,
+    7.50341796875,
+    6.77685546875
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 127.015,
+    "project": {
+     "color": null,
+     "requiresEngine": null
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: media offline: prores422hq-2160p-23976.mov.",
+    "failures": []
+   }
+  },
+  {
+   "row": "uhd-prores-3-blur-23.976-linear",
+   "at": "2026-10-18T05:15:39.156Z",
+   "cpu": "Apple M4 Max",
+   "load": [
+    12.36083984375,
+    7.54443359375,
+    6.79541015625
+   ],
+   "value": {
+    "built": {
+     "layers": [
+      {
+       "type": "video",
+       "trim": 8,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      },
+      {
+       "type": "video",
+       "trim": 4,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      },
+      {
+       "type": "video",
+       "trim": 0,
+       "from": 0,
+       "dur": 4,
+       "fx": [
+        "blur"
+       ],
+       "asset": "a5nxxnxb"
+      }
+     ],
+     "fps": 23.976023976023978,
+     "asset": {
+      "storage": null,
+      "rendition": true
+     }
+    },
+    "importSeconds": 127.015,
+    "project": {
+     "color": {
+      "mode": "standard",
+      "linearBlending": true,
+      "precision": "float16",
+      "blendDomain": "hdrSafe"
+     },
+     "requiresEngine": "native"
+    },
+    "route": "legacy",
+    "routeReason": "Drawn by the current engine: media offline: prores422hq-2160p-23976.mov; native-only features.",
+    "failures": []
+   }
+  }
+ ]
+}

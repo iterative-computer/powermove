@@ -1,0 +1,217 @@
+{
+ "source": "engine/crates/pm-cli/scripts/wasm-budget-3d.mjs",
+ "rows": [
+  {
+   "project": "3d/camera-animated",
+   "layers": 4,
+   "documentBytes": 8213,
+   "queries": 388,
+   "heapLiveAfterLoad": 77534,
+   "heapLive": 79755,
+   "heapPeak": 97900,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/camera-orthographic",
+   "layers": 4,
+   "documentBytes": 7363,
+   "queries": 388,
+   "heapLiveAfterLoad": 72140,
+   "heapLive": 74380,
+   "heapPeak": 92541,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/depth-sets",
+   "layers": 10,
+   "documentBytes": 14820,
+   "queries": 334,
+   "heapLiveAfterLoad": 146305,
+   "heapLive": 148718,
+   "heapPeak": 177481,
+   "linearBytes": 1835008
+  },
+  {
+   "project": "3d/gltf",
+   "layers": 4,
+   "documentBytes": 7482,
+   "queries": 604,
+   "heapLiveAfterLoad": 71571,
+   "heapLive": 73314,
+   "heapPeak": 88393,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/gltf-materials",
+   "layers": 3,
+   "documentBytes": 5949,
+   "queries": 226,
+   "heapLiveAfterLoad": 55688,
+   "heapLive": 57185,
+   "heapPeak": 72322,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "3d/lathe-extrude",
+   "layers": 5,
+   "documentBytes": 9245,
+   "queries": 469,
+   "heapLiveAfterLoad": 89517,
+   "heapLive": 91897,
+   "heapPeak": 109415,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/legacy-scene",
+   "layers": 1,
+   "documentBytes": 5077,
+   "queries": 145,
+   "heapLiveAfterLoad": 51660,
+   "heapLive": 55924,
+   "heapPeak": 100616,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "3d/lights",
+   "layers": 12,
+   "documentBytes": 19863,
+   "queries": 388,
+   "heapLiveAfterLoad": 202115,
+   "heapLive": 204534,
+   "heapPeak": 243377,
+   "linearBytes": 1966080
+  },
+  {
+   "project": "3d/mesh-slots-maps",
+   "layers": 4,
+   "documentBytes": 8474,
+   "queries": 172,
+   "heapLiveAfterLoad": 82484,
+   "heapLive": 86022,
+   "heapPeak": 108199,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/missing-model",
+   "layers": 2,
+   "documentBytes": 3718,
+   "queries": 118,
+   "heapLiveAfterLoad": 34818,
+   "heapLive": 36762,
+   "heapPeak": 50051,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "3d/motion-blur",
+   "layers": 5,
+   "documentBytes": 9893,
+   "queries": 334,
+   "heapLiveAfterLoad": 94328,
+   "heapLive": 96122,
+   "heapPeak": 115522,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/nested-precomp",
+   "layers": 5,
+   "documentBytes": 8413,
+   "queries": 398,
+   "heapLiveAfterLoad": 82265,
+   "heapLive": 84250,
+   "heapPeak": 100435,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/primitives",
+   "layers": 11,
+   "documentBytes": 21985,
+   "queries": 955,
+   "heapLiveAfterLoad": 206406,
+   "heapLive": 209411,
+   "heapPeak": 251912,
+   "linearBytes": 1966080
+  },
+  {
+   "project": "3d/solo-hidden",
+   "layers": 5,
+   "documentBytes": 8539,
+   "queries": 199,
+   "heapLiveAfterLoad": 85393,
+   "heapLive": 87183,
+   "heapPeak": 103879,
+   "linearBytes": 1703936
+  },
+  {
+   "project": "3d/studio-defaults",
+   "layers": 2,
+   "documentBytes": 3716,
+   "queries": 118,
+   "heapLiveAfterLoad": 35211,
+   "heapLive": 36671,
+   "heapPeak": 50421,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "3d/transparency",
+   "layers": 8,
+   "documentBytes": 14167,
+   "queries": 712,
+   "heapLiveAfterLoad": 140183,
+   "heapLive": 142582,
+   "heapPeak": 169925,
+   "linearBytes": 1835008
+  },
+  {
+   "project": "layers/obj-model",
+   "layers": 1,
+   "documentBytes": 3385,
+   "queries": 145,
+   "heapLiveAfterLoad": 27973,
+   "heapLive": 30125,
+   "heapPeak": 49896,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "layers/studio-cube",
+   "layers": 2,
+   "documentBytes": 4824,
+   "queries": 226,
+   "heapLiveAfterLoad": 46982,
+   "heapLive": 49626,
+   "heapPeak": 69792,
+   "linearBytes": 1638400
+  },
+  {
+   "project": "real/powermove-ad",
+   "layers": 884,
+   "documentBytes": 1429248,
+   "queries": 1071694,
+   "heapLiveAfterLoad": 11221179,
+   "heapLive": 11346520,
+   "heapPeak": 14101415,
+   "linearBytes": 25493504
+  },
+  {
+   "capture": "~/Library/Application Support/Powermove Engine Corpus/v1-20261012-230504-ae47a3b3",
+   "projects3d": 18,
+   "heapLiveMax": 209411,
+   "heapPeakMax": 251912,
+   "linearMax": 1966080,
+   "budget": {
+    "heapLive": 8000000,
+    "linear": 32000000
+   },
+   "within": true,
+   "real": {
+    "project": "real/powermove-ad",
+    "layers": 884,
+    "documentBytes": 1429248,
+    "queries": 1071694,
+    "heapLiveAfterLoad": 11221179,
+    "heapLive": 11346520,
+    "heapPeak": 14101415,
+    "linearBytes": 25493504
+   }
+  }
+ ]
+}

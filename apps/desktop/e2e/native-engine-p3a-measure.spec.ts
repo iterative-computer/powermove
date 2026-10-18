@@ -27,8 +27,9 @@
  *   ffmpeg -f lavfi -i "testsrc2=size=3840x2160:rate=30000/1001,noise=alls=12:allf=t" -t 12 \
  *     -c:v prores_videotoolbox -profile:v hq -pix_fmt p210le \
  *     -color_primaries bt709 -color_trc bt709 -colorspace bt709 prores422hq-2160p-2997.mov
- * (and 24000/1001 → -23976, 60000/1001 → -5994) in $PM_P3A_MEDIA. Media
- * is linked, not copied, into the disposable profile.
+ * (and 24000/1001 → -23976, 60000/1001 → -5994) in $PM_P3A_MEDIA. The
+ * clips are copied into the disposable profile's media store, as an import
+ * does by default (PM_P3A_LINK=1 links them instead).
  *
  * Opt in (heavy; one Electron at a time):
  *   PM_P3A_MEASURE=1 pm-electron-lock bunx playwright test e2e/native-engine-p3a-measure.spec.ts --workers=1 --global-timeout=0
@@ -51,6 +52,8 @@ const OUT = process.env.PM_P3A_MEASURE_OUT ?? path.join(os.tmpdir(), 'powermove-
 const MEDIA = process.env.PM_P3A_MEDIA ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/scratch/p3agate');
 const SECONDS = Number(process.env.PM_P3A_SECONDS ?? 60);
 const MEMORY_SECONDS = Number(process.env.PM_P3A_MEMORY_SECONDS ?? 0);
+/** Link the clips instead of copying them into the profile's media store (PM_P3A_LINK=1). */
+const LINK_MEDIA = process.env.PM_P3A_LINK === '1';
 
 test.skip(!process.env.PM_P3A_MEASURE, 'measurements run on request (PM_P3A_MEASURE=1)');
 
@@ -107,14 +110,14 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
       const { page } = session;
       await session.openEditor();
       await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
-      await page.evaluate(({ num, den }) => {
+      await page.evaluate(({ num, den, linkMedia }) => {
         const PM = (window as any).PM;
-        PM.HostMedia?.setProjectStorage?.('link');
+        if (linkMedia) PM.HostMedia?.setProjectStorage?.('link');
         const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: 4, bg: '#000000' });
         project.fpsRational = { num, den };
         PM.replaceProject(project);
         PM.setTime(0);
-      }, { num: rate.num, den: rate.den });
+      }, { num: rate.num, den: rate.den, linkMedia: LINK_MEDIA });
       const importStart = Date.now();
       const chooser = page.waitForEvent('filechooser');
       await page.evaluate(() => (window as any).PM.pickFiles());
