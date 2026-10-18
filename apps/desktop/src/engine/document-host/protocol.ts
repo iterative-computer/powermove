@@ -163,6 +163,8 @@ export interface InstanceStats {
   instance: number;
   projectId: string;
   revision: number;
+  /** The instance document's canonical hash (`canonicalProjectHash`), to compare with the host's copy. */
+  hash?: string;
   historyDepth: number;
   /** `<op>:<reason>` → count, from the native API and the edit kernels. */
   fallbacks: Record<string, number>;

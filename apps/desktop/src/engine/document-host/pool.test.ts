@@ -13,6 +13,7 @@ import type { AgentToolResponseEvent } from '../../shared/ipc';
 import { DocumentHostPool } from './pool';
 import { DocumentHostError, INSTANCE_STATE_KEY, type DocumentHostServices } from './protocol';
 import { BRIDGE, FIXTURE, WASM, buildEngineBundle, hostServices, type TestHost } from './test-host';
+import { canonicalProjectHash } from '../../shared/canonical-json';
 
 let bundle: { script: string; dispose(): void } | null = null;
 beforeAll(async () => { bundle = await buildEngineBundle(); }, 180_000);
@@ -135,6 +136,87 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     const state = await ask(pool, 'Palpha', 'run-r', 'get_project_state', {});
     expect(JSON.stringify(state.content)).toContain('Renamed by a tab');
     expect((await pool.stats('Palpha')).historyDepth).toBe(0);
+  }, 60_000);
+
+  it('never loses an edit made while its batch, or a remote patch, is in flight', async () => {
+    // The reviewer's sequence, step by step: T1's batch in flight, a remote
+    // patch R arrives, T2 edits, T2's batch in flight, T3 edits. Each host
+    // patch round trip waits until the test releases it.
+    const host = hostServices();
+    host.seed('Palpha', 'Alpha');
+    host.sessions.join(host.tab, 'Palpha', null);
+    const base = host.services.session;
+    const gates: Array<() => void> = [];
+    let sends = 0;
+    host.services.session = {
+      ...base,
+      patch: async (projectId, patches) => {
+        sends += 1;
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return base.patch(projectId, patches);
+      },
+    };
+    const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+      for (let i = 0; i < 400; i++) { if (await ok()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
+      throw new Error(`timed out waiting for ${what}`);
+    };
+    const pool = newPool(host.services);
+    await pool.open('Palpha');
+    const revision = async () => (await pool.stats('Palpha')).revision;
+    // Each call reads the revision the worker has now (its edits apply before they reach the host).
+    const add = async (run: string, name: string) => {
+      const baseRevision = await revision();
+      return pool.call('Palpha', { runId: run, callId: `race-${name}`, tool: 'apply_commands', arguments: { commands: [{ type: 'add_layer', layerType: 'shape', name }], label: name }, baseRevision });
+    };
+    const t1 = add('run-1', 'T1');
+    await until("T1's batch in flight", () => sends === 1);
+    host.sessions.patch(host.tab, 'Palpha', [{ path: ['name'], exists: true, value: 'Renamed by a tab' }] as never);
+    // R reaches the worker over the pool's IPC.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const r1 = await revision();
+    const t2 = add('run-2', 'T2');
+    await until('T2 edited', async () => (await revision()) > r1);
+    gates.shift()!();
+    await until("T2's batch in flight", () => sends === 2 && gates.length === 1);
+    const r2 = await revision();
+    const t3 = add('run-3', 'T3');
+    await until('T3 edited', async () => (await revision()) > r2);
+    // From here every round trip goes through.
+    const release = setInterval(() => { while (gates.length) gates.shift()!(); }, 5);
+    try {
+      const answers = await Promise.all([t1, t2, t3]);
+      expect(answers.map((a) => [a.runId, a.ok, a.error ?? null])).toEqual([['run-1', true, null], ['run-2', true, null], ['run-3', true, null]]);
+      // Read-your-writes: every answered edit is in the host's copy, with the tab's.
+      expect(names(host, 'Palpha').sort()).toEqual(['T1', 'T2', 'T3']);
+      expect(doc(host, 'Palpha').name).toBe('Renamed by a tab');
+      expect((await pool.stats('Palpha')).hash).toBe(canonicalProjectHash(doc(host, 'Palpha')));
+    } finally { clearInterval(release); }
+  }, 60_000);
+
+  it("converges on the host's order when a remote patch writes the same value as an edit in flight", async () => {
+    const host = hostServices();
+    host.seed('Palpha', 'Alpha');
+    host.sessions.join(host.tab, 'Palpha', null);
+    const base = host.services.session;
+    let sends = 0;
+    host.services.session = {
+      ...base,
+      patch: async (projectId, patches) => {
+        sends += 1;
+        // The tab's rename reaches the host first; the agent's batch lands after it, so the agent's value wins there.
+        if (sends === 1) host.sessions.patch(host.tab, 'Palpha', [{ path: ['name'], exists: true, value: 'Tab name' }] as never);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return base.patch(projectId, patches);
+      },
+    };
+    const pool = newPool(host.services);
+    await pool.open('Palpha');
+    const renamed = await ask(pool, 'Palpha', 'run-1', 'apply_commands', { commands: [{ type: 'set_composition', patch: { name: 'Agent name' } }], label: 'rename' });
+    expect(renamed.ok).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const stats = await pool.stats('Palpha');
+    expect(stats.hash).toBe(canonicalProjectHash(doc(host, 'Palpha')));
+    expect(doc(host, 'Palpha').name).toBe('Agent name');
   }, 60_000);
 
   it('fails by name, with retry, when pm-wasm is missing and the new engine is on; never a legacy evaluator', async () => {

@@ -271,6 +271,7 @@ export class DocumentWorker {
       instance: this.instance,
       projectId: this.projectId!,
       revision: Number(PM['proj']?.revision) || 0,
+      hash: canonicalProjectHash(PM['proj']),
       historyDepth: PM['hist'].export({ copy: false }).entries.length,
       fallbacks,
       calls,
@@ -306,34 +307,116 @@ export class DocumentWorker {
 
   /* ── the session ─────────────────────────────────────────────────────── */
 
+  /** The host's patch sends, in order; never rejects (each send reports to its own caller). */
   private sending: Promise<void> = Promise.resolve();
+  /** A send the host refused: the next sync reconciles with the host's copy. */
+  private diverged = false;
+  /** Batches queued or in flight that the host has not acknowledged. */
+  private unacked = new Set<Patch[]>();
+  /** A reconciliation with the host's copy, queued behind the sends; it sends every local edit. */
+  private reconciling: Promise<void> | null = null;
+
+  /**
+   * Diffs the document against what the session last had from us, marks it
+   * synced, and queues the patches, all synchronously, as remote-sync does in
+   * a tab: whatever is in the document now is in this batch, so an edit made
+   * while an earlier batch or a remote patch is in flight is never marked
+   * synced without being sent. Resolves once the host applied this batch (and
+   * every batch before it); rejects when the host refused it.
+   */
+  private flushLocal(): Promise<void> {
+    if (!this.chain || !this.projectId || this.readOnly) return this.sending;
+    // A pending reconciliation sends everything the document has when it runs.
+    if (this.reconciling) return this.reconciling;
+    if (this.diverged) { this.diverged = false; return this.startReconcile(); }
+    const projectId = this.projectId;
+    const after = JSON.stringify(this.chain.PM['proj']);
+    if (after === this.synced) return this.sending;
+    const patches: Patch[] = diffPatches(JSON.parse(this.synced), JSON.parse(after)).forward;
+    this.synced = after;
+    if (!patches.length) return this.sending;
+    this.unacked.add(patches);
+    const send = this.sending.then(async () => {
+      try { this.seq = await this.service<number>('session.patch', projectId, patches); } finally { this.unacked.delete(patches); }
+    });
+    this.sending = send.catch((error) => {
+      this.diverged = true;
+      this.log(`[engine] ${projectId}: the host refused an edit batch (${(error as Error)?.message ?? error}); the next sync sends it again`);
+    });
+    return send;
+  }
+
+  /**
+   * Behind every queued send: join again (idempotent for a member), take the
+   * host's copy, put this document's unsent edits on top of it, and send
+   * them. Used after a refused batch, and after a remote patch that wrote a
+   * path one of our unacknowledged batches also writes, where the host's
+   * order (which this worker cannot see) decides the value. Until it has run,
+   * no new batch is cut (`flushLocal` answers this promise) and remote
+   * patches advance `synced` and the document alike, so `synced` stays what
+   * the host had from us.
+   */
+  private startReconcile(): Promise<void> {
+    const projectId = this.projectId!;
+    const run = this.sending.then(async () => {
+      try {
+        const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
+        if (!this.chain || this.projectId !== projectId || !joined?.doc) return;
+        const PM = this.chain.PM;
+        const local = diffPatches(JSON.parse(this.synced), JSON.parse(JSON.stringify(PM['proj']))).forward;
+        const host = JSON.stringify(joined.doc);
+        this.seq = joined.seq;
+        const next = local.length ? applyPatch(JSON.parse(host), local) : JSON.parse(host);
+        if (JSON.stringify(next) !== JSON.stringify(PM['proj'])) PM['replaceProject'](next, { selection: PM['sel'] });
+        const mine = diffPatches(JSON.parse(host), JSON.parse(JSON.stringify(PM['proj']))).forward;
+        this.synced = JSON.stringify(PM['proj']);
+        if (mine.length) this.seq = await this.service<number>('session.patch', projectId, mine);
+      } finally {
+        this.reconciling = null;
+      }
+    });
+    this.reconciling = run;
+    this.sending = run.catch((error) => {
+      this.diverged = true;
+      this.log(`[engine] ${projectId}: reconciling with the host failed (${(error as Error)?.message ?? error}); the next sync tries again`);
+    });
+    return run;
+  }
 
   /** Sends what changed since the last sync; resolves once the host applied it. */
-  private syncUp(): Promise<void> {
-    this.sending = this.sending.then(async () => {
-      if (!this.chain || !this.projectId || this.readOnly) return;
-      const after = JSON.stringify(this.chain.PM['proj']);
-      if (after === this.synced) return;
-      const patches: Patch[] = diffPatches(JSON.parse(this.synced), JSON.parse(after)).forward;
-      this.synced = after;
-      if (!patches.length) return;
-      this.seq = await this.service<number>('session.patch', this.projectId, patches);
-    });
-    return this.sending;
+  private async syncUp(): Promise<void> {
+    try {
+      await this.flushLocal();
+    } catch (error) {
+      throw new DocumentHostError('service-unavailable', `The host did not take this call's edits: ${(error as Error)?.message ?? error}. They stay in the document host and are sent with the next call.`, true);
+    }
   }
 
   private applyRemote(patch: SessionPatch): void {
     if (!this.chain || patch.projectId !== this.projectId) return;
     const PM = this.chain.PM;
-    // Our own unsent edits go first, so the remote patch lands on the base the
-    // host applied it to (as remote-sync does in a tab).
-    void this.syncUp().then(() => {
-      PM['replaceProject'](applyPatch(PM['proj'], patch.patches), { selection: PM['sel'] });
-      this.synced = JSON.stringify(PM['proj']);
-      this.seq = patch.seq;
-    });
+    // Our own unsent edits are queued first (now, synchronously), then the
+    // remote patch applies at once, as remote-sync does in a tab.
+    void this.flushLocal().catch(() => { /* reported by flushLocal; resent on the next sync */ });
+    // Patches on disjoint paths commute. When the remote patch writes a path
+    // one of our unacknowledged batches also writes, the host's order decides
+    // the value: reconcile with its copy once our sends have landed.
+    const conflicts = [...this.unacked].some((batch) => batch.some((mine) => patch.patches.some((theirs) => overlaps(mine.path, theirs.path))));
+    // What the host has from us, and the document, both take the patch.
+    this.synced = JSON.stringify(applyPatch(JSON.parse(this.synced), structuredClone(patch.patches)));
+    PM['replaceProject'](applyPatch(PM['proj'], patch.patches), { selection: PM['sel'] });
+    if (!this.reconciling) this.synced = JSON.stringify(PM['proj']);
+    this.seq = patch.seq;
+    if (conflicts && !this.reconciling) void this.startReconcile().catch(() => { /* logged; retried on the next sync */ });
   }
 }
+
+/** One path is a prefix of the other: the two writes touch the same value. */
+const overlaps = (a: readonly unknown[], b: readonly unknown[]): boolean => {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (String(a[i]) !== String(b[i])) return false;
+  return true;
+};
 
 const sum = (table: Record<string, number> | undefined): number => Object.values(table ?? {}).reduce((a, b) => a + Number(b), 0);
 
