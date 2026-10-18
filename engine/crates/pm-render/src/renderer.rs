@@ -137,10 +137,15 @@ pub trait CommandBracket: Send + Sync {
 }
 
 /// The motion blur and resampler a request asks of its root composition.
-fn build_options(comp: &Comp<'_>, request: &RenderRequest) -> plan::BuildOptions {
+fn build_options(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+    shader_fallback: bool,
+) -> plan::BuildOptions {
     plan::BuildOptions {
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
+        shader_fallback,
         video_end: request.video_end,
     }
 }
@@ -166,6 +171,12 @@ pub struct Renderer {
     effects: Effects,
     /// Another effect host in place of the renderer's own (tests).
     effect_host: Option<Arc<dyn EffectHost>>,
+    /// Shader-layer programs and the decision 19 fallback runner's state
+    /// (`crate::shader_layers`).
+    shaders: crate::shader_layers::exec::ShaderState,
+    /// Mesh definitions given with [`Renderer::set_mesh_definitions`]; the
+    /// definition set's mesh snapshots are added to them.
+    explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
 }
@@ -196,6 +207,8 @@ impl Renderer {
             bracket: None,
             effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
             effect_host: None,
+            shaders: Default::default(),
+            explicit_meshes: Default::default(),
         }
     }
 
@@ -214,7 +227,9 @@ impl Renderer {
         &mut self,
         set: &pm_protocol::definitions::DefinitionSetSnapshot,
     ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
-        self.effects.set_snapshot(set)
+        let out = self.effects.set_snapshot(set);
+        self.refresh_meshes();
+        out
     }
 
     /// Applies a kernel update (`pushDefinitions`); the failures are
@@ -223,12 +238,77 @@ impl Renderer {
         &mut self,
         update: &pm_protocol::definitions::DefinitionsUpdate,
     ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
-        self.effects.apply(update)
+        let out = self.effects.apply(update);
+        self.refresh_meshes();
+        out
     }
 
     /// Forgets every definition: effects and transitions are routed again.
     pub fn clear_definitions(&mut self) {
         self.effects.clear();
+        self.refresh_meshes();
+    }
+
+    /// The mesh layer definitions the 3D pass plans with: the built-in OBJ
+    /// model layer, [`Renderer::set_mesh_definitions`], and every mesh
+    /// snapshot of the definition set (contract 10: `renderer.assetField`
+    /// and the parameter defaults), the set's winning over the others.
+    fn refresh_meshes(&mut self) {
+        let mut all = crate::scene3d::legacy::builtin_mesh_definitions();
+        all.extend(self.explicit_meshes.clone());
+        all.extend(crate::shader_layers::mesh_definitions(&self.effects));
+        self.options3d.mesh_definitions = Arc::new(all);
+    }
+
+    /// Whether a decision 19 fallback runner (a WebGL2 context in the
+    /// renderer) draws programs the native pipeline cannot translate. With
+    /// one, such layers plan as fallback requests and a frame without their
+    /// pixels fails with [`RenderError::ShaderFallbackPending`]; without
+    /// one (the default, every headless host) they route as
+    /// `Feature::ShaderFallback`.
+    pub fn set_shader_fallback_runner(&mut self, attached: bool) {
+        self.shaders.fallback_runner = attached;
+        if !attached {
+            self.shaders.clear_fallback();
+        }
+    }
+
+    /// Stores the runner's pixels for a request key
+    /// (`crate::shader_layers::FallbackRequest::key`).
+    pub fn put_fallback_pixels(
+        &mut self,
+        key: String,
+        pixels: crate::shader_layers::FallbackPixels,
+    ) {
+        self.shaders.fallback.insert(key, pixels);
+    }
+
+    /// What the shader UI is told about the shader and extension layers of
+    /// `composition` and the compositions it nests, at the document's
+    /// revision (`crate::shader_layers::reports`): shader layers whose code
+    /// does not compile and extension layers whose definition is missing.
+    pub fn layer_reports(
+        &self,
+        document: &pm_model::Document,
+        composition: &str,
+    ) -> Vec<pm_protocol::error::EngineError> {
+        let meshes = self.options3d.mesh_definitions.clone();
+        crate::shader_layers::layer_reports(
+            document,
+            composition,
+            effect_host(&self.effect_host, &self.effects).and_then(|e| e.layer_definitions()),
+            &|id| meshes.contains_key(id),
+        )
+    }
+
+    /// Shader-layer programs built and fallback pixels held.
+    pub fn shader_state(&self) -> &crate::shader_layers::exec::ShaderState {
+        &self.shaders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shaders_mut(&mut self) -> &mut crate::shader_layers::exec::ShaderState {
+        &mut self.shaders
     }
 
     /// The definitions in force (what an export job embeds).
@@ -437,6 +517,8 @@ impl Renderer {
         // own folder; definition sets made before keep their cache.
         self.effects
             .set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
+        // Shader layers share the folder (entries are content-addressed).
+        crate::shader_layers::translate::set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
         self.scene3d.set_program_cache(dir);
     }
 
@@ -454,9 +536,8 @@ impl Renderer {
         &mut self,
         definitions: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     ) {
-        let mut all = crate::scene3d::legacy::builtin_mesh_definitions();
-        all.extend(definitions);
-        self.options3d.mesh_definitions = Arc::new(all);
+        self.explicit_meshes = definitions;
+        self.refresh_meshes();
     }
 
     /// 3D layers render without MSAA when `false` (only for the parity
@@ -635,7 +716,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
-            build_options(&comp, request),
+            build_options(&comp, request, self.shaders.fallback_runner),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -670,7 +751,7 @@ impl Renderer {
         } else {
             None
         };
-        let (legend, taken, unsupported, exec_failures, timer) = {
+        let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             let mut exec = Exec {
                 device: &self.device,
@@ -683,6 +764,8 @@ impl Renderer {
                 effects: &mut self.effects,
                 timer,
                 vector: &mut self.vector,
+                shaders: &mut self.shaders,
+                fallback_pending: Vec::new(),
                 text: &mut self.text_gpu,
                 precision,
                 working: color.working,
@@ -708,7 +791,7 @@ impl Renderer {
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
             // so media caches filled by this encoder stay valid.
-            let complete = exec.unsupported.is_empty();
+            let complete = exec.unsupported.is_empty() && exec.fallback_pending.is_empty();
             if complete {
                 exec.flip_color(&mut encoder, &gl_rows, target);
             }
@@ -733,7 +816,15 @@ impl Renderer {
             }
             let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
             let timer = exec.timer.take();
-            (legend, exec.taken, exec.unsupported, exec.failures, timer)
+            let pending = std::mem::take(&mut exec.fallback_pending);
+            (
+                legend,
+                exec.taken,
+                exec.unsupported,
+                exec.failures,
+                timer,
+                pending,
+            )
         };
         if let Some(timer) = timer {
             self.effects.watchdog.finish(&mut encoder, timer);
@@ -750,6 +841,11 @@ impl Renderer {
         failures.extend(exec_failures);
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
+        }
+        if !pending.is_empty() {
+            return Err(RenderError::ShaderFallbackPending(
+                pending.iter().map(|r| (**r).clone()).collect(),
+            ));
         }
         Ok(Rendered {
             quads,
@@ -1024,7 +1120,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
-            build_options(&comp, request),
+            build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -1064,7 +1160,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
-            build_options(&comp, request),
+            build_options(&comp, request, self.shaders.fallback_runner),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

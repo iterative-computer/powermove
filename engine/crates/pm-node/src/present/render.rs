@@ -13,7 +13,7 @@
 //! the command buffer that wrote its surface completed, and a surface is
 //! never written while the viewer holds it (contract 2's `PoolLedger`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -185,6 +185,11 @@ pub enum Command {
         key: Key,
         message: AudioMessage,
     },
+    /// The renderer's shader fallback runner answered (decision 19).
+    ShaderFallback {
+        key: Key,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     /// The paused viewer's Blender previews (sent once, at start).
@@ -238,6 +243,9 @@ fn composer(device: &wgpu::Device, queue: &wgpu::Queue, config: &ThreadConfig) -
     composer
         .renderer()
         .set_program_cache_dir(config.shader_cache.clone());
+    // Viewer sessions come from a renderer with the decision 19 fallback
+    // runner (`engine-connection/shader-fallback.ts`).
+    composer.renderer().set_shader_fallback_runner(true);
     composer
 }
 
@@ -362,6 +370,8 @@ struct View {
     retry: Option<PoolRetry>,
     /// The route last reported to the viewer (document source).
     reported: Option<Route>,
+    /// What the shader UI was last told about this view's layers.
+    layer_reports: super::layer_reports::LayerReports,
     /// A Play waits for the audio clock's first playing sample: the host
     /// µs after which it starts on the host clock instead, and the audio
     /// epoch that was current when it was asked (not the answer).
@@ -410,6 +420,19 @@ struct Thread {
     generations: Generations,
     /// The paused viewer's Blender previews (document source).
     blender: Option<Arc<super::blender::PreviewBlender>>,
+    /// Shader fallback requests sent to each view's renderer and not yet
+    /// answered (by request key), and the bands received so far.
+    fallback: Fallback,
+}
+
+/// The decision 19 fallback runner's state on this thread.
+#[derive(Default)]
+struct Fallback {
+    asked: BTreeMap<String, Key>,
+    bands: pm_render::shader_layers::Bands,
+    /// Layers each view was told draw through the runner (logged once per
+    /// layer, not once per animated frame's request).
+    logged: BTreeSet<(Key, String)>,
 }
 
 fn now() -> i64 {
@@ -451,6 +474,7 @@ pub fn run(
         peaks,
         generations,
         blender: None,
+        fallback: Fallback::default(),
     };
     thread.check_in();
     loop {
@@ -760,6 +784,7 @@ impl Thread {
                     view.dirty = true;
                 }
             }
+            Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
@@ -778,10 +803,76 @@ impl Thread {
         true
     }
 
+    /// The runner's answer: a band of pixels (the frame renders again once
+    /// every band of a request arrived), or a failure (the composition is
+    /// routed to the legacy viewer, as a program the engine cannot draw).
+    fn shader_fallback(
+        &mut self,
+        key: Key,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    ) {
+        use pm_protocol::shader_fallback::ShaderFallbackMessage as M;
+        match message {
+            M::Pixels(band) => {
+                if self.fallback.asked.get(&band.key) != Some(&key) {
+                    return;
+                }
+                let Some((request, pixels)) = self.fallback.bands.add(&band) else {
+                    return;
+                };
+                self.fallback.asked.remove(&request);
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.renderer().put_fallback_pixels(request, pixels);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = true;
+                }
+            }
+            M::Failed {
+                key: request,
+                reason,
+                message,
+            } => {
+                if self.fallback.asked.remove(&request) != Some(key) {
+                    return;
+                }
+                self.fallback.bands.forget(&request);
+                (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!(
+                        "viewer: the shader fallback runner could not draw a layer ({reason}: {message})"
+                    ),
+                }]);
+                if let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key))
+                {
+                    let composition = view.state.composition.as_str().to_owned();
+                    doc.force_legacy(
+                        &composition,
+                        vec![format!(
+                            "the shader fallback runner could not draw a layer ({reason})"
+                        )],
+                    );
+                    view.dirty = true;
+                }
+            }
+            // Requests travel the other way.
+            M::Requests { .. } => {}
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
         if let Some(blender) = &self.blender {
             blender.forget(key);
         }
+        // Requests the session was asked for, with the bands that arrived.
+        let fallback = &mut self.fallback;
+        fallback.asked.retain(|request, k| {
+            if *k == key {
+                fallback.bands.forget(request);
+            }
+            *k != key
+        });
+        fallback.logged.retain(|(k, _)| *k != key);
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -1191,6 +1282,7 @@ impl Thread {
             requests: VecDeque::new(),
             retry: None,
             reported: None,
+            layer_reports: Default::default(),
             awaiting: None,
             audio_version: 0,
             #[cfg(feature = "remote-layer")]
@@ -2095,6 +2187,29 @@ impl Thread {
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
                     drop(stats);
+                    // Shader compile errors and missing extension layers at
+                    // this frame's revision, before the frame (section 11).
+                    let renderer = composer.renderer();
+                    let reports = view.layer_reports.due(
+                        view.revision,
+                        renderer.effects().generation(),
+                        &composition,
+                        || renderer.layer_reports(doc.document(), &composition),
+                    );
+                    for error in reports {
+                        let report = FailureReport {
+                            revision: view.revision,
+                            error,
+                        };
+                        let mut envelope = Envelope::new(Message::Event {
+                            body: Event::Failure(report),
+                        })
+                        .with_session(key.1);
+                        envelope.revision = Some(view.revision);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
                     // Effects the GPU watchdog turned off (measured on an
                     // earlier frame): reported at this frame's revision.
                     for error in composer.renderer().watchdog_reports(false) {
@@ -2111,9 +2226,56 @@ impl Thread {
                         }
                     }
                 }
+                Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
+                    // Layers only the fallback runner draws (decision 19):
+                    // ask the view's renderer, and render the frame again
+                    // when the pixels arrive.
+                    let fresh: Vec<_> = requests
+                        .into_iter()
+                        .filter(|r| !self.fallback.asked.contains_key(&r.key))
+                        .collect();
+                    for chunk in fresh.chunks(pm_protocol::shader_fallback::MAX_REQUESTS) {
+                        for r in chunk {
+                            self.fallback.asked.insert(r.key.clone(), key);
+                            // The Shader panel hears it as the layer's
+                            // `NotHeadlessRenderable` report (reports.rs).
+                            if !self.fallback.logged.insert((key, r.layer.clone())) {
+                                continue;
+                            }
+                            (self.sink)(vec![Action::Log {
+                                level: LogLevel::Info,
+                                message: format!(
+                                    "layer {} draws through the shader fallback runner \
+                                     ({}x{}; native pipeline stopped at {}: {}); \
+                                     not headless-renderable",
+                                    r.layer,
+                                    r.width,
+                                    r.height,
+                                    r.stage,
+                                    r.message.lines().next().unwrap_or_default()
+                                ),
+                            }]);
+                        }
+                        let body = Event::ShaderFallback(
+                            pm_protocol::shader_fallback::ShaderFallbackMessage::Requests {
+                                requests: chunk.to_vec(),
+                            },
+                        );
+                        let mut envelope =
+                            Envelope::new(Message::Event { body }).with_session(key.1);
+                        envelope.revision = Revision::new(doc.revision()).ok();
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
+                    return None;
+                }
                 Err(pm_render::RenderError::Unsupported(list)) => {
                     let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
                     doc.force_legacy(&composition, reasons);
+                    // The legacy compositor fills the shader meta while it
+                    // draws; frames the engine presents again repeat it all.
+                    view.layer_reports.reset();
                     // The next turn reports the route and stops a run.
                     view.dirty = true;
                     return None;

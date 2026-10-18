@@ -1,0 +1,21 @@
+{
+ "name": "hsv-hue-sweep",
+ "kind": "shader",
+ "covers": [
+  "helper-hsv",
+  "helper-luma",
+  "param-float"
+ ],
+ "prompt": "A full-frame rainbow that sweeps its hue over time; add a saturation slider and desaturate the bottom third using luminance.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "5837da0876265c38f5828ea392214dc4f2997cc32d4fd6f5cf26b81999322904",
+  "seconds": 11.673,
+  "generated": "2026-10-17T07:31:01.831Z"
+ },
+ "code": "// Full-frame rainbow with time-swept hue, saturation control,\n// and a luminance-desaturated bottom third.\nuniform float uSpeed;       // @param 0.15 0 2\nuniform float uBands;       // @param 1.0 0.25 6\nuniform float uSaturation;  // @param 1.0 0 1\nuniform float uBottomDesat; // @param 1.0 0 1\nuniform float uEdgeSoft;    // @param 0.02 0 0.2\n\nvoid main() {\n  // Diagonal rainbow across the full frame, hue sweeps over time\n  float aspect = iResolution.x / iResolution.y;\n  float h = fract((uv.x * aspect + uv.y * 0.35) / aspect * uBands + iTime * uSpeed);\n  vec3 col = hsv2rgb(vec3(h, clamp(uSaturation, 0.0, 1.0), 1.0));\n\n  // Bottom third (uv.y < 1/3): mix toward luminance gray\n  float edge = 1.0 / 3.0;\n  float soft = max(uEdgeSoft, 1e-4);\n  float bottom = 1.0 - smoothstep(edge - soft, edge + soft, uv.y);\n  vec3 gray = vec3(luma(col));\n  col = mix(col, gray, bottom * clamp(uBottomDesat, 0.0, 1.0));\n\n  fragColor = vec4(col, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a shader layer: a full-frame diagonal rainbow whose hue sweeps over time (uSpeed, uBands), with a uSaturation slider (0–1). The bottom third blends toward luma() gray, controlled by uBottomDesat and a soft edge (uEdgeSoft). I haven't compiled or rendered it because no Powermove tools were attached, and it assumes uv.y = 0 is the bottom of the frame."
+}

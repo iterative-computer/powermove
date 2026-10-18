@@ -164,7 +164,7 @@ pub fn builtin_definitions() -> DefinitionSetSnapshot {
     }
 }
 
-fn diagnostics(failure: &Failure) -> Vec<ShaderDiagnostic> {
+pub(crate) fn diagnostics(failure: &Failure) -> Vec<ShaderDiagnostic> {
     failure
         .diagnostics
         .iter()
@@ -178,7 +178,7 @@ fn diagnostics(failure: &Failure) -> Vec<ShaderDiagnostic> {
         .collect()
 }
 
-fn truncate(mut message: String) -> String {
+pub(crate) fn truncate(mut message: String) -> String {
     const MAX: usize = pm_protocol::error::MAX_ERROR_MESSAGE_BYTES;
     if message.len() > MAX {
         let mut end = MAX - 3;
@@ -619,6 +619,10 @@ impl crate::composite::EffectHost for Effects {
 
     fn transition_known(&self, ty: &pm_model::JsString) -> bool {
         plan::transition_known(self, ty)
+    }
+
+    fn layer_definitions(&self) -> Option<&Effects> {
+        Some(self)
     }
 
     fn prepare_transition<'d>(

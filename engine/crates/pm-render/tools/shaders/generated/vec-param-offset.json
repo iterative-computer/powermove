@@ -1,0 +1,22 @@
+{
+ "name": "vec-param-offset",
+ "kind": "shader",
+ "covers": [
+  "param-vec2",
+  "param-vec4",
+  "param-float",
+  "param-no-annotation"
+ ],
+ "prompt": "Shader layer of a soft spotlight whose center is a vec2 parameter and whose color is a vec4 parameter (rgba), plus a falloff slider. Also keep an unannotated uniform for a future control.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "fbccd64b5612e74ff43d433a413f841ef98590132c0430c76f5b64ed341e98d0",
+  "seconds": 22.256,
+  "generated": "2026-10-17T07:32:00.969Z"
+ },
+ "code": "// Soft spotlight — Powermove shader layer (GLSL ES 3.0)\n// uCenter is in layer uv (0..1). uColor rgba: rgb tint, a = peak intensity.\nuniform vec2  uCenter;   // @param 0.5,0.5 0 1\nuniform vec4  uColor;    // @param 1.0,0.86,0.62,1.0 0 1\nuniform float uFalloff;  // @param 0.35 0.02 1.5\nuniform float uExtra;    // reserved for a future control (unannotated, no Inspector UI yet)\n\nvoid main() {\n  float aspect = iResolution.x / max(iResolution.y, 1.0);\n  vec2 d = (uv - uCenter) * vec2(aspect, 1.0);\n  float r = length(d);\n  float f = max(uFalloff, 1e-3);\n  // Gaussian-like core with a smooth tail that reaches zero.\n  float glow = exp(-(r * r) / (f * f));\n  glow *= 1.0 - smoothstep(f * 1.5, f * 3.0, r);\n  float a = clamp(glow * uColor.a, 0.0, 1.0);\n  // Premultiplied output so the light composites over layers below.\n  fragColor = vec4(uColor.rgb * a, a);\n}",
+ "definition": null,
+ "summary": "Shader layer with a soft Gaussian spotlight. It has uCenter (vec2, layer uv), uColor (vec4 rgba, where alpha scales intensity), a uFalloff slider (0.02–1.5) and an unannotated uExtra uniform kept for a future control. Not compiled or rendered because no live tools were attached, and the API pack doesn't document @param syntax for vec2/vec4, so the comma-list defaults on uCenter and uColor may not produce Inspector controls."
+}

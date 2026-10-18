@@ -26,7 +26,7 @@ mod support;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_render::parity::{bar_3d, dilate, msaa_edges};
-use pm_render::{RenderRequest, Renderer, builtin_definitions, unsupported_with_definitions};
+use pm_render::{RenderRequest, Renderer, all_builtin_definitions, unsupported_with_definitions};
 use support::*;
 
 /// `render/still-*` projects and whether the renderer draws them.
@@ -132,10 +132,11 @@ fn corpus_render_parity() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
-    // The built-in effects and transitions as the kernel snapshots them
-    // (the captures load only built-in and missing definitions).
+    // The built-in effects, transitions, and extension layers as the kernel
+    // snapshots them (the captures load only built-in and missing
+    // definitions).
     renderer
-        .set_definitions(&builtin_definitions())
+        .set_definitions(&all_builtin_definitions())
         .expect("built-in definitions");
     let mut compared = 0;
     let mut failed = Vec::new();
@@ -164,6 +165,17 @@ fn corpus_render_parity() {
             skipped.push((p.name.clone(), "text class: tests/text_corpus.rs".into()));
             continue;
         }
+        // The capture app had only the built-in definitions: any other
+        // extension layer definition was missing there (the checkerboard).
+        let mut set = all_builtin_definitions();
+        set.missing = support::extension_definitions(&p.document)
+            .into_iter()
+            .filter(|id| !set.definitions.iter().any(|d| d.id.as_str() == id))
+            .map(|id| id.as_str().into())
+            .collect();
+        renderer
+            .set_definitions(&set)
+            .expect("built-in definitions");
         let issues = unsupported_with_definitions(
             &p.document,
             &p.composition,

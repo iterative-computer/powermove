@@ -45,6 +45,7 @@ use crate::priority::{
     JobsCancelled, SubmitJob,
 };
 use crate::scene::EvaluatedScene;
+use crate::shader_fallback::ShaderFallbackMessage;
 use crate::slicing::{DeadlineSignal, SlicingPolicy};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::{ContractId, Hello, WIRE_VERSION, Welcome};
@@ -311,6 +312,10 @@ pub enum Event {
     /// Renderer ↔ interactive engine (session-bound): the mix's monitor
     /// solo, levels, and waveform peaks (contract 6, [`AudioMessage`]).
     Audio(AudioMessage),
+    /// Interactive engine ↔ renderer (session-bound): the decision 19
+    /// shader fallback runner's requests and pixels (contract 10,
+    /// [`ShaderFallbackMessage`]).
+    ShaderFallback(ShaderFallbackMessage),
 }
 
 /// Response kinds, for correlating answers with requests.
@@ -456,6 +461,7 @@ impl Event {
             Event::LeaseUsage(_) => ContractId::Lease,
             Event::JobStatus(_) => ContractId::Priority,
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
+            Event::ShaderFallback(_) => ContractId::Definitions,
         }
     }
 
@@ -469,6 +475,7 @@ impl Event {
                 | Event::Viewer(_)
                 | Event::Transport(_)
                 | Event::Audio(_)
+                | Event::ShaderFallback(_)
         )
     }
 }
@@ -558,6 +565,7 @@ impl Validate for Event {
             Event::Viewer(state) => state.validate(),
             Event::Failure(report) => report.error.validate(),
             Event::InFlight(in_flight) => in_flight.validate(),
+            Event::ShaderFallback(message) => message.validate(),
             _ => Ok(()),
         }
     }

@@ -22,6 +22,7 @@ pub mod blender;
 pub mod clock;
 pub mod compose;
 pub mod document;
+mod layer_reports;
 pub mod peaks;
 pub mod render;
 pub mod schedule;
@@ -391,6 +392,19 @@ impl FramePresenter for BridgePresenter {
         message: pm_protocol::clock::AudioMessage,
     ) {
         self.send(Command::Audio {
+            key: (port, session),
+            message,
+        });
+    }
+
+    fn shader_fallback(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    ) {
+        self.send(Command::ShaderFallback {
             key: (port, session),
             message,
         });

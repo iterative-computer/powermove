@@ -250,8 +250,8 @@ impl ViewDocument {
             })
             .collect();
         for u in pm_render::unsupported_with_media(&self.doc, composition, &self.media) {
-            // With definitions, effects, transitions, and adjustment layers
-            // with effects are drawn; one the renderer cannot draw (no
+            // With definitions, effects, transitions, adjustment layers
+            // with effects, and extension layers are drawn; one the renderer cannot draw (no
             // definition, a program that needs the fallback runner) fails
             // the render as unsupported and routes the composition then
             // (`force_legacy`).
@@ -261,14 +261,19 @@ impl ViewDocument {
                     pm_render::Feature::Effects
                         | pm_render::Feature::Transition
                         | pm_render::Feature::Adjustment
+                        | pm_render::Feature::ExtensionDefinition(_)
                 )
             {
                 continue;
             }
             // The viewer never draws final Blender frames: it draws native
             // shading, and Blender surfaces while paused in Material
-            // Preview or Rendered (`super::blender`), as today.
-            if u.feature == pm_render::Feature::Blender {
+            // Preview or Rendered (`super::blender`), as today. Its renderer
+            // also runs the decision 19 fallback runner: programs only it
+            // can draw render through it.
+            if u.feature == pm_render::Feature::Blender
+                || matches!(u.feature, pm_render::Feature::ShaderFallback(_))
+            {
                 continue;
             }
             reasons.push(describe(&u));

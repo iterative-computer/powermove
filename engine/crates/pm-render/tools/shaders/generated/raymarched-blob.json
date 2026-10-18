@@ -1,0 +1,22 @@
+{
+ "name": "raymarched-blob",
+ "kind": "shader",
+ "covers": [
+  "raymarch-loop",
+  "structs",
+  "iTime",
+  "out-params"
+ ],
+ "prompt": "Raymarched metaball blob that slowly morphs, lit with a key light and a rim light. Use a hit struct for the march result.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "19eb6283ece9b584b65203c4d2a696341665bef619f7c89be36b6f99026b32db",
+  "seconds": 28.012,
+  "generated": "2026-10-17T07:31:43.079Z"
+ },
+ "code": "// Raymarched metaball blob — slow morph, key + rim lighting\nuniform float uSpeed;     // @param 0.4 0 3\nuniform float uBlend;     // @param 0.45 0.05 1.5\nuniform float uSize;      // @param 0.42 0.15 0.8\nuniform vec3  uBase;      // @param #3A2A8C\nuniform vec3  uKey;       // @param #FFE2C0\nuniform float uKeyGain;   // @param 1.2 0 3\nuniform vec3  uRim;       // @param #3FD8FF\nuniform float uRimGain;   // @param 1.4 0 4\nuniform float uRimPower;  // @param 3.0 0.5 8\nuniform vec3  uBg;        // @param #07070C\n\nstruct Hit {\n  bool  hit;\n  float t;\n  vec3  pos;\n  int   steps;\n};\n\nfloat smin(float a, float b, float k) {\n  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);\n  return mix(b, a, h) - k * h * (1.0 - h);\n}\n\nfloat map(vec3 q) {\n  float t = iTime * uSpeed;\n  float d = 1e5;\n  for (int i = 0; i < 5; i++) {\n    float fi = float(i);\n    vec3 c = vec3(\n      sin(t * (0.70 + 0.13 * fi) + fi * 1.7),\n      cos(t * (0.50 + 0.11 * fi) + fi * 2.3),\n      sin(t * (0.60 + 0.09 * fi) + fi * 0.9)\n    ) * vec3(0.7, 0.5, 0.5);\n    float r = uSize + 0.08 * sin(t * 1.3 + fi * 2.1);\n    d = smin(d, length(q - c) - r, uBlend);\n  }\n  return d;\n}\n\nvec3 calcNormal(vec3 q) {\n  const vec2 e = vec2(1.0, -1.0) * 0.0012;\n  return normalize(e.xyy * map(q + e.xyy) + e.yyx * map(q + e.yyx) +\n                   e.yxy * map(q + e.yxy) + e.xxx * map(q + e.xxx));\n}\n\nHit march(vec3 ro, vec3 rd) {\n  Hit h;\n  h.hit = false;\n  h.t = 0.0;\n  h.pos = ro;\n  h.steps = 0;\n  for (int i = 0; i < 110; i++) {\n    h.pos = ro + rd * h.t;\n    float d = map(h.pos);\n    h.steps = i;\n    if (d < 0.0008 * h.t + 0.0005) { h.hit = true; break; }\n    h.t += d * 0.9;\n    if (h.t > 12.0) break;\n  }\n  return h;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  vec3 ro = vec3(0.0, 0.0, 3.6);\n  ro.xz *= rot(0.15 * sin(t * 0.3));\n  vec3 fw = normalize(-ro);\n  vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));\n  vec3 up = cross(rt, fw);\n  vec3 rd = normalize(p.x * rt + p.y * up + 1.6 * fw);\n\n  // Background: soft vertical gradient + faint glow\n  vec3 col = uBg * (1.0 + 0.6 * (0.5 - uv.y));\n  col += uRim * 0.05 * exp(-3.0 * dot(p, p));\n\n  Hit h = march(ro, rd);\n  if (h.hit) {\n    vec3 n = calcNormal(h.pos);\n    vec3 v = -rd;\n\n    vec3 keyDir = normalize(vec3(0.6, 0.7, 0.55));\n    vec3 rimDir = normalize(vec3(-0.7, 0.35, -0.6));\n\n    float diff = max(dot(n, keyDir), 0.0);\n    float wrap = max((dot(n, keyDir) + 0.3) / 1.3, 0.0);\n    vec3 hv = normalize(keyDir + v);\n    float spec = pow(max(dot(n, hv), 0.0), 64.0) * diff;\n\n    float fres = pow(1.0 - max(dot(n, v), 0.0), uRimPower);\n    float rimMask = clamp(dot(n, rimDir) + 0.6, 0.0, 1.0);\n    float rim = fres * rimMask;\n\n    float ao = clamp(1.0 - float(h.steps) / 110.0, 0.0, 1.0);\n    ao = mix(0.55, 1.0, ao);\n    float amb = 0.5 + 0.5 * n.y;\n\n    vec3 surf = uBase * (0.12 * amb + 0.9 * wrap * uKey * uKeyGain);\n    surf += uKey * spec * uKeyGain * 0.9;\n    surf *= ao;\n    surf += uRim * rim * uRimGain;\n\n    float fog = exp(-0.04 * h.t * h.t);\n    col = mix(col, surf, fog);\n  }\n\n  float vig = 1.0 - 0.45 * dot(p, p);\n  col *= vig;\n  col = col / (1.0 + col);          // tonemap\n  col = pow(col, vec3(1.0 / 2.2));  // gamma\n  fragColor = vec4(col, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a shader layer: five spheres blend together into one slowly changing blob, rendered with raymarching. Each march returns a `Hit` struct (`hit`, `t`, `pos`, `steps`). It's lit by a warm key light with a highlight and a cyan back rim light. Speed, blend, size, colors, light strengths and rim falloff are Inspector controls. I couldn't compile or render it because no Powermove tools were attached this run."
+}

@@ -418,3 +418,35 @@ pub fn has_3d_objects(document: &pm_model::Document) -> bool {
         _ => false,
     }
 }
+
+/// Every extension layer definition id the document's layers use.
+pub fn extension_definitions(document: &Document) -> Vec<String> {
+    fn walk(n: &pm_model::Node, out: &mut Vec<String>) {
+        match n.kind() {
+            pm_model::NodeKind::Object(map) => {
+                let is_extension = map
+                    .get(b"type".as_slice())
+                    .is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s) if s.to_string_lossy() == "extension"));
+                if is_extension
+                    && let Some(d) = map.get(b"d".as_slice())
+                    && let Some(def) = d.get("definition")
+                    && let pm_model::NodeKind::String(s) = def.kind()
+                {
+                    out.push(s.to_string_lossy());
+                }
+                for v in map.values() {
+                    walk(v, out);
+                }
+            }
+            pm_model::NodeKind::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(root) = document.root() {
+        walk(root, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}

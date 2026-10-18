@@ -1,0 +1,20 @@
+{
+ "name": "cursor-glow",
+ "kind": "shader",
+ "covers": [
+  "iMouse",
+  "iResolution"
+ ],
+ "prompt": "A glow that follows the mouse cursor, Shadertoy style, over a subtle gradient background.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "ecd72d6fdd500d1ff59a46324f51d7299f2bff06b80acce9f9ebfefb07823eeb",
+  "seconds": 15.895,
+  "generated": "2026-10-17T07:30:17.430Z"
+ },
+ "code": "// Cursor glow over a subtle gradient — Shadertoy style.\n// iMouse is read in pixels (Shadertoy convention); values in 0..1 are treated as uv.\n// With no mouse input (0,0), the glow drifts on a slow Lissajous path so renders stay alive.\nuniform float uRadius;     // @param 0.22 0.02 1.0\nuniform float uIntensity;  // @param 1.0 0 3\nuniform float uFalloff;    // @param 2.2 0.5 6\nuniform float uDrift;      // @param 0.25 0 2\nuniform vec3  uGlow;       // @param #FF8A3D\nuniform vec3  uTop;        // @param #141826\nuniform vec3  uBottom;     // @param #07080D\nuniform bool  uFollowMouse; // @param true\n\nvoid main() {\n  float aspect = iResolution.x / max(iResolution.y, 1.0);\n  vec2 asp = vec2(aspect, 1.0);\n\n  // Subtle diagonal gradient with soft noise breathing and dithering against banding.\n  float g = clamp(uv.y * 0.85 + uv.x * 0.15, 0.0, 1.0);\n  vec3 col = mix(uBottom, uTop, smoothstep(0.0, 1.0, g));\n  col += 0.015 * (fbm(uv * 3.0 * asp + iTime * 0.05) - 0.5);\n\n  // Cursor position in uv space.\n  vec2 m = iMouse;\n  bool hasMouse = uFollowMouse && (m.x > 0.0 || m.y > 0.0);\n  if (hasMouse && (m.x > 1.0 || m.y > 1.0)) m /= max(iResolution, vec2(1.0));\n  float t = iTime * uDrift;\n  vec2 drift = vec2(0.5 + 0.28 * sin(t * 1.3), 0.5 + 0.22 * sin(t * 1.9 + 1.2));\n  vec2 c = hasMouse ? m : drift;\n\n  // Glow: soft core + wide halo, aspect-correct.\n  float d = length((uv - c) * asp);\n  float r = max(uRadius, 1e-3);\n  float halo = 1.0 / (1.0 + pow(d / r, uFalloff) * 4.0);\n  float core = exp(-pow(d / (r * 0.18), 2.0));\n  float pulse = 0.94 + 0.06 * sin(iTime * 2.0);\n\n  vec3 glow = uGlow * halo * 0.85 + mix(uGlow, vec3(1.0), 0.6) * core * 0.6;\n  col += glow * uIntensity * pulse;\n\n  // Gentle vignette + tonemap + dither.\n  vec2 q = (uv - 0.5) * asp;\n  col *= 1.0 - 0.35 * dot(q, q);\n  col = col / (1.0 + col * 0.35);\n  col += (hash(uv * iResolution + fract(iTime)) - 0.5) / 255.0;\n\n  fragColor = vec4(col, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote the shader layer: a warm glow that follows the cursor over a dark navy gradient with a light noise texture. It has not been compiled or rendered, because no Powermove tools were attached to this run. The shader reads iMouse as pixels, or as uv if the values are 0–1. With no mouse input, the glow drifts on its own so rendered frames don't look empty. Settings like glow size, strength, falloff, drift, the three colors and mouse-following on/off are all Inspector controls."
+}

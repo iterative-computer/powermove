@@ -1,0 +1,22 @@
+{
+ "name": "voronoi-cells",
+ "kind": "shader",
+ "covers": [
+  "helper-hash",
+  "uv",
+  "param-float",
+  "arrays"
+ ],
+ "prompt": "Animated Voronoi cells with dark borders, like cracked glass. Cell scale and border width as sliders.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "88cde82454ce49b1e2acf8c2d4869e7557e40874714ad41af85af4f1e8536e4b",
+  "seconds": 20.989,
+  "generated": "2026-10-17T07:31:09.951Z"
+ },
+ "code": "// Cracked glass — animated Voronoi cells with dark borders\nuniform float uScale;   // @param 6.0 1.0 20.0\nuniform float uBorder;  // @param 0.04 0.0 0.25\nuniform float uSpeed;   // @param 0.4 0.0 3.0\nuniform vec3  uTint;    // @param #8FC8E8\nuniform vec3  uEdge;    // @param #050608\n\nvec2 hash2(vec2 p) {\n  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));\n  return fract(sin(p) * 43758.5453);\n}\n\nvec2 cellPoint(vec2 c, float t) {\n  vec2 h = hash2(c);\n  return 0.5 + 0.4 * sin(t + 6.2831 * h);\n}\n\n// Returns distance to nearest cell border; outputs cell id and vector to seed.\nfloat voronoi(vec2 x, float t, out vec2 id, out vec2 toSeed) {\n  vec2 n = floor(x);\n  vec2 f = fract(x);\n  vec2 mg = vec2(0.0);\n  vec2 mr = vec2(0.0);\n  float md = 8.0;\n  for (int j = -1; j <= 1; j++) {\n    for (int i = -1; i <= 1; i++) {\n      vec2 g = vec2(float(i), float(j));\n      vec2 r = g + cellPoint(n + g, t) - f;\n      float d = dot(r, r);\n      if (d < md) { md = d; mr = r; mg = g; }\n    }\n  }\n  md = 8.0;\n  for (int j = -2; j <= 2; j++) {\n    for (int i = -2; i <= 2; i++) {\n      vec2 g = mg + vec2(float(i), float(j));\n      vec2 r = g + cellPoint(n + g, t) - f;\n      vec2 dr = r - mr;\n      if (dot(dr, dr) > 1e-5) {\n        md = min(md, dot(0.5 * (mr + r), normalize(dr)));\n      }\n    }\n  }\n  id = n + mg;\n  toSeed = mr;\n  return md;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  vec2 id, toSeed;\n  float d = voronoi(p * uScale, t, id, toSeed);\n\n  // Per-cell glass shard color with faceted lighting\n  vec2 h = hash2(id);\n  vec3 col = uTint * (0.45 + 0.55 * h.x);\n  vec2 dir = normalize(toSeed + 1e-4);\n  float facet = dot(dir, normalize(vec2(0.6 + 0.4 * h.y, 0.8)));\n  col *= 0.75 + 0.35 * facet;\n  col += 0.08 * fbm(p * uScale * 1.5 + id);\n\n  // Bright rim just inside each crack\n  float aa = max(fwidth(d), 1e-4);\n  float rim = 1.0 - smoothstep(uBorder, uBorder + 0.08, d);\n  col += rim * 0.35 * (0.5 + 0.5 * h.y);\n\n  // Dark crack border\n  float edge = 1.0 - smoothstep(uBorder - aa, uBorder + aa, d);\n  col = mix(col, uEdge, edge);\n\n  float vig = 1.0 - 0.5 * dot(p, p);\n  fragColor = vec4(col * vig, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a cracked-glass shader layer: moving Voronoi cells with dark borders, using `uScale` for cell scale and `uBorder` for border width. It hasn't been compiled or rendered because no live Powermove tools were attached. `uSpeed`, `uTint` (shard colour) and `uEdge` (border colour) are also exposed as controls."
+}

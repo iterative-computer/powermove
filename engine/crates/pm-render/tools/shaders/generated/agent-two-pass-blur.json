@@ -1,0 +1,37 @@
+{
+ "name": "agent-two-pass-blur",
+ "kind": "effect",
+ "covers": [
+  "effect-passes",
+  "effect-uniforms"
+ ],
+ "prompt": "Effect: a two-pass separable box blur (horizontal then vertical) with a radius slider.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "584a813a38ea8ecf87d2b8cefa0ae7a70f55e770c83c3b0de20525b831013d96",
+  "seconds": 22.191,
+  "generated": "2026-10-17T07:35:03.701Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.box-blur",
+  "label": "Box Blur",
+  "group": "Blur & Sharpen",
+  "passes": 2,
+  "params": [
+   {
+    "k": "radius",
+    "label": "Radius",
+    "def": 8,
+    "min": 0,
+    "max": 64,
+    "step": 0.1,
+    "unit": "px"
+   }
+  ],
+  "frag": "\n  // Two-pass separable box blur: u_pass 0 = horizontal, 1 = vertical.\n  // Fractional radius weights the outermost taps so animation is smooth.\n  vec2 dir = (u_pass == 0) ? vec2(u_texel.x, 0.0) : vec2(0.0, u_texel.y);\n  float r = clamp(u_radius, 0.0, 64.0);\n  float ri = floor(r);\n  float fr = r - ri;\n  vec4 acc = texture(u_tex, v_st);\n  float wsum = 1.0;\n  for (int i = 1; i <= 65; i++) {\n    float fi = float(i);\n    if (fi > ri + 1.0) break;\n    float w = (fi <= ri) ? 1.0 : fr;\n    if (w <= 0.0) break;\n    vec2 off = dir * fi;\n    acc += w * texture(u_tex, v_st + off);\n    acc += w * texture(u_tex, v_st - off);\n    wsum += 2.0 * w;\n  }\n  // Averaging premultiplied RGBA keeps transparent edges clean.\n  o = acc / wsum;\n"
+ },
+ "summary": "I wrote the Box Blur effect (`gen.box-blur`, group Blur & Sharpen) but haven't run validate_effect, compiled the GLSL or rendered it, because no Powermove tools were attached to this run. It uses two passes: `u_pass` 0 blurs horizontally and pass 1 blurs vertically. It has one keyframeable control, Radius (0–64 px, default 8); fractional values partly weight the outer pixels so the radius animates smoothly, and it averages premultiplied RGBA so transparent edges stay clean."
+}

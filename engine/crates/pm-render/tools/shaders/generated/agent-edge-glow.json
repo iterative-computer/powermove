@@ -1,0 +1,101 @@
+{
+ "name": "agent-edge-glow",
+ "kind": "effect",
+ "covers": [
+  "effect-keepOrig",
+  "effect-uniforms"
+ ],
+ "prompt": "Effect: neon edge glow — detect edges in a first pass, blur them in a second pass, and add them back over the original layer in a third.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "dc8c3b40a4eb9fd62610ecc73cf3c96a31e87e4b2a78e3306ecbf5a1b7de03c3",
+  "seconds": 54.042,
+  "generated": "2026-10-17T07:35:48.889Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.neon-edge-glow",
+  "label": "Neon Edge Glow",
+  "group": "Stylize",
+  "passes": 3,
+  "keepOrig": true,
+  "params": [
+   {
+    "k": "color",
+    "label": "Glow Color",
+    "type": "color",
+    "def": "#19F0FF"
+   },
+   {
+    "k": "intensity",
+    "label": "Glow Intensity",
+    "def": 1.6,
+    "min": 0,
+    "max": 5,
+    "step": 0.01
+   },
+   {
+    "k": "radius",
+    "label": "Glow Radius",
+    "def": 12,
+    "min": 0,
+    "max": 64,
+    "step": 0.1,
+    "unit": "px"
+   },
+   {
+    "k": "threshold",
+    "label": "Edge Threshold",
+    "def": 0.15,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   },
+   {
+    "k": "softness",
+    "label": "Edge Softness",
+    "def": 0.25,
+    "min": 0.001,
+    "max": 1,
+    "step": 0.01
+   },
+   {
+    "k": "width",
+    "label": "Edge Width",
+    "def": 1,
+    "min": 0.5,
+    "max": 4,
+    "step": 0.05,
+    "unit": "px"
+   },
+   {
+    "k": "core",
+    "label": "Core Brightness",
+    "def": 0.8,
+    "min": 0,
+    "max": 3,
+    "step": 0.01
+   },
+   {
+    "k": "sourceColor",
+    "label": "Use Source Color",
+    "def": 0,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   },
+   {
+    "k": "original",
+    "label": "Original Opacity",
+    "def": 1,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   }
+  ],
+  "frag": "\n  vec3 LW = vec3(0.2126, 0.7152, 0.0722);\n  if (u_pass == 0) {\n    // Pass 1: Sobel edge mask from luma + alpha of the layer.\n    vec2 d = u_texel * u_width;\n    float gx = 0.0, gy = 0.0;\n    for (int j = -1; j <= 1; j++) {\n      for (int i = -1; i <= 1; i++) {\n        vec4 c = texture(u_tex, v_st + vec2(float(i), float(j)) * d);\n        float v = dot(c.rgb, LW) + 0.5 * c.a;\n        gx += v * float(i) * (j == 0 ? 2.0 : 1.0);\n        gy += v * float(j) * (i == 0 ? 2.0 : 1.0);\n      }\n    }\n    float e = smoothstep(u_threshold, u_threshold + u_softness, length(vec2(gx, gy)));\n    o = vec4(vec3(e), e);\n  } else if (u_pass == 1) {\n    // Pass 2: Gaussian-weighted golden-angle disk blur of the edge mask.\n    float r = max(u_radius, 0.0);\n    vec4 acc = texture(u_tex, v_st);\n    float wsum = 1.0;\n    if (r > 0.01) {\n      for (int i = 0; i < 64; i++) {\n        float fi = float(i) + 0.5;\n        float rr = sqrt(fi / 64.0) * r;\n        float a = fi * 2.39996323;\n        vec2 off = vec2(cos(a), sin(a)) * rr * u_texel;\n        float q = rr / r;\n        float w = exp(-2.5 * q * q);\n        acc += texture(u_tex, v_st + off) * w;\n        wsum += w;\n      }\n    }\n    o = acc / wsum;\n  } else {\n    // Pass 3: add crisp core + blurred glow over the original layer.\n    vec4 orig = texture(u_orig, v_st);\n    float glow = texture(u_tex, v_st).r;\n    vec2 d = u_texel * u_width;\n    float gx = 0.0, gy = 0.0;\n    for (int j = -1; j <= 1; j++) {\n      for (int i = -1; i <= 1; i++) {\n        vec4 c = texture(u_orig, v_st + vec2(float(i), float(j)) * d);\n        float v = dot(c.rgb, LW) + 0.5 * c.a;\n        gx += v * float(i) * (j == 0 ? 2.0 : 1.0);\n        gy += v * float(j) * (i == 0 ? 2.0 : 1.0);\n      }\n    }\n    float core = smoothstep(u_threshold, u_threshold + u_softness, length(vec2(gx, gy)));\n    vec3 sc = orig.a > 0.001 ? orig.rgb / orig.a : u_color;\n    vec3 hsv = rgb2hsv(clamp(sc, 0.0, 1.0));\n    hsv.y = max(hsv.y, 0.6);\n    hsv.z = 1.0;\n    vec3 col = mix(u_color, hsv2rgb(hsv), u_sourceColor);\n    vec4 base = orig * u_original;\n    vec3 add = col * (glow * u_intensity + core * u_core);\n    float ga = clamp(max(add.r, max(add.g, add.b)), 0.0, 1.0);\n    float a = base.a + ga * (1.0 - base.a);\n    o = vec4(min(base.rgb + add, vec3(a)), a);\n  }\n"
+ },
+ "summary": "I wrote \"gen.neon-edge-glow\" (group: Stylize), a three-pass effect that keeps a copy of the original layer. Pass 1 finds edges from brightness and transparency, pass 2 blurs them, and pass 3 adds them over the original as a sharp core plus a soft glow. Nothing was tested: there were no live tools here, so I couldn't run validate_effect, compile the GLSL or render frames. It also assumes pass numbering starts at 0 and that the original layer can be read in every pass."
+}

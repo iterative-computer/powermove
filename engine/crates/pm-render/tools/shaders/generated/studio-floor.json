@@ -1,0 +1,116 @@
+{
+ "name": "studio-floor",
+ "kind": "extension",
+ "covers": [
+  "extension-color",
+  "raymarch-loop",
+  "extension-toggle-bool"
+ ],
+ "prompt": "Extension layer that renders a seamless studio backdrop (cyclorama) with a soft floor shadow; background color, light color, and a toggle for a grid on the floor.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "ef86e2bc0b046b2fc0010da4507f4f14959f3f39fa49393fca4884e135b99208",
+  "seconds": 52.244,
+  "generated": "2026-10-17T07:34:02.706Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.cyclorama",
+  "label": "Studio Cyclorama",
+  "version": 1,
+  "params": [
+   {
+    "k": "bgColor",
+    "label": "Background Color",
+    "type": "color",
+    "def": "#d9d6d0"
+   },
+   {
+    "k": "lightColor",
+    "label": "Light Color",
+    "type": "color",
+    "def": "#fff3e0"
+   },
+   {
+    "k": "lightIntensity",
+    "label": "Light Intensity",
+    "def": 0.8,
+    "min": 0,
+    "max": 2,
+    "step": 0.01
+   },
+   {
+    "k": "lightSpread",
+    "label": "Light Spread",
+    "def": 0.9,
+    "min": 0.2,
+    "max": 2,
+    "step": 0.01
+   },
+   {
+    "k": "horizon",
+    "label": "Floor Height",
+    "def": 0.38,
+    "min": 0.1,
+    "max": 0.75,
+    "step": 0.01
+   },
+   {
+    "k": "cove",
+    "label": "Cove Softness",
+    "def": 0.12,
+    "min": 0.01,
+    "max": 0.3,
+    "step": 0.005
+   },
+   {
+    "k": "shadowStrength",
+    "label": "Floor Shadow",
+    "def": 0.55,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   },
+   {
+    "k": "shadowSize",
+    "label": "Shadow Size",
+    "def": 0.45,
+    "min": 0.05,
+    "max": 1.5,
+    "step": 0.01
+   },
+   {
+    "k": "grid",
+    "label": "Floor Grid (0 off / 1 on)",
+    "def": 0,
+    "min": 0,
+    "max": 1,
+    "step": 1
+   },
+   {
+    "k": "gridScale",
+    "label": "Grid Density",
+    "def": 4,
+    "min": 1,
+    "max": 16,
+    "step": 0.1
+   },
+   {
+    "k": "gridOpacity",
+    "label": "Grid Opacity",
+    "def": 0.35,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   }
+  ],
+  "defaults": {},
+  "renderer": {
+   "kind": "fragment",
+   "fragment": "void main(){\n  float asp = iResolution.x / max(iResolution.y, 1.0);\n  vec2 p = vec2((uv.x - 0.5) * asp, uv.y);\n  float h = u_horizon;\n  // floor weight with a soft curved cove into the wall\n  float fl = 1.0 - smoothstep(h - u_cove, h + u_cove, uv.y);\n  // key light pool centred above the cove, falling onto wall and floor\n  vec2 lc = vec2(0.0, h + 0.18);\n  vec2 ld = (p - lc) * vec2(0.55, mix(1.0, 1.6, fl));\n  float s = max(u_lightSpread, 0.05);\n  float light = exp(-dot(ld, ld) * 2.4 / (s * s));\n  vec3 col = u_bgColor * mix(0.42, 1.0, clamp(light * u_lightIntensity, 0.0, 1.0));\n  col += u_lightColor * light * u_lightIntensity * 0.22;\n  col *= mix(vec3(1.0), u_lightColor, 0.25 * clamp(u_lightIntensity, 0.0, 1.0));\n  // gentle cove occlusion and floor falloff toward camera\n  float coveBand = exp(-pow((uv.y - h) / max(u_cove, 0.01), 2.0) * 1.5);\n  col *= 1.0 - 0.06 * coveBand;\n  col *= mix(1.0, 0.82, fl * clamp(1.0 - uv.y / max(h, 0.01), 0.0, 1.0));\n  // optional perspective floor grid\n  if (u_grid > 0.5) {\n    float dy = max(h - uv.y, 1e-3);\n    float z = 0.25 / dy;\n    vec2 w = vec2(p.x * z, z) * u_gridScale;\n    vec2 fw = max(fwidth(w), vec2(1e-4));\n    vec2 g = abs(fract(w - 0.5) - 0.5) / fw;\n    float line = 1.0 - clamp(min(g.x, g.y), 0.0, 1.0);\n    float fade = clamp(dy / max(h, 0.01) * 3.0, 0.0, 1.0) * fl;\n    fade *= clamp(1.0 - max(fw.x, fw.y) * 1.5, 0.0, 1.0);\n    col *= 1.0 - line * u_gridOpacity * 0.55 * fade;\n  }\n  // soft contact shadow pool on the floor\n  vec2 sc = vec2(0.0, h * 0.55);\n  float ss = max(u_shadowSize, 0.01);\n  vec2 sd = (p - sc) / vec2(ss, ss * 0.22);\n  float sh = exp(-dot(sd, sd) * 1.8) * u_shadowStrength * fl;\n  col *= 1.0 - sh * 0.7;\n  // subtle vignette + dither against banding\n  vec2 vq = (uv - 0.5) * vec2(asp, 1.0);\n  col *= 1.0 - 0.28 * dot(vq, vq);\n  col += (hash(uv * iResolution) - 0.5) / 255.0;\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}"
+  }
+ },
+ "summary": "I wrote the `gen.cyclorama` layer definition but didn't compile, load or render it, because no Powermove tools were attached to this run. It draws a seamless studio wall that curves into the floor, with a lit area centred above the curve and a soft oval shadow on the floor.\n- **Controls:** Background Color, Light Color, Light Intensity, Light Spread, Floor Height, Cove Softness (how gradual the wall-to-floor curve is), Floor Shadow, Shadow Size, Floor Grid, Grid Density and Grid Opacity. They can all be animated.\n- **Grid toggle:** the API docs don't describe an on/off parameter type, so Floor Grid is a 0/1 slider rather than a checkbox. The grid shows in perspective on the floor and fades out toward the back wall.\n- **Unconfirmed assumptions:** the shader assumes these renderers get the shader layer's built-in variables (`iResolution`, `hash`), and that `uv.y` runs from 0 at the bottom. If `uv.y` actually starts at the top, the floor will appear at the top of the frame."
+}

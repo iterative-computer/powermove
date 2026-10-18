@@ -108,6 +108,19 @@ pub trait FramePresenter: Send {
     ) {
     }
 
+    /// The renderer's shader fallback runner answered (contract 10,
+    /// decision 19: pixels of a program the native pipeline cannot
+    /// translate, or why it could not draw it). Presenters without
+    /// fallback layers ignore it.
+    fn shader_fallback(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _message: pm_protocol::shader_fallback::ShaderFallbackMessage,
+    ) {
+    }
+
     /// A viewer or scrub frame request. The presenter answers later on the
     /// port with `Response::Frame` (or an error) for `id`; an `Err` here is
     /// sent at once.
