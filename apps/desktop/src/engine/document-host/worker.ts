@@ -16,6 +16,7 @@ import type { ExtensionRecord } from '../../shared/extensions';
 import type { PersistReason } from '../../shared/engine-protocol';
 import type { TranscribeProgress } from '../../shared/transcription';
 import { bootChain, memoryStore, type Chain, type EnginePolicy } from './chain';
+import { deterministicSeam } from './contract';
 import { recordFor, records as storeRecords, setRecords } from '../../renderer/src/kernel/extensions.svelte';
 import {
   DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
@@ -181,6 +182,8 @@ export class DocumentWorker {
       if (saved.hash !== canonicalProjectHash(PM['proj'])) this.log(`[engine] ${projectId}: the document changed since its history was saved (another member edited it); undo applies on top`);
     }
     this.extensions = await this.chain.bootExtensions();
+    // The contract tests' deterministic ids and clock (contract.ts), tests only.
+    if (process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED']) deterministicSeam();
     this.log(`[engine] opened ${projectId} (seq ${joined.seq}, ${restored} undo entries, extensions ${this.extensions.active.length} active)`);
     return this.opened(restored);
   }
