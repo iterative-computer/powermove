@@ -188,6 +188,10 @@ enum HostCall {
     Service {
         token: u64,
     },
+    /// A call the viewer presenter asked for, answered to it by its token.
+    Presenter {
+        token: u64,
+    },
 }
 
 /// The answer to a [`Engine::mint_handle`] call.
@@ -434,6 +438,7 @@ impl Engine {
     pub fn pump(&mut self) -> Vec<Action> {
         let mut out = Out::default();
         self.drain_jobs(&mut out);
+        self.drain_presenter(&mut out);
         out.0
     }
 
@@ -648,6 +653,7 @@ impl Engine {
             self.release_waiting_frames(now, &mut out);
             self.drain_jobs(&mut out);
         }
+        self.drain_presenter(&mut out);
         out.0
     }
 
@@ -1420,6 +1426,19 @@ impl Engine {
                     self.viewer_transport(port, sid, command, now, out);
                 }
             }
+            (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
+                if self.jobs.is_some() =>
+            {
+                // Contract 11: surfaces and progress of the job engine's
+                // Blender requests.
+                self.jobs.as_mut().expect("checked").host_event(&event);
+            }
+            (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
+                if self.presenter.is_some() =>
+            {
+                // The paused viewer's Blender requests (interactive engine).
+                self.presenter.as_mut().expect("checked").host_event(&event);
+            }
             (
                 Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_) | Event::Audio(_),
                 PeerKind::Renderer,
@@ -1806,6 +1825,11 @@ impl Engine {
                     jobs.host_answer(token, Ok(body));
                 }
             }
+            (HostCall::Presenter { token }, body) => {
+                if let Some(presenter) = self.presenter.as_mut() {
+                    presenter.host_answer(token, Ok(body));
+                }
+            }
             (call, body) => out.log(
                 LogLevel::Error,
                 format!("host answered {call:?} with {:?}", body.kind()),
@@ -1857,6 +1881,11 @@ impl Engine {
             HostCall::Service { token } => {
                 if let Some(jobs) = self.jobs.as_mut() {
                     jobs.host_answer(token, Err(error));
+                }
+            }
+            HostCall::Presenter { token } => {
+                if let Some(presenter) = self.presenter.as_mut() {
+                    presenter.host_answer(token, Err(error));
                 }
             }
         }
@@ -2030,6 +2059,7 @@ impl Engine {
             self.release_waiting_frames(now, &mut out);
             self.drain_jobs(&mut out);
         }
+        self.drain_presenter(&mut out);
         self.flush_inflight(&mut out);
         let active = !self.sessions.is_empty();
         if let Some(usage) = self.lease.poll_report(now, active)
@@ -2262,6 +2292,39 @@ impl Engine {
             }
         }
         self.flush_inflight(out);
+    }
+
+    /// Makes the presenter's host calls (the paused viewer's Blender jobs).
+    fn drain_presenter(&mut self, out: &mut Out) {
+        let Some(presenter) = self.presenter.as_mut() else {
+            return;
+        };
+        let calls = presenter.drain_host_requests();
+        for call in calls {
+            let failed = match self.open_host() {
+                Some(host) => match self.call_host(host, call.request, call.session, out) {
+                    Some(id) => {
+                        self.host_calls
+                            .insert(id, HostCall::Presenter { token: call.token });
+                        None
+                    }
+                    None => Some("The host call could not be sent."),
+                },
+                None => Some("The engine has no host connection."),
+            };
+            if let Some(message) = failed
+                && let Some(presenter) = self.presenter.as_mut()
+            {
+                presenter.host_answer(
+                    call.token,
+                    Err(EngineError::new(
+                        ErrorCode::Internal,
+                        ErrorScope::Connection,
+                        message,
+                    )),
+                );
+            }
+        }
     }
 
     fn flush_inflight(&mut self, out: &mut Out) {

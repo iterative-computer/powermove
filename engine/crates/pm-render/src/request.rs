@@ -68,6 +68,10 @@ pub struct RenderRequest {
     /// render; an export never draws it, and [`RenderRequest::from_frame_request`]
     /// drops it for exports and agent captures (section 8).
     pub view: Option<ViewOverride>,
+    /// How compositions rendered with Blender draw (`crate::blender`):
+    /// native shading, an export's prepared surfaces, or the paused
+    /// viewer's preview surfaces.
+    pub blender: crate::blender::BlenderRender,
     /// Motion blur of layers with their switch on (`crate::motion`).
     pub motion_blur: MotionBlur,
     /// The resampler of `compat` level 2 raster content
@@ -91,6 +95,7 @@ impl RenderRequest {
             background: true,
             export: false,
             view: None,
+            blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
@@ -109,6 +114,7 @@ impl RenderRequest {
             background: true,
             export: false,
             view: None,
+            blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
@@ -141,6 +147,7 @@ impl RenderRequest {
             background: true,
             export: request.purpose == FramePurpose::Export,
             view: request.view.clone().filter(|_| !request.purpose.is_final()),
+            blender: crate::blender::BlenderRender::Native,
             motion_blur: match request.motion_blur {
                 MotionBlurKind::Off => MotionBlur::Off,
                 kind => MotionBlur::Kind(kind),

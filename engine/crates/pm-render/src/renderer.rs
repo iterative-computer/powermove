@@ -975,6 +975,61 @@ impl Renderer {
         )?)
     }
 
+    /// The Blender snapshots a frame needs (section 17's Blender stage):
+    /// the frame is planned without drawing, and every composition pass
+    /// with `render3d.enabled` (every one with 3D objects for `preview`)
+    /// gives the snapshot of its frame, at the plan's own times and sizes.
+    /// A frame whose snapshot cannot be built answers why
+    /// ([`crate::blender::BlenderSnapshots::errors`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn blender_snapshots(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        preview: bool,
+        options: crate::blender::SnapshotOptions,
+    ) -> Result<crate::blender::BlenderSnapshots, RenderError> {
+        request.validate()?;
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        // Planned exactly as `render` plans it (effects, transitions, text,
+        // motion blur), so every 3D pass the render reaches is collected:
+        // without the effect host a layer with effects would be refused
+        // before its content is planned.
+        let (_, build) = plan::build_blender(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            self.options3d.for_request(request),
+            Some(&mut self.text),
+            build_options(&comp, request),
+            crate::blender::PlanState::collecting(preview, options),
+        );
+        Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
+    }
+
     /// The plan of a frame without rendering it (tests, `pm-cli parity`).
     pub fn plan(
         &mut self,

@@ -181,7 +181,7 @@ fn masked<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64) -> JsResult
 
 /// The composition's scene at `time` (`compositionRuntime`).
 #[allow(clippy::too_many_arguments)]
-fn composition_scene<'d>(
+pub(crate) fn composition_scene<'d>(
     scope: &mut Scope<'_, 'd>,
     time: f64,
     width: u32,

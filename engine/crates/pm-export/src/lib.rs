@@ -19,6 +19,7 @@
 //!   offline mix, and the encoder above.
 
 pub mod atomic;
+pub mod blender;
 pub mod convert;
 pub mod dither;
 pub mod gpu_time;

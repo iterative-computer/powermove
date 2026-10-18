@@ -20,6 +20,7 @@
 //!   definition snapshots (contract 10) and the GPU watchdog.
 
 pub mod assets;
+pub mod blender;
 pub mod capability;
 pub mod composite;
 pub mod effects;

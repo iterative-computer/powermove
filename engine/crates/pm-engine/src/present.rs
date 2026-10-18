@@ -162,6 +162,26 @@ pub trait FramePresenter: Send {
     ) {
     }
 
+    /// Host services calls the presenter wants made (the paused viewer's
+    /// Blender jobs, contract 11): drained on every `receive`, `tick`, and
+    /// `pump`, answered through [`Self::host_answer`] with the same token.
+    fn drain_host_requests(&mut self) -> Vec<crate::jobs::HostRequest> {
+        Vec::new()
+    }
+
+    /// The answer to a [`crate::jobs::HostRequest`] from
+    /// [`Self::drain_host_requests`].
+    fn host_answer(
+        &mut self,
+        _token: u64,
+        _answer: Result<pm_protocol::envelope::Response, EngineError>,
+    ) {
+    }
+
+    /// A host event for the presenter's own requests: Blender surfaces and
+    /// progress, delivered before the request's answer.
+    fn host_event(&mut self, _event: &pm_protocol::envelope::Event) {}
+
     /// An asset of the session's document resolved to a file, or went
     /// offline (`None`: the host could not resolve it, or it left the
     /// document).
