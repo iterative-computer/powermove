@@ -39,6 +39,8 @@ import path from 'node:path';
 
 import { build } from 'esbuild';
 
+import { rawText } from './esbuild-raw-text.mjs';
+
 const desktop = path.resolve(import.meta.dirname, '..');
 const repo = path.resolve(desktop, '../..');
 const engineDir = path.join(repo, 'engine');
@@ -201,7 +203,7 @@ const waitDisplay = process.argv.includes('--wait-display');
 /** Whether the panel shows what a run measures: display awake, session unlocked. */
 const displayUsable = (state) => !state.asleep && !state.locked;
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const common = { bundle: true, logLevel: 'warning', alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
+const common = { bundle: true, logLevel: 'warning', plugins: [rawText], alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
 await build({
   ...common,
   entryPoints: { main: path.join(desktop, 'src/main/engine/integration/measure-main.ts'), 'engine-process': path.join(desktop, 'src/main/engine/engine-process.ts') },
