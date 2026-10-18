@@ -29,7 +29,7 @@ use objc2_core_text::CTFont;
 use super::coretext::{CoreTextReference, RefRun};
 use super::outline::FaceRef;
 
-pub use super::scene::GlyphMask;
+pub use super::scene::{GlyphMask, MaskStyle};
 
 impl GlyphMask {
     pub fn is_empty(&self) -> bool {
@@ -39,7 +39,7 @@ impl GlyphMask {
 
 /// Face buffer, face index, glyph, size bits, variation (tag, value bits),
 /// quarter-pixel offset.
-type MaskKey = (usize, u32, u16, u32, Vec<(u32, u32)>, u8);
+type MaskKey = (usize, u32, u16, u32, Vec<(u32, u32)>, u8, u32);
 
 /// CoreGraphics glyph masks, cached.
 #[derive(Default)]
@@ -67,10 +67,10 @@ impl super::scene::MaskSource for CgMasks {
         coords: &[(u32, f32)],
         glyph: u16,
         size: f32,
-        quarter: u8,
+        style: MaskStyle,
         bounds: kurbo::Rect,
     ) -> Option<Arc<GlyphMask>> {
-        CgMasks::mask(self, face, coords, glyph, size, quarter, bounds)
+        CgMasks::mask(self, face, coords, glyph, size, style, bounds)
     }
 
     fn preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
@@ -141,7 +141,7 @@ impl CgMasks {
         coords: &[(u32, f32)],
         glyph: u16,
         size: f32,
-        quarter: u8,
+        style: MaskStyle,
         bounds: kurbo::Rect,
     ) -> Option<Arc<GlyphMask>> {
         let key = (
@@ -150,7 +150,8 @@ impl CgMasks {
             glyph,
             size.to_bits(),
             coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
-            quarter,
+            style.quarter,
+            style.skew.to_bits(),
         );
         if let Some(m) = self.masks.get(&key) {
             return m.clone();
@@ -164,8 +165,7 @@ impl CgMasks {
             color: [0.0, 0.0, 0.0, 1.0],
         };
         let font = self.fonts.font(&run);
-        let mask =
-            font.and_then(|f| draw(&f, glyph, f64::from(quarter) / 4.0, bounds).map(Arc::new));
+        let mask = font.and_then(|f| draw(&f, glyph, style, bounds).map(Arc::new));
         if self.bytes > CACHE_BYTES {
             self.clear();
         }
@@ -250,9 +250,10 @@ const PAD: i32 = 3;
 fn draw(
     font: &CFRetained<CTFont>,
     glyph: u16,
-    sub_x: f64,
+    style: MaskStyle,
     bounds: kurbo::Rect,
 ) -> Option<GlyphMask> {
+    let sub_x = f64::from(style.quarter) / 4.0;
     if !(bounds.x0.is_finite()
         && bounds.y0.is_finite()
         && bounds.x1.is_finite()
@@ -292,16 +293,31 @@ fn draw(
     CGContext::set_allows_font_subpixel_positioning(c, true);
     CGContext::set_should_subpixel_position_fonts(c, true);
     CGContext::set_text_drawing_mode(c, objc2_core_graphics::CGTextDrawingMode::Fill);
+    // The pen is the CTM's origin, so the text matrix (synthetic italic)
+    // shears the glyph about its own origin.
+    CGContext::translate_ctm(c, f64::from(-left) + sub_x, (h as i32 + top) as f64);
+    if style.skew != 0.0 {
+        // CoreGraphics' y runs up: y-down skew `x + s·y` is `c = −s`.
+        CGContext::set_text_matrix(
+            c,
+            objc2_core_foundation::CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: -f64::from(style.skew),
+                d: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+        );
+    }
     CGContext::set_should_antialias(c, true);
     CGContext::set_allows_font_smoothing(c, true);
     CGContext::set_should_smooth_fonts(c, true);
     CGContext::set_gray_fill_color(c, 0.0, 1.0);
     // The pen: `-left + sub_x` from the bitmap's left edge, on the baseline
-    // `-top` rows below its top (CoreGraphics' y runs up from the bottom).
-    let pos = CGPoint {
-        x: f64::from(-left) + sub_x,
-        y: (h as i32 + top) as f64,
-    };
+    // `-top` rows below its top (CoreGraphics' y runs up from the bottom);
+    // the CTM is translated there.
+    let pos = CGPoint { x: 0.0, y: 0.0 };
     unsafe {
         font.draw_glyphs(
             NonNull::new(&glyph as *const u16 as *mut u16).expect("non-null"),
@@ -416,7 +432,8 @@ mod tests {
         };
         let mut masks = CgMasks::new();
         let bounds = kurbo::Rect::new(1.0, -11.5, 9.0, 0.0);
-        let m = masks.mask(face, &[], gid, 16.0, 0, bounds).unwrap();
+        let style = |quarter| MaskStyle { quarter, skew: 0.0 };
+        let m = masks.mask(face, &[], gid, 16.0, style(0), bounds).unwrap();
         assert!(!m.is_empty());
         // The H's left stem starts about one pixel right of the pen.
         let col = |x: i32| -> u32 {
@@ -426,10 +443,10 @@ mod tests {
         };
         assert!(col(-1) == 0 && col(2) > 1000);
         // Offsets move the ink; the cache returns the same mask.
-        let q = masks.mask(face, &[], gid, 16.0, 2, bounds).unwrap();
+        let q = masks.mask(face, &[], gid, 16.0, style(2), bounds).unwrap();
         assert_ne!(q.coverage, m.coverage);
         assert!(Arc::ptr_eq(
-            &masks.mask(face, &[], gid, 16.0, 0, bounds).unwrap(),
+            &masks.mask(face, &[], gid, 16.0, style(0), bounds).unwrap(),
             &m
         ));
     }

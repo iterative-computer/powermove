@@ -151,19 +151,28 @@ pub struct GlyphMask {
     pub coverage: Vec<u8>,
 }
 
+/// How a platform glyph mask is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaskStyle {
+    /// The glyph's offset right of a whole pixel, in quarter pixels.
+    pub quarter: u8,
+    /// Skia's synthetic italic: `x' = x + skew × y` with y down (0: none).
+    pub skew: f32,
+}
+
 /// Where level 1 glyph masks come from when the platform rasterizes them as
 /// Canvas2D does (`cgmask` on macOS).
 pub trait MaskSource {
     /// The mask of `glyph` of `face` at `size` device px and variation
-    /// `coords`, drawn `quarter`/4 px right of a whole pixel; `bounds` is the
-    /// glyph's outline box at that size (device px, y down).
+    /// `coords`, drawn in `style`; `bounds` is the glyph's outline box at
+    /// that size (device px, y down).
     fn mask(
         &mut self,
         face: FaceRef<'_>,
         coords: &[(u32, f32)],
         glyph: u16,
         size: f32,
-        quarter: u8,
+        style: MaskStyle,
         bounds: Rect,
     ) -> Option<Arc<GlyphMask>>;
     /// The preblend table for straight E-encoded paint `rgb`.
@@ -383,20 +392,32 @@ impl Painter<'_> {
                     continue;
                 };
                 let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // Synthesized bold keeps the outline path: Skia's fake bold
+                // (a stroke-and-fill path) is not reproduced exactly yet
+                // (docs/engine/text-render.md, "Gaps").
                 if !as_path
                     && !large
                     && place.axis_aligned
                     && !run.synthetic_bold
-                    && skew_of(run) == 0.0
                     && let (Some(masks), Coords::User(coords)) =
                         (self.masks.as_deref_mut(), run.coords)
                 {
                     let (x, y) = self.profile.snap.apply(p.x, p.y);
                     let ix = x.floor();
-                    let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
-                    if let Some(m) =
-                        masks.mask(run.face, coords, g.id as u16, dsize, quarter, bare.bounds)
-                    {
+                    let style = MaskStyle {
+                        quarter: (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8,
+                        skew: skew_of(run) as f32,
+                    };
+                    let grow_x = f64::from(style.skew).abs()
+                        * bare.bounds.y0.abs().max(bare.bounds.y1.abs());
+                    if let Some(m) = masks.mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        dsize,
+                        style,
+                        bare.bounds.inflate(grow_x, 0.0),
+                    ) {
                         platform.push((ix as i64, y as i64, m));
                     }
                     continue;
