@@ -22,7 +22,7 @@ import { ffmpegBinary } from './helpers/ffmpeg';
 const ffprobe = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
 const encoder = (file: string): string => JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format_tags=encoder', '-of', 'json', file], { encoding: 'utf8' })).format.tags?.encoder ?? '';
 /** The first frame's pixel at (10, 10) as RGB. */
-const pixel = (file: string): number[] => [...execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'crop=1:1:10:10', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
+const pixel = (file: string): number[] => [...execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'format=rgb24,crop=1:1:10:10', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
 
 test('an effect registered just before an export is drawn by the job engine, with overrides by id', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-definitions-'));
@@ -84,6 +84,60 @@ test('an effect registered just before an export is drawn by the job engine, wit
     const [r3, g3, b3] = pixel(restored);
     expect(b3, 'disposing the override restores the earlier registration').toBeGreaterThan(200);
     expect(r3! + g3!).toBeLessThan(80);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/* Decision 19 for effects (amendment 21: drawn, not routed): an effect the
+   native pipeline cannot translate (a sampler3D; WebGL draws it on unit 1,
+   where keepOrig's `u_orig` is set and no 3D texture is bound, so it reads
+   (0, 0, 0, 1)) is drawn in a job export by the window's fallback runner
+   with its input texture (contract 14: the job engine asks main, main asks
+   the window's runner), and composed back into the chain. */
+test('an effect only the WebGL runner draws is exported through the window\'s fallback runner', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-fallback-export-'));
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  try {
+    await expect.poll(() => session.app.evaluate(() => {
+      const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
+      return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
+    }), { timeout: 20_000 }).toBe('ready/ready');
+    await session.openEditor();
+    await expect.poll(() => session.page.evaluate(() => !!(window as any).PM.EngineDefinitions), { timeout: 20_000 }).toBe(true);
+    const file = path.join(root, 'fallback.mp4');
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, file);
+    const result = await session.page.evaluate(async () => {
+      const PM = (window as any).PM;
+      PM.proj = PM.mkProject({ name: 'Fallback export', w: 320, h: 180, fps: 24, dur: 1 });
+      PM.proj.work = [0, 1];
+      PM.bus.emit('project');
+      PM.Edit.apply([{ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 }], { label: 'Red', origin: 'user' });
+      PM.Kernel.registerEffect('e2e.fallback', {
+        id: 'e2e.volume', label: 'E2E volume', group: 'Color', params: [], rawShader: true, keepOrig: true,
+        frag: [
+          '#version 300 es',
+          'precision highp float;',
+          'in vec2 v_uv; in vec2 v_st; in vec2 v_px;',
+          'uniform sampler2D u_tex;',
+          'uniform highp sampler3D u_orig;',
+          'out vec4 o;',
+          'void main(){ vec4 c = texture(u_tex, v_st); o = vec4(c.a, c.a, 0.0, c.a) * texture(u_orig, vec3(0.5)).a; }'
+        ].join('\n')
+      });
+      PM.Edit.apply({ type: 'add_effect', target: PM.proj.layers[0].id, effect: 'e2e.volume' }, { origin: 'user', label: 'Add effect' });
+      return PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+    });
+    expect(result).toEqual({ cancelled: false });
+    expect(encoder(file), 'drawn by the job engine, not routed').not.toMatch(/^Lavf/);
+    const [r, g, b] = pixel(file);
+    // The fallback runner drew the effect over the red solid: yellow.
+    expect(r, 'the fallback program is drawn').toBeGreaterThan(200);
+    expect(g, 'the fallback program is drawn').toBeGreaterThan(200);
+    expect(b).toBeLessThan(60);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
