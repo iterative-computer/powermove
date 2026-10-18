@@ -1659,8 +1659,11 @@ impl<'a> Canvas<'a> {
         Ok(())
     }
 
-    /// `fCurrentDepth.next()` for the current device.
+    /// `fCurrentDepth.next()` for the current device, after the clip draws
+    /// recorded by restores since the last draw have advanced the depth
+    /// (`Device::drawClipShape`).
     fn next_z(&mut self) -> u32 {
+        self.take_clip_draws();
         let dev = self.devices.last_mut().unwrap();
         dev.current_z += 1;
         dev.current_z
