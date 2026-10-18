@@ -110,25 +110,58 @@ was found on the corpus's real project and checked against Chromium itself
    optical size).
 
    **Decided (Phase 1 T1, by the orchestrator under amendment 22): measure
-   as the running app's renderer does.** The app's UI text (`system-ui` at
-   12 and 13 px, weight 400, upright: `--fs-sm` and `--fs-md`) is laid out at
-   the window's device scale factor, so its entries are seeds:
-   `app_ui_font_cache_seeds(scale factors)` (pm-text) and
-   `appUiFontCacheSeeds` (`shared/engine-fonts-seeds.ts`, equal by test).
-   A window keeps every scale factor's entries it has been on, in order.
-   Main tracks each window's displays (`main/engine-fonts-seeds.ts`:
-   `browser-window-created`, `moved`, `resized`, display changes) and
-   - answers `engine-fonts:seeds` with that window's seeds and sends
-     `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
-     takes them through the new `pm_fonts_seeds` export (kept across
-     registry generation changes, applied to a revived instance);
-   - sends every window's own seeds to both engines' font services
-     (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds }] }`, replayed last
-     on every port; see "Seeds per window" below).
-   Text layer weights default to 500, so only weight 400 `system-ui` text at
-   24 and 26 px (2x) or 12 and 13 px (1x, no change) is affected. Not
-   modelled: other UI text (11, 15, 18 px; weights 500 and 600) and page
-   zoom, which the decision does not cover.
+   as the running app's renderer does.** The seeds are the font cache
+   entries the window's own UI text has created (2026-10-18, third pass;
+   the second pass modelled only `--fs-sm` and `--fs-md` at 12 and 13 px,
+   which missed the density setting and every other UI size and weight):
+
+   - **The UI font census** (`renderer/src/engine-doc/ui-font-census.ts`,
+     started from `legacy/bootstrap.ts` with the new engine on) watches the
+     document for text it lays out (elements with client rects holding
+     non-blank text, form controls with a value or placeholder) and reports
+     each new description (computed family stack, CSS size, weight, slope,
+     with the device pixel ratio it was laid out at) on
+     `engine-fonts:ui-fonts`. It rescans everything when the device pixel
+     ratio changes (another display, page zoom: `devicePixelRatio`
+     includes it) or the root's attributes change (`data-density`, theme),
+     and otherwise only what mutations touched, when the renderer is idle.
+     So a comfy window on a 2x display reports `--fs-md` at 14 px (the 28 px
+     entry with `opsz` 14), and an open inspector or menu adds its 11, 15
+     and 18 px text at weights 400, 500 and 600 as it appears.
+   - **Main resolves each stack as Chromium does**
+     (`shared/engine-fonts-seeds.ts` `uiFontSeed`): the first family that
+     is a system font alias (`system-ui`, `-apple-system`,
+     `BlinkMacSystemFont`, one cache key, as the real project's capture
+     shows) creates the entry; an installed family before it (the
+     registry's available family names, hidden `.`-prefixed ones excluded,
+     fetched again when the registry's generation moves) or a named generic
+     (`sans-serif`, `ui-monospace`, ...) means the text is not in the
+     system font. `--f-ui` is `"SF Pro Text", -apple-system, ...`, so a user
+     who installs SF Pro Text has no system font entries, as in Chromium.
+   - **Each window keeps its entries in creation order**
+     (`FontSeedTracker`): the first description to create a key (effective
+     size, weight, slope) fixes its `opsz`; a window keeps every display's
+     entries; a closed window or a new renderer process
+     (`render-process-gone`) forgets them.
+   - pm-text matches a seed for any of the system font aliases
+     (`blink::measure`, `same_cache_family`), so a canvas measuring
+     `-apple-system` finds the entries too.
+   - `app_ui_font_cache_seeds` (pm-text) and `appUiFontCacheSeeds` remain the
+     startup model at the default density for tools with no window (the
+     corpus test, `pm-cli parity`, `pm-cli render --ui-scale`).
+
+   Main answers `engine-fonts:seeds` with the window's seeds and sends
+   `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
+   takes them through `pm_fonts_seeds`; both engines' font services get
+   every window's seeds (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds
+   }] }`, replayed last on every port). The typing measurement in the app
+   (2026-10-18) shows the census at work: 11 and 12 seeds in a fresh editor
+   window, where the static model had 2.
+
+   Not modelled: entries a canvas creates first (a canvas measuring off the
+   1/100 px grid between 17 and 28 px; below 0.01 px of optical size), the
+   font cache's purge under memory pressure, pseudo-element text
+   (`::before`, `::placeholder`), and system colors' and SVG text's fonts.
 
    **Seeds per window (2026-10-18).** Each BrowserWindow is its own
    renderer with its own Chromium font cache, so the engines measure a
@@ -141,7 +174,9 @@ was found on the corpus's real project and checked against Chromium itself
      (`EngineFontClient::setSessionOwner`, the `sessions` list of
      `Op::Seeds`, job engine only) and waits for the engine to take it
      before submitting the job, so an export measures with the seeds of
-     the window it was started from;
+     the window it was started from. If the engine does not take them
+     within 5 s, once more; then the export does not start (an error to
+     the window) rather than lay text out with every window's seeds;
    - a render thread's `ServedFonts` takes the scope of each layer
      (`Renderer::set_text_seed_scope`: the view's port in the presenter,
      the work's port and session in the job lanes) and resolves it port
@@ -287,7 +322,10 @@ ends a waiting render thread), the hub's and `served`'s unit tests (seeds
 by port, session and fallback; a `DirectServer` never drops its registry
 off its thread), and main's (`engine-fonts.test.ts`: seeds replayed last,
 mirrors while down, session owners after the next replay;
-`engine-fonts-seeds.test.ts`; `shared/engine-fonts-seeds.test.ts`;
+`engine-fonts-seeds.test.ts`: censuses in, installed fonts and closed or
+restarted renderers; `shared/engine-fonts-seeds.test.ts`: stack resolution
+and creation order; `renderer/src/engine-doc/ui-font-census.test.ts`: what
+the census reports, density changes;
 `native-engine.test.ts`: connects name the window; `agent-jobs.test.ts`:
 the session's window before the job).
 

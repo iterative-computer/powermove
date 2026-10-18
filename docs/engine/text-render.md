@@ -147,9 +147,11 @@ Measured, not assumed:
   `text-fit` (10 families × 2 weights × 24 sizes, white) by coordinate search
   of mean ink SSIM, then smoothed; the expansion saturates at 0.305 px from
   64 px.
-- **Paths:** a glyph whose font size exceeds 256 px, or whose plain bounds
-  plus one pixel exceed 256 px in either dimension, draws as a plain path
-  (Menlo's 1.03 em full block switches at 250 px, its H at 260 px).
+- **Paths:** text at or above 256 device px (`SubRunContainer` draws masks
+  and distance fields only below `maxMaskSize`, 256), or a glyph whose
+  plain bounds plus one pixel exceed 256 px in either dimension, draws as a
+  plain path (Menlo's 1.03 em full block switches at 250 px, its H at 260
+  px).
 - **Large text:** from 162 px, glyphs sit at exact positions (no y rounding;
   the H at 170 px sits 0.4 px below a rounded baseline) with expansion
   0.425 / 0.325 px, offset −0.303 px, exponent 0.962, and the linear curve
@@ -276,9 +278,75 @@ pm-render on macOS):
   cubic, cubics cut at `T = k / 2^L` (Wang's formula), vertices snapped to
   1/256 px, 4 samples per pixel (`scene::tessellated_coverage`).
 
-The outline path with the Canvas2D profile (below) remains for what the
-masks do not cover yet: glyphs from 162 to 256 px device size (Skia's
-distance-field text) and platforms without CoreGraphics.
+- **Paths at exactly the sample positions:** multisampled path coverage
+  counts a sample that lies exactly on an edge by the rasterizer's
+  top-left rule (a crossing at the sample's x counts). Text at 256 px puts
+  the canonical 64 px outline at a scale of exactly 4, so vertices land on
+  sample positions; with the strict comparison 1,491 pixels were a sample
+  off.
+
+The outline path with the Canvas2D profile (below) remains only for
+platforms without CoreGraphics.
+
+## Distance-field text (162 to 256 px, level 1)
+
+2026-10-18 (third pass). Chromium's GPU canvas draws text whose device
+size (`SkFontPriv::ApproximateTransformedTextSize`: the text size times the
+matrix's largest scale) is at least 162 and below 256 px as distance-field
+text (`SubRunControl::isSDFT`, `getSDFFont` on macOS). pm-text does the
+same (`render::sdf`, `MaskSource::sdf_glyph`):
+
+- **Strike.** One strike per glyph at 256 px (162 px for text at exactly
+  162), the text matrix the identity: CoreGraphics draws the glyph with
+  smoothing on (the strike's `kNormal` hinting) into Skia's glyph bounds
+  (the CoreText bounding box rounded out, one pixel more each side), the
+  pixels are linearized (`gLinearCoverageFromCGLCDValue`, `(v² + 128) /
+  255`) and reduced to luminance without the paint's preblend (the SDF mask
+  filter ignores it). Synthesized bold and wide strokes generate the A8
+  from the glyph's path framed in strike space instead
+  (`skpath::frame_a8`: fake bold at the strike's size, the stroke width
+  divided by the strike-to-source scale; plain A8, no LCD).
+- **Field.** `SkGenerateDistanceFieldFromA8Image` ported line for line
+  (`sdf::distance_field`: Gustavson's edge distances, Danielsson's 8SSEDT
+  with Skia's pointer walk, `pack_distance_field_val<4>`), padded by 4.
+- **Placement.** `prepare_for_SDFT_drawing`: the glyph position mapped by
+  the creation matrix (`1 / strikeToSourceScale`, in `f32`), the field's
+  bounds inset by 2; the quad drawn through the canvas matrix
+  pre-translated by the blob origin and scaled by the creation matrix's
+  inverse (Graphite's `VertexFiller`). A field over 256 texels is drawn as
+  a direct mask when the mask fits (the SDFT run's rejects go to the direct
+  mask case), else as a path.
+- **Fragment.** Emulated per pixel (`sdf::draw`): vertices snapped to 1/256
+  px, texture coordinates interpolated over the strip's triangles,
+  bilinear filtering with 8-bit weights rounded to nearest, `dist =
+  7.96875 (texel − 128/255)` in half precision (the one half operation the
+  captures show rounding), derivatives over 2×2 quads, `afw = 0.65
+  |J·n|`, `smoothstep(−afw, afw, dist)` (no gamma adjustment on Mac),
+  stored to 8 bits and blended glyph by glyph like the masks. Fitted on the
+  three main-capture cases: snapping to 1/128 or 1/512 px, truncated, 9-bit
+  or exact weights, and the whole fragment in half each leave pixels 2 code
+  values off; this model leaves none (and 4,400 to 2,300 pixels 1 off per
+  case, within the gate).
+
+## Text colors (CSS Color 4 and 5)
+
+`render::color4` (third pass) ports Blink's color model so a text color is
+the `SkColor4f` Chromium paints with: `lab()`, `lch()`, `oklab()`,
+`oklch()`, `color()` in every predefined space (sRGB, linear sRGB, Display
+P3, A98, ProPhoto, Rec. 2020, XYZ D50/D65), `color-mix()` (missing and
+analogous components, premultiplied interpolation, hue methods, percentage
+normalization), relative colors (`rgb(from …)` with channel keywords and
+`calc()`, `min()`, `max()`, `clamp()`), `none`, `currentcolor` (black: the
+raster canvas is never in the document) and the system colors measured on
+the closure capture (`CanvasText`, `Canvas`, `LinkText`, `GrayText`;
+`AccentColor` is not a color to the canvas and keeps the previous style).
+Conversions follow `ui/gfx/color_conversions.cc` and skcms (its own `powf`
+approximation where `Color::ToSRGB` uses it for linear sRGB); gamut mapping
+is not baked in (`kBakedGamutMapping` off, as the capture's out-of-gamut
+`oklch()` shows). Colors outside sRGB stay unclamped through the glyph
+blend; the 8-bit target clamps them. All 36 colors of the closure capture
+match within 1 code value. `light-dark()` and system colors not measured
+still refuse their layer.
 
 ## Routing
 
@@ -296,6 +364,52 @@ draws it when asked. `Renderer::set_captions_hidden` is `PM.captionsHidden`
 (exports with `captionsBurn: false`).
 
 ## Measurements
+
+**2026-10-18 (third pass: distance-field text, CSS Color 4, the closure
+capture)**, Apple M4 Max, macOS 27, Electron 44 / Chromium 152, addon built
+at the pass's head without LTO (see Gaps).
+
+`tests/text_raster.rs` gates two captures now:
+
+| Capture | Cases | Exact (within 1 code value) | Pinned | Refused |
+|---|---:|---:|---:|---:|
+| main (`text-raster-20261016-061928`) | 495 | 462 (second pass: 459) | 33 | 0 |
+| closure (`text-closure-20261018-205749`) | 78 | 61 | 5 | 12 (`COLR`) |
+
+- The three 162 to 256 px main cases are exact (were 31,975, 30,632 and
+  16,169 pixels off, max Δ 148, 147, 126).
+- Closure capture: distance-field text at 161, 162, 163, 180, 210, 255,
+  256 and 257 px, five families, densities 2, 0.5 and 2.75, colors,
+  scripts, tracking, a paragraph, synthetic italic: exact except
+  `sdf-sizes-0004` (210 px: 4 pixels by 2), `sdf-synthetic-0016`
+  (synthesized bold at 200 px: 16 pixels by up to 6), `sdf-scripts-0023`
+  (Arabic at 200 px: 41 pixels by 2, one row where joined glyphs
+  overlap), `sdf-caption-0027` (a 6 px stroke at 180 px: 12 pixels by up
+  to 21) and `sdf-caption-0028` (`pop` at 160 px: 3 pixels by up to 5).
+  All 36 CSS Color 4 and 5 colors are exact; the 12 `COLR` cases are
+  refused (Gaps).
+- `text_corpus`: 237 frames, 235 exact within 2 code values, 0 failed,
+  0 not compared (unchanged; the two `animator-blur` frames stay pinned).
+  The isolated-text half compares text without its effects and with a
+  parent or matte source that is not kept removed (so at another
+  transform): it proves the text, not the user's frame.
+- `text_level2`: 400 cases and 20 layers, 0 below their gate. `text_gpu`:
+  GPU paint pass vs CPU reference max |Δ| 0. `text_colors`: pass (CSS Color
+  4 colors draw; `light-dark()` and unmeasured system colors refuse).
+- E2E with `POWERMOVE_NEW_ENGINE=1` under the lock, `--workers=1`, every
+  test checking afterwards that the viewer routed to the engine with no
+  refused layer, no presenter layer failure and no render error
+  (`e2e/helpers/engine-drew.ts`): `canvas-text` 6/6, `captions` 2/2
+  (subtitles import, edit, burn into frames, export), `font-anchor` 1/1,
+  `split-text` 4/4, `text-animators` 1/1, `text-layout-resize` 2/2. The
+  first run failed `font-anchor` because the check judged a session still
+  `pending` after the test replaced the project; the check now waits for
+  the session to settle, and the rerun passed.
+- Canvas text typing in the app with the engine drawing
+  (`native-engine-text-typing.spec.ts`, 60 keys each, 0 missed, route
+  `engine`, 0 layer failures): title 96 px p95 17.4 ms (p50 11.8, max
+  18.1); paragraph 48 px in a 1,400 px box p95 15.7 ms; `system-ui` 24 px
+  p95 13.2 ms. Target ≤ 33 ms.
 
 **2026-10-18 (second pass: glyph frames, blending, exactness gates)**, Apple
 M4 Max, macOS 27, references from Electron 44 / Chromium 152.
@@ -471,6 +585,14 @@ end (Phase 3a gate).
 
 ## Review sheets
 
+2026-10-18 (third pass), regenerated at the pass's head:
+`~/Library/Application Support/Powermove Engine Corpus/review/text-sidebyside-20261018c-main/index.html`
+(the three distance-field cases this pass changed and every pinned case,
+36 sheets) and `.../review/text-sidebyside-20261018c-closure/index.html`
+(every closure case the engine draws, 66 sheets). Canvas2D top, engine
+middle, differences beyond 1 code value ×4 bottom. They supersede
+`text-sidebyside-20261018b`.
+
 2026-10-18 (glyph masks): `~/Library/Application Support/Powermove Engine
 Corpus/review/text-1792322940/index.html`, 420 sheets (every text case:
 today's Canvas2D, engine level 1, CoreText with smoothing, engine level 2),
@@ -494,8 +616,10 @@ source engine/env.sh
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts            # text-raster-*
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set fit  # text-fit-*
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set probe
+python3 engine/crates/pm-text/capture/colr-fonts.py "$HOME/Library/Application Support/Powermove Engine Corpus/fonts"   # needs fontTools
+~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set closure   # text-closure-*
 cd engine
-cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
+cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_DIFFS (+ PM_TEXT_DIFFS_PINNED), PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
 cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_gpu
@@ -513,44 +637,40 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
 ## Gaps
 
 Each of these is a visible or measurable difference on level 1 content
-today (amendment 22), pinned in the exactness gates so it cannot grow;
-none is accepted, each is open work. Updated 2026-10-18 (second pass).
+today (amendment 22), pinned in the exactness gates so it cannot grow, or a
+refusal; none is accepted, each is open work for an orchestrator decision.
+Updated 2026-10-18 (third pass).
 
-- **Large text, 162 to 256 px device** (the 200 px `sizes` cases, the 192
-  px density case): 16,170 to 31,975 pixels, max Δ 126 to 148 (outline path
-  with the fitted large-text profile). Chromium's Skia draws this range as
-  distance-field text (`sktext::gpu::SubRunControl`: from
-  `kLargeDFFontLimit` 162 to the maximum, 256 px SDF masks on Mac, A8
-  masks turned into distance fields by `SkGenerateDistanceFieldFromA8Image`,
-  sampled bilinearly and shaded by Graphite's `sdf_text_coverage_fn` in
-  half precision with screen-space derivatives). What is known: the base
-  mask is CoreGraphics' A8 at 256 px without smoothing, linearized
-  (`gLinearCoverageFromCGLCDValue`), no preblend (`kNone` flags); the
-  field is padded by 4 (`SK_DistanceFieldPad`), drawn with a 2 px inset
-  (`SK_DistanceFieldInset`); on Mac `SK_GAMMA_APPLY_TO_A8` is not defined,
-  so the gamma adjustment is 0 and coverage is `smoothstep(-w, w, d)` with
-  `d = 7.96875 (texel − 128/255)` and `w = 0.65 |J · ∇d / |∇d||`. Matching
-  it means porting the field generator and running the same shader on the
-  same GPU (its bilinear sampling and fp16 arithmetic); not done.
+- **`COLR` color fonts** (project fonts only; no installed macOS font has a
+  `COLR` table) refuse their layer. The closure capture shows Chromium does
+  not draw them as CoreGraphics color images: drawn that way (in an em box
+  or in CoreText's glyph bounds, at quarter-pixel or whole-pixel
+  positions) they differ by ink SSIM 0.85 to 0.99, max Δ up to 232 (a layer
+  outside the base glyph is kept, whole-pixel placement fits best). The
+  likely path is Skia's Fontations typeface for `COLR` web fonts (its own
+  layer bounds, paths filled by Skia's rasterizer, gradients by its
+  shaders). References: `text-closure-20261018-205749`, cases `colr-0030`
+  to `colr-0041` (`v0` layered and `v1` gradient fonts at 14 to 200 px).
+- **Distance-field residuals** (closure capture): synthesized bold at 200
+  px 16 pixels by up to 6; a 6 px stroke at 180 px 12 pixels by up to 21;
+  Arabic at 200 px 41 pixels by 2 (overlapping joined glyphs); 210 px 4
+  pixels by 2; `pop` at 160 px 3 pixels by up to 5.
 - **Caption pop at density 1** (`caption-pop-0455`, `-0456`, `-0458`,
-  `-0459`): 2 to 75 pixels by 2 to 13 in `text_raster` (the corpus's pop
-  frames are exact).
+  `-0459`): 2 to 75 pixels by 2 to 13 in `text_raster`, all in the black
+  stroke of the scaled word (the corpus's pop frames are exact).
 - **Blurred animator glyphs** (`animator-blur`): 1 to 5 pixels by 3.
 - **Small residuals**: synthesized bold 1 and 7 pixels by 2; variable fonts
   6 to 448 pixels by 2 to 6 (Chromium's CTFont carries variations
   differently); caption strokes 2 and 7 pixels by 2 and 4; classic,
   whisper, paper, spotlight and fade captions 1 to 2 pixels by 2 or 3
-  (8-bit rounding between the box, stroke and fill items, which the
-  engine composites in float).
-- **`COLR` color fonts** are still refused rather than drawn, and CSS colors
-  the module does not reproduce (`lab()`, `lch()`, `oklab()`, `oklch()`,
-  `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`,
-  system colors) refuse their layer (`Feature::Text`). Neither is in the
-  corpus or the captures; both need a capture to match.
+  (8-bit rounding between the box, stroke and fill items).
+- **Colors**: `light-dark()` and the system colors not measured
+  (`ButtonFace`, `Highlight`, ...) refuse their layer.
 - **Level 2**: animated and range-styled text and typography anchoring are
   still refused, and `compat` level 2 content still routes
   (`Feature::CompatLevel2`); level 2 layer semantics (bounds, picks,
-  anchors in `pm-eval`) are not built.
+  anchors in `pm-eval`) are not built. No existing project holds level 2
+  content (it is created only with the new engine), but the brief lists it.
 - **`Feature::Text`** stays in `pm_render::unsupported`: it is the reason a
   renderer without fonts, an unsupported color, a `COLR` glyph, or an
   unanswered registry question refuses a layer. Hosts with fonts no longer
@@ -561,16 +681,36 @@ none is accepted, each is open work. Updated 2026-10-18 (second pass).
   naming `Geist` draws in Geist after onboarding in that window and in the
   fallback otherwise; the engine always draws the fallback. Not seen in the
   corpus.
-- The tables and the emoji shift are data measured from one Electron
-  (Chromium 152) on macOS 27 with default font smoothing; an update that
-  changes Skia's tables or CoreText's emoji placement (or a user-level
+- The tables, the emoji shift, and the GPU model of distance-field text are
+  data measured from one Electron (Chromium 152) on macOS 27 with default
+  font smoothing on Apple silicon; an update that changes Skia's tables,
+  CoreText's emoji placement or the GPU's rasterization (or a user-level
   `AppleFontSmoothing` default) needs them measured again;
   `tests/text_raster.rs` fails only when the references are captured
   again.
-- Unattended render queue jobs (possibly after a relaunch, no window)
-  measure with every open window's seeds.
+- Unattended render queue jobs (possibly after a relaunch, no window) and
+  `pm-cli` measure with every open window's seeds (or the startup model).
+- Release builds with LTO fail on this machine ("failed to get bitcode",
+  probably kache-cached rlibs without embedded bitcode); every test and the
+  addon were built with `CARGO_PROFILE_RELEASE_LTO=false`.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts, third pass):
+
+- `apps/desktop/src/preload/index.ts` (bridge's file, one line):
+  `reportUiFonts` on `engineFonts` (`engine-fonts:ui-fonts`).
+- `apps/desktop/src/renderer/src/legacy/bootstrap.ts` (one entry): the UI
+  font census.
+- `apps/desktop/src/main/engine/index.ts` (small): the census channel and
+  the window list for the seeds.
+- `apps/desktop/src/main/engine/agent-jobs.ts`: an export whose window's
+  seeds the job engine never takes does not start.
+- `engine/crates/pm-cli/tests/render.rs`: text renders with the host's
+  fonts; exit 3 is tested with a project color setting from a later
+  version.
+- `apps/desktop/e2e/helpers/engine-drew.ts`: fails when the status API is
+  missing; waits for the session to settle.
 
 2026-10-18 (lane ne-fonts, second pass):
 
