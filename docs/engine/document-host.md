@@ -54,6 +54,7 @@ transcribe, cancel, progress). The serve supervisor implements them over its lin
 
 Failures are named (`DocumentHostFailure`: `code`, `message`, `retry`):
 `pm-wasm-unavailable`, `font-service-unavailable`, `project-missing`,
+`requires-new-engine`,
 `worker-crashed`, `worker-timeout`, `closed`, `wrong-route`,
 `sandbox-unavailable`, `service-unavailable`, `worker-error`. The supervisor turns
 them into the tool's error text, with "(retry the call)" when `retry` holds.
@@ -85,6 +86,11 @@ them into the tool's error text, with "(retry the call)" when `retry` holds.
    30 s, up to five attempts, as the desktop's engine supervisor does.
 6. **The production consistency check** runs after every changing call: the mirror's
    hash must equal the document's.
+7. **The shared reader guards** (`shared/engine-stamp.ts`, `shared/reader-version.ts`)
+   apply as on the desktop: a project stamped `requiresEngine: "native"` is refused
+   with `requires-new-engine` when the new engine is off; a project that needs a newer
+   reader opens read-only (`InstanceOpened.readOnly`), so its edits stay in the
+   instance and never reach the session or the profile store.
 
 ## The engine policy
 
@@ -169,7 +175,7 @@ on or off and nothing else (`flags.ts profileOverride`).
 
 | Check | Command | Result (2026-10-18, M4 Max) |
 |---|---|---|
-| Pool against real workers | `vitest run src/engine/document-host/pool.test.ts` | 7 tests: two projects in two processes with interleaved calls, answers attributed by run and call; rollback on one never touches the other; restart (new pool, same store) resumes 3 and 1 undo entries; SIGKILL'd worker restarts and resumes; remote session edits applied without undo entries; missing pm-wasm and missing font service fail by name with retry and recover when the module appears; flag off keeps today's evaluator; export_video refused as `wrong-route` |
+| Pool against real workers | `vitest run src/engine/document-host/pool.test.ts` | 8 tests: reader guards (stamped project refused with the flag off, newer project read-only); two projects in two processes with interleaved calls, answers attributed by run and call; rollback on one never touches the other; restart (new pool, same store) resumes 3 and 1 undo entries; SIGKILL'd worker restarts and resumes; remote session edits applied without undo entries; missing pm-wasm and missing font service fail by name with retry and recover when the module appears; flag off keeps today's evaluator; export_video refused as `wrong-route` |
 | Worker without a browser | `vitest run src/engine/document-host/hosts.test.ts` | 5 tests: `generate_captions` through host services; no-model answer without a service; 2D and text edits in `audit` mode with **0 fallbacks, 0 dual mismatches, 0 auditor failures**; the measured ink fallback (below); local extension registration and Store refusal |
 | Contract sequence | `vitest run src/engine/document-host/contract.test.ts` | 15 calls answered, two workers byte-identical |
 | Desktop vs worker | `playwright test e2e/document-host-contract.spec.ts --workers=1` | see the lane report |
