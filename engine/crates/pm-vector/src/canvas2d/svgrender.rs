@@ -1723,6 +1723,14 @@ fn is_simple_shape(shape: &Shape, t: &Transform, stroke: bool) -> bool {
     }
 }
 
+/// `load_x_radii` / `load_y_radii`: per-corner radii in UL, UR, LR, LL order.
+fn corner_radii(rr: &SkRRect) -> ([f32; 4], [f32; 4]) {
+    (
+        [rr.radii[0][0], rr.radii[1][0], rr.radii[2][0], rr.radii[3][0]],
+        [rr.radii[0][1], rr.radii[1][1], rr.radii[2][1], rr.radii[3][1]],
+    )
+}
+
 /// The fill geometry `chooseRenderer` selects.
 fn fill_geometry(shape: &Shape, t: &Transform) -> Result<Option<Geom>, SvgError> {
     match shape {
@@ -1742,7 +1750,8 @@ fn fill_geometry(shape: &Shape, t: &Transform) -> Result<Option<Geom>, SvgError>
             if rr.is_rect() {
                 return fill_geometry(&Shape::Rect(rr.rect), t);
             }
-            Ok(Some(Geom::Analytic(analytic::instance(&AnalyticGeometry::FillRRect { rect: rr.rect, radii: [rr.radii[0][0], rr.radii[0][1]] }, &t.m))))
+            let (x_radii, y_radii) = corner_radii(rr);
+            Ok(Some(Geom::Analytic(analytic::instance(&AnalyticGeometry::FillRRect { rect: rr.rect, x_radii, y_radii }, &t.m))))
         }
         Shape::Path(p, rule) => {
             if p.is_convex() && *rule == Rule::NonZero {
@@ -1766,7 +1775,8 @@ fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap)
                 if rr.is_rect() {
                     AnalyticGeometry::StrokeRect { rect: rr.rect, radius: params.radius, join: params.join }
                 } else {
-                    AnalyticGeometry::StrokeRRect { rect: rr.rect, corner_radius: rr.radii[0][0], radius: params.radius, join: params.join }
+                    let (x_radii, y_radii) = corner_radii(rr);
+                    AnalyticGeometry::StrokeRRect { rect: rr.rect, x_radii, y_radii, radius: params.radius, join: params.join }
                 }
             }
             _ => unreachable!(),

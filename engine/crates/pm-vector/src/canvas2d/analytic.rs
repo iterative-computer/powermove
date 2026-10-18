@@ -39,15 +39,22 @@ pub struct Instance {
 pub enum Geometry {
     /// A filled rectangle `[l, t, r, b]`.
     FillRect([f32; 4]),
+    /// A filled rounded rectangle with per-corner radii in `SkRRect` corner
+    /// order (UL, UR, LR, LL), as `load_x_radii`/`load_y_radii` read them.
     FillRRect {
         rect: [f32; 4],
-        radii: [f32; 2],
+        x_radii: [f32; 4],
+        y_radii: [f32; 4],
     },
     /// A stroked rectangle with the stroke radius and join (`StrokeStyle`
     /// convention: negative round, zero bevel, positive miter limit).
     StrokeRRect {
         rect: [f32; 4],
-        corner_radius: f32,
+        /// Per-corner x radii (UL, UR, LR, LL); the step requires relatively
+        /// circular corners so only `fX` is uploaded.
+        x_radii: [f32; 4],
+        /// Per-corner y radii, used only for `opposite_insets_intersect`.
+        y_radii: [f32; 4],
         radius: f32,
         join: f32,
     },
@@ -85,6 +92,13 @@ fn local_aa_radius(m: &Mat) -> f32 {
     if r.is_finite() { r } else { f32::INFINITY }
 }
 
+/// `opposite_insets_intersect(const SkRRect&, strokeRadius, aaRadius)`.
+fn rrect_insets_intersect(r: [f32; 4], x_radii: &[f32; 4], y_radii: &[f32; 4], stroke_inset: f32, aa_radius: f32) -> bool {
+    let max_inset = stroke_inset + 2.0 * aa_radius;
+    let (w, h) = (r[2] - r[0], r[3] - r[1]);
+    x_radii.iter().any(|&rx| max_inset >= w - rx) || y_radii.iter().any(|&ry| max_inset >= h - ry)
+}
+
 /// `AnalyticRRectRenderStep::writeVertices`.
 pub fn instance(g: &Geometry, m: &Mat) -> Instance {
     let mut aa_radius = local_aa_radius(m);
@@ -92,12 +106,12 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
     let mut center_weight = SOLID_INTERIOR;
     let (a, b, c, center_xy, intersects);
     match *g {
-        Geometry::FillRRect { rect: r, radii } => {
-            a = [radii[0]; 4];
-            b = [radii[1]; 4];
+        Geometry::FillRRect { rect: r, x_radii, y_radii } => {
+            a = x_radii;
+            b = y_radii;
             c = r;
             center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
-            intersects = (r[2] - r[0]) <= 2.0 * aa_radius || (r[3] - r[1]) <= 2.0 * aa_radius;
+            intersects = rrect_insets_intersect(r, &x_radii, &y_radii, 0.0, aa_radius);
         }
         Geometry::FillRect(r) => {
             a = [-1.0; 4];
@@ -109,7 +123,8 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
         }
         Geometry::StrokeRRect {
             rect: r,
-            corner_radius,
+            x_radii,
+            y_radii,
             radius,
             join,
         } => {
@@ -130,11 +145,10 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
                     join
                 },
             ];
-            b = [corner_radius; 4];
+            b = x_radii;
             c = r;
             center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
-            let inset = stroke_inset + 2.0 * aa_radius;
-            intersects = inset >= size[0] - corner_radius || inset >= size[1] - corner_radius;
+            intersects = rrect_insets_intersect(r, &x_radii, &y_radii, stroke_inset, aa_radius);
         }
         Geometry::StrokeRect { rect: r, radius, join } => {
             let size = [r[2] - r[0], r[3] - r[1]];

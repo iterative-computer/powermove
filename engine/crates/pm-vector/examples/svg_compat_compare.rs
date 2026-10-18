@@ -1,4 +1,8 @@
 //! Chromium SVG bucket comparison. Evidence stays outside the repository.
+//!
+//! `--cases <file.json> --capture <dir>` compares a custom case list (the
+//! `canvas-ref/run.ts --cases` format) against its capture instead of the
+//! fixture cases.
 #[path = "../tests/canvas_cases/mod.rs"]
 mod canvas_cases;
 use pm_vector::render::svg::SvgDocument;
@@ -11,10 +15,18 @@ fn write(path: &std::path::Path, w: u32, h: u32, pixels: &[u8]) {
 fn main() {
     let out = std::path::PathBuf::from(std::env::var("PM_MEDIA_EVIDENCE").expect("evidence directory outside repository"));
     std::fs::create_dir_all(&out).unwrap();
-    let capture = canvas_cases::capture_dir().expect("Chromium capture required");
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |name: &str| args.iter().position(|a| a == name).map(|i| args[i + 1].clone());
+    let (cases, capture) = match (arg("--cases"), arg("--capture")) {
+        (Some(cases), Some(capture)) => {
+            let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(cases).unwrap()).unwrap();
+            (doc["cases"].as_array().unwrap().clone(), std::path::PathBuf::from(capture))
+        }
+        _ => (canvas_cases::cases(), canvas_cases::capture_dir().expect("Chromium capture required")),
+    };
     let mut rows = Vec::new();
     let mut fonts = pm_text::compat::Compat::new(pm_text::registry::CoreTextRegistry::new());
-    for c in canvas_cases::cases() {
+    for c in cases {
         if c["kind"] != "svg" {
             continue;
         }

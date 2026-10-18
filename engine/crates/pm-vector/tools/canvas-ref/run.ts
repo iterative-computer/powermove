@@ -17,6 +17,7 @@
  * Starts Electron: run under the machine-wide lock.
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-vector/tools/canvas-ref/run.ts [--out <dir>]
  */
+import { existsSync } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -106,8 +107,13 @@ const server = Bun.serve({
   },
 });
 
-// The electron package's index exports the binary's path.
-const electron: string = (await import(path.join(repo, 'apps/desktop/node_modules/electron/index.js'))).default;
+// The electron package's index exports the binary's path. A worktree without
+// its own node_modules falls back to the main checkout's install.
+const electronIndex = [repo, path.resolve(repo, '../../..')]
+  .map((r) => path.join(r, 'apps/desktop/node_modules/electron/index.js'))
+  .find((p) => existsSync(p));
+if (!electronIndex) throw new Error('electron is not installed (run bun install in apps/desktop)');
+const electron: string = (await import(electronIndex)).default;
 // A parent running inside Electron (or an agent host) may export
 // ELECTRON_RUN_AS_NODE, which would start Electron as plain Node.
 const env = { ...process.env };
