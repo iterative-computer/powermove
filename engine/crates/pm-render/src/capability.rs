@@ -47,12 +47,8 @@ pub enum Feature {
     /// Bezier path masks (today's Canvas2D coverage route, which also takes
     /// every other mask of the layer).
     PathMasks,
-    /// A track matte, or a layer used as one.
-    TrackMatte,
     /// Transitions.
     Transition,
-    /// A blend mode other than normal (or an animated blend mode).
-    BlendMode(String),
     /// Layer or group motion blur.
     MotionBlur,
     /// 2.5D layers (the 3D switch or a 3D group).
@@ -115,9 +111,7 @@ impl fmt::Display for Feature {
             Feature::Effects => write!(f, "effects"),
             Feature::Masks => write!(f, "masks"),
             Feature::PathMasks => write!(f, "path masks"),
-            Feature::TrackMatte => write!(f, "track mattes"),
             Feature::Transition => write!(f, "transitions"),
-            Feature::BlendMode(m) => write!(f, "blend mode {m}"),
             Feature::MotionBlur => write!(f, "motion blur"),
             Feature::TwoAndAHalfD => write!(f, "2.5D layers"),
             Feature::Adjustment => write!(f, "adjustment layers with effects"),
