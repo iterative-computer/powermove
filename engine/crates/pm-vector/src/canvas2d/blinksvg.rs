@@ -150,7 +150,7 @@ pub enum TransformOp {
 }
 
 /// Blink's SVG number parser (`ParseNumber`): float values.
-fn parse_numbers(s: &str) -> Option<Vec<f32>> {
+pub fn parse_numbers(s: &str) -> Option<Vec<f32>> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;

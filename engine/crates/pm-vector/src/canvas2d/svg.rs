@@ -185,8 +185,39 @@ fn object_bbox(g: &Geometry) -> Option<[f32; 4]> {
 /// and Blink's `Gradient` do.
 struct Resolver<'a> {
     elements: &'a Elements,
+    raw: &'a RawElements<'a>,
     /// The root viewport (user units) for percentage lengths.
     viewport: [f32; 2],
+    /// The current shape's fill and stroke paints (by address) with the
+    /// paint server element their source property names. usvg copies a
+    /// shared objectBoundingBox gradient under a generated id, so the
+    /// source element is found from the shape's (inherited) property.
+    sources: [(usize, Option<String>); 2],
+}
+
+/// The `#id` of a `url(#id)` paint (with or without a fallback).
+fn url_id(v: &str) -> Option<String> {
+    let rest = v.trim().strip_prefix("url(")?;
+    let inner = &rest[..rest.find(')')?];
+    let inner = inner.trim().trim_matches(|c| c == '\'' || c == '"');
+    inner.strip_prefix('#').map(str::to_string)
+}
+
+/// The paint server a shape's `fill`/`stroke` names, through inheritance
+/// (a `style` declaration wins over the presentation attribute).
+fn paint_source(raw: &RawElements<'_>, id: &str, prop: &str) -> Option<String> {
+    let mut n = raw.get(id)?;
+    loop {
+        let declared = n.attribute("style").and_then(|style| {
+            style.split(';').filter_map(|d| d.split_once(':')).filter(|(k, _)| k.trim() == prop).map(|(_, v)| v).last()
+        });
+        if let Some(v) = declared.or_else(|| n.attribute(prop))
+            && v.trim() != "inherit"
+        {
+            return url_id(v);
+        }
+        n = n.parent_element()?;
+    }
 }
 
 /// A gradient attribute resolved through the `href` chain
@@ -224,7 +255,12 @@ impl PaintResolver for Resolver<'_> {
             usvg::Paint::RadialGradient(g) => g,
             usvg::Paint::Pattern(_) => return Err(SvgError("SVG pattern paint server is not implemented by the compatibility canvas".into())),
         };
-        let id = base.id();
+        let address = std::ptr::from_ref(paint) as usize;
+        let source = self.sources.iter().find(|(a, _)| *a == address).and_then(|(_, id)| id.as_deref());
+        let id = source.unwrap_or(base.id());
+        if !self.elements.get(id).is_some_and(|e| matches!(e.kind.as_str(), "linearGradient" | "radialGradient")) {
+            return Err(SvgError(format!("SVG gradient {id:?} has no source element")));
+        }
         let attr = |name: &str| gradient_attr(self.elements, id, name);
         let bbox_units = attr("gradientUnits").is_none_or(|u| u.trim() != "userSpaceOnUse");
         let [vw, vh] = self.viewport;
@@ -463,6 +499,10 @@ impl Walk<'_> {
             anti_alias: !matches!(p.rendering_mode(), usvg::ShapeRendering::CrispEdges | usvg::ShapeRendering::OptimizeSpeed),
         };
         let fill_rule = p.fill().map_or(Rule::NonZero, |f| rule(f.rule()));
+        self.resolver.sources = [
+            (p.fill().map_or(0, |f| std::ptr::from_ref(f.paint()) as usize), paint_source(self.resolver.raw, p.id(), "fill")),
+            (p.stroke().map_or(0, |f| std::ptr::from_ref(f.paint()) as usize), paint_source(self.resolver.raw, p.id(), "stroke")),
+        ];
         let ops = blinksvg::shape_ops(&geometry, &style, fill_rule, bbox, &self.resolver)?;
         self.builder.push_item(state, ops);
         Ok(())
@@ -563,7 +603,7 @@ fn content_record(raw: &RawElements, sizing: &blinksvg::NaturalSizing, draw: &Im
     if viewport_group && !matches!(tree.root().children(), [] | [usvg::Node::Group(_)]) {
         return Err(SvgError("usvg's viewport group is not where it is expected".into()));
     }
-    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport }, viewport_group };
+    let mut walk = Walk { builder, elements, resolver: Resolver { elements, raw, viewport, sources: [(0, None), (0, None)] }, viewport_group };
     walk.group(tree.root(), root_state, true, false)?;
     Ok(walk.builder.finish())
 }
@@ -646,46 +686,140 @@ const SVG_NS: &str = "http://www.w3.org/2000/svg";
 const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// Elements whose painting the canvas references cover (or that paint
-/// nothing).
+/// Elements whose painting the references cover (or that paint nothing).
 const ELEMENTS: &[&str] = &[
     "svg", "g", "defs", "path", "rect", "circle", "ellipse", "polygon", "polyline", "line",
     "linearGradient", "radialGradient", "stop", "clipPath", "title", "desc", "metadata",
 ];
+const SHAPES: &[&str] = &["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"];
 
-/// Presentation properties (attributes and `style` declarations) whose
-/// painting the references cover. Stroke properties are inert without a
-/// stroke; a stroke itself is refused by [`check_record`].
+/// A finite number, with an optional `px` unit when `px` is set.
+fn is_number(v: &str, px: bool) -> bool {
+    let v = v.trim();
+    let v = if px { v.strip_suffix("px").unwrap_or(v) } else { v };
+    v.trim().parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+fn is_percentage(v: &str) -> bool {
+    v.trim().strip_suffix('%').is_some_and(|p| is_number(p, false))
+}
+
+/// The color syntaxes the references measure (`gate-paint-colors`,
+/// `gate-paint-invalid`): hex of 3, 4, 6 or 8 digits, a keyword (CSS
+/// color names, `transparent`, or an unknown word, which both engines
+/// treat as invalid), and comma-separated `rgb()`, `rgba()`, `hsl()`,
+/// `hsla()`.
+fn is_color(v: &str) -> bool {
+    let v = v.trim();
+    if let Some(hex) = v.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    if !v.is_empty() && v.chars().all(|c| c.is_ascii_alphabetic()) {
+        return !v.eq_ignore_ascii_case("inherit") && !v.eq_ignore_ascii_case("currentcolor");
+    }
+    let lower = v.to_ascii_lowercase();
+    for f in ["rgb(", "rgba(", "hsl(", "hsla("] {
+        if let Some(args) = lower.strip_prefix(f).and_then(|r| r.strip_suffix(')')) {
+            let parts: Vec<&str> = args.split(',').collect();
+            return (3..=4).contains(&parts.len()) && parts.iter().all(|p| is_number(p, false) || is_percentage(p));
+        }
+    }
+    false
+}
+
+/// The element a `url(#id)` names, when it is one of `kinds` (no fallback).
+fn url_target<'a>(doc: &'a usvg::roxmltree::Document<'a>, v: &str, kinds: &[&str]) -> bool {
+    let v = v.trim();
+    let Some(id) = url_id(v) else { return false };
+    if !v.ends_with(')') {
+        return false;
+    }
+    doc.descendants().find(|n| n.is_element() && n.attribute("id") == Some(id.as_str())).is_some_and(|n| n.tag_name().namespace() == Some(SVG_NS) && kinds.contains(&n.tag_name().name()))
+}
+
+/// A presentation property (attribute or `style` declaration) with a value
+/// the references cover. Stroke properties other than `stroke` are inert
+/// without a stroke; a stroke itself is refused by [`check_record`].
+fn property_ok(doc: &usvg::roxmltree::Document<'_>, name: &str, value: &str) -> Option<bool> {
+    if !PROPERTIES.contains(&name) {
+        return None;
+    }
+    let v = value.trim();
+    let paint = |v: &str| v == "none" || v == "currentColor" || is_color(v) || url_target(doc, v, &["linearGradient", "radialGradient"]);
+    Some(match name {
+        "fill" | "stroke" => paint(v),
+        "fill-opacity" | "opacity" | "stop-opacity" => is_number(v, false),
+        "fill-rule" | "clip-rule" => matches!(v, "nonzero" | "evenodd"),
+        "clip-path" => v == "none" || url_target(doc, v, &["clipPath"]),
+        "color" => is_color(v),
+        "stop-color" => v == "currentColor" || is_color(v),
+        "display" => matches!(v, "none" | "inline"),
+        "shape-rendering" => matches!(v, "auto" | "geometricPrecision" | "optimizeSpeed" | "crispEdges"),
+        "stroke-width" | "stroke-opacity" | "stroke-linecap" | "stroke-linejoin" | "stroke-miterlimit" | "stroke-dasharray" | "stroke-dashoffset" => true,
+        // Illustrator's root `enable-background` is ignored by Blink and usvg.
+        "enable-background" => true,
+        _ => return None,
+    })
+}
+
+/// The presentation properties [`property_ok`] admits.
 const PROPERTIES: &[&str] = &[
-    "fill", "fill-opacity", "fill-rule", "opacity", "clip-path", "clip-rule", "color", "display",
-    "shape-rendering", "stop-color", "stop-opacity", "stroke", "stroke-width", "stroke-opacity",
-    "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset",
-    // Illustrator's root `enable-background` is ignored by Blink and usvg.
-    "enable-background",
+    "fill", "stroke", "fill-opacity", "opacity", "stop-opacity", "fill-rule", "clip-rule", "clip-path", "color",
+    "stop-color", "display", "shape-rendering", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
+    "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "enable-background",
 ];
 
-/// Non-presentation attributes, with what their values may be.
-fn attribute_ok(element: &str, name: &str, value: &str) -> Result<bool, SvgError> {
+/// The attribute names [`attribute_ok`] admits (on some element).
+const ATTRIBUTES: &[&str] = &[
+    "id", "class", "version", "baseProfile", "transform", "viewBox", "preserveAspectRatio", "width", "height", "x", "y",
+    "rx", "ry", "cx", "cy", "r", "x1", "y1", "x2", "y2", "fx", "fy", "fr", "gradientUnits", "gradientTransform",
+    "spreadMethod", "href", "offset", "clipPathUnits", "d", "points",
+];
+
+/// A transform list Blink and usvg both parse, and invertible.
+fn transform_ok(v: &str) -> bool {
+    blinksvg::element_transform(Some(v)).is_ok_and(|m| m.is_invertible())
+}
+
+/// A non-presentation attribute with a value the references cover
+/// (docs/engine/vector.md, "What level 1 draws"; `tools/canvas-ref/svg-gate-cases.ts`).
+fn attribute_ok(doc: &usvg::roxmltree::Document<'_>, element: &str, is_root: bool, name: &str, value: &str) -> bool {
+    if !ATTRIBUTES.contains(&name) {
+        return false;
+    }
     let v = value.trim();
-    let number = |v: &str| v.trim_end_matches("px").trim().parse::<f64>().is_ok_and(f64::is_finite);
     let gradient = matches!(element, "linearGradient" | "radialGradient");
-    Ok(match name {
-        "id" | "class" | "version" | "baseProfile" | "viewBox" | "preserveAspectRatio" | "transform" | "style" => true,
-        // The root's size: numbers, px, percentages or auto
-        // (`natural_sizing`).
-        "width" | "height" if element == "svg" => v.is_empty() || v == "auto" || number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok()),
-        "x" | "y" if element == "svg" => true,
-        "x" | "y" | "width" | "height" | "rx" | "ry" | "cx" | "cy" | "r" | "x1" | "y1" | "x2" | "y2" if !gradient => number(v) || v == "auto" && matches!(name, "rx" | "ry"),
-        "x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "r" | "fx" | "fy" | "fr" if gradient => {
-            number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok())
+    match name {
+        // `class` styles nothing without a <style> sheet (refused).
+        "id" | "class" | "version" | "baseProfile" => true,
+        "transform" => (element == "g" || element == "clipPath" || SHAPES.contains(&element)) && transform_ok(v),
+        "viewBox" => {
+            is_root && blinksvg::parse_numbers(v).is_some_and(|n| n.len() == 4 && n.iter().all(|x| x.is_finite()) && n[2] > 0.0 && n[3] > 0.0)
         }
-        "gradientUnits" | "gradientTransform" | "spreadMethod" | "href" if gradient => true,
-        "offset" if element == "stop" => number(v) || v.strip_suffix('%').is_some_and(|p| p.trim().parse::<f64>().is_ok()),
+        "preserveAspectRatio" => {
+            let mut words = v.split_whitespace();
+            let align = words.next();
+            let mode = words.next();
+            is_root
+                && words.next().is_none()
+                && matches!(align, Some("none" | "xMinYMin" | "xMidYMin" | "xMaxYMin" | "xMinYMid" | "xMidYMid" | "xMaxYMid" | "xMinYMax" | "xMidYMax" | "xMaxYMax"))
+                && matches!(mode, None | Some("meet" | "slice"))
+        }
+        // The root's size (`natural_sizing`) and its ignored position.
+        "width" | "height" if is_root => v == "auto" || is_number(v, true) || is_percentage(v),
+        "x" | "y" if is_root => is_number(v, true),
+        "x" | "y" | "width" | "height" | "rx" | "ry" | "cx" | "cy" | "r" | "x1" | "y1" | "x2" | "y2" if SHAPES.contains(&element) => is_number(v, true),
+        "x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "r" | "fx" | "fy" | "fr" if gradient => is_number(v, true) || is_percentage(v),
+        "gradientUnits" if gradient => matches!(v, "objectBoundingBox" | "userSpaceOnUse"),
+        "gradientTransform" if gradient => transform_ok(v),
+        "spreadMethod" if gradient => matches!(v, "pad" | "reflect" | "repeat"),
+        "href" if gradient => url_target(doc, &format!("url({v})"), &["linearGradient", "radialGradient"]),
+        "offset" if element == "stop" => is_number(v, false) || is_percentage(v),
         "clipPathUnits" if element == "clipPath" => v == "userSpaceOnUse",
         "d" if element == "path" => !v.contains(['A', 'a']),
         "points" if matches!(element, "polygon" | "polyline") => true,
         _ => false,
-    })
+    }
 }
 
 /// The document's elements and attributes, against what the references
@@ -708,31 +842,32 @@ pub fn check_source(doc: &usvg::roxmltree::Document<'_>) -> Result<(), SvgError>
         if matches!(name, "title" | "desc" | "metadata") {
             continue;
         }
+        let refuse = |a: &str, v: &str| SvgError(format!("SVG <{name} {a}=\"{v}\"> needs compatibility support"));
         for a in n.attributes() {
             let ok = match a.namespace() {
-                None => PROPERTIES.contains(&a.name()) || attribute_ok(name, a.name(), a.value())?,
+                None if a.name() == "style" => {
+                    for decl in a.value().split(';') {
+                        if decl.trim().is_empty() {
+                            continue;
+                        }
+                        let Some((prop, value)) = decl.split_once(':') else {
+                            return Err(SvgError(format!("SVG style declaration {decl:?} needs compatibility support")));
+                        };
+                        if property_ok(doc, prop.trim(), value) != Some(true) {
+                            return Err(SvgError(format!("SVG style declaration {:?} needs compatibility support", decl.trim())));
+                        }
+                    }
+                    true
+                }
+                None => property_ok(doc, a.name(), a.value()).unwrap_or_else(|| attribute_ok(doc, name, n == root, a.name(), a.value())),
                 Some(XML_NS) => true,
-                Some(XLINK_NS) => a.name() == "href" && matches!(name, "linearGradient" | "radialGradient"),
+                Some(XLINK_NS) => a.name() == "href" && attribute_ok(doc, name, false, "href", a.value()),
                 // Editor namespaces (Inkscape, Sodipodi, Illustrator) are
                 // not SVG properties.
                 Some(_) => true,
             };
             if !ok {
-                return Err(SvgError(format!("SVG <{name} {}=\"{}\"> needs compatibility support", a.name(), a.value())));
-            }
-            if a.namespace().is_none() && a.name() == "style" {
-                for decl in a.value().split(';') {
-                    let Some((prop, _)) = decl.split_once(':') else {
-                        if decl.trim().is_empty() {
-                            continue;
-                        }
-                        return Err(SvgError(format!("SVG style declaration {decl:?} needs compatibility support")));
-                    };
-                    let prop = prop.trim();
-                    if !PROPERTIES.contains(&prop) {
-                        return Err(SvgError(format!("SVG style property {prop} needs compatibility support")));
-                    }
-                }
+                return Err(refuse(a.name(), a.value()));
             }
         }
         stack.extend(n.children().filter(|c| c.is_element()));
@@ -800,3 +935,82 @@ pub fn raster(data: &[u8], tree: &usvg::Tree, elements: &Elements, width: u32, h
     Ok(Bitmap { width, height, rgba: canvas.finish() })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every element, property and attribute name the source gate admits
+    /// appears in a Chromium reference document (`tools/canvas-ref`:
+    /// `svg-gate-cases.ts` and the SVG cases of `cases.ts`).
+    #[test]
+    fn every_admitted_construct_has_a_reference() {
+        let mut elements = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
+        for fixture in ["svg-gate-cases.json", "canvas-cases.json"] {
+            let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
+            let json = std::fs::read_to_string(path).unwrap();
+            // The fixtures are JSON; the documents are the "svg" strings.
+            for chunk in json.split("\"svg\": \"").skip(1) {
+                let mut doc = String::new();
+                let mut chars = chunk.chars();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => doc.push(chars.next().unwrap()),
+                        c => doc.push(c),
+                    }
+                }
+                let parsed = usvg::roxmltree::Document::parse(&doc).unwrap();
+                for n in parsed.descendants().filter(|n| n.is_element() && n.tag_name().namespace() == Some(SVG_NS)) {
+                    elements.insert(n.tag_name().name().to_string());
+                    for a in n.attributes() {
+                        names.insert(a.name().to_string());
+                        if a.name() == "style" {
+                            for d in a.value().split(';').filter_map(|d| d.split_once(':')) {
+                                names.insert(d.0.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for e in ELEMENTS {
+            assert!(elements.contains(*e), "<{e}> has no reference");
+        }
+        for n in PROPERTIES.iter().chain(ATTRIBUTES) {
+            assert!(names.contains(*n), "{n} has no reference");
+        }
+    }
+
+    #[test]
+    fn source_values_outside_the_references_are_refused() {
+        let check = |body: &str| {
+            let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">{body}</svg>"#);
+            check_source(&usvg::roxmltree::Document::parse(&svg).unwrap())
+        };
+        assert_eq!(check(r##"<rect width="5" height="5" fill="#123456" transform="rotate(10 5 5)"/>"##), Ok(()));
+        for body in [
+            r##"<rect width="5" height="5" rx="auto"/>"##,
+            r##"<rect width="5" height="5" transform="scale(0)"/>"##,
+            r##"<rect width="5" height="5" transform="rotate("/>"##,
+            r##"<defs transform="scale(2)"/>"##,
+            r##"<rect width="5" height="5" fill="url(#missing)"/>"##,
+            r##"<rect width="5" height="5" fill="url(#g) red"/><linearGradient id="g"/>"##,
+            r##"<rect width="5" height="5" clip-path="url(#g)"/><linearGradient id="g"/>"##,
+            r##"<rect width="5" height="5" fill="rgb(1 2 3 / 50%)"/>"##,
+            r##"<rect width="5" height="5" fill="oklch(0.5 0.1 200)"/>"##,
+            r##"<rect width="5" height="5" fill="inherit"/>"##,
+            r##"<rect width="5" height="5" opacity="50%"/>"##,
+            r##"<rect width="5" height="5" display="block"/>"##,
+            r##"<rect width="5" height="5" style="mix-blend-mode:multiply"/>"##,
+            r##"<rect width="5" height="5" preserveAspectRatio="none"/>"##,
+        ] {
+            assert!(check(body).is_err(), "{body}");
+        }
+        let root = |attrs: &str| check_source(&usvg::roxmltree::Document::parse(&format!(r#"<svg xmlns="http://www.w3.org/2000/svg" {attrs}/>"#)).unwrap());
+        assert_eq!(root(r#"width="96" height="96" viewBox="0 0 24 24" preserveAspectRatio="xMaxYMid slice""#), Ok(()));
+        for attrs in [r#"viewBox="0 0 0 10""#, r#"viewBox="0 0 10""#, r#"preserveAspectRatio="defer xMidYMid""#, r#"preserveAspectRatio="xMidYMid meet slice""#, r#"transform="scale(2)""#, r#"width="10em""#] {
+            assert!(root(attrs).is_err(), "{attrs}");
+        }
+    }
+}
