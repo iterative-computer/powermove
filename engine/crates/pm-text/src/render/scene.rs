@@ -578,27 +578,12 @@ impl Painter<'_> {
                     });
                     continue;
                 }
-                // A font with color glyphs (`COLR`) is a color font to Skia's
-                // CoreText scaler (`kCTFontColorGlyphsTrait`): every glyph is
-                // CoreGraphics' color image, the paint's alpha its only
-                // modulation, like `sbix` emoji.
-                if colr {
-                    if place.axis_aligned
-                        && let Some(item) =
-                            self.color_glyph(run, g.id, p, dsize, None, color, opacity, blur)
-                    {
-                        images.push(item);
-                        continue;
+                if colr && super::bitmap::is_colr_glyph(run.face, g.id) {
+                    let what = "color vector glyphs (COLR)".to_owned();
+                    if !self.unsupported.contains(&what) {
+                        self.unsupported.push(what);
                     }
-                    if super::bitmap::is_colr_glyph(run.face, g.id) {
-                        let what = "color vector glyphs (COLR) without the platform's color \
-                                    glyph images (no CoreGraphics, or a rotated or skewed matrix)"
-                            .to_owned();
-                        if !self.unsupported.contains(&what) {
-                            self.unsupported.push(what);
-                        }
-                        continue;
-                    }
+                    continue;
                 }
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
@@ -1062,22 +1047,6 @@ impl Painter<'_> {
                         };
                         images.push(item);
                     }
-                    continue;
-                }
-                if super::bitmap::has_colr(run.face) {
-                    let Some(item) = self.color_glyph(
-                        run,
-                        g.id,
-                        p,
-                        device_size as f32,
-                        None,
-                        color,
-                        opacity,
-                        0.0,
-                    ) else {
-                        return false;
-                    };
-                    images.push(item);
                     continue;
                 }
                 let Coords::User(coords) = run.coords else {
@@ -1841,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn color_vector_glyphs_without_the_platform_are_refused_not_drawn() {
+    fn color_vector_glyphs_are_refused_not_drawn() {
         use skrifa::MetadataProvider;
         let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
             eprintln!("Arial is not installed; skipped");
@@ -1895,82 +1864,9 @@ mod tests {
         // A plain glyph of the face draws.
         let (n, unsupported) = draw(&[glyph(b)]);
         assert!(n > 0 && unsupported.is_empty(), "{unsupported:?}");
-        // Without CoreGraphics' color images the color vector glyph is
-        // refused, not drawn as a monochrome outline.
+        // The color vector glyph is refused, not drawn as a monochrome outline.
         let (_, unsupported) = draw(&[glyph(b), glyph(a)]);
-        assert_eq!(unsupported.len(), 1, "{unsupported:?}");
-        assert!(unsupported[0].starts_with("color vector glyphs (COLR)"));
-    }
-
-    /// With CoreGraphics, every glyph of a `COLR` font is its color image
-    /// (Skia's CoreText scaler treats the font as a color font), drawn in
-    /// the font's palette, not the paint's color.
-    #[cfg(all(target_os = "macos", feature = "cg-masks"))]
-    #[test]
-    fn color_vector_glyphs_draw_as_coregraphics_color_images() {
-        use skrifa::MetadataProvider;
-        let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            eprintln!("Arial is not installed; skipped");
-            return;
-        };
-        let font = skrifa::FontRef::new(&arial).unwrap();
-        let a = font.charmap().map('A').unwrap().to_u32();
-        let colr = with_colr(&arial, a as u16);
-        let face = FaceRef {
-            data: &colr,
-            index: 0,
-            id: 7,
-        };
-        let mut outlines = Outlines::new();
-        let mut bitmaps = Bitmaps::new();
-        let mut masks = super::super::cgmask::CgMasks::new();
-        let mut painter = Painter {
-            outlines: &mut outlines,
-            bitmaps: &mut bitmaps,
-            masks: Some(&mut masks),
-            profile: Profile::CANVAS2D,
-            unsupported: Vec::new(),
-        };
-        let glyphs = [PlacedGlyph {
-            id: a,
-            x: 0.0,
-            y: 0.0,
-        }];
-        let run = Run {
-            face,
-            size: 40.0,
-            coords: Coords::User(&[]),
-            synthetic_bold: false,
-            synthetic_italic: false,
-            oblique: 0.0,
-            glyphs: &glyphs,
-            bitmap_size: None,
-        };
-        let mut items = Vec::new();
-        painter.fill_text(
-            &mut items,
-            &[run],
-            (0.0, 40.0),
-            Affine::IDENTITY,
-            [1.0, 1.0, 1.0, 1.0],
-            1.0,
-            0.0,
-        );
-        assert!(painter.unsupported.is_empty(), "{:?}", painter.unsupported);
-        let image = items
-            .iter()
-            .find_map(|i| match &i.content {
-                ItemContent::Image { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-            .expect("a color image");
-        // The palette's red, not the white paint.
-        let red = image
-            .data
-            .chunks_exact(4)
-            .filter(|p| p[3] > 200 && p[0] > 200 && p[1] < 60 && p[2] < 60)
-            .count();
-        assert!(red > 20, "{red} red pixels");
+        assert_eq!(unsupported, vec!["color vector glyphs (COLR)".to_owned()]);
     }
 
     /// Text drawn as paths: a square covers its pixels with all four
