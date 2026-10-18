@@ -272,6 +272,24 @@ project) reads the stored copy: content identity, not location, names it.
 
 ## The engine (contract 14)
 
+Import completion is also a host-binding barrier: `ingestAsset` awaits
+`HostMedia.flushBindings(project)` before returning. The debounced binding on
+asset/project events remains useful for later document edits, but is too late
+for an immediate export or a frame of a parallel image import. This is the
+shared cause of rerun defects D4 and D5, fixed by `6a2f9587` before this lane.
+Removing only the import's acknowledgement reproduces a cancelled immediate
+MP4 export, both generated image assets resolving to null immediately, and
+41 layer failures in the synthetic 500-layer project. With it restored those
+three checks pass (zero render/layer failures). The new
+`e2e/media-import-readiness.spec.ts` checks both engine settings, every image's
+host resolution before any polling/extra flush, immediate export without an
+offline prompt, and both images' exact exported pixels.
+
+`import-converted-formats.spec.ts` now checks the original-preservation contract
+in native mode: TIFF, HEIC and Matroska bytes hash exactly to the source fixture,
+with separate PNG/WebM browser renditions. Legacy mode still checks stored
+conversions. These storage assertions do not change the existing pixel checks.
+
 Each window binds its open project's media in main (`mediaStore.bind`:
 asset id → store key and hash, or link). `HostServicesCore` resolves
 `mintHandle { mediaRead { asset } }` through `MediaStoreService.resolveAsset`:
@@ -359,3 +377,39 @@ proxy) instead of converted from its bytes.
 - Bookmark-based tracking of moved files (security-scoped bookmarks) and a
   Relink sheet for name, timecode, or duration proposals (4b).
 - Garbage collection of unreferenced store objects (4b Storage).
+
+
+## K1, B1 and R3 follow-up (2026-10-18)
+
+The export sheet and Add to Queue now await `HostMedia.flushBindings` before
+submitting their captured project. The agent's `__mcp_context` does the same
+before returning its project snapshot. The barrier first finishes migration of
+IndexedDB-only media into the verified host store, then awaits main's binding
+acknowledgement. A project switch during the await does not change which project
+is exported. Flag off keeps the barrier a no-op.
+
+Queue snapshots persist each copied asset's content hash when the entry is added,
+including older projects that only have storage keys. Main binds every export
+snapshot's copied hashes and linked originals to that job session before resync.
+Host media capability requests carry their engine process and session to the
+resolver, so those bindings survive a project switch, window close and queued-job
+relaunch, and cannot be confused with an interactive session with the same number.
+A later write under the same storage key does not change the queued content.
+Completion, failure and cancellation release the session bindings. The live
+window's bindings keep their existing lifetime and ambiguity checks.
+
+A job's frozen entry is tried first: link, then hash object, then storage key
+record (each copied asset keeps its key, also when it had no record at snapshot
+time). If that is offline, the job falls back to live bindings from windows on
+the same project id. A job waiting for media therefore resumes on its 2 s
+re-mint when copied media is put later, when the user relinks it with Locate
+Media in that project's window, or when a saved hash object is gone but the key
+still has bytes. Windows on other projects are never consulted.
+
+The unit regressions cover acknowledgement ordering, IndexedDB migration without
+writing/deleting IndexedDB, copied and linked media after window release, reused
+storage keys, session/process isolation, and release after success or submission
+failure. The image-readiness e2e retains its immediate-import check, exact red and
+green export pixels and zero import-time layer failures, then checks immediate
+export after reopen and queued export after switching away and releasing the
+window's bindings.

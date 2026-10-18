@@ -8,12 +8,14 @@
  *   node scripts/engine-fonts-integration.mjs [--skip-build] [--json out.json]
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
 import { build } from 'esbuild';
+
+import { rawText } from './esbuild-raw-text.mjs';
 
 const desktop = path.resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
@@ -37,14 +39,7 @@ try {
     target: 'node22',
     external: ['electron'],
     logLevel: 'warning',
-    // Vite's `?raw` imports (main's Blender worker script) as text.
-    plugins: [{
-      name: 'raw',
-      setup(b) {
-        b.onResolve({ filter: /\?raw$/ }, (a) => ({ path: path.resolve(a.resolveDir, a.path.replace(/\?raw$/, '')), namespace: 'raw' }));
-        b.onLoad({ filter: /.*/, namespace: 'raw' }, async (a) => ({ contents: readFileSync(a.path, 'utf8'), loader: 'text' }));
-      }
-    }]
+    plugins: [rawText]
   });
   const electron = createRequire(path.join(desktop, 'package.json'))('electron');
   const env = {

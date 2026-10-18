@@ -110,7 +110,10 @@ export type InstallNativeEngineOptions = {
   log?: Log;
   windows: () => BrowserWindow[];
   /** The media store's asset resolution for `mediaRead` handles. */
-  resolveAsset?: (asset: string) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
+  resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
+  /** Keeps job snapshot media available after its window changes or closes. */
+  snapshotMedia?(project: Record<string, any>): Promise<Record<string, any>>;
+  bindMediaSession?(session: number, project: Record<string, any> | null): Promise<void>;
   /** A proxy of an offline asset for draft renders (Phase 4a generates them). */
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
 };
@@ -397,6 +400,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   let renderQueue: RenderQueue | null = null;
   const agentJobs = new AgentJobs({
     engine,
+    ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // A window's exports measure text with its font cache seeds.
     sessionOwner: (session, owner) => jobFontClient.setSessionOwner(session, owner),
@@ -508,7 +512,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       : `${chosen.filePath}.${panel.extension}`;
     const id = await renderQueue!.add({
       name: path.basename(file),
-      project: JSON.parse(queueRequest.project),
+      project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
       options: queueRequest.options,
       destination: file,
       ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),

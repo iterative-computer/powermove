@@ -270,3 +270,221 @@ POWERMOVE_NEW_ENGINE=1 $L bunx playwright test e2e/export-video-frames.spec.ts e
 for f in 0 1; do POWERMOVE_NEW_ENGINE=$f $L bunx playwright test e2e/import-image-sequence.spec.ts:7 \
   --repeat-each=12 --workers=1 --retries=0; done
 ```
+
+## Rerun correctness fixes: D4, D5, R3, R2 and the two test writers
+
+Verified 2026-10-18 on `feat/ne-races`, integration base `9f6e8f27`, the same
+M4 Max reference machine. Release addons and pm-wasm built in the worktree;
+hidden Electron under the machine lock, one worker, no retries.
+
+**D4 and D5 share the import-binding race.** The renderer exposed a completed
+import before the debounced asset binding reached main. An immediate export's
+offline check saw an unknown asset; the interactive engine could also resolve
+newly imported images before main knew them. The integration branch already
+contains the fix, `6a2f9587`: `ingestAsset` awaits
+`HostMedia.flushBindings(targetProject)` before returning, including silent,
+parallel imports. This lane keeps that fix and adds a multi-import regression.
+
+The negative control removed **only** that await and rebuilt the app. All three
+reproductions failed: `export-mp4.spec.ts:7` returned `{cancelled: true}`;
+both generated PNGs in the new readiness test resolved to null immediately;
+the synthetic 500-layer measurement recorded 41 layer failures. Restoring the
+await makes all three pass, with zero render/layer failures in the synthetic
+project (two imported images used by 35 image layers).
+
+`media-import-readiness.spec.ts` runs with the flag off and on. It checks both
+images are imported, resolves each through main immediately with no polling or
+extra flush (flag on), exports immediately with no offline prompt, and checks
+both exported regions are exactly opaque red and green. Assigning the regions
+does not assume a parallel import's completion order.
+
+**R3 was lazy temporal-ease adoption.** Hydration sanitized ordinary channels
+but left `powermove.3d.scene` animation inside extension data untouched. Legacy
+evaluation then added defaults that native evaluation did not write. Which
+frames had evaluated determined whether a flag-off open changed the document.
+`legacy/app.ts` now adopts and normalizes these scene channels during hydration,
+including nested compositions. Bare scene keys retain their linear behavior:
+adoption precedes the general sanitizer's ordinary layer default handles.
+The regression checks object, material, light, camera and environment tracks,
+quarter/midpoint values, unchanged JSON after evaluation, and idempotent reopen.
+It fails before the fix and passes after it. `scene3d.md` records the change.
+
+**R2 and test writers.** The alpha ProRes preset expects canonical
+`prores-4444`, still supplying old `prores` to test migration. The render-queue
+rename and tracer work-area assignment call `PM.touch()`. The affected import
+rerun also reached three old assertions that predate preservation of originals.
+Native TIFF/HEIC/Matroska imports now verify source bytes by BLAKE3 and separate
+PNG/WebM renditions; legacy mode still verifies stored conversions. Existing
+pixel, alpha, frame-order and duration assertions remain unchanged.
+
+**Verification:**
+
+- Four targeted unit files (`legacy/app`, renderer `host-media-store`, main
+  `media-store/service`, `engine/offline-media`): **78 pass**.
+- All 11 affected cases (`export-mp4`, `export-webm`, `import-animated-image`,
+  `import-converted-formats`, the saved-preset case) pass with the flag off and
+  on. The first native run passed all seven D4 reproductions, then failed the
+  three obsolete storage assertions; those pass after the spec update. The
+  new two-mode image readiness/pixel test also passes.
+- The two writer reproductions and saved-preset case in `audit`, with engine
+  fonts: **3 pass; 76 audits, zero failures**, including zero missed writes,
+  mirror mismatches and stale answers; 777 dual answers, zero mismatched/stale;
+  zero consistency mismatches and tracking violations.
+- Unchanged engine-switch corpus harness: **131/131 in both runs**, 71 s and
+  67 s, including `3d/legacy-scene`. Each compares 131 baseline, control, off,
+  and on-again documents; 65 assets across 60 media projects; zero failed or
+  skipped projects and zero page errors. Its existing on→on control still
+  records regenerated key ids in 16 effect projects; switching adds nothing
+  beyond that. This is inherited harness behavior, not a new exception or a
+  claim that those 16 raw document hashes are stable.
+
+No main/engine, preload, kernel API or raster changes were needed in this lane;
+the temporary negative-control raster edit was restored exactly. No capability
+reason, routing path, tolerance or corpus case changed. Both requested
+integration merges were already up to date.
+
+Reproduce with the existing commands above plus
+`e2e/media-import-readiness.spec.ts`; the synthetic case is
+`PM_TRACER_MEASURE=1` with `native-engine-tracer-measure.spec.ts --grep 'synthetic 500-layer'`.
+The auditor cases are `engine-delivery.spec.ts:199`,
+`native-engine-tracer.spec.ts:348`, and `ae-audit-implementation.spec.ts:102`, with
+`VITE_POWERMOVE_NATIVE_EVALUATOR=audit POWERMOVE_ENGINE_FONTS=1` and
+`POWERMOVE_NATIVE_REPORT_FILE` outside the repository. Run every e2e under the
+lock with `--workers=1 --retries=0`. Run
+`scripts/gate-engine-switch-corpus.mjs --json <outside-repo-path>` twice under
+the lock for the corpus gate. Build both `build:engine` and `build:wasm` first.
+
+
+## K1, B1 and R3b: stable keys and export bindings
+
+Follow-up on `feat/ne-fixups`, integration base `01a9f4af` (2026-10-18).
+Both requested integration merges were already up to date. No router,
+capability reason, corpus case, tolerance or allowed-difference rule changed.
+
+**K1.** Known effect parameters are sanitized twice against one global key-id
+set: a loose pass (keys typed by the saved value, or 0) and then the
+definition's pass (value typed by `param.def`). The second pass saw the
+channel's own ids as duplicates and replaced them. Each registered channel now
+releases its own ids from the set just before its second pass; both passes and
+their value and keyframe semantics are unchanged. (A first version of this fix
+merged the passes into one def-typed pass. Review showed that changed today's
+hydration of null, missing and mismatched-type values, which owner rule 22
+forbids, and it was replaced.)
+
+Two regressions: the id test preserves numeric, color, boolean and
+unknown-parameter ids and requires byte-stable JSON on reopen; it fails against
+the base (registered ids replaced). The parity test hydrates `{v:null}`, a
+primitive `null`, color and boolean keys with no `v`, a numeric param with
+`v:'5'` and keys `[1,5]`, and a color param with `v:3`, and pins today's
+results: value 0, 0, def, def, def, def, and no keyframes for all of them. It
+passes on the base app.ts except for the key-id assertion, and fails against
+the single-pass version (values became def and the dropped keys animated).
+
+**B1.** Export and Add to Queue await the media binding acknowledgement, as does
+the agent export's `__mcp_context`. They retain their captured project while
+awaiting it. IndexedDB-only media finishes verified migration before the barrier
+answers. Already imported media binds immediately from cached records: adding an
+unconditional migration await here reproduced two import-time offline layer
+failures, which the unchanged zero-layer-failure assertion caught. That await
+was removed for cached media, and the original assertion passes again.
+
+Queue entries persist copied-media hashes at Add to Queue. Every export snapshot
+binds copied hashes and linked originals to its job session before resync; host
+capability resolution now carries engine process and session. Project switches,
+window release and later writes under the same storage key cannot replace those
+bindings. Ending the job releases them. Existing live-window ambiguity checks
+and capability-port validation remain in place.
+
+A job's bindings are not a dead end. Each copied asset keeps its storage key
+next to the frozen hash (also when no record existed at snapshot time), and the
+job remembers its project id. Resolution tries the frozen entry first (link,
+then hash object, then key record, the same order as the window path). When that
+is offline it falls back to windows bound to the same project id, with the usual
+ambiguity check; windows on other projects never count. So `wait_for_media`'s
+2 s re-mint resumes a queued or sheet job when copied media that was offline at
+enqueue is put later, when the user relinks with Locate Media in the project's
+window, or when a saved hash object is missing but the key's record exists. The
+regression covers all three and that another project's window is ignored; it
+fails against the first B1 version.
+
+Negative controls fail without the sheet/agent acknowledgement and without job
+binding. The unit tests cover migration, immutable queue content, copied and
+linked media after window release, process/session isolation and session cleanup.
+The expanded image-readiness e2e retains immediate post-import resolution and
+zero import-time layer failures, then exports after reopen with no live binding,
+and renders a queued snapshot after switching projects and releasing the
+window's bindings. Every exported red/green sample must remain exact opaque
+RGBA, with no offline prompt.
+
+**R3b.** The legacy-scene regression now has color, boolean and id-less keys in
+root and nested compositions. It compares legacy answers at quarter/midpoint,
+retains the numeric 22.5/45 assertions, checks ids, and requires unchanged JSON
+after evaluation and reopen. Removing scene-channel adoption fails the test.
+
+`media-import-readiness.spec.ts`'s native presentation check requires an **awake
+display and unlocked session**, as the presentation harness does. Keep that
+assertion unconditional when running this test: do not interpret a sleeping
+compositor's lack of presentation as an import or export failure. The media,
+export pixels and layer-failure assertions remain separate requirements.
+
+Outside the lane's named files, the changes are: main's engine host callback
+types and wiring (`main/engine/{index,native-engine,services}.ts`); the
+`bindMediaSession` hook in `main/engine/agent-jobs.ts` and its test; the agent
+snapshot call site and test (`legacy/assistant/mcp-project-tools`); the
+`e2e/media-import-readiness.spec.ts` extension (reopen export, queue after
+project switch); and notes in `export.md`, `media-store.md` and `scene3d.md`.
+The hot `main/index.ts` edit is only the three media callbacks. No preload,
+kernel API, editing or raster implementation changed.
+
+Remaining: `flushBindings` migrates uncached IndexedDB media before a sheet export
+or queue add. For large media that delays the start by a full copy, and the
+progress sheet shows nothing while it runs. It is correct but has no UI
+feedback yet.
+
+**Verification:**
+
+- Release `pm-node`/`pm-bridge` and `pm-wasm` build successfully.
+- Nine targeted unit files: **129 pass** (hydration, exporter, agent context,
+  renderer/main media store, agent jobs, host services/contract and render queue).
+- Image readiness, reopen export and queued snapshot pixels: **2 pass**, flag
+  off/on. The original presentation and zero-layer-failure assertions pass.
+- MP4 delivery with AAC and export cancellation: **2 pass with the flag off**,
+  **2 pass with it on**. Hidden Electron, lock held, one worker, no retries.
+- Unchanged engine-switch corpus: **131/131 twice**, **70 s and 67 s**; each
+  compares 131 baseline/control/off/on-again documents, 65 assets in 60 media
+  projects. Zero failures, skips, page errors **and unstable reopen documents**.
+  The earlier control's 16 effect projects no longer regenerate key ids.
+- Extension boundary check passes. Main TypeScript checking passes with
+  `--composite false --incremental false`; the standard composite command is
+  blocked by existing TS6307 file-list errors from `shared/canonical-json.test.ts`
+  importing renderer `compositions.ts` and `registry.ts`. Those files are unchanged.
+- Every commit's staged file list/diff and gitleaks scan were checked; the local
+  hook remains enabled. No push, integration-branch merge, tag or release.
+
+**Verification after the review corrections** (K1 two-stage restore, B1 job
+fallback), app rebuilt by the e2e global setup:
+
+- Eleven targeted unit files (the nine above plus `media-store/store` and
+  `engine/offline-media`): **148 pass**. Negative controls as described under
+  K1 and B1.
+- MP4 delivery and cancellation: **2 pass flag off, 2 pass flag on** (lock,
+  one worker, no retries).
+- Unchanged engine-switch corpus: **131/131 twice, 69 s and 73 s**, zero
+  failures, skips or stamps.
+- `media-import-readiness.spec.ts`: flag off passes; flag on fails at the
+  presentation poll (line 66) because the machine had been idle about 11 h with
+  the display asleep, the precondition stated above. A temporary untracked copy
+  that skipped only that poll (and the presenter check, since no presenter
+  exists while asleep) passed **2/2**, covering import readiness, export pixels,
+  reopen export and the queued snapshot after a project switch. The copy was
+  deleted. The committed spec is unchanged and still needs an awake display.
+- Web and node `tsc --noEmit --composite false`: no errors in changed files.
+  The two R3b test lines that failed `noUncheckedIndexedAccess` were fixed.
+
+Reproduce from `apps/desktop` after sourcing `../../engine/env.sh` and building
+`build:engine` and `build:wasm`. Run `bunx vitest run` on the nine files above with
+`--maxWorkers=4`; run `e2e/media-import-readiness.spec.ts` and
+`e2e/export-mp4.spec.ts` under `pm-electron-lock` with `--workers=1 --retries=0`,
+setting `POWERMOVE_NEW_ENGINE=0` and `1` for the MP4 spec. Run the unchanged
+`scripts/gate-engine-switch-corpus.mjs --json <outside-repo-path>` twice under
+the lock. The readiness spec supplies both engine settings itself.

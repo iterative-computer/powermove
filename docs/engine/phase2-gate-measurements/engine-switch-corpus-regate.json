@@ -1,0 +1,313 @@
+{
+  "corpus": "v1-20261012-230504-ae47a3b3",
+  "projects": 131,
+  "roundTripped": 130,
+  "withMedia": 60,
+  "assets": 65,
+  "compared": {
+    "on (baseline)": 131,
+    "on (control)": 131,
+    "off": 131,
+    "on again": 131
+  },
+  "failed": [
+    {
+      "id": "3d/legacy-scene",
+      "problems": [
+        "off: stored project differs at layers[0].d.data.scene.objects[0].p.ry.kf[0].autoBezier, layers[0].d.data.scene.objects[0].p.ry.kf[0].continuous, layers[0].d.data.scene.objects[0].p.ry.kf[0].inEase, layers[0].d.data.scene.objects[0].p.ry.kf[0].inInterp and 8 more",
+        "on again: stored project differs at layers[0].d.data.scene.objects[0].p.ry.kf[0].autoBezier, layers[0].d.data.scene.objects[0].p.ry.kf[0].continuous, layers[0].d.data.scene.objects[0].p.ry.kf[0].inEase, layers[0].d.data.scene.objects[0].p.ry.kf[0].inInterp and 8 more"
+      ],
+      "differences": {
+        "off": [
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].autoBezier",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].continuous",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].inEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].inInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].outEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].outInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].autoBezier",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].continuous",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].inEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].inInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].outEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].outInterp",
+            "undefined",
+            "\"linear\""
+          ]
+        ],
+        "on again": [
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].autoBezier",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].continuous",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].inEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].inInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].outEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[0].outInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].autoBezier",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].continuous",
+            "undefined",
+            "false"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].inEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].inInterp",
+            "undefined",
+            "\"linear\""
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].outEase",
+            "undefined",
+            "{\"influence\":33.333333333333336,\"speed\":0}"
+          ],
+          [
+            "layers[0].d.data.scene.objects[0].p.ry.kf[1].outInterp",
+            "undefined",
+            "\"linear\""
+          ]
+        ]
+      }
+    }
+  ],
+  "skipped": [],
+  "stamped": [],
+  "unstableOnReopen": [
+    {
+      "id": "effects/blur",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/motionblurDir",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.angle.kf[0].i",
+        "layers[0].fx[0].p.angle.kf[1].i",
+        "layers[6].fx[0].p.angle.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/sharpen",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/glow",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.radius.kf[0].i",
+        "layers[0].fx[0].p.radius.kf[1].i",
+        "layers[6].fx[0].p.radius.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/color",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.hue.kf[0].i",
+        "layers[0].fx[0].p.hue.kf[1].i",
+        "layers[6].fx[0].p.hue.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/levels",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.inWhite.kf[0].i",
+        "layers[0].fx[0].p.inWhite.kf[1].i",
+        "layers[6].fx[0].p.inWhite.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/duotone",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.shadow.kf[0].i",
+        "layers[0].fx[0].p.shadow.kf[1].i",
+        "layers[6].fx[0].p.shadow.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/grain",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/vignette",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/chroma",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/pixelate",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.size.kf[0].i",
+        "layers[0].fx[0].p.size.kf[1].i",
+        "layers[6].fx[0].p.size.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/posterize",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.levels.kf[0].i",
+        "layers[0].fx[0].p.levels.kf[1].i",
+        "layers[6].fx[0].p.levels.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/displace",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/shadow",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.distance.kf[0].i",
+        "layers[0].fx[0].p.distance.kf[1].i",
+        "layers[6].fx[0].p.distance.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/invert",
+      "paths": 4,
+      "sample": [
+        "layers[0].fx[0].p.amount.kf[0].i",
+        "layers[0].fx[0].p.amount.kf[1].i",
+        "layers[6].fx[0].p.amount.kf[0].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    },
+    {
+      "id": "effects/gradient",
+      "paths": 2,
+      "sample": [
+        "layers[6].fx[0].p.angle.kf[0].i",
+        "layers[6].fx[0].p.angle.kf[1].i"
+      ],
+      "switchLosesNothingBeyondIt": true
+    }
+  ],
+  "pageErrors": [],
+  "seconds": 66
+}

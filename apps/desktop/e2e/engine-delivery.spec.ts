@@ -216,7 +216,7 @@ test('the render queue runs jobs unattended, keeps going past a failure, and kee
     // Snapshots: editing the live project after queuing does not change the job.
     await solidProject(session.page, 'Queue B');
     expect(await add({ format: 'webm-vp9', scale: 0.5, fps: 24, range: 'all', quality: 'draft', mblur: false, audio: false })).toMatchObject({ status: 'added' });
-    await session.page.evaluate(() => { (window as any).PM.proj.name = 'Edited after queuing'; });
+    await session.page.evaluate(() => { const PM = (window as any).PM; PM.proj.name = 'Edited after queuing'; PM.touch(); });
 
     await session.page.evaluate(() => (window as any).PM.Export.queueDialog());
     const panel = session.page.getByRole('dialog', { name: 'Render Queue', exact: true });
