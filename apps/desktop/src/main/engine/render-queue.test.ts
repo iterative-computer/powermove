@@ -16,13 +16,13 @@ const options = (format = 'prores-hq'): SheetExportOptions => ({
 
 class FakeEngine implements QueueEngine {
   available = true;
-  submitted: Array<{ project: any; options: SheetExportOptions; destination: string; overwrite: string; jobId: string }> = [];
+  submitted: Array<{ project: any; options: SheetExportOptions; destination: string; overwrite: string; jobId: string; definitions?: unknown[] }> = [];
   cancelled: string[] = [];
   fail: string | null = null;
-  async exportQueued(project: unknown, o: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail') {
+  async exportQueued(project: unknown, o: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: any[]) {
     if (this.fail) throw new Error(this.fail);
     const jobId = `engine-${this.submitted.length + 1}`;
-    this.submitted.push({ project, options: o, destination, overwrite, jobId });
+    this.submitted.push({ project, options: o, destination, overwrite, jobId, definitions });
     return { jobId, frames: 48 };
   }
   async cancelQueued(jobId: string) {
@@ -132,6 +132,29 @@ describe('render queue', () => {
     again.engineReady();
     await settle();
     expect(engine2.submitted.map((s) => s.destination)).toEqual(['/out/A.mov']);
+  });
+
+  it('keeps the definitions a job was queued with across relaunch and removes them with the job', async () => {
+    const { dir, queue } = await setup();
+    const captured = [{ generation: 1, full: true, upserts: [{ id: 'blur', kind: 'effect', origin: 'fork' }], removals: [] }];
+    const a = await queue.add({ name: 'A.mov', project: project(), options: options(), destination: '/out/A.mov', definitions: captured as any });
+    await queue.add({ name: 'B.mov', project: project(), options: options(), destination: '/out/B.mov' });
+    const file = path.join(dir, `${a}.definitions.json`);
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual(captured);
+    await queue.dispose();
+    // Relaunch: the job renders with the set it was queued with, not the
+    // windows' sets now; a job queued without one gets none.
+    const engine2 = new FakeEngine();
+    const again = new RenderQueue({ directory: dir, engine: engine2, platform: platform() });
+    queues.push(again);
+    await again.start();
+    await settle();
+    expect(engine2.submitted[0]!.definitions).toEqual(captured);
+    again.status('engine-1', { jobId: 'engine-1', state: 'done', progress: 1, path: '/out/A.mov' });
+    await settle();
+    expect(engine2.submitted[1]!.definitions).toEqual([]);
+    await again.act({ kind: 'clearFinished' });
+    await vi.waitFor(async () => expect((await readdir(dir)).filter((f) => f.endsWith('.definitions.json'))).toEqual([]));
   });
 
   it('cancels, retries, reorders, removes, and reveals', async () => {

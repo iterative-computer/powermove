@@ -8,7 +8,7 @@
  * agent job snapshots in the job engine) start from the window's current
  * definitions, and so a restarted engine can be primed.
  */
-import type { DefinitionKind, DefinitionSnapshot, DefinitionsUpdate } from '../../shared/engine-protocol';
+import type { DefinitionKind, DefinitionRemoval, DefinitionSnapshot, DefinitionsUpdate } from '../../shared/engine-protocol';
 import { isRecord, isSafeUint } from './protocol';
 
 export class DefinitionGap extends Error {
@@ -62,6 +62,27 @@ export class DefinitionSet {
   missingIds(): string[] {
     return [...this.missing.values()];
   }
+
+  /** The definitions no registration remains for, as removals. */
+  missingRemovals(): DefinitionRemoval[] {
+    return [...this.missing.keys()].map((k) => {
+      const [kind, id] = k.split('\0') as [DefinitionKind, string];
+      return { kind, id };
+    });
+  }
+
+  /**
+   * The updates that bring a fresh session to this set from `generation`:
+   * a full update, then (when some definitions are missing) a delta
+   * removing them, so the session skips them as missing (as the window
+   * does) rather than not knowing them.
+   */
+  updatesFrom(generation: number): DefinitionsUpdate[] {
+    const updates = [this.fullUpdate(generation)];
+    const removals = this.missingRemovals();
+    if (removals.length) updates.push({ generation: generation + 1, full: false, upserts: [], removals });
+    return updates;
+  }
 }
 
 /** Shape checks for an update a renderer sent (the engine validates the
@@ -83,12 +104,34 @@ export function validateUpdate(update: unknown): asserts update is DefinitionsUp
   }
 }
 
+/** A window's current set as main holds it: `version` changes with every update applied. */
+export interface WindowDefinitions {
+  version: number;
+  /** The updates that bring a fresh (or restarted) session to the set from `generation` (`DefinitionSet.updatesFrom`). */
+  updates(generation: number): DefinitionsUpdate[];
+}
+
 /** Latest definitions per window. */
 export class DefinitionRelay {
   private windows = new Map<number, DefinitionSet>();
+  private versions = new Map<number, number>();
+  private nextVersion = 1;
 
   update(windowId: number, update: unknown): void {
     validateUpdate(update);
+    this.apply(windowId, update);
+    this.versions.set(windowId, this.nextVersion++);
+  }
+
+  /** The window's current set, or null when it has pushed none. */
+  current(windowId: number): WindowDefinitions | null {
+    const set = this.windows.get(windowId);
+    const version = this.versions.get(windowId);
+    if (!set || version === undefined) return null;
+    return { version, updates: (generation) => set.updatesFrom(generation) };
+  }
+
+  private apply(windowId: number, update: DefinitionsUpdate): void {
     const set = this.windows.get(windowId);
     if (!set) {
       if (!update.full) throw new DefinitionGap('the first update from a window must be full');
@@ -114,5 +157,6 @@ export class DefinitionRelay {
 
   forget(windowId: number): void {
     this.windows.delete(windowId);
+    this.versions.delete(windowId);
   }
 }

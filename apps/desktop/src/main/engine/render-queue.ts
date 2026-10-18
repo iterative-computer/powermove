@@ -39,12 +39,13 @@ import {
 import { SIDECAR_SUFFIX_PATTERN } from '../../shared/ipc';
 import { sidecarPath } from '../export-sidecar';
 import { atomicWrite } from '../project-files';
+import type { DefinitionsUpdate } from '../../shared/engine-protocol';
 import type { UserExportStatus } from './agent-jobs';
 
 /** What the queue needs from the job engine (AgentJobs). */
 export interface QueueEngine {
   readonly available: boolean;
-  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }>;
+  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: DefinitionsUpdate[]): Promise<{ jobId: string; frames: number }>;
   cancelQueued(jobId: string): Promise<void>;
 }
 
@@ -119,6 +120,13 @@ export class RenderQueue {
     return path.join(this.options.directory, 'queue.json');
   }
 
+  /** The definitions a job renders with, captured from its window when it
+   *  was queued (contract 10: a queued job renders the effects of the
+   *  extensions the user had then, forks and overrides by id included). */
+  private definitionsFile(id: string): string {
+    return path.join(this.options.directory, `${id}.definitions.json`);
+  }
+
   private snapshotFile(id: string): string {
     return path.join(this.options.directory, `${id}.json`);
   }
@@ -191,6 +199,8 @@ export class RenderQueue {
     destination: string;
     sidecars?: CaptionSidecar[];
     preset?: string;
+    /** The window's definitions as the updates a job session starts with. */
+    definitions?: DefinitionsUpdate[];
   }): Promise<string> {
     await this.loaded;
     if (!validSheetExportOptions(input.options)) throw new Error('Invalid export settings.');
@@ -209,6 +219,9 @@ export class RenderQueue {
       (s.extension === 'srt' || s.extension === 'vtt') && typeof s.text === 'string' && (s.suffix === undefined || SIDECAR_SUFFIX_PATTERN.test(s.suffix)));
     await mkdir(this.options.directory, { recursive: true, mode: 0o700 });
     await atomicWrite(this.snapshotFile(id), new TextEncoder().encode(JSON.stringify(project)));
+    if (input.definitions?.length) {
+      await atomicWrite(this.definitionsFile(id), new TextEncoder().encode(JSON.stringify(input.definitions)));
+    }
     this.jobs.push({
       id,
       name: input.name,
@@ -298,9 +311,15 @@ export class RenderQueue {
       this.end(job, 'failed', 'The project snapshot of this job is missing.');
       return;
     }
+    // Jobs queued before definitions were captured have none (their
+    // effects are reported as the engine cannot draw them, never drawn
+    // from another set).
+    const definitions: DefinitionsUpdate[] = await readFile(this.definitionsFile(job.id), 'utf8')
+      .then((text) => JSON.parse(text) as DefinitionsUpdate[])
+      .catch(() => []);
     const finished = new Promise<void>((resolve) => { this.waiters.set(job.id, resolve); });
     try {
-      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite]);
+      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], definitions);
       if (!this.current || this.current.id !== job.id) {
         // Cancelled while it was being submitted.
         await this.options.engine.cancelQueued(started.jobId);
@@ -452,6 +471,7 @@ export class RenderQueue {
         if (job && this.current?.id !== job.id) {
           this.jobs = this.jobs.filter((j) => j.id !== job.id);
           await unlink(this.snapshotFile(job.id)).catch(() => {});
+          await unlink(this.definitionsFile(job.id)).catch(() => {});
           this.changed();
         }
         this.agents = this.agents.filter((a) => !(a.id === action.id && a.finishedAt));
@@ -487,7 +507,10 @@ export class RenderQueue {
       case 'clearFinished': {
         const gone = this.jobs.filter((j) => j.state === 'done' || j.state === 'cancelled');
         this.jobs = this.jobs.filter((j) => !gone.includes(j));
-        for (const job of gone) await unlink(this.snapshotFile(job.id)).catch(() => {});
+        for (const job of gone) {
+          await unlink(this.snapshotFile(job.id)).catch(() => {});
+          await unlink(this.definitionsFile(job.id)).catch(() => {});
+        }
         this.agents = this.agents.filter((a) => !a.finishedAt);
         this.changed();
         break;

@@ -676,6 +676,9 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   let listener: ((s: any) => void) | null = null;
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
+    // Main captures this window's definitions for the job (contract 10):
+    // pending registrations and extension reloads reach it first.
+    await PM.EngineDefinitions?.settle?.();
     const started = await engine.exportVideo({
       project: JSON.stringify(p),
       name: outputName(opts),
@@ -745,6 +748,8 @@ X.addToQueue = async (rawOpts: any) => {
     ? captionSidecars(PM.proj, sidecarFormat, { from: t0, to: t1 }).map((s) => ({ extension: sidecarFormat, text: s.text, ...(s.suffix ? { suffix: s.suffix } : {}) }))
     : [];
   try {
+    // The queued job keeps this window's definitions as they are now.
+    await PM.EngineDefinitions?.settle?.();
     const result = await engine.queueAdd({
       project: JSON.stringify(PM.proj),
       name: outputName(opts),

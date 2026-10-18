@@ -55,7 +55,8 @@ export type ViewerMessage =
 export interface DefinitionsSource {
   session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
   applied(applied: DefinitionsApplied): void;
-  failure(report: FailureReport): void;
+  /** `stream`: this session's stream (a definition failure older than its latest push of that definition is stale). */
+  failure(report: FailureReport, stream?: DefinitionStream | null): void;
   /** A frame at this revision is shown: layer reports it did not repeat are cleared. */
   frame?(revision: number): void;
 }
@@ -66,6 +67,8 @@ export interface DefinitionStream {
   full(): void;
   /** Makes the next registry change send the whole set. */
   stale(): void;
+  /** The generation of the latest update sent that changed a definition. */
+  changedAt?(kind: string, id: string): number | undefined;
   dispose(): void;
 }
 
@@ -399,7 +402,7 @@ export class DocumentSession {
         this.failures.push(`${error.code}: ${error.message}`);
         if (this.failures.length > 32) this.failures.shift();
         // Shader meta and compile errors at the report's revision.
-        this.options.definitions?.()?.failure(event as unknown as FailureReport);
+        this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
           void this.resync(error.code);
           return;

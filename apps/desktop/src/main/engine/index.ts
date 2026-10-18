@@ -395,6 +395,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const agentJobs = new AgentJobs({
     engine,
     log,
+    // Each job renders its window's winning registrations (contract 10).
+    definitions: (owner) => engine!.definitions.current(owner),
     onDelivered: (owner, file) => rememberExport(owner, file),
     onUserStatus: (owner, status) => {
       const file = userDestinations.get(status.jobId);
@@ -507,7 +509,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       options: queueRequest.options,
       destination: file,
       ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),
-      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {})
+      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {}),
+      definitions: engine!.definitions.current(event.sender.id)?.updates(1) ?? []
     });
     return { status: 'added' as const, id };
   });

@@ -802,7 +802,15 @@ impl Thread {
                 doc.set_definitions(set, registered);
                 let definitions = doc.definitions().cloned();
                 let registered = doc.take_registered();
-                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // A definition failure is reported at the definitions
+                // generation it was translated at (not a document
+                // revision): the kernel drops one older than its latest
+                // push of that definition, the translation of a set already
+                // replaced (kernel/engine-definitions.ts).
+                let revision = definitions
+                    .as_ref()
+                    .and_then(|(set, _)| Revision::new(set.generation.get()).ok())
+                    .unwrap_or(Revision::ZERO);
                 // Translate now (not at the next frame) and report each
                 // definition that fails (contract 10; the kernel fills the
                 // shader UI from these).

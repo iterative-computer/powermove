@@ -576,6 +576,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   const pinned = liveToolObservations.get(request.runId) || liveToolTransactions.get(request.runId);
   if (pinned && request.tool !== '__finish_run') assertTransactionProject(pinned);
   if (request.tool.startsWith('__mcp_')) {
+    // `export_video` reads its project here and then renders in the job
+    // engine with this window's definitions: a publication earlier in the
+    // run reaches main before this answer does (contract 10).
+    if (request.tool === '__mcp_context') await PM.EngineDefinitions?.settle?.();
     const value = await mcpProjectTool(PM, request.tool, request.arguments);
     if (request.tool === '__mcp_context') refreshLiveTransaction(request);
     return { ok: true, content: [toolText(value)], revision: currentRevision() };
@@ -710,7 +714,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === '__engine_frames_plan') {
     // render_frames through the job engine (main/engine/agent-jobs.ts): the
     // same times and width the capture below would use, and the project at
-    // the revision the agent sees.
+    // the revision the agent sees. Extension reloads and registrations
+    // still pending (a publication just before) reach main's definitions
+    // first, so the frames never show a false "missing" (contract 10).
+    await PM.EngineDefinitions?.settle?.();
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
     const times = safeTimes(rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite), defaultTimes());
     const width = PM.clamp(Math.round(Number(request.arguments.width) || 720), 160, 1280);
