@@ -43,6 +43,8 @@ export interface PoolOptions {
   openTimeoutMs?: number;
   /** Restarts allowed after crashes before calls fail with `worker-crashed` (retry true). */
   maxRestarts?: number;
+  /** A crash this long ago no longer counts against `maxRestarts` (default 60 s). */
+  quietResetMs?: number;
 }
 
 interface Instance {
@@ -58,6 +60,7 @@ interface Instance {
 
 const DEFAULT_OPEN_TIMEOUT = 60_000;
 const DEFAULT_RESTARTS = 5;
+const QUIET_RESET_MS = 60_000;
 
 export function forkWorker(script: string, env: Record<string, string | undefined>): WorkerHandle {
   const child: ChildProcess = fork(script, ['--document-worker'], {
@@ -85,6 +88,8 @@ export class DocumentHostPool implements DocumentHostPoolApi {
   private readonly byProject = new Map<string, Instance>();
   private nextInstance = 1;
   private restarts = new Map<string, number>();
+  /** When each project's worker last exited unexpectedly. */
+  private lastCrash = new Map<string, number>();
   private stopped = false;
   private offPatch: () => void;
   private offExtensions: () => void;
@@ -237,15 +242,22 @@ export class DocumentHostPool implements DocumentHostPoolApi {
     if (instance.closing || this.stopped) return;
     const count = (this.restarts.get(instance.projectId) ?? 0) + 1;
     this.restarts.set(instance.projectId, count);
+    this.lastCrash.set(instance.projectId, Date.now());
     this.log(`[engine] document host worker for ${instance.projectId} exited (${signal ?? code}); attempt ${count}`);
   }
 
   /** The open instance for a call, restarting a crashed one within the backoff budget. */
   private async ready(projectId: string): Promise<Instance> {
-    const restarts = this.restarts.get(projectId) ?? 0;
+    let restarts = this.restarts.get(projectId) ?? 0;
+    // A quiet minute since the last crash starts the budget again, so a
+    // retry after the budget ran out can succeed (the failure says retry).
+    if (restarts > 0 && Date.now() - (this.lastCrash.get(projectId) ?? 0) > (this.options.quietResetMs ?? QUIET_RESET_MS)) {
+      this.restarts.delete(projectId);
+      restarts = 0;
+    }
     if (!this.byProject.has(projectId) && restarts > 0) {
       if (restarts > (this.options.maxRestarts ?? DEFAULT_RESTARTS)) {
-        throw new DocumentHostError('worker-crashed', `The document host worker for ${projectId} keeps exiting; the host log has the reason.`, true);
+        throw new DocumentHostError('worker-crashed', `The document host worker for ${projectId} keeps exiting; the host log has the reason. Retry in a minute.`, true);
       }
       const delay = Math.min(30_000, 1000 * 2 ** (restarts - 1));
       await new Promise((resolve) => setTimeout(resolve, delay).unref?.());
