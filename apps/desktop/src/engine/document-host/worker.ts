@@ -22,6 +22,8 @@ import { deterministicSeam } from './contract';
 import { recordFor } from '../../renderer/src/kernel/extensions.svelte';
 import { BUILTIN_EXTENSIONS } from '../../renderer/src/kernel/builtins';
 import { WorkerExtensions } from './extensions';
+import { WorkerMedia } from './media';
+import { projectFingerprint } from '../../renderer/src/legacy/core/project-fingerprint';
 import {
   DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
   type DocumentHostFailure, type FromWorker, type InstanceOpened, type InstancePersisted, type InstanceStats,
@@ -62,6 +64,7 @@ export class DocumentWorker {
   private extensions = { active: [] as string[], failed: [] as Array<{ id: string; error: string }> };
   private queue: Promise<unknown> = Promise.resolve();
   private readonly ext: WorkerExtensions;
+  private media: WorkerMedia | null = null;
 
   constructor(private readonly port: WorkerPort, private readonly policy: EnginePolicy) {
     port.onMessage((message) => this.receive(message));
@@ -195,7 +198,11 @@ export class DocumentWorker {
     this.instance = instance;
     this.seq = joined.seq;
     PM['isHomeProject'] = () => !PM['proj']?.id;
+    // Media status from the host's media store, as the editor's decoded registry gives it (media.ts).
+    this.media = new WorkerMedia((request) => this.service('mediaPath.lookup', request), () => this.projectId, (line) => this.log(line));
+    PM['assets'] = this.media;
     PM['replaceProject'](joined.doc, {});
+    this.media.refresh(PM['proj']?.assets);
     PM['bus']?.emit('projects:open');
     this.synced = JSON.stringify(PM['proj']);
     // The undo history this instance had: never cleared by another project,
@@ -250,6 +257,7 @@ export class DocumentWorker {
 
   private async close(): Promise<null> {
     if (!this.chain) return null;
+    if (this.persistTimer) { clearTimeout(this.persistTimer); this.persistTimer = null; }
     await this.persist('close');
     await this.service('session.leave', this.projectId);
     await this.chain.loader()?.dispose();
@@ -321,6 +329,10 @@ export class DocumentWorker {
     const PM = this.requireChain().PM;
     const handle = this.onRequest;
     if (!handle) throw new DocumentHostError('worker-error', 'The agent tool harness is not registered.');
+    // Media status the call may read is settled first, so the answer never depends on timing.
+    this.media?.refresh(PM['proj']?.assets);
+    await this.media?.settled();
+    if (request.tool === 'get_workspace_state') await this.readFileState();
     const key = `${request.runId}\u0000${request.callId}`;
     if (this.toolResponses.has(key)) throw new DocumentHostError('worker-error', `Tool call ${request.callId} of run ${request.runId} is already running.`);
     const response = await new Promise<AgentToolResponseEvent>((resolve) => {
@@ -333,8 +345,43 @@ export class DocumentWorker {
     // The production consistency check (plan section 6, item 7) after every
     // call that changed the document: the mirror must hash as the document.
     if (Number(PM['proj']?.revision) !== request.baseRevision) PM['EngineDoc']?.check?.('agent-tool');
-    if (response.changed || Number(PM['proj']?.revision) !== request.baseRevision) await this.persist('toolCall').catch((error) => this.log(`[engine] persist after ${request.tool} failed: ${(error as Error).message}`));
+    if (response.changed || Number(PM['proj']?.revision) !== request.baseRevision) this.schedulePersist(request.tool);
     return response;
+  }
+
+  /**
+   * The project's file state as the editor reports it (`PM.projectFileState`,
+   * legacy/app.ts): the file association from the profile store, and unsaved
+   * unless the document's fingerprint equals the saved (or baseline) hash.
+   */
+  private async readFileState(): Promise<void> {
+    const PM = this.requireChain().PM;
+    const id = String(PM['proj']?.id ?? '');
+    const STATE = String(PM['Projects']?.STATE ?? 'projectState.');
+    const [meta, legacy] = await Promise.all([
+      this.service<unknown>('store.read', `projectMeta.${id}`).catch(() => null),
+      this.service<unknown>('store.read', `${STATE}${id}`).catch(() => null),
+    ]);
+    const file = ((meta as { file?: unknown } | null)?.file ?? (legacy as { file?: unknown } | null)?.file ?? null) as { path?: string; savedHash?: string; baselineHash?: string } | null;
+    const baseline = file?.savedHash || file?.baselineHash;
+    const dirty = !baseline || baseline !== await projectFingerprint(JSON.stringify(PM['proj']));
+    PM['projectFileState'] = (projectId: string) => (projectId === id ? { path: file?.path, dirty } : { path: undefined, dirty: true });
+  }
+
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Persists the history once a burst of changing calls settles (the whole
+   * undo stack is one profile-store write): at most once per PERSIST_MS, and
+   * always on close and at shutdown. The document itself is already in the
+   * session before each answer.
+   */
+  private schedulePersist(tool: string): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      if (!this.chain) return;
+      this.queue = this.queue.then(() => this.persist('toolCall')).catch((error) => this.log(`[engine] persist after ${tool} failed: ${(error as Error).message}`));
+    }, PERSIST_MS);
   }
 
   /* ── the session ─────────────────────────────────────────────────────── */
@@ -449,6 +496,9 @@ const overlaps = (a: readonly unknown[], b: readonly unknown[]): boolean => {
   for (let i = 0; i < n; i++) if (String(a[i]) !== String(b[i])) return false;
   return true;
 };
+
+/** How long changing calls are gathered before the history is persisted. */
+const PERSIST_MS = 750;
 
 const sum = (table: Record<string, number> | undefined): number => Object.values(table ?? {}).reduce((a, b) => a + Number(b), 0);
 

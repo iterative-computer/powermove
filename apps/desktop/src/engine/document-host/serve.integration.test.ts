@@ -97,6 +97,8 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host beh
       const glow = await pool.call('Pserve', { runId: 'run-g', callId: 's4', tool: 'apply_commands', arguments: { commands: [{ type: 'add_layer', id: 'Lglow', layerType: 'solid', name: 'Glow' }, { type: 'add_effect', target: 'Lglow', effect: 'serve-glow.glow' }], label: 'glow' }, baseRevision: state.revision ?? 0 });
       expect(glow.error ?? null).toBeNull();
 
+      // History is persisted once a burst of calls settles; ask for it now.
+      await pool.persist('Pserve', 'toolCall');
       const saved = JSON.parse((await engine.sync<string | null>(IPC.storeGetSync, { key: INSTANCE_STATE_KEY('Pserve') })) ?? 'null');
       expect(saved?.history?.entries?.map((e: any) => e.label)).toEqual(['Agent · serve', 'glow']);
     } finally {
