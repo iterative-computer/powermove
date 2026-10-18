@@ -96,7 +96,9 @@ pub fn capture_dir() -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("masks-"))
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("masks-"))
                 && ids.iter().all(|id| p.join(format!("{id}.png")).is_file())
         })
         .collect();
@@ -111,7 +113,11 @@ pub fn read_coverage(path: &Path) -> (u32, u32, Vec<u8>) {
     let mut buf = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buf).unwrap();
     buf.truncate(info.buffer_size());
-    (info.width, info.height, buf.chunks_exact(4).map(|p| p[3]).collect())
+    (
+        info.width,
+        info.height,
+        buf.chunks_exact(4).map(|p| p[3]).collect(),
+    )
 }
 
 /// (pixels off by more than 1, largest difference, pixels off at all).
