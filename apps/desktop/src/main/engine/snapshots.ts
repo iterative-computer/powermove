@@ -14,8 +14,9 @@
  * wrote (pm-bridge `takePixels`), which Electron's IPC carries to the
  * renderer in shared memory again.
  *
- * Every reply is bounded: the request's own wait, plus a render allowance,
- * caps how long main waits, and a window may have at most
+ * Every reply is bounded: the request's own wait (with a Blender wait,
+ * that too and the wait again after it), plus a render allowance, caps
+ * how long main waits, and a window may have at most
  * `MAX_PER_WINDOW` snapshots outstanding and every window together at
  * most `MAX_OUTSTANDING_BYTES` of results. A reply is never an exception:
  * failures come back as `{ status: 'failed', code, message }`.
@@ -44,6 +45,17 @@ export type TakePixels = (name: string, length: number) => Uint8Array;
 export const MAX_WAIT_MS = 120_000;
 /** Time main allows past the request's own wait for the render and its readback. */
 export const RENDER_ALLOWANCE_MS = 10_000;
+/** Longest a snapshot's Blender stage may run (pm_protocol MAX_BLENDER_WAIT_MS:
+ *  today's 10-minute Blender timeout, plus the queue ahead of it). */
+export const MAX_BLENDER_WAIT_MS = 900_000;
+
+/** How long main waits for the engine's answer: the request's own wait,
+ *  and with a Blender wait, the Blender stage and the wait again after it
+ *  (the engine counts its wait afresh once Blender is done). */
+export function answerBoundMs(snapshot: SnapshotRequest): number {
+  const blender = snapshot.blenderWaitMs ?? 0;
+  return (blender > 0 ? 2 * snapshot.waitMs + blender : snapshot.waitMs) + RENDER_ALLOWANCE_MS;
+}
 /** How long a snapshot waits for an interactive engine that is starting. */
 export const READY_POLL_MS = 25;
 /** Snapshots one window may have in flight. */
@@ -82,6 +94,10 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
   if (!Number.isInteger(s['waitMs']) || (s['waitMs'] as number) < 1 || (s['waitMs'] as number) > MAX_WAIT_MS) return false;
+  // A Blender wait (today's `snapshotAsync` prepares the frame): never for
+  // a blocked thread.
+  const blender = s['blenderWaitMs'];
+  if (blender !== undefined && (!Number.isInteger(blender) || (blender as number) < 0 || (blender as number) > MAX_BLENDER_WAIT_MS || ((blender as number) > 0 && s['class'] === 'sync'))) return false;
   const uploaded = s['uploaded'];
   if (!Array.isArray(uploaded) || uploaded.length > 64 || !uploaded.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 512)) return false;
   const target = s['target'] as Record<string, unknown> | null;
@@ -186,7 +202,8 @@ export class SnapshotService {
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const started = now();
     const snapshot: SnapshotRequest = request.snapshot;
-    const deadline = started + snapshot.waitMs + RENDER_ALLOWANCE_MS;
+    const bound = answerBoundMs(snapshot);
+    const deadline = started + bound;
     // A cold start or a restart: wait (within the request's own wait) for
     // the interactive engine rather than fail at once.
     while (!this.options.engine.isReady('interactive')) {
@@ -224,7 +241,7 @@ export class SnapshotService {
       }
       if (prepared === 'timeout') {
         this.stats.failed++;
-        return failed('timeout', `Main's session for the window was not ready within ${snapshot.waitMs + RENDER_ALLOWANCE_MS} ms.`);
+        return failed('timeout', `Main's session for the window was not ready within ${bound} ms.`);
       }
       if (prepared === 'needsDocument') {
         this.stats.needsDocument++;
@@ -264,7 +281,7 @@ export class SnapshotService {
       this.stats.failed++;
       // A late answer still frees its segment at once.
       void answer.then((late) => this.discard(late), () => {});
-      return failed('timeout', `The engine did not answer the snapshot within ${snapshot.waitMs + RENDER_ALLOWANCE_MS} ms.`);
+      return failed('timeout', `The engine did not answer the snapshot within ${bound} ms.`);
     }
     if (response.type !== 'snapshot') {
       this.stats.failed++;

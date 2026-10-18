@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
-import { MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 
 const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Partial<EngineSnapshotRequest> = {}): EngineSnapshotRequest => ({
   generation: 2,
@@ -70,6 +70,17 @@ describe('snapshot requests', () => {
     expect(validSnapshotRequest(request({ uploaded: Array.from({ length: 65 }, () => 'k') }))).toBe(false);
     expect(validSnapshotRequest(null)).toBe(false);
   });
+
+  it('accept a bounded Blender wait for async and idle captures only', () => {
+    expect(validSnapshotRequest(request({ class: 'async', blenderWaitMs: 600_000 }))).toBe(true);
+    expect(validSnapshotRequest(request({ class: 'idle', blenderWaitMs: 0 }))).toBe(true);
+    expect(validSnapshotRequest(request({ blenderWaitMs: 0 }))).toBe(true);
+    // A blocked thread never waits for Blender.
+    expect(validSnapshotRequest(request({ blenderWaitMs: 1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ class: 'async', blenderWaitMs: MAX_BLENDER_WAIT_MS + 1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ class: 'async', blenderWaitMs: -1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ class: 'async', blenderWaitMs: 0.5 }))).toBe(false);
+  });
 });
 
 describe('SnapshotService', () => {
@@ -133,6 +144,30 @@ describe('SnapshotService', () => {
       late(rendered({ kind: 'sharedMemory', name: '/pm.0123456789abcdef01234567', length: 32 }));
       await vi.advanceTimersByTimeAsync(0);
       expect(take).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for Blender within its bound, and the request wait again after it', async () => {
+    expect(answerBoundMs(request({ waitMs: 200 }).snapshot)).toBe(200 + RENDER_ALLOWANCE_MS);
+    const blender = request({ class: 'async', waitMs: 200, blenderWaitMs: 60_000 });
+    expect(answerBoundMs(blender.snapshot)).toBe(400 + 60_000 + RENDER_ALLOWANCE_MS);
+    vi.useFakeTimers();
+    try {
+      let answer: (r: Response) => void = () => {};
+      const e = engine(() => new Promise<Response>((resolve) => { answer = resolve; }));
+      const service = new SnapshotService({ engine: e, takePixels: () => new Uint8Array(0), log: () => {}, now: () => Date.now() });
+      const reply = service.snapshot(9, blender);
+      // Past the plain bound: Blender may still be rendering.
+      await vi.advanceTimersByTimeAsync(200 + RENDER_ALLOWANCE_MS + 1_000);
+      answer(rendered({ kind: 'inline', bytes: new Uint8Array(32) }));
+      expect(await reply).toMatchObject({ status: 'rendered' });
+      expect((e.sent[0]!.body as { snapshot: { blenderWaitMs: number } }).snapshot.blenderWaitMs).toBe(60_000);
+      // And it is bounded.
+      const late = service.snapshot(9, blender);
+      await vi.advanceTimersByTimeAsync(answerBoundMs(blender.snapshot) + 1);
+      expect(await late).toMatchObject({ status: 'failed', code: 'timeout' });
     } finally {
       vi.useRealTimers();
     }
