@@ -411,8 +411,8 @@ at the pass's head without LTO (see Gaps).
   (p50 11.7, max 19.5); paragraph 48 px in a 1,400 px box p95 21.6 ms (p50
   18.8, max 23.8); `system-ui` 24 px p95 18.1 ms (p50 11.6, max 24.2).
   Target ≤ 33 ms. (A run an hour earlier, same code but the
-  distance-field blend: 18.8, 19.8, 12.9 ms.) Other lanes' builds were
-  running on the machine (load 8 to 9).
+  distance-field blend: 18.8, 19.8, 12.9 ms.) Load average during the
+  run: 6.2 to 6.7 (other lanes' work on the machine).
 
 **2026-10-18 (second pass: glyph frames, blending, exactness gates)**, Apple
 M4 Max, macOS 27, references from Electron 44 / Chromium 152.
