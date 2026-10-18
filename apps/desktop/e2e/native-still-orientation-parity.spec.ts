@@ -164,9 +164,8 @@ async function fixtures(session: LaunchedApp, dir: string): Promise<Case[]> {
   for (const o of [2, 3, 4, 5, 6, 7, 8]) {
     await writeFile(out(`png-exif${o}.png`), pngWithExif(png, o)); add(out(`png-exif${o}.png`), true);
   }
-  // Chromium reads eXIf only before IDAT; the native decoder does too, but
-  // this structure stays routed until it is compared.
-  await writeFile(out('png-exif6-late.png'), pngWithExif(png, 6, true)); add(out('png-exif6-late.png'), false);
+  // Both decoders ignore eXIf after IDAT; keep the existing unrotated look.
+  await writeFile(out('png-exif6-late.png'), pngWithExif(png, 6, true)); add(out('png-exif6-late.png'), true);
   const alphaPng = await readFile(src.alpha);
   await writeFile(out('png-alpha-exif6.png'), pngWithExif(alphaPng, 6)); add(out('png-alpha-exif6.png'), true);
   for (const o of [2, 3, 4, 5, 6, 7, 8]) add(imageio(src.png, `jpeg-o${o}.jpg`, 'public.jpeg', o, 'srgb'), true);
@@ -211,7 +210,7 @@ async function fixtures(session: LaunchedApp, dir: string): Promise<Case[]> {
 async function capture(session: LaunchedApp, cases: Case[], output: string, label: 'legacy' | 'native'): Promise<Capture[]> {
   await session.openEditor();
   const frames: Capture[] = [];
-  for (const { file } of cases) {
+  for (const { file, drawn } of cases) {
     await session.page.evaluate(({ W, H }) => {
       const PM = (window as any).PM;
       PM.replaceProject(PM.mkProject({ w: W, h: H, fps: 30, dur: 1, name: 'Orientation parity', bg: '#5a6e82' }));
@@ -242,7 +241,16 @@ async function capture(session: LaunchedApp, cases: Case[], output: string, labe
     });
     const outputFile = path.join(output, `${label}-${path.basename(file)}.png`);
     await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, outputFile);
-    expect(await session.page.evaluate(async ({ W, H }) => (window as any).PM.Export.run({ format: 'still', w: W, h: H, alpha: false, mblur: false }), { W, H })).toEqual({ cancelled: false });
+    await session.page.evaluate(() => {
+      const w = window as any; w.__stillJobs = [];
+      w.__stillOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__stillJobs.push(s));
+    });
+    expect(await session.page.evaluate(async ({ W, H, alpha }) => (window as any).PM.Export.run({ format: 'still', w: W, h: H, alpha, mblur: false }), { W, H, alpha: process.env.PM_MEDIA_PNG_ALPHA === '1' })).toEqual({ cancelled: false });
+    const jobs = await session.page.evaluate(() => { const w = window as any; w.__stillOff(); return w.__stillJobs; });
+    if (label === 'native' && drawn) {
+      expect(jobs.some((j: any) => j.state === 'done' && !j.routed), file).toBe(true);
+      expect(jobs.some((j: any) => j.routed), file).toBe(false);
+    }
     const pixels = await session.page.evaluate(async ({ bytes, W, H }) => {
       const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
       const canvas = new OffscreenCanvas(W, H), ctx = canvas.getContext('2d')!; ctx.drawImage(image, 0, 0); image.close();

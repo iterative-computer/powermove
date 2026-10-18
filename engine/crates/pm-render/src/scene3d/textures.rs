@@ -6,7 +6,8 @@
 //! magnification, nearest minification, clamped).
 //!
 //! Map images decode through `pm-media` and only in the still classes the
-//! 2D renderer draws (`crate::media::probe_image`); images with
+//! 2D renderer draws from the native reader (`crate::media::probe_still`
+//! with `StillReader::Native`); images with
 //! transparency are refused, since the premultiplication Chromium applies
 //! to an `ImageBitmap` uploaded to WebGL has not been measured. Both are
 //! decided statically ([`Textures::probe`], cached per file version), so
@@ -480,12 +481,24 @@ pub fn decode(
     path: &Path,
     pool: &pm_media::pool::FramePool,
 ) -> Result<(u32, u32, Vec<u8>), MapError> {
-    match crate::media::probe_image(path) {
+    // Maps upload the native reader's samples, so they are probed in its
+    // classes, not in those of Chromium's compatibility bitmap.
+    match crate::media::probe_still(path, crate::media::StillReader::Native) {
         Ok(()) => {}
         Err(crate::media::ProbeIssue::Unsupported(f)) => {
             return Err(MapError::Unsupported(format!("3D texture map image ({f})")));
         }
         Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
+    }
+    // Maps upload stored samples: a PNG gamma Chromium or ImageIO would
+    // apply is not implemented for them.
+    if pm_media::image::png_gamma::png_gamma(path)
+        .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?
+        .is_some()
+    {
+        return Err(MapError::Unsupported(
+            "3D texture map image (PNG gamma (gAMA))".into(),
+        ));
     }
     let still = pm_media::image::read(path, pool)
         .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?;

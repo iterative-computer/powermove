@@ -13,13 +13,17 @@
 pub mod animation;
 pub mod avif_compat;
 pub mod compat;
+mod compat_color;
+mod compat_tiff;
 pub mod exr;
 pub mod icc;
 pub mod imageio;
 pub mod jpeg;
+pub mod png_gamma;
 pub mod raster;
 pub mod sequence;
 pub mod svg;
+mod svg_broken;
 
 use crate::error::{MediaError, Result};
 use crate::frame::{
@@ -41,6 +45,7 @@ pub enum ImageBackend {
     OpenExr,
     Ffmpeg,
     Resvg,
+    CrabbyAvif,
 }
 
 /// Formats recognized from the first bytes of a file.
@@ -175,6 +180,11 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         // profile. ImageIO converts those through their profile.
         ImageFormat::Tiff if !matches!(raster::tiff_photometric(path)?, Some(0..=2)) => {
             imageio::read_frame(path, 0, pool, format)
+        }
+        // Gray+alpha TIFF is a valid app import that image's TIFF adapter
+        // cannot expand. ImageIO preserves its source precision and alpha.
+        ImageFormat::Tiff => {
+            raster::read(path, pool, format).or_else(|_| imageio::read_frame(path, 0, pool, format))
         }
         _ => raster::read(path, pool, format),
     }

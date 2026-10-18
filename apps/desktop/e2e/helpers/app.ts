@@ -113,7 +113,7 @@ async function startElectron(
   // Codex and some Node launchers set this for their own Electron subprocesses.
   // Passing it through makes Electron run as plain Node, which rejects the
   // Chromium debugging flag Playwright needs before our app can even start.
-  delete launchEnv.ELECTRON_RUN_AS_NODE;
+  delete (launchEnv as NodeJS.ProcessEnv).ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({
     args: ['.'],
     cwd: repoRoot,
