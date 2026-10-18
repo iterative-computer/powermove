@@ -267,8 +267,12 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
             })?;
         }
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        if pm_media::image::compat::applies(&still) {
-            let bitmap = pm_media::image::compat::bitmap(&still, &pool)
+        if pm_media::image::avif_compat::applies(&still) {
+            let bitmap = pm_media::image::avif_compat::read(path, &still, &pool)
+                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
+            image_color(&bitmap).map(|_| ())
+        } else if pm_media::image::compat::applies(&still) {
+            let bitmap = pm_media::image::compat::bitmap_at(path, &still, &pool)
                 .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
             image_color(&bitmap).map(|_| ())
         } else {
@@ -847,7 +851,7 @@ impl MediaCache {
             still = pm_media::image::avif_compat::read(path, &still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
-            still = pm_media::image::compat::bitmap(&still, &self.pool)
+            still = pm_media::image::compat::bitmap_at(path, &still, &self.pool)
                 .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         }
         let color = match interpret {

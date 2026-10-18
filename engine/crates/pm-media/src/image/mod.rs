@@ -13,6 +13,8 @@
 pub mod animation;
 pub mod avif_compat;
 pub mod compat;
+mod compat_color;
+mod compat_palette;
 pub mod exr;
 pub mod icc;
 pub mod imageio;

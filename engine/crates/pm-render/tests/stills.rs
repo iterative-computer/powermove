@@ -87,15 +87,11 @@ fn untested_still_classes_are_unsupported() {
     let d = dir().join("other");
     std::fs::create_dir_all(&d).unwrap();
     let cases: &[(&str, &[&str], &str)] = &[
-        ("a.bmp", &[], "BMP stills"),
-        ("a.gif", &[], "GIF stills"),
-        ("a.ico", &["-c:v", "bmp", "-f", "ico"], "ICO stills"),
         (
             "a.exr",
             &["-c:v", "exr", "-pix_fmt", "gbrpf32le"],
             "floating-point stills",
         ),
-        ("mono.png", &["-pix_fmt", "monob"], "1-bit PNG stills"),
         ("a.dpx", &["-pix_fmt", "gbrp10le"], ""),
     ];
     for (name, args, message) in cases {
@@ -105,15 +101,15 @@ fn untested_still_classes_are_unsupported() {
         assert!(got.contains(message), "{name}: {got}");
         eprintln!("{name:<12} unsupported: {got}");
     }
-    // PNG gamma and chromaticity chunks Chromium honors and pm-media does
-    // not: unsupported unless an sRGB chunk overrides them.
+    // Gamma-only PNG uses the measured compatibility transform; independent
+    // chromaticity/HDR metadata is still a distinct class.
     let plain = d.join("plain.png");
     ffmpeg(&plain, &["-pix_fmt", "rgb24"]);
     assert_eq!(probe_image(&plain), Ok(()));
     let bytes = std::fs::read(&plain).unwrap();
     let gama = d.join("gama.png");
     std::fs::write(&gama, with_chunk(&bytes, b"gAMA", &55555u32.to_be_bytes())).unwrap();
-    assert!(unsupported(&gama).contains("gAMA"));
+    assert_eq!(probe_image(&gama), Ok(()));
     let overridden = d.join("gama-srgb.png");
     let srgb = with_chunk(&bytes, b"sRGB", &[0]);
     std::fs::write(
@@ -328,10 +324,9 @@ fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
 /// The compatibility bitmap consumes the decoder's applied orientation
 /// where Chromium applies it (PNG eXIf before the image data, JPEG, TIFF,
 /// HEIF; compared in `e2e/native-still-orientation-parity.spec.ts`). WebP
-/// EXIF is ignored, as Blink ignores it. Late PNG eXIf is still gated when
-/// the decoder did not apply it.
+/// EXIF and post-IDAT PNG eXIf are ignored, as Blink ignores them.
 #[test]
-fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
+fn decoded_orientation_and_ignored_late_exif_match_blink() {
     let d = dir().join("oriented");
     std::fs::create_dir_all(&d).unwrap();
     let mut cases: Vec<PathBuf> = Vec::new();
@@ -433,9 +428,10 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
             _ => pm_media::image::ImageFormat::Heif,
         };
         let t = pm_render::stills::container_transform(p, format);
-        assert!(
-            matches!(t, Ok(Some(_))),
-            "{}: header parse found {t:?}",
+        assert_eq!(
+            t.unwrap().is_some(),
+            p.file_name().unwrap() != "exif6-late.png",
+            "{}: pre-IDAT transforms only",
             p.display()
         );
     }
@@ -448,15 +444,16 @@ fn decoded_orientation_is_drawn_and_unapplied_late_exif_stays_gated() {
     }
 
     for p in &cases {
-        if p.file_name().unwrap() == "exif6-late.png" {
-            assert!(unsupported(p).contains("oriented stills"));
-        } else {
-            assert_eq!(probe_image(p), Ok(()), "{}", p.display());
-        }
+        assert_eq!(probe_image(p), Ok(()), "{}", p.display());
     }
     // Applied orientations are pixel permutations of the unoriented
     // bitmap (so is Chromium's oriented ImageBitmap; media.md).
     let plain_rgba = compat_rgba8(&plain);
+    assert_eq!(
+        compat_rgba8(&d.join("exif6-late.png")),
+        plain_rgba,
+        "late EXIF is ignored"
+    );
     for (name, o) in [("exif6.png", 6u8), ("exif2.png", 2)] {
         let expect = orient_rgba8(&plain_rgba, 96, 54, o);
         assert!(compat_rgba8(&d.join(name)) == expect, "{name}");
@@ -730,7 +727,7 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
 fn compat_rgba8(path: &Path) -> Vec<u8> {
     let pool = pm_media::pool::FramePool::new(0);
     let original = pm_media::image::read(path, &pool).unwrap();
-    let bitmap = pm_media::image::compat::bitmap(&original, &pool).unwrap();
+    let bitmap = pm_media::image::compat::bitmap_at(path, &original, &pool).unwrap();
     bitmap
         .frame
         .with_planes(|planes| {
@@ -893,7 +890,7 @@ fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
 /// legacy renderer (`render/still-photo-gray-jpg`); progressive gray is
 /// routed.
 #[test]
-fn progressive_gray_jpeg_is_unsupported() {
+fn progressive_gray_jpeg_is_supported() {
     let d = dir().join("gray-jpeg");
     std::fs::create_dir_all(&d).unwrap();
     let gray_png = d.join("gray.png");
@@ -916,10 +913,73 @@ fn progressive_gray_jpeg_is_unsupported() {
         bytes.windows(2).any(|w| w == [0xFF, 0xC2]),
         "ImageIO wrote no progressive frame header"
     );
-    let got = unsupported(&progressive);
-    assert!(got.contains("progressive gray"), "{got}");
-    eprintln!("progressive gray JPEG unsupported: {got}");
+    assert_eq!(probe_image(&progressive), Ok(()));
     std::fs::remove_dir_all(&d).ok();
+}
+
+/// Full app comparisons of these classes live in the explicit
+/// svgstills-parity harness; keep the capability and source precision
+/// boundaries covered without depending on private fixtures.
+#[test]
+fn additional_integer_decoder_classes_are_drawn() {
+    let d = dir().join("integer-classes");
+    std::fs::create_dir_all(&d).unwrap();
+    for (name, args) in [
+        ("a.bmp", vec!["-pix_fmt", "bgr24"]),
+        ("a.ico", vec!["-vf", "scale=64:64"]),
+        ("a.gif", vec!["-pix_fmt", "pal8"]),
+    ] {
+        let path = d.join(name);
+        ffmpeg(&path, &args);
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+    }
+    for bits in [png::BitDepth::One, png::BitDepth::Two, png::BitDepth::Four] {
+        let path = d.join(format!("gray-{}.png", bits as u8));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 8, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(bits);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![0x55; bits as usize * 2])
+            .unwrap();
+        assert_eq!(probe_image(&path), Ok(()));
+    }
+    let avif = d.join("ten-bit.avif");
+    ffmpeg(
+        &avif,
+        &[
+            "-vf",
+            "setparams=color_primaries=1:color_trc=13:colorspace=1,format=yuv420p10le",
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            "10",
+            "-crf",
+            "25",
+        ],
+    );
+    assert_eq!(probe_image(&avif), Ok(()));
+    let original = pm_media::image::read(&avif, &pm_media::pool::FramePool::new(0)).unwrap();
+    assert!(original.bit_depth > 8, "native precision is retained");
+    assert_eq!(avif_compat_rgba8(&avif).len(), 96 * 54 * 4);
+    let palette = d.join("palette.tiff");
+    ffmpeg(&palette, &["-pix_fmt", "pal8"]);
+    assert_eq!(probe_image(&palette), Ok(()));
+    let converted = d.join("palette.png");
+    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    assert!(
+        Command::new(bin)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&palette)
+            .args(["-frames:v", "1", "-c:v", "png"])
+            .arg(&converted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(compat_rgba8(&palette), compat_rgba8(&converted));
+    std::fs::remove_dir_all(d).unwrap();
 }
 
 #[test]
@@ -963,10 +1023,10 @@ fn integer_and_alpha_tiff_bitmaps_match_the_shipped_png_conversion() {
     std::fs::remove_dir_all(d).unwrap();
 }
 
-/// The extra alpha-ramp app capture fails the unchanged 2D bar. Keep that
-/// combination explicit without excluding opaque RGBA files from ICC support.
+/// The app alpha-ramp references are matched by quantizing source-space
+/// premultiplied pixels and delaying gamut clipping until the final store.
 #[test]
-fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
+fn wide_gamut_alpha_and_opaque_rgba_are_supported() {
     let d = dir().join("icc-alpha");
     std::fs::create_dir_all(&d).unwrap();
     for (label, alpha) in [("opaque", 255u8), ("translucent", 128)] {
@@ -977,7 +1037,7 @@ fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
         encoder
             .write_header()
             .unwrap()
-            .write_image_data(&[192, 96, 32, alpha].repeat(16))
+            .write_image_data(&[255, 0, 0, alpha].repeat(16))
             .unwrap();
         for space in ["p3", "adobe"] {
             for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
@@ -991,10 +1051,14 @@ fn wide_gamut_alpha_keeps_its_gate_but_opaque_rgba_is_supported() {
                         ..Default::default()
                     },
                 );
-                if alpha == 255 {
-                    assert_eq!(probe_image(&path), Ok(()));
-                } else {
-                    assert!(unsupported(&path).contains("wide-gamut ICC stills with alpha"));
+                assert_eq!(probe_image(&path), Ok(()));
+                if alpha != 255 {
+                    let px = compat_rgba8(&path);
+                    assert!(
+                        px.chunks_exact(4).all(|p| p[0] > p[3] && p[3] == alpha),
+                        "{}: gamut clips only after premultiplication",
+                        path.display()
+                    );
                 }
             }
         }

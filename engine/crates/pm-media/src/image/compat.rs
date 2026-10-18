@@ -10,8 +10,10 @@ use pm_protocol::color::{AlphaMode, Transfer};
 
 /// Native pixels for which the decoder's old 8-bit surface is reproduced.
 pub fn applies(still: &StillImage) -> bool {
-    !still.float
-        && !unmatched_icc_alpha(still)
+    (!still.float
+        || (still.format == ImageFormat::Tiff
+            && still.bit_depth == 32
+            && matches!(still.color.icc_class, None | Some(IccClass::Srgb))))
         && matches!(
             still.format,
             ImageFormat::Png
@@ -19,53 +21,47 @@ pub fn applies(still: &StillImage) -> bool {
                 | ImageFormat::Jpeg
                 | ImageFormat::Heif
                 | ImageFormat::Tiff
+                | ImageFormat::Bmp
+                | ImageFormat::Ico
+                | ImageFormat::Gif
         )
         && (matches!(
             still.color.icc_class,
             None | Some(
-                IccClass::Srgb | IccClass::GraySrgb | IccClass::DisplayP3 | IccClass::Other
+                IccClass::Srgb
+                    | IccClass::GraySrgb
+                    | IccClass::DisplayP3
+                    | IccClass::Other
+                    | IccClass::ConvertedToSrgb
             )
         ))
-}
-
-/// Wide-gamut translucent ImageBitmaps still miss the legacy alpha class.
-/// An alpha channel containing only full coverage is an opaque bitmap and
-/// remains in the measured ICC class, regardless of the container's flags.
-pub fn unmatched_icc_alpha(still: &StillImage) -> bool {
-    if !matches!(
-        still.color.icc_class,
-        Some(IccClass::DisplayP3 | IccClass::Other)
-    ) || still.color.alpha == AlphaMode::Opaque
-    {
-        return false;
-    }
-    still
-        .frame
-        .with_planes(|planes| {
-            let p = &planes[0];
-            for y in 0..p.desc.height {
-                for x in 0..p.desc.width {
-                    let ptr = unsafe { p.ptr.add(y * p.stride + x * p.desc.format.bytes()) };
-                    let opaque = match p.desc.format {
-                        PlaneFormat::Rgba8 => unsafe { *ptr.add(3) == 255 },
-                        PlaneFormat::Rgba16 => unsafe {
-                            std::ptr::read_unaligned(ptr.add(6).cast::<u16>()) == u16::MAX
-                        },
-                        _ => false,
-                    };
-                    if !opaque {
-                        return true;
-                    }
-                }
-            }
-            false
-        })
-        .unwrap_or(true)
 }
 
 /// Build a level-1 surface for a class accepted by [`applies`].
 /// Calling this on an unmeasured class does not establish pixel parity.
 pub fn bitmap(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
+    bitmap_impl(still, pool, None)
+}
+
+/// As [`bitmap`], including color information PNG decoders do not expose
+/// through the generic image trait. This changes only the level-1 bitmap.
+pub fn bitmap_at(
+    path: &std::path::Path,
+    still: &StillImage,
+    pool: &FramePool,
+) -> Result<StillImage> {
+    if still.format == ImageFormat::Tiff && super::raster::tiff_photometric(path)? == Some(3) {
+        return bitmap(&super::compat_palette::read(path, still, pool)?, pool);
+    }
+    let png = if still.format == ImageFormat::Png {
+        png_color(path)?
+    } else {
+        None
+    };
+    bitmap_impl(still, pool, png)
+}
+
+fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> Result<StillImage> {
     let (w, h) = (still.frame.format.width, still.frame.format.height);
     let mut rgba = still.frame.with_planes(|planes| {
         let p = &planes[0];
@@ -86,6 +82,13 @@ pub fn bitmap(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
                             out.push((v >> 8) as u8);
                         }
                     }
+                    PlaneFormat::Rgba32Float if still.format == ImageFormat::Tiff => {
+                        for c in 0..4 {
+                            let v =
+                                unsafe { std::ptr::read_unaligned(ptr.add(c * 4).cast::<f32>()) };
+                            out.push(((v * 65535.0).round().clamp(0.0, 65535.0) as u16 >> 8) as u8);
+                        }
+                    }
                     _ => {
                         return Err(MediaError::invalid(
                             "compatibility bitmap needs integer RGBA",
@@ -96,46 +99,91 @@ pub fn bitmap(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
         }
         Ok(out)
     })??;
-    let transformed = matches!(
-        still.color.icc_class,
-        Some(IccClass::DisplayP3 | IccClass::Other)
-    );
+    let transformed = png.is_some()
+        || matches!(
+            still.color.icc_class,
+            Some(IccClass::DisplayP3 | IccClass::Other)
+        );
     let mut premultiplied = still.color.alpha == AlphaMode::Premultiplied;
-    if transformed && let Some(profile) = &still.color.icc {
+    if transformed {
         use crate::sys::skcms as s;
-        let mut padded = profile.clone();
+        let profile = still.color.icc.as_deref().unwrap_or_default();
+        let mut padded = profile.to_vec();
         padded.extend_from_slice(&[0; 4]);
         // skcms retains pointers into the padded profile only for this call.
         unsafe {
             let mut source: s::skcms_ICCProfile = std::mem::zeroed();
-            if s::skcms_ParseWithA2BPriority(
-                padded.as_ptr().cast(),
-                profile.len(),
-                [0, 1].as_ptr(),
-                2,
-                &mut source,
-            ) {
-                let alpha = if premultiplied {
-                    s::skcms_AlphaFormat_PremulAsEncoded
-                } else {
-                    s::skcms_AlphaFormat_Unpremul
-                };
-                if !s::skcms_Transform(
-                    rgba.as_ptr().cast(),
-                    s::skcms_PixelFormat_RGBA_8888,
-                    alpha,
-                    &source,
-                    rgba.as_mut_ptr().cast(),
-                    s::skcms_PixelFormat_RGBA_8888,
-                    s::skcms_AlphaFormat_Unpremul,
-                    s::skcms_sRGB_profile(),
-                    w * h,
-                ) {
+            let parsed = if let Some(color) = png {
+                source = *s::skcms_sRGB_profile();
+                match color {
+                    PngColor::Gamma(gamma) => {
+                        for curve in &mut source.trc {
+                            curve.__bindgen_anon_1 = s::skcms_Curve__bindgen_ty_1 {
+                                alias_of_table_entries: 0,
+                                parametric: s::skcms_TransferFunction {
+                                    g: 1.0 / gamma,
+                                    a: 1.0,
+                                    ..Default::default()
+                                },
+                            };
+                        }
+                    }
+                    PngColor::DisplayP3 => {
+                        source.toXYZD50.vals = [
+                            [0.515102, 0.291965, 0.157153],
+                            [0.241182, 0.692236, 0.0665819],
+                            [-0.00104941, 0.0418818, 0.784378],
+                        ]
+                    }
+                }
+                true
+            } else {
+                s::skcms_ParseWithA2BPriority(
+                    padded.as_ptr().cast(),
+                    profile.len(),
+                    [0, 1].as_ptr(),
+                    2,
+                    &mut source,
+                )
+            };
+            if parsed {
+                canonicalize_trc(&mut source);
+                // ImageBitmap first quantizes a premultiplied source-space
+                // bitmap. Skia readPixels then unpremultiplies, converts color
+                // without clipping, and premultiplies before the final store.
+                // RGBA8 skcms output clamps unpremultiplied RGB internally;
+                // use float output so out-of-gamut RGB survives until after
+                // multiplication. Valid legacy RGB can exceed its alpha.
+                if !premultiplied && still.color.alpha != AlphaMode::Opaque {
+                    for p in rgba.chunks_exact_mut(4) {
+                        let a = u32::from(p[3]);
+                        for c in &mut p[..3] {
+                            *c = ((u32::from(*c) * a * 257 + 257 * 128) >> 16) as u8;
+                        }
+                    }
+                }
+                let mut converted = vec![0.0f32; rgba.len()];
+                if !super::compat_color::transform(&source, &rgba, &mut converted)
+                    && !s::skcms_Transform(
+                        rgba.as_ptr().cast(),
+                        s::skcms_PixelFormat_RGBA_8888,
+                        s::skcms_AlphaFormat_PremulAsEncoded,
+                        &source,
+                        converted.as_mut_ptr().cast(),
+                        s::skcms_PixelFormat_RGBA_ffff,
+                        s::skcms_AlphaFormat_PremulAsEncoded,
+                        s::skcms_sRGB_profile(),
+                        w * h,
+                    )
+                {
                     return Err(MediaError::invalid(
                         "ICC cannot transform the compatibility bitmap",
                     ));
                 }
-                premultiplied = false;
+                for (byte, value) in rgba.iter_mut().zip(converted) {
+                    *byte = (value * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+                }
+                premultiplied = true;
             }
             // Blink ignores an invalid embedded profile and reads sRGB.
         }
@@ -188,6 +236,125 @@ pub fn bitmap(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
         float: false,
         ..still.clone()
     })
+}
+
+/// PNG's `gAMA`-only profile selection from SkPngRustCodec. Higher
+/// precedence color chunks and cHRM are handled by their measured classes.
+#[derive(Clone, Copy)]
+enum PngColor {
+    Gamma(f32),
+    DisplayP3,
+}
+
+fn png_color(path: &std::path::Path) -> Result<Option<PngColor>> {
+    use std::io::Read;
+    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut signature = [0; 8];
+    file.read_exact(&mut signature)?;
+    if signature != *b"\x89PNG\r\n\x1a\n" {
+        return Err(MediaError::invalid("PNG signature"));
+    }
+    let mut gamma = None;
+    let mut overridden = false;
+    let mut p3 = false;
+    loop {
+        let mut header = [0; 8];
+        file.read_exact(&mut header)?;
+        let len = u32::from_be_bytes(header[..4].try_into().unwrap());
+        match &header[4..] {
+            b"IDAT" | b"IEND" => break,
+            b"sRGB" | b"iCCP" | b"cHRM" => overridden = true,
+            b"cICP" if len == 4 => {
+                let mut b = [0; 4];
+                file.read_exact(&mut b)?;
+                p3 = b == [12, 13, 0, 1];
+                overridden = true;
+                file.seek_relative(4)?;
+                continue;
+            }
+            b"gAMA" if len == 4 => {
+                let mut b = [0; 4];
+                file.read_exact(&mut b)?;
+                gamma = Some(u32::from_be_bytes(b) as f32 / 100000.0);
+                file.seek_relative(4)?;
+                continue;
+            }
+            _ => {}
+        }
+        file.seek_relative(i64::from(len) + 4)?;
+    }
+    Ok(if p3 {
+        Some(PngColor::DisplayP3)
+    } else if overridden {
+        None
+    } else {
+        gamma
+            .filter(|g| *g > 0.0 && !(0.95 < *g * 2.2 && *g * 2.2 < 1.05))
+            .map(PngColor::Gamma)
+    })
+}
+
+/// `SkColorSpace::Make` / `MakeRGB` canonicalize near-sRGB and gamma-2.2
+/// curves before readPixels constructs its color transform. Profile curves
+/// use 16.16 coefficients; applying those literally changes byte rounding.
+unsafe fn canonicalize_trc(profile: &mut crate::sys::skcms::skcms_ICCProfile) {
+    use crate::sys::skcms as s;
+    unsafe {
+        if !profile.has_trc || profile.has_A2B {
+            return;
+        }
+        let values = |t: s::skcms_TransferFunction| [t.g, t.a, t.b, t.c, t.d, t.e, t.f];
+        let srgb = *s::skcms_sRGB_TransferFunction();
+        let parametric = profile
+            .trc
+            .iter()
+            .all(|c| c.__bindgen_anon_2.table_entries == 0);
+        let replacement = if parametric {
+            let t = profile.trc[0].__bindgen_anon_1.parametric;
+            if !profile
+                .trc
+                .iter()
+                .all(|c| values(c.__bindgen_anon_1.parametric) == values(t))
+            {
+                return;
+            }
+            if values(t)
+                .iter()
+                .zip(values(srgb))
+                .all(|(a, b)| (a - b).abs() < 0.001)
+            {
+                Some(srgb)
+            } else if (t.a - 1.0).abs() < 0.001
+                && t.b.abs() < 0.001
+                && t.e.abs() < 0.001
+                && (t.g - 2.2).abs() < 0.001
+                && t.d <= 0.0
+            {
+                Some(s::skcms_TransferFunction {
+                    g: 2.2,
+                    a: 1.0,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        } else if s::skcms_TRCs_AreApproximateInverse(
+            profile,
+            s::skcms_sRGB_Inverse_TransferFunction(),
+        ) {
+            Some(srgb)
+        } else {
+            None
+        };
+        if let Some(t) = replacement {
+            for c in &mut profile.trc {
+                c.__bindgen_anon_1 = s::skcms_Curve__bindgen_ty_1 {
+                    alias_of_table_entries: 0,
+                    parametric: t,
+                };
+            }
+        }
+    }
 }
 
 /// Chromium's software I420 video upload uses libyuv's nearest-chroma,

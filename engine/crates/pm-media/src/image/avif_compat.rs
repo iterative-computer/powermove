@@ -10,11 +10,14 @@ use pm_protocol::color::{AlphaMode, Transfer};
 use std::path::Path;
 
 /// Whether the decoded facts are in the class this module reproduces
-/// (8-bit, sRGB or untagged). [`structure`] adds the container facts.
+/// (8/10-bit SDR, sRGB or untagged; ImageIO exposes 10-bit as 16-bit sRGB). [`unmeasured`] adds the container facts.
 pub fn applies(still: &StillImage) -> bool {
     still.format == ImageFormat::Avif
-        && still.bit_depth == 8
-        && matches!(still.color.icc_class, None | Some(IccClass::Srgb))
+        && matches!(still.bit_depth, 8 | 16)
+        && matches!(
+            still.color.icc_class,
+            None | Some(IccClass::Srgb | IccClass::ConvertedToSrgb)
+        )
 }
 
 struct Decoder(*mut a::avifDecoder);
@@ -127,7 +130,7 @@ fn colorimetry(image: &a::avifImage) -> Option<String> {
     (!srgb_cicp(p, t)).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
 }
 
-/// Why an AVIF is outside the class compared with Chromium (8-bit 4:2:0,
+/// Why an AVIF is outside the class compared with Chromium (8/10-bit 4:2:0,
 /// full or limited range, opaque or with alpha, any `irot`/`imir`/`clap`,
 /// no ICC profile, and a CICP color description Blink reads as sRGB
 /// ([`srgb_cicp`]); `tests/stills.rs` and
@@ -141,7 +144,7 @@ pub fn unmeasured(path: &Path) -> Result<Option<String>> {
             return Ok(Some(what));
         }
         Ok(match image.yuvFormat {
-            a::AVIF_PIXEL_FORMAT_YUV420 if image.depth == 8 => None,
+            a::AVIF_PIXEL_FORMAT_YUV420 if matches!(image.depth, 8 | 10) => None,
             a::AVIF_PIXEL_FORMAT_YUV420 => Some(format!("{}-bit AVIF stills", image.depth)),
             a::AVIF_PIXEL_FORMAT_YUV444 => Some("AVIF stills with 4:4:4 chroma".into()),
             a::AVIF_PIXEL_FORMAT_YUV422 => Some("AVIF stills with 4:2:2 chroma".into()),
@@ -239,6 +242,8 @@ pub fn read(path: &Path, original: &StillImage, pool: &FramePool) -> Result<Stil
                 chromaticities: None,
             },
             orientation: o,
+            bit_depth: 8,
+            float: false,
             ..original.clone()
         })
     }

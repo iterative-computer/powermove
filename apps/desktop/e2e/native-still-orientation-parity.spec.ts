@@ -164,9 +164,8 @@ async function fixtures(session: LaunchedApp, dir: string): Promise<Case[]> {
   for (const o of [2, 3, 4, 5, 6, 7, 8]) {
     await writeFile(out(`png-exif${o}.png`), pngWithExif(png, o)); add(out(`png-exif${o}.png`), true);
   }
-  // Chromium reads eXIf only before IDAT; the native decoder does too, but
-  // this structure stays routed until it is compared.
-  await writeFile(out('png-exif6-late.png'), pngWithExif(png, 6, true)); add(out('png-exif6-late.png'), false);
+  // Both decoders ignore eXIf after IDAT; keep the existing unrotated look.
+  await writeFile(out('png-exif6-late.png'), pngWithExif(png, 6, true)); add(out('png-exif6-late.png'), true);
   const alphaPng = await readFile(src.alpha);
   await writeFile(out('png-alpha-exif6.png'), pngWithExif(alphaPng, 6)); add(out('png-alpha-exif6.png'), true);
   for (const o of [2, 3, 4, 5, 6, 7, 8]) add(imageio(src.png, `jpeg-o${o}.jpg`, 'public.jpeg', o, 'srgb'), true);
