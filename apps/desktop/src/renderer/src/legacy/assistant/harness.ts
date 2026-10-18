@@ -15,6 +15,7 @@ import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
 import { validateEffect } from '../../kernel/glsl';
+import { effectSnapshot } from '../../kernel/definition-snapshots';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { TRANSCRIPTION_MODEL_MISSING } from '../../../../shared/transcription';
@@ -597,6 +598,14 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     if (observed) assertTransactionProject(observed);
     PM.selectLayers([...new Set(ids)], request.arguments.add === true);
     return { ok: true, content: [toolText({ selection: clone(PM.sel) })], revision: currentRevision() };
+  }
+  if (request.tool === '__validate_effect_snapshot') {
+    // validate_effect through the engine (main/agent-tools/bridge.ts): the
+    // kernel's registration validator, then the definition snapshot the
+    // engine compiles, wrapped exactly as a registration would be.
+    const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
+    const snapshot = effectSnapshot(definition, 'local', { effect: PM.GLSL_PRE, transition: PM.TRANSITION_PRE, layer: PM.SHADER_HEADER });
+    return { ok: true, content: [toolText({ id: definition.id, parameterCount: definition.params.length, snapshot })], revision: currentRevision() };
   }
   if (request.tool === 'validate_effect') {
     const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);

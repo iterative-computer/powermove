@@ -471,4 +471,15 @@ describe('definitions in the job engine (contract 10)', () => {
     expect(push!.body).toMatchObject({ generation: 1, full: true, upserts: [{ id: 'acme.fork' }] });
     expect(engine.sent.indexOf(push!)).toBeLessThan(engine.sent.indexOf(engine.of('submitJob')[0]!));
   });
+
+  it('compile definitions on a scratch session and give back their failures (validate_effect)', async () => {
+    const engine = new FakeEngine();
+    const failure = { code: 'shaderCompile', scope: { kind: 'definition', definition: 'acme.glow' }, message: 'no', retry: { kind: 'afterUserAction' }, detail: null };
+    engine.definitions = (body) => ({ type: 'definitionsApplied', generation: (body as any).generation, failures: [failure] } as any);
+    const jobs = new AgentJobs({ engine });
+    await expect(jobs.compileDefinitions([snapshot('acme.glow')])).resolves.toEqual([failure]);
+    expect(engine.of('openSession')[0]!.body).toMatchObject({ role: 'job' });
+    expect(engine.of('pushDefinitions')[0]!.body).toMatchObject({ generation: 1, full: true, upserts: [{ id: 'acme.glow' }], removals: [] });
+    expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
+  });
 });

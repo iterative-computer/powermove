@@ -56,6 +56,7 @@ import {
 } from '../../shared/delivery';
 import type {
   AgentFrameOutcome,
+  DefinitionsApplied,
   DefinitionsUpdate,
   EngineError,
   EngineProcess,
@@ -732,6 +733,29 @@ export class AgentJobs {
       if (answer.type !== 'definitionsApplied' || answer.generation !== update.generation) {
         throw new AgentJobError('The job engine did not acknowledge the definitions.');
       }
+    }
+  }
+
+  /**
+   * Compiles definitions through the job engine's GLSL pipeline (and their
+   * GPU pipelines) without registering them anywhere: a scratch session
+   * receives them and its acknowledgment carries their failures
+   * (`validate_effect`).
+   */
+  async compileDefinitions(snapshots: DefinitionsUpdate['upserts']): Promise<DefinitionsApplied['failures']> {
+    const session = await this.openSession(`validate-${randomUUID()}`, 'job');
+    try {
+      let answer: Response;
+      try {
+        answer = await this.options.engine.request('job', { type: 'pushDefinitions', generation: 1, full: true, upserts: snapshots, removals: [] }, session);
+      } catch (error) {
+        const e = remote(error);
+        throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
+      }
+      if (answer.type !== 'definitionsApplied') throw new AgentJobError('The job engine did not compile the definition.');
+      return answer.failures;
+    } finally {
+      await this.closeSession(session);
     }
   }
 
