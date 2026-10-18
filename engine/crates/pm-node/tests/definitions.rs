@@ -5,6 +5,10 @@
 //! definition's program and its watchdog record, so an effect the watchdog
 //! turned off stays off; another view drawing in between does not reset it.
 //! A definition registered again (a delta's upsert) starts over.
+//!
+//! The budget records only in production (today's compositor never turns a
+//! program off, amendment 22) and never applies to built-ins: this test
+//! enforces it on view A for a user override of `blur` by id.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,10 +116,16 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     let headless = Renderer::headless().unwrap();
     let mut composer = Composer::new(headless.device(), headless.queue());
     let blur_ms = Arc::new(AtomicU64::new(300));
-    let builtins = Arc::new(pm_render::builtin_definitions());
+    let builtins = Arc::new({
+        let mut set = pm_render::builtin_definitions();
+        for d in set.definitions.iter_mut().filter(|d| d.id.as_str() == "blur") {
+            d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+        }
+        set
+    });
     let doc = blurred();
     let plain = document(json!([]));
-    // View A draws the blur; a 1 ns budget makes it overrun.
+    // View A draws the blur; an enforced 250 ms budget makes it overrun.
     let a = 1u64;
     let b = 2u64;
     composer.use_definitions(a, Some(&(builtins.clone(), 1)), &[]);
@@ -125,6 +135,11 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         .effects_mut()
         .watchdog
         .set_timing_source(Some(blur_takes(blur_ms.clone())));
+    composer
+        .renderer()
+        .effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
     // Judged at the first frame's completion: 300 ms against 250.
     let first = render(&mut composer, &doc);
     let reports = composer.renderer().watchdog_reports(true);
