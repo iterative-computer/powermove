@@ -3033,7 +3033,11 @@ fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
 
 fn assert_sixteen_voice_edit_starts(cold: bool) {
     let _load = stress_enabled().then(CpuContention::start);
-    let dir = temp_dir("a8-level-start");
+    let dir = temp_dir(if cold {
+        "a8-cold-start"
+    } else {
+        "a8-level-start"
+    });
     let file = dir.join("tone.wav");
     write_wav(
         &file,
