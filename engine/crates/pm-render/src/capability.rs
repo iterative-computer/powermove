@@ -633,9 +633,22 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Validate resolved bytes first: unreadable SVGs are named layer
-        // failures at execution, even while valid level 1 SVGs retain
-        // their unresolved raster-parity gate.
+        // Level 1 SVG images (today's `<img>` per size bucket) are routed
+        // without reading them: the bytes Chromium accepts are not
+        // usvg's, so a parse here could only misreport them.
+        if !crate::vector::level2(layer) {
+            // Offline media is a named layer failure at execution.
+            if let Some(assets) = assets
+                && assets
+                    .path(&asset_id, Some(record))
+                    .is_none_or(|p| std::fs::metadata(p).is_err())
+            {
+                return;
+            }
+            add(layer, Feature::SvgImage);
+            return;
+        }
+        // Level 2: unreadable SVGs are named layer failures at execution.
         let has_text = match assets {
             Some(assets) => {
                 let Some(path) = assets.path(&asset_id, Some(record)) else {
@@ -648,7 +661,7 @@ fn check_media(
             }
             None => false,
         };
-        if !crate::vector::level2(layer) || has_text {
+        if has_text {
             add(layer, Feature::SvgImage);
         }
         return;

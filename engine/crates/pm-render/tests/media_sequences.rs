@@ -70,20 +70,24 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
     let dir = std::env::temp_dir().join(format!("pm-render-media-errors-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bytes");
-    for (kind, format, sequence) in [
-        ("image", "png", false),
-        ("image", "svg", false),
-        ("video", "webm", false),
-        ("video", "gif", true),
+    // (kind, format, sequence, compat level)
+    for (kind, format, sequence, level) in [
+        ("image", "png", false, 1),
+        ("image", "svg", false, 1),
+        ("image", "svg", false, 2),
+        ("video", "webm", false, 1),
+        ("video", "gif", true, 1),
     ] {
-        doc["layers"] = json!([layer(
+        let mut source = layer(
             "source",
             kind,
             json!({"asset":"clip", "w":16,"h":16}),
             8.0,
             8.0,
-            1.0
-        )]);
+            1.0,
+        );
+        source["compat"] = json!(level);
+        doc["layers"] = json!([source]);
         asset(&mut doc, "clip", kind, format, 16, 16, 1.0);
         if sequence {
             doc["assets"]["clip"]["imageSequence"] = json!({"fps":10,"frames":3});
@@ -101,9 +105,21 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
             }
             let document = load(&doc);
             let unsupported = renderer.unsupported_with_media(&document, "Ptest-root", &resolver);
+            if format == "svg" && level == 1 && corrupt != 0 {
+                // Level 1 SVG images are routed without being parsed:
+                // Chromium's `<img>` decides what their bytes show.
+                assert_eq!(
+                    unsupported
+                        .iter()
+                        .map(|u| u.feature.clone())
+                        .collect::<Vec<_>>(),
+                    vec![Feature::SvgImage]
+                );
+                continue;
+            }
             assert!(
                 unsupported.is_empty(),
-                "{kind} corrupt={corrupt}: {unsupported:?}"
+                "{kind} level {level} corrupt={corrupt}: {unsupported:?}"
             );
             let frame = renderer
                 .render(

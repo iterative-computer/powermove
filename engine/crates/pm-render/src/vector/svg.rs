@@ -56,6 +56,8 @@ pub fn document(path: &Path) -> Result<(Arc<SvgDocument>, Stamp), String> {
         return Ok((doc, stamp));
     }
     let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // usvg reads UTF-8 only; Chromium honors the declared encoding.
+    let data = pm_media::image::svg::utf8_source(&data);
     let doc = Arc::new(SvgDocument::parse(&data).map_err(|e| e.to_string())?);
     docs.retain(|c| c.path != path);
     if docs.len() >= MAX_DOCUMENTS {

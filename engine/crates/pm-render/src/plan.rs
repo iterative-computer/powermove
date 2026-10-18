@@ -1141,19 +1141,29 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
+                // Level 2 SVG images draw at output resolution
+                // (crate::vector::svg); level 1 and SVG text stay routed.
+                // A level 1 SVG is not parsed: Chromium's `<img>` accepts
+                // it, so a usvg error would not mean the file is corrupt.
+                if !crate::vector::level2(layer) {
+                    if let Err(e) = std::fs::metadata(&path) {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message: format!("{}: {e}", path.display()),
+                        });
+                    } else {
+                        b.unsupported
+                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
+                    }
+                    return Ok(None);
+                }
                 if let Err(message) = crate::vector::svg::document(&path) {
                     b.failures.push(LayerFailure {
                         composition: comp_id,
                         layer: js::layer_id(layer),
                         message,
                     });
-                    return Ok(None);
-                }
-                // Level 2 SVG images draw at output resolution
-                // (crate::vector::svg); level 1 and SVG text stay routed.
-                if !crate::vector::level2(layer) {
-                    b.unsupported
-                        .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
                     return Ok(None);
                 }
                 let sw = js::or_number(&rec("w"), 1.0);

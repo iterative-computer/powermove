@@ -53,7 +53,7 @@ impl SvgDocument {
     }
 
     pub fn from_data(data: &[u8]) -> Result<SvgDocument> {
-        let tree = usvg::Tree::from_data(data, &options())
+        let tree = usvg::Tree::from_data(&utf8_source(data), &options())
             .map_err(|e| MediaError::Image(format!("SVG: {e}")))?;
         Ok(SvgDocument { tree })
     }
@@ -107,12 +107,83 @@ impl SvgDocument {
     }
 }
 
-/// Whether a file's first bytes look like SVG (or gzipped SVGZ).
+/// The character encoding Chromium's XML parser reads an SVG image in
+/// (Blink `TextResourceDecoder` for XML with no transport charset, as a
+/// `blob:` or `file:` image has): a byte order mark; else UTF-16 recognized
+/// from `<?` in 16-bit units; else the XML declaration's `encoding` label
+/// (a UTF-16 label on 8-bit bytes means UTF-8, an unknown label is ignored);
+/// else UTF-8.
+pub fn source_encoding(data: &[u8]) -> &'static encoding_rs::Encoding {
+    use encoding_rs::{UTF_8, UTF_16BE, UTF_16LE};
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(data) {
+        return encoding;
+    }
+    if data.starts_with(b"<\0?\0") {
+        return UTF_16LE;
+    }
+    if data.starts_with(b"\0<\0?") {
+        return UTF_16BE;
+    }
+    declared_encoding(data)
+        .map(|e| {
+            if e == UTF_16LE || e == UTF_16BE {
+                UTF_8
+            } else {
+                e
+            }
+        })
+        .unwrap_or(UTF_8)
+}
+
+/// The encoding an XML declaration at the start of `data` names.
+fn declared_encoding(data: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    let head = &data[..data.len().min(1024)];
+    if !head.starts_with(b"<?xml") {
+        return None;
+    }
+    let end = head.windows(2).position(|w| w == b"?>")?;
+    let decl = &head[5..end];
+    let at = decl.windows(8).position(|w| w == b"encoding")?;
+    let rest = &decl[at + 8..];
+    let rest = &rest[rest.iter().position(|b| !b.is_ascii_whitespace())?..];
+    let rest = rest.strip_prefix(b"=")?;
+    let rest = &rest[rest.iter().position(|b| !b.is_ascii_whitespace())?..];
+    let quote = *rest.first().filter(|q| matches!(q, b'"' | b'\''))?;
+    let len = rest[1..].iter().position(|&b| b == quote)?;
+    encoding_rs::Encoding::for_label(&rest[1..1 + len])
+}
+
+/// `data` as UTF-8 for usvg: decoded from [`source_encoding`] with
+/// malformed sequences replaced (U+FFFD), as Chromium decodes before
+/// parsing, and the byte order mark removed. Gzipped data is returned as is
+/// (usvg inflates SVGZ itself).
+pub fn utf8_source(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    if data.starts_with(&[0x1f, 0x8b]) {
+        return Cow::Borrowed(data);
+    }
+    match source_encoding(data).decode_with_bom_removal(data).0 {
+        Cow::Borrowed(s) => Cow::Borrowed(s.as_bytes()),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+    }
+}
+
+/// Whether a file's first bytes look like SVG (or gzipped SVGZ), in any
+/// encoding [`source_encoding`] reads.
 pub fn sniff(head: &[u8]) -> bool {
     if head.starts_with(&[0x1f, 0x8b]) {
         return false;
     }
-    let text = String::from_utf8_lossy(head);
+    // A head may end inside a character; the lossy decode only affects
+    // the last one.
+    let text = source_encoding(head)
+        .decode_without_bom_handling(
+            head.strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+                .or_else(|| head.strip_prefix(&[0xFF, 0xFE][..]))
+                .or_else(|| head.strip_prefix(&[0xFE, 0xFF][..]))
+                .unwrap_or(head),
+        )
+        .0;
     let t = text.trim_start_matches('\u{feff}').trim_start();
     t.starts_with("<svg")
         || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
@@ -175,5 +246,63 @@ mod tests {
         assert!(sniff(b"<?xml version=\"1.0\"?>\n<svg>"));
         assert!(sniff("\u{feff}  <svg>".as_bytes()));
         assert!(!sniff(b"\x89PNG"));
+        let utf16: Vec<u8> = "<?xml version=\"1.0\"?><svg/>"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        assert!(sniff(&utf16));
+    }
+
+    /// Valid SVGs in the encodings Chromium honors parse; their text keeps
+    /// its characters.
+    #[test]
+    fn reads_declared_and_marked_encodings() {
+        use encoding_rs::{UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+        let body = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\"><title>Café</title><rect width=\"4\" height=\"2\" fill=\"red\"/></svg>";
+        let latin1 = |decl: &str| {
+            let mut v = decl.as_bytes().to_vec();
+            v.extend(body.chars().map(|c| c as u32 as u8));
+            v
+        };
+        let l1 = latin1("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n");
+        assert_eq!(source_encoding(&l1), WINDOWS_1252);
+        assert!(std::str::from_utf8(&l1).is_err());
+        assert!(
+            String::from_utf8(utf8_source(&l1).into_owned())
+                .unwrap()
+                .contains("Café")
+        );
+        assert_eq!(SvgDocument::from_data(&l1).unwrap().size(), (4.0, 2.0));
+        let single = latin1("<?xml version='1.0' encoding = 'windows-1252' ?>");
+        assert_eq!(source_encoding(&single), WINDOWS_1252);
+
+        let decl = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>";
+        let text = format!("{decl}{body}");
+        let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut be_bom = vec![0xFE, 0xFF];
+        be_bom.extend_from_slice(&be);
+        assert_eq!(source_encoding(&le), UTF_16LE);
+        assert_eq!(source_encoding(&be), UTF_16BE);
+        assert_eq!(source_encoding(&be_bom), UTF_16BE);
+        for data in [&le, &be, &be_bom] {
+            assert_eq!(SvgDocument::from_data(data).unwrap().size(), (4.0, 2.0));
+        }
+        // A UTF-16 label on 8-bit bytes, an unknown label, and no
+        // declaration all read as UTF-8; malformed UTF-8 is replaced.
+        assert_eq!(source_encoding(format!("{decl}{body}").as_bytes()), UTF_8);
+        assert_eq!(
+            source_encoding(b"<?xml version=\"1.0\" encoding=\"x-nope\"?><svg/>"),
+            UTF_8
+        );
+        let mut bad = body.as_bytes().to_vec();
+        let at = body.find("Caf").unwrap() + 3;
+        bad.splice(at..at + 2, [0xFF]);
+        assert_eq!(SvgDocument::from_data(&bad).unwrap().size(), (4.0, 2.0));
+        // Valid UTF-8 is not copied.
+        assert!(matches!(
+            utf8_source(body.as_bytes()),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }
