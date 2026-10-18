@@ -17,7 +17,7 @@ import path from 'node:path';
 import { BrowserWindow, dialog, MessageChannelMain, Notification, powerSaveBlocker, screen, sharedTexture, shell, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
 import { extensionOf, isRenderFormat, migrateFormat, normalizeDelivery } from '../../shared/delivery';
-import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
+import { ENGINE_IPC, type EngineSnapshotReply, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
 import { discoverBlender } from '../blender-service';
 import { routeToCurrentExporter } from '../render-encoder';
@@ -31,6 +31,8 @@ import { AgentJobError, AgentJobs } from './agent-jobs';
 import { askAboutOfflineMedia, offlineClips } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
+import { SnapshotService } from './snapshots';
+import { CompatFrames } from './compat-frames';
 import type { ChildLike, PortLike } from './ports';
 
 /** Main's own client id for its font port to the interactive engine (never
@@ -124,6 +126,8 @@ export type InstalledNativeEngine = {
   renderQueue?: RenderQueue | null;
   /** The frame bridge, when its addon loaded. */
   frameBridge?: FrameBridge | null;
+  /** Engine snapshots for windows (snapshots.ts). */
+  snapshots?: SnapshotService | null;
   attachWindow(window: BrowserWindow): void;
   dispose(): Promise<void>;
 };
@@ -219,10 +223,37 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   options.ipc.on(ENGINE_IPC.enabledSync, (event) => {
     event.returnValue = options.isTrustedSender(event) && options.enabled;
   });
+  /* Snapshots (the Phase 3c render transport, snapshots.ts). A synchronous
+     caller always gets exactly one reply, set when the engine answers. */
+  let snapshots: SnapshotService | null = null;
+  const unavailable: EngineSnapshotReply = { status: 'failed', code: 'unavailable', message: 'The new engine is off (Settings › General › Use New Engine).' };
+  const snapshotReply = (event: Electron.IpcMainEvent | IpcMainInvokeEvent, request: unknown): Promise<EngineSnapshotReply> => {
+    if (!options.isTrustedSender(event)) return Promise.resolve({ status: 'failed', code: 'refused', message: 'Unauthorized IPC sender' });
+    if (!snapshots) return Promise.resolve(unavailable);
+    return snapshots.snapshot(event.sender.id, request).catch((error: unknown) => ({ status: 'failed', code: 'internal', message: error instanceof Error ? error.message : String(error) }) as EngineSnapshotReply);
+  };
+  options.ipc.on(ENGINE_IPC.snapshotSync, (event, request: unknown) => {
+    void snapshotReply(event, request).then((reply) => {
+      if (!event.sender.isDestroyed()) event.returnValue = reply;
+    });
+  });
+  options.ipc.handle(ENGINE_IPC.snapshot, (event, request: unknown) => snapshotReply(event, request));
+  const removeSnapshotIpc = (): void => {
+    options.ipc.removeAllListeners(ENGINE_IPC.snapshotSync);
+    options.ipc.removeHandler(ENGINE_IPC.snapshot);
+  };
 
   if (!options.enabled) {
     // The probe stays answerable (with the reason it cannot run) while the engine is off.
-    return { engine: null, agentJobs: null, attachWindow: () => {}, dispose: async () => options.ipc.removeHandler(ENGINE_IPC.probeMedia) };
+    return {
+      engine: null,
+      agentJobs: null,
+      attachWindow: () => {},
+      dispose: async () => {
+        options.ipc.removeHandler(ENGINE_IPC.probeMedia);
+        removeSnapshotIpc();
+      }
+    };
   }
 
   const addon = engineAddonPath({ isPackaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env });
@@ -249,7 +280,21 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
 
   const engineNowUs = engineClock(bridgeAddon);
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
+  // Exports of layers only a window draws (a `raster` override, a
+  // compatibility WebGL2 context): the job engine asks, the windows answer.
+  const compatFrames = new CompatFrames({
+    windows: () => options.windows()
+      .filter((w) => !w.isDestroyed())
+      .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask) })),
+    publishPixels: bridgeAddon?.publishPixels ? (bytes) => bridgeAddon.publishPixels!(bytes) : null,
+    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null
+  });
+  options.ipc.on(ENGINE_IPC.compatAnswer, (event, answer: unknown) => {
+    if (!options.isTrustedSender(event)) return;
+    if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
+  });
   engine = new NativeEngine({
+    compatFrame: (request) => compatFrames.serve(request),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
@@ -315,6 +360,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   engine.listen({
     crash: (report) => broadcast(ENGINE_IPC.crash, report),
     status: (status) => broadcast(ENGINE_IPC.status, statusMessage(true, status))
+  });
+  snapshots = new SnapshotService({
+    engine,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
+    log
   });
 
   // The font registry and subsetting run in the interactive engine (plan
@@ -550,6 +600,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     });
     window.once('closed', () => {
       engine?.removeClient(id);
+      compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
     });
     // A page that goes away never reports its frame surfaces released.
@@ -568,8 +619,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     agentJobs,
     renderQueue,
     frameBridge,
+    snapshots,
     attachWindow,
     dispose: async () => {
+      removeSnapshotIpc();
+      options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
+      snapshots = null;
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
       options.ipc.removeHandler(ENGINE_IPC.probeMedia);
       options.ipc.removeHandler(ENGINE_IPC.hostTime);

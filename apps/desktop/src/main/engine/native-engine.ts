@@ -80,6 +80,10 @@ export type NativeEngineOptions = {
    *  it Blender requests answer `unsupported` and the current engine runs
    *  Blender. */
   blender?: { locate: BlenderLocator; tempRoot: string };
+  /** The job engine's `compatFrame` requests: a layer's compatibility
+   *  pixels drawn by the document's window (compat-frames.ts). Without it
+   *  they answer `notHeadlessRenderable`. */
+  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -554,6 +558,12 @@ export class NativeEngine {
           if (body.type === 'cancelJobs' && body.kind === 'job' && (process === 'job' || blender.owns(body.job, current.hostPort))) {
             return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
           }
+        }
+        if (body.type === 'compatFrame') {
+          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for compatibility frames.'));
+          if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
+          const { type: _type, ...request } = body;
+          return this.options.compatFrame(request);
         }
         return this.services.serve(process, current.hostPort, body, session);
       },

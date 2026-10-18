@@ -168,6 +168,20 @@ pub fn take_pixels(name: String, length: f64) -> Result<napi::bindgen_prelude::B
         .map_err(|e| napi::Error::from_reason(format!("pixel segment {name}: {e}")))
 }
 
+/// Writes pixels into a fresh shared-memory segment for an engine to take
+/// (`shm::publish`; the job engine's compatibility frames). Returns its
+/// name; main unlinks it with `unlinkPixels` if the engine never takes it.
+#[napi]
+pub fn publish_pixels(bytes: napi::bindgen_prelude::Buffer) -> Result<String> {
+    crate::shm::publish(&bytes).map_err(|e| napi::Error::from_reason(format!("pixel segment: {e}")))
+}
+
+/// Unlinks a segment `publishPixels` made (a no-op once it was taken).
+#[napi]
+pub fn unlink_pixels(name: String) {
+    crate::shm::unlink(&name);
+}
+
 /// Main's own Team ID, or `null` when main is not signed with a certificate.
 #[napi]
 pub fn own_team_id() -> Result<Option<String>> {
