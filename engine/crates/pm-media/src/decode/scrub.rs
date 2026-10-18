@@ -90,7 +90,7 @@ const KEEP_BEFORE: usize = 32;
 /// random seek), not drags: nothing is decoded ahead of them.
 const MAX_STRIDE: i64 = 16;
 /// An idle worker exits after this long; the next request starts another.
-const IDLE_EXIT: Duration = Duration::from_secs(30);
+pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 
 /// The decode workers of one renderer's display frames.
 pub struct ViewerDecode {
@@ -98,6 +98,7 @@ pub struct ViewerDecode {
     workers: Mutex<HashMap<(u64, InstanceId), Arc<Worker>>>,
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
+    idle_exit: Duration,
 }
 
 struct Worker {
@@ -119,6 +120,7 @@ struct Shared {
     alive: AtomicBool,
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
+    idle_exit: Duration,
 }
 
 #[derive(Default)]
@@ -170,7 +172,15 @@ impl ViewerDecode {
             workers: Mutex::new(HashMap::new()),
             landed: Arc::new(AtomicU64::new(0)),
             stats: Arc::new(Mutex::new(ScrubStats::default())),
+            idle_exit: IDLE_EXIT,
         }
+    }
+
+    /// Idle workers exit after `idle` instead of [`IDLE_EXIT`] (workers
+    /// started from now on).
+    pub fn with_idle_exit(mut self, idle: Duration) -> ViewerDecode {
+        self.idle_exit = idle;
+        self
     }
 
     pub fn service(&self) -> &Arc<DecodeService> {
@@ -215,28 +225,53 @@ impl ViewerDecode {
             purpose: DecodePurpose::Display,
         };
         self.stats.lock().unwrap().requests += 1;
-        let worker = self.worker(source, instance);
-        let shared = &worker.shared;
-        if let Some(frame) = self.service.cache().get(&key) {
-            self.stats.lock().unwrap().cached += 1;
+        loop {
+            let worker = self.worker(source, instance);
+            if let Some(fetched) = self.fetch_on(&worker.shared, &key, n, want) {
+                return fetched;
+            }
+            // The worker exited idle before it saw the request: `worker`
+            // starts another.
+        }
+    }
+
+    /// [`Self::fetch`] on one worker; `None` when the worker exited idle
+    /// before the request reached it. A worker exits only under its state
+    /// lock: one seen alive while that lock is held decodes what is queued
+    /// before it may exit.
+    fn fetch_on(
+        &self,
+        shared: &Shared,
+        key: &FrameKey,
+        n: usize,
+        want: Want,
+    ) -> Option<Result<Fetched>> {
+        if let Some(frame) = self.service.cache().get(key) {
             let mut st = shared.state.lock().unwrap();
+            if !shared.alive.load(Ordering::Acquire) {
+                return None;
+            }
+            self.stats.lock().unwrap().cached += 1;
             st.moved_to(n);
             // A drag that moves through cached frames keeps the look-ahead
             // ahead of it.
             st.ahead_from = Some(n);
             drop(st);
             shared.wake.notify_one();
-            return Ok(Fetched {
+            return Some(Ok(Fetched {
                 frame,
                 shown: n,
                 exact: true,
-            });
+            }));
         }
         let mut st = shared.state.lock().unwrap();
+        if !shared.alive.load(Ordering::Acquire) {
+            return None;
+        }
         st.moved_to(n);
         if let Some(e) = st.failed.remove(&n) {
             self.stats.lock().unwrap().errors += 1;
-            return Err(MediaError::decode(e));
+            return Some(Err(MediaError::decode(e)));
         }
         if want == Want::Scrub {
             if st.scrub.is_some_and(|old| old != n) {
@@ -249,11 +284,11 @@ impl ViewerDecode {
             shared.wake.notify_one();
             if let Some((shown, frame)) = shared.nearest(n, &st) {
                 self.stats.lock().unwrap().stand_ins += 1;
-                return Ok(Fetched {
+                return Some(Ok(Fetched {
                     frame,
                     shown,
                     exact: false,
-                });
+                }));
             }
             // Nothing decoded yet to stand in: wait for the exact frame.
         }
@@ -272,11 +307,11 @@ impl ViewerDecode {
                     st.waiting.remove(&n);
                     st.delivered.remove(&n);
                 }
-                return Ok(Fetched {
+                return Some(Ok(Fetched {
                     frame,
                     shown: n,
                     exact: true,
-                });
+                }));
             }
             if let Some(e) = st.failed.get(&n).cloned() {
                 let left = st.waiting.get_mut(&n).map(|w| {
@@ -288,10 +323,12 @@ impl ViewerDecode {
                     st.failed.remove(&n);
                 }
                 self.stats.lock().unwrap().errors += 1;
-                return Err(MediaError::decode(e));
+                return Some(Err(MediaError::decode(e)));
             }
             if !shared.alive.load(Ordering::Acquire) {
-                return Err(MediaError::decode("the decode worker stopped"));
+                // Shut down (its source was released) after it took the
+                // request: not an idle exit.
+                return Some(Err(MediaError::decode("the decode worker stopped")));
             }
             st = shared.done.wait(st).unwrap();
         }
@@ -340,6 +377,7 @@ impl ViewerDecode {
             alive: AtomicBool::new(true),
             landed: self.landed.clone(),
             stats: self.stats.clone(),
+            idle_exit: self.idle_exit,
         });
         let run = shared.clone();
         let thread = std::thread::Builder::new()
@@ -506,12 +544,14 @@ impl Shared {
             if let Some(m) = self.ahead(&mut st) {
                 return Some(Job::Ahead(m));
             }
-            let (next, timeout) = self.wake.wait_timeout(st, IDLE_EXIT).unwrap();
+            let (next, timeout) = self.wake.wait_timeout(st, self.idle_exit).unwrap();
             st = next;
             let idle = st.exact.is_empty() && st.scrub.is_none();
             if timeout.timed_out() && idle {
-                // Exiting under the lock: `fetch` sees `alive` false only
-                // after this, and starts a new worker.
+                // Exiting under the lock: a request queued while it was
+                // held is decoded first (the loop sees it); one that takes
+                // the lock later sees `alive` false and `fetch` starts a
+                // new worker.
                 self.alive.store(false, Ordering::Release);
                 return None;
             }
@@ -618,5 +658,37 @@ mod tests {
         assert_eq!(st.stride, -9);
         st.moved_to(300);
         assert_eq!(st.stride, 0, "a jump is not a drag");
+    }
+
+    /// A request that reaches a worker after it exited idle is not queued
+    /// there (nobody would decode it): `fetch` starts another worker.
+    #[test]
+    fn a_worker_that_exited_idle_takes_no_requests() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+        let src = MediaSource::open(&path).unwrap();
+        let service = Arc::new(DecodeService::new(Default::default()));
+        let viewer = ViewerDecode::new(service).with_idle_exit(Duration::ZERO);
+        // The worker `fetch` took, exiting idle before it locked the state.
+        let worker = viewer.worker(&src, 1);
+        let t = std::time::Instant::now();
+        while worker.shared.alive.load(Ordering::Acquire) {
+            assert!(t.elapsed().as_secs() < 20, "the worker never exited");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let key = |n: usize| FrameKey {
+            source: src.id,
+            sample: src.index.frames[n].sample,
+            purpose: DecodePurpose::Display,
+        };
+        for want in [Want::Exact, Want::Scrub] {
+            assert!(viewer.fetch_on(&worker.shared, &key(5), 5, want).is_none());
+        }
+        let st = worker.shared.state.lock().unwrap();
+        assert!(st.exact.is_empty() && st.scrub.is_none());
+        drop(st);
+        let f = viewer.fetch(&src, 1, 5, Want::Exact).unwrap();
+        assert!(f.exact && f.shown == 5);
+        assert_eq!(viewer.stats().workers, 2);
     }
 }

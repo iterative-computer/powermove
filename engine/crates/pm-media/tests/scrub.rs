@@ -161,6 +161,36 @@ fn released_sources_stop_their_workers() {
     assert!(!viewer.pending());
 }
 
+/// Workers that exit idle while requests arrive: every request is
+/// answered (an exact one with its frame, a scrub one lands), never with
+/// "the decode worker stopped" or a target nobody decodes.
+#[test]
+fn requests_racing_an_idle_exit_are_answered() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let viewer = ViewerDecode::new(service()).with_idle_exit(Duration::ZERO);
+    let n = src.pts.len();
+    for i in 0..300usize {
+        // Pauses around the idle timeout, so requests meet workers that
+        // are exiting.
+        std::thread::sleep(Duration::from_micros(((i * 37) % 200) as u64));
+        let k = (i * 7) % n;
+        if i % 3 == 0 {
+            let landed = viewer.landed();
+            let f = viewer.fetch(&src, 1, k, Want::Scrub).unwrap();
+            if !f.exact {
+                eventually("the scrub target landed", || viewer.landed() != landed);
+            }
+        } else {
+            let f = viewer.fetch(&src, 1, k, Want::Exact).unwrap();
+            assert!(f.exact);
+            assert_eq!(f.frame.md5_hex().unwrap(), want[k], "frame {k}");
+        }
+    }
+    assert!(viewer.stats().workers > 1, "{:?}", viewer.stats());
+    assert_eq!(viewer.stats().errors, 0);
+}
+
 /// Long GOP with a B pyramid (the generated corpus): exact and scrub
 /// requests in a drag stay equal to the sequential decode with
 /// unreferenced pictures left out of every seek.
