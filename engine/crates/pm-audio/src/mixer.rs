@@ -130,8 +130,18 @@ pub struct RenderReport {
     /// Missing voices whose own deadline has not expired. No PCM or meter /
     /// retune progress may commit until this is empty.
     pub waiting_voices: Vec<String>,
-    /// Project output frames silenced for missing input, summed over voices.
+    /// IDs of voices that sounded with all their input on a strip the
+    /// monitor solo lets through, in the current or an outgoing retune mix,
+    /// each once. Unlike `voices - starved`, a glide's outgoing copies of the
+    /// same voices do not count twice: playback uses this to tell whether a
+    /// wait would silence anything heard (A4.1).
+    pub heard_whole: Vec<String>,
+    /// Project output frames silenced for missing input, summed over
+    /// voices. A voice a retune glide renders in several mixes counts once
+    /// (its largest drop), as in `dropped_by_voice`.
     pub dropped_voice_frames: u64,
+    /// Output frames silenced for missing input, per voice id, each once.
+    pub dropped_by_voice: Vec<(String, u64)>,
     /// Errors decoding or evaluating, one per voice.
     pub errors: Vec<(String, String)>,
 }
@@ -494,7 +504,24 @@ impl Mixer {
                             report.waiting_voices.push(id);
                         }
                     }
-                    report.dropped_voice_frames += outgoing_report.dropped_voice_frames;
+                    for id in outgoing_report.heard_whole {
+                        if !report.heard_whole.contains(&id) {
+                            report.heard_whole.push(id);
+                        }
+                    }
+                    for (id, frames) in outgoing_report.dropped_by_voice {
+                        match report.dropped_by_voice.iter_mut().find(|(v, _)| *v == id) {
+                            Some((_, counted)) if *counted >= frames => {}
+                            Some((_, counted)) => {
+                                report.dropped_voice_frames += frames - *counted;
+                                *counted = frames;
+                            }
+                            None => {
+                                report.dropped_voice_frames += frames;
+                                report.dropped_by_voice.push((id, frames));
+                            }
+                        }
+                    }
                     report.errors.extend(outgoing_report.errors);
                 }
                 Err(e) => {
@@ -575,6 +602,7 @@ impl Mixer {
         let graph = self.graph.clone();
         let comps = graph.resolve(&doc)?;
         let open = comps[0].clone();
+        let solo = monitor_solo.filter(|s| !s.is_empty());
         for (vi, plan) in graph.voices.iter().enumerate() {
             self.voice_dropped_frames = 0;
             let mut voice_options;
@@ -596,14 +624,22 @@ impl Mixer {
                         if !report.starved_voices.contains(&plan.id) {
                             report.starved_voices.push(plan.id.clone());
                         }
-                        report.dropped_voice_frames += self.voice_dropped_frames;
+                        if self.voice_dropped_frames > 0 {
+                            report.dropped_voice_frames += self.voice_dropped_frames;
+                            report
+                                .dropped_by_voice
+                                .push((plan.id.clone(), self.voice_dropped_frames));
+                        }
+                    } else if solo.is_none_or(|s| s.contains(&plan.strip))
+                        && !report.heard_whole.contains(&plan.id)
+                    {
+                        report.heard_whole.push(plan.id.clone());
                     }
                 }
                 Ok(None) => {}
                 Err(e) => report.errors.push((plan.id.clone(), e.to_string())),
             }
         }
-        let solo = monitor_solo.filter(|s| !s.is_empty());
         for (si, strip) in self.strips.iter().enumerate() {
             if solo.is_some_and(|s| !s.contains(&graph.strips[si])) {
                 continue;

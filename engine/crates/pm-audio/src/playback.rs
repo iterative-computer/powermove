@@ -1267,10 +1267,17 @@ impl RenderThread {
                 let now = self.ring.played_frames();
                 let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
                 // A4.1: the reserve bounds a wait only while it protects a
-                // voice that is sounding. At a start nothing of the run plays
-                // yet, and with every voice missing nothing would be heard
-                // by dropping: both keep the A3 hold.
-                let protects = self.startup.is_none() && report.voices > report.starved;
+                // voice that is heard. At a start nothing of the run plays
+                // yet, and with every heard voice missing nothing would be
+                // heard by dropping: both keep the A3 hold. Voices count by
+                // id, so a retune glide's outgoing copies of the missing
+                // voice cannot outnumber the ready ones, and a voice the
+                // monitor solo silences protects nothing.
+                let protects = self.startup.is_none()
+                    && report
+                        .heard_whole
+                        .iter()
+                        .any(|id| !report.starved_voices.contains(id));
                 let reserve = self
                     .ring
                     .buffered_frames()
