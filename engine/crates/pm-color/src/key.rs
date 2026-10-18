@@ -51,6 +51,7 @@ fn matrix_id(m: MatrixCoefficients) -> u8 {
         MatrixCoefficients::Bt709 => 1,
         MatrixCoefficients::Bt601 => 2,
         MatrixCoefficients::Bt2020Ncl => 3,
+        MatrixCoefficients::Bt2020Cl => 4,
     }
 }
 

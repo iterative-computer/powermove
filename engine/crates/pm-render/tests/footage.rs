@@ -691,11 +691,12 @@ fn interpreted_stills_convert_other_profiles_through_colorsync() {
     let mut r = Renderer::headless().unwrap();
     let (doc, res) = still_document(&adobe, (w, h), None);
     let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
-    assert!(
-        r.render(&load(&doc), "Ptest-root", ticks(0.0), &request, &res)
-            .is_err(),
-        "Adobe RGB stills are routed without an interpretation"
-    );
+    let compatible = r
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &request, &res)
+        .unwrap();
+    assert!(compatible.failures.is_empty(), "{:?}", compatible.failures);
+    // Level 1 now draws the Chromium/skcms compatibility bitmap. Explicit
+    // interpretation still takes the original, high-precision ColorSync path.
     // Any interpretation that leaves color alone (here square pixels) draws
     // it, converted by ColorSync into linear Rec.709 and re-encoded with E.
     let (doc, res) = still_document(&adobe, (w, h), Some(json!({ "pixelAspect": [1, 1] })));

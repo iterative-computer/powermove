@@ -23,6 +23,7 @@ use pm_protocol::error::{EngineError, ErrorScope};
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LayerReports {
     told: Option<Told>,
+    runtime: BTreeMap<(String, String), (Revision, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,11 +80,64 @@ impl LayerReports {
         due
     }
 
+    /// Runtime media failures can change within a revision (a linked file
+    /// goes offline or a requested decode fails). Report them before the
+    /// frame, without flooding the port on every playback frame.
+    pub(crate) fn runtime_due(
+        &mut self,
+        revision: Revision,
+        failures: &[pm_render::LayerFailure],
+    ) -> Vec<EngineError> {
+        use pm_protocol::error::{ErrorCode, MAX_ERROR_MESSAGE_BYTES, Retry};
+        // A layer the static reports already name (a shader that does not
+        // compile, a missing extension definition) is said once, there.
+        let covered = |f: &pm_render::LayerFailure| {
+            self.told.as_ref().is_some_and(|told| {
+                told.composition == f.composition && told.reports.contains_key(&f.layer)
+            })
+        };
+        let current: BTreeMap<_, _> = failures
+            .iter()
+            .filter(|f| !covered(f))
+            .map(|f| {
+                (
+                    (f.composition.clone(), f.layer.clone()),
+                    (revision, f.message.clone()),
+                )
+            })
+            .collect();
+        let reports = current
+            .iter()
+            .filter(|(key, value)| self.runtime.get(*key) != Some(*value))
+            .map(|((composition, layer), (_, detail))| {
+                let mut message = format!("Layer {layer} in {composition}: {detail}");
+                if message.len() > MAX_ERROR_MESSAGE_BYTES {
+                    let mut end = MAX_ERROR_MESSAGE_BYTES;
+                    while !message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    message.truncate(end);
+                }
+                EngineError::new(
+                    ErrorCode::DecodeFailed,
+                    ErrorScope::Layer {
+                        layer: layer.as_str().into(),
+                    },
+                    message,
+                )
+                .with_retry(Retry::AfterUserAction)
+            })
+            .collect();
+        self.runtime = current;
+        reports
+    }
+
     /// Forgets what was said (the composition routed to the legacy viewer,
     /// whose compositor fills the shader meta itself): the next frame the
     /// engine presents repeats every report.
     pub(crate) fn reset(&mut self) {
         self.told = None;
+        self.runtime.clear();
     }
 }
 
@@ -144,5 +198,44 @@ mod tests {
             r.due(rev(2), Some(Seq::new(2).unwrap()), "d", || vec![a2.clone()]),
             vec![a2]
         );
+    }
+    #[test]
+    fn runtime_failures_report_changes_recovery_and_revisions() {
+        let mut reports = LayerReports::default();
+        let failure = pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: "image".into(),
+            message: "photo.png is offline".into(),
+        };
+        let first = reports.runtime_due(rev(1), std::slice::from_ref(&failure));
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].scope,
+            ErrorScope::Layer {
+                layer: "image".into()
+            }
+        );
+        assert!(first[0].message.contains("photo.png"));
+        assert!(
+            reports
+                .runtime_due(rev(1), std::slice::from_ref(&failure))
+                .is_empty()
+        );
+        assert_eq!(
+            reports
+                .runtime_due(rev(2), std::slice::from_ref(&failure))
+                .len(),
+            1
+        );
+        assert!(reports.runtime_due(rev(2), &[]).is_empty());
+        assert_eq!(reports.runtime_due(rev(2), &[failure]).len(), 1);
+        let long = pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: "image".into(),
+            message: "é".repeat(4096),
+        };
+        let error = reports.runtime_due(rev(2), &[long]).pop().unwrap();
+        use pm_protocol::validate::Validate;
+        assert!(error.validate().is_ok());
     }
 }

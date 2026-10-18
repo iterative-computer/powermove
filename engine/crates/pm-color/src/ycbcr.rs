@@ -31,7 +31,7 @@ impl Matrix {
         kb: 0.0593,
     };
 
-    /// The matrix for a coefficient tag; `None` for RGB (identity).
+    /// The linear matrix, or `None` for RGB and nonlinear BT.2020 CL.
     pub fn of(coefficients: MatrixCoefficients) -> Option<Matrix> {
         coefficients.kr_kb().map(|(kr, kb)| Matrix { kr, kb })
     }
@@ -84,6 +84,37 @@ impl Matrix {
             [kb as f32, ((1.0 - kb) * sb) as f32, (-kb * sr) as f32],
         ]
     }
+}
+
+/// BT.2020 constant-luminance Y′cC′bcC′rc → R′G′B′, unclipped.
+/// BT.2020-2 table 4: unlike NCL, green is recovered in linear light.
+/// Uses the smooth alpha/beta solution specified there (valid at both
+/// 10 and 12 bits); extends the transfer odd-symmetrically as other inputs.
+pub fn bt2020_cl_to_rgb([y, cb, cr]: [f64; 3]) -> [f64; 3] {
+    const ALPHA: f64 = 1.099_296_826_809_44;
+    const BETA: f64 = 0.018_053_968_510_807;
+    let decode = |v: f64| {
+        let m = v.abs();
+        let l = if m < 4.5 * BETA {
+            m / 4.5
+        } else {
+            libm::pow((m + ALPHA - 1.0) / ALPHA, 1.0 / 0.45)
+        };
+        l.copysign(v)
+    };
+    let encode = |v: f64| {
+        let m = v.abs();
+        let e = if m < BETA {
+            4.5 * m
+        } else {
+            ALPHA * libm::pow(m, 0.45) - (ALPHA - 1.0)
+        };
+        e.copysign(v)
+    };
+    let b = y + cb * if cb < 0.0 { 1.9404 } else { 1.5816 };
+    let r = y + cr * if cr < 0.0 { 1.7184 } else { 0.9936 };
+    let g = (decode(y) - 0.2627 * decode(r) - 0.0593 * decode(b)) / 0.6780;
+    [r, encode(g), b]
 }
 
 /// Code values of one Y′CbCr output or source: bit depth and range.

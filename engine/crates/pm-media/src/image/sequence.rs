@@ -1,7 +1,7 @@
 //! Image sequences (section 13 "Formats at cutover": any image format, with
 //! gaps reported): numbered files found from one member.
 
-use crate::error::Result;
+use crate::error::{MediaError, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,70 @@ pub struct ImageSequence {
 }
 
 impl ImageSequence {
+    /// Explicit files selected by the host, matching today's importer:
+    /// padding may vary, gaps are reported, duplicate numbers are errors.
+    /// Unlike directory discovery this never adds an unselected file.
+    pub fn from_paths(paths: &[PathBuf]) -> Result<Self> {
+        if paths.len() < 2 {
+            return Err(MediaError::invalid(
+                "choose at least 2 numbered image frames",
+            ));
+        }
+        let mut frames = Vec::with_capacity(paths.len());
+        let (mut prefix, mut suffix) = (String::new(), String::new());
+        for (i, path) in paths.iter().enumerate() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| MediaError::invalid("sequence filename is not UTF-8"))?;
+            let (p, digits, s) = split(name)
+                .filter(|(_, _, s)| s.starts_with('.') && !s[1..].contains('.'))
+                .ok_or_else(|| MediaError::invalid("sequence images must end in frame numbers"))?;
+            let number = digits
+                .parse::<i64>()
+                .ok()
+                .filter(|v| *v <= 9_007_199_254_740_991)
+                .ok_or_else(|| {
+                    MediaError::invalid("sequence frame number is not a safe integer")
+                })?;
+            let s = s.to_ascii_lowercase();
+            if i == 0 {
+                prefix = p.into();
+                suffix = s;
+            } else if p != prefix || s != suffix {
+                return Err(MediaError::invalid(
+                    "sequence images must share their name and extension",
+                ));
+            }
+            frames.push((number, path.clone()));
+        }
+        frames.sort_by_key(|f| f.0);
+        let mut gaps = Vec::new();
+        for pair in frames.windows(2) {
+            let (a, b) = (pair[0].0, pair[1].0);
+            if a == b {
+                return Err(MediaError::invalid(format!("duplicate frame number {a}")));
+            }
+            if b > a + 1 {
+                gaps.push((a + 1, b - 1));
+            }
+        }
+        Ok(Self {
+            dir: paths[0].parent().unwrap_or(Path::new(".")).into(),
+            prefix,
+            suffix,
+            padding: 0,
+            frames,
+            gaps,
+        })
+    }
+
+    /// Compat level 1 plays the available files consecutively, skipping
+    /// missing numbers. This differs from `file_for`'s numbered hold mode.
+    pub fn available_file(&self, index: usize) -> Option<&Path> {
+        self.frames.get(index).map(|f| f.1.as_path())
+    }
+
     pub fn first(&self) -> i64 {
         self.frames[0].0
     }

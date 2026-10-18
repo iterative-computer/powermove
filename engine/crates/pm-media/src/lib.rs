@@ -30,6 +30,7 @@ pub mod index;
 pub mod interlace;
 pub mod interpret;
 pub mod pool;
+pub mod preview;
 pub mod probe;
 pub mod sys;
 pub mod time;

@@ -400,6 +400,33 @@ describe('import decisions', () => {
 });
 
 describe('the engine stamp', () => {
+  it('flushes imported media bindings before an immediate export can ask for them', async () => {
+    vi.useFakeTimers();
+    try {
+      const { host } = fakeHost();
+      const { legacy } = fakeLegacy();
+      let acknowledge!: () => void;
+      host.bind = vi.fn(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const PM: any = {
+        MediaStore: legacy,
+        proj: { id: 'P1', assets: { a: { id: 'a', storageKey: 'media:v2:new' } }, layers: [], comps: {} },
+        bus: { on: vi.fn() },
+      };
+      installHostMediaStore(PM, { mediaStore: host });
+      let done = false;
+      const flushing = PM.HostMedia.flushBindings().then(() => { done = true; });
+      expect(host.bind).toHaveBeenCalledWith('P1', { a: { key: 'media:v2:new' } });
+      await Promise.resolve();
+      expect(done).toBe(false);
+      acknowledge();
+      await flushing;
+      expect(done).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('announces each requiresEngine write to the write barrier', () => {
     vi.useFakeTimers();
     try {

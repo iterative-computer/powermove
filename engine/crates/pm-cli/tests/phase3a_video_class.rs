@@ -273,6 +273,11 @@ fn reference_f64(path: &Path, n: u32, color: &Tags, w: u32, h: u32) -> Vec<f64> 
     let cubic_x = color.subsampling == Subsampling::S420;
     let scale = f64::from(1u32 << (depth - 8));
     let max = f64::from((1u32 << depth) - 1);
+    assert_ne!(
+        color.matrix,
+        MatrixCoefficients::Bt2020Cl,
+        "the scalar NCL oracle cannot verify constant luminance"
+    );
     let (kr, kb) = match color.matrix {
         MatrixCoefficients::Bt709 => (0.2126, 0.0722),
         MatrixCoefficients::Bt2020Ncl => (0.2627, 0.0593),
@@ -451,6 +456,7 @@ fn file_tags(path: &Path) -> Tags {
             "bt709" => MatrixCoefficients::Bt709,
             "smpte170m" | "bt470bg" => MatrixCoefficients::Bt601,
             "bt2020nc" => MatrixCoefficients::Bt2020Ncl,
+            "bt2020c" => MatrixCoefficients::Bt2020Cl,
             "" | "unknown" | "gbr" => {
                 if height <= 576 {
                     MatrixCoefficients::Bt601
@@ -990,6 +996,7 @@ fn measure(
             MatrixCoefficients::Bt709 => "709",
             MatrixCoefficients::Bt601 => "170m",
             MatrixCoefficients::Bt2020Ncl => "2020_ncl",
+            MatrixCoefficients::Bt2020Cl => "2020_cl",
             MatrixCoefficients::Identity => "input",
         },
         range: if color.range == Range::Full {

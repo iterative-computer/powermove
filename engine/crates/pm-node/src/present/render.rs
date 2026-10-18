@@ -2323,11 +2323,15 @@ impl Thread {
                     // Shader compile errors and missing extension layers at
                     // this frame's revision, before the frame (section 11).
                     let renderer = composer.renderer();
-                    let reports = view.layer_reports.due(
+                    let mut reports = view.layer_reports.due(
                         view.revision,
                         renderer.effects().generation(),
                         &composition,
                         || renderer.layer_reports(doc.document(), &composition),
+                    );
+                    reports.extend(
+                        view.layer_reports
+                            .runtime_due(view.revision, &composed.failures),
                     );
                     for error in reports {
                         let report = FailureReport {
