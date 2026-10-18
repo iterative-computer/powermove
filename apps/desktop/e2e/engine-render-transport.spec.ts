@@ -249,7 +249,9 @@ test.describe('Use New Engine: the render transport', () => {
       // renderer's GLSL fallback runner draws it (decision 19).
       const code = 'uniform samplerCube uEnv;\nvoid main(){ fragColor = vec4(texture(uEnv, vec3(uv, 1.0)).rgb + vec3(uv, 0.0), 1.0); }';
       const sky = PM.mkLayer('shader', { name: 'Sky', from: 0, dur: 4, d: { code, uniforms: {}, w: 320, h: 180 } }, project);
-      sky.p['position.x'].v = 320; sky.p['position.y'].v = 180;
+      // Its top-left at (160, 90): it spans 160..480 × 90..270.
+      sky.p['anchor.x'].v = 0; sky.p['anchor.y'].v = 0;
+      sky.p['position.x'].v = 160; sky.p['position.y'].v = 90;
       project.layers = [sky];
       PM.replaceProject(project);
       PM.Projects?.put?.(PM.proj);
@@ -273,10 +275,10 @@ test.describe('Use New Engine: the render transport', () => {
     const background = await dataUrlPixel(page, result.url, 10, 10);
     console.log(`fallback snapshot pixels: left ${left.slice(0, 3)} right ${right.slice(0, 3)} background ${background.slice(0, 3)}`);
     expect(near(background, [0x20, 0x30, 0x40], 12)).toBe(true);
-    expect(near(left, [0x20, 0x30, 0x40], 40)).toBe(false);
-    expect(near(right, [0x20, 0x30, 0x40], 40)).toBe(false);
-    // uv.x grows to the right: the red channel does not fall.
-    expect(right[0]!).toBeGreaterThanOrEqual(left[0]!);
+    // vec4(uv, 0, 1) over an empty cube map: red is uv.x (0.1 and 0.87 at
+    // these points), green uv.y (0.5).
+    expect(near(left, [26, 128, 0], 8)).toBe(true);
+    expect(near(right, [222, 128, 0], 8)).toBe(true);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
