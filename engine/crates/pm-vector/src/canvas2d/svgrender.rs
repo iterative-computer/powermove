@@ -2204,16 +2204,28 @@ fn render_draw(target: &mut MsaaTarget, depth: &mut [u32], d: &Draw) {
         d.clip.scissor[2].min(w as i32).max(0) as usize,
         d.clip.scissor[3].min(h as i32).max(0) as usize,
     ];
+    // Only the pixels the geometry can touch (an inverse fill: its draw
+    // bounds) can pass; the rest of the scissor is skipped.
+    let region = draw_region(d, w, h);
+    let scissor = [scissor[0].max(region[0]), scissor[1].max(region[1]), scissor[2].min(region[2]), scissor[3].min(region[3])];
     if scissor[2] <= scissor[0] || scissor[3] <= scissor[1] {
         return;
     }
     // Coverage per sample.
-    let mut mask = target.mask();
+    // Analytic draws carry their own per-sample coverage; only the
+    // tessellated geometry needs the sample mask.
+    let mut mask = match d.geom {
+        Geom::Analytic(_) => SampleMask { width: 0, height: 0, pattern: target.pattern, bits: Vec::new() },
+        _ => target.mask(),
+    };
     let mut coverage: Option<analytic::Samples> = None;
     match &d.geom {
         Geom::Polygons { polys, rule, .. } => fill_polygons(&mut mask, polys, *rule),
         Geom::Triangles(tris) => fill_triangles(&mut mask, tris),
-        Geom::Analytic(inst) => coverage = Some(analytic::rasterize(inst, target.width, target.height, target.pattern)),
+        Geom::Analytic(inst) => {
+            let r = [scissor[0] as u32, scissor[1] as u32, scissor[2] as u32, scissor[3] as u32];
+            coverage = Some(analytic::rasterize_region(inst, r, target.pattern));
+        }
     }
     if d.inverse {
         // An inverse fill covers every sample of the draw bounds outside
@@ -2231,9 +2243,8 @@ fn render_draw(target: &mut MsaaTarget, depth: &mut [u32], d: &Draw) {
             // Which samples does the geometry cover?
             let mut covered = 0u8;
             for s in 0..n {
-                let i = p * n + s;
                 let c = match &coverage {
-                    Some(cov) => cov.coverage[i].is_some(),
+                    Some(cov) => cov.get(px as u32, py as u32, s, n).is_some(),
                     None => mask.bits[p] & (1 << s) != 0,
                 };
                 if c {
@@ -2290,7 +2301,7 @@ fn render_draw(target: &mut MsaaTarget, depth: &mut [u32], d: &Draw) {
                 }
                 let i = p * n + s;
                 let cov = match &coverage {
-                    Some(c) => c.coverage[i].unwrap_or(0.0),
+                    Some(c) => c.get(px as u32, py as u32, s, n).unwrap_or(0.0),
                     None => 1.0,
                 } * clip_cov;
                 if cov <= 0.0 {
@@ -2305,6 +2316,44 @@ fn render_draw(target: &mut MsaaTarget, depth: &mut [u32], d: &Draw) {
             }
         }
     }
+}
+
+/// The target pixels `[x0, y0, x1, y1)` a draw can cover: the geometry's
+/// bounds plus a pixel (sub-pixel snapping), or an inverse fill's draw
+/// bounds.
+fn draw_region(d: &Draw, w: usize, h: usize) -> [usize; 4] {
+    let from = |x0: f64, y0: f64, x1: f64, y1: f64| -> [usize; 4] {
+        if x0 > x1 || y0 > y1 {
+            return [0, 0, 0, 0];
+        }
+        let c = |v: f64, max: usize| v.clamp(0.0, max as f64) as usize;
+        [c(x0.floor() - 1.0, w), c(y0.floor() - 1.0, h), c(x1.floor() + 2.0, w), c(y1.floor() + 2.0, h)]
+    };
+    if d.inverse {
+        let b = d.clip.draw_bounds;
+        return from(f64::from(b[0]), f64::from(b[1]), f64::from(b[2]), f64::from(b[3]));
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut add = |x: f64, y: f64| {
+        if x.is_finite() && y.is_finite() {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    };
+    match &d.geom {
+        Geom::Polygons { polys, .. } => polys.iter().flatten().for_each(|p| add(p[0], p[1])),
+        Geom::Triangles(tris) => tris.iter().flatten().for_each(|p| add(f64::from(p[0]), f64::from(p[1]))),
+        Geom::Analytic(inst) => {
+            let b = analytic::mesh_pixel_bounds(inst, w as u32, h as u32);
+            return [b[0] as usize, b[1] as usize, b[2] as usize, b[3] as usize];
+        }
+    }
+    if x0 == f64::MAX {
+        return [0, 0, 0, 0];
+    }
+    from(x0, y0, x1, y1)
 }
 
 /// Convenience: the shape's device polygons (for tests).

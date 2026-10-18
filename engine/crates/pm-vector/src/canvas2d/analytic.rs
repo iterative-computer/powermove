@@ -714,22 +714,63 @@ pub fn coverage(v: &Varyings) -> f32 {
 /// Per-sample coverage of one instance: for each covered sample, the
 /// fragment coverage of the first triangle (in primitive order) covering it.
 pub struct Samples {
+    /// The stored region: `width × height` pixels from `origin`.
     pub width: u32,
     pub height: u32,
+    pub origin: [u32; 2],
     /// `width × height × samples per pixel`; `None` where no triangle covers
     /// the sample.
     pub coverage: Vec<Option<f32>>,
 }
 
-/// Rasterizes an instance's mesh.
+impl Samples {
+    /// The coverage of sample `s` of target pixel `(px, py)`.
+    #[inline]
+    pub fn get(&self, px: u32, py: u32, s: usize, n: usize) -> Option<f32> {
+        let (x, y) = (px.wrapping_sub(self.origin[0]), py.wrapping_sub(self.origin[1]));
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        self.coverage[(y * self.width + x) as usize * n + s]
+    }
+}
+
+/// Rasterizes an instance's mesh over the whole `width × height` target.
 pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]]) -> Samples {
+    rasterize_region(inst, [0, 0, width, height], pattern)
+}
+
+/// The target pixels the instance's mesh can touch, within a `width ×
+/// height` target: `[x0, y0, x1, y1)`.
+pub fn mesh_pixel_bounds(inst: &Instance, width: u32, height: u32) -> [u32; 4] {
+    let one = 1i64 << SUBPIXEL_BITS;
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for i in 0..36 {
+        let v = vertex(inst, i);
+        let (x, y) = (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1])));
+        x0 = x0.min(x.div_euclid(one));
+        y0 = y0.min(y.div_euclid(one));
+        x1 = x1.max(x.div_euclid(one) + 1);
+        y1 = y1.max(y.div_euclid(one) + 1);
+    }
+    let c = |v: i64, max: u32| v.clamp(0, i64::from(max)) as u32;
+    [c(x0, width), c(y0, height), c(x1, width), c(y1, height)]
+}
+
+/// Rasterizes an instance's mesh, storing only the target pixels in
+/// `region` (`[x0, y0, x1, y1)`); samples outside it are not computed.
+pub fn rasterize_region(inst: &Instance, region: [u32; 4], pattern: &[[f64; 2]]) -> Samples {
     let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
     let n = pattern.len();
+    let (rw, rh) = (region[2].saturating_sub(region[0]), region[3].saturating_sub(region[1]));
     let mut out = Samples {
-        width,
-        height,
-        coverage: vec![None; (width * height) as usize * n],
+        width: rw,
+        height: rh,
+        origin: [region[0], region[1]],
+        coverage: vec![None; (rw * rh) as usize * n],
     };
+    let (width, height) = (region[2], region[3]);
+    let index = |px: i64, py: i64, si: usize| ((py as u32 - region[1]) * rw + (px as u32 - region[0])) as usize * n + si;
     let one = 1i64 << SUBPIXEL_BITS;
     for k in 2..INDICES.len() {
         let tri = [
@@ -742,9 +783,9 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
         if area == 0 {
             continue;
         }
-        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(0);
+        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(i64::from(region[0]));
         let maxx = p.iter().map(|q| q.0).max().unwrap().div_euclid(one).min(i64::from(width) - 1);
-        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(0);
+        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(i64::from(region[1]));
         let maxy = p.iter().map(|q| q.1).max().unwrap().div_euclid(one).min(i64::from(height) - 1);
         if maxx < minx || maxy < miny {
             continue;
@@ -760,7 +801,7 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
                 let mut covered = [false; 4];
                 let mut any = false;
                 for (si, s) in pattern.iter().enumerate() {
-                    let idx = (py as u32 * width + px as u32) as usize * n + si;
+                    let idx = index(px, py, si);
                     if out.coverage[idx].is_some() {
                         continue;
                     }
@@ -792,7 +833,7 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
                 let c = coverage(&v);
                 for (si, &cov) in covered.iter().enumerate().take(n) {
                     if cov {
-                        out.coverage[(py as u32 * width + px as u32) as usize * n + si] = Some(c);
+                        out.coverage[index(px, py, si)] = Some(c);
                     }
                 }
             }
