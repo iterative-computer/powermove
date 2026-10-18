@@ -872,6 +872,52 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
 }
 
 #[test]
+fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
+    // Resolved in the frame's own command buffer, Metal returned the
+    // previous frame's end sample: only a renderer's first timed frame read
+    // as a span, and every later one ended before it began and went
+    // unjudged. Each frame here is timed (its timestamps are read before
+    // the next one) and must be judged.
+    let _gpu = gpu();
+    let mut r = builtins();
+    if !r
+        .device()
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
+        eprintln!("no TIMESTAMP_QUERY on this device; the watchdog times nothing");
+        return;
+    }
+    let (doc, res) = document(
+        vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
+        None,
+    );
+    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
+    let mut judged = 0;
+    for frame in 0..8 {
+        render(
+            &mut r,
+            &doc,
+            &res,
+            0.5 + f64::from(frame) * 0.01,
+            &request(),
+        )
+        .unwrap();
+        let reports = r.watchdog_reports(true);
+        if reports.len() == 1 {
+            judged += 1;
+        }
+        // Registered again: on for the next frame.
+        r.effects_mut()
+            .watchdog
+            .forget(DefinitionKind::Effect, &"blur".into());
+    }
+    // Metal can leave a sample empty while other devices are busy in this
+    // process; nearly every frame must still be judged.
+    assert!(judged >= 6, "{judged} of 8 frames judged");
+}
+
+#[test]
 fn a_viewport_safe_chain_renders_a_padded_crop_of_the_region() {
     let _gpu = gpu();
     // Large enough that the padded crop (128 px of overscan plus the
