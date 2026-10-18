@@ -32,7 +32,7 @@
 // Host answers carry protocol errors by value, as the engine hands them over.
 #![allow(clippy::result_large_err)]
 
-mod blender;
+pub(crate) mod blender;
 pub mod gate;
 
 use std::collections::{HashMap, VecDeque};
@@ -314,11 +314,6 @@ impl Shared {
         }
     }
 
-    /// The surfaces host services delivered for Blender job `job`.
-    fn take_blender_surfaces(&self, job: &JobId) -> Vec<pm_protocol::blender::BlenderSurface> {
-        self.lock().blender.by_job.remove(job).unwrap_or_default()
-    }
-
     fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
         self.call_many(vec![(request, session)])
             .pop()
@@ -333,6 +328,31 @@ impl Shared {
         }
         let (device, queue) = gpu.as_ref().expect("set above");
         Ok(Renderer::new(device.clone(), queue.clone()))
+    }
+}
+
+impl blender::HostPort for Shared {
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
+        Shared::call(self, request, session)
+    }
+
+    fn call_until(
+        &self,
+        request: Request,
+        session: Option<SessionId>,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Response, EngineError>> {
+        Shared::call_until(self, request, session, deadline, cancel)
+    }
+
+    fn begin_blender_job(&self, job: &JobId) {
+        self.lock().blender.begin(job);
+    }
+
+    /// The surfaces host services delivered for Blender job `job`.
+    fn take_blender_surfaces(&self, job: &JobId) -> Vec<pm_protocol::blender::BlenderSurface> {
+        self.lock().blender.take(job)
     }
 }
 

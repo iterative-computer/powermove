@@ -1,5 +1,7 @@
-//! The job engine's Blender backend (contract 11 over the host port;
-//! contract 14's Blender supervision runs in host services).
+//! The engines' Blender backend (contract 11 over the host port; contract
+//! 14's Blender supervision runs in host services): the job engine's
+//! exports, and the interactive engine's paused viewer
+//! (`crate::present::blender`).
 //!
 //! For each Blender frame the stage needs, the backend writes the
 //! snapshot's canonical JSON into the Blender Surfaces cache area
@@ -12,9 +14,10 @@
 //! (`blenderFailed`, `blenderMissing`, `cancelled`). Cancelling the export
 //! sends `cancelJobs` for the Blender job, which stops Blender.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use pm_blender::BlenderError;
@@ -26,14 +29,13 @@ use pm_protocol::blender::{
     SurfaceRequest, limits,
 };
 use pm_protocol::common::{ByteSize, ContentHash, JobId, SessionId, Size, Ticks};
-use pm_protocol::envelope::{Request, Response};
-use pm_protocol::error::{EngineError, ErrorCode};
+use pm_engine::jobs::HostRequest;
+use pm_protocol::envelope::{Event, Request, Response};
+use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 use pm_protocol::host::{
     CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, MintHandle, ResolveHandle,
 };
 use pm_protocol::priority::{CancelJobs, PriorityClass};
-
-use super::Shared;
 
 /// How long the job engine waits for one Blender frame. Host services own
 /// the 10-minute run timeout, which does not count the time Blender is
@@ -44,29 +46,52 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 /// (`prune`).
 const INPUT_HORIZON: Duration = FRAME_TIMEOUT;
 
-/// The Blender backend of one job lane.
-pub(super) struct HostBackend {
-    pub shared: Arc<Shared>,
-    /// The export this backend works for now (set by the lane per job).
-    pub job: Arc<std::sync::Mutex<JobParams>>,
+/// How long an ordinary host call (handles, status) may take.
+const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The host port as a Blender backend uses it: calls made from a thread
+/// off the engine's, answered by the engine's host connection, and the
+/// `blenderSurface` events of the Blender jobs it waits for.
+pub(crate) trait HostPort: Send + Sync {
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError>;
+    /// One call answered by `deadline`, or `None` once `cancel` is set.
+    fn call_until(
+        &self,
+        request: Request,
+        session: Option<SessionId>,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Response, EngineError>>;
+    /// Surfaces of `job` are wanted from now on (before it is sent).
+    fn begin_blender_job(&self, job: &JobId);
+    /// The surfaces delivered for `job`; later ones are dropped.
+    fn take_blender_surfaces(&self, job: &JobId) -> Vec<BlenderSurface>;
+}
+
+/// The Blender backend of one job lane, or of the paused viewer.
+pub(crate) struct HostBackend<P: HostPort + ?Sized> {
+    pub port: Arc<P>,
+    /// The work this backend renders for now (set per job).
+    pub job: Arc<Mutex<JobParams>>,
     area: Option<(PathBuf, CapabilityHandle, SessionId)>,
     next: u64,
 }
 
-/// The export a lane's Blender backend works for.
+/// What a Blender backend works for.
 #[derive(Debug, Clone)]
-pub(super) struct JobParams {
-    /// The export's session (handles are bound to it) and class.
+pub(crate) struct JobParams {
+    /// The session (handles are bound to it) and class.
     pub session: SessionId,
     pub priority: PriorityClass,
-    /// The export job, to name Blender jobs after it.
+    /// The export job (or the viewer's preview), to name Blender jobs
+    /// after it.
     pub export: JobId,
 }
 
-impl HostBackend {
-    pub fn new(shared: Arc<Shared>, job: Arc<std::sync::Mutex<JobParams>>) -> HostBackend {
+impl<P: HostPort + ?Sized> HostBackend<P> {
+    pub fn new(port: Arc<P>, job: Arc<Mutex<JobParams>>) -> HostBackend<P> {
         HostBackend {
-            shared,
+            port,
             job,
             area: None,
             next: 0,
@@ -86,7 +111,7 @@ impl HostBackend {
             return Ok((path.clone(), handle.clone()));
         }
         let failed = |e: EngineError| BlenderError::Failed(format!("Blender cache: {}", e.message));
-        let grant = match self.shared.call(
+        let grant = match self.port.call(
             Request::MintHandle(MintHandle {
                 kind: CapabilityKind::Cache {
                     cache: CacheKind::BlenderSurfaces,
@@ -103,7 +128,7 @@ impl HostBackend {
             }
             Err(e) => return Err(failed(e)),
         };
-        let resolved = match self.shared.call(
+        let resolved = match self.port.call(
             Request::ResolveHandle(ResolveHandle {
                 handle: grant.handle.clone(),
                 session,
@@ -126,7 +151,7 @@ impl HostBackend {
 
     fn media_handle(&self, asset: &str) -> Result<CapabilityHandle, BlenderError> {
         let session = self.params().session;
-        match self.shared.call(
+        match self.port.call(
             Request::MintHandle(MintHandle {
                 kind: CapabilityKind::MediaRead {
                     asset: asset.into(),
@@ -179,10 +204,10 @@ fn of_engine(e: EngineError) -> BlenderError {
     }
 }
 
-impl BlenderBackend for HostBackend {
+impl<P: HostPort + ?Sized> BlenderBackend for HostBackend<P> {
     fn version(&mut self) -> Result<String, BlenderError> {
         let session = self.params().session;
-        match self.shared.call(Request::BlenderStatus, Some(session)) {
+        match self.port.call(Request::BlenderStatus, Some(session)) {
             Ok(Response::BlenderStatus(s)) if s.supported() => Ok(s.version.unwrap_or_default()),
             Ok(Response::BlenderStatus(s)) => Err(BlenderError::Missing(
                 s.error
@@ -285,20 +310,21 @@ impl BlenderBackend for HostBackend {
         };
         pm_protocol::validate::Validate::validate(&request)
             .map_err(|v| BlenderError::Failed(v.to_string()))?;
-        let answer = self.shared.call_until(
+        self.port.begin_blender_job(&id);
+        let answer = self.port.call_until(
             Request::BlenderRender(request),
             Some(params.session),
             Instant::now() + FRAME_TIMEOUT,
             cancel,
         );
-        let delivered = self.shared.take_blender_surfaces(&id);
+        let delivered = self.port.take_blender_surfaces(&id);
         match answer {
             Some(Ok(Response::Ack)) => {}
             Some(Ok(_)) => return Err(BlenderError::Failed("unexpected Blender answer".into())),
             Some(Err(e)) => return Err(of_engine(e)),
             None => {
                 // Cancelled: stop Blender.
-                let _ = self.shared.call(
+                let _ = self.port.call(
                     Request::CancelJobs(CancelJobs::Job { job: id }),
                     Some(params.session),
                 );
@@ -330,18 +356,195 @@ impl BlenderBackend for HostBackend {
     }
 }
 
-/// Surfaces received for each Blender job, until its answer arrives.
+/// Surfaces received for each Blender job that is waiting for them. Events
+/// for a job nobody waits for (it was cancelled, or failed, before they
+/// arrived) are dropped, so nothing accumulates across cancelled jobs.
 #[derive(Default)]
-pub(super) struct Delivered {
-    pub by_job: std::collections::HashMap<JobId, Vec<BlenderSurface>>,
+pub(crate) struct Delivered {
+    open: HashSet<JobId>,
+    by_job: HashMap<JobId, Vec<BlenderSurface>>,
 }
 
 impl Delivered {
+    pub fn begin(&mut self, job: &JobId) {
+        self.open.insert(job.clone());
+    }
+
     pub fn push(&mut self, s: BlenderSurface) {
+        if !self.open.contains(&s.job) {
+            return;
+        }
         // Bounded: a job has at most the nested-frame limit of surfaces.
         let list = self.by_job.entry(s.job.clone()).or_default();
         if list.len() < limits::MAX_NESTED_FRAMES {
             list.push(s);
         }
+    }
+
+    /// The job's surfaces; the job is closed.
+    pub fn take(&mut self, job: &JobId) -> Vec<BlenderSurface> {
+        self.open.remove(job);
+        self.by_job.remove(job).unwrap_or_default()
+    }
+
+    /// Jobs waiting and surfaces held (tests).
+    #[cfg(test)]
+    pub fn held(&self) -> (usize, usize) {
+        (self.open.len(), self.by_job.values().map(Vec::len).sum())
+    }
+}
+
+/// A host-call channel for threads off the engine's (the paused viewer's
+/// Blender worker): calls wait in an outbox until the engine drains it
+/// (`FramePresenter::drain_host_requests`), answers come back by token,
+/// and `blenderSurface` events are kept for the job waiting for them.
+pub(crate) struct HostLink {
+    state: Mutex<LinkState>,
+    answered: Condvar,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[derive(Default)]
+struct LinkState {
+    next_token: u64,
+    outbox: Vec<HostRequest>,
+    answers: HashMap<u64, Result<Response, EngineError>>,
+    /// Calls sent and not yet answered.
+    waiting: HashSet<u64>,
+    blender: Delivered,
+    shutdown: bool,
+}
+
+impl HostLink {
+    /// `wake` asks the engine's thread to drain the outbox soon.
+    pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Arc<HostLink> {
+        Arc::new(HostLink {
+            state: Mutex::new(LinkState::default()),
+            answered: Condvar::new(),
+            wake,
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, LinkState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The calls to make now.
+    pub fn drain(&self) -> Vec<HostRequest> {
+        std::mem::take(&mut self.lock().outbox)
+    }
+
+    /// The answer to a drained call.
+    pub fn answer(&self, token: u64, answer: Result<Response, EngineError>) {
+        let mut st = self.lock();
+        if st.waiting.remove(&token) {
+            st.answers.insert(token, answer);
+        }
+        drop(st);
+        self.answered.notify_all();
+    }
+
+    /// A host event: Blender surfaces of the jobs this link waits for.
+    pub fn event(&self, event: &Event) {
+        if let Event::BlenderSurface(s) = event {
+            self.lock().blender.push(s.clone());
+        }
+    }
+
+    /// The engine is going away: every wait ends.
+    pub fn shutdown(&self) {
+        self.lock().shutdown = true;
+        self.answered.notify_all();
+    }
+
+    fn send(&self, request: Request, session: Option<SessionId>) -> u64 {
+        let mut st = self.lock();
+        st.next_token += 1;
+        let token = st.next_token;
+        st.waiting.insert(token);
+        st.outbox.push(HostRequest {
+            token,
+            request,
+            session,
+        });
+        drop(st);
+        (self.wake)();
+        token
+    }
+
+    fn wait(
+        &self,
+        token: u64,
+        deadline: Instant,
+        cancel: Option<&AtomicBool>,
+    ) -> Option<Result<Response, EngineError>> {
+        let mut st = self.lock();
+        loop {
+            if let Some(answer) = st.answers.remove(&token) {
+                return Some(answer);
+            }
+            let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+            if cancelled || st.shutdown {
+                st.waiting.remove(&token);
+                st.outbox.retain(|r| r.token != token);
+                return if cancelled {
+                    None
+                } else {
+                    Some(Err(EngineError::new(
+                        ErrorCode::Cancelled,
+                        ErrorScope::Connection,
+                        "The engine is shutting down.",
+                    )))
+                };
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                st.waiting.remove(&token);
+                return Some(Err(EngineError::new(
+                    ErrorCode::Timeout,
+                    ErrorScope::Connection,
+                    "Host services did not answer in time.",
+                )));
+            }
+            st = self
+                .answered
+                .wait_timeout(st, left.min(Duration::from_millis(100)))
+                .map(|(g, _)| g)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+    }
+
+    /// Calls waiting, answers held, and Blender jobs open (tests).
+    #[cfg(test)]
+    pub fn pending(&self) -> (usize, usize, usize) {
+        let st = self.lock();
+        (st.waiting.len(), st.answers.len(), st.blender.held().0)
+    }
+}
+
+impl HostPort for HostLink {
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
+        let token = self.send(request, session);
+        self.wait(token, Instant::now() + HOST_CALL_TIMEOUT, None)
+            .expect("only a cancel ends a wait without an answer")
+    }
+
+    fn call_until(
+        &self,
+        request: Request,
+        session: Option<SessionId>,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Response, EngineError>> {
+        let token = self.send(request, session);
+        self.wait(token, deadline, Some(cancel))
+    }
+
+    fn begin_blender_job(&self, job: &JobId) {
+        self.lock().blender.begin(job);
+    }
+
+    fn take_blender_surfaces(&self, job: &JobId) -> Vec<BlenderSurface> {
+        self.lock().blender.take(job)
     }
 }
