@@ -32,7 +32,8 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, type DocumentStream, type FallbackRunner } from './session';
+import { DocumentSession, documentId, type DocumentStream } from './session';
+import { EngineRenderTransport } from './render-transport';
 import { ShaderFallbackRunner } from './shader-fallback';
 import { EngineTransport } from './transport';
 
@@ -78,6 +79,9 @@ export interface EngineConnectionHandle {
   onClock(listener: (sample: ClockSample) => void): () => void;
   /** The session the transport follows (the newest viewer session). */
   session(): DocumentSession | null;
+  /** Engine snapshots, compatibility pixels, and UI snapshots (the Phase 3c
+   *  render transport; also `PM.EngineRender`). */
+  render: EngineRenderTransport;
   hostClock: HostClock;
   transport: EngineTransport;
   dispose(): void;
@@ -107,7 +111,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const ready = new Set<() => void>();
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
-  let fallbackRunner: FallbackRunner | null = null;
+  let fallbackRunner: ShaderFallbackRunner | null = null;
+  /** A session with no viewer, so snapshots work while no viewer is open
+   *  (the Library, a closed viewer): open while no viewer session is. */
+  let standby: DocumentSession | null = null;
   const transport = new EngineTransport(() => current, hostClock);
   PM.setTransportDriver?.(transport);
 
@@ -160,6 +167,62 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     return doc as DocumentStream;
   };
 
+  /** The session snapshots are taken of: the newest viewer session once it
+   *  has the document, else the standby. */
+  const snapshotSession = (): DocumentSession | null => {
+    if (current && current.id !== null && !current.closed && current.applied > 0) return current;
+    if (standby && standby.id !== null && !standby.closed) return standby;
+    return current;
+  };
+  const closeStandby = (): void => {
+    const s = standby;
+    standby = null;
+    s?.close();
+  };
+  /** Opens the standby session while the connection is up and no viewer
+   *  session is open; closes it once one is. */
+  const syncStandby = (): void => {
+    const c = connection;
+    if (sessions.size || !c?.ready || c.closed || !PM.EngineDoc?.enabled) {
+      if (sessions.size && current && current.applied > 0) closeStandby();
+      return;
+    }
+    if (standby && !standby.closed) return;
+    const s: DocumentSession = new DocumentSession({
+      connection: c,
+      stream: stream(),
+      documentId: () => String(PM.proj?.id ?? ''),
+      stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
+      definitions: () => ((PM as any).EngineDefinitions ?? null),
+      fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+      handlers: {
+        message: () => {},
+        closed: () => {
+          if (standby === s) standby = null;
+        }
+      },
+      log
+    });
+    standby = s;
+    void s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
+  };
+  const renderTransport = new EngineRenderTransport({
+    native,
+    session: snapshotSession,
+    revision: () => {
+      const barrier = PM.EngineDoc?.barrier;
+      if (!barrier) return null;
+      barrier.flush();
+      return barrier.revision;
+    },
+    composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
+    document: () => documentId(PM.proj?.id),
+    viewSeq: () => current?.viewSeq ?? null,
+    fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+    log
+  });
+  (PM as any).EngineRender = renderTransport;
+
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
     const next = new EngineConnection(nextGeneration, port, log);
@@ -183,6 +246,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
     for (const listener of [...ready]) listener();
+    // A viewer that opens attaches a session; until then (or without one)
+    // snapshots use the standby.
+    queueMicrotask(syncStandby);
   }
 
   const onMessage = (event: MessageEvent): void => {
@@ -227,6 +293,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         sessions.delete(s);
         if (current === s) current = [...sessions].at(-1) ?? null;
         transport.refresh();
+        syncStandby();
       };
       session = new DocumentSession({
         connection: c,
@@ -271,7 +338,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       current = session;
       transport.resetLoop();
       const opened = session;
-      void opened.start().catch((error: unknown) => {
+      void opened.start().then(syncStandby, (error: unknown) => {
         log('warn', `engine viewer session: ${error instanceof Error ? error.message : String(error)}`);
       });
       return {
@@ -291,6 +358,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     hostClock,
     transport,
     audio,
+    render: renderTransport,
     session: () => current,
     setTrace: (on) => {
       if (on === trace) return;
@@ -332,6 +400,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       for (const s of [...sessions]) s.close();
       sessions.clear();
       current = null;
+      closeStandby();
+      renderTransport.dispose();
+      if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       connection?.close('the engine connection was removed');
       connection = null;
       hostClock.stop();

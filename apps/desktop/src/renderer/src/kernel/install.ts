@@ -10,6 +10,8 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  Layer,
+  RasterWindow,
   PreviewViewport,
   AnimAPI,
   AssetRecord,
@@ -186,7 +188,12 @@ function makeProject(PM: LegacyPM): ProjectAPI {
     playing: () => !!PM?.playing,
     undo: () => PM?.hist?.undo?.(),
     redo: () => PM?.hist?.redo?.(),
-    snapshot: async (t, maxWidth) => (await PM?.Export?.snapshot?.(t ?? PM?.time ?? 0, maxWidth ?? 480)) ?? ''
+    snapshot: async (t, maxWidth) => {
+      // With the new engine on, the engine draws it (never the current engine).
+      const engine = engineRender(PM);
+      if (engine) return engine.snapshotDataUrl(t ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj).catch(() => '');
+      return (await PM?.Export?.snapshot?.(t ?? PM?.time ?? 0, maxWidth ?? 480)) ?? '';
+    }
   };
 }
 
@@ -196,6 +203,12 @@ const EMPTY_MAT4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 
 /** The native evaluator (engine-doc), when the flag is on; it answers through
  *  pm-wasm and falls back to the legacy code itself. */
+/** The engine's render transport while "Use New Engine" is on
+ *  (engine-connection/render-transport.ts). */
+function engineRender(PM: LegacyPM): import('../engine-connection/render-transport').EngineRenderTransport | null {
+  return PM?.EngineRender ?? null;
+}
+
 function native(PM: LegacyPM): import('../engine-doc/native').NativeApi | null {
   const doc = PM?.EngineDoc;
   return doc?.enabled && doc.api ? doc.api : null;
@@ -383,8 +396,41 @@ function makeRender(PM: LegacyPM): RenderAPI {
     },
     raster,
     textLayout: (layer, time) => { const n = native(PM); const t = time ?? PM?.time ?? 0; return (n ? n.textLayout(layer, t) : PM?.textCaretLayout?.(layer, t)) ?? null; },
-    renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
-    snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
+    /* The synchronous compatibility path (apiVersion 1 to 3): with the new
+       engine on, pixels come from the engine through a synchronous request
+       (render-transport.ts), never from the current engine. */
+    renderFrameTo: (time, width, height, options) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.renderFrameTo?.(time, width, height, options);
+      const canvas = engine.renderFrameToSync(time, width, height, options);
+      if (!canvas) throw new Error(`The engine could not render the frame: ${engine.stats.lastFailure ?? 'unknown error'}`);
+      return canvas;
+    },
+    snapshot: (time, maxWidth) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.Export?.snapshot?.(time, maxWidth) ?? '';
+      return engine.snapshotDataUrlSync(time ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj);
+    },
+    /* apiVersion 4's async siblings (additive): the UI never blocks. */
+    snapshotAsync: async (time: number, maxWidth = 480) => {
+      const engine = engineRender(PM);
+      if (!engine) return (await PM?.Export?.snapshotAsync?.(time, maxWidth)) ?? '';
+      return engine.snapshotDataUrl(time ?? PM?.time ?? 0, maxWidth, PM.proj);
+    },
+    renderFrameToAsync: async (time: number, width: number, height: number, options?: Record<string, unknown>) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.renderFrameTo?.(time, width, height, options);
+      return engine.renderFrameTo(time, width, height, options);
+    },
+    rasterAsync: async (layer: Layer, scale = 1, time?: number, crop?: RasterWindow | null) => {
+      const engine = engineRender(PM);
+      if (!engine) return raster(layer, scale, time);
+      const t = time ?? PM?.time ?? 0;
+      const box = crop && Number.isFinite(crop.w) && Number.isFinite(crop.h) ? { x: Math.max(0, Math.round(Number(crop.x) || 0)), y: Math.max(0, Math.round(Number(crop.y) || 0)), width: Math.max(1, Math.round(crop.w as number)), height: Math.max(1, Math.round(crop.h as number)) } : null;
+      const project = PM?.proj ?? { w: 1, h: 1 };
+      const bound = Math.max(1, Math.ceil(Math.max(project.w, project.h) * scale * 4));
+      return engine.snapshot({ time: t, width: Math.min(16384, bound), height: Math.min(16384, bound), pixels: 'premultiplied', layer: { id: String(layer?.id ?? ''), scale, crop: box } });
+    }
   } as RenderAPI;
 }
 

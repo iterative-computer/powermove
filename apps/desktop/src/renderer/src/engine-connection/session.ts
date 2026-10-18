@@ -412,6 +412,38 @@ export class DocumentSession {
     }
   }
 
+  /** The interactive engine launch this session belongs to. */
+  get generation(): number {
+    return this.options.connection.generation;
+  }
+
+  /** A resync is in flight (a staged document reads asynchronously): the
+   *  engine reaches the current revision only after it lands. */
+  get resyncPending(): boolean {
+    return this.resyncing !== null;
+  }
+
+  /** Posts a fallback program's pixels on the session's port in row bands
+   *  that fit a message (the viewer's asks and the snapshot path). */
+  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void {
+    const session = this.id;
+    if (session === null || this.closed) return;
+    const rowBytes = pixels.width * 8;
+    const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
+    const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
+    for (let row = 0; row < pixels.height; row += rowsPerBand) {
+      const rows = Math.min(rowsPerBand, pixels.height - row);
+      this.options.connection.event({ type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) } as never, session);
+    }
+  }
+
+  /** Posts an event on the session's port (compatibility uploads). */
+  post(event: Record<string, unknown> & { type: string }): boolean {
+    if (this.id === null || this.closed) return false;
+    this.options.connection.event(event as never, this.id);
+    return true;
+  }
+
   /**
    * Draws one program the engine's pipeline cannot translate with the
    * fallback runner and uploads its pixels in row bands that fit a message
@@ -427,13 +459,7 @@ export class DocumentSession {
       this.fallbackRunner ??= this.options.fallbackRunner?.() ?? null;
       if (!this.fallbackRunner) throw new ShaderFallbackError(request.key, 'unavailable', 'no shader fallback runner');
       const pixels = await this.fallbackRunner.render(request);
-      const rowBytes = pixels.width * 8;
-      const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
-      const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
-      for (let row = 0; row < pixels.height; row += rowsPerBand) {
-        const rows = Math.min(rowsPerBand, pixels.height - row);
-        send({ fallback: 'pixels', key: request.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) });
-      }
+      if (this.id === session) this.uploadFallback(pixels);
     } catch (error) {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
@@ -442,8 +468,12 @@ export class DocumentSession {
     }
   }
 
+  /** The newest viewer state's sequence number sent (`ViewerState.viewSeq`). */
+  viewSeq: number | null = null;
+
   sendViewerState(state: ViewerState): void {
     if (this.closed) return;
+    this.viewSeq = Number(state.viewSeq);
     if (this.id === null || this.resyncing && this.applied === 0) {
       this.pendingState = state;
       return;
