@@ -1164,9 +1164,23 @@ viewer to the current engine.
 - `child_scheduling`: a sync snapshot during playback answered in 8.4 to
   9.1 ms (five runs, earlier); an idle snapshot waited until the transport
   stopped.
-- `e2e/engine-render-transport.spec.ts` (six tests): see the lane report
-  for the final run; a sync snapshot during a staged resync of a 13 MiB
-  document answered through main's session at once (`documentSync` 1).
+- `e2e/engine-render-transport.spec.ts` (seven tests): 21 of 21 with
+  `--repeat-each=3` after merging the integration branch (load average
+  about 5). A sync snapshot during a staged resync of a 13 MiB document
+  answered through main's session in 101.8 to 109.4 ms (four runs; the
+  5 s sync wait before); a sync snapshot's fallback round drew the
+  program on real WebGL with the expected pixels.
+- `render.raster` of a 96 px text layer with the engine: p50 2.6 ms, p95
+  3.1 ms, max 4.4 ms (30 calls); `render.snapshot(0.5, 480)` p50 3.0 ms.
+- `native-engine-tracer.spec.ts:144`: 20 of 20 as the first test of a
+  batch (20 separate runs) and 16 of 16 with `--repeat-each=8` (twice).
+- The flag-on engine specs together (`engine-render-transport`,
+  `native-engine-tracer`, `native-engine-transport`,
+  `engine-present-recovery`, `native-engine`, `engine-blender`,
+  `engine-export`, `engine-delivery`): 30 of 31; the one failure is the
+  J/K/L A/V sync check (2× reverse, a sawtooth of 6 to 11 ms), which
+  failed 1 of 6 runs on this branch and 1 of 6 on the integration
+  branch's own build (`575a7cd0`) with the same pattern.
 - Two regressions found and fixed on the way: waveform requests made
   before the host answered for a just-imported file were told the media
   is offline and never asked again (`native-engine-transport`'s audio
