@@ -5,6 +5,8 @@ pub mod analytic;
 pub mod blink;
 pub mod context;
 pub mod convex;
+pub mod filter;
+pub mod mask;
 pub mod msaa;
 pub mod paint;
 pub mod shape;

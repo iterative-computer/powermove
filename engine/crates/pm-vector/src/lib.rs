@@ -42,7 +42,8 @@ pub use kurbo;
 pub use canvas::{CanvasPath, CanvasTransform, NegativeRadius, TransformOp};
 pub use corner::{CornerContent, CornerRadii, rounded_rect_path, rounded_rect_svg};
 pub use mask::{
-    LayerMasks, MaskMode, MaskShape, MaskValues, ParametricMasks, PathMasks, layer_inverse,
+    LayerMasks, MaskMode, MaskOutline, MaskShape, MaskValues, ParametricMasks, PathMask, PathMasks,
+    layer_inverse,
 };
 pub use path::{PathDraw, PathLayer, PathNode, PathValues, Vertex, path_points, trace_path};
 pub use shape::{ShapeContent, ShapeError, ShapeGeometry, ShapeKind, ShapeRaster, shape_geometry};
