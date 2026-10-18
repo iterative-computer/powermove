@@ -60,9 +60,28 @@ pw() { # <name> <env...> -- <playwright args...>
     "$L" bunx playwright test "$@" --workers=1 --retries=0 --global-timeout=0 --reporter=list,json
 }
 
+# Presentation and page-timing steps measure only with the main display awake
+# and the session unlocked (pm-bridge's harness feature reports both); wait
+# for that, then let the panel settle. GATE_NO_DISPLAY_WAIT=1 skips the wait.
+wait_display() {
+  [ -n "${GATE_NO_DISPLAY_WAIT:-}" ] && return 0
+  local addon="$OUT/pm_bridge_harness.node"
+  cp "$repo/engine/target/release/libpm_bridge.dylib" "$addon" || return 1
+  local state
+  while :; do
+    state="$(node -e "const s=require(process.argv[1]).displayState();process.stdout.write(!s.asleep&&!s.locked?'usable':'asleep '+s.asleep+' locked '+s.locked)" "$addon")"
+    [ "$state" = usable ] && break
+    sleep 60
+  done
+  sleep 20
+}
+
 step() {
   local name="$1"
   local before after start status
+  case "$name" in
+    tracer-measure|perf|s1|frame-bridge-integration|engine-specs-new|transport-repeat) wait_display ;;
+  esac
   before="$(load1)"; start="$(date '+%Y-%m-%dT%H:%M:%S')"
   case "$name" in
     ledger-off)
@@ -82,6 +101,8 @@ step() {
       rm -f "$OUT/tracer-measure-page.jsonl"
       pw tracer-measure PM_TRACER_MEASURE=1 PM_TRACER_MEASURE_OUT="$OUT/tracer-measure-page.jsonl" -- \
         e2e/native-engine-tracer-measure.spec.ts ;;
+    transport-repeat)
+      pw transport-repeat X=1 -- e2e/native-engine-transport.spec.ts --repeat-each="${GATE_REPEAT:-3}" ;;
     perf)
       "$L" node scripts/frame-bridge-measure.mjs --skip-build --tag "$TAG" --only "${GATE_RUNS:-$PERF_RUNS}" ;;
     s1)
@@ -97,7 +118,7 @@ step() {
     pm-wasm-bench)
       "$L" node scripts/pm-wasm-bench.mjs --rounds 200 ;;
     list)
-      echo "ledger-off audit-suite engine-specs engine-specs-new flag-on-specs tracer-measure perf s1"
+      echo "ledger-off audit-suite engine-specs engine-specs-new transport-repeat flag-on-specs tracer-measure perf s1"
       echo "frame-bridge-integration engine-host-integration test-mcp engine-switch-corpus pm-wasm-bench"
       return 0 ;;
     *) echo "unknown step $name" >&2; return 2 ;;
