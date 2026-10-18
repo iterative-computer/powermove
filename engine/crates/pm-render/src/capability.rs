@@ -50,11 +50,6 @@ pub enum Feature {
     MotionBlur,
     /// 2.5D layers (the 3D switch or a 3D group).
     TwoAndAHalfD,
-    /// A `compat` level 1 shape layer on a 2.5D plane: its Canvas2D raster
-    /// is drawn through the plane, which magnifies the vector lane's pinned
-    /// single-sample MSAA residuals (docs/engine/vector.md "Residuals";
-    /// `space/groups-25d`). Kept routed until those close.
-    PlaneShapeRaster,
     /// Adjustment layers with effects.
     Adjustment,
     /// Content created at `compat` level 2.
@@ -115,7 +110,6 @@ impl fmt::Display for Feature {
             Feature::Transition => write!(f, "transitions"),
             Feature::MotionBlur => write!(f, "motion blur"),
             Feature::TwoAndAHalfD => write!(f, "2.5D layers"),
-            Feature::PlaneShapeRaster => write!(f, "level 1 shape rasters on 2.5D planes"),
             Feature::Adjustment => write!(f, "adjustment layers with effects"),
             Feature::CompatLevel2 => write!(f, "compat level 2 content"),
             Feature::ProjectColor => write!(f, "non-default project color settings"),
@@ -405,10 +399,10 @@ fn check_composition(
                 }
             }
         }
-        // Motion blur and 2.5D planes are drawn for the layer types their
-        // parity cases cover (`crate::motion`, `crate::space25d`;
-        // docs/engine/motion.md); other types keep routing until their own
-        // renderers are compared with them.
+        // Motion blur and 2.5D planes are drawn for every visual layer type
+        // (`crate::motion::DRAWN_TYPES`, `crate::space25d::DRAWN_TYPES`,
+        // each compared with today's in the corpus; docs/engine/motion.md).
+        // A type missing from those lists is a new layer type and routes.
         let mblur = node::member(Some(layer), "mblur");
         let own_blur = is_property(mblur) || node::truthy(mblur);
         if own_blur && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
@@ -430,11 +424,6 @@ fn check_composition(
         // reached through a blurred precomp are drawn at every sample time:
         // types outside the compared lists keep routing.
         let (three_d, blurred) = enclosing_groups(layers, layer);
-        let level1 =
-            !node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0);
-        if ty == "shape" && level1 && (three_d || js::flag(layer, "threeD")) {
-            add(layer, Feature::PlaneShapeRaster);
-        }
         if !NOT_VISUAL.contains(&ty.as_str()) {
             if three_d && !crate::space25d::DRAWN_TYPES.contains(&ty.as_str()) {
                 add(layer, Feature::TwoAndAHalfD);

@@ -101,13 +101,10 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
 /// (project, most pixels off by more than 1, largest difference). A frame
 /// within its pin is listed as known instead of failed; one beyond it fails.
 ///
-/// - `composition/metadata`: the radius-24 rectangle's Canvas2D raster has
-///   two pixels where one of Chromium's four MSAA samples falls on the other
-///   side of a tessellated arc edge (0.15/256 px from it); the compat level 1
-///   emulation reproduces the raster otherwise exactly
-///   (docs/engine/vector.md, "Residuals"; `shape-corpus-rect-r24-s1` in
-///   pm-vector's Canvas2D parity test).
-const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[("composition/metadata", 6, 43)];
+/// Empty: `composition/metadata` (the radius-24 rectangle's single flipped
+/// MSAA samples) is bit-exact since the compat level 1 emulation models the
+/// MSAA pass's approx-fit viewport (docs/engine/vector.md, "Residuals").
+const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[];
 
 #[test]
 fn corpus_render_parity() {
