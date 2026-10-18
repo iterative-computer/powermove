@@ -289,14 +289,88 @@ impl PaintResolver for Resolver<'_> {
     }
 }
 
-/// The raw transform attribute of a usvg node's element, as Blink computes it.
-fn raw_transform(elements: &Elements, id: &str, fallback: usvg::Transform) -> Result<Affine, SvgError> {
-    match elements.get(id) {
-        Some(e) => blinksvg::element_transform(e.attrs.get("transform").map(String::as_str)),
-        None => {
-            let t = fallback;
-            Ok(Affine([t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f64::from)))
-        }
+/// The raw transform attribute of an element, as Blink computes it.
+fn element_transform(e: &Element) -> Result<Affine, SvgError> {
+    blinksvg::element_transform(e.attrs.get("transform").map(String::as_str))
+}
+
+/// What a usvg group stands for in Blink's paint property tree.
+enum GroupKind<'a> {
+    /// A `<g>`: its own element.
+    Element(&'a Element),
+    /// The group usvg makes around a shape (or text) element for the
+    /// element's `transform`, `opacity` and `clip-path`: in Blink those are
+    /// the shape's own property nodes, so the group takes the element's
+    /// raw transform and the shape pushes none.
+    Wrapper(&'a Element),
+    /// The group usvg makes under the tree root for the root's viewBox
+    /// transform: Blink's root transform (`ImageDraw::root_transform`),
+    /// already in the record builder's root state.
+    Viewport,
+}
+
+/// The node's raw element (usvg keeps the source id on `<g>` groups,
+/// shapes and text; `annotate` gave every element one).
+fn node_element<'a>(elements: &'a Elements, n: &usvg::Node) -> Option<&'a Element> {
+    let id = match n {
+        usvg::Node::Group(g) => g.id(),
+        usvg::Node::Path(p) => p.id(),
+        usvg::Node::Text(t) => t.id(),
+        usvg::Node::Image(i) => i.id(),
+    };
+    if id.is_empty() { None } else { elements.get(id) }
+}
+
+/// Whether usvg put its viewport group (the root viewBox transform) under
+/// the tree root: `convert_doc` makes one exactly when
+/// `ViewBox::to_transform(tree.size())` is not the identity (usvg 0.48,
+/// replicated in f32; no `background-color` is admitted).
+fn usvg_viewport_group(sizing: &blinksvg::NaturalSizing, tree: &usvg::Tree) -> bool {
+    let Some(vb) = sizing.view_box.filter(|vb| vb[2] > 0.0 && vb[3] > 0.0 && vb.iter().all(|v| v.is_finite())) else {
+        // No viewBox: usvg's synthesized one is the size at the origin.
+        return false;
+    };
+    let size = tree.size();
+    let (mut sx, mut sy) = (size.width() / vb[2], size.height() / vb[3]);
+    let par = sizing.preserve_aspect_ratio;
+    if par.align != 0 {
+        let s = if par.slice { sx.max(sy) } else { sx.min(sy) };
+        (sx, sy) = (s, s);
+    }
+    let (x, y) = (-vb[0] * sx, -vb[1] * sy);
+    let (w, h) = (size.width() - vb[2] * sx, size.height() - vb[3] * sy);
+    let tx = match par.align {
+        2 | 5 | 8 => x + w / 2.0,
+        3 | 6 | 9 => x + w,
+        _ => x,
+    };
+    let ty = match par.align {
+        4..=6 => y + h / 2.0,
+        7..=9 => y + h,
+        _ => y,
+    };
+    !(sx == 1.0 && sy == 1.0 && tx == 0.0 && ty == 0.0)
+}
+
+fn group_kind<'a>(elements: &'a Elements, g: &usvg::Group, viewport: bool) -> Result<GroupKind<'a>, SvgError> {
+    if viewport {
+        return Ok(GroupKind::Viewport);
+    }
+    if !g.id().is_empty() {
+        return match elements.get(g.id()) {
+            Some(e) if e.kind == "g" => Ok(GroupKind::Element(e)),
+            Some(e) => Err(SvgError(format!("SVG <{}> group needs compatibility support", e.kind))),
+            None => Err(SvgError("SVG group without a source element".into())),
+        };
+    }
+    // usvg's `convert_group` around a shape or text element: one child, the
+    // element's own node (which keeps the element id).
+    match g.children() {
+        [child] if !matches!(child, usvg::Node::Group(_)) => match node_element(elements, child) {
+            Some(e) if e.kind != "g" => Ok(GroupKind::Wrapper(e)),
+            _ => Err(SvgError("SVG group without a source element needs compatibility support".into())),
+        },
+        _ => Err(SvgError("SVG group without a source element needs compatibility support".into())),
     }
 }
 
@@ -304,10 +378,13 @@ struct Walk<'a> {
     builder: RecordBuilder<'a>,
     elements: &'a Elements,
     resolver: Resolver<'a>,
+    /// The tree root's only child is usvg's viewport group.
+    viewport_group: bool,
 }
 
 impl Walk<'_> {
-    fn group(&mut self, g: &usvg::Group, parent: ItemState, is_root: bool) -> Result<(), SvgError> {
+    /// `viewport`: `g` is usvg's viewport group.
+    fn group(&mut self, g: &usvg::Group, parent: ItemState, is_root: bool, viewport: bool) -> Result<(), SvgError> {
         if g.mask().is_some() {
             return Err(SvgError("SVG mask paint record needs compatibility support".into()));
         }
@@ -315,9 +392,17 @@ impl Walk<'_> {
             return Err(SvgError("SVG blend mode paint record needs compatibility support".into()));
         }
         let mut state = parent;
+        let mut wrapped = false;
         if !is_root {
             // The element's own transform node (UpdateTransformForSVGChild).
-            let m = raw_transform(self.elements, g.id(), g.transform())?;
+            let m = match group_kind(self.elements, g, viewport)? {
+                GroupKind::Element(e) => element_transform(e)?,
+                GroupKind::Wrapper(e) => {
+                    wrapped = true;
+                    element_transform(e)?
+                }
+                GroupKind::Viewport => Affine::IDENTITY,
+            };
             state.transform = self.builder.push_transform(parent.transform, m);
             // clip-path (UpdateClipPathClip): the clip's path in the element's
             // user space.
@@ -337,8 +422,11 @@ impl Walk<'_> {
         }
         for n in g.children() {
             match n {
-                usvg::Node::Group(c) => self.group(c, state, false)?,
-                usvg::Node::Path(p) => self.path(p, state)?,
+                usvg::Node::Group(c) => {
+                    let viewport = is_root && self.viewport_group;
+                    self.group(c, state, false, viewport)?
+                }
+                usvg::Node::Path(p) => self.path(p, state, wrapped)?,
                 usvg::Node::Text(t) => {
                     let ops = vec![Op::DrawText(Box::new(TextItem { node: (**t).clone() }))];
                     self.builder.push_item(state, ops);
@@ -349,18 +437,23 @@ impl Walk<'_> {
         Ok(())
     }
 
-    fn path(&mut self, p: &usvg::Path, parent: ItemState) -> Result<(), SvgError> {
+    /// `wrapped`: the parent is usvg's group around this shape, which
+    /// already pushed the shape's own transform node.
+    fn path(&mut self, p: &usvg::Path, parent: ItemState, wrapped: bool) -> Result<(), SvgError> {
         if !p.is_visible() {
             return Ok(());
         }
         let mut state = parent;
-        // usvg folds a path's own `transform` into its abs_transform; Blink
-        // gives it its own transform node.
-        let own = match self.elements.get(p.id()) {
-            Some(e) => blinksvg::element_transform(e.attrs.get("transform").map(String::as_str))?,
-            None => Affine::IDENTITY,
-        };
-        state.transform = self.builder.push_transform(parent.transform, own);
+        if !wrapped {
+            // usvg wraps every shape whose transform is not the identity;
+            // an unwrapped shape's own transform is the identity in usvg's
+            // float, which Blink's double may still see (`rotate(360)`).
+            let own = match self.elements.get(p.id()) {
+                Some(e) => element_transform(e)?,
+                None => Affine::IDENTITY,
+            };
+            state.transform = self.builder.push_transform(parent.transform, own);
+        }
         let geometry = geometry(p, self.elements);
         let bbox = object_bbox(&geometry);
         let style = ShapeStyle {
@@ -466,8 +559,12 @@ fn content_record(raw: &RawElements, sizing: &blinksvg::NaturalSizing, draw: &Im
         Some(vb) => [vb[2], vb[3]],
         None => [sizing.width.unwrap_or(draw.container[0]), sizing.height.unwrap_or(draw.container[1])],
     };
-    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport } };
-    walk.group(tree.root(), root_state, true)?;
+    let viewport_group = usvg_viewport_group(sizing, tree);
+    if viewport_group && !matches!(tree.root().children(), [] | [usvg::Node::Group(_)]) {
+        return Err(SvgError("usvg's viewport group is not where it is expected".into()));
+    }
+    let mut walk = Walk { builder, elements, resolver: Resolver { elements, viewport }, viewport_group };
+    walk.group(tree.root(), root_state, true, false)?;
     Ok(walk.builder.finish())
 }
 
