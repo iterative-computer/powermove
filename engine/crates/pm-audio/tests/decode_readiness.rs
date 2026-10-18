@@ -428,3 +428,169 @@ fn a_memoized_decode_failure_reads_as_the_first() {
     assert_eq!(again, first);
     assert_eq!(nonblocking, first);
 }
+
+/// What playback reads to tell whether a wait would silence anything heard
+/// (A4.1): voices that sounded whole, by id, on heard strips. A retune
+/// glide renders its outgoing copies of the same voices, so `starved` can
+/// outnumber `voices` with one voice missing beside a ready one; the ids do
+/// not. A voice the monitor solo silences is not heard.
+#[test]
+fn heard_whole_voices_count_once_across_glides_and_follow_the_solo() {
+    let dir = temp_dir("readiness-heard-whole");
+    let good_file = dir.join("good.wav");
+    let late_file = dir.join("late.wav");
+    write_wav(&good_file, 48_000, &[tone(48_000, 1.0, 997.0, 0.2)]);
+    write_wav(&late_file, 48_000, &[tone(48_000, 1.0, 631.0, 0.1)]);
+    let rig = Rig::new(&[("g", &good_file), ("s", &late_file)]);
+    let good = rig.cache.open(&good_file, None).unwrap();
+    rig.cache.block(&good, 0, true).unwrap();
+    let doc = |late_gain: &str| {
+        project(
+            30.0,
+            1.0,
+            &[
+                audio("good", "g", 0.0, 1.0, "", ""),
+                audio("late", "s", 0.0, 1.0, late_gain, ""),
+            ],
+            &[],
+            "",
+        )
+    };
+    let mut mixer = rig.mixer(doc(""), "C", MixFormat::stereo(48_000));
+    // A fader drag: four live edits in flight at once (the glide limit).
+    for gain in [0.9, 0.8, 0.7, 0.6] {
+        let next = doc(&format!(r#","gain":{gain}"#));
+        let graph = Arc::new(rig.graph(&next, "C"));
+        mixer.glide_to(Arc::new(next), graph, None);
+    }
+    let mut out = vec![vec![]; 2];
+    let report = mixer
+        .render(0, 256, &mut out, &RenderOptions::default())
+        .unwrap();
+    assert_eq!(report.voices, 2, "the current mix");
+    assert_eq!(report.starved, 5, "the missing voice in every mix");
+    assert_eq!(report.starved_voices, ["late"]);
+    assert_eq!(report.waiting_voices, ["late"]);
+    assert_eq!(report.heard_whole, ["good"]);
+    assert!(mixer.is_gliding(), "a waiting render holds the glides");
+    let dropping = RenderOptions {
+        drop_voices: ["late".to_string()].into(),
+        ..RenderOptions::default()
+    };
+    let report = mixer.render(0, 256, &mut out, &dropping).unwrap();
+    assert_eq!(report.starved, 5);
+    assert!(report.waiting_voices.is_empty());
+    assert_eq!(report.dropped_by_voice, [("late".to_string(), 256)]);
+    assert_eq!(report.dropped_voice_frames, 256, "the voice counts once");
+
+    let solo_late = RenderOptions {
+        monitor_solo: Some(["late".to_string()].into()),
+        ..RenderOptions::default()
+    };
+    let mut plain = rig.mixer(doc(""), "C", MixFormat::stereo(48_000));
+    let report = plain.render(0, 256, &mut out, &solo_late).unwrap();
+    assert_eq!(report.starved_voices, ["late"]);
+    assert!(
+        report.heard_whole.is_empty(),
+        "a soloed-out voice protects nothing: {:?}",
+        report.heard_whole
+    );
+    let solo_good = RenderOptions {
+        monitor_solo: Some(["good".to_string()].into()),
+        ..RenderOptions::default()
+    };
+    let report = plain.render(0, 256, &mut out, &solo_good).unwrap();
+    assert_eq!(report.heard_whole, ["good"]);
+}
+
+/// A4 point 3 through the mixer: a pitch-preserving voice that was playing,
+/// then dropped for 300 ms (past the old fixed 120 ms window), re-enters
+/// with its vocoder's phase history and equals a render that never dropped.
+#[test]
+fn a_stretched_voice_re_enters_a_300_ms_drop_bit_exact() {
+    let dir = temp_dir("readiness-stretch-reentry");
+    let good_file = dir.join("good.wav");
+    let late_file = dir.join("late.wav");
+    let n = 4 * pm_audio::source::BLOCK;
+    let seconds = n as f64 / 48_000.0;
+    write_wav(
+        &good_file,
+        48_000,
+        &[tone(48_000, seconds, 997.0, 0.2), vec![0.0; n]],
+    );
+    write_wav(
+        &late_file,
+        48_000,
+        &[vec![0.0; n], tone(48_000, seconds, 631.0, 0.1)],
+    );
+    let rig = Rig::new(&[("g", &good_file), ("s", &late_file)]);
+    let good = rig.cache.open(&good_file, None).unwrap();
+    for block in 0..4 {
+        rig.cache.block(&good, block, true).unwrap();
+    }
+    let late = rig.cache.open(&late_file, None).unwrap();
+    rig.cache.block(&late, 0, true).unwrap();
+    let clip = |id, asset| audio(id, asset, 0.0, 4.0, r#", "speed":1.5"#, "");
+    let doc = || project(30.0, 4.0, &[clip("good", "g"), clip("late", "s")], &[], "");
+    let mut played = rig.mixer(doc(), "C", MixFormat::stereo(48_000));
+    let options = |dropped: bool| RenderOptions {
+        drop_voices: if dropped {
+            ["late".to_string()].into()
+        } else {
+            Default::default()
+        },
+        ..RenderOptions::default()
+    };
+    // Source block 1 starts at output 65536 / 1.5.
+    let (first, end) = (32_768i64, 32_768 + 48_000);
+    let mut heard = Vec::new();
+    let mut drop_from = None;
+    let mut at = first;
+    while at < end {
+        let mut out = vec![vec![]; 2];
+        let dropping = drop_from.is_some();
+        let report = played
+            .render(at, 256, &mut out, &options(dropping))
+            .unwrap();
+        if !report.waiting_voices.is_empty() {
+            // The late voice's wait expires at once here: drop it.
+            drop_from.get_or_insert(at);
+            continue;
+        }
+        if let Some(from) = drop_from
+            && at - from >= 14_400
+            && !rig.cache.is_ready(&late, pm_audio::source::BLOCK as i64, 1)
+        {
+            // 300 ms of output dropped: block 1 decodes.
+            rig.cache.block(&late, 1, true).unwrap();
+            rig.cache.block(&late, 2, true).unwrap();
+        }
+        heard.push((at, out, report.starved_voices.is_empty()));
+        at += 256;
+    }
+    let from = drop_from.expect("the late voice dropped");
+    let back = heard
+        .iter()
+        .find(|(a, _, whole)| *a > from && *whole)
+        .map(|(a, _, _)| *a)
+        .expect("the late voice came back");
+    assert!(back - from >= 14_400, "dropped {} samples", back - from);
+    let mut reference = rig.mixer(doc(), "C", MixFormat::stereo(48_000));
+    let mut silent = 0;
+    for (a, out, whole) in &heard {
+        let mut expected = vec![vec![]; 2];
+        let report = reference
+            .render(*a, 256, &mut expected, &options(false))
+            .unwrap();
+        assert!(report.starved_voices.is_empty());
+        assert_eq!(out[0], expected[0], "the other voice at {a}");
+        if *whole {
+            assert_eq!(out[1], expected[1], "the late voice at {a}");
+        } else {
+            assert!(out[1].iter().all(|&v| v == 0.0));
+            silent += 1;
+        }
+    }
+    assert!(silent > 0);
+    assert!(heard.iter().filter(|(a, _, _)| *a >= back).count() > 16);
+}
