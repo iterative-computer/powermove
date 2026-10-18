@@ -77,7 +77,9 @@ fn transform_matches(still: &StillImage, header: &Header, compat: bool) -> bool 
         }
 }
 
-/// Whether a decoded still is in a tested class.
+/// Whether a decoded still is in a tested class. An AVIF Chromium's
+/// decoder cannot parse is not a class: [`crate::media::probe_image`]
+/// reports it as an unreadable source before calling this.
 pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     if still.float {
         return unsupported("floating-point stills");
@@ -135,7 +137,8 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
                 Ok(Some(what)) => {
                     unsupported(format!("{what} (not compared with the legacy renderer)"))
                 }
-                Err(e) => unsupported(format!("AVIF stills Chromium's decoder cannot parse ({e})")),
+                // Reported unreadable by `probe_image`.
+                Err(_) => Ok(()),
             };
         }
         ImageFormat::Avif => return unsupported("AVIF stills outside the tested 8-bit sRGB class"),

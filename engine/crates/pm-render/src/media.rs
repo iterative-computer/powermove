@@ -256,6 +256,16 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
         let pool = FramePool::new(0);
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        // Chromium cannot show an AVIF its decoder cannot parse, whatever
+        // ImageIO reads: a named failure, not a class.
+        if pm_media::image::avif_compat::applies(&still) {
+            pm_media::image::avif_compat::unmeasured(path).map_err(|e| {
+                ProbeIssue::Unreadable(format!(
+                    "{}: Chromium's AVIF decoder cannot parse it ({e})",
+                    path.display()
+                ))
+            })?;
+        }
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
         if pm_media::image::compat::applies(&still) {
             let bitmap = pm_media::image::compat::bitmap(&still, &pool)
