@@ -58,9 +58,10 @@ build before the fix.
 for the macro and statement budgets, one that stalls WebGL for seconds): today it
 renders nothing and `runEffects` skips it, so the engine skips it the same way
 (`Status::Refused`, reported as `ShaderCompile`). A failure in any later stage is
-engine-only: WebGL draws the program, so layers using it are routed
-(`Feature::ShaderFallback`, reported as `NotHeadlessRenderable`) until the decision 19
-fallback runner exists. Nothing is drawn wrong.
+engine-only: WebGL draws the program, so it runs in the decision 19 fallback runner with
+its textures (`Status::NeedsFallback`, reported as `NotHeadlessRenderable`; "The fallback
+runner" below). A renderer without a runner (`pm-cli`) names it as not
+headless-renderable. Nothing is drawn wrong, and nothing is routed.
 
 ## Where effects run
 
@@ -163,7 +164,9 @@ effects are routed as before (`Feature::Effects`, `Feature::Transition`,
 | Effect id marked missing in the set (removal, omitted from a full update, `missing` of an embedded set) | `PM.FX[type]` undefined: skipped, layer buffer path | same |
 | Effect id unknown (no snapshot, not missing) | n/a | routed (`Feature::Definition`); contract 10: `pm-cli` fails only here |
 | Program WebGL refuses | skipped | skipped, `ShaderCompile` reported |
-| Program WebGL draws, engine cannot translate | drawn | routed (`Feature::ShaderFallback`), `NotHeadlessRenderable` reported |
+| Program WebGL draws, engine cannot translate | drawn | drawn by the fallback runner with its textures (viewer: the window's runner; jobs: a window's runner through the host); `NotHeadlessRenderable` reported; `pm-cli`: named failure, exit 4 |
+| Program the fallback runner refuses (WebGL refuses it too) | skipped | skipped, `ShaderCompile` reported |
+| Fallback draw past the runner's 10 s deadline | context lost | viewer: turned off, `WatchdogTimeout`; job: stops with a named error |
 | Watchdog overrun | n/a | skipped from the next frame, `WatchdogTimeout` reported |
 | Transition registered | drawn | drawn |
 | Transition unknown / missing / program refused | — / no transition / `withLayer` | routed / no transition / no transition |
@@ -174,7 +177,10 @@ consumers; `unsupported` and `unsupported_with_media` are unchanged (they list e
 transitions, and adjustment layers with effects). The interactive engine's presenter
 (pm-node `present/document.rs`) routes with `unsupported_with_media` and, once the
 session has definitions, ignores those three features; a definition it cannot draw
-fails the frame as unsupported and routes then. Built-ins: `pm_render::builtin_definitions()` (the 16 effects and 4
+fails the frame as unsupported and routes then; a definition only the runner draws does
+not: the presenter sends its request (and textures) to the window's runner and presents
+the frame once the pixels arrive, and a runner failure marks the program (skipped or
+turned off, reported) instead of routing (`present/render.rs`). Built-ins: `pm_render::builtin_definitions()` (the 16 effects and 4
 transitions as the kernel snapshots them; a vitest fails when `builtins.json` drifts
 from the kernel; `bun engine/crates/pm-render/tools/effects/builtins.ts` rewrites it).
 
@@ -207,17 +213,43 @@ runs at the start of later frames), and a deterministic test hook.
   `FramePresenter::definitions` and pm-node's `Composer::use_definitions`
   forgets them.
 - **The hang guard** (every renderer, every frame, not only the one frame
-  timed on the GPU): every frame drawing a program is followed from its
-  submission (`Queue::on_submitted_work_done` records the completion time).
-  A frame whose commands have not completed within the hang budget of wall
-  time (2 s interactive; 10 s for jobs, Chromium's own GPU watchdog, so an
-  export that finishes today finishes here) is a runaway: every program it
-  drew that is not a built-in (`DefinitionOrigin::BuiltIn`) is disabled at
-  once and reported, so a runaway user loop is never submitted again; it is
-  judged while still running, not when (if ever) it completes. Built-ins
-  cannot run away and are kept. A true hang ends when the operating
+  timed on the GPU), in two steps (review fix, 2026-10-18):
+  1. *Suspicion.* Every frame drawing a user program is followed from when
+     it could start (its submission, or the completion of the frame before
+     it). It is suspected only when a poll made after the hang budget (2 s
+     interactive; 10 s for jobs, Chromium's own GPU watchdog) saw it still
+     running. A completion seen late is not suspicion: wgpu fires
+     `on_submitted_work_done` at the next poll or submit, so a frame that
+     finished while nobody polled (the presenter waiting for the WebGL
+     runner, a busy render thread) is not a runaway. Hosts poll between
+     renders (`Renderer::watchdog_watch`), and job hosts wait through
+     `Renderer::wait_idle`, which polls every 100 ms, so a runaway is seen
+     running and its frame is never delivered. While a suspect runs, the
+     viewer holds frames that would draw one of its user programs
+     (`RenderError::WatchdogPending`) instead of submitting the runaway again.
+  2. *Attribution*, once the suspect completed (or the system aborted it):
+     a program is guilty when its own timestamps show it ran past the hang
+     budget, or began and never ended in a frame whose wall time passed the
+     budget. Programs whose timestamps show they finished are cleared, so GPU
+     contention (another process, an export on the same GPU, a heavy frame
+     of built-ins or 3D) turns nothing off. Without timestamps (no timestamp
+     queries, or both query slots busy) a program is guilty only after two
+     unexplained hangs.
+  A guilty program is disabled and reported; a job stops. Built-ins cannot
+  run away and are never suspected. A true hang ends when the operating
   system's GPU timeout aborts the command buffer; device-loss recovery stays
-  the device owner's (Gaps).
+  the device owner's (Gaps). Before the fix the completion callback's time
+  was read as the GPU's finish time and every non-built-in program of any
+  frame slower than 2 s was blamed: a viewer waiting over 2 s for the WebGL
+  runner, or an export on the same GPU, could turn off innocent user and
+  Store effects.
+- **The fallback runner's watchdog.** The renderer's runner fences every
+  pass and polls it: a draw not finished within its 10 s deadline loses the
+  context on purpose (so the renderer is never blocked in `readPixels`) and
+  fails with `watchdog`; the program is never run again until its source
+  changes. The engine turns it off like a runaway native program
+  (`WatchdogTimeout`, viewer) or stops the job naming it. Compiles have their
+  own 10 s deadline (`KHR_parallel_shader_compile`).
 - **Trusted samples.** A timestamp sample is judged only when both samples
   are after the newest trusted sample, it ends after it begins, and it is no
   longer than the frame's own submission-to-completion wall time (+50 ms);
@@ -246,11 +278,18 @@ runs at the start of later frames), and a deterministic test hook.
   programs, the job policy, a frame judged while still running),
   `pm-node/tests/definitions.rs`
   `a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views`.
-  Production renderers never set a source. The GPU path keeps its own test,
+  `Watchdog::set_clock` replaces the wall clock alone, so the real
+  completion path (polls, callbacks, timestamps) is tested with time passing
+  at will: `tests/watchdog.rs`
+  `a_frame_whose_completion_is_seen_late_is_not_a_runaway`,
+  `a_frame_slowed_by_contention_turns_nothing_off`,
+  `a_frame_seen_running_past_the_hang_budget_is_cleared_by_its_timestamps`,
+  `a_suspect_frame_holds_frames_drawing_its_user_programs_until_it_is_judged`.
+  Production renderers set neither. The GPU path keeps its own test,
   `the_watchdog_judges_every_timed_frame_not_only_the_first`.
 
 Measured 2026-10-18 (M4 Max): `tests/watchdog.rs` 5 of 5 tests passing in
-each of 10 runs; `pm-node/tests/definitions.rs` passing in 20 of 20 runs
+each of 10 runs before the review fix; 10 of 10 tests passing in each of 10 runs after it; `pm-node/tests/definitions.rs` passing in 20 of 20 runs
 (plus one before them). The two failures issue A2 recorded (the first test
 failing and the pm-node test passing 1 in 6) did not reproduce on this tip
 before the change either, idle or with two `effects` test binaries running
@@ -262,6 +301,87 @@ the longest of 5 frames, measured again 2026-10-17 with every frame judged): Gau
 Sharpen 0.95, every other built-in 0.66 to 0.77 ms. Translating the 20 built-ins in a cold
 process: 149 ms; from the in-memory cache: 0.10 ms. First frame per effect, pipeline build
 included: 63 to 112 ms.
+
+## The fallback runner (decision 19, effects and transitions)
+
+Review fix, 2026-10-18 (amendment 21: drawn, never routed). A step whose
+program the native pipeline cannot translate (`Status::NeedsFallback`: a
+sampler other than a float `sampler2D`, a naga or Metal failure on a user's
+machine) runs in the renderer's own WebGL2 runner
+(`engine-connection/shader-fallback.ts`), the same ANGLE that draws it today:
+
+1. **Engine** (`effects/fallback.rs`, `effects/exec.rs`). The frame's commands
+   so far are submitted, the step's textures are read back as binary16 RGBA in
+   GL row order (an effect's input, its original with `keepOrig`, its backdrop;
+   a transition's two frames), and a `FallbackRequest` is built with the
+   wrapped program, the compositor's uniform calls for every pass
+   (`morePasses`, 1 to 8 ping-pong passes), which unit samples which texture
+   (`units`; `chain` samples the previous pass from the second pass on), and
+   `setParam`'s positional alias per call (`u_p<i>`, `u_c<i>`, applied when
+   the named uniform is not active). It is keyed by everything that decides
+   its pixels, the textures included. The runner's pixels go into a working
+   target that continues the chain (`clamp` after it, as a native step).
+2. **Viewer** (pm-node `present/render.rs`). Without the pixels the frame is
+   not presented (`RenderError::ShaderFallbackPending`): the presenter sends
+   the request and then its textures in row bands
+   (`ShaderFallbackMessage::Input`), the window's session collects them
+   (`engine-connection/session.ts`), the runner draws, and the pixels come
+   back as bands. A runner failure marks the program instead of routing:
+   `compile` (WebGL refuses it too) is skipped and reported as today's
+   `runEffects` skips it; `watchdog` turns it off (`WatchdogTimeout`).
+3. **Jobs** (pm-node `jobs/fallback.rs`, contract 14). A job renderer waits
+   on a `FallbackHost`: the lane writes the textures into the session's
+   scratch cache area, sends `Request::ShaderFallback`, and main
+   (`main/engine/shader-fallback-relay.ts`) reads them, runs the request in
+   the window the job works for (an export's or agent batch's owner; render
+   queue jobs and jobs whose window closed use any window with the new
+   engine), and writes the pixels back. The runner is stateless, so any
+   window draws the same pixels. `compile` skips the program as today's
+   exporter does, `watchdogTimeout` stops the job, no window fails the job
+   naming the program. A renderer with a host does not list
+   `Feature::ShaderFallback` (`Renderer::unsupported_with_media`).
+4. **`pm-cli`** has no runner: such a program is a named, deterministic
+   "not headless-renderable" failure (exit 4).
+
+The runner (`ShaderFallbackRunner.render(request, textures)`) uploads each
+texture as RGBA16F (linear, clamp to edge, as the compositor's `grab`
+buffers), leaves units no request names empty (samplers read (0, 0, 0, 1),
+as in the compositor), draws each pass into a fresh RGBA16F target cleared
+to transparent with blending off, and fences every pass under the draw
+deadline (the runner's watchdog, above).
+
+Evidence (2026-10-18, M4 Max):
+- Shader level against the compositor's WebGL replay: corpus
+  `glsl-20261018-193347` adds three fallback cases (`collect.ts`): a 3-pass
+  effect with `keepOrig` and a positional alias, a backdrop effect with a
+  named number, color, and an aliased toggle, and a transition with a
+  number and a color, each with default, alt, coerced or random values and
+  above-1.0 inputs. They and the 8 sampler probes, 31 variants, run through
+  the engine, the request goes to the real runner in headless Chromium
+  (`tools/shaders/fallback-runner.ts --fallback`), and the composed result
+  is compared with WebGL: 31 of 31 match within 1 CV
+  (`tests/effects_webgl.rs` `fallback_effects_match_webgl`). A non-float
+  sampler is drawable in WebGL only on a unit no float sampler uses, so
+  these cases name it after a unit the compositor sets (`u_orig` with
+  keepOrig, `u_to` for transitions).
+- `tests/effects_fallback.rs` (6 tests: without a runner it is still
+  `Feature::ShaderFallback`; the viewer asks with the effect's textures and
+  draws the pixels; a job renderer waits on its host and matches the
+  viewer; a refused program is skipped and reported once; a draw past the
+  runner's deadline is turned off and stops a job; a job without a runner
+  fails naming the program), `pm-node/tests/shader_fallback.rs` (requests,
+  texture bands, and pixels end to end through a child engine),
+  `pm-node/tests/jobs.rs`
+  `effects_only_the_webgl_runner_draws_run_in_a_window_through_the_host`,
+  `shader-fallback.test.ts` (texture bands, units, the chain, `u_orig` and
+  `u_backdrop`, aliases, the draw deadline), `shader-fallback-relay.test.ts`
+  (main's relay: owner window, another window, failures, timeouts, the
+  scratch files).
+- `e2e/engine-definitions-export.spec.ts` "an effect only the WebGL runner
+  draws is exported through the window's fallback runner": with Use New
+  Engine on, a raw effect with a `sampler3D` is exported by the job engine
+  (AVAssetWriter, not the current exporter's FFmpeg) and drawn by the
+  window's runner over the layer (passed).
 
 ## Definition snapshots (contract 10)
 
@@ -381,14 +501,28 @@ submit, refusal fails the export, frame sessions after every publication
 and under concurrent batches, queue jobs, `compileDefinitions`);
 `render-queue.test.ts` (persisted across relaunch, removed with the job);
 `bridge.test.ts` (`validate_effect` through the engine);
-`e2e/engine-definitions-export.spec.ts` (written, not run: Gaps).
+`e2e/engine-definitions-export.spec.ts` (passed 2026-10-18 with a release
+engine build: an effect registered in the same task as the export is drawn
+by the job engine, an override by id draws the override, disposing it
+restores the earlier registration, and the export is never the current
+exporter's). `pm-cli` warns when a project that draws definitions renders
+with the built-in set (`rendering_with_the_built_in_set_warns_when_the_project_draws_definitions`),
+and the render queue logs a job whose definitions file cannot be read
+(`render-queue.test.ts`).
 
-**Compile errors are the engine's** (2026-10-18). With the new engine on,
-`GL.compileError` answers every engine key from engine reports only: `fx:`,
-`tr:`, `extension:`, `engine:`, and a shader layer's legacy `sh:<layer>:<hash>`
-key (read as that layer's `engine:` report). A program the engine compiles
-shows no error, and an error the legacy compositor recorded before for the
-same key is never shown again (before, `?? legacy(key)` resurrected it).
+**Compile errors follow whoever draws** (2026-10-18, review fix). With the
+new engine on and the engine presenting the composition (the viewer
+session's route is `engine`, `EngineShaderMeta.setRoute` from
+`engine-connection/install.ts`), `GL.compileError` answers every engine key
+from engine reports only: `fx:`, `tr:`, `extension:`, and a shader layer's
+legacy `sh:<layer>:<hash>` key (read as that layer's `engine:` report). A
+program the engine compiles shows no error, and an error the legacy
+compositor recorded before for the same key is never shown again. While the
+legacy compositor draws (no viewer session yet, a session closed, or the
+composition routed for a feature the engine does not draw yet), those keys
+are the legacy compositor's again, so a shader layer it draws with broken
+GLSL shows its error in the Inspector as today. `engine:` keys exist only in
+engine reports and are always the engine's.
 Definition compile failures carry the definitions generation they were
 translated at in `FailureReport.revision` (pm-node `present/render.rs`); one
 older than the session stream's latest push of that definition
@@ -424,8 +558,21 @@ Measured 2026-10-16 (M4 Max, macOS 27, wgpu 30.0.1 Metal):
 | Generated (S3) | 219 | 211 | 8 (2 `linkError` cases) | 0 |
 | Coverage probes | 394 | 260 of 270 drawn | 122 | 12 |
 
-Known open (each also in S3.md): 8 probes whose only sampler is not a float `sampler2D`
-(WebGL samples (0, 0, 0, 1); the bind check refuses: fallback runner), ternary on a
+Rerun 2026-10-18 on `glsl-20261018-193347` (the same cases plus the three fallback
+cases), with programs only the fallback runner draws in a column of their own (compared
+with WebGL by `fallback_effects_match_webgl`, above) instead of known open:
+
+| Group | Variants | Match WebGL | Fallback runner | Both refuse | Known open | Failures |
+|---|---|---|---|---|---|---|
+| Built-in effects | 176 | 176 | 0 | 0 | 0 | 0 |
+| Built-in transitions | 52 | 52 | 0 | 0 | 0 | 0 |
+| Fallback | 23 | 0 | 23 | 0 | 0 | 0 |
+| Generated (S3) | 219 | 211 | 0 | 8 | 0 | 0 |
+| Coverage probes | 394 | 260 | 8 | 122 | 4 | 0 |
+
+Known open (each also in S3.md): until the fallback runner drew them, 8 probes whose only
+sampler is not a float `sampler2D` (WebGL samples (0, 0, 0, 1); now drawn by the runner and
+matched), ternary on a
 struct or an array (WebGL refuses; the engine accepts: needs expression types), `out
 vec3` (GL leaves alpha undefined; 320 values at 2 CV), integer division by zero
 (undefined). `output-ivec4` links in WebGL and its draw fails; the engine refuses it at
@@ -492,6 +639,33 @@ at 0.10%, 0.05%, 0.02% of pixels, max 16, 27, 85 CV (float 15.9, 26.9,
 85.0 CV). Matching them requires a layer buffer bit-identical to WebGL's
 for every input that reaches these effects; not attempted here (Gaps).
 
+Rerun 2026-10-18 after the review (same capture, `PM_RENDER_ONLY`, debug
+build: the release corpus build fails to link under kache with "failed to
+get bitcode from object file for LTO"): `render/fx-color` t = 0, 1, 2 at
+98.12%, 97.80%, 97.50% exact, 100% within 1 CV, max 1 CV (float 0.50,
+0.75, 0.75 CV); `render/fx-levels` at 98.35%, 97.24%, 98.49% exact, 100%
+within 1 CV, max 1 CV (float 0.25, 0.25, 0.37 CV); `render/fx-posterize`
+unchanged (99.90%, 99.95%, 99.98% exact, max 16, 27, 85 CV). Color and
+Levels render as today within the drawing class's 1 CV at the corpus's
+parameters; at parameters where they are step functions they have
+Posterize's exposure. Side-by-sides of Posterize: `PM_RENDER_DIFFS`
+(review copies outside the repository).
+
+The Store `mrsigma/liquid-glass-ios27` 2.0.8 glass effect is the shader
+gate's WebGL-unstable item (`docs/engine/shaders.md`): there both renderers
+get bit-identical inputs, so the difference is the arithmetic. ANGLE and
+naga each translate the GLSL to their own MSL, and Metal compiles both
+(wgpu with Metal's default fast math, which permits reassociation and
+contraction that depend on the exact MSL text). Two translations of the same
+program then round differently, and where the program is discontinuous (a
+threshold or branch on a computed value in its highlight) a rounding
+difference flips the side; WebGL itself moves by up to 67 CV there when its
+input moves one binary16 step. Whether ANGLE also compiles with fast math on
+Apple GPUs was not verified here. Matching it bit for bit would need the
+engine to emit ANGLE's MSL for that program; running it in the fallback
+runner would match the arithmetic but not in-app inputs (the layer buffer is
+within 1 CV, not bit-identical) and would read the frame back every frame.
+
 **Store GLSL.** Fuzz (`pm-glsl-fuzz`, worker process, per-input deadline), 2026-10-16:
 
 | Run | Inputs | Outcomes | Crashes, hangs, panics | Slowest |
@@ -530,22 +704,21 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 
 ## Gaps
 
-- **Fallback for effects and transitions** (decision 19 with texture inputs)
-  is not built: a definition only the runner could draw is still
-  `Feature::ShaderFallback` (the interactive engine routes it; jobs and
-  `pm-cli` name it as not headless-renderable). What it needs: an effect
-  pass node that plans a `FallbackRequest` carrying its input and backdrop
-  (read back from the frame's targets, keyed by the program, the calls, and
-  the inputs' content), the runner contract extended with input textures
-  (`u_tex`, `u_orig`, `u_backdrop`, `u_from`, `u_to`) and 1 to 8 ping-pong
-  passes, the pixels composed back into the chain; for desktop job exports a
-  host-services request that asks a window's runner (contract 14), so the
-  job waits for it like the interactive presenter does. Shader layers have
-  the runner today (`docs/engine/shaders.md`).
-- **The fallback runner's own draw deadline**: the runner relies on WebGL
-  context loss (Chromium's GPU watchdog) to stop a runaway program, and a
-  program that lost the context is not run again; there is no shorter
-  deadline of its own and no `WatchdogTimeout` report for it.
+- **The shader-layer and effect budget is a behavior change** (needs Jude's
+  call): the interactive watchdog turns off a user effect, transition,
+  shader layer, or fragment extension layer measured over 250 ms of GPU time
+  in one frame, until it is registered again (a shader layer: until its code
+  changes). Today's compositor (`legacy/gl/gpu-timing.ts`) only records GPU
+  time and never turns anything off, so a slow but finite user shader that
+  today draws slowly is left out of the viewer here (exports are not
+  budgeted: `Policy::Job`). Plan section 8 and issue A2 ask for the budget;
+  amendment 22 forbids visible differences on existing projects.
+- **Fallback runner throughput.** Each fallback step reads its textures back
+  and sends them to the renderer and the pixels back (binary16: 8 bytes per
+  pixel each way, about 16 MB per full-HD texture); results are cached by
+  content key (512 MB), so a still frame costs one round trip, but an
+  animated fallback effect does one per frame. Not measured against
+  today's playback rate.
 - **Translation in a helper process** not built: a crash inside glslang or naga takes
   the engine process (the fuzz runs found none; limits stop every bomb found); a hang
   costs one leaked thread past the deadline. The job engine's compile worker
@@ -568,12 +741,10 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
   composite is in linear light and there is no reference for it.
 - **WebGL-unstable class**: Posterize (and at other parameters Levels and
-  Color) differ from today at isolated pixels in the app (above); escalated
-  to Jude with side-by-sides. Not matched.
-- **Not run**: `e2e/engine-definitions-export.spec.ts` (needs the app and a
-  release engine build; free disk was below the 40 GB limit when this lane
-  ran, 24 to 38 GB, so no release build was started), the full pm-render
-  suite.
+  Color) differ from today at isolated pixels in the app, and the Store
+  liquid-glass-ios27 2.0.8 glass effect in the shader gate (above);
+  escalated to Jude with side-by-sides. Not matched.
+- **Not run**: the full pm-render suite and clippy (targeted tests only).
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); Store has 3 public extensions, not in this
   corpus (their sources stay outside the repository); one machine and one GPU family.

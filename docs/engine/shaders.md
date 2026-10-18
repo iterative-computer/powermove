@@ -121,8 +121,9 @@ SPIR-V rewrite, the bind check (amendment 9: samplers other than a float
 
 | Host | What happens |
 |---|---|
-| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure routes the composition to the legacy viewer |
-| Job engine, the hidden host | No runner: `Feature::ShaderFallback`, not headless-renderable (static check and render alike); a job fails before anything is written, naming the layer and the stage |
+| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure is reported and the layer draws nothing (`compile`: WebGL refuses it too, as today) or is turned off by the watchdog (`watchdog`); the composition is never routed (amendment 21, review fix 2026-10-18) |
+| Job engine (desktop exports, agent stills) | The lane's `FallbackHost` (pm-node `jobs/fallback.rs`, contract 14) asks main to run the request in a window's runner (the job's owner, else any window with the new engine), with the textures and the result as files in the session's scratch area; the job waits for it and renders the frame again. `compile` skips the program as today's exporter does; `watchdogTimeout` stops the job; no window fails the job naming the layer |
+| A host with no window open (the hidden host) | The relay has no runner to ask: the job fails naming the program (`shader-fallback-relay.test.ts`, "fails named when none is open"; `tests/effects_fallback.rs` `a_job_without_a_runner_fails_naming_the_program_instead_of_skipping_it`) |
 | `pm-cli render` | No runner: exits 4, "not headless-renderable", naming each layer and definition, before anything is written; the same on every run (`pm-cli/tests/definitions.rs`) |
 
 The runner (`ShaderFallbackRunner`): one WebGL2 context on an
@@ -132,7 +133,13 @@ calls replayed with the GL entry point each names (GL's own type rules drop
 the mismatched ones, as in the compositor), no texture bound, `readPixels`
 as binary16 in GL row order. Compiles go through `KHR_parallel_shader_compile`
 with a deadline (10 s); a lost context is recreated, and a program that lost it
-is not run again. Programs are cached (32), requests run one at a time.
+is not run again. Programs are cached (32), requests run one at a time. Every
+pass's draw is fenced and polled under a 10 s draw deadline (the runner's
+watchdog, review fix 2026-10-18): a draw past it loses the context on purpose
+so the renderer is never blocked in `readPixels`, fails with `watchdog`, and
+the program is never run again until its source changes; the engine reports
+`WatchdogTimeout` and turns it off (a job stops). Effects and transitions use
+the same runner with their textures (effects.md, "The fallback runner").
 
 Upload: the session sends the pixels in row bands of at most 8 MiB
 (`ShaderFallbackMessage::Pixels`; messages are limited to 16 MiB), or
@@ -168,8 +175,8 @@ Evidence:
   viewer's 4× scale: 320 × 180), presents no frame until both bands arrive out
   of order, then reports the layer (`notHeadlessRenderable`, layer scope, at
   the frame's revision, before the frame), logs it once, and presents the
-  frame; a runner failure for the next program routes the composition
-  (`unsupported`).
+  frame; a runner failure for the next program is reported, the layer draws
+  nothing, and the frame is presented, not routed.
 - `shader_layers::exec` unit tests: a program the device refuses at pipeline
   creation (injected) asks the runner in the same frame with a runner, is
   reported, and its pixels are uploaded once for three frames; without a
@@ -362,17 +369,13 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **One machine, one GPU family** (M4 Max); the runner was measured in
   headless Chromium, not inside the Electron renderer (the session path is
   covered by the vitest and the pm-node test, the WebGL path by the gate).
-- **Fallback for effects and transitions** is not built: a definition only the
-  runner could draw still routes in the viewer (`Feature::ShaderFallback`)
-  and is named not headless-renderable in jobs and `pm-cli`; the runner
-  contract has no input textures yet (an effect needs its layer buffer and
-  backdrop read back and sent; design in effects.md, Gaps).
-- **The runner's own draw deadline:** a runaway fallback program is
-  stopped by WebGL context loss (Chromium's GPU watchdog; a program that
-  lost the context is not run again); no shorter deadline, no
-  `WatchdogTimeout` report for it. Shader and fragment layers the engine
-  draws are timed, disabled, and guarded against runaways like effects
-  (effects.md, "The watchdog"; `tests/watchdog.rs`).
+- **Effects and transitions in the runner** were built 2026-10-18 (effects.md,
+  "The fallback runner"), and the runner has its own draw deadline (above).
+  Shader and fragment layers the engine draws are timed, disabled, and
+  guarded against runaways like effects (effects.md, "The watchdog";
+  `tests/watchdog.rs`); the 250 ms interactive budget on them is a behavior
+  change against today's compositor, which never turns a shader off
+  (effects.md, Gaps: needs Jude's call).
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
   readback, and upload per frame shown; there is no render-ahead for it (a
   static one is uploaded once).
