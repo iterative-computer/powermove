@@ -10,6 +10,7 @@ import { agentInstructions, agentResultSchema } from '../codex/instructions';
 import { prepareAgentWorkspace, discardPartialRun, discardExtensionStage, removeEmptyRunDirectory, type AgentWorkspace, type AgentApiPackFile } from '../codex/workspace';
 import { withStageSnapshot, publishExtensionChanges } from '../codex/change-history';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
+import { DEPRECATION_GUIDANCE } from '../../shared/extension-analysis';
 
 const start = z.object({ prompt: z.string().min(1).max(200000), access: z.enum(['project', 'editor']).default('project'), context: z.enum(['project', 'app']).default('project') }).strict();
 const changes = z.object({ extensions: z.array(z.object({ id: z.string(), action: z.enum(['created', 'updated', 'removed']), summary: z.string().max(4000) }).strict()).max(100) }).strict();
@@ -63,8 +64,9 @@ export class ExternalAgentSession {
     if (name === 'publish_extensions') {
       if (session.inspectionOnly) throw new Error('Planning access cannot publish extensions.');
       const input = changes.parse(args), workspace = this.workspace!;
+      let deprecations: Awaited<ReturnType<typeof validateStagedExtensions>> = [];
       const changeSet = await withStageSnapshot(workspace, async snapshot => {
-        await validateStagedExtensions(snapshot, input.extensions);
+        deprecations = await validateStagedExtensions(snapshot, input.extensions);
         return publishExtensionChanges(snapshot, input.extensions);
       }, input.extensions.map(change => change.id));
       await this.options.refreshExtensions?.(input.extensions.map(change => change.id));
@@ -74,7 +76,9 @@ export class ExternalAgentSession {
         extensionsDir: this.options.extensionsDir, apiPackFiles: await this.options.apiPackFiles(), workspaceId: `mcp-${session.runId}`
       });
       session.stagingDirectory = this.workspace.stagingDirectory;
-      return { changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory: this.workspace.stagingDirectory };
+      // Deprecated compatibility APIs in what was published (amendment 23; extension-analysis.ts).
+      return { changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory: this.workspace.stagingDirectory,
+        ...(deprecations.length ? { deprecations, guidance: DEPRECATION_GUIDANCE } : {}) };
     }
     if (name === 'import_media_to_timeline' || (name === 'import_media' && this.options.importMedia)) {
       if (session.inspectionOnly || session.context === 'app') throw new Error('This tool requires project access and an attached project.');

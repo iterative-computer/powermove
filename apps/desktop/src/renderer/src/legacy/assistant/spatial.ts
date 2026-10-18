@@ -2431,7 +2431,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       const verificationRequest = resultVerificationPrompt(originalRequest,
         runs.flatMap(entry => entry.artifacts).filter((artifact: any) => artifact.importToTimeline)
           .map((artifact: any) => ({ path: artifact.path, imported: artifact.imported, layerIds: artifact.layerIds || [], error: artifact.error || null })),
-        health, pendingProjectEdit?.commands || []);
+        health, pendingProjectEdit?.commands || [], Array.isArray(decoded?.extensionWarnings) ? decoded.extensionWarnings.slice(0, 200) : []);
       try {
         await runAutonomousRequest({ session, request: verificationRequest, token, controller, access, focus, context, threadId, originalRequest, priorRuns: runs, pendingProjectEdit });
         return;

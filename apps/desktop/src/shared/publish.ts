@@ -80,6 +80,12 @@ export interface PublishPlanDto {
   permissionFindings: PermissionFinding[];
   /** Soft findings: each needs a reason, sent as a waiver. One per file and line. */
   waivableFindings: PublishFinding[];
+  /**
+   * Deprecated compatibility APIs the source uses (amendment 23). Advice only:
+   * they never block publishing, need no waiver, and keep working at
+   * apiVersion 1 to 3 for everyone who installs the release.
+   */
+  deprecationFindings?: import('./extension-analysis').DeprecationWarning[];
   manifest: { id: string; name: string; description: string | null };
   /** Defaults for a first publish; the current listing for an update (re-sent unchanged). */
   listing: PublishListing;
