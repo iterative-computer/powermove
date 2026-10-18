@@ -97,6 +97,32 @@ describe('installKernel', () => {
     expect(native).toHaveBeenCalledTimes(1);
   });
 
+  it('with the engine on, snapshots keep today’s contracts: snapshotAsync goes through PM.Export (Blender prepared there), project.snapshot rejects an unprepared Blender frame', async () => {
+    const PM = fakePM();
+    const words = 'The Blender frame is not prepared. Render this frame before capturing it.';
+    PM.EngineRender = {
+      snapshotDataUrl: vi.fn(async (_t: number, _w: number, _size: unknown, options?: { prepareBlender?: boolean }) => {
+        if (options?.prepareBlender) return 'data:prepared';
+        throw Object.assign(new Error(words), { code: 'blenderFailed' });
+      })
+    };
+    PM.Export = { ...(PM.Export ?? {}), snapshotAsync: vi.fn(async () => 'data:export-async') };
+    installed = installKernel(PM);
+    const api = installed.api('demo');
+    // Today's PM.Export.snapshotAsync (its guard, pause, and Blender
+    // preparation; with the engine on it reaches PM.EngineCaptures).
+    expect(await (api.render as any).snapshotAsync(1, 320)).toBe('data:export-async');
+    expect(PM.Export.snapshotAsync).toHaveBeenCalledWith(1, 320);
+    // Without the exporter, the engine prepares the Blender frame itself.
+    delete PM.Export.snapshotAsync;
+    expect(await (api.render as any).snapshotAsync(1, 320)).toBe('data:prepared');
+    // project.snapshot is today's synchronous capture: a Blender frame
+    // nobody prepared rejects with today's words; other failures are ''.
+    await expect(api.project.snapshot(0, 320)).rejects.toThrow(words);
+    PM.EngineRender.snapshotDataUrl.mockImplementation(async () => { throw Object.assign(new Error('x'), { code: 'unsupported' }); });
+    expect(await api.project.snapshot(0, 320)).toBe('');
+  });
+
   it('accepts the rasterizer installed after kernel boot and forwards all arguments', () => {
     const PM = fakePM();
     installed = installKernel(PM);

@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { install as installExporter } from '../legacy/core/exporter';
-import { installAppCaptures } from './app-captures';
+import { CAPTURE_BUSY, installAppCaptures, usesBlender } from './app-captures';
 
 vi.mock('../legacy/core/export-preview', () => ({ animateExportPreview: () => () => {} }));
 vi.mock('../player/export-web', () => ({
@@ -27,7 +27,7 @@ function legacyPM() {
 
 const engine = () => ({
   snapshotDataUrlSync: vi.fn((time: number, width: number) => `data:engine-sync:${time}:${width}`),
-  snapshotDataUrl: vi.fn(async (time: number, width: number) => `data:engine-async:${time}:${width}`)
+  snapshotDataUrl: vi.fn(async (time: number, width: number, _size?: unknown, _options?: { prepareBlender?: boolean }) => `data:engine-async:${time}:${width}`)
 });
 
 describe('the app’s captures with the new engine on', () => {
@@ -64,5 +64,46 @@ describe('the app’s captures with the new engine on', () => {
     installExporter(PM);
     PM.Export.snapshot(0);
     expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(0, 480, PM.proj);
+  });
+
+  it('snapshotAsync keeps today’s contract: Blender prepares the frame, playback pauses and resumes, one capture at a time', async () => {
+    const { PM } = legacyPM();
+    const calls: string[] = [];
+    PM.playing = true;
+    PM.pause = () => { calls.push('pause'); PM.playing = false; };
+    PM.play = () => { calls.push('play'); PM.playing = true; };
+    let finish: (url: string) => void = () => {};
+    const e = engine();
+    e.snapshotDataUrl.mockImplementation(() => { calls.push('capture'); return new Promise<string>((resolve) => { finish = resolve; }); });
+    installAppCaptures(PM, e);
+    installExporter(PM);
+    const pending = PM.Export.snapshotAsync(1, 320);
+    await Promise.resolve();
+    expect(e.snapshotDataUrl).toHaveBeenCalledWith(1, 320, PM.proj, { prepareBlender: true });
+    expect(PM.agentFrameCapture).toBe(true);
+    // A second capture while one runs is refused with today's words.
+    await expect(PM.Export.snapshotAsync(2, 320)).rejects.toThrow(CAPTURE_BUSY);
+    finish('data:blender');
+    expect(await pending).toBe('data:blender');
+    expect(calls).toEqual(['pause', 'capture', 'play']);
+    expect(PM.agentFrameCapture).toBe(false);
+    // While an export runs, too.
+    PM.Export.busy = true;
+    await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(CAPTURE_BUSY);
+    PM.Export.busy = false;
+    // A failure (Blender missing) still resumes playback and frees the slot.
+    e.snapshotDataUrl.mockImplementation(async () => { throw new Error('This composition renders with Blender. Install Blender 4.5 or later.'); });
+    PM.playing = true;
+    calls.length = 0;
+    await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(/Install Blender/);
+    expect(calls).toEqual(['pause', 'play']);
+    expect(PM.agentFrameCapture).toBe(false);
+  });
+
+  it('knows a Blender document by any composition with render3d on', () => {
+    expect(usesBlender({ render3d: { enabled: true } })).toBe(true);
+    expect(usesBlender({ render3d: { enabled: false }, comps: { a: { render3d: { enabled: true } } } })).toBe(true);
+    expect(usesBlender({ comps: { a: { render3d: null }, b: null } })).toBe(false);
+    expect(usesBlender(null)).toBe(false);
   });
 });

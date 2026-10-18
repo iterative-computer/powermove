@@ -13,13 +13,31 @@
  * (`legacy/core/exporter.ts`): whatever wraps or replaces them (an
  * extension override by id) still reaches the engine through them, in any
  * install order.
+ *
+ * `snapshotAsync` keeps today's contract: it refuses while an export or
+ * another frame capture runs, pauses playback while it captures (and
+ * resumes it), and a Blender composition's frame is rendered by Blender
+ * first (today's `prepareFrame`; the engine's Blender stage, the same one
+ * behind the paused viewer's Rendered shading), then captured. `snapshot`
+ * draws a frame an earlier capture prepared, or fails with today's error.
  */
 import type { PMRegistry } from '../legacy/registry';
 
 export type CaptureEngine = {
   snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }): string;
-  snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }): Promise<string>;
+  snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options?: { prepareBlender?: boolean }): Promise<string>;
 };
+
+/** Today's refusal while an export or another frame capture runs. */
+export const CAPTURE_BUSY = 'Wait for the current frame capture or export to finish.';
+
+/** Whether `project` has a composition Blender renders (`render3d.enabled`):
+ *  the open one or any in `comps`. */
+export function usesBlender(project: { render3d?: { enabled?: unknown } | null; comps?: Record<string, { render3d?: { enabled?: unknown } | null } | null> | null } | null | undefined): boolean {
+  if (!project) return false;
+  if (project.render3d?.enabled) return true;
+  return Object.values(project.comps ?? {}).some((comp) => !!comp?.render3d?.enabled);
+}
 
 /** `PM.EngineCaptures`: what the exporter's captures draw with. */
 export type EngineCaptures = {
@@ -32,7 +50,18 @@ export type EngineCaptures = {
 export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () => void {
   const captures: EngineCaptures = {
     snapshot: (time, maxWidth = 480) => engine.snapshotDataUrlSync(Number(time) || 0, Number(maxWidth) || 480, PM.proj),
-    snapshotAsync: (time, maxWidth = 480) => engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj)
+    snapshotAsync: async (time, maxWidth = 480) => {
+      if (PM.Export?.busy || PM.agentFrameCapture) throw new Error(CAPTURE_BUSY);
+      const wasPlaying = !!PM.playing;
+      PM.pause?.();
+      PM.agentFrameCapture = true;
+      try {
+        return await engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true });
+      } finally {
+        PM.agentFrameCapture = false;
+        if (wasPlaying) PM.play?.();
+      }
+    }
   };
   PM.EngineCaptures = captures;
   return () => {

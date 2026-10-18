@@ -191,8 +191,15 @@ function makeProject(PM: LegacyPM): ProjectAPI {
     redo: () => PM?.hist?.redo?.(),
     snapshot: async (t, maxWidth) => {
       // With the new engine on, the engine draws it (never the current engine).
+      // Today's path is the synchronous capture: a Blender composition with
+      // no prepared frame rejects with today's error; other failures are ''.
       const engine = engineRender(PM);
-      if (engine) return engine.snapshotDataUrl(t ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj).catch(() => '');
+      if (engine) {
+        return engine.snapshotDataUrl(t ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj).catch((error: { code?: string; message?: string }) => {
+          if (error?.code === 'blenderFailed') throw new Error(String(error.message));
+          return '';
+        });
+      }
       return (await PM?.Export?.snapshot?.(t ?? PM?.time ?? 0, maxWidth ?? 480)) ?? '';
     }
   };
@@ -463,10 +470,13 @@ function makeRender(PM: LegacyPM): RenderAPI {
       return engine.snapshotDataUrlSync(time ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj);
     },
     /* apiVersion 4's async siblings (additive): the UI never blocks. */
+    /* Today's `PM.Export.snapshotAsync` with the flag on or off: with the
+       engine it reaches `PM.EngineCaptures` through the exporter (and any
+       wrapper of it), which prepares a Blender frame first as today. */
     snapshotAsync: async (time: number, maxWidth = 480) => {
       const engine = engineRender(PM);
-      if (!engine) return (await PM?.Export?.snapshotAsync?.(time, maxWidth)) ?? '';
-      return engine.snapshotDataUrl(time ?? PM?.time ?? 0, maxWidth, PM.proj);
+      if (!engine || PM?.Export?.snapshotAsync) return (await PM?.Export?.snapshotAsync?.(time, maxWidth)) ?? '';
+      return engine.snapshotDataUrl(time ?? PM?.time ?? 0, maxWidth, PM.proj, { prepareBlender: true });
     },
     renderFrameToAsync: async (time: number, width: number, height: number, options?: Record<string, unknown>) => {
       const engine = engineRender(PM);

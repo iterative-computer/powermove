@@ -42,6 +42,10 @@ export const MAX_ROUNDS = 3;
 export const SYNC_WAIT_MS = 5_000;
 export const ASYNC_WAIT_MS = 30_000;
 export const IDLE_WAIT_MS = 120_000;
+/** How long a capture that prepares its Blender frame (today's
+ *  `snapshotAsync`) lets Blender run: today's 10-minute Blender timeout,
+ *  plus the queue ahead of it (pm_protocol MAX_BLENDER_WAIT_MS). */
+export const BLENDER_WAIT_MS = 900_000;
 /** Options of a layer raster: the composition it is in (default: the open
  *  one), the caller's layer object (JSON) when it is not the document's,
  *  and the largest side. */
@@ -73,6 +77,12 @@ export type EngineSnapshotOptions = {
   draft3d?: boolean;
   /** How long the engine may wait for the revision and its turn (ms). */
   waitMs?: number;
+  /** Today's `snapshotAsync`: Blender renders the frame's Blender
+   *  surfaces first (`prepareFrame`), then the capture draws them. Off (the
+   *  default, today's synchronous capture), a Blender composition draws a
+   *  frame an earlier capture prepared or fails with today's error. Async
+   *  and idle frames only; ignored with `draft3d`. */
+  prepareBlender?: boolean;
   /** A layer's raster instead of the frame (`render.raster` base pixels).
    *  `content`: the layer object the caller passed, as JSON, when it is not
    *  the document's own (a wrapper's modified copy). */
@@ -154,6 +164,10 @@ export type RenderTransportOptions = {
    *  (none yet, the document not arrived, or a staged resync in flight):
    *  main serves it from a session of its own. `full` serializes it. */
   windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
+  /** Whether the window's document has a composition Blender renders
+   *  (`render3d.enabled`): only then does a capture that prepares its
+   *  Blender frame ask the engine (and main) to wait for Blender. */
+  usesBlender?: () => boolean;
   log: (level: 'info' | 'warn' | 'error', message: string) => void;
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
 };
@@ -194,7 +208,7 @@ export class EngineRenderTransport {
   }
 
   /** The request main forwards, or why there is none. */
-  private request(options: EngineSnapshotOptions, cls: SnapshotClass, uploaded: string[], detached = false): EngineSnapshotRequest {
+  private request(options: EngineSnapshotOptions, cls: SnapshotClass, uploaded: string[], detached = false, revision?: number | null): EngineSnapshotRequest {
     const session = this.options.session();
     if (!detached && (!session || session.id === null || session.closed)) {
       // A blocked thread cannot wait for one to open: start it for the next call.
@@ -207,6 +221,7 @@ export class EngineRenderTransport {
     if (!Number.isFinite(time)) throw new EngineSnapshotError('invalidMessage', 'A snapshot needs a finite time.');
     const wait = options.waitMs ?? (cls === 'sync' ? SYNC_WAIT_MS : cls === 'async' ? ASYNC_WAIT_MS : IDLE_WAIT_MS);
     const layer = options.layer;
+    const blender = cls !== 'sync' && !layer && options.prepareBlender === true && options.draft3d !== true && (this.options.usesBlender?.() ?? true);
     const snapshot: SnapshotRequest = {
       composition: options.composition ?? this.options.composition(),
       time: ticks(time),
@@ -218,9 +233,10 @@ export class EngineRenderTransport {
       class: cls,
       viewSeq: this.options.viewSeq(),
       waitMs: Math.max(1, Math.min(120_000, Math.round(wait))),
+      ...(blender ? { blenderWaitMs: BLENDER_WAIT_MS } : {}),
       uploaded
     };
-    return { generation: session?.generation ?? 0, session: session?.id ?? null, revision: this.options.revision(), snapshot };
+    return { generation: session?.generation ?? 0, session: session?.id ?? null, revision: revision === undefined ? this.options.revision() : revision, snapshot };
   }
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
@@ -251,6 +267,9 @@ export class EngineRenderTransport {
     const started = performance.now();
     const native = this.options.native;
     if (!native.snapshotSync) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no synchronous engine snapshots.'), 'snapshot');
+    // Flush pending edits first (once): a flush that starts a staged resync
+    // must be seen before choosing the path below.
+    const revision = this.options.revision();
     // This thread blocks until the answer: the window's own session serves
     // it only when it has the document and no staged resync is on its way
     // (the resync's next step would need this thread). Otherwise main serves
@@ -261,7 +280,7 @@ export class EngineRenderTransport {
       // The window's own session (the standby) serves later ones.
       if (!session || session.closed) void this.options.wake?.();
       try {
-        return this.documentSnapshotSync(options, started);
+        return this.documentSnapshotSync(options, started, revision);
       } catch (error) {
         if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
         throw this.fail(error, 'snapshot');
@@ -270,7 +289,7 @@ export class EngineRenderTransport {
     const uploaded: string[] = [];
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const reply = native.snapshotSync(this.request(options, 'sync', uploaded));
+        const reply = native.snapshotSync(this.request(options, 'sync', uploaded, false, revision));
         if (reply.status === 'rendered') {
           this.stats.sync++;
           this.stats.slowestSyncMs = Math.max(this.stats.slowestSyncMs, performance.now() - started);
@@ -301,17 +320,17 @@ export class EngineRenderTransport {
   private sentToMain: { id: string; revision: number } | null = null;
 
   /** A sync snapshot main serves from its own session for this window. */
-  private documentSnapshotSync(options: EngineSnapshotOptions, started: number): EngineSnapshot {
+  private documentSnapshotSync(options: EngineSnapshotOptions, started: number, flushed: number | null): EngineSnapshot {
     const native = this.options.native;
     const doc = this.options.windowDocument!()!;
-    const revision = this.options.revision() ?? doc.revision;
+    const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_ROUNDS + 1; round++) {
       if (send && !body) body = doc.full();
-      const request = this.request(options, 'sync', uploaded, true);
+      const request = this.request(options, 'sync', uploaded, true, revision);
       const reply = native.snapshotSync!({
         ...request,
         session: null,
@@ -481,8 +500,17 @@ export class EngineRenderTransport {
     }
   }
 
-  async snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }): Promise<string> {
-    return this.canvas(await this.snapshot(this.snapshotOptions(time, maxWidth, size))).toDataURL('image/jpeg', 0.74);
+  /** The same, asynchronously. `prepareBlender`: today's `snapshotAsync`,
+   *  which has Blender render the frame first; without it, today's
+   *  synchronous capture (a Blender frame nobody prepared fails). */
+  async snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options: { prepareBlender?: boolean } = {}): Promise<string> {
+    const snapshot = { ...this.snapshotOptions(time, maxWidth, size), prepareBlender: options.prepareBlender === true };
+    return this.canvas(await this.snapshot(snapshot)).toDataURL('image/jpeg', 0.74);
+  }
+
+  /** The window's document revision, after flushing pending edits. */
+  currentRevision(): number | null {
+    return this.options.revision();
   }
 
   /* ── compatibility pixels (the extcompat lane builds on these) ── */
@@ -579,7 +607,7 @@ export class EngineThumbnails {
   /** Resolves with the snapshot, or `null` when a newer request for the
    *  same key replaced this one or the result came back stale. Rejects
    *  with `EngineSnapshotError` on failure. */
-  async request(request: ThumbnailRequest, revision: () => number | null = () => null): Promise<EngineSnapshot | null> {
+  async request(request: ThumbnailRequest, revision: () => number | null = () => this.transport.currentRevision()): Promise<EngineSnapshot | null> {
     const ticket = ++this.next;
     this.latest.set(request.key, ticket);
     const required = request.minRevision ?? revision() ?? 0;

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { EngineRenderTransport, EngineSnapshotError, type TransportSession, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void> } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -48,6 +48,7 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; 
     revision: options.flush ?? (() => 12),
     windowDocument: options.windowDocument,
     wake: options.wake,
+    usesBlender: options.usesBlender,
     composition: () => 'comp-1',
     document: () => 'doc-1',
     viewSeq: () => 4,
@@ -137,6 +138,44 @@ describe('EngineRenderTransport', () => {
     expect(await first).toBeNull();
     expect((await second)!.data[0]).toBe(3);
     expect(transport.thumbnails.stale).toBe(2);
+  });
+
+  it('thumbnails require the revision the window had when it asked, by default', async () => {
+    const { transport } = setup([rendered(2, 2, 1, 12), rendered(2, 2, 2, 13)], { flush: () => 13 });
+    expect(await transport.thumbnails.request({ key: 'k', time: 0, width: 2, height: 2 })).toBeNull();
+    expect((await transport.thumbnails.request({ key: 'k', time: 0, width: 2, height: 2 }))!.data[0]).toBe(2);
+  });
+
+  it('only async captures that prepare their Blender frame wait for Blender, and only in Blender documents', async () => {
+    let blender = true;
+    const replies = Array.from({ length: 8 }, () => rendered(320, 180));
+    const { transport, asked } = setup(replies, { usesBlender: () => blender });
+    // Today's snapshotAsync: Blender renders the frame first.
+    await transport.snapshotDataUrl(0, 320, { w: 640, h: 360 }, { prepareBlender: true });
+    expect(asked[0]!.snapshot).toMatchObject({ class: 'async', blenderWaitMs: BLENDER_WAIT_MS, target: { kind: 'frame', draft3d: false } });
+    // Today's synchronous capture shape over invoke (project.snapshot): no.
+    await transport.snapshotDataUrl(0, 320, { w: 640, h: 360 });
+    expect(asked[1]!.snapshot.blenderWaitMs).toBeUndefined();
+    // A blocked thread never waits for Blender.
+    transport.snapshotSync({ time: 0, width: 320, height: 180, prepareBlender: true });
+    expect(asked[2]!.snapshot.blenderWaitMs).toBeUndefined();
+    // Draft 3D draws native shading; nothing to prepare.
+    await transport.snapshot({ time: 0, width: 320, height: 180, prepareBlender: true, draft3d: true });
+    expect(asked[3]!.snapshot.blenderWaitMs).toBeUndefined();
+    // A document without Blender compositions never asks main to wait for it.
+    blender = false;
+    await transport.snapshotDataUrl(0, 320, { w: 640, h: 360 }, { prepareBlender: true });
+    expect(asked[4]!.snapshot.blenderWaitMs).toBeUndefined();
+  });
+
+  it('flushes before choosing the path: a flush that starts a staged resync goes to main’s session', () => {
+    const live = { ...session(), applied: 12 };
+    const windowDocument = () => ({ id: 'doc-1', revision: 13, full: () => ({ json: new TextEncoder().encode('{}'), hash: 'cd'.repeat(32), revision: 13 }) });
+    let flushed = 0;
+    const { transport, asked } = setup([rendered(2, 2)], { session: live, windowDocument, flush: () => { flushed++; live.resyncPending = true; return 13; } });
+    transport.snapshotSync({ time: 0, width: 2, height: 2 });
+    expect(flushed).toBe(1);
+    expect(asked[0]).toMatchObject({ session: null, revision: 13, document: { id: 'doc-1', revision: 13 } });
   });
 
   it('uploads compatibility pixels in bands and answers export asks for its document', async () => {

@@ -36,7 +36,7 @@ import { DocumentSession, documentId, type DocumentStream } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
-import { installAppCaptures } from './app-captures';
+import { installAppCaptures, usesBlender } from './app-captures';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
@@ -271,6 +271,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         }
       };
     },
+    usesBlender: () => usesBlender(PM.proj),
     log
   });
   (PM as any).EngineRender = renderTransport;
