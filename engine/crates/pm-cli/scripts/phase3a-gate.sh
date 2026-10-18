@@ -84,13 +84,25 @@ done
 # Section 2's third linear-blending line (a blurred white line conserves energy).
 run blur-energy cargo test --release -p pm-cli --test phase3a_bars -- --ignored --nocapture --test-threads=1
 
-# Section 25's video class against FFmpeg plus zimg (the sources the legacy
-# capture shows as a playback proxy, and the opaque fixtures beside them).
+# Section 25's video class against FFmpeg plus zimg: the flat e2e fixtures
+# (matrix and range only), generated sources with chroma edges, and the
+# corpus's own H.264 media.
 run video-class cargo test --release -p pm-cli --test phase3a_video_class -- --ignored --nocapture --test-threads=1
 
 # Section 2's determinism bar, second half: native and WASM evaluation are
 # bit-identical on the corpus (needs pm_wasm.wasm: bun run --cwd apps/desktop build:wasm).
 run eval-wasm ./target/release/pm-cli parity eval --wasm --json "$out/parity-eval.json"
+
+# Section 2's determinism bar for lossless outputs: png16 exports of nine
+# corpus projects, twice each, compared byte for byte.
+run png16-determinism "$here/png16-determinism.sh" "$(newest v1-)" "$out/png16"
+
+# The shader gate's corpus, collected again at this tip with the same Store
+# fetch (bun; public Store releases, no credentials) and compared with the
+# corpus the WebGL references were taken from: the references stand only if
+# no case changed.
+run shader-recollect bun "$engine/crates/pm-render/tools/shaders/collect.ts" --out "$out/shaders-recollect"
+run shader-corpus-same python3 -I "$here/shader-corpus-same.py" "$(newest shaders-)" "$out/shaders-recollect"
 
 # The memory row's pm-wasm part: the mirror's heap and linear memory per
 # window with each 3D corpus project (and the real project) loaded.
