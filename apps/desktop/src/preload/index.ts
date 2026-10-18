@@ -588,6 +588,8 @@ const bridge: PowermoveBridge = {
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {
       const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+        // Acknowledged at once: main passes over a window that does not.
+        ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
         void Promise.resolve()
           .then(() => run({ request: job.request, textures: job.textures }))
           .then(

@@ -20,9 +20,12 @@ const request = (textures = 2): ShaderFallbackRequest => ({
   calls: [], stage: 'bind', message: 'sampler', textures, units: [], morePasses: []
 });
 
+const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
 function relay(windows: number[], owner: number | null) {
   const sent: Array<{ window: number; job: ShaderFallbackJob }> = [];
   const timers: Array<() => void> = [];
+  const acks: Array<() => void> = [];
   const r = new ShaderFallbackRelay({
     send: (window, job) => {
       if (window === 404) return false;
@@ -31,12 +34,14 @@ function relay(windows: number[], owner: number | null) {
     },
     windows: () => windows,
     ownerOf: () => owner,
-    schedule: (fn) => {
-      timers.push(fn);
-      return { cancel: () => { timers.splice(timers.indexOf(fn), 1); } };
+    ackMs: 5,
+    schedule: (fn, ms) => {
+      const list = ms === 5 ? acks : timers;
+      list.push(fn);
+      return { cancel: () => { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } };
     }
   });
-  return { r, sent, timers };
+  return { r, sent, timers, acks };
 }
 
 describe('the shader fallback relay', () => {
@@ -55,6 +60,7 @@ describe('the shader fallback relay', () => {
   it('uses another window when the owner is gone, and fails named when none is open', async () => {
     const { r, sent } = relay([404, 5], 404);
     void r.run(9, request(), []);
+    await flush();
     expect(sent.map((s) => s.window)).toEqual([5]);
     const none = await relay([], null).r.run(9, request(), []);
     expect(none).toEqual({ ok: false, reason: 'unavailable', message: expect.stringContaining('no window') });
@@ -74,6 +80,35 @@ describe('the shader fallback relay', () => {
     expect(fallbackErrorCode('compile')).toBe('shaderCompile');
     expect(fallbackErrorCode('watchdog')).toBe('watchdogTimeout');
     expect(fallbackErrorCode('contextLost')).toBe('unsupported');
+  });
+});
+
+describe('acknowledgements', () => {
+  it('passes over a window that does not acknowledge a request, quickly, and gives one that does the full timeout', async () => {
+    const { r, sent, timers, acks } = relay([1, 2], 1);
+    const answer = r.run(9, request(), []);
+    expect(sent.map((s) => s.window)).toEqual([1]);
+    // Window 1 is reloading: no acknowledgement within ackMs.
+    acks[0]!();
+    await flush();
+    expect(sent.map((s) => s.window)).toEqual([1, 2]);
+    // A late answer from window 1 is not heard.
+    r.answer(1, { id: sent[0]!.job.id, ok: true, rgba16f: new Uint16Array(8).fill(1) });
+    // Window 2 acknowledges: its acknowledgement deadline is gone, the full timeout stays.
+    r.answer(2, { id: sent[1]!.job.id, received: true });
+    expect(acks).toHaveLength(0);
+    expect(timers).toHaveLength(1);
+    r.answer(2, { id: sent[1]!.job.id, ok: true, rgba16f: new Uint16Array(8).fill(3) });
+    const result = await answer;
+    expect(result.ok && Array.from(result.rgba16f)).toEqual(new Array(8).fill(3));
+    expect(timers).toHaveLength(0);
+  });
+
+  it('fails unavailable, naming it, when no window acknowledges', async () => {
+    const { r, acks } = relay([1], null);
+    const answer = r.run(9, request(), []);
+    acks[0]!();
+    expect(await answer).toEqual({ ok: false, reason: 'unavailable', message: expect.stringContaining('acknowledged') });
   });
 });
 
@@ -114,6 +149,9 @@ describe('serving a job engine fallback request', () => {
     expect(await code(serveHostFallback(body(), scratch, null))).toBe('unsupported');
     expect(await code(serveHostFallback(body(), scratch, async () => ({ ok: false, reason: 'compile', message: 'no' })))).toBe('shaderCompile');
     expect(await code(serveHostFallback(body(), scratch, async () => ({ ok: false, reason: 'watchdog', message: 'no' })))).toBe('watchdogTimeout');
+    // A transient failure keeps the runner's reason in its message.
+    const lost = await serveHostFallback(body(), scratch, async () => ({ ok: false, reason: 'contextLost', message: 'lost' })).catch((e: unknown) => e);
+    expect(lost).toMatchObject({ code: 'unsupported', message: 'contextLost: lost' });
     expect(await readdir(dir)).not.toContain('out.rgba16f');
   });
 });

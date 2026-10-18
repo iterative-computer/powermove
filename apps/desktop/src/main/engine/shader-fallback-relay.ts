@@ -11,6 +11,12 @@
  * agent frame batch's owner); render queue jobs and jobs whose window
  * closed use any window with the new engine. The runner is stateless
  * (the request carries everything), so any window draws the same pixels.
+ *
+ * A window acknowledges a request as soon as its runner has it
+ * (`{ id, received: true }`, sent by the preload's listener). A window that
+ * does not within `ackMs` (it is reloading, or its renderer has not
+ * installed the runner yet) is passed over for the next one, so a job does
+ * not wait the full timeout on a window that never heard it.
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -35,10 +41,16 @@ export type ShaderFallbackRelayOptions = {
   ownerOf(session: number): number | null;
   /** How long a window may take (ms). The job engine waits 120 s. */
   timeoutMs?: number;
+  /** How long a window may take to acknowledge a request (ms). */
+  ackMs?: number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
 };
 
-type Waiting = { window: number; resolve(result: ShaderFallbackResult): void; timer: { cancel(): void } };
+type Timer = { cancel(): void };
+type Waiting = { window: number; resolve(result: ShaderFallbackResult | 'notReady'): void; timer: Timer; ack: Timer | null };
+
+/** Default acknowledgement deadline (ms). */
+export const ACK_MS = 10_000;
 
 export class ShaderFallbackRelay {
   private next = 1;
@@ -46,29 +58,53 @@ export class ShaderFallbackRelay {
 
   constructor(private readonly options: ShaderFallbackRelayOptions) {}
 
-  /** Runs `request` in a window's runner. */
-  run(session: number, request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackResult> {
+  /** Runs `request` in a window's runner: the job's owner first, then
+   *  any other window, passing over windows that do not acknowledge it. */
+  async run(session: number, request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackResult> {
     const windows = this.options.windows();
     const owner = this.options.ownerOf(session);
     const order = owner !== null && windows.includes(owner) ? [owner, ...windows.filter((w) => w !== owner)] : windows;
-    const id = this.next++;
+    let passed = 0;
     for (const window of order) {
-      const answered = new Promise<ShaderFallbackResult>((resolve) => {
-        const ms = this.options.timeoutMs ?? 110_000;
-        const schedule = this.options.schedule ?? ((fn, t) => {
-          const handle = setTimeout(fn, t);
-          return { cancel: () => clearTimeout(handle) };
-        });
-        const timer = schedule(() => {
-          if (this.waiting.delete(id)) resolve({ ok: false, reason: 'unavailable', message: `the window did not answer within ${Math.round(ms / 1000)} s` });
-        }, ms);
-        this.waiting.set(id, { window, resolve, timer });
-      });
-      if (this.options.send(window, { id, request, textures })) return answered;
-      this.waiting.get(id)?.timer.cancel();
-      this.waiting.delete(id);
+      const outcome = await this.ask(window, { id: this.next++, request, textures });
+      if (outcome !== 'notReady') return outcome;
+      passed++;
     }
-    return Promise.resolve({ ok: false, reason: 'unavailable', message: 'no window with the new engine is open to run the WebGL fallback runner' });
+    return {
+      ok: false,
+      reason: 'unavailable',
+      message: passed > 0
+        ? `no window with the new engine acknowledged the WebGL fallback request (${passed} asked)`
+        : 'no window with the new engine is open to run the WebGL fallback runner'
+    };
+  }
+
+  private schedule(fn: () => void, ms: number): Timer {
+    const schedule = this.options.schedule ?? ((f, t) => {
+      const handle = setTimeout(f, t);
+      return { cancel: () => clearTimeout(handle) };
+    });
+    return schedule(fn, ms);
+  }
+
+  /** Asks one window; `notReady` when it is gone or does not acknowledge. */
+  private ask(window: number, job: ShaderFallbackJob): Promise<ShaderFallbackResult | 'notReady'> {
+    const { id } = job;
+    return new Promise((resolve) => {
+      const ms = this.options.timeoutMs ?? 110_000;
+      const settle = (result: ShaderFallbackResult | 'notReady') => {
+        const w = this.waiting.get(id);
+        if (!w) return;
+        this.waiting.delete(id);
+        w.timer.cancel();
+        w.ack?.cancel();
+        resolve(result);
+      };
+      const timer = this.schedule(() => settle({ ok: false, reason: 'unavailable', message: `the window did not answer within ${Math.round(ms / 1000)} s` }), ms);
+      const ack = this.schedule(() => settle('notReady'), this.options.ackMs ?? ACK_MS);
+      this.waiting.set(id, { window, resolve: settle, timer, ack });
+      if (!this.options.send(window, job)) settle('notReady');
+    });
   }
 
   /** A window answered (only the window asked is heard). */
@@ -78,8 +114,12 @@ export class ShaderFallbackRelay {
     const id = Number(m['id']);
     const waiting = this.waiting.get(id);
     if (!waiting || waiting.window !== window) return;
-    this.waiting.delete(id);
-    waiting.timer.cancel();
+    if (m['received'] === true) {
+      // The window's runner has it: it now has the full timeout.
+      waiting.ack?.cancel();
+      waiting.ack = null;
+      return;
+    }
     if (m['ok'] === true && m['rgba16f'] instanceof Uint16Array) {
       waiting.resolve({ ok: true, rgba16f: m['rgba16f'] });
     } else {
@@ -89,10 +129,8 @@ export class ShaderFallbackRelay {
 
   /** A window closed: what it was asked fails at once. */
   forget(window: number): void {
-    for (const [id, w] of [...this.waiting]) {
+    for (const w of [...this.waiting.values()]) {
       if (w.window !== window) continue;
-      this.waiting.delete(id);
-      w.timer.cancel();
       w.resolve({ ok: false, reason: 'unavailable', message: 'the window running the fallback closed' });
     }
   }
@@ -136,7 +174,12 @@ export async function serveHostFallback(
   }));
   if (!run) throw new ProtocolError('unsupported', 'No window can run the WebGL fallback runner here.');
   const result = await run(request, textures);
-  if (!result.ok) throw new ProtocolError(fallbackErrorCode(result.reason), result.message || result.reason);
+  if (!result.ok) {
+    const code = fallbackErrorCode(result.reason);
+    // The job engine reads `unsupported` as a transient failure; the
+    // runner's own reason (`contextLost`, `deadline`, ...) stays in the message.
+    throw new ProtocolError(code, code === 'unsupported' ? `${result.reason}: ${result.message || result.reason}` : result.message || result.reason);
+  }
   if (result.rgba16f.length * 2 !== bytes) throw new ProtocolError('unsupported', 'the runner answered pixels of another size');
   await writeFile(path.join(area.path, body.output), new Uint8Array(result.rgba16f.buffer, result.rgba16f.byteOffset, result.rgba16f.byteLength), { mode: 0o600 });
 }
