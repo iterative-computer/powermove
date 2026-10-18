@@ -31,7 +31,7 @@ function viewerApi(services: Map<string, unknown>, log: (level: string, message:
     groups: { ancestors: () => [], transformRoots: () => [] },
     anim: { active: () => true, ev: () => 0, version: () => 0, worldMatrix: () => [1, 0, 0, 1, 0, 0] },
     model: { TYPE_META: {}, layer: () => undefined, curComp: () => project },
-    render: { gl: { bounds: () => null, pick: () => null, context: null, previewViewport: null, resize: vi.fn() } },
+    render: { gl: { bounds: () => null, pick: () => null, context: null, canvas: null, previewViewport: null, resize: vi.fn() } },
     transport: { time: () => 0, playing: () => false, quality: 1, perf: { auto: false }, previewResolution: 1, invalidate() {} },
     util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
     events: { on: () => ({ dispose() {} }) },

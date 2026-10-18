@@ -878,18 +878,23 @@ export interface RenderAPI {
     compileError(key: string): string | null;
     readonly previewViewport: PreviewViewport | null;
     /**
-     * @deprecated Compatibility member (apiVersion 1 to 3). To draw, register a
-     * GLSL layer with `api.layers.register({ renderer: { kind: 'fragment', fragment } })`
-     * or an effect with `api.effects.register`; to read the frame, use
+     * The canvas the editor's frame presentation is bound to (the last canvas
+     * passed to `init`), or null before any viewer called `init`. Available to
+     * every apiVersion; use it instead of `context.canvas`.
+     */
+    readonly canvas: HTMLCanvasElement | null;
+    /**
+     * @deprecated Compatibility member (apiVersion 1 to 3). Find the bound
+     * canvas with `api.render.gl.canvas`; to draw, register a GLSL layer with
+     * `api.layers.register({ renderer: { kind: 'fragment', fragment } })` or an
+     * effect with `api.effects.register`; to read the frame, use
      * `await api.render.renderFrameToAsync(time, width, height)`.
      *
-     * With "Use New Engine" on this is a compatibility context: a WebGL2 context
-     * on an offscreen canvas the size of the preview. Before each `frame:rendered`
-     * it holds the engine's finished frame (so `readPixels` reads the composite);
-     * whatever the extension draws into it afterwards, until the next frame, is
-     * composited over the composition as the top layer in the preview and in
-     * export (see "The compatibility WebGL context" in EXTENSIONS.md).
-     * Without the engine it is the compositor's own context, as before.
+     * Null until a viewer called `init`, then a WebGL2 context of the bound
+     * canvas (`context.canvas === render.gl.canvas`), as today. With "Use New
+     * Engine" on, the engine presents over that canvas, which stays hidden
+     * under the presentation: the context is a compatibility context (see
+     * "The compatibility WebGL context" in EXTENSIONS.md).
      */
     readonly context: WebGL2RenderingContext | null;
   };

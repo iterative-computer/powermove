@@ -116,6 +116,7 @@ import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-m
 import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { assetAudio, assetSource } from './live-media';
 import { createRasterCompat } from './raster-compat';
+import { compatContext } from './compat-context';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -450,7 +451,12 @@ function makeRender(PM: LegacyPM): RenderAPI {
       },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
-      get context() { return PM?.GL?.gl ?? null; }
+      /* The canvas `init` bound (the engine's binding with the new engine on,
+         the compositor's otherwise). */
+      get canvas() { return (PM?.EngineCanvas?.bound ?? PM?.GL?.gl?.canvas ?? null) as HTMLCanvasElement | null; },
+      /* The compatibility context: null until a viewer called `init`, then a
+         WebGL2 context of the bound canvas (compat-context.ts). */
+      get context() { return compatContext(PM); }
     },
     raster,
     textLayout: (layer, time) => { const n = native(PM); const t = time ?? PM?.time ?? 0; return (n ? n.textLayout(layer, t) : PM?.textCaretLayout?.(layer, t)) ?? null; },
