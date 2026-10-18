@@ -7,8 +7,8 @@
  * Installed here and not in the old headless host: core/media (asset
  * records), gl/shaders and gl/transitions (the effect and transition
  * registries `add_effect` and `set_transition` read), the captions service
- * (`generate_captions`), and the extension loader with the built-ins, so the
- * kernel's registries hold what the desktop's hold.
+ * (`generate_captions`), the scripting catalog, and the extension loader
+ * with the built-ins, so the kernel's registries hold what the desktop's hold.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -159,11 +159,11 @@ export async function bootChain(options: ChainOptions): Promise<Chain> {
     import('../../renderer/src/legacy/core/easing'), import('../../renderer/src/legacy/core/model'), import('../../renderer/src/legacy/core/selection'),
     import('../../renderer/src/legacy/core/anim'), import('../../renderer/src/legacy/core/history'),
   ]);
-  const [library, projects, editing, capabilities, media, shaders, transitions, captions, workspace, harness, builtins] = await Promise.all([
+  const [library, projects, editing, capabilities, media, shaders, transitions, captions, workspace, harness, scripting, builtins] = await Promise.all([
     import('../../renderer/src/legacy/core/library'), import('../../renderer/src/legacy/core/projects'), import('../../renderer/src/legacy/core/editing'),
     import('../../renderer/src/legacy/core/capabilities'), import('../../renderer/src/legacy/core/media'), import('../../renderer/src/legacy/gl/shaders'),
     import('../../renderer/src/legacy/gl/transitions'), import('../../renderer/src/captions/install'), import('../../renderer/src/legacy/core/workspace'),
-    import('../../renderer/src/legacy/assistant/harness'), import('../../renderer/src/kernel/builtins'),
+    import('../../renderer/src/legacy/assistant/harness'), import('../../renderer/src/legacy/core/scripting'), import('../../renderer/src/kernel/builtins'),
   ]);
   diag.install(PM as never); util.install(PM as never);
   PM['store'] = options.store;
@@ -172,7 +172,13 @@ export async function bootChain(options: ChainOptions): Promise<Chain> {
   const engine = await installHeadlessEngineDoc(PM, options.log, options.policy);
   for (const step of [library, projects, editing, capabilities, media, shaders, transitions]) step.install(PM as never);
   captions.installCaptions(PM as never);
-  for (const step of [workspace, harness]) step.install(PM as never);
+  for (const step of [workspace, harness, scripting]) step.install(PM as never);
+  // Scripts run in the browser's opaque-origin frame and worker (its
+  // guarantees in PM.Script.catalog()); happy-dom is no isolation boundary,
+  // so a document host never runs one. The catalog the agent reads is the same.
+  const noIsolation = () => Promise.reject(new DocumentHostError('service-unavailable', 'Scripts run in the editor’s isolated browser runtime, which the document host does not have.'));
+  PM['Script'].preview = noIsolation;
+  PM['Script'].apply = noIsolation;
   let loader: import('../../renderer/src/kernel/loader').Loader | null = null;
   return {
     PM,

@@ -26,6 +26,38 @@ export function answerOf(response: AgentToolResponseEvent | Omit<AgentToolRespon
 
 export const canonicalDocument = (doc: unknown): string => canonicalStringify(canonicalProject(doc as never));
 
+const ID_KEYS = new Set(['id', 'i', 'historyId']);
+
+/** Every id string the value carries under an id key. */
+function idsIn(value: unknown, out = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) { for (const v of value) idsIn(v, out); return out; }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (ID_KEYS.has(k) && typeof v === 'string') out.add(v);
+      else if (typeof v === 'string' && v.startsWith('{')) { try { idsIn(JSON.parse(v), out); } catch { /* not JSON */ } }
+      else idsIn(v, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * The transcript with every id minted during the run renamed by order of
+ * first appearance (`#1`, `#2`, …), everywhere it occurs (answers' JSON
+ * text included). Ids come from Math.random on every host, and the
+ * desktop's own UI draws from the same generator between calls, so two
+ * desktop runs differ the same way; everything else must be byte-identical.
+ */
+export function normalizeMintedIds(transcript: ContractTranscript, initial: unknown): ContractTranscript {
+  const known = idsIn(initial);
+  const serialized = JSON.stringify(transcript);
+  const minted = [...idsIn(transcript)].filter((id) => !known.has(id) && id.length >= 3);
+  minted.sort((a, b) => serialized.indexOf(a) - serialized.indexOf(b));
+  let out = serialized;
+  minted.forEach((id, n) => { out = out.split(id).join(`#${n + 1}`); });
+  return JSON.parse(out);
+}
+
 export async function runContractOnWorker(script: string, sequence: ContractCall[] = CONTRACT_SEQUENCE): Promise<ContractTranscript> {
   const host = hostServices();
   host.seed(CONTRACT_PROJECT_ID, 'Contract', contractProject());
