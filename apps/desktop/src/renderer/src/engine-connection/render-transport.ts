@@ -45,6 +45,9 @@ export const IDLE_WAIT_MS = 120_000;
 /** Largest side of a layer raster asked for: 6,000² is under the engine's
  *  40-million-pixel snapshot cap. */
 export const MAX_RASTER_EDGE = 6000;
+/** How long a UI snapshot waits for the viewer's session before the
+ *  connection opens a standby one. */
+export const STANDBY_AFTER_MS = 5_000;
 /** Largest compatibility band in one message (pm_protocol MAX_COMPAT_BAND_BYTES). */
 export const MAX_COMPAT_BAND_BYTES = 8 * 1024 * 1024;
 
@@ -133,6 +136,9 @@ export type RenderTransportOptions = {
   /** The viewer state on screen (`ViewerState.viewSeq`), if any. */
   viewSeq: () => number | null;
   fallbackRunner: () => TransportFallbackRunner | null;
+  /** Opens a session to take snapshots of when none is open (the
+   *  connection's standby); resolves once it has the document. */
+  wake?: () => Promise<void>;
   log: (level: 'info' | 'warn' | 'error', message: string) => void;
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
 };
@@ -160,6 +166,12 @@ export class EngineRenderTransport {
     this.producers.clear();
   }
 
+  /** Resolves once a session is open, or after `ms`. */
+  private async waitForSession(ms: number): Promise<void> {
+    const until = performance.now() + ms;
+    while (!this.ready && performance.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
   /** Whether a session is open to take snapshots of. */
   get ready(): boolean {
     const s = this.options.session();
@@ -169,7 +181,11 @@ export class EngineRenderTransport {
   /** The request main forwards, or why there is none. */
   private request(options: EngineSnapshotOptions, cls: SnapshotClass, uploaded: string[]): EngineSnapshotRequest {
     const session = this.options.session();
-    if (!session || session.id === null || session.closed) throw new EngineSnapshotError('noSession', 'The window has no engine session yet.');
+    if (!session || session.id === null || session.closed) {
+      // A blocked thread cannot wait for one to open: start it for the next call.
+      if (cls === 'sync') void this.options.wake?.();
+      throw new EngineSnapshotError('noSession', 'The window has no engine session yet.');
+    }
     const width = Math.round(options.width), height = Math.round(options.height);
     if (!(width >= 1 && height >= 1 && width <= 16384 && height <= 16384)) throw new EngineSnapshotError('invalidMessage', `A ${options.width}×${options.height} snapshot is outside 1..16384.`);
     const time = Number(options.time);
@@ -256,6 +272,12 @@ export class EngineRenderTransport {
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
     const uploaded: string[] = [];
     try {
+      if (!this.ready) {
+        // UI snapshots wait for the viewer's own session first (it opens at
+        // boot); a standby opens only when none comes.
+        if (cls === 'idle') await this.waitForSession(STANDBY_AFTER_MS);
+        if (!this.ready) await this.options.wake?.();
+      }
       for (let round = 0; round < MAX_ROUNDS; round++) {
         const reply = await native.snapshot(this.request(options, cls, uploaded));
         if (reply.status === 'rendered') {

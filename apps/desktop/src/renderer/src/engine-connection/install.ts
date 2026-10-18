@@ -197,15 +197,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     standby = null;
     s?.close();
   };
-  /** Opens the standby session while the connection is up and no viewer
-   *  session is open; closes it once one is. */
+  /** Closes the standby once a viewer session has the document. */
   const syncStandby = (): void => {
+    if (sessions.size && current && current.applied > 0) closeStandby();
+  };
+  /**
+   * Opens the standby session, on demand only: when a snapshot is asked
+   * for while no viewer session is open (the Library, a closed viewer).
+   * Never at boot: a second session there competes with the viewer's own
+   * resync and definitions (measured: it made the tracer's effects frame
+   * and the J/K/L A/V sync flaky). Resolves once it has the document.
+   */
+  let standbyReady: Promise<void> | null = null;
+  const wakeStandby = (): Promise<void> => {
     const c = connection;
-    if (sessions.size || !c?.ready || c.closed || !PM.EngineDoc?.enabled) {
-      if (sessions.size && current && current.applied > 0) closeStandby();
-      return;
-    }
-    if (standby && !standby.closed) return;
+    if (sessions.size || !c?.ready || c.closed || !PM.EngineDoc?.enabled) return Promise.resolve();
+    if (standby && !standby.closed && standbyReady) return standbyReady;
     const s: DocumentSession = new DocumentSession({
       connection: c,
       stream: stream(),
@@ -222,7 +229,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       log
     });
     standby = s;
-    void s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
+    standbyReady = s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
+    return standbyReady;
   };
   const renderTransport = new EngineRenderTransport({
     native,
@@ -238,6 +246,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     document: () => documentId(PM.proj?.id),
     viewSeq: () => current?.viewSeq ?? null,
     fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+    wake: wakeStandby,
     log
   });
   (PM as any).EngineRender = renderTransport;
@@ -274,9 +283,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
     for (const listener of [...ready]) listener();
-    // A viewer that opens attaches a session; until then (or without one)
-    // snapshots use the standby.
-    queueMicrotask(syncStandby);
+
   }
 
   const onMessage = (event: MessageEvent): void => {
@@ -327,7 +334,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         sessions.delete(s);
         if (current === s) current = [...sessions].at(-1) ?? null;
         transport.refresh();
-        syncStandby();
       };
       session = new DocumentSession({
         connection: c,

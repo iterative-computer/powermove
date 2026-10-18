@@ -640,7 +640,7 @@ function projectThumb() {
   // frame on screen (it waits out playback and gestures), never the
   // current engine's canvas, which no longer shows.
   const engine = PM.EngineRender;
-  if (engine?.ready) {
+  if (engine) {
     const project = PM.proj;
     const height = Math.max(1, Math.round(320 * (Number(project.h) || 1) / (Number(project.w) || 1)));
     void engine.thumbnails.request({ key: `project-thumbnail:${project.id}`, time: PM.time, width: 320, height, draft3d: true })

@@ -94,8 +94,10 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     const next = ids.find((id) => rendered.get(id) !== key);
     if (!next) return;
     const renderedKey = key;
+    // With the new engine on, never the current engine (its snapshot opens
+    // a session when no viewer has one).
     const engine = PM.EngineRender;
-    if (engine?.ready) {
+    if (engine) {
       void renderWithEngine(engine, next)
         .then((url) => { if (url && !disposed) urls[next] = url; })
         .catch((error) => console.warn('Composition thumbnail failed', error))

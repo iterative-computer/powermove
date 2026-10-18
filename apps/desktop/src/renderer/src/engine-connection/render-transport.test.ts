@@ -100,10 +100,20 @@ describe('EngineRenderTransport', () => {
     expect(transport.stats.lastFailure).toBe('unsupported: x');
   });
 
-  it('fails clearly without a session', () => {
-    const { transport } = setup([]);
-    (transport as unknown as { options: { session: () => null } }).options.session = () => null;
+  it('fails clearly without a session, and opens one on demand (never at boot)', async () => {
+    const { transport, session: s } = setup([rendered(2, 2)]);
+    const options = (transport as unknown as { options: { session: () => TransportSession | null; wake?: () => Promise<void> } }).options;
+    let open = false;
+    let woken = 0;
+    options.session = () => (open ? s : null);
+    options.wake = async () => { woken++; open = true; };
+    // A blocked thread cannot wait: it fails now and the session opens for the next call.
     expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(EngineSnapshotError);
+    expect(woken).toBe(1);
+    open = false;
+    // An async snapshot opens it and goes on.
+    expect((await transport.snapshot({ time: 0, width: 2, height: 2 })).width).toBe(2);
+    expect(woken).toBe(2);
   });
 
   it('async siblings draw with the async runner', async () => {
