@@ -269,7 +269,9 @@ impl Profile {
     };
 
     fn as_path(&self, size: f64) -> bool {
-        self.path_above.is_some_and(|p| size > p)
+        // `SubRunContainer`: masks and distance fields only below the
+        // maximum size (`approximateDeviceTextSize < maxMaskSize`).
+        self.path_above.is_some_and(|p| size >= p)
     }
 
     /// Whether a glyph at `size` device px is in the large-text regime.
@@ -282,8 +284,10 @@ impl Profile {
     pub fn glyph_as_path(&self, size: f64, bounds: kurbo::Rect) -> bool {
         // Skia compares the glyph mask's size, the bounds rounded out (one
         // pixel more than the outline's extent at most phases).
-        self.path_above
-            .is_some_and(|p| size > p || bounds.width() + 1.0 > p || bounds.height() + 1.0 > p)
+        self.as_path(size)
+            || self
+                .path_above
+                .is_some_and(|p| bounds.width() + 1.0 > p || bounds.height() + 1.0 > p)
     }
 
     /// The profile at `size` device px (linear between points).

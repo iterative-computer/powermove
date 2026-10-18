@@ -439,14 +439,15 @@ impl Placement {
 /// The GPU canvas's distance-field strike size for text of `size` under
 /// the placement's matrix, or `None` outside its range
 /// (`SubRunControl::isSDFT`, `getSDFFont` on macOS): from 162 to 256 device
-/// px (`SkFontPriv::ApproximateTransformedTextSize`), the 162 px strike at
-/// exactly 162 and the 256 px strike above.
+/// px, 256 excluded (`SkFontPriv::ApproximateTransformedTextSize`;
+/// `SubRunContainer` draws text at or above the maximum size as paths), the
+/// 162 px strike at exactly 162 and the 256 px strike above.
 fn sdf_strike(size: f32, place: &Placement) -> Option<f32> {
     let approx = size * place.max_scale();
     if !(approx.is_finite() && approx > 0.0) {
         return None;
     }
-    if (162.0..=256.0).contains(&approx) {
+    if (162.0..256.0).contains(&approx) {
         Some(if approx <= 162.0 { 162.0 } else { 256.0 })
     } else {
         None
@@ -1009,9 +1010,9 @@ impl Painter<'_> {
             join: pm_skia_path::LineJoin::Round,
             miter_limit: 2.0,
         };
-        // `SkStrikeSpec::ShouldDrawAsPath`: the text matrix's scale beyond
-        // 256 px draws paths, not glyph images.
-        if runs.iter().any(|r| f64::from(r.size) * place.scale > 256.0) {
+        // `SubRunContainer`: text at or beyond the 256 px maximum draws
+        // paths, not glyph images.
+        if runs.iter().any(|r| f64::from(r.size) * place.scale >= 256.0) {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
@@ -1545,7 +1546,7 @@ pub fn tessellated_coverage(
             let mut ci = 0;
             for px in 0..w {
                 let xs = (ix0 + px as i64) as f64 + sx;
-                while ci < crossings.len() && crossings[ci].0 < xs {
+                while ci < crossings.len() && crossings[ci].0 <= xs {
                     winding += crossings[ci].1;
                     ci += 1;
                 }
