@@ -412,3 +412,19 @@ fn dropped_stretch_preserves_other_voices_and_reenters_at_the_current_sample() {
         );
     }
 }
+
+#[test]
+fn a_memoized_decode_failure_reads_as_the_first() {
+    let dir = temp_dir("memoized-failure");
+    let file = dir.join("bad.wav");
+    write_wav(&file, 48_000, &[vec![0.5; 4_096]]);
+    let cache = pm_audio::SourceCache::new(64 << 20, 0);
+    let source = cache.open(&file, None).unwrap();
+    cache.set_decode_failing(&source, true);
+    let first = cache.block(&source, 0, true).unwrap_err().to_string();
+    let again = cache.block(&source, 0, true).unwrap_err().to_string();
+    let nonblocking = cache.block(&source, 0, false).unwrap_err().to_string();
+    assert_eq!(first, "media: decode: block 0: injected decode failure");
+    assert_eq!(again, first);
+    assert_eq!(nonblocking, first);
+}

@@ -121,7 +121,8 @@ pub struct RenderReport {
     pub voices: usize,
     /// Voices that had source blocks missing (playback only).
     pub starved: usize,
-    /// IDs of voices missing input, including outgoing retune voices.
+    /// IDs of voices missing input, including outgoing retune voices, each
+    /// once.
     pub starved_voices: Vec<String>,
     /// Project output frames silenced for missing input, summed over voices.
     pub dropped_voice_frames: u64,
@@ -477,7 +478,11 @@ impl Mixer {
             match self.render_current(start, frames, target, options, solo.as_ref()) {
                 Ok(outgoing_report) => {
                     report.starved += outgoing_report.starved;
-                    report.starved_voices.extend(outgoing_report.starved_voices);
+                    for id in outgoing_report.starved_voices {
+                        if !report.starved_voices.contains(&id) {
+                            report.starved_voices.push(id);
+                        }
+                    }
                     report.dropped_voice_frames += outgoing_report.dropped_voice_frames;
                     report.errors.extend(outgoing_report.errors);
                 }
@@ -566,7 +571,9 @@ impl Mixer {
                     report.voices += 1;
                     report.starved += starved as usize;
                     if starved {
-                        report.starved_voices.push(plan.id.clone());
+                        if !report.starved_voices.contains(&plan.id) {
+                            report.starved_voices.push(plan.id.clone());
+                        }
                         report.dropped_voice_frames += self.voice_dropped_frames;
                     }
                 }
@@ -744,8 +751,13 @@ impl Mixer {
                         .then_some(self.src_valid.as_mut_slice()),
                 )?;
                 if options.drop_starved {
-                    self.voice_dropped_frames +=
-                        self.src_valid.iter().filter(|&&v| !v).count() as u64;
+                    // Like the other readers, only frames that would be
+                    // heard count as dropped.
+                    self.voice_dropped_frames += self.src_valid[..n]
+                        .iter()
+                        .zip(&self.gains[..n])
+                        .filter(|&(&valid, &gain)| !valid && gain != 0.0)
+                        .count() as u64;
                 }
             }
             Reader::Grid {

@@ -1897,3 +1897,111 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
     drop(playback);
     cache.shutdown();
 }
+
+/// A memoized decode error is met on every segment and the A3 drop message
+/// on every episode; polling `take_errors` (the viewer's status does, every
+/// 33 ms) hands each distinct message out once, not once per drain.
+#[test]
+fn recurring_errors_are_taken_once() {
+    let rate = 48_000u32;
+    let dir = temp_dir("recurring-errors");
+    let (good_file, bad_file, late_file) = (
+        dir.join("good.wav"),
+        dir.join("bad.wav"),
+        dir.join("late.wav"),
+    );
+    let n = rate as usize;
+    let good: Vec<f32> = (0..n).map(|i| 0.1 + (i % 997) as f32 / 10_000.0).collect();
+    write_wav(&good_file, rate, &[good.clone(), vec![0.0; n]]);
+    write_wav(&bad_file, rate, &[vec![0.3; n], vec![0.3; n]]);
+    write_wav(&late_file, rate, &[vec![0.0; n], vec![0.2; n]]);
+    let cache = SourceCache::new(64 << 20, 2);
+    let good_source = cache.open(&good_file, None).unwrap();
+    cache.block(&good_source, 0, true).unwrap();
+    let bad_source = cache.open(&bad_file, None).unwrap();
+    cache.set_decode_failing(&bad_source, true);
+    let late_source = cache.open(&late_file, None).unwrap();
+    cache.set_decode_blocked(&late_source, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(rate),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_ms: 0,
+            preroll_wait_ms: 0,
+            ..PlaybackConfig::default()
+        },
+        rate,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(
+        30.0,
+        1.0,
+        &[
+            audio("good", "g", 0.0, 1.0, "", ""),
+            audio("bad", "b", 0.0, 1.0, "", ""),
+            audio("late", "s", 0.0, 1.0, "", ""),
+        ],
+        &[],
+        "",
+    );
+    let resolver = |id: &str| {
+        Some(match id {
+            "g" => good_file.clone(),
+            "b" => bad_file.clone(),
+            _ => late_file.clone(),
+        })
+    };
+    assert!(
+        playback
+            .set_project(Arc::new(doc), "C", &resolver)
+            .unwrap()
+            .is_empty()
+    );
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let mut taken = Vec::new();
+    let mut out = vec![0.0; 256 * 2];
+    let mut played = Vec::new();
+    let host_start = host_now_us();
+    let mut frame = 0u64;
+    // Past the bound and well into the drop episode, draining every buffer.
+    while frame < rate as u64 / 2 {
+        side.callback(&mut out, 2, host_start + frame * 1_000_000 / rate as u64);
+        if frame >= rate as u64 * pm_audio::playback::SOURCE_WAIT_MS / 1000 {
+            played.extend_from_slice(&out);
+        }
+        frame += 256;
+        taken.extend(playback.take_errors());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        playback.stats().dropped_renders > 1,
+        "{:?}",
+        playback.stats()
+    );
+    assert!(
+        played.chunks_exact(2).any(|p| p[0] != 0.0),
+        "the good voice plays on: playback is not frozen"
+    );
+    let decode: Vec<_> = taken.iter().filter(|e| e.starts_with("bad:")).collect();
+    assert_eq!(decode.len(), 1, "{taken:?}");
+    assert_eq!(
+        decode[0], "bad: media: decode: block 0: injected decode failure",
+        "a memoized failure reads as the first did"
+    );
+    let drops: Vec<_> = taken.iter().filter(|e| e.contains("120 ms")).collect();
+    assert_eq!(drops.len(), 1, "{taken:?}");
+    assert!(
+        drops[0].ends_with(": late"),
+        "each starved voice named once: {taken:?}"
+    );
+    assert_eq!(taken.len(), 2, "{taken:?}");
+    cache.set_decode_blocked(&late_source, false);
+    drop(playback);
+    cache.shutdown();
+}

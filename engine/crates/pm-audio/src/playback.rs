@@ -143,12 +143,37 @@ struct Shared {
     latency_us: AtomicU32,
     reanchor: AtomicBool,
     meters: Mutex<VecDeque<Meters>>,
-    errors: Mutex<Vec<String>>,
+    errors: Mutex<ErrorLog>,
     starved: AtomicU64,
     starve_retries: AtomicU64,
     dropped_renders: AtomicU64,
     dropped_voice_frames: AtomicU64,
     device_rate: u32,
+}
+
+/// The render errors of one playback. A failure recurs on every segment
+/// that meets it (a bad block's decode error is memoized, a broken clip
+/// fails each evaluation), so each distinct message is handed out by
+/// [`Playback::take_errors`] once for the life of the playback, however
+/// often it is drained. The counters in [`PlaybackStats`] keep counting
+/// every occurrence.
+#[derive(Default)]
+struct ErrorLog {
+    pending: Vec<String>,
+    reported: HashSet<String>,
+}
+
+impl ErrorLog {
+    fn push(&mut self, message: String) {
+        if !self.reported.contains(&message) {
+            self.reported.insert(message.clone());
+            self.pending.push(message);
+        }
+    }
+
+    fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 /// A read-only view of a [`Playback`]'s clock, for another thread.
@@ -253,7 +278,7 @@ impl Playback {
             latency_us: AtomicU32::new(latency_us),
             reanchor: AtomicBool::new(false),
             meters: Mutex::new(VecDeque::new()),
-            errors: Mutex::new(Vec::new()),
+            errors: Mutex::new(ErrorLog::default()),
             starved: AtomicU64::new(0),
             starve_retries: AtomicU64::new(0),
             dropped_renders: AtomicU64::new(0),
@@ -416,9 +441,15 @@ impl Playback {
             .cloned()
     }
 
-    /// Errors met while rendering (decode or evaluation), each once.
+    /// Errors met while rendering (decode or evaluation) since the last
+    /// call. Each distinct message comes out once for the life of the
+    /// playback, so polling this never repeats a recurring failure.
     pub fn take_errors(&self) -> Vec<String> {
-        std::mem::take(&mut *self.shared.errors.lock().unwrap_or_else(|e| e.into_inner()))
+        self.shared
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     pub fn stats(&self) -> PlaybackStats {
@@ -893,10 +924,11 @@ impl RenderThread {
     }
 
     fn error(&self, e: String) {
-        let mut errors = self.shared.errors.lock().unwrap_or_else(|e| e.into_inner());
-        if !errors.contains(&e) {
-            errors.push(e);
-        }
+        self.shared
+            .errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(e);
     }
 
     /// The media position heard now, from the published clock. Until the

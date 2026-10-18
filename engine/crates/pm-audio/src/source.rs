@@ -130,6 +130,18 @@ pub struct SourceCache {
     decode_gate_changed: Condvar,
     #[cfg(feature = "test-hooks")]
     gated_decoders: AtomicU64,
+    #[cfg(feature = "test-hooks")]
+    decode_failing: Mutex<HashSet<u64>>,
+}
+
+/// A failed block's message as kept for later reads, which return it as a
+/// decode error: a decode error keeps its own text, so every read of the
+/// block reports the same message as the first.
+fn memo(e: &AudioError) -> String {
+    match e {
+        AudioError::Media(pm_media::MediaError::Decode(m)) => m.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -162,6 +174,8 @@ impl SourceCache {
             decode_gate_changed: Condvar::new(),
             #[cfg(feature = "test-hooks")]
             gated_decoders: AtomicU64::new(0),
+            #[cfg(feature = "test-hooks")]
+            decode_failing: Mutex::default(),
         });
         cache.ensure_workers(workers);
         cache
@@ -223,6 +237,19 @@ impl SourceCache {
             gate.remove(&source.id);
         }
         self.decode_gate_changed.notify_all();
+    }
+
+    /// Makes every block of a source that is not decoded yet fail to
+    /// decode (a corrupt-media regression hook). Failures are memoized like
+    /// real decode errors.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_decode_failing(&self, source: &Source, failing: bool) {
+        let mut failing_ids = lock(&self.decode_failing);
+        if failing {
+            failing_ids.insert(source.id);
+        } else {
+            failing_ids.remove(&source.id);
+        }
     }
 
     #[cfg(feature = "test-hooks")]
@@ -298,6 +325,11 @@ impl SourceCache {
             let delay = self.decode_delay_us.load(Ordering::Relaxed);
             if delay != 0 {
                 std::thread::sleep(std::time::Duration::from_micros(delay));
+            }
+            if lock(&self.decode_failing).contains(&source.id) {
+                return Err(AudioError::Media(pm_media::MediaError::decode(format!(
+                    "block {index}: injected decode failure"
+                ))));
             }
         }
         let mut decoder = lock(&source.decoder);
@@ -379,7 +411,7 @@ impl SourceCache {
                     Ok(Some(block))
                 }
                 Err(e) => {
-                    b.errors.insert(key, e.to_string());
+                    b.errors.insert(key, memo(&e));
                     Err(e)
                 }
             };
@@ -554,7 +586,7 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                 c.insert(&mut blocks, key, Arc::new(block));
             }
             Err(e) => {
-                blocks.errors.insert(key, e.to_string());
+                blocks.errors.insert(key, memo(&e));
             }
         }
         c.ready.notify_all();
