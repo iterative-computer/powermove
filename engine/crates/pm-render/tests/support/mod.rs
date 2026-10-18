@@ -471,13 +471,18 @@ pub fn extension_definitions(document: &Document) -> Vec<String> {
 #[allow(dead_code)]
 pub fn routing_forbidden(feature: &pm_render::Feature) -> bool {
     use pm_render::Feature;
-    matches!(
-        feature,
+    match feature {
         Feature::Masks
-            | Feature::MotionBlur
-            | Feature::TwoAndAHalfD
-            | Feature::CompatLevel2
-            | Feature::RequiresEngine
-            | Feature::ProjectColor
-    )
+        | Feature::MotionBlur
+        | Feature::TwoAndAHalfD
+        | Feature::CompatLevel2
+        | Feature::RequiresEngine
+        | Feature::ProjectColor => true,
+        // Level 2 text the text renderer does not lay out yet
+        // (`capability::level2_text_gap`) is compat level 2 content: it is
+        // reported as text so the text lane owns it, and it is forbidden
+        // like every other level 2 route.
+        Feature::Text(why) => why.contains("compat level 2"),
+        _ => false,
+    }
 }
