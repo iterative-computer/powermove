@@ -362,12 +362,14 @@ is unchanged; preserving originals for new imports is outside this round.
 
 Orientation and container transforms are drawn only as Chromium shows
 them, and each class has an app comparison:
-`e2e/native-still-orientation-parity.spec.ts` imports 54 generated stills
-with Use New Engine off and on, exports both over an opaque background and
-requires the drawn cases to keep the box today's import measured, route to
-the engine, and stay within the 2D class (max ≤ 4, ≤ 0.1% of pixels above
-1 CV, alpha ≤ 1). Measured 2026-10-18: every drawn case is max 0 or 1 CV
-with no pixel above 1.
+`e2e/native-still-orientation-parity.spec.ts` imports 52 stills in this
+round (51 drawn, plus late PNG `eXIf`; 59 since round 4 below) with Use New
+Engine off and on, exports both over an opaque background and requires the
+drawn cases to route to the engine and stay within the 2D class (max ≤ 4,
+≤ 0.1% of pixels above 1 CV, alpha ≤ 1). The pixel comparison is what
+proves the native draw geometry; the spec also requires the asset box
+Chromium's import measured in each session to agree. Measured 2026-10-18:
+every drawn case is max 0 or 1 CV with no pixel above 1.
 
 - PNG `eXIf` before the image data, orientations 2 to 8, opaque and
   translucent; JPEG (Y′CbCr, all eight orientations, and gray); TIFF tag
@@ -390,6 +392,46 @@ with no pixel above 1.
   `avif_compat::unmeasured` keeps 4:4:4, 4:2:2, monochrome and deeper
   AVIF explicit: no available encoder writes those, so they were not
   compared.
+
+### AVIF color descriptions and parse failures (review round 4)
+
+Round 3 drew only AVIFs whose container said sRGB or nothing (primaries 1
+or 2 with transfer 2 or 13) and failed every other file the ImageIO class
+check let through as invalid media, so a valid BT.709-tagged AVIF (transfer
+1, which FFmpeg and many tools write; ImageIO reports it as sRGB) became a
+layer failure where today's renderer draws it. Blink's `AVIFImageDecoder`
+builds the color profile from the container's description after
+`avifDecoderParse` (the ICC profile when there is one): unspecified
+primaries read as BT.709 and an unspecified transfer as sRGB, and
+`gfx::ColorSpace::GetTransferFunction` gives BT.709, SMPTE 170M and both
+BT.2020 transfers the sRGB curve, so with BT.709 primaries
+`SkColorSpace::MakeRGB` returns sRGB itself and nothing is converted
+([color_space.cc](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/ui/gfx/color_space.cc)).
+`avif_compat::srgb_cicp` is that set (primaries 1 or 2; transfer 1, 2, 6,
+13, 14 or 15); the matrix only steers the YUV conversion, which is
+CrabbyAvif's in both. `avif_compat::unmeasured` now applies the same
+container gate as `read`, so any other description (and an embedded ICC
+profile, which Blink converts from) is a named unsupported class, never a
+failure. `read` checks the container description, as Blink does, before
+decoding.
+
+Blink also accepts AV1 items without `pixi` (libheif 1.11 and older;
+`AVIF_STRICT_PIXI_REQUIRED` off). `avif_compat` did not, so such files were
+routed as unparseable; they now draw. An AVIF ImageIO reads but Chromium's
+decoder cannot parse is reported by `probe_image` as an unreadable source
+(a named layer failure) instead of a route.
+
+Measured: `tests/stills.rs` `avif_color_descriptions_blink_reads_as_srgb_are_drawn`
+encodes SVT-AV1 AVIFs with each description: transfers 1, 6, 14 and 15
+with BT.709 primaries give the byte-identical bitmap of the sRGB-tagged
+file, unspecified primaries with transfer 1 equal the unspecified file,
+matrices 6 and 9 draw, and linear, gamma 2.2, SMPTE 240M, xvYCC, BT.1361,
+PQ, HLG and BT.601/BT.470/BT.2020 primaries route with a named reason. The
+app spec adds `e2e/fixtures/still-cicp-{1-1-1,1-6-1,1-6-6,1-14-9,2-1-2}.avif`
+and `still-no-pixi.avif` (drawn, compared with the legacy export) and
+`still-cicp-9-1-9.avif` (routed with its reason). `pm-cli render` of the
+reviewer's 96×64 project with 1/1/1 and 1/6/1 files writes the same PNG as
+1/13/1.
 
 Chromium's oriented ImageBitmap is a pixel permutation of the unoriented
 premultiplied bitmap: the WebGL texture of a translucent PNG with `eXIf` 6
