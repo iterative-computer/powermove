@@ -359,6 +359,14 @@ async function run(config: AppConfig): Promise<void> {
         await run('input mode', `window.__measureApp.setInputMode(${JSON.stringify(inputMode)})`);
         await run('reset', 'window.__measureApp.reset()');
         await takeEngineTrace();
+        // Diagnostics only, as in the playback scenario (PM_MEASURE_CPU_PROFILE).
+        const profilePath = process.env['PM_MEASURE_CPU_PROFILE'];
+        if (profilePath) {
+          contents.debugger.attach('1.3');
+          await contents.debugger.sendCommand('Profiler.enable');
+          await contents.debugger.sendCommand('Profiler.setSamplingInterval', { interval: 500 });
+          await contents.debugger.sendCommand('Profiler.start');
+        }
         const generated: [number, number][] = [];
         const done = new Promise<void>((resolve) => setTimeout(resolve, config.durationMs + 500));
         let last = { x: press.x, y: press.y };
@@ -370,6 +378,13 @@ async function run(config: AppConfig): Promise<void> {
         });
         await done;
         generator.stop();
+        if (profilePath) {
+          const { profile } = (await contents.debugger.sendCommand('Profiler.stop')) as { profile: unknown };
+          const target = (config.inputModes?.length ?? 0) > 1 ? profilePath.replace(/(\.cpuprofile)?$/, `-${inputMode}.cpuprofile`) : profilePath;
+          writeFileSync(target, JSON.stringify(profile));
+          contents.debugger.detach();
+          result['cpuProfile'] = target;
+        }
         await sleep(300);
         await run('input mode off', 'window.__measureApp.setInputMode(null)');
         contents.sendInputEvent({ type: 'mouseUp', x: last.x, y: last.y, button: press.button, clickCount: 1 });

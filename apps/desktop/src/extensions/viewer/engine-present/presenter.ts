@@ -360,7 +360,9 @@ export class EnginePresenter implements Presenter {
   private enqueue(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
     if (desc.duration !== null) this.lastFrameTicks = desc.duration;
     const item: Queued<Payload> = { desc, payload: { frame }, arrivedMs };
-    for (const old of this.buffer.push(item)) this.dropItem(old, 'superseded');
+    // A timed frame comes back from the buffer when a newer revision of the
+    // same frame replaced it (an edit during playback), not as a drop.
+    for (const old of this.buffer.push(item)) this.dropItem(old, old.desc.duration === null ? 'superseded' : 'replaced');
     this.stats.maxQueued = Math.max(this.stats.maxQueued, this.buffer.size);
     if (desc.duration === null && this.options.drawOnArrival && this.raf) {
       const show = this.buffer.takeImmediate();

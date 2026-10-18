@@ -165,6 +165,8 @@ function tracerRuns() {
     { name: 'tracer-drag-engine-500-load', ...latency, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: s500, inputModes: ['drag'], env: doc },
     { name: 'tracer-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, startS: 0, env: doc },
     { name: 'tracer-edit-playback-engine-1000', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: s1000, edits: { everyMs: 250 }, startS: 0, env: doc },
+    // The same edits with Use New Engine off (docs/engine/perf.md: the page's per-edit cost on the legacy path).
+    { name: 'tracer-edit-playback-today-1000', ...playback, app: true, tracer: true, mode: 'today', load: false, synthetic: s1000, edits: { everyMs: 250 }, startS: 0 },
     { name: 'tracer-playback-engine-25', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
     { name: 'tracer-playback-engine-23976', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc },
     { name: 'tracer-playback-engine-30-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0, env: doc },
@@ -672,6 +674,8 @@ function firstAtOrAfterSorted(xs, t) {
  * includes it (viz timing for the worker's canvas).
  */
 function analyzeEdits(page, ctx, sink, offMain) {
+  // Use New Engine off: no engine frames, only the page's cost of each edit.
+  if (!page.engineTrace) return { n: page.edits.length, applyMs: dist(page.edits.map(([, t0, t1]) => t1 - t0), 3) };
   const draws = page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[2], submitMs: d[5] })).sort((a, b) => a.rafMs - b.rafMs);
   const applyMs = [];
   const toPresentMs = [];

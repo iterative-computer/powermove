@@ -19,6 +19,14 @@
 //! drawn that refresh, so the two do not contend for the GPU at viz's
 //! deadline (S1: viz's draw took 2.6 to 2.7 ms instead of 0.6 ms for frames
 //! that reached the display a refresh late while engine frames rendered).
+//!
+//! An edit during playback ([`Schedule::invalidate`]) makes the frames
+//! already rendered ahead stale: they show the older revision. They are
+//! rendered again, from the earliest one that can still reach the display,
+//! before any new frame, as long as that leaves the next new frame on time;
+//! the viewer replaces a queued frame with a newer revision of the same
+//! frame (`jitter-buffer.ts`), and keeps the stale one when the new one
+//! cannot be ready, so an edit never costs a frame (docs/engine/perf.md).
 
 use super::clock::TransportClock;
 use pm_protocol::common::TICKS_PER_SECOND;
@@ -83,6 +91,13 @@ pub struct Schedule {
     next_k: Option<i64>,
     /// Render cost of a timed frame (host µs, exponentially weighted).
     cost_us: Option<f64>,
+    /// The next stale frame to render again (frames from it up to `next_k`,
+    /// exclusive, were rendered at an older revision).
+    redo: Option<i64>,
+    /// An edit arrived: `redo` starts again from the frame on display.
+    redo_pending: bool,
+    /// The first frame of this run (nothing before it was rendered).
+    start_k: Option<i64>,
 }
 
 impl Schedule {
@@ -90,6 +105,22 @@ impl Schedule {
     /// The render cost estimate stays: the composition is the same.
     pub fn reset(&mut self) {
         self.next_k = None;
+        self.redo = None;
+        self.redo_pending = false;
+        self.start_k = None;
+    }
+
+    /// The document changed: every frame rendered ahead shows an older
+    /// revision. They are rendered again (see the module notes).
+    pub fn invalidate(&mut self) {
+        if self.next_k.is_some() {
+            self.redo_pending = true;
+        }
+    }
+
+    /// Whether rendering frame `k` now renders a stale frame again.
+    pub fn redoing(&self, k: i64) -> bool {
+        self.redo == Some(k)
     }
 
     /// A timed frame took `cost_us` from the start of its render until its
@@ -155,6 +186,7 @@ impl Schedule {
             return Next::Idle;
         }
         let f = clock.frame_ticks();
+        let fresh = self.next_k.is_none();
         let k = *self.next_k.get_or_insert_with(|| {
             // The first frame due after the margin, but never one before the
             // line's start: during the preroll the line extrapolates
@@ -167,6 +199,9 @@ impl Schedule {
                 k.max(anchor.div_euclid(f))
             }
         });
+        if fresh {
+            self.start_k = Some(k);
+        }
         let Some((from, until)) = Self::interval(clock, k) else {
             return Next::Idle;
         };
@@ -175,6 +210,9 @@ impl Schedule {
             (3.0 * p.hint.period_us).max(DELIVERY_US / 2.0)
         });
         let ready = now as f64 + self.cost_us.map_or(0.0, |c| c + delivery);
+        if let Some(next) = self.next_redo(clock, now, k, until, ready, phase) {
+            return next;
+        }
         if until < now as f64 || until < ready {
             self.next_k = Some(k + Self::step(clock));
             return Next::Skip { k };
@@ -206,7 +244,80 @@ impl Schedule {
 
     /// The frame `k` was rendered; move on.
     pub fn rendered(&mut self, clock: &TransportClock, k: i64) {
-        self.next_k = Some(k + Self::step(clock));
+        if self.redo == Some(k) {
+            self.redo = Some(k + Self::step(clock));
+        } else {
+            self.next_k = Some(k + Self::step(clock));
+        }
+    }
+
+    /// The stale frame to render again now (or the slot to wait for), or
+    /// `None` when new frames go first. `k` is the next new frame, shown
+    /// until `until_k`; `ready` is when a render started now reaches the
+    /// display.
+    fn next_redo(
+        &mut self,
+        clock: &TransportClock,
+        now: i64,
+        k: i64,
+        until_k: f64,
+        ready: f64,
+        phase: Option<Phase>,
+    ) -> Option<Next> {
+        let step = Self::step(clock);
+        let f = clock.frame_ticks();
+        if std::mem::take(&mut self.redo_pending) {
+            // From the frame on display now (it cannot be replaced in time
+            // and is passed over below) to the last one rendered.
+            let on_display = clock.unwrapped_at(now).div_euclid(f);
+            let first = match self.start_k {
+                Some(s) if (s - on_display) * step > 0 => s,
+                _ => on_display,
+            };
+            self.redo = ((k - first) * step > 0).then_some(first);
+        }
+        let now_f = now as f64;
+        while let Some(j) = self.redo {
+            if (k - j) * step <= 0 {
+                self.redo = None;
+                break;
+            }
+            let Some((from, _)) = Self::interval(clock, j) else {
+                self.redo = None;
+                break;
+            };
+            // A replacement must reach the viewer before the frame starts
+            // showing: the viewer takes a frame from its queue for the refresh
+            // that shows its start, and a copy arriving after that is dropped.
+            // Too late to replace: the stale frame stays.
+            if from < ready {
+                self.redo = Some(j + step);
+                continue;
+            }
+            // New frames first: render a stale one again only if the next
+            // new frame can still be ready after it.
+            let cost = self.cost_us.unwrap_or(0.0);
+            if ready + cost > until_k {
+                self.redo = None;
+                break;
+            }
+            let Some(phase) = phase else {
+                return Some(Next::Render {
+                    k: j,
+                    shown_from: from,
+                });
+            };
+            let slot = phase.slot_at_or_before(now_f);
+            let next_slot = slot + phase.hint.period_us;
+            if now_f - slot <= phase.window_us() || from - next_slot < Self::frame_us(clock) {
+                return Some(Next::Render {
+                    k: j,
+                    shown_from: from,
+                });
+            }
+            return Some(Next::WaitUntil(next_slot));
+        }
+        None
     }
 }
 
@@ -389,6 +500,110 @@ mod tests {
             schedule.next_in_phase(&clock, 12_000, 4, Some(p)),
             Next::WaitUntil(15_000.0)
         );
+    }
+
+    /// Renders what is due at `now` (lead 4, no phase) and returns the frames.
+    fn render_due(schedule: &mut Schedule, clock: &TransportClock, now: i64) -> Vec<i64> {
+        let mut out = Vec::new();
+        loop {
+            match schedule.next(clock, now, 4) {
+                Next::Render { k, .. } => {
+                    out.push(k);
+                    schedule.rendered(clock, k);
+                }
+                Next::Skip { .. } => {}
+                _ => return out,
+            }
+        }
+    }
+
+    #[test]
+    fn an_edit_renders_the_frames_ahead_again_from_the_first_that_can_still_show() {
+        // 60 fps: frame 600 shows from 50 ms (the preroll), 601 from 66.7 ms.
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(5_000.0);
+        assert_eq!(render_due(&mut schedule, &clock, 0), vec![600, 601]);
+        assert_eq!(render_due(&mut schedule, &clock, 34_000), vec![602, 603]);
+        // An edit at 40 ms: a frame rendered now reaches the viewer at 70 ms
+        // (5 ms render, 25 ms delivery), after 600 and 601 start showing;
+        // 602 (from 83.3 ms) and 603 can still be replaced.
+        schedule.invalidate();
+        assert!(matches!(
+            schedule.next(&clock, 40_000, 4),
+            Next::Render { k: 602, .. }
+        ));
+        assert!(schedule.redoing(602));
+        schedule.rendered(&clock, 602);
+        assert!(matches!(
+            schedule.next(&clock, 40_000, 4),
+            Next::Render { k: 603, .. }
+        ));
+        schedule.rendered(&clock, 603);
+        // Then new frames, in order: 604 is due at 50 ms (shown from 116.7 ms).
+        match schedule.next(&clock, 40_000, 4) {
+            Next::WaitUntil(at) => assert!((at - 50_000.0).abs() < 1.0, "{at}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            schedule.next(&clock, 50_000, 4),
+            Next::Render { k: 604, .. }
+        ));
+        assert!(!schedule.redoing(604));
+    }
+
+    #[test]
+    fn an_edit_before_the_run_starts_redoes_only_frames_that_were_rendered() {
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        assert_eq!(render_due(&mut schedule, &clock, 0), vec![600, 601]);
+        // At 10 ms the line extrapolates to frame 597; nothing before 600 was rendered.
+        schedule.invalidate();
+        assert!(matches!(
+            schedule.next(&clock, 10_000, 4),
+            Next::Render { k: 600, .. }
+        ));
+        schedule.rendered(&clock, 600);
+        assert!(matches!(
+            schedule.next(&clock, 10_000, 4),
+            Next::Render { k: 601, .. }
+        ));
+        schedule.rendered(&clock, 601);
+        assert!(matches!(
+            schedule.next(&clock, 10_000, 4),
+            Next::WaitUntil(_)
+        ));
+        // A seek or a pause forgets the stale frames with the position.
+        schedule.invalidate();
+        schedule.reset();
+        assert!(!schedule.redo_pending && schedule.redo.is_none());
+    }
+
+    #[test]
+    fn new_frames_go_before_stale_ones_when_both_cannot_be_ready() {
+        // 30 ms renders at 60 fps with a lead of 4: the next new frame (604,
+        // shown until 133.3 ms) must start by 78 ms; a stale frame first at
+        // 55 ms would make it 55 + 30 + 30 + 25 = 140 ms.
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(1_000.0);
+        assert_eq!(render_due(&mut schedule, &clock, 0), vec![600, 601]);
+        assert_eq!(render_due(&mut schedule, &clock, 34_000), vec![602, 603]);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        schedule.observe(30_000.0);
+        assert!(schedule.cost_us().unwrap() > 27_000.0);
+        schedule.invalidate();
+        assert!(matches!(
+            schedule.next(&clock, 55_000, 4),
+            Next::Render { k: 604, .. }
+        ));
+        assert!(!schedule.redoing(604));
     }
 
     #[test]

@@ -47,9 +47,16 @@ function audioLayers(project: any = PM.proj) {
      layer of the open composition that the clip is mixed into. */
   const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any, chain: any[] = [], strip: any = null) => {
     if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
+    // Whether any layer is soloed, once per composition rather than once per
+    // layer (a scan of every layer per layer was 7.5 ms per edit at 1,000
+    // layers; docs/engine/perf.md).
+    let soloed: boolean | undefined;
     for (const layer of comp.layers) {
-      if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo && !(PM.groupAncestors?.(layer, comp.layers) || []).some((group: any) => group.solo))) continue;
-      const groupChain = (PM.groupAncestors?.(layer, comp.layers) || []).map((group: any) => ({ group, offset }));
+      if (!layer || layer.on === false) continue;
+      soloed ??= comp.layers.some((l: any) => l.solo);
+      const ancestors = PM.groupAncestors?.(layer, comp.layers) || [];
+      if (soloed && !layer.solo && !ancestors.some((group: any) => group.solo)) continue;
+      const groupChain = ancestors.map((group: any) => ({ group, offset }));
       if (groupChain.some(({ group }: any) => group.on === false)) continue;
       const naturalStart: any = offset + Math.max(0, finite(layer.from));
       const start: any = Math.max(windowStart, naturalStart);

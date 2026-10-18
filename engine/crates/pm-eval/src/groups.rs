@@ -315,24 +315,35 @@ impl<'d> Scope<'_, 'd> {
         parent_group: Option<&JsValue>,
         boundary: &mut dyn FnMut(&mut Self, &'d Node) -> JsResult<bool>,
     ) -> JsResult<Vec<&'d Node>> {
-        let owner = |l: &Node| {
-            let g = node::get(l, b"group");
-            if g.truthy() { Some(g.to_js()) } else { None }
-        };
-        let matches = |l: &Node, parent: Option<&JsValue>| match (owner(l), parent) {
-            (None, None) => true,
-            (Some(a), Some(b)) => js_sem::strict_eq(&a, b),
-            _ => false,
-        };
-        let mut result = Vec::new();
-        let mut stack: Vec<std::vec::IntoIter<&'d Node>> = vec![
+        let owners = LayerOwners::of(layers);
+        self.compositing_layers_with(layers, &owners, parent_group, boundary)
+    }
+
+    /// [`Self::compositing_layers`] with the layers' groups read beforehand
+    /// ([`LayerOwners::of`] over the same `layers`), for callers that build
+    /// several passes over one layer list (each boundary group of a frame).
+    pub fn compositing_layers_with(
+        &mut self,
+        layers: &[&'d Node],
+        owners: &LayerOwners,
+        parent_group: Option<&JsValue>,
+        boundary: &mut dyn FnMut(&mut Self, &'d Node) -> JsResult<bool>,
+    ) -> JsResult<Vec<&'d Node>> {
+        debug_assert_eq!(owners.0.len(), layers.len());
+        let members = |parent: Option<&JsValue>| -> Vec<&'d Node> {
             layers
                 .iter()
-                .copied()
-                .filter(|l| matches(l, parent_group))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        ];
+                .zip(&owners.0)
+                .filter(|(_, owner)| match (owner, parent) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => js_sem::strict_eq(a, b),
+                    _ => false,
+                })
+                .map(|(l, _)| *l)
+                .collect()
+        };
+        let mut result = Vec::new();
+        let mut stack: Vec<std::vec::IntoIter<&'d Node>> = vec![members(parent_group).into_iter()];
         while let Some(level) = stack.last_mut() {
             let Some(layer) = level.next() else {
                 stack.pop();
@@ -349,12 +360,7 @@ impl<'d> Scope<'_, 'd> {
                     });
                 }
                 let id = node::get(layer, b"id").to_js();
-                let children: Vec<&'d Node> = layers
-                    .iter()
-                    .copied()
-                    .filter(|l| matches(l, Some(&id)))
-                    .collect();
-                stack.push(children.into_iter());
+                stack.push(members(Some(&id)).into_iter());
             } else {
                 result.push(layer);
             }
@@ -365,6 +371,26 @@ impl<'d> Scope<'_, 'd> {
     /// `validMatteSource(layers, layer, id)` over the composition's layers.
     pub fn valid_matte_source(&self, layer: &Node, id: &JsValue) -> bool {
         crate::matte::valid_matte_source(self.layers(), layer, id)
+    }
+}
+
+/// Each layer's group (`L.group` when truthy), read once per layer list: a
+/// scan of every layer's `group` member per group was 9% of a viewer frame
+/// (docs/engine/perf.md).
+#[derive(Debug, Clone)]
+pub struct LayerOwners(Vec<Option<JsValue>>);
+
+impl LayerOwners {
+    pub fn of(layers: &[&Node]) -> LayerOwners {
+        LayerOwners(
+            layers
+                .iter()
+                .map(|l| {
+                    let g = node::get(l, b"group");
+                    if g.truthy() { Some(g.to_js()) } else { None }
+                })
+                .collect(),
+        )
     }
 }
 

@@ -271,6 +271,9 @@ pub struct Stats {
     pub immediate_frames: u64,
     pub responses: u64,
     pub late_skipped: u64,
+    /// Frames rendered ahead that an edit made stale, rendered again at the
+    /// new revision (docs/engine/perf.md).
+    pub rerendered: u64,
     pub pool_waits: u64,
     pub releases: u64,
     pub release_mismatches: u64,
@@ -799,6 +802,10 @@ impl Thread {
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
+            // Frames already rendered ahead show the older revision.
+            if view.clock.is_playing() {
+                view.schedule.invalidate();
+            }
         }
     }
 
@@ -1905,6 +1912,9 @@ impl Thread {
                     let f = view.clock.frame_ticks();
                     let media = view.clock.wrap(k * f);
                     let shown_for = super::schedule::Schedule::frame_us(&view.clock);
+                    if view.schedule.redoing(k) {
+                        self.stats().rerendered += 1;
+                    }
                     let started = now();
                     let rendered = self.render(key, media, k, Some((shown_from, shown_for)));
                     let Some(view) = self.views.get_mut(&key) else {

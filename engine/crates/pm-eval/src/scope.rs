@@ -34,11 +34,74 @@ pub struct Scope<'a, 'd> {
     /// `PM.proj`: the open composition (the same as `comp` unless a nested
     /// composition is being evaluated).
     pub project: &'a Comp<'d>,
+    /// Local matrices and group ancestry computed in this scope, when
+    /// memoized ([`Scope::memoize_transforms`]).
+    pub(crate) local_memo: Option<LocalMemo<'d>>,
+}
+
+/// Local matrices by layer node and time, and group ancestors by layer node.
+/// The document is borrowed for the scope's whole life, so a node's address
+/// names one node and its content cannot change while the memo exists.
+#[derive(Default)]
+pub(crate) struct LocalMemo<'d> {
+    local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
+    ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
+}
+
+fn address(layer: &Node) -> usize {
+    std::ptr::from_ref(layer) as usize
+}
+
+impl<'d> LocalMemo<'d> {
+    pub(crate) fn get(&self, layer: &Node, time: f64) -> Option<crate::transform::Mat2d> {
+        self.local.get(&(address(layer), time.to_bits())).copied()
+    }
+
+    pub(crate) fn insert(&mut self, layer: &Node, time: f64, m: crate::transform::Mat2d) {
+        self.local.insert((address(layer), time.to_bits()), m);
+    }
+}
+
+/// A multiplicative hasher for (address, time bits) keys (SipHash costs more
+/// than the lookup it guards).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct BuildAddressHasher;
+
+#[derive(Default)]
+pub(crate) struct AddressHasher(u64);
+
+impl std::hash::BuildHasher for BuildAddressHasher {
+    type Hasher = AddressHasher;
+    fn build_hasher(&self) -> AddressHasher {
+        AddressHasher(0)
+    }
+}
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
 }
 
 impl<'a, 'd> Scope<'a, 'd> {
     pub fn new(ev: &'a mut Evaluator, comp: &'a Comp<'d>, project: &'a Comp<'d>) -> Self {
-        Scope { ev, comp, project }
+        Scope {
+            ev,
+            comp,
+            project,
+            local_memo: None,
+        }
     }
 
     /// The open composition evaluated as itself (`PM.scope` empty).
@@ -47,6 +110,20 @@ impl<'a, 'd> Scope<'a, 'd> {
             ev,
             comp,
             project: comp,
+            local_memo: None,
+        }
+    }
+
+    /// Remembers each layer's local matrix per time and its group ancestors
+    /// for the rest of this scope (the legacy evaluation window, `PM.beginEval`, memoizes
+    /// transforms the same way). Every member of a group otherwise
+    /// re-evaluates the group's transform channels, and each of its parents'
+    /// (docs/engine/perf.md). Local matrices are pure functions of the layer
+    /// and the time, so answers are unchanged; renderers enable it for one
+    /// frame's plan.
+    pub fn memoize_transforms(&mut self) {
+        if self.local_memo.is_none() {
+            self.local_memo = Some(LocalMemo::default());
         }
     }
 
@@ -101,7 +178,18 @@ impl<'a, 'd> Scope<'a, 'd> {
 
     /// `PM.groupAncestors(L)`: enclosing groups, innermost first.
     pub fn group_ancestors(&mut self, layer: &'d Node) -> JsResult<Vec<&'d Node>> {
-        self.ev.group_ancestors(self.comp, layer)
+        if let Some(found) = self
+            .local_memo
+            .as_ref()
+            .and_then(|memo| memo.ancestors.get(&address(layer)))
+        {
+            return Ok(found.clone());
+        }
+        let groups = self.ev.group_ancestors(self.comp, layer)?;
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.ancestors.insert(address(layer), groups.clone());
+        }
+        Ok(groups)
     }
 
     /// `PM.ev(L, key, T)`.

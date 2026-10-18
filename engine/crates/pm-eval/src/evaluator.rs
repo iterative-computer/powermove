@@ -493,6 +493,16 @@ impl Evaluator {
         }
     }
 
+    /// Forgets the expression error of a channel that evaluated without one.
+    /// Most documents record none, and building the key (three strings, a
+    /// SipHash) on every channel read cost 12% of a viewer frame
+    /// (docs/engine/perf.md), so an empty map answers at once.
+    fn clear_error(&mut self, cx: &Comp<'_>, layer: Option<&Node>, key: &JsString) {
+        if !self.errors.is_empty() {
+            self.errors.remove(&Self::error_key(cx, layer, key));
+        }
+    }
+
     // ── by node ──────────────────────────────────────────────────────────
 
     /// `evalKfs(kf, t, interpolateColor)`.
@@ -526,23 +536,33 @@ impl Evaluator {
         if !prop.truthy() {
             return Ok(JsValue::Number(0.0));
         }
-        let tl = local_time(layer, time)?;
         let expr = match &prop {
             Got::Node(n) => node::get(n, b"expr"),
             _ => Got::Undefined,
         };
         let color = interpolates_color(key.as_bytes());
         if !expr.truthy() {
-            self.errors.remove(&Self::error_key(cx, layer, key));
-            return self.static_or_track(&prop, tl, color);
+            self.clear_error(cx, layer, key);
+            return self.static_or_track(&prop, layer, time, color);
         }
+        let tl = local_time(layer, time)?;
         let prop_node = prop.node().expect("an expression lives on an object");
         self.eval_prop(cx, layer, prop_node, &expr, tl, time, key)
     }
 
-    /// `prop.kf?.length ? evalKfs(prop.kf, tl, color) : prop.v`.
-    fn static_or_track(&mut self, prop: &Got<'_>, tl: f64, color: bool) -> JsResult<JsValue> {
+    /// `prop.kf?.length ? evalKfs(prop.kf, tl, color) : prop.v`, with `tl`
+    /// (`T - L.from`) read only for a track. `L` is an object here (its `p`
+    /// was read), so reading `L.from` cannot throw and the order of reads
+    /// does not show.
+    fn static_or_track(
+        &mut self,
+        prop: &Got<'_>,
+        layer: Option<&Node>,
+        time: f64,
+        color: bool,
+    ) -> JsResult<JsValue> {
         if kf_length_truthy(prop) {
+            let tl = local_time(layer, time)?;
             let kf = prop.node().and_then(|p| node::member(Some(p), "kf"));
             return self.eval_keyframes(kf, tl, color);
         }
@@ -578,7 +598,7 @@ impl Evaluator {
         let expr = node::get(p, b"expr");
         let color = interpolates_color(key.as_bytes());
         if !expr.truthy() {
-            self.errors.remove(&Self::error_key(cx, layer, key));
+            self.clear_error(cx, layer, key);
             let got = Got::Node(p);
             if kf_length_truthy(&got) {
                 let tl = local_time(layer, time)?;
@@ -1176,8 +1196,7 @@ impl Evaluator {
         if node::get(p, b"expr").truthy() {
             return (Plan::Live { expression: true }, from);
         }
-        self.errors
-            .remove(&Self::error_key(cx, Some(layer), &address.key));
+        self.clear_error(cx, Some(layer), &address.key);
         if !kf_length_truthy(&prop) {
             return (Plan::Const(Ok(node::get(p, b"v").to_js())), from);
         }

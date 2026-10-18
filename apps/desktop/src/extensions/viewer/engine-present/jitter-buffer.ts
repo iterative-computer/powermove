@@ -43,13 +43,28 @@ export class JitterBuffer<T> {
     return this.timed[0]?.desc.duration ?? null;
   }
 
-  /** Adds an arriving frame; returns frames it supersedes. */
+  /**
+   * Adds an arriving frame; returns frames it supersedes. A timed frame
+   * replaces a queued one of the same frame (pts and duration) at an older
+   * document revision, in place: an edit during playback makes the engine
+   * render the frames it had rendered ahead again (docs/engine/perf.md), and
+   * the stale copy is shown only if the new one does not arrive in time.
+   */
   push(item: Queued<T>): Queued<T>[] {
     if (item.desc.duration === null) {
       const previous = this.immediate;
       if (previous && previous.desc.seq > item.desc.seq) return [item];
       this.immediate = item;
       return previous ? [previous] : [];
+    }
+    const stale = this.timed.findIndex((q) => q.desc.pts === item.desc.pts && q.desc.duration === item.desc.duration);
+    if (stale >= 0) {
+      const queued = this.timed[stale]!;
+      if (queued.desc.revision < item.desc.revision) {
+        this.timed[stale] = item;
+        return [queued];
+      }
+      if (queued.desc.revision > item.desc.revision) return [item];
     }
     this.timed.push(item);
     return [];
