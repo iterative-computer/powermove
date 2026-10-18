@@ -24,7 +24,7 @@ import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
-import { EngineFontClient, installEngineFontService } from '../engine-fonts';
+import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
@@ -34,12 +34,7 @@ import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import type { ChildLike, PortLike } from './ports';
 
-/** Main's own client id for its font port to the interactive engine (never
- *  a window id: those are positive). */
-export const FONT_CLIENT_ID = -1;
-/** Main's font port to the job engine (its exports and agent frames lay
- *  text out with the same project fonts and seeds). */
-export const JOB_FONT_CLIENT_ID = -2;
+export { FONT_CLIENT_ID, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 
 export { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from './flag';
 

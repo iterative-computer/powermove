@@ -8,7 +8,7 @@
  *   node scripts/engine-fonts-integration.mjs [--skip-build] [--json out.json]
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,7 +36,15 @@ try {
     format: 'cjs',
     target: 'node22',
     external: ['electron'],
-    logLevel: 'warning'
+    logLevel: 'warning',
+    // Vite's `?raw` imports (main's Blender worker script) as text.
+    plugins: [{
+      name: 'raw',
+      setup(b) {
+        b.onResolve({ filter: /\?raw$/ }, (a) => ({ path: path.resolve(a.resolveDir, a.path.replace(/\?raw$/, '')), namespace: 'raw' }));
+        b.onLoad({ filter: /.*/, namespace: 'raw' }, async (a) => ({ contents: readFileSync(a.path, 'utf8'), loader: 'text' }));
+      }
+    }]
   });
   const electron = createRequire(path.join(desktop, 'package.json'))('electron');
   const env = {

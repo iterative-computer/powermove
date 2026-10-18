@@ -29,6 +29,13 @@ import { ENGINE_FONTS_IPC, type EngineFontsResult, type FontFaceDescriptors } fr
 import type { PortLike } from './engine/ports';
 
 export const ENGINE_FONTS_FLAG = 'POWERMOVE_ENGINE_FONTS';
+
+/** Main's own client id for its font port to the interactive engine (never
+ *  a window id: those are positive). */
+export const FONT_CLIENT_ID = -1;
+/** Main's font port to the job engine (its exports and agent frames lay
+ *  text out with the same project fonts and seeds). */
+export const JOB_FONT_CLIENT_ID = -2;
 export const ENGINE_BRIDGE_PATH = 'POWERMOVE_PM_BRIDGE';
 
 export { ENGINE_FONTS_IPC };
