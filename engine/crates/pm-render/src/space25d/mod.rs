@@ -22,6 +22,8 @@
 use pm_eval::{JsResult, Scope};
 use pm_model::Node;
 
+pub(crate) mod local;
+
 /// Layer types drawn as 2.5D planes and compared with today's (groups
 /// supply the space). Shapes and text keep today's raster density (the 2D
 /// world matrix's) and draw through the plane; 3D object layers draw in
