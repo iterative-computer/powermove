@@ -6,6 +6,7 @@
  */
 import { shaderPresets, studioCube } from '../catalog';
 import { newProject, type Builder, type Channel, type Value } from '../doc';
+import { ref } from '../media';
 import { GRADIENT, project, type CorpusProject } from './common';
 import { shaderUniforms } from './layers';
 
@@ -87,6 +88,38 @@ function spaceGenerated(): CorpusProject {
   });
 }
 
+function pathMasksMore(): CorpusProject {
+  const b = newProject('composite/path-masks-more', { name: 'Path masks on more layer types', w: 480, h: 300, dur: 3, backgroundFill: GRADIENT });
+  const blob = (extra: Record<string, unknown> = {}) => b.path('Blob', [[-60, -20, 0, 0, 30, -40], [30, -50, -20, 0, 40, 15], [70, 15, 0, -30, -10, 45], [-15, 55, 40, 0, -50, 0]], { closed: true, ...extra });
+  b.add(b.layer('image', { name: 'Photo', d: { asset: ref('corpus-photo.tiff'), fit: 'cover', w: 480, h: 300 }, p: { 'position.x': 240, 'position.y': 150 } }));
+  // A motion-blurred layer with a feathered path mask (today's slow path).
+  const moving = b.add(b.layer('solid', { name: 'Blurred, path masked', mblur: true, d: { color: '#FF6B1A', w: 140, h: 110 }, p: { 'position.x': b.ch(20, [[0, 20], [2, 140]]), 'position.y': 20 } }));
+  moving.masks.push(b.mask('rect', { x: 70, y: 55, feather: 10 }, { path: blob() }));
+  // Text with a path mask and a subtract ellipse.
+  const text = b.add(b.layer('text', { name: 'Masked title', d: { text: 'Masked', size: 64, weight: 800, color: '#FFFFFF', align: 'center' }, p: { 'position.x': 360, 'position.y': 60 } }));
+  text.masks.push(b.mask('rect', { x: 0, y: -10, feather: 6 }, { path: blob({ scaleX: 130, scaleY: 70, rotation: b.ch(0, [[0, 0], [3, 45]]) }) }));
+  text.masks.push(b.mask('ellipse', { x: 20, y: -15, w: 30, h: 30, feather: 0 }, { mode: 'subtract' }));
+  // A layer inside a 3D group (its plane maps the coverage).
+  const rig = b.layer('group', { name: '3D group', threeD: true, p: { 'position.x': 120, 'position.y': 220, 'anchor.x': 120, 'anchor.y': 220, 'rotation.y': b.ch(-30, [[0, -30], [3, 30]]), perspective: 50 } });
+  const card = b.add(b.layer('solid', { name: 'Masked card in a 3D group', group: rig.id, d: { color: '#4C8DFF', w: 150, h: 100 }, p: { 'position.x': 45, 'position.y': 170 } }));
+  card.masks.push(b.mask('rect', { x: 75, y: 50, feather: 14 }, { path: blob() }));
+  b.add(rig);
+  // An adjustment layer limited by a path mask.
+  const adjustment = b.add(b.layer('adjustment', { name: 'Masked adjustment', fx: [b.effect('color', { saturation: -100, contrast: 15 })], p: { 'anchor.x': 240, 'anchor.y': 150, 'position.x': 240, 'position.y': 150 } }));
+  adjustment.masks.push(b.mask('rect', { x: 300, y: 210, feather: 20 }, { path: blob({ scaleX: 120, scaleY: 120 }) }));
+  // A 3D object layer with a path mask.
+  const ball = b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: 0.5, segments: 32 } }, material: { p: { color: '#3FCF8E', roughness: .5, metalness: .1 } } },
+    { name: 'Path masked sphere', position: [1.4, -0.5, 0], p: { 'rotation.y': b.ch(0, [[0, 0], [3, 120]]) } }));
+  ball.masks.push(b.mask('rect', { x: 400, y: 210, feather: 4 }, { path: blob({ scaleX: 80, scaleY: 80 }) }));
+  b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 2.5, color: '#FFFFFF' } }, { position: [-4, 6, 4] }));
+  b.add(b.camera3d({ camera: { p: { targetX: 0, targetY: 0, targetZ: 0 } }, environment: { shadows: false } }, { position: [0, 0.5, 4] }));
+  return project(b, {
+    group: 'Compositing', title: 'Path masks on more layer types',
+    covers: ['path mask with motion blur', 'path mask on text', 'path mask in a 3D group', 'path mask on an adjustment layer', 'path mask on a 3D object layer'],
+    samples: [0.5, 1.6], alpha: true,
+  });
+}
+
 export function compclose3Projects(): CorpusProject[] {
-  return [blurGenerated(), spaceGenerated()];
+  return [blurGenerated(), spaceGenerated(), pathMasksMore()];
 }
