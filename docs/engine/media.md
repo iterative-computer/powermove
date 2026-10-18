@@ -674,9 +674,12 @@ an explicit `Feature::SvgImage` gate, never an empty paint:
   scanner cannot read.
 
 89 probe documents were measured in Electron 44 (Blob `<img>` and Canvas2D
-`drawImage`): all 89 agree (`svg_broken::tests` pins every case plus
-painted variants of each new rule; `examples/svg_broken_compare.rs` replays a
-probe directory). Results are
+`drawImage`): all 89 agree (`svg_broken::tests` pins every case;
+`examples/svg_broken_compare.rs` replays a probe directory). The tests also
+pin painted variants of each new rule (`loopUnreferenced`,
+`depthEntityWithin`, `attlistNsDefault`, `xmlStylesheetPi`, ...); those are
+derived from the libxml2 rules, not captured from Chromium, so they are
+unmeasured until a probe run covers them. Results are
 cached per path, size and modification time for plan builds.
 Missing/unreadable files keep named media failures. Valid SVG with text,
 unsupported paint, or other usvg limitations retains its original gate.

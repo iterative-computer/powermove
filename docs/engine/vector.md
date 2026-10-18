@@ -176,8 +176,9 @@ except one pixel, by 1/255.
 `pm_vector::render::svg::SvgDocument` parses with usvg 0.48; as in an
 `<img>`, only `data:` URLs resolve (no file or network loads). Parsing and
 the paint-record walk run on a stack sized to the document's nesting
-(`element_depth`, 16 MiB plus 64 KiB per level); a document nested deeper
-than Chromium's 5,000-element limit is an error, as Chromium shows it broken.
+(`element_depth`, 16 MiB plus 64 KiB per level) when it nests more than 64
+levels, and on the caller's stack otherwise; a document nested deeper than
+Chromium's 5,000-element limit is an error, as Chromium shows it broken.
 
 - **Level 1** (today's buckets) is drawn: `svg_raster_dimensions` ports
   `svgRasterDimensions`, and `SvgDocument::raster_compat` paints the bucket
@@ -185,11 +186,11 @@ than Chromium's 5,000-element limit is an error, as Chromium shows it broken.
   `pm-render` plans it as the image quad (`VectorSource::SvgBucket`, keyed by
   path, stamp and bucket size) with the layer's `fit` window. A document
   Chromium shows as a broken `<img>` paints nothing (`media.md`, "Broken
-  level-1 SVG documents"); a document the replay cannot paint yet (text,
-  masks, patterns, embedded images, nested or multi-shape clip paths, filters
-  other than one Gaussian blur, blend modes) and a document usvg rejects but
-  Chromium paints (external DTD subsets, parameter entities) stay routed as
-  `Feature::SvgImage` (`SvgDocument::compat_supported`). Declared ISO-8859-1
+  level-1 SVG documents"). Only documents the replay paints inside the 2D
+  class at every bucket are drawn ("What level 1 draws" below); everything
+  else, and a document usvg rejects but Chromium paints (external DTD
+  subsets, parameter entities), stays routed as `Feature::SvgImage` with
+  the reason `SvgDocument::compat_supported` names. Declared ISO-8859-1
   and UTF-16 sources decode as Chromium does at both levels
   (`pm_media::image::svg::utf8_source`). Offline/unreadable files are named
   layer failures.
@@ -245,26 +246,106 @@ color-filter/crop/blur chain. `canvas2d::svgrender` replays it as Graphite's
 `examples/svg_compat_compare` compares all 27 retained references and writes
 side-by-sides outside the repository (`PM_MEDIA_EVIDENCE`; `--cases` and
 `--capture` run experiment lists captured by `tools/canvas-ref/run.ts
---cases`). `tests/svg.rs` pins the result: **18 of 27** cases are in the 2D
-class (opacity, gradient, clip, even-odd and transform at all three sizes;
-solid at 64² and 200²; stroke at 200²). The rest are blockers, not accepted
-differences:
+--cases`). The replay's environment switches (`PM_SVG_DEBUG`,
+`PM_SVG_PROBE`, `PM_SVG_MESH`, `PM_SVG_STRADDLE`, `PM_SVG_S0_RULE`) exist
+only in builds with the `svg-diagnostics` feature (`examples/svg_debug`);
+the engine never reads them.
 
-| Case | Measured | Cause |
-|---|---|---|
-| solid 333 × 150, stroke 64², stroke 333 × 150 | max 44 / 15 / 19 CV on 4 / 30 / 135 pixels | Chromium's analytic draws inside a multisampled pass (one tessellated draw anywhere in the pass is enough) take, at isolated pixels, one mesh triangle's center-evaluated coverage for every sample. A WebGPU probe of the same mesh on the same GPU (`/tmp` evidence, outside the repository) rasterizes per sample exactly as the emulation does, and the pixels follow the strip triangle's parity and the sample's position in the 2 × 2 quad, so the behaviour is Graphite's draw path, not the rasterizer; it is not modeled. |
-| blur 64², 200², 333 × 150 | within 2 CV; 14 / 3804 / 5008 pixels at 2 | residual precision in the rescale and blur passes with the linear-RGB color filter |
-| text 64², 200², 333 × 150 | max 120–157 CV | pm-text draws the font at the layout size under the device matrix; Blink lays SVG text out with `CalculateScreenFontSizeScalingFactor` (the scaled font, `FixedAscent`, an integer `Ascent()` at paint, `context.Scale(1 / s)`), which the pm-text placement does not yet follow. |
+The replay runs on the CPU, synchronously on a `VectorCache` miss (each new
+bucket). Each draw is rasterized only over the pixels its geometry can touch
+(analytic coverage is stored for the mesh's bounds; only tessellated draws
+allocate a sample mask). Release build, 200-shape documents (measured
+2026-10-18): 200 translucent circles (analytic, one sample) 0.29 s at
+2048², 1.10 s and 228 MB RSS at 4096², 4.3 s and 878 MB at 8192²; 200
+triangles (4× MSAA with a per-sample depth buffer) 0.11 s at 2048², 0.42 s
+and 627 MB at 4096², 1.6 s and 2.4 GB at 8192². Legacy Chromium draws
+these on the GPU. The full-target MSAA and depth attachments are the memory
+floor; rendering in row bands would bound it and is not done yet.
+
+### What level 1 draws
+
+`SvgDocument::compat_supported(w, h)` is the level 1 gate. It is an
+allowlist of what the canvas references measure inside the 2D class, and it
+is static: it judges every bucket `svgRasterDimensions` can choose for an
+asset of natural size `w × h` (`svg_bucket_ladder`: the requested scale is a
+multiple of 0.25 up to the 8192 bound, so the ladder is finite, 205–512
+buckets for the reference documents and 32,768 for a 1 × 1 record), so a
+routing decision holds at every frame. The verdict is cached on the parsed
+document per source size; judging a ladder replays the record through the
+draw model without tessellating or rasterizing (`Canvas::classifier`), about
+2 ms for 512 buckets.
+
+A document is drawn only when all of these hold:
+
+- **Source** (`canvas2d::svg::check_source`): elements `svg` (root only),
+  `g`, `defs`, `path` (no arc commands), `rect`, `circle`, `ellipse`,
+  `polygon`, `polyline`, `line`, `linearGradient`, `radialGradient`, `stop`,
+  `clipPath` (user-space units), `title`, `desc`, `metadata`; presentation
+  properties `fill`, `fill-opacity`, `fill-rule`, `opacity`, `clip-path`,
+  `clip-rule`, `color`, `display`, `shape-rendering`, the gradient stop
+  properties and the stroke properties (inert without a stroke), as
+  attributes or inline `style`; shape lengths in user units (`px`), gradient
+  lengths in user units or percentages. Elements and attributes in other
+  namespaces (editor metadata) are skipped, as Blink and usvg skip them. No
+  `<style>` sheets, `use`, `symbol`, nested `svg`, `switch`, `a`, markers,
+  masks, patterns, filters, images, text, animation, `overflow`,
+  `paint-order` or `vector-effect`.
+- **Record** (`check_record`): no text, no strokes, no filter layers, every
+  shape antialiased (no `crispEdges`/`optimizeSpeed`), and gradients only
+  with pad spread, a centered radial (no focal point or focal radius), at
+  most four stops after Blink's padding, and not degenerate.
+- **Draw passes** (`svgrender::pass_verdict`, at every bucket): no clip
+  element drawn into the depth attachment, and no analytic draw (round
+  rects, ovals, unaligned rects) or analytic clip in a pass that also has a
+  multisampled (tessellated) draw. Which renderer a draw or clip gets
+  depends on the bucket (pixel alignment, the destination's aspect), so the
+  classification uses the replay's own `chooseRenderer` and clip stack at
+  each bucket.
+
+So level 1 draws documents of solid and gradient fills that are either all
+analytic shapes (with group opacity and rect or circular round-rect clips
+the clip stack resolves analytically or geometrically) or all tessellated
+paths without clips. `tests/svg.rs` pins the gate on the 27 references and
+checks that every admitted case is inside the 2D class; the unit tests in
+`render/svg.rs` pin each refusal.
+
+### SVG replay parity
+
+On `canvas-20261016-075306-cbd1dcfd` (Chromium 152, Apple M-series), 18 of
+the 27 cases are inside the 2D class. The gate admits 11 of them, at their
+own size (opacity, gradient and even-odd at all three sizes; clip at 64²
+and 200²), and all 11 are inside the class. Routed, with what blocks them:
+
+| Case | Gate | Measured replay | Cause |
+|---|---|---|---|
+| solid 64², 200², 333 × 150 | analytic oval with a tessellated path | in class / in class / max 44 CV on 4 pixels | Chromium's analytic draws inside a multisampled pass take, at pixels along the analytic mesh's edges, one mesh triangle's center-evaluated coverage for every sample. A WebGPU probe of the same mesh on the same GPU (`/tmp` evidence, outside the repository) rasterizes per sample exactly as the emulation does, and the pixels follow the strip triangle's parity and the sample's position in the 2 × 2 quad, so the behaviour is Graphite's draw path, not the rasterizer; it is not modeled. Being in class at 64² and 200² is not evidence for other buckets. |
+| stroke 64², 200², 333 × 150 | strokes | max 15 / in class / max 19 CV | the same multisampled-pass behaviour along the analytic round-rect stroke: whole straight-edge columns (x = 4 at 64²; x = 22 and x = 313 at 333 × 150), 9–19 CV, not isolated samples |
+| transform 64², 200², 333 × 150 | strokes | in class | a dashed tessellated stroke next to an analytic rotated rect: the same pass mix; strokes are not admitted until the stroke cases reach the class |
+| clip 333 × 150 | depth-attachment clip | exact | the stretched circle clip is an elliptical oval: the deferred clip draw goes into the depth attachment of a multisampled pass with analytic draws. Not on the ladder of the reference asset (its buckets keep the source aspect), but routed wherever it occurs |
+| blur 64², 200², 333 × 150 | filter | max 2 CV; 14 / 3804 / 5008 pixels at 2 across the blurred interior | residual precision in the rescale and blur passes with the linear-RGB color filter |
+| text 64², 200², 333 × 150 | text | max 120–157 CV | pm-text draws the font at the layout size under the device matrix; Blink lays SVG text out with `CalculateScreenFontSizeScalingFactor` (the scaled font, `FixedAscent`, an integer `Ascent()` at paint, `context.Scale(1 / s)`), which the pm-text placement does not yet follow. |
+
+Not measured against Chromium and therefore routed: repeat and reflect
+spreads, focal radial gradients, more than four stops, `crispEdges`,
+arcs, `paint-order`, markers, `non-scaling-stroke`, miter joins,
+path clips, nested and multi-shape clips, masks, patterns, embedded images,
+other filters and blend modes.
 
 ### Corpus
 
-With the level-1 bucket enabled, `tests/corpus.rs` on the SVG capture
-(`v1-20261012-230504-ae47a3b3`) compares `layers/svg-scales` (3 frames:
-99.98% within 1 CV, max 7) and `mattes/nested-and-animated` (6 frames: opaque
-pixels within 1 CV; the transparent float check reports 1.1–2.0 CV); the
-other 32 of the 34 SVG projects have text layers and are judged by
-`tests/text_corpus.rs` (see the lane report for the per-project table). The
-34-project composition gate is therefore not yet met.
+All 34 corpus projects with SVG layers use the corpus asset
+`corpus-art.svg` (gradients, a round-rect clip, a tessellated curve under
+group opacity next to analytic rects and a circle, and a dashed stroke).
+The gate routes it (strokes; the pass mix would route it too), so every one
+of the 34 is skipped by `tests/corpus.rs` and `tests/text_corpus.rs` with
+the `SVG images` reason, and both tests pass on this branch. On the
+previous round, with the gate open, `layers/svg-scales` measured max 7 CV
+on contiguous diagonal edge runs, `mattes/nested-and-animated` failed the
+transparent float check at 1.1–2.0 CV, `mattes/modes` max 6 CV and
+`compositing/blend-modes-alpha` 99.84% within 1 CV: those are the pass mix
+and stroke differences above, now routed. The 34-project composition gate
+is not met; it needs the multisampled-pass behaviour modeled and the
+stroke and blur cases inside the class.
 
 ## Memory
 
