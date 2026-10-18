@@ -50,8 +50,58 @@ pub fn bitmap_at(
     still: &StillImage,
     pool: &FramePool,
 ) -> Result<StillImage> {
+    let failed_jpeg_upload = if still.format == ImageFormat::Jpeg {
+        let info = super::jpeg::info(&std::fs::read(path)?)?;
+        info.precision > 8 || info.arithmetic
+    } else {
+        false
+    };
+    if failed_jpeg_upload {
+        // Chromium imports these as float ImageBitmaps, but today's RGBA8
+        // texImage2D fails INVALID_VALUE. Its incomplete sampler is opaque
+        // black, including in completed exports. Preserve that picture at
+        // level 1; the native-depth JPEG remains available at level 2.
+        let (w, h) = (still.frame.format.width, still.frame.format.height);
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [0, 0, 0, 255]).collect();
+        return Ok(StillImage {
+            frame: pool_rgba(
+                pool,
+                w,
+                h,
+                Rgba::U8(&rgba),
+                true,
+                8,
+                "Chromium incomplete JPEG texture".into(),
+            )?,
+            color: ImageColor {
+                icc: None,
+                icc_bytes: None,
+                icc_class: None,
+                transfer: Transfer::DisplayE,
+                alpha: AlphaMode::Opaque,
+                chromaticities: None,
+            },
+            bit_depth: 8,
+            float: false,
+            ..still.clone()
+        });
+    }
+    if still.format == ImageFormat::Jpeg
+        && let Some(bitmap) = super::jpeg::cmyk_bitmap(path, pool)?
+    {
+        return Ok(bitmap);
+    }
+    if still.format == ImageFormat::Tiff && still.backend == super::ImageBackend::Ffmpeg {
+        return bitmap(still, pool);
+    }
     if still.format == ImageFormat::Tiff && super::raster::tiff_photometric(path)? == Some(3) {
         return bitmap(&super::compat_palette::read(path, still, pool)?, pool);
+    }
+    if still.format == ImageFormat::Tiff {
+        return bitmap(
+            &super::compat_tiff::read(path, still.orientation, pool)?,
+            pool,
+        );
     }
     let png = if still.format == ImageFormat::Png {
         png_color(path)?
@@ -59,6 +109,28 @@ pub fn bitmap_at(
         None
     };
     bitmap_impl(still, pool, png)
+}
+
+/// Stored integer samples of the TIFF rendition the shipped app imports.
+/// The native-depth source API is deliberately separate.
+pub fn read_tiff_source(path: &std::path::Path, pool: &FramePool) -> Result<StillImage> {
+    let orientation = super::raster::tiff_short(path, 274)?
+        .filter(|o| (1..=8).contains(o))
+        .unwrap_or(1) as u8;
+    super::compat_tiff::read(path, orientation, pool)
+}
+
+pub(super) fn cicp_supported(primaries: u16, transfer: u16) -> bool {
+    matches!(primaries, 1 | 2 | 9 | 12) && matches!(transfer, 1 | 2 | 6 | 13 | 14 | 15 | 16 | 18)
+}
+
+pub(super) fn bitmap_cicp(
+    still: &StillImage,
+    pool: &FramePool,
+    primaries: u16,
+    transfer: u16,
+) -> Result<StillImage> {
+    bitmap_impl(still, pool, Some(PngColor::Cicp(primaries, transfer)))
 }
 
 fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> Result<StillImage> {
@@ -116,7 +188,10 @@ fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> R
             let parsed = if let Some(color) = png {
                 source = *s::skcms_sRGB_profile();
                 match color {
-                    PngColor::Gamma(gamma) => {
+                    PngColor::Gamma(gamma) | PngColor::Chromaticity { gamma, .. } => {
+                        if let PngColor::Chromaticity { matrix, .. } = color {
+                            source.toXYZD50.vals = matrix;
+                        }
                         for curve in &mut source.trc {
                             curve.__bindgen_anon_1 = s::skcms_Curve__bindgen_ty_1 {
                                 alias_of_table_entries: 0,
@@ -128,12 +203,43 @@ fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> R
                             };
                         }
                     }
-                    PngColor::DisplayP3 => {
-                        source.toXYZD50.vals = [
-                            [0.515102, 0.291965, 0.157153],
-                            [0.241182, 0.692236, 0.0665819],
-                            [-0.00104941, 0.0418818, 0.784378],
-                        ]
+                    PngColor::Cicp(primaries, transfer) => {
+                        source.toXYZD50.vals = match primaries {
+                            9 => [
+                                [0.673459, 0.165661, 0.125100],
+                                [0.279033, 0.675338, 0.0456288],
+                                [-0.00193139, 0.0299794, 0.797162],
+                            ],
+                            12 => [
+                                [0.515102, 0.291965, 0.157153],
+                                [0.241182, 0.692236, 0.0665819],
+                                [-0.00104941, 0.0418818, 0.784378],
+                            ],
+                            _ => source.toXYZD50.vals,
+                        };
+                        let t = if transfer == 16 {
+                            s::skcms_TransferFunction {
+                                g: -5.0,
+                                a: 203.0,
+                                ..Default::default()
+                            }
+                        } else if transfer == 18 {
+                            s::skcms_TransferFunction {
+                                g: -6.0,
+                                a: 203.0,
+                                b: 1000.0,
+                                c: 1.2,
+                                ..Default::default()
+                            }
+                        } else {
+                            *s::skcms_sRGB_TransferFunction()
+                        };
+                        for curve in &mut source.trc {
+                            curve.__bindgen_anon_1 = s::skcms_Curve__bindgen_ty_1 {
+                                alias_of_table_entries: 0,
+                                parametric: t,
+                            };
+                        }
                     }
                 }
                 true
@@ -238,12 +344,13 @@ fn bitmap_impl(still: &StillImage, pool: &FramePool, png: Option<PngColor>) -> R
     })
 }
 
-/// PNG's `gAMA`-only profile selection from SkPngRustCodec. Higher
-/// precedence color chunks and cHRM are handled by their measured classes.
+/// PNG color-profile selection from the pinned SkPngRustCodec. CICP
+/// overrides ICC/sRGB, then valid cHRM requires a valid gAMA.
 #[derive(Clone, Copy)]
 enum PngColor {
     Gamma(f32),
-    DisplayP3,
+    Cicp(u16, u16),
+    Chromaticity { gamma: f32, matrix: [[f32; 3]; 3] },
 }
 
 fn png_color(path: &std::path::Path) -> Result<Option<PngColor>> {
@@ -256,18 +363,49 @@ fn png_color(path: &std::path::Path) -> Result<Option<PngColor>> {
     }
     let mut gamma = None;
     let mut overridden = false;
-    let mut p3 = false;
+    let mut hdr = None;
+    let mut chromaticity = None;
+    let mut has_chrm = false;
     loop {
         let mut header = [0; 8];
         file.read_exact(&mut header)?;
         let len = u32::from_be_bytes(header[..4].try_into().unwrap());
         match &header[4..] {
             b"IDAT" | b"IEND" => break,
-            b"sRGB" | b"iCCP" | b"cHRM" => overridden = true,
+            b"sRGB" | b"iCCP" => overridden = true,
+            b"cHRM" if len == 32 => {
+                has_chrm = true;
+                let mut b = [0; 32];
+                file.read_exact(&mut b)?;
+                let v: Vec<f32> = b
+                    .chunks_exact(4)
+                    .map(|c| u32::from_be_bytes(c.try_into().unwrap()) as f32 / 100000.0)
+                    .collect();
+                let mut matrix = crate::sys::skcms::skcms_Matrix3x3::default();
+                if unsafe {
+                    crate::sys::skcms::skcms_PrimariesToXYZD50(
+                        v[2],
+                        v[3],
+                        v[4],
+                        v[5],
+                        v[6],
+                        v[7],
+                        v[0],
+                        v[1],
+                        &mut matrix,
+                    )
+                } {
+                    chromaticity = Some(matrix.vals);
+                }
+                file.seek_relative(4)?;
+                continue;
+            }
             b"cICP" if len == 4 => {
                 let mut b = [0; 4];
                 file.read_exact(&mut b)?;
-                p3 = b == [12, 13, 0, 1];
+                if matches!(b[0], 1 | 9 | 12) && matches!(b[1], 13 | 16 | 18) && b[2..] == [0, 1] {
+                    hdr = Some((u16::from(b[0]), u16::from(b[1])));
+                }
                 overridden = true;
                 file.seek_relative(4)?;
                 continue;
@@ -283,10 +421,12 @@ fn png_color(path: &std::path::Path) -> Result<Option<PngColor>> {
         }
         file.seek_relative(i64::from(len) + 4)?;
     }
-    Ok(if p3 {
-        Some(PngColor::DisplayP3)
-    } else if overridden {
+    Ok(if let Some((primaries, transfer)) = hdr {
+        Some(PngColor::Cicp(primaries, transfer))
+    } else if overridden || (has_chrm && chromaticity.is_none()) {
         None
+    } else if let (Some(matrix), Some(gamma)) = (chromaticity, gamma.filter(|g| *g > 0.0)) {
+        Some(PngColor::Chromaticity { gamma, matrix })
     } else {
         gamma
             .filter(|g| *g > 0.0 && !(0.95 < *g * 2.2 && *g * 2.2 < 1.05))
@@ -554,14 +694,14 @@ mod tests {
                     assert_eq!(g, v as f32 / 100_000.0);
                 }
                 None => assert!(!applied, "{v}"),
-                Some(PngColor::DisplayP3) => panic!("{v}"),
+                Some(_) => panic!("{v}"),
             }
         }
         assert!(check("srgb", &[(b"sRGB", vec![0]), gama(70_000)]).is_none());
-        assert!(check("chrm", &[(b"cHRM", vec![0; 32]), gama(70_000)]).is_none());
+        assert!(check("chrm-invalid", &[(b"cHRM", vec![0; 32]), gama(70_000)]).is_none());
         assert!(matches!(
             check("p3", &[(b"cICP", vec![12, 13, 0, 1]), gama(70_000)]),
-            Some(PngColor::DisplayP3)
+            Some(PngColor::Cicp(12, 13))
         ));
         std::fs::remove_dir_all(&dir).ok();
     }

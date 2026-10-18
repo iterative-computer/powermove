@@ -15,6 +15,10 @@ fn pow(x: f32, y: f32) -> f32 {
     let m = f32::from_bits((x.to_bits() & 0x007fffff) | 0x3f000000);
     let log = (-m).mul_add(1.4980303, e - 124.22552) - 1.72588 / (0.35208872 + m);
     let x = log * y;
+    pow2(x)
+}
+
+fn pow2(x: f32) -> f32 {
     let f = x - x.floor();
     let mut v = (-f).mul_add(1.4901291, x + 121.274055);
     v += 27.728024 / (4.8425255 - f);
@@ -24,7 +28,20 @@ fn pow(x: f32, y: f32) -> f32 {
 
 fn transfer(v: f32, t: s::skcms_TransferFunction) -> f32 {
     let x = v.abs();
-    let r = if x <= t.d {
+    let r = if t.g == -5.0 {
+        let p = pow(x, 32.0 / 2523.0);
+        pow(
+            (p - 107.0 / 128.0).max(0.0) / (-2392.0f32 / 128.0).mul_add(p, 2413.0 / 128.0),
+            8192.0 / 1305.0,
+        )
+    } else if t.g == -6.0 {
+        let hlg = if x * 2.0 <= 1.0 {
+            pow(x * 2.0, 2.0)
+        } else {
+            pow2(std::f32::consts::LOG2_E * ((x - 0.5599107) * (1.0 / 0.17883277))) + 0.28466892
+        };
+        (1.0 / 12.0 - 1.0 + 1.0) * hlg
+    } else if x <= t.d {
         t.c.mul_add(x, t.f)
     } else {
         pow(t.a.mul_add(x, t.b), t.g) + t.e
@@ -44,7 +61,9 @@ pub(super) unsafe fn transform(
             || !profile.has_trc
             || profile.has_A2B
             || !profile.trc.iter().all(|c| {
-                c.__bindgen_anon_2.table_entries == 0 && c.__bindgen_anon_1.parametric.g >= 0.0
+                c.__bindgen_anon_2.table_entries == 0
+                    && (c.__bindgen_anon_1.parametric.g >= 0.0
+                        || matches!(c.__bindgen_anon_1.parametric.g, -5.0 | -6.0))
             })
         {
             return false;
@@ -54,17 +73,52 @@ pub(super) unsafe fn transform(
         if !s::skcms_Matrix3x3_invert(&destination.toXYZD50, &mut inverse) {
             return false;
         }
-        let matrix = s::skcms_Matrix3x3_concat(&inverse, &profile.toXYZD50).vals;
+        let t = profile.trc[0].__bindgen_anon_1.parametric;
+        let scale = if t.g == -5.0 {
+            10000.0 / t.a
+        } else if t.g == -6.0 {
+            t.b / t.a
+        } else {
+            1.0
+        };
+        let mut matrix = s::skcms_Matrix3x3_concat(&inverse, &profile.toXYZD50).vals;
+        for row in &mut matrix {
+            for v in row {
+                *v *= scale;
+            }
+        }
         let encode = *s::skcms_sRGB_Inverse_TransferFunction();
+        let rec2020 = s::skcms_Matrix3x3 {
+            vals: [
+                [0.673459, 0.165661, 0.125100],
+                [0.279033, 0.675338, 0.0456288],
+                [-0.00193139, 0.0299794, 0.797162],
+            ],
+        };
+        let mut weights = [0.262700, 0.678000, 0.059300];
+        if profile.toXYZD50.vals != rec2020.vals {
+            let mut inverse = s::skcms_Matrix3x3::default();
+            s::skcms_Matrix3x3_invert(&rec2020, &mut inverse);
+            let m = s::skcms_Matrix3x3_concat(&inverse, &profile.toXYZD50).vals;
+            weights =
+                [0, 1, 2].map(|i| m[0][i] * 0.262700 + m[1][i] * 0.678000 + m[2][i] * 0.059300);
+        }
         for (src, dst) in rgba.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
             let a = f32::from(src[3]) * (1.0 / 255.0);
             let scale = if a > 0.0 { 1.0 / a } else { 0.0 };
-            let rgb = [0, 1, 2].map(|c| {
+            let mut rgb = [0, 1, 2].map(|c| {
                 transfer(
                     f32::from(src[c]) * (1.0 / 255.0) * scale,
                     profile.trc[c].__bindgen_anon_1.parametric,
                 )
             });
+            if t.g == -6.0 {
+                let y = weights[2].mul_add(rgb[2], weights[1].mul_add(rgb[1], weights[0] * rgb[0]));
+                let ootf = pow(y.abs(), t.c - 1.0).copysign(y);
+                for v in &mut rgb {
+                    *v *= ootf;
+                }
+            }
             for (c, m) in matrix.iter().enumerate() {
                 let v = m[0].mul_add(rgb[0], m[1].mul_add(rgb[1], m[2] * rgb[2]));
                 dst[c] = transfer(v, encode) * a;

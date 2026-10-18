@@ -256,11 +256,20 @@ fn interpreted_color(
 
 /// Keep native-depth sources unchanged. At level 1, a file Chromium can
 /// decode must not depend on ImageIO accepting the same AVIF container.
+/// TIFF reads the shipped FFmpeg PNG rendition before compatibility color conversion.
 fn image_source(
     path: &Path,
     pool: &FramePool,
     compat: bool,
 ) -> pm_media::Result<pm_media::image::StillImage> {
+    if compat {
+        use std::io::Read;
+        let mut head = [0; 16];
+        let n = std::fs::File::open(path)?.read(&mut head)?;
+        if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Tiff {
+            return pm_media::image::compat::read_tiff_source(path, pool);
+        }
+    }
     pm_media::image::read(path, pool).or_else(|error| {
         if compat {
             use std::io::Read;

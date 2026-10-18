@@ -1,4 +1,4 @@
-//! Chromium 152's SDR AVIF decode: CrabbyAvif + dav1d + libyuv into a
+//! Chromium 152's AVIF decode: CrabbyAvif + dav1d + libyuv into a
 //! premultiplied 8-bit bitmap, with Blink `AVIFImageDecoder`'s container
 //! handling: a valid `clap` anchored at (0, 0) crops the decoded planes
 //! before conversion (any other `clap` shows the full image), and `irot` /
@@ -10,7 +10,7 @@ use pm_protocol::color::{AlphaMode, Transfer};
 use std::path::Path;
 
 /// Whether the decoded facts are in the class this module reproduces
-/// (SDR with supported ICC or CICP; ImageIO exposes deep AVIF as 16-bit).
+/// (supported ICC or CICP; ImageIO exposes deep AVIF as 16-bit).
 /// [`unmeasured`] adds the container facts.
 pub fn applies(still: &StillImage) -> bool {
     still.format == ImageFormat::Avif && matches!(still.bit_depth, 8 | 16) && !still.float
@@ -154,14 +154,15 @@ fn colorimetry(image: &a::avifImage) -> Option<String> {
         return unsafe { profile(image).err().map(|e| e.to_string()) };
     }
     let (p, t) = (image.colorPrimaries, image.transferCharacteristics);
-    (!srgb_cicp(p, t)).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
+    (!srgb_cicp(p, t) && !super::compat::cicp_supported(p, t))
+        .then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
 }
 
 /// Why an AVIF is outside the class compared with Chromium: SDR 8/10/12-bit
 /// 4:4:4, 4:2:2, 4:2:0 or monochrome, full/limited range, alpha, container
 /// transforms and ICC, plus the measured 16-bit enhanced 4:4:4 containers.
 /// Gain maps keep the SDR base image, as the shipped
-/// ImageBitmap-to-WebGL upload does; HDR base images remain unmeasured.
+/// ImageBitmap-to-WebGL upload does, including HDR base images.
 pub fn unmeasured(path: &Path) -> Result<Option<String>> {
     let bytes = std::fs::read(path)?;
     unsafe {
@@ -299,6 +300,13 @@ pub fn read_bitmap(path: &Path, pool: &FramePool) -> Result<StillImage> {
             tagged.color.icc_class = Some(class);
             tagged.color.icc = Some(bytes);
             super::compat::bitmap(&tagged, pool)
+        } else if !srgb_cicp(decoded.colorPrimaries, decoded.transferCharacteristics) {
+            super::compat::bitmap_cicp(
+                &bitmap,
+                pool,
+                decoded.colorPrimaries,
+                decoded.transferCharacteristics,
+            )
         } else {
             Ok(bitmap)
         }

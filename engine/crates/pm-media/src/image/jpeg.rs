@@ -63,6 +63,8 @@ pub struct JpegInfo {
     /// Sample precision in bits (8 or 12; 2 to 16 for lossless JPEG).
     pub precision: u8,
     pub lossless: bool,
+    /// Arithmetic entropy coding (Chromium uses a float ImageBitmap).
+    pub arithmetic: bool,
     /// TurboJPEG colorspace (`TJCS_*`).
     pub colorspace: i32,
     /// TurboJPEG subsampling (`TJSAMP_*`), -1 when unknown.
@@ -149,6 +151,7 @@ fn header(h: &Handle, bytes: &[u8]) -> Result<JpegInfo> {
         height: h.get(tj::TJPARAM_JPEGHEIGHT).max(0) as usize,
         precision: h.get(tj::TJPARAM_PRECISION).clamp(0, 16) as u8,
         lossless: h.get(tj::TJPARAM_LOSSLESS) == 1,
+        arithmetic: h.get(tj::TJPARAM_ARITHMETIC) == 1,
         colorspace: h.get(tj::TJPARAM_COLORSPACE),
         subsampling: h.get(tj::TJPARAM_SUBSAMP),
     })
@@ -158,6 +161,124 @@ fn header(h: &Handle, bytes: &[u8]) -> Result<JpegInfo> {
 /// ImageIO, which applies their profile).
 pub fn handles(info: &JpegInfo) -> bool {
     [tj::TJCS_RGB, tj::TJCS_YCbCr, tj::TJCS_GRAY].contains(&info.colorspace)
+}
+
+/// Blink's CMYK/YCCK bitmap and decode-time ICC transform. Native-depth
+/// reading still uses ImageIO.
+pub fn cmyk_bitmap(path: &Path, pool: &FramePool) -> Result<Option<StillImage>> {
+    let bytes = std::fs::read(path)?;
+    let h = Handle::new()?;
+    let info = header(&h, &bytes)?;
+    if ![tj::TJCS_CMYK, tj::TJCS_YCCK].contains(&info.colorspace) {
+        return Ok(None);
+    }
+    if info.precision != 8 || info.lossless {
+        return Err(MediaError::unsupported("deep/lossless CMYK JPEG"));
+    }
+    let profile = unsafe {
+        let mut profile = std::ptr::null_mut();
+        let mut size = 0;
+        if tj::tj3GetICCProfile(h.0, &mut profile, &mut size) == 0 && !profile.is_null() {
+            let bytes = std::slice::from_raw_parts(profile, size).to_vec();
+            tj::tj3Free(profile.cast());
+            bytes
+        } else {
+            Vec::new()
+        }
+    };
+    let (w, height) = (info.width, info.height);
+    let len = w
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|n| *n <= 1 << 30)
+        .ok_or_else(|| MediaError::invalid("CMYK JPEG bitmap size"))?;
+    h.set(tj::TJPARAM_FASTDCT, 0)?;
+    h.set(tj::TJPARAM_FASTUPSAMPLE, 0)?;
+    let mut rgba = vec![0; len];
+    let rc = unsafe {
+        tj::tj3Decompress8(
+            h.0,
+            bytes.as_ptr(),
+            bytes.len(),
+            rgba.as_mut_ptr(),
+            (w * 4) as i32,
+            tj::TJPF_CMYK,
+        )
+    };
+    if rc != 0 && unsafe { tj::tj3GetErrorCode(h.0) } == tj::TJERR_FATAL as i32 {
+        return Err(h.error("CMYK decode"));
+    }
+    // JPEGImageDecoder::SetPixel<JCS_CMYK> interprets libjpeg's inverted
+    // CMYK bytes as iC*iK/255, using integer truncation, with opaque alpha.
+    for p in rgba.chunks_exact_mut(4) {
+        let k = u32::from(p[3]);
+        for c in &mut p[..3] {
+            *c = (u32::from(*c) * k / 255) as u8;
+        }
+        p[3] = 255;
+    }
+    // Chromium 152 first writes the approximate RGB above, then applies
+    // its CMYK ICC transform to that four-byte row (including the 255 K).
+    // Preserve this shipped order even though a direct CMYK transform is
+    // more accurate. Invalid or mismatched profiles are ignored by Blink.
+    if !profile.is_empty() {
+        use crate::sys::skcms as s;
+        let mut padded = profile.clone();
+        padded.extend([0; 4]);
+        unsafe {
+            let mut source = std::mem::zeroed();
+            if s::skcms_ParseWithA2BPriority(
+                padded.as_ptr().cast(),
+                profile.len(),
+                [0, 1].as_ptr(),
+                2,
+                &mut source,
+            ) && source.data_color_space == s::skcms_Signature_CMYK
+            {
+                let mut converted = vec![0; rgba.len()];
+                if !s::skcms_Transform(
+                    rgba.as_ptr().cast(),
+                    s::skcms_PixelFormat_RGBA_8888,
+                    s::skcms_AlphaFormat_Unpremul,
+                    &source,
+                    converted.as_mut_ptr().cast(),
+                    s::skcms_PixelFormat_RGBA_8888,
+                    s::skcms_AlphaFormat_Unpremul,
+                    s::skcms_sRGB_profile(),
+                    w * height,
+                ) {
+                    return Err(MediaError::decode("CMYK JPEG ICC conversion"));
+                }
+                rgba = converted;
+            }
+        }
+    }
+    let orientation = exif_orientation(&bytes);
+    let (rgba, w, height) = orient(&rgba, w, height, 4, orientation);
+    Ok(Some(StillImage {
+        frame: pool_rgba(
+            pool,
+            w,
+            height,
+            Rgba::U8(&rgba),
+            true,
+            8,
+            "Blink CMYK JPEG rgba8".into(),
+        )?,
+        format: ImageFormat::Jpeg,
+        backend: ImageBackend::LibjpegTurbo,
+        bit_depth: 8,
+        float: false,
+        orientation,
+        color: ImageColor {
+            icc: None,
+            icc_bytes: None,
+            icc_class: None,
+            transfer: Transfer::DisplayE,
+            alpha: AlphaMode::Opaque,
+            chromaticities: None,
+        },
+    }))
 }
 
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
@@ -190,7 +311,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     let pitch = (w * 4) as i32;
     let label = format!("libjpeg-turbo {}-bit", info.precision);
     let (frame, bits) = match info.precision {
-        8 if !info.lossless => {
+        p if p <= 8 => {
             let mut px = vec![0u8; w * ht * 4];
             let r = unsafe {
                 tj::tj3Decompress8(
@@ -206,13 +327,13 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
                 return Err(h.error("decode"));
             }
             let (px, ow, oh) = orient(&px, w, ht, 4, orientation);
-            (pool_rgba(pool, ow, oh, Rgba::U8(&px), false, 8, label)?, 8)
+            (pool_rgba(pool, ow, oh, Rgba::U8(&px), false, p, label)?, p)
         }
         p => {
             // 12-bit lossy, or lossless at any precision: samples 0 to 2^p − 1.
             let mut px = vec![0u16; w * ht * 4];
             let r = unsafe {
-                if p == 12 && !info.lossless {
+                if p <= 12 {
                     tj::tj3Decompress12(
                         h.0,
                         bytes.as_ptr(),

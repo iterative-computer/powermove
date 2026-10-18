@@ -3,14 +3,16 @@
 //!
 //! Level 1 consumes Blink's 8-bit compatibility bitmap (pm-media/image/
 //! compat.rs): PNG16 quantization, skcms ICC conversion/clipping, and WebP
-//! premultiplication occur before filtering. SDR AVIF uses Chromium 152's
-//! pinned CrabbyAvif/dav1d/libyuv conversion. Native-depth source readers
+//! premultiplication occur before filtering. AVIF uses Chromium 152's
+//! pinned CrabbyAvif/dav1d/libyuv conversion, followed by the measured
+//! Skia PQ/HLG/primaries transform. TIFF uses the shipped FFmpeg rendition;
+//! JPEG supports CMYK and preserves deep JPEG's incomplete black sampler.
+//! Native-depth source readers
 //! remain available to level 2 and Interpret Footage.
 //!
-//! All 21 detailed still corpus cases pass the 2D/alpha classes. Container
-//! checks keep other structures explicit (HDR/chromaticity-only PNG, CMYK
-//! JPEG, TIFF tiles/unmeasured float/other models, and AVIF outside the
-//! measured SDR classes).
+//! All 21 detailed still corpus cases pass the 2D/alpha classes. Header
+//! checks keep unmeasured color descriptions explicit; measured decoder
+//! failures preserve today's errors or incomplete texture as documented.
 //!
 //! Container transforms are drawn only as Chromium shows them, each
 //! compared in the app (`e2e/native-still-orientation-parity.spec.ts`):
@@ -390,7 +392,7 @@ fn exif_orientation(payload: &[u8]) -> io::Result<Option<u16>> {
 }
 
 /// PNG at all legal integer depths, with gAMA-only conversion and matching
-/// SDR CICP/ICC declarations. Independent cHRM/HDR remains unmeasured.
+/// CICP/ICC and cHRM/gAMA declarations, including measured PQ/HLG.
 /// Like Blink, eXIf is read only before IDAT.
 fn png<R: Read + Seek>(
     r: &mut R,
@@ -400,7 +402,7 @@ fn png<R: Read + Seek>(
         return Err(malformed("no PNG signature"));
     }
     let mut header = Header::default();
-    let (mut depth, mut srgb, mut iccp, mut chrm) = (0u8, false, false, false);
+    let mut depth = 0u8;
     let mut before_idat = true;
     while let Some(head) = array_or_eof::<8, _>(r)? {
         let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
@@ -411,17 +413,19 @@ fn png<R: Read + Seek>(
                 depth = array::<13, _>(r)?[8];
                 body_read = 13;
             }
-            b"sRGB" => srgb |= before_idat,
-            b"iCCP" => iccp |= before_idat,
-            b"cHRM" => chrm |= before_idat,
-            b"cICP" if len == 4 && equivalent_cicp.is_some() => {
+
+            b"cICP" if len == 4 && before_idat => {
                 let tag = array::<4, _>(r)?;
                 body_read = 4;
-                if Some(tag) != equivalent_cicp {
+                if Some(tag) != equivalent_cicp
+                    && !(matches!(tag[0], 1 | 9 | 12)
+                        && matches!(tag[1], 13 | 16 | 18)
+                        && tag[2..] == [0, 1])
+                {
                     return Ok(unsupported("PNG CICP differs from its ICC profile").map(|_| header));
                 }
             }
-            b"cICP" | b"mDCv" | b"cLLi" | b"mDCV" | b"cLLI" => {
+            b"cICP" if before_idat => {
                 return Ok(unsupported("PNG stills with CICP or HDR metadata").map(|_| header));
             }
             b"eXIf" if before_idat => {
@@ -437,16 +441,12 @@ fn png<R: Read + Seek>(
     if !matches!(depth, 1 | 2 | 4 | 8 | 16) {
         return Ok(unsupported(format!("{depth}-bit PNG stills")).map(|_| header));
     }
-    if chrm && !srgb && !iccp {
-        return Ok(
-            unsupported("PNG stills with independent chromaticity chunks (cHRM)").map(|_| header),
-        );
-    }
     Ok(Ok(header))
 }
 
-/// JPEG: baseline/progressive Huffman, 8-bit gray, RGB or Y'CbCr, and APP1
-/// EXIF. CMYK, arithmetic, lossless and 12-bit remain unmeasured.
+/// JPEG: Huffman baseline/progressive, extended sequential and lossless,
+/// and arithmetic DCT, with gray/RGB/Y'CbCr/CMYK and APP1 EXIF. Deep ImageBitmap uploads keep
+/// Chromium's opaque-black incomplete sampler.
 fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     if array::<2, _>(r)? != [0xFF, 0xD8] {
         return Err(malformed("no start of image"));
@@ -475,21 +475,18 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             // The Adobe APP14 transform and component ids are decoder facts
             // libjpeg-turbo applies as Chromium does; only EXIF and the
             // frame header decide the class.
-            0xE1 | 0xC0 | 0xC2 => {
+            0xE1 | 0xC0..=0xC3 | 0xC9 | 0xCA => {
                 let body = read_vec(r, body_len)?;
                 match marker {
                     0xE1 if body.starts_with(b"Exif\0\0") => {
                         header.exif(exif_orientation(&body)?);
                     }
-                    0xC0 | 0xC2 => sof = Some(body),
+                    0xC0..=0xC3 | 0xC9 | 0xCA => sof = Some(body),
                     _ => {}
                 }
             }
-            0xC1 | 0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                return Ok(
-                    unsupported("JPEG stills other than baseline or progressive Huffman")
-                        .map(|_| header),
-                );
+            0xC5..=0xC7 | 0xCB | 0xCD..=0xCF => {
+                return Ok(unsupported("hierarchical or differential JPEG stills").map(|_| header));
             }
             _ => r.seek_relative(body_len as i64)?,
         }
@@ -498,12 +495,12 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     Ok(jpeg_frame(&sof).map(|_| header))
 }
 
-/// The class of a baseline or progressive (SOF0 or SOF2) frame header.
+/// The component/sample class of a Huffman JPEG frame header.
 fn jpeg_frame(sof: &[u8]) -> Result<(), Feature> {
     if sof.len() < 6 {
         return unsupported("malformed JPEG headers");
     }
-    if sof[0] != 8 {
+    if !(2..=16).contains(&sof[0]) {
         return unsupported(format!("{}-bit JPEG stills", sof[0]));
     }
     let n = sof[5] as usize;
@@ -514,8 +511,8 @@ fn jpeg_frame(sof: &[u8]) -> Result<(), Feature> {
     match n {
         // libjpeg-turbo performs both RGB and Y'CbCr conversion as in
         // Chromium; component ids and Adobe transform are decoder facts.
-        1 | 3 => Ok(()),
-        _ => unsupported("CMYK and other JPEG stills with neither 1 nor 3 components"),
+        1 | 3 | 4 => Ok(()),
+        _ => unsupported("JPEG stills with neither 1, 3 nor 4 components"),
     }
 }
 
@@ -567,6 +564,12 @@ fn tiff<R: Read + Seek>(r: &mut R, allow_icc: bool) -> io::Result<Result<Header,
     let entries = ifd0(r)?;
     let mut header = Header::default();
     header.exif(ifd0_orientation(&entries)?);
+    // Level-1 samples now come from the shipped FFmpeg TIFF rendition,
+    // including its tile/layout/model handling. Decode failures are named
+    // media errors before this header check; only orientation remains here.
+    if allow_icc {
+        return Ok(Ok(header));
+    }
     // A tag of the image structure: present and scalar, or absent (the
     // TIFF default); several values (or another type) is outside the class.
     let scalar = |tag: u16, default: u32| ifd_scalar(&entries, tag, default);
@@ -837,14 +840,14 @@ mod tests {
             assert!(png(png_with(bits, &[])).is_ok());
         }
         assert!(png(png_with(8, &[b"gAMA"])).is_ok());
-        assert!(png(png_with(8, &[b"cHRM", b"gAMA"])).is_err());
+        assert!(png(png_with(8, &[b"cHRM", b"gAMA"])).is_ok());
         assert!(png(png_with(8, &[b"sRGB", b"gAMA", b"cHRM"])).is_ok());
         assert!(png(png_with(8, &[b"iCCP", b"gAMA"])).is_ok());
         assert!(png(png_with(8, &[b"cICP"])).is_err());
-        assert!(png(png_with(16, &[b"mDCv"])).is_err());
+        assert!(png(png_with(16, &[b"mDCv"])).is_ok());
         // An sRGB chunk after the image data overrides nothing.
         let late = png_with_bodies(8, &[(b"cHRM", &[0; 32])], &[(b"sRGB", &[0])]);
-        assert!(png(late).is_err());
+        assert!(png(late).is_ok());
         assert!(png(b"\x89PNG\r\n\x1a".to_vec()).is_err());
     }
 
@@ -935,13 +938,13 @@ mod tests {
             assert!(jpeg(jpeg_with(0xC2, 8, &ycc(y), None)).is_ok());
         }
         assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_ok());
-        // 12-bit, arithmetic, lossless, CMYK and malformed stay gated.
-        assert!(jpeg(jpeg_with(0xC1, 12, &gray, None)).is_err());
-        assert!(jpeg(jpeg_with(0xC0, 12, &gray, None)).is_err());
-        assert!(jpeg(jpeg_with(0xC9, 8, &gray, None)).is_err());
-        assert!(jpeg(jpeg_with(0xC3, 8, &gray, None)).is_err());
+        // Extended/deep/lossless, arithmetic DCT and CMYK are measured.
+        assert!(jpeg(jpeg_with(0xC1, 12, &gray, None)).is_ok());
+        assert!(jpeg(jpeg_with(0xC0, 12, &gray, None)).is_ok());
+        assert!(jpeg(jpeg_with(0xC9, 8, &gray, None)).is_ok());
+        assert!(jpeg(jpeg_with(0xC3, 8, &gray, None)).is_ok());
         let cmyk = [(1, 0x11), (2, 0x11), (3, 0x11), (4, 0x11)];
-        assert!(jpeg(jpeg_with(0xC0, 8, &cmyk, Some(2))).is_err());
+        assert!(jpeg(jpeg_with(0xC0, 8, &cmyk, Some(2))).is_ok());
         assert!(jpeg(jpeg_with(0xC0, 8, &ycc(0x11), Some(0))).is_ok());
         let rgb = [(b'R', 0x11), (b'G', 0x11), (b'B', 0x11)];
         assert!(jpeg(jpeg_with(0xC0, 8, &rgb, None)).is_ok());
