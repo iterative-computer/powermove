@@ -187,7 +187,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'validate_effect',
-    description: 'Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. Catches invalid ids, duplicate/invalid parameter keys, more than 32 params, invalid pass counts and oversized shader bodies. With the new engine on, it also compiles the wrapped shader through the engine pipeline and returns compile errors with line numbers in your frag (valid: false), or a warning when only the app's WebGL fallback can draw it. Does not register an effect, change the project or render. After loading, verify registration and render_frames output separately.',
+    description: 'Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. Catches invalid ids, duplicate/invalid parameter keys, more than 32 params, invalid pass counts and oversized shader bodies. With the new engine on, it also compiles the wrapped shader through the engine pipeline and returns compile errors with line numbers in your frag (valid: false), or a warning when only the app\'s WebGL fallback can draw it. Does not register an effect, change the project or render. After loading, verify registration and render_frames output separately.',
     inputSchema: closedObject({ definition: { type: 'object', description: 'The complete object passed to api.effects.register, including id, label, group, params and frag. Use an existing group (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate) rather than inventing one.' } }, ['definition'])
   },
   {
