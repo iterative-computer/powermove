@@ -471,10 +471,15 @@ impl TextContext {
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
-                masks: self
-                    .masks
-                    .as_deref_mut()
-                    .map(|m| m as &mut dyn pm_text::render::scene::MaskSource),
+                // Platform masks are Canvas2D's look: level 1 only (level 2
+                // captions swap in the CoreText profile and draw outlines).
+                masks: if self.profile == Profile::CANVAS2D {
+                    self.masks
+                        .as_deref_mut()
+                        .map(|m| m as &mut dyn pm_text::render::scene::MaskSource)
+                } else {
+                    None
+                },
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
