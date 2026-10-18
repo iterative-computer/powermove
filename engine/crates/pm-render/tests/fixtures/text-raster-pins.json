@@ -1,85 +1,201 @@
 {
- "note": "Cases of text-raster captures below the text class (SSIM 0.98) with the floor they must not fall below (measured 2026-10-16 minus 0.005). See docs/engine/text-render.md, Gaps. Lower a pin when the profile improves; remove it when the case passes.",
+ "note": "Cases of text-raster captures not yet within 1 code value of Canvas2D everywhere: the most pixels beyond 1 code value (over1) and the largest channel difference (max) each may have, as measured 2026-10-18. Each is a gap in docs/engine/text-render.md. A case may not get worse; a pin whose case becomes exact fails the test until it is removed, so pins only shrink.",
  "pins": {
-  "density-0411": 0.966,
-  "density-0416": 0.967,
-  "emoji-0307": 0.969,
-  "emoji-0308": 0.957,
-  "emoji-0309": 0.96,
-  "families-0049": 0.966,
-  "families-0054": 0.92,
-  "families-0060": 0.95,
-  "families-0067": 0.941,
-  "families-0068": 0.942,
-  "families-0072": 0.957,
-  "families-0074": 0.963,
-  "families-0085": 0.968,
-  "families-0090": 0.916,
-  "families-0097": 0.947,
-  "families-0098": 0.904,
-  "families-0102": 0.957,
-  "families-0103": 0.966,
-  "families-0104": 0.97,
-  "families-0109": 0.919,
-  "families-0115": 0.959,
-  "families-0120": 0.934,
-  "families-0121": 0.916,
-  "families-0126": 0.969,
-  "families-0127": 0.929,
-  "families-0132": 0.95,
-  "families-0134": 0.933,
-  "families-0139": 0.941,
-  "families-0140": 0.942,
-  "italic-0262": 0.951,
-  "scripts-0363": 0.969,
-  "sizes-0000": 0.931,
-  "sizes-0004": 0.966,
-  "sizes-0010": 0.926,
-  "sizes-0014": 0.948,
-  "sizes-0018": 0.94,
-  "sizes-regular-0001": 0.93,
-  "sizes-regular-0005": 0.92,
-  "sizes-regular-0009": 0.956,
-  "sizes-regular-0019": 0.94,
-  "synthetic-0274": 0.951,
-  "synthetic-0276": 0.946,
-  "synthetic-0278": 0.924,
-  "variable-0298": 0.971,
-  "variable-0301": 0.909,
-  "weights-0150": 0.969,
-  "weights-0151": 0.975,
-  "weights-0154": 0.969,
-  "weights-0155": 0.975,
-  "weights-0158": 0.969,
-  "weights-0159": 0.975,
-  "weights-0162": 0.972,
-  "weights-0166": 0.972,
-  "weights-0186": 0.954,
-  "weights-0187": 0.96,
-  "weights-0190": 0.958,
-  "weights-0191": 0.96,
-  "weights-0194": 0.963,
-  "weights-0195": 0.966,
-  "weights-0198": 0.963,
-  "weights-0202": 0.972,
-  "weights-0206": 0.975,
-  "weights-0207": 0.974,
-  "weights-0210": 0.975,
-  "weights-0211": 0.974,
-  "weights-0214": 0.975,
-  "weights-0215": 0.974,
-  "weights-0218": 0.975,
-  "weights-0219": 0.974,
-  "weights-0222": 0.969,
-  "weights-0223": 0.96,
-  "weights-0226": 0.969,
-  "weights-0227": 0.96,
-  "weights-0230": 0.969,
-  "weights-0231": 0.96,
-  "weights-0234": 0.97,
-  "weights-0235": 0.958,
-  "weights-0238": 0.974,
-  "weights-0239": 0.971,
-  "weights-0247": 0.866
+  "sizes-0046": {
+   "over1": 31975,
+   "max": 148
+  },
+  "sizes-regular-0047": {
+   "over1": 30632,
+   "max": 147
+  },
+  "synthetic-0276": {
+   "over1": 1,
+   "max": 2
+  },
+  "synthetic-0278": {
+   "over1": 7,
+   "max": 2
+  },
+  "variable-0295": {
+   "over1": 8,
+   "max": 6
+  },
+  "variable-0296": {
+   "over1": 31,
+   "max": 2
+  },
+  "variable-0297": {
+   "over1": 261,
+   "max": 2
+  },
+  "variable-0298": {
+   "over1": 6,
+   "max": 3
+  },
+  "variable-0299": {
+   "over1": 35,
+   "max": 2
+  },
+  "variable-0300": {
+   "over1": 448,
+   "max": 2
+  },
+  "density-0427": {
+   "over1": 16170,
+   "max": 126
+  },
+  "large-0428": {
+   "over1": 332,
+   "max": 128
+  },
+  "large-0429": {
+   "over1": 341,
+   "max": 128
+  },
+  "caption-classic-0433": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-classic-0434": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-classic-0435": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-boxed-0436": {
+   "over1": 8,
+   "max": 92
+  },
+  "caption-boxed-0437": {
+   "over1": 8,
+   "max": 92
+  },
+  "caption-boxed-0438": {
+   "over1": 8,
+   "max": 92
+  },
+  "caption-boxed-0439": {
+   "over1": 4,
+   "max": 46
+  },
+  "caption-boxed-0440": {
+   "over1": 4,
+   "max": 46
+  },
+  "caption-boxed-0441": {
+   "over1": 4,
+   "max": 46
+  },
+  "caption-whisper-0442": {
+   "over1": 1,
+   "max": 2
+  },
+  "caption-whisper-0443": {
+   "over1": 1,
+   "max": 2
+  },
+  "caption-whisper-0444": {
+   "over1": 1,
+   "max": 2
+  },
+  "caption-whisper-0445": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-whisper-0446": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-whisper-0447": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-spotlight-0448": {
+   "over1": 47,
+   "max": 24
+  },
+  "caption-spotlight-0449": {
+   "over1": 49,
+   "max": 20
+  },
+  "caption-spotlight-0450": {
+   "over1": 56,
+   "max": 16
+  },
+  "caption-spotlight-0451": {
+   "over1": 143,
+   "max": 38
+  },
+  "caption-spotlight-0452": {
+   "over1": 118,
+   "max": 36
+  },
+  "caption-spotlight-0453": {
+   "over1": 168,
+   "max": 55
+  },
+  "caption-pop-0454": {
+   "over1": 188,
+   "max": 28
+  },
+  "caption-pop-0455": {
+   "over1": 203,
+   "max": 34
+  },
+  "caption-pop-0456": {
+   "over1": 252,
+   "max": 45
+  },
+  "caption-pop-0457": {
+   "over1": 915,
+   "max": 28
+  },
+  "caption-pop-0458": {
+   "over1": 746,
+   "max": 59
+  },
+  "caption-pop-0459": {
+   "over1": 1105,
+   "max": 64
+  },
+  "caption-paper-0460": {
+   "over1": 4,
+   "max": 60
+  },
+  "caption-paper-0461": {
+   "over1": 4,
+   "max": 60
+  },
+  "caption-paper-0462": {
+   "over1": 4,
+   "max": 60
+  },
+  "caption-paper-0463": {
+   "over1": 9,
+   "max": 120
+  },
+  "caption-paper-0464": {
+   "over1": 9,
+   "max": 120
+  },
+  "caption-paper-0465": {
+   "over1": 9,
+   "max": 120
+  },
+  "caption-stroke-0489": {
+   "over1": 2,
+   "max": 2
+  },
+  "caption-stroke-0491": {
+   "over1": 7,
+   "max": 4
+  },
+  "caption-fade-0492": {
+   "over1": 1,
+   "max": 2
+  }
  }
 }

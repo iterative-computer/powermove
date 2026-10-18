@@ -8,12 +8,15 @@
 //! Vello coverage, the float paint pass) and compared with the canvas the
 //! legacy code painted, as the compositor uploads it (premultiplied RGBA8).
 //!
-//! Score: SSIM (the mean of the four channels' maps, 11 × 11 Gaussian,
-//! σ = 1.5) over ink windows (pixels whose local mean alpha exceeds 1/512 in
-//! either image; empty background cannot inflate it), and over the full
-//! canvas. Gate: ink SSIM ≥ 0.98 for every case, except the cases pinned in
-//! `tests/fixtures/text-raster-pins.json` (known to be below the class,
-//! docs/engine/text-render.md "Gaps"), which must stay above their floors.
+//! Gate: today's pixels exactly (amendment 22): every channel of every pixel
+//! within 1 code value of the capture. Cases known to differ are pinned in
+//! `tests/fixtures/text-raster-pins.json` with the most pixels beyond 1 code
+//! value and the largest difference they may have (each a gap in
+//! docs/engine/text-render.md); a pinned case may not get worse, and a pin
+//! whose case is exact fails too, so pins only shrink. Reported besides:
+//! SSIM (the mean of the four channels' maps, 11 × 11 Gaussian, σ = 1.5)
+//! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
+//! image) and over the full canvas.
 //!
 //! The capture is private (renders of the system fonts): `PM_TEXT_RASTER`
 //! names it, else the newest `text-raster-*` in the corpus directory.
@@ -83,18 +86,28 @@ fn main() {
     }
     let only = std::env::var("PM_TEXT_ONLY").ok();
     let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(PathBuf::from);
-    // Known cases below the text class and their floors (docs/engine/text-render.md, Gaps).
-    let pins: std::collections::BTreeMap<String, f64> = {
+    // Known differences: the most pixels beyond 1 code value and the largest
+    // difference (docs/engine/text-render.md, Gaps).
+    let pins: std::collections::BTreeMap<String, (usize, u8)> = {
         let v: Value =
             serde_json::from_str(include_str!("fixtures/text-raster-pins.json")).unwrap();
         v["pins"]
             .as_object()
             .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.as_f64().unwrap()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    (
+                        v["over1"].as_u64().unwrap() as usize,
+                        v["max"].as_u64().unwrap() as u8,
+                    ),
+                )
+            })
             .collect()
     };
-    let mut pinned_below = 0;
+    let mut pinned = 0;
+    let mut exact = 0;
     let mut rows = Vec::new();
     let mut failed = Vec::new();
     let started = std::time::Instant::now();
@@ -160,26 +173,33 @@ fn main() {
             }
         }
         let (ink, full, ratio) = ink_ssim(&reference, &ours, cw, ch);
-        let pin = pins.get(id).copied();
-        let pass = geometry.is_empty()
-            && match pin {
-                Some(floor) => ink >= floor,
-                None => ink >= 0.98,
-            };
-        if pin.is_some() && ink < 0.98 {
-            pinned_below += 1;
-        }
-        // The largest channel difference, and the share of pixels off by
-        // more than one code value (exactness, not only the text class).
+        // The largest channel difference, and the pixels off by more than
+        // one code value.
         let (mut max_diff, mut off) = (0u8, 0usize);
         for (a, b) in reference.chunks_exact(4).zip(ours.chunks_exact(4)) {
             let d = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap();
             max_diff = max_diff.max(d);
             off += usize::from(d > 1);
         }
+        let pin = pins.get(id).copied();
+        let stale = pin.is_some() && off == 0;
+        let pass = geometry.is_empty()
+            && !stale
+            && match pin {
+                Some((most, max)) => off <= most && max_diff <= max,
+                None => off == 0,
+            };
+        pinned += usize::from(pin.is_some());
+        exact += usize::from(off == 0);
         let line = format!(
-            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
-            cw, ch
+            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6}{}{} {geometry}",
+            cw,
+            ch,
+            match pin {
+                Some((most, max)) => format!(" (pinned ≤{most}, ≤{max})"),
+                None => String::new(),
+            },
+            if stale { " exact now: remove its pin" } else { "" }
         );
         println!("{line}");
         if !pass {
@@ -232,10 +252,11 @@ fn main() {
     }
     let stats = renderer.text_gpu().stats;
     println!(
-        "\n{} cases in {:.1} s; {} pinned cases below 0.98 (gap); {} failed; pages {} (cpu {}); vello: {}",
+        "\n{} cases in {:.1} s; {} exact within 1 code value; {} pinned (gaps); {} failed; pages {} (cpu {}); vello: {}",
         rows.len(),
         started.elapsed().as_secs_f64(),
-        pinned_below,
+        exact,
+        pinned,
         failed.len(),
         stats.pages,
         stats.cpu_pages,
@@ -249,7 +270,7 @@ fn main() {
     }
     assert!(
         failed.is_empty(),
-        "{} cases below the text class",
+        "{} cases differ from today beyond their pins",
         failed.len()
     );
 }
