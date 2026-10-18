@@ -2,6 +2,10 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
+import { expectEngineDrewText } from './helpers/engine-drew';
+
+// With the new engine on, the engine (not the legacy renderer) drew the text.
+test.afterEach(async ({ session }) => { await expectEngineDrewText(session); });
 
 /* Screenshots are review material, never committed: they go outside the repo. */
 const SHOTS = process.env.PM_CAPTION_SHOTS || '/tmp/pm-captions';
