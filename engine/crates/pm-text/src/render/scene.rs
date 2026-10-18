@@ -358,35 +358,10 @@ impl Painter<'_> {
                 let bsize = run.bitmap_size.unwrap_or(dsize);
                 if color_face
                     && place.axis_aligned
-                    && let Some(masks) = self.masks.as_deref_mut()
-                    && let Some((image, left, top)) = {
-                        let (x, y) = self.profile.snap.apply(p.x, p.y);
-                        let ix = x.floor();
-                        let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
-                        // Drawn at the em size CoreText uses for the strike.
-                        let shift = emoji_shift.unwrap_or(0);
-                        masks
-                            .color(run.face, g.id as u16, bsize, quarter, bsize)
-                            .map(|(i, l, t)| (i, l + ix as i32, t + y as i32 + shift))
-                    }
+                    && let Some(item) =
+                        self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, blur)
                 {
-                    let t = Affine::translate((f64::from(left), f64::from(top)));
-                    let b = Rect::new(
-                        f64::from(left),
-                        f64::from(top),
-                        f64::from(left) + f64::from(image.width),
-                        f64::from(top) + f64::from(image.height),
-                    );
-                    images.push(Item {
-                        content: ItemContent::Image {
-                            image,
-                            transform: t,
-                        },
-                        color,
-                        opacity,
-                        blur,
-                        bounds: b,
-                    });
+                    images.push(item);
                     continue;
                 }
                 if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
@@ -622,7 +597,7 @@ impl Painter<'_> {
 
     /// `strokeText` of the runs with `lineWidth = width` (layout px), round
     /// joins, and miter limit 2 (the captions context). Color bitmap glyphs
-    /// are not stroked (Skia strokes outlines only).
+    /// have no outline to stroke: on macOS their image is drawn again.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_text(
         &mut self,
@@ -704,6 +679,49 @@ impl Painter<'_> {
 }
 
 impl Painter<'_> {
+    /// A color bitmap glyph as the platform draws it (CoreGraphics, the
+    /// whole-pixel position and quarter offset, Apple Color Emoji's shift),
+    /// with the paint's alpha; `None` when the platform does not draw it.
+    #[allow(clippy::too_many_arguments)]
+    fn color_glyph(
+        &mut self,
+        run: &Run<'_>,
+        glyph: u32,
+        p: kurbo::Point,
+        bsize: f32,
+        emoji_shift: Option<i32>,
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
+    ) -> Option<Item> {
+        let masks = self.masks.as_deref_mut()?;
+        let (x, y) = self.profile.snap.apply(p.x, p.y);
+        let ix = x.floor();
+        let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
+        // Drawn at the em size CoreText uses for the strike.
+        let shift = emoji_shift.unwrap_or(0);
+        let (image, left, top) = masks
+            .color(run.face, glyph as u16, bsize, quarter, bsize)
+            .map(|(i, l, t)| (i, l + ix as i32, t + y as i32 + shift))?;
+        let t = Affine::translate((f64::from(left), f64::from(top)));
+        let b = Rect::new(
+            f64::from(left),
+            f64::from(top),
+            f64::from(left) + f64::from(image.width),
+            f64::from(top) + f64::from(image.height),
+        );
+        Some(Item {
+            content: ItemContent::Image {
+                image,
+                transform: t,
+            },
+            color,
+            opacity,
+            blur,
+            bounds: b,
+        })
+    }
+
     /// `strokeText` as Skia draws it on macOS: each glyph's image generated
     /// from its path with a stroke frame (`skpath`), at the glyph's
     /// quarter-pixel position, through the path mask gamma of the stroke
@@ -733,24 +751,42 @@ impl Painter<'_> {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
+        let mut images = Vec::new();
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
             let skew = skew_of(run);
             let bitmap_face = has_bitmaps(run.face);
+            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
+            let emoji_shift =
+                (color_face && super::bitmap::is_apple_color_emoji(run.face)).then(|| {
+                    let dsize = device_size as f32;
+                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize)) as i32
+                });
             for g in run.glyphs {
                 let bsize = run.bitmap_size.unwrap_or(device_size as f32);
+                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
                 if bitmap_face
                     && self
                         .bitmaps
                         .get(run.face, g.id, device_size as f32, bsize)
                         .is_some()
                 {
+                    // A color glyph has no path to frame: Skia draws its
+                    // image in the stroke pass too (with the stroke paint's
+                    // alpha), so the fill pass draws it over itself.
+                    if color_face {
+                        let Some(item) =
+                            self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, 0.0)
+                        else {
+                            return false;
+                        };
+                        images.push(item);
+                    }
                     continue;
                 }
                 let Coords::User(coords) = run.coords else {
                     return false;
                 };
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
                 let (x, y) = self.profile.snap.apply(p.x, p.y);
                 let ix = x.floor();
                 let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
@@ -800,6 +836,7 @@ impl Painter<'_> {
                 0.0,
             ));
         }
+        out.extend(images);
         true
     }
 }
@@ -825,31 +862,35 @@ fn mask_image(
     if w == 0 || h == 0 || w > 16384 || h > 16384 {
         return None;
     }
-    // Coverage composited source-over in float.
-    let mut cov = vec![0.0f32; w * h];
+    // Each glyph quad is blended source-over into the 8-bit canvas with the
+    // paint's color and alpha (`globalAlpha` included): overlapping glyphs
+    // of a translucent paint build up, and the target is quantized after
+    // every glyph, as the GPU canvas blends them.
+    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
+    let rgb = [color[0], color[1], color[2]].map(|c| c.clamp(0.0, 1.0) as f32);
+    let mut data = vec![0u8; w * h * 4];
     for (x, y, m, path) in masks {
         let table = tables[usize::from(*path)];
         let ox = (x + i64::from(m.left) - x0) as usize;
         let oy = (y + i64::from(m.top) - y0) as usize;
         for row in 0..m.height as usize {
             let src = &m.coverage[row * m.width as usize..(row + 1) * m.width as usize];
-            let dst = &mut cov[(oy + row) * w + ox..(oy + row) * w + ox + m.width as usize];
-            for (d, &c) in dst.iter_mut().zip(src) {
-                if c != 0 {
-                    let a = f32::from(table[c as usize]) / 255.0;
-                    *d = a + *d * (1.0 - a);
+            let start = ((oy + row) * w + ox) * 4;
+            let dst = &mut data[start..start + m.width as usize * 4];
+            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
+                if c == 0 {
+                    continue;
                 }
+                let sa = f32::from(table[c as usize]) / 255.0 * a;
+                let keep = 1.0 - sa;
+                for k in 0..3 {
+                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
+                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+                let v = sa + f32::from(d[3]) / 255.0 * keep;
+                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
-    }
-    let a = color[3].clamp(0.0, 1.0) as f32;
-    let mut data = Vec::with_capacity(w * h * 4);
-    for c in cov {
-        let alpha = c * a;
-        for c in &color[..3] {
-            data.push((c.clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
-        }
-        data.push((alpha * 255.0).round() as u8);
     }
     let image = Arc::new(Rgba8 {
         width: w as u32,
@@ -859,9 +900,9 @@ fn mask_image(
     let transform = Affine::translate((x0 as f64, y0 as f64));
     Some(Item {
         content: ItemContent::Image { image, transform },
-        // The image holds the color; the item keeps only `globalAlpha`.
+        // The image holds the color and `globalAlpha`.
         color: [1.0, 1.0, 1.0, 1.0],
-        opacity,
+        opacity: 1.0,
         blur,
         bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
     })
