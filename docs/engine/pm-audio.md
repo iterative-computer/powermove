@@ -1343,8 +1343,9 @@ underruns and a continuously correct clock; 4,096-/8,192-frame callbacks
 with transient recovery inside each voice's budget and prolonged drops
 beside a ready voice or with every voice missing; and warm / initially cold
 paused preparation at the playhead, a work start and a paused seek. Every
-prepared start must queue a complete 128- or 512-frame buffer within its
-first device callback (2.667 or 10.667 ms) and equal offline samples exactly.
+prepared start must queue a complete 256- or 512-frame buffer within its
+first device callback (5.333 or 10.667 ms) and equal offline samples exactly
+(128 frames before the buffer-size review follow-up below).
 A ring test also grows while full and partially consumed, then skips an old
 epoch; the concurrent order test grows twice while both threads run. `graph.rs` is
 formatted as requested.
@@ -1442,7 +1443,12 @@ with Cargo, use the existing 30-iteration commands above and the LTO-off
 environment setting. No audio tolerance, corpus case or existing comparison
 was relaxed. The follow-up below supersedes the initial caller and latency gaps.
 
-### A6 interactive-buffer follow-up
+### A6 interactive-buffer follow-up (buffer size superseded)
+
+The 128-frame request below was wrong: it is WebAudio's render quantum,
+not the device buffer today's app runs at. The review follow-up after this
+section restores today's 256-frame output buffer and re-measures. The
+latency attribution here still explains why an explicit size is needed.
 
 The 512-frame inherited HAL default caused the slower start tail. Tracing
 30 starts separated the app request, audio control arrival/application,
@@ -1522,3 +1528,157 @@ but the renderer's native peak-request/answer sets are empty. This broader
 waveform synchronization gate remains open; its assertion was not removed,
 skipped, or relaxed. No waveform routing/synchronization code was changed
 for A6.
+
+### A6 review follow-up: today's output buffer, overloads, idle cost
+
+**Buffer size.** Today's app runs its `AudioContext` (latency hint
+`interactive`) on Chromium's macOS output, whose
+`AudioManagerMac::ChooseBufferSize` asks for 256 frames up to 96 kHz and
+512 above, clamped to the device's I/O range. Every legacy capture reports
+`AudioContext.baseLatency` 5.333 ms, 256 frames at 48 kHz. The previous
+follow-up requested 128 frames, which halved the real-time deadline
+(2.667 ms against 5.333 ms) and doubled callback wakeups (375 against 187.5
+per second), a cost and underrun risk today's app does not have.
+`OutputStream` now requests exactly Chromium's size, 256 frames, or 512
+frames above 96 kHz. Both are clamped to the device range; unknown-size
+devices keep their default. The real device (MacBook Pro speakers, 48 kHz)
+runs 187.5 callbacks a second in every native measurement below, the same
+rate as today's app.
+
+**Overloads.** cpal 0.18 reports CoreAudio's `kAudioDeviceProcessorOverload`
+as an `Xrun` stream error, which used to set the stream's diagnostic
+"failed" flag. Overloads now leave the stream running (as WebAudio's does)
+and are counted: `PlaybackStats::device_overloads` and
+`device_callbacks`, and `AudioStatus.deviceOverloads` and
+`deviceCallbacks` in the presenter report. Ring underruns still count
+every callback while paused, because the ring is empty by design. Only
+deltas over a playing window measure dropouts.
+
+**Play-start, re-measured.** The measurement used the final binary at
+256 frames, a hidden isolated app under the Electron lock, 30 paired
+captures per engine, and the same scheduled-presentation method as
+before. Values are in ms from `PM.play`:
+
+| Seek → Play | Engine | p50 | p95 | p99 | max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 250 ms paused | Today's app | 29.412 | 32.027 | 32.315 | 32.315 |
+| 250 ms paused | Native, 256 frames | 26.358 | 28.441 | 28.495 | 28.495 |
+| same task (0 ms) | Today's app | 29.407 | 32.114 | 32.614 | 32.614 |
+| same task (0 ms) | Native, 256 frames | 25.798 | 28.032 | 28.366 | 28.366 |
+
+An earlier 256-frame capture, made before the preparation-order change,
+agreed within 0.8 ms at every percentile (native p95 28.336 and 28.502).
+
+`PM_AUDIO_START_WAIT_MS=0` seeks and plays in the same renderer task, so
+paused preparation gets no time; the single-voice project's start still
+leads today at every percentile. The native captures report a 256-frame
+first callback, zero host-clock runs, zero device overloads and starved
+renders, and no audio problems. Both engines report zero page errors.
+Host-offset error was at most 50 µs (250 ms) and 150 µs (same task).
+Legacy `baseLatency` was 5.333 ms in every sample.
+
+**Device cost against today.** `engine/crates/pm-audio/tools/audio-load.ts`
+measures both engines in the hidden app over 15 s windows: paused with the
+device open, playing, and playing beside four busy loops (all at nice 15).
+Each window records the Electron process tree's CPU time, top's energy
+impact and coreaudiod's CPU. Two paired runs after the idle fix below:
+
+| Window | Today's tree CPU / energy | Native tree CPU / energy | coreaudiod today / native |
+| --- | --- | --- | --- |
+| Paused | 6.6%, 5.3% / 6.5, 5.1 | 4.9%, 4.6% / 3.9, 4.1 | 3.1-3.5% / 3.3-3.5% |
+| Playing | 50.0%, 51.3% / 47.4, 48.8 | 51.1%, 51.7% / 46.8, 47.7 | 3.8% / 4.1-4.2% |
+| Playing under load | 33.2%, 34.0% / 31.4, 32.7 | 45.2%, 38.3% / 42.9, 36.2 | 3.0-3.1% / 3.1-3.6% |
+
+Whole-tree CPU includes each engine's video path. Under load it reflects
+the CPU share a niced app wins against the loops, so it is not an audio
+cost. Today's Chromium exposes `AudioContext.playbackStats`. It counted zero
+underrun events in every window, including under load. In every window,
+native counted 187.5 callbacks a second, zero device overloads, and zero
+ring underruns or starved renders while playing. top's idle-wakeup column
+did not produce interval values usable as rates and is not reported.
+Paused, today's AudioContext keeps rendering (it is never suspended), and
+so does the native stream. The audio path alone is measured by
+`examples/paused_cost.rs` on the real device. It uses a silent
+-120 dBFS source, 10 s windows and process CPU from `getrusage`:
+
+| Project | Paused CPU | Playing CPU | Overloads | Playing ring underruns |
+| --- | ---: | ---: | ---: | ---: |
+| 1 voice | 0.10-0.25% | 0.44-0.84% | 0 | 0 |
+| 16 voices | 0.13-0.25% | 1.4-4.1% | 0 | 0 |
+| 16 voices at 1.5x, looping | 0.13-0.30% | 25-32% | 0 | 0-7 (see below) |
+
+Before this follow-up, the paused render loop re-bounded every voice's
+spans and readiness for three starts on each 20 ms turn. That cost 0.8-2.2%
+CPU idle with 16 stretched voices, against 0.19-0.22% on the base branch.
+Fully prepared, unchanged starts are now re-checked once a second
+(`PAUSED_REFRESH`), so evicted blocks are still queued again. The
+presenter's paused 33 ms status wake is part of the 1-voice paused figure.
+
+**Pre-existing loop-wrap underruns.** With 16 stretched voices looping
+[4 s, 6 s), ring underruns occur at loop wraps: 0-7 counted 256-frame
+callbacks over 10 s in six runs. The base branch (before A6, 512-frame default) also
+counts 1-5 at 512 frames. A straight play-through of the same project
+counts 0. A wrap re-enters the loop start with a fresh stretch pre-roll for
+every voice in one render, and 16 voices nearly fill the 80 ms reserve. A6
+did not introduce this, and its prepared paused histories are used only by
+Play. Keeping a prepared loop-start history while playing is the likely
+fix. It is listed as an open gap.
+
+**Preemptible preparation.** Each paused start renders every voice, about
+2.4 ms per stretched voice for a fresh pre-roll. The render loop now checks
+for a control between starts, and between 8-group bounding steps, and
+handles it first. The first start whose look-ahead is not yet bounded (the
+playhead first) gets the turn's whole bounding budget: six steps, the same
+total the pass used to spread over every start's windows. Reverse
+look-behind windows follow once every look-ahead is bounded. A first
+attempt bounded every start's look-ahead before any look-behind, and that
+was slower for the playhead (0.91-0.99 s). The final order replaced it.
+`play_preempts_paused_preparation_after_an_edit` edits 16 stretched voices
+and sends Play at 48 phases, 2 ms apart, of the restarted pass:
+
+| | Play acknowledged p95 / max (ms) | Playhead prepared | All three starts |
+| --- | --- | ---: | ---: |
+| No preemption, original order | 8.6-9.2 / 9.6-10.3 | not measured | 2.10-2.25 s |
+| Preemption, original order | 2.3-4.0 / 3.3-4.3 | 0.65-0.73 s | 1.93-2.10 s |
+| Final: preemption, playhead budget first | 1.5-1.8 / 1.9-2.0 | 0.49-0.52 s | 1.23-1.30 s |
+
+The last row includes one run under the stress profile. A Play that lands
+before the playhead is prepared is a fresh start. Its first 512-frame
+buffer is queued 27.7-29.0 ms (p50), 43.3-48.4 ms (p95) and 49.8-51.6 ms
+(max) after Play. For such a heavy project, that adds about the same to the
+app-level start within half a second of an edit. That is the existing A3
+start hold, not a dropout. Today's app has no equivalent wait, so it stays
+on the orchestrator decision list above (item 1).
+
+**Presenter.** A paused exact seek can create a view's audio link before
+the view's first document arrives. `warm_audio` returns once any link
+exists, so the device used to open cold at the first Play. `audio_for` now
+sends `AudioCtl::Warm` whenever it creates a link. Paused exact seeks reach
+audio only for views the engine draws, the same `Route::Engine` check that
+scrubs and Play use. `present/audio.rs` is rustfmt-clean.
+
+**Validation of the final binary.** These ran with pinned Rust, `kache`,
+four build jobs, niceness 15, four test threads and the local
+`CARGO_PROFILE_RELEASE_LTO=off` setting described above. The playback
+suite passed **30/30 plain and 30/30 stressed**, 32 tests each (the new
+preemption test included): 1,920 executions with zero failures or ignored
+tests. Suite times were 24.10-25.23 s. All pm-audio targets pass: 49
+library tests (one existing ignored measurement), 11 decode-readiness, 2
+layouts, 1 legacy parity, 14 mixer, 3 resampler, 5 sources and 6 stretch.
+pm-node passes its 37 `present::` unit tests and the present and scrub
+integration tests. Strict release clippy for `pm-audio`/`pm-node` all
+targets, `cargo fmt -p pm-audio --check`, a rustfmt-clean `present/`, and
+the production `cargo check --release -p pm-node --lib` all pass. The hidden
+transport app run passes J/K/L, play around and the paused seek/scrub
+regression. The waveform/meter case still fails at the same assertion
+(`peaksSource` never `engine`, 150 expected, 0 received), unchanged from
+before this follow-up.
+
+**What remains.** The loop-wrap underruns above, the A3 start hold after
+an edit or cold seek, reverse and 2x master output-seek and converter
+histories that still prime on Play, and the waveform/meter app case
+(native peaks provenance, outside this lane). Bluetooth and USB output
+devices were not attached to this machine. The buffer request matches
+Chromium's for them too, but no measurement on them is claimed.
+`RenderReport.heard_whole` is kept: it is a public diagnostic with its own
+decode-readiness test.
