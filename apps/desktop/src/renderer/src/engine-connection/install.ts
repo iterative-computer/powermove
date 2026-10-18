@@ -226,6 +226,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
       definitions: () => ((PM as any).EngineDefinitions ?? null),
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+      onCompat: (message) => renderTransport.receiveCompat(message, s),
       handlers: {
         message: () => {},
         closed: () => {
@@ -235,13 +236,14 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       log
     });
     standby = s;
-    standbyReady = s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
+    standbyReady = s.start().then(() => renderTransport.syncProducers(s)).catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
     return standbyReady;
   };
   const documentEncoder = new TextEncoder();
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
+    sessions: () => [...sessions, ...(standby ? [standby] : [])],
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
@@ -280,6 +282,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // engine on, nothing asks the current engine for pixels. The exporter's
   // methods ask `PM.EngineCaptures` (it installs after this module).
   const unrouteCaptures = installAppCaptures(PM, renderTransport);
+  // The kernel's raster override producer answers through it (kernel/raster-compat.ts).
+  const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
@@ -384,6 +388,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         onAudio: (message) => {
           if (session) audio.receive(message, session);
         },
+        // The `raster` override's answers (kernel/raster-compat.ts).
+        onCompat: (message) => renderTransport.receiveCompat(message, session),
         onStats: (message) => {
           if (session !== current) return;
           stats.receive(message, performance.now());
@@ -404,7 +410,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       current = session;
       transport.resetLoop();
       const opened = session;
-      void opened.start().then(syncStandby, (error: unknown) => {
+      void opened.start().then(() => {
+        renderTransport.syncProducers(opened);
+        syncStandby();
+      }, (error: unknown) => {
         log('warn', `engine viewer session: ${error instanceof Error ? error.message : String(error)}`);
       });
       return {
@@ -479,6 +488,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       current = null;
       closeStandby();
       unrouteCaptures();
+      detachRasterCompat();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;

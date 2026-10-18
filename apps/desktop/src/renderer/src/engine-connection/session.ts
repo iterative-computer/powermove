@@ -95,6 +95,9 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
+  /** The engine's asks for compatibility answers (`CompatMessage` `needs`:
+   *  the `raster` override's layers a viewer frame waits for). */
+  onCompat?: (message: Record<string, unknown>) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -389,6 +392,10 @@ export class DocumentSession {
       case 'patchesApplied':
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
+      case 'compat': {
+        if (event['compat'] === 'needs') this.options.onCompat?.(event);
+        return;
+      }
       case 'shaderFallback': {
         if (event['fallback'] !== 'requests') return;
         for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) void this.runFallback(request);

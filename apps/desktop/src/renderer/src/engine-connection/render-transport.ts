@@ -143,10 +143,36 @@ export type CompatProducer = (request: CompatFrameRequest) =>
   | null
   | Promise<{ key: string; width: number; height: number; format: CompatFormat; origin: [number, number]; scale: number; data: Uint8Array } | null>;
 
+/**
+ * A producer's answer to one of the engine's compatibility needs (a layer at
+ * a frame, at the density today's compositor rasterizes it): its raster on
+ * the quad it describes, a pass-through, a raster already uploaded under
+ * `key`, or no answer (the producer cannot decide: the frame stays waiting
+ * and asks again).
+ */
+export type CompatAnswerResult =
+  | { kind: 'native' }
+  | { kind: 'reuse'; key: string }
+  | {
+      kind: 'raster'; key: string; width: number; height: number; format: CompatFormat; data: Uint8Array;
+      /** Today's `anchorX`, `anchorY` (layer pixels). */
+      anchor: [number, number];
+      /** Today's `w`, `h` (layer pixels). */
+      size: [number, number];
+      uv?: [number, number, number, number];
+    }
+  | null;
+
+/** Answers the engine's needs for one source (the raster override's producer). */
+export type CompatAnswerer = (need: CompatNeed, revision: number) => CompatAnswerResult;
+
 export type RenderTransportOptions = {
   native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
   /** The session snapshots are taken of (the newest viewer session). */
   session: () => TransportSession | null;
+  /** Every open session of the window (viewer sessions and the standby):
+   *  each learns which compatibility producers the window has. */
+  sessions?: () => TransportSession[];
   /** The document revision the window has, after flushing pending edits to
    *  the engine (`PM.EngineDoc.barrier`). */
   revision: () => number | null;
@@ -180,6 +206,12 @@ function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): Eng
 
 export class EngineRenderTransport {
   private readonly producers = new Map<CompatSource, CompatProducer>();
+  /** Producers of viewer frames' and snapshots' compatibility answers. */
+  private readonly answerers = new Map<CompatSource, CompatAnswerer>();
+  /** Needs answered with `reuse`, so a repeated ask gets pixels instead
+   *  (the engine dropped that raster meanwhile). */
+  private readonly reused = new Set<string>();
+  readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0 };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -193,6 +225,105 @@ export class EngineRenderTransport {
   dispose(): void {
     this.offAsk();
     this.producers.clear();
+    this.answerers.clear();
+  }
+
+  /* ── compatibility answers (the `raster` override; pm_render::compat) ── */
+
+  /**
+   * Registers the producer that answers the engine's needs for `source`
+   * (viewer frames ask over the session's port, snapshots in their
+   * `needsRenderer` rounds). The session learns which producers it has; the
+   * engine asks none without one. Returns an unregister.
+   */
+  answerCompat(source: CompatSource, answerer: CompatAnswerer): () => void {
+    this.answerers.set(source, answerer);
+    this.syncProducers();
+    return () => {
+      if (this.answerers.get(source) !== answerer) return;
+      this.answerers.delete(source);
+      this.syncProducers();
+    };
+  }
+
+  /** Tells `session` (default: every open session) which producers this window has. */
+  syncProducers(session?: TransportSession | null): void {
+    const targets = session !== undefined ? [session] : (this.options.sessions?.() ?? [this.options.session()]);
+    for (const s of new Set(targets)) {
+      if (!s || s.id === null || s.closed) continue;
+      s.post({ type: 'compat', compat: 'producers', sources: [...this.answerers.keys()] });
+    }
+  }
+
+  /** The engine asked `session` for answers (`CompatMessage` `needs`). */
+  receiveCompat(message: Record<string, unknown>, session: TransportSession | null = this.options.session()): void {
+    if (message['compat'] !== 'needs' || !session) return;
+    const needs = Array.isArray(message['needs']) ? message['needs'] as CompatNeed[] : [];
+    for (const need of needs) this.answerNeed(need, session);
+  }
+
+  /** Draws one need with its producer and posts the answer; false when there was none. */
+  private answerNeed(need: CompatNeed, session: TransportSession): boolean {
+    const answerer = this.answerers.get(need.source);
+    if (!answerer) return false;
+    this.compatStats.needs++;
+    const revision = this.options.revision() ?? 0;
+    const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}`;
+    let answer: CompatAnswerResult;
+    try {
+      answer = answerer(need, revision);
+    } catch (error) {
+      this.options.log('warn', `the ${need.source} producer failed for layer ${need.layer}: ${error instanceof Error ? error.message : String(error)}`);
+      answer = null;
+    }
+    if (answer?.kind === 'reuse' && this.reused.has(`${tag}\u0000${revision}`)) answer = null;
+    if (!answer) {
+      this.compatStats.unanswered++;
+      return false;
+    }
+    const id = { composition: need.composition, layer: need.layer, time: need.time, source: need.source };
+    if (answer.kind === 'native') {
+      this.compatStats.natives++;
+      return session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision });
+    }
+    if (answer.kind === 'reuse') {
+      this.compatStats.reuses++;
+      this.reused.add(`${tag}\u0000${revision}`);
+      if (this.reused.size > 4096) this.reused.clear();
+      return session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision });
+    }
+    this.compatStats.rasters++;
+    return this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer);
+  }
+
+  private postRaster(session: TransportSession, id: { composition: string; layer: string; time: number; source: CompatSource; key: string }, revision: number, scale: number,
+    raster: Extract<CompatAnswerResult, { kind: 'raster' }>): boolean {
+    const bpp = raster.format === 'rgba16fPremultiplied' ? 8 : 4;
+    if (raster.data.byteLength !== raster.width * raster.height * bpp) throw new EngineSnapshotError('invalidMessage', 'Compatibility pixels do not match their size.');
+    const rowBytes = raster.width * bpp;
+    const rowsPerBand = Math.max(1, Math.floor(MAX_COMPAT_BAND_BYTES / rowBytes));
+    for (let row = 0; row < raster.height; row += rowsPerBand) {
+      const rows = Math.min(rowsPerBand, raster.height - row);
+      if (!session.post({
+        type: 'compat', compat: 'pixels', id, revision, width: raster.width, height: raster.height, format: raster.format,
+        origin: raster.anchor, scale, row, rows, data: raster.data.slice(row * rowBytes, (row + rows) * rowBytes),
+        size: raster.size, ...(raster.uv ? { uv: raster.uv } : {})
+      })) return false;
+    }
+    return true;
+  }
+
+  /** A snapshot round's compatibility needs: drawn and posted on the
+   *  calling thread; throws when a need has no producer. */
+  private answerRound(compat: CompatNeed[]): void {
+    if (!compat.length) return;
+    const session = this.options.session();
+    if (!session) throw new EngineSnapshotError('unavailable', 'The window has no engine session to post compatibility pixels on.');
+    for (const need of compat) {
+      if (!this.answerNeed(need, session)) {
+        throw new EngineSnapshotError('notHeadlessRenderable', `No ${need.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} in this window answered for layer ${need.layer}.`);
+      }
+    }
   }
 
   /** Resolves once a session is open, or after `ms`. */
@@ -252,8 +383,9 @@ export class EngineRenderTransport {
     return e;
   }
 
-  /** Compatibility needs this transport cannot draw yet (the engine names
-   *  none until pm-render consumes compatibility pixels). */
+  /** Compatibility needs a snapshot of main's own session for the window
+   *  cannot get: their answers go on the window's session port, which that
+   *  session does not read (main never opens one with producers). */
   private compatUnmet(compat: CompatNeed[]): EngineSnapshotError | null {
     return compat.length ? new EngineSnapshotError('notHeadlessRenderable', `The frame needs ${compat.length} compatibility raster(s) this snapshot path does not draw.`) : null;
   }
@@ -298,8 +430,8 @@ export class EngineRenderTransport {
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
         this.stats.rounds++;
-        const unmet = this.compatUnmet(reply.compat);
-        if (unmet) throw unmet;
+        this.answerRound(reply.compat);
+        if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
         const session = this.options.session();
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
@@ -357,6 +489,7 @@ export class EngineRenderTransport {
       this.stats.rounds++;
       const unmet = this.compatUnmet(reply.compat);
       if (unmet) throw unmet;
+      if (!reply.fallback.length) continue;
       const runner = this.options.fallbackRunner();
       if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
       for (const r of reply.fallback) {
@@ -391,8 +524,8 @@ export class EngineRenderTransport {
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
         this.stats.rounds++;
-        const unmet = this.compatUnmet(reply.compat);
-        if (unmet) throw unmet;
+        this.answerRound(reply.compat);
+        if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
         const session = this.options.session();
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');

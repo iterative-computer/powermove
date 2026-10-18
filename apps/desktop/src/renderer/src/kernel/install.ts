@@ -115,6 +115,7 @@ import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { assetAudio, assetSource } from './live-media';
+import { createRasterCompat } from './raster-compat';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -901,12 +902,33 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   // can capture/delegate to it without changing the base beneath themselves.
   const rasterDescriptor = Object.getOwnPropertyDescriptor(PM, 'raster');
   let nativeRaster = PM.raster;
+  /* With "Use New Engine" on, a registered wrapper makes the window the
+     engine's raster override producer (raster-compat.ts): the engine asks
+     for each text, captions, and shape layer, and the chain runs over lazy
+     engine rasters. */
+  const rasterCompat = createRasterCompat(PM, {
+    isBase: (fn) => fn === rasterBase,
+    chain: () => kernel.services.get<RenderAPI['raster']>('raster'),
+    onChainChange: (fn) => kernel.services.onChange('raster', fn),
+    engineRaster: (layer, scale, time) => {
+      const engine = engineRender(PM);
+      return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time]) : null;
+    }
+  });
   const rasterBase: RenderAPI['raster'] = (...args) => {
+    if (rasterCompat.producing) return rasterCompat.base(args);
     const engine = publicRaster > 0 ? engineRender(PM) : null;
     return engine ? engineRasterBase(PM, engine, args) : (nativeRaster?.(...args) ?? null);
   };
   PM.__rasterBase = rasterBase;
   const rasterRegistration = kernel.services.register('raster', rasterBase);
+  rasterCompat.reset();
+  PM.RasterCompat = rasterCompat;
+  if (PM.EngineRender) subscriptions.push(rasterCompat.attach(PM.EngineRender));
+  subscriptions.push(() => {
+    rasterCompat.dispose();
+    if (PM.RasterCompat === rasterCompat) PM.RasterCompat = null;
+  });
   const rasterDispatch: RenderAPI['raster'] = (...args) =>
     (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);
   const attachRaster = (value: any) => {
