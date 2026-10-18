@@ -179,6 +179,8 @@ the paint-record walk run on a stack sized to the document's nesting
 (`element_depth`, 16 MiB plus 64 KiB per level) when it nests more than 64
 levels, and on the caller's stack otherwise; a document nested deeper than
 Chromium's 5,000-element limit is an error, as Chromium shows it broken.
+`raster_compat_with_text` (diagnostics) keeps the caller's font resolver
+on the caller's thread and refuses documents nested deeper than 64 levels.
 
 - **Level 1** (today's buckets) is drawn: `svg_raster_dimensions` ports
   `svgRasterDimensions`, and `SvgDocument::raster_compat` paints the bucket
@@ -246,7 +248,8 @@ color-filter/crop/blur chain. `canvas2d::svgrender` replays it as Graphite's
 `examples/svg_compat_compare` compares all 27 retained references and writes
 side-by-sides outside the repository (`PM_MEDIA_EVIDENCE`; `--cases` and
 `--capture` run experiment lists captured by `tools/canvas-ref/run.ts
---cases`). The replay's environment switches (`PM_SVG_DEBUG`,
+--cases`); `examples/svg_gate` prints the gate verdict at each case's size
+and over its ladder (`--cases` likewise). The replay's environment switches (`PM_SVG_DEBUG`,
 `PM_SVG_PROBE`, `PM_SVG_MESH`, `PM_SVG_STRADDLE`, `PM_SVG_S0_RULE`) exist
 only in builds with the `svg-diagnostics` feature (`examples/svg_debug`);
 the engine never reads them.
@@ -264,10 +267,9 @@ floor; rendering in row bands would bound it and is not done yet.
 
 ### What level 1 draws
 
-`SvgDocument::compat_supported(w, h)` is the level 1 gate. It is an
-allowlist of what the canvas references measure inside the 2D class, and it
-is static: it judges every bucket `svgRasterDimensions` can choose for an
-asset of natural size `w × h` (`svg_bucket_ladder`: the requested scale is a
+`SvgDocument::compat_supported(w, h)` is the level 1 gate. It is static:
+it judges every bucket `svgRasterDimensions` can choose for an asset of
+natural size `w × h` (`svg_bucket_ladder`: the requested scale is a
 multiple of 0.25 up to the 8192 bound, so the ladder is finite, 205–512
 buckets for the reference documents and 32,768 for a 1 × 1 record), so a
 routing decision holds at every frame. The verdict is cached on the parsed
@@ -275,39 +277,103 @@ document per source size; judging a ladder replays the record through the
 draw model without tessellating or rasterizing (`Canvas::classifier`), about
 2 ms for 512 buckets.
 
+What the gate admits is backed by Chromium references in two ways.
+Every source construct it admits (element, attribute, property, and the
+value forms below) is exercised by a reference document: the 27 canvas
+cases and the 83 documents of `tools/canvas-ref/svg-gate-cases.ts` (383
+cases at two or three bucket sizes each, captured with `run.ts
+--svg-gate`). Each gate document isolates one construct with paint the
+replay draws in one kind of pass (analytic shapes only, or tessellated
+paths only): root sizing (`width`/`height` equal to, double, fractional,
+`px`, percentage, `auto`, one dimension only, no viewBox, no size), a
+viewBox origin (positive, negative, comma-separated), root `x`/`y`, all 19
+`preserveAspectRatio` values with wide and tall viewBoxes, ten transform
+forms on analytic shapes, tessellated shapes and groups, a shape transform
+with its own opacity, clip-path and bounding-box gradient, gradient
+percentages, `href` chains (`href` and `xlink:href`), stop ordering and
+clamping, radial gradient transforms and user space, clip shapes, colors in
+every accepted syntax, `currentColor`, inline `style`, `display`,
+`shape-rendering`, rect radius rules, degenerate shapes, path command and
+number syntax, `points` separators, inert stroke properties and editor
+metadata. `canvas2d::svg`'s unit test `every_admitted_construct_has_a_reference`
+fails if the allowlists name an element, property or attribute that no
+reference document uses.
+
 A document is drawn only when all of these hold:
 
 - **Source** (`canvas2d::svg::check_source`): elements `svg` (root only),
   `g`, `defs`, `path` (no arc commands), `rect`, `circle`, `ellipse`,
   `polygon`, `polyline`, `line`, `linearGradient`, `radialGradient`, `stop`,
-  `clipPath` (user-space units), `title`, `desc`, `metadata`; presentation
-  properties `fill`, `fill-opacity`, `fill-rule`, `opacity`, `clip-path`,
-  `clip-rule`, `color`, `display`, `shape-rendering`, the gradient stop
-  properties and the stroke properties (inert without a stroke), as
-  attributes or inline `style`; shape lengths in user units (`px`), gradient
-  lengths in user units or percentages. Elements and attributes in other
-  namespaces (editor metadata) are skipped, as Blink and usvg skip them. No
-  `<style>` sheets, `use`, `symbol`, nested `svg`, `switch`, `a`, markers,
-  masks, patterns, filters, images, text, animation, `overflow`,
-  `paint-order` or `vector-effect`.
+  `clipPath` (user-space units), `title`, `desc`, `metadata`. Values are
+  checked, not only names: `transform` only on `g`, shapes and `clipPath`,
+  in a list both parsers accept and invertible; `viewBox` (four finite
+  numbers, positive size) and `preserveAspectRatio` (`none` or an
+  alignment with optional `meet`/`slice`, no `defer`) only on the root; root
+  `width`/`height` as numbers, `px`, percentages or `auto`; shape lengths as
+  numbers or `px` (`rx`/`ry="auto"` is refused: Chromium draws square
+  corners where usvg rounds); paints as `none`, `currentColor`, a color
+  (hex of 3, 4, 6 or 8 digits, a keyword, comma-separated `rgb()`, `rgba()`,
+  `hsl()`, `hsla()`) or `url(#id)` naming a gradient (no fallback);
+  `clip-path` as `none` or `url(#id)` naming a `clipPath`; opacities as
+  plain numbers; `display` `none` or `inline`; gradient lengths as numbers or
+  percentages, `href` naming a gradient. The stroke properties are admitted
+  (inert without a stroke; a stroke is refused below). Elements and
+  attributes in other namespaces (editor metadata) are skipped, as Blink
+  and usvg skip them. No `<style>` sheets, `use`, `symbol`, nested `svg`,
+  `switch`, `a`, markers, masks, patterns, filters, images, text,
+  animation, `overflow`, `paint-order` or `vector-effect`.
 - **Record** (`check_record`): no text, no strokes, no filter layers, every
   shape antialiased (no `crispEdges`/`optimizeSpeed`), and gradients only
   with pad spread, a centered radial (no focal point or focal radius), at
   most four stops after Blink's padding, and not degenerate.
 - **Draw passes** (`svgrender::pass_verdict`, at every bucket): no clip
-  element drawn into the depth attachment, and no analytic draw (round
+  element drawn into the depth attachment, no analytic draw (round
   rects, ovals, unaligned rects) or analytic clip in a pass that also has a
-  multisampled (tessellated) draw. Which renderer a draw or clip gets
-  depends on the bucket (pixel alignment, the destination's aspect), so the
-  classification uses the replay's own `chooseRenderer` and clip stack at
-  each bucket.
+  multisampled (tessellated) draw, and no filled path of nested rects
+  (Graphite's `Device::drawPath` turns `SkPathPriv::IsNestedFillRects`
+  paths into `drawRect`/`drawDRRect`, which the replay does not emulate).
+  Which renderer a draw or clip gets depends on the bucket (pixel
+  alignment, the destination's aspect), so the classification uses the
+  replay's own `chooseRenderer` and clip stack at each bucket.
 
 So level 1 draws documents of solid and gradient fills that are either all
-analytic shapes (with group opacity and rect or circular round-rect clips
-the clip stack resolves analytically or geometrically) or all tessellated
-paths without clips. `tests/svg.rs` pins the gate on the 27 references and
-checks that every admitted case is inside the 2D class; the unit tests in
-`render/svg.rs` pin each refusal.
+analytic shapes (with group or shape opacity and rect or circular
+round-rect clips the clip stack resolves analytically or geometrically) or
+all tessellated paths without clips, under any admitted root sizing and
+transforms. The tests:
+
+- `tests/svg.rs` pins the gate on the 27 canvas cases and the 383 gate
+  reference cases (`GATE`, `GATE_REFUSED`; everything else is admitted) and,
+  with the captures present, requires every admitted case to be inside the
+  2D class against Chromium.
+- `pm-render`'s `tests/vector.rs` `level1_svg_images_match_chromium_buckets`
+  draws the 46 gate documents with an explicit root size end to end (plan
+  gate, `svgRasterDimensions`, replay, upload, image quad, texel for texel)
+  and compares the frame with the replayed bucket and, with the capture,
+  with Chromium: the icon form, the 200 × 120 documents (viewBox origin,
+  shape transform, gradients) and all 42 `preserveAspectRatio` documents.
+  It fails on the previous walker (max 228–255 CV on the root-sizing and
+  aspect cases).
+- The unit tests in `render/svg.rs` and `canvas2d/svg.rs` pin each refusal
+  and the value checks.
+
+The previous gate admitted `transform`, `viewBox`, `preserveAspectRatio`
+and root `width`/`height` with any value although no reference covered
+them, and the walker drew them wrong: usvg wraps a shape whose transform,
+opacity or clip-path is set in a group without an id, and puts the root
+viewBox transform in a group under the tree root; the walker took usvg's
+matrix for both, so a shape's own transform was applied twice and the root
+viewBox transform on top of Blink's root transform (an icon
+`width="96" height="96" viewBox="0 0 24 24"` drew nothing; reviewer
+captures max 229–255 CV). The walker now maps a `<g>` to its element's
+transform, a wrapper group to the shape's transform (the shape pushes none)
+and usvg's viewport group (detected exactly from usvg's
+`ViewBox::to_transform`) to nothing. The gate references also found two
+replay defects, both fixed: usvg copies a shared bounding-box gradient
+under a generated id and the resolver fell back to default gradient
+geometry (max 104 CV; the source element now comes from the shape's
+inherited `fill`/`stroke`, and an unresolved gradient is an error), and
+the nested-rects path above (max 85 CV; refused).
 
 ### SVG replay parity
 
@@ -348,6 +414,18 @@ were already within 1 CV either way, 98 move to the reference and 9 move
 away; the nine are one-to-three splits with the lone sample at 1, 2 or 3,
 the same features as some of the pixels it fixes, so the deciding input is
 still missing.
+
+On the gate references (`svg-gate-20261018-163629-8db61ae3`, Chromium
+152; a repeat capture is byte-identical), the gate admits 358 of 383 cases
+and all 358 are inside the 2D class. The 25 refused: 16 clips drawn into
+the depth attachment (stretched oval, rotated rect, polygon and even-odd
+path clips; max 11–55 CV on several of them), the nested-rect path (max 85
+CV), `rx="auto"` (max 255 CV), five-stop gradients (in class, refused as
+unmeasured beyond four) and a five-digit hex color (in class, outside the
+accepted syntaxes). The reviewer's 94 experiment cases (`/tmp/rev-nesvg`)
+give 90 admitted, all inside the class; the four refused are a five-stop
+radial and the nested-groups document mixing an analytic rect with a
+tessellated path (max 7 CV).
 
 Not measured against Chromium and therefore routed: repeat and reflect
 spreads, focal radial gradients, more than four stops, `crispEdges`,
