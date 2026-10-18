@@ -6,7 +6,8 @@
  *   59.94 on Pro; zero drops over 60 s; same with linear blending on".
  *   Three 3840 × 2160 ProRes 422 HQ layers, each a different 4 s section of
  *   one 12 s clip (three decodes per frame), each with a Gaussian blur, in
- *   a 4 s composition at the clip's rate, played looping for 60 s, then
+ *   a composition of a whole number of frames (96, 120, 240: about 4 s) at
+ *   the clip's rate, played looping for 60 s, then
  *   again after turning on "Blend in linear light" (if the composition
  *   still routes to the engine; its route is recorded either way). Every
  *   timed frame the presentation shows is counted: a composition frame
@@ -113,7 +114,8 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
       await page.evaluate(({ num, den, linkMedia }) => {
         const PM = (window as any).PM;
         if (linkMedia) PM.HostMedia?.setProjectStorage?.('link');
-        const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: 4, bg: '#000000' });
+        // A whole number of frames (about 4 s), so the loop wraps on a frame boundary.
+        const project = PM.mkProject({ name: 'UHD ProRes', w: 3840, h: 2160, fps: num / den, dur: (Math.round((4 * num) / den) * den) / num, bg: '#000000' });
         project.fpsRational = { num, den };
         PM.replaceProject(project);
         PM.setTime(0);
@@ -133,13 +135,14 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
         const PM = (window as any).PM;
         const first = PM.proj.layers.find((l: any) => l.type === 'video');
         const asset = first.d.asset;
-        // Two more layers of the same clip, 4 s and 8 s into it.
-        for (const trim of [4, 8]) {
+        // Two more layers of the same clip, 3.9 s and 7.8 s into it (every
+        // layer ends inside the 12 s clip).
+        for (const trim of [3.9, 7.8]) {
           PM.Edit.apply({ type: 'add_layer', layerType: 'video', name: `UHD ${trim}`, content: { asset, fit: 'contain', w: 3840, h: 2160, trim, speed: 1 } }, { origin: 'panel', label: 'Add layer' });
         }
         const videos = PM.proj.layers.filter((l: any) => l.type === 'video');
         for (const layer of videos) {
-          PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0, duration: 4 } }, { origin: 'panel', label: 'Timing' });
+          PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0, duration: PM.proj.dur } }, { origin: 'panel', label: 'Timing' });
           PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'blur', parameters: { amount: 24 } }, { origin: 'panel', label: 'Add effect' });
         }
         // Lower layers show through: each upper layer at 60% opacity.
@@ -147,6 +150,7 @@ test.describe('Use New Engine: Phase 3a measurements', () => {
         return {
           layers: PM.proj.layers.map((l: any) => ({ type: l.type, trim: l.d?.trim, from: l.from, dur: l.dur, fx: (l.fx ?? []).map((f: any) => f.type), asset: l.d?.asset })),
           fps: PM.proj.fps,
+          dur: PM.proj.dur,
           asset: PM.assets?.get?.(asset) ? { storage: PM.assets.get(asset).storage ?? null, rendition: PM.assets.get(asset).rendition ?? null } : null
         };
       });
