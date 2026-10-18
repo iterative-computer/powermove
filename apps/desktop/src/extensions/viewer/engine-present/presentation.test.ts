@@ -272,9 +272,9 @@ describe('ViewerPresentation', () => {
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now());
-    // Drawn, but not on screen yet: still hidden, no events, no `latest`.
+    // Drawn and shown, but not on screen yet: no events, no `latest`.
     expect(painter.draws).toBe(1);
-    expect(presentation.canvas.style.visibility).toBe('hidden');
+    expect(presentation.canvas.style.visibility).toBe('visible');
     expect(presentation.presenting).toBe(false);
     expect(presentation.latest).toBeNull();
     expect(presented).toEqual([]);

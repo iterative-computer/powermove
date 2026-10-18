@@ -42,6 +42,8 @@ async function openEngineViewer(session: LaunchedApp): Promise<void> {
   await solidsProject(page);
   await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
   await expect.poll(() => page.evaluate(() => document.getElementById('engine-present')?.style.visibility), { timeout: 20_000 }).toBe('visible');
+  // A frame on screen (not just drawn): later frame events are the test's own.
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
 }
 
 /** The RGB of a data URL's pixel (decoded in the page). */
@@ -232,6 +234,49 @@ test.describe('Use New Engine: the render transport', () => {
     expect(near(pixel, [0xff, 0x33, 0x00], 24)).toBe(true);
     // The viewer's own session catches up afterwards.
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.session()?.resyncPending), { timeout: 30_000 }).toBe(false);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('a sync snapshot of a program only the renderer draws runs the fallback on the calling thread (real WebGL)', async ({ session }) => {
+    const { page } = session;
+    await session.openEditor();
+    await page.waitForFunction(() => Boolean((window as any).PM?.EngineRender));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const project = PM.mkProject({ name: 'Fallback', w: 640, h: 360, fps: 30, dur: 4, bg: '#203040' });
+      project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+      // A samplerCube uniform: the native pipeline cannot translate it, the
+      // renderer's GLSL fallback runner draws it (decision 19).
+      const code = 'uniform samplerCube uEnv;\nvoid main(){ fragColor = vec4(texture(uEnv, vec3(uv, 1.0)).rgb + vec3(uv, 0.0), 1.0); }';
+      const sky = PM.mkLayer('shader', { name: 'Sky', from: 0, dur: 4, d: { code, uniforms: {}, w: 320, h: 180 } }, project);
+      sky.p['position.x'].v = 320; sky.p['position.y'].v = 180;
+      project.layers = [sky];
+      PM.replaceProject(project);
+      PM.Projects?.put?.(PM.proj);
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const result = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('transport-probe');
+      const before = { ...PM.EngineRender.stats };
+      // A size the viewer never drew: the program is asked for again.
+      const url = api.render.snapshot(0.5, 300);
+      return { url, rounds: PM.EngineRender.stats.rounds - before.rounds, failed: PM.EngineRender.stats.failed - before.failed };
+    });
+    expect(result.failed).toBe(0);
+    expect(result.rounds).toBeGreaterThanOrEqual(1);
+    expect(result.url.startsWith('data:image/jpeg')).toBe(true);
+    // The program's pixels where the layer is (what the runner drew on this
+    // thread), the background elsewhere.
+    const left = await dataUrlPixel(page, result.url, 90, 84);
+    const right = await dataUrlPixel(page, result.url, 205, 84);
+    const background = await dataUrlPixel(page, result.url, 10, 10);
+    console.log(`fallback snapshot pixels: left ${left.slice(0, 3)} right ${right.slice(0, 3)} background ${background.slice(0, 3)}`);
+    expect(near(background, [0x20, 0x30, 0x40], 12)).toBe(true);
+    expect(near(left, [0x20, 0x30, 0x40], 40)).toBe(false);
+    expect(near(right, [0x20, 0x30, 0x40], 40)).toBe(false);
+    // uv.x grows to the right: the red channel does not fall.
+    expect(right[0]!).toBeGreaterThanOrEqual(left[0]!);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

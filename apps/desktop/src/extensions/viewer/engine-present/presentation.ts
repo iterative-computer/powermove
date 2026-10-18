@@ -275,7 +275,7 @@ export class ViewerPresentation {
 
   /** Whether engine frames are on screen now. */
   get presenting(): boolean {
-    return this.canvasElement.style.visibility === 'visible' && this.latestFrame !== null;
+    return this.canvasElement.style.visibility === 'visible' && this.revealing === null && this.latestFrame !== null;
   }
 
   /** The newest frame drawn, with its tags and overlay geometry. */
@@ -344,8 +344,7 @@ export class ViewerPresentation {
       const frame = this.revealing;
       this.revealing = null;
       this.revealFor = null;
-      if (!frame) return;
-      this.canvasElement.style.visibility = 'visible';
+      if (!frame || this.canvasElement.style.visibility !== 'visible') return;
       if (this.statusElement) this.setStatus(null);
       this.show(frame);
     };
@@ -657,15 +656,22 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
       this.routedRevision = null;
-      // A hidden canvas shows a frame only once the GPU finished it and the
-      // page's compositor has it (the drawing's canvas and this page commit
-      // separately): it stays hidden until then (`reveal`), so what shows
-      // is never an empty canvas, and `latest`, `presenting`, and the
-      // frame events wait for it.
+      // A canvas that was hidden shows a frame only once the GPU finished
+      // it and the display took it (the drawing's canvas and this page
+      // commit separately; at a cold start the drawing's pipelines compile
+      // first): it shows at once, so the page has committed it by then, and
+      // `latest`, `presenting`, and the frame events wait for the frame
+      // (`reveal`). A new presenter (a restart, a replaced drawing) starts
+      // its own wait.
       if (this.canvasElement.style.visibility !== 'visible') {
-        const start = this.revealing === null || this.revealFor !== presenter;
+        this.canvasElement.style.visibility = 'visible';
         this.revealing = frame;
-        if (start) this.reveal(presenter);
+        this.reveal(presenter);
+        return;
+      }
+      if (this.revealing) {
+        this.revealing = frame;
+        if (this.revealFor !== presenter) this.reveal(presenter);
         return;
       }
       if (this.statusElement) this.setStatus(null);
