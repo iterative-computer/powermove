@@ -48,9 +48,9 @@ async function capture(session: LaunchedApp, files: string[], output: string, la
   return frames;
 }
 
-for (const alpha of [false, true]) test(`${alpha ? 'Translucent' : 'Opaque'} ICC PNG and preserved TIFF originals match Chromium before filtering`, async () => {
+for (const encoded of process.env.PM_MEDIA_PNG_ALPHA === '1' ? [true] : [false, true])
+for (const alpha of [false, true]) test(`${alpha ? 'Translucent' : 'Opaque'} ICC PNG and preserved TIFF originals match Chromium with ${encoded ? 'transparent' : 'opaque'} PNG output`, async () => {
   test.setTimeout(180_000);
-  const encoded = process.env.PM_MEDIA_PNG_ALPHA === '1';
   const output = process.env.PM_MEDIA_EVIDENCE ? path.join(process.env.PM_MEDIA_EVIDENCE, `${alpha ? 'icc-alpha' : 'icc-opaque'}${encoded ? '-encoded' : ''}`) : await mkdtemp(path.join(os.tmpdir(), 'pm-icc-parity-'));
   await mkdir(output, { recursive: true });
   let session: LaunchedApp | null = null;
