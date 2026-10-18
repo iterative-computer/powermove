@@ -166,14 +166,58 @@ per frame: plan without drawing → snapshots (per nested composition)
 
 ## The paused viewer
 
-`BlenderRender::Preview` draws the preview surfaces a `PreviewSurfaces`
-host has for each composition's preview snapshot (preview samples and
-scale; EEVEE for Material Preview; drawn stretched over the frame as
-today) and reports the snapshots it lacks, drawing natively meanwhile.
-The interactive engine's presenter does not pass the view override or the
-paused state into its renders yet (`compose.rs` renders with `view: None`),
-so the viewer's Material Preview and Rendered shading still come from the
-current engine; see Gaps.
+Today's viewer draws Blender only while paused in Material Preview
+(EEVEE) or Rendered (the composition's engine) shading
+(`renderBlenderPreview`, `schedulePreview`); Wireframe, Solid, and
+playback draw natively. The interactive engine does the same:
+
+- **Shading reaches the engine.** The viewer's `ViewerState.view` carries
+  the 3D viewport's shading whenever the composition has a scene (Rendered
+  without a camera used to be sent as no override); the presenter passes
+  the override into its renders (`compose.rs`: editor camera, Wireframe and
+  X-ray looks, Local View, and the shading).
+- **Routing.** The viewer never draws final Blender frames, so
+  `Feature::Blender` no longer routes a composition to the current viewer
+  (`present/document.rs`); a Blender composition draws natively, or with
+  its preview surfaces while paused.
+- **Paused frames** (`present/render.rs`): a frame drawn while paused in
+  Material Preview or Rendered renders with `BlenderRender::Preview` over
+  a `ViewHost` (`present/blender.rs`). Every composition with 3D objects
+  builds its preview snapshot (the composition's own size times the preview
+  scale, whatever the zoom; preview samples; EEVEE for Material Preview),
+  draws the surfaces the presenter has for it, and draws natively while it
+  reports the snapshots it lacks. Motion-blur samples of a paused frame
+  draw natively (preview frames exist only at the frame's own time, as
+  today). Playback frames and the draft shadings render
+  `BlenderRender::Native`.
+- **The worker** (`PreviewBlender`, thread `pm-viewer-blender`): the lacking
+  snapshots become the view's wanted set; after today's 250 ms debounce the
+  worker runs them through a `BlenderStage` (section 14.7 keys over the
+  Blender Surfaces area, so a frame rendered before, by the viewer or an
+  export, is never rendered again) and host services' supervised Blender
+  (`HostBackend` over a `HostLink`: host calls queued for the engine's
+  thread, drained on `tick` and on every wake-up `pump`, answered by token;
+  `blenderSurface` events routed to the presenter). Decoded surfaces stay
+  in memory under today's 512 MB preview budget, least recently drawn first
+  out, and the view is drawn again when they arrive.
+- **Cancel.** A paused frame that wants other snapshots (the playhead
+  moved, an edit), a draft shading, or the view closing cancels the running
+  job: `cancelJobs` for its Blender job, which kills the worker's process
+  group. Main accepts `cancelJobs` from the interactive engine for its own
+  launch's Blender jobs only (`EngineBlender.owns`).
+- **Playback.** Host services stop Blender (`SIGSTOP`) while anything plays
+  (contract 13); a job running when playback starts finishes after it
+  stops, and no job starts during playback.
+- **Failures** (Blender missing, a failed job) go to the viewer as a
+  session failure (`blenderMissing`, `blenderFailed`; the viewer logs it)
+  and stop that view's previews until its shading changes, as today's
+  `error` stops `schedulePreview` until `setShading`. A host without a
+  Blender path (`unsupported`) stops previews for the launch.
+- **Host services** (`native-engine.ts`): `blenderRender` is served for
+  both engines (one serialized worker and one queue of 16). The utility
+  process calls `pump` on every empty action batch (a wake-up from a thread
+  off its own), so host calls from the job lanes and the viewer's worker go
+  out at once rather than at the next 100 ms `tick`.
 
 ## Tests and measurements
 
@@ -229,18 +273,38 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 - `pm-cli/src/render.rs`: the Blender stage on the installed Blender.
 - `apps/desktop/src/main/engine/native-engine.ts` and `index.ts`: the
   Blender locator and the routing of `blenderStatus`, `blenderRender`, and
-  the job engine's `cancelJobs`.
+  `cancelJobs` (both engines; the interactive engine's own jobs only).
+- `apps/desktop/src/main/engine/engine-process.ts`: an empty action batch
+  pumps the engine.
+- `pm-engine`: `FramePresenter::drain_host_requests`, `host_answer`, and
+  `host_event`, and the engine's `HostCall::Presenter` routing.
+- `pm-node/src/present/{mod,render,compose,document}.rs`: the presenter's
+  host link and Blender worker, `Command::UseBlender` and `BlenderReady`,
+  the paused preview per render, `Composer::set_blender` and the view
+  override in viewer renders, the `blenderPreview` stats, and routing
+  without `Feature::Blender`.
+- `apps/desktop/src/extensions/viewer/engine-present/view-state.ts`: a 3D
+  composition always sends its shading.
+- `pm-render/tests/motion.rs`: the request is cloned (as on the integration
+  branch).
 
 ## Gaps
 
 - **Imported glTF models and recipe parts** are not built into snapshots;
   their compositions route (the static check lists them). The comparison
   harness lists the glTF corpus snapshots as not built.
-- **The paused viewer's Blender shading** (Material Preview and Rendered)
-  is not connected in the interactive engine: the presenter renders
-  without the view override or the paused state, and the interactive
-  engine has no Blender path to host services. The renderer side
-  (`BlenderRender::Preview`) is built and tested.
+- **The viewport's busy and error state** (`previewState()`: the
+  spinner and the error line in the 3D viewport UI) still comes from
+  today's renderer-side preview; the engine's preview jobs and failures
+  are in the presenter's status (`blenderPreview`) and the viewer's log,
+  not in that UI.
+- **Today's preview still runs alongside** when the engine draws the
+  viewer: `setShading` schedules today's `renderBlenderPreview` regardless
+  of who presents (renderer code outside this lane); the e2e reports how
+  many of today's runs happen next to the engine's.
+- **The editor camera** is not sent by the viewer yet (`view-params.ts`:
+  `camera: null` until the 3D lane exposes it), so previews in the editor
+  view use the composition camera, as the engine's native frames do.
 - **Agent frames** (`render_frames`) of Blender compositions route to
   today's capture (contract 12's `cachedOrPending` and `render` policies are
   not implemented in the job engine's still path).

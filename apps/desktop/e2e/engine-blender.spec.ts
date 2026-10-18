@@ -165,3 +165,126 @@ test('exports with Blender layers render in the job engine and look like today\'
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/* The paused viewer's Blender shading (plan section 8, contract 11): with
+   Use New Engine on, the engine draws the viewer of a Blender composition
+   (native shading in Solid), and while paused in Material Preview it has
+   host services render each layer's preview surface (EEVEE, preview
+   samples and scale) in the installed Blender and draws them per layer:
+   the viewer's pixels are the surfaces composited. Playback draws natively
+   and starts no Blender job; pausing at a new time renders that frame.
+   Skipped without Blender 4.5 or newer. */
+test('the paused viewer draws Blender surfaces in Material Preview, and native shading while playing', async () => {
+  test.setTimeout(300_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-viewer-blender-'));
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  try {
+    const { page, app } = session;
+    await ready(session);
+    await session.openEditor();
+    test.skip(!(await project(session)), 'Install Blender 4.5 or newer to run the Blender viewer integration');
+    // Today's own preview runs at main's IPC (they would double Blender's work).
+    await app.evaluate(({ ipcMain }) => {
+      const ipc = ipcMain as any, original = ipc._invokeHandlers.get('blender:run');
+      (globalThis as any).__todayPreviewRuns = 0;
+      ipc.removeHandler('blender:run');
+      ipc.handle('blender:run', async (event: unknown, job: any) => {
+        if (job.operation === 'render') (globalThis as any).__todayPreviewRuns++;
+        return original(event, job);
+      });
+    });
+    const report = async () => (await app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'))) as any;
+    const preview = async () => (await report()).presenter.blenderPreview as { runs: number; jobs: number; rendered: number; cached: number; failed: number; lastError: string | null; device: string | null; surfaces: number };
+    const route = () => page.evaluate(() => (window as any).PM.EngineConnection.status().route as string);
+    await expect.poll(route, { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => document.getElementById('engine-present')?.style.visibility), { timeout: 20_000 }).toBe('visible');
+    expect((await preview()).runs).toBe(0);
+    const frameTag = () => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.engineFrame?.() ?? null);
+    // Material Preview, paused at 0.
+    await page.evaluate(() => (window as any).PM.Kernel.api('blender-viewer').scene3d.viewport.run('shading', 'material'));
+    await expect.poll(async () => { const p = await preview(); return p.failed ? `failed: ${p.lastError}` : p.surfaces; }, { timeout: 180_000 }).toBe(2);
+    const first = await preview();
+    console.log(`viewer Blender preview: ${JSON.stringify(first)}`);
+    expect(first.jobs).toBe(1);
+    expect(first.rendered + first.cached).toBe(2);
+    expect(first.device).toBeTruthy();
+    // The frame drawn after the surfaces arrived.
+    const drawn = (await report()).presenter.documentFrames as number;
+    await expect.poll(async () => (await report()).presenter.documentFrames, { timeout: 10_000 }).toBeGreaterThanOrEqual(drawn);
+    await page.waitForTimeout(500);
+    // The surfaces composited over the composition's black, from the
+    // Blender Surfaces area (the preview is the composition's size).
+    const userData = await app.evaluate(({ app }) => app.getPath('userData'));
+    const dir = path.join(userData, 'Engine Cache', 'Blender Surfaces', 'surfaces');
+    const files = (await readdir(dir)).filter((n) => n.endsWith('.png'));
+    expect(files.length).toBe(2);
+    const layers = files.map((f) => rgba(path.join(dir, f)));
+    expect(layers.every((l) => l.length === W * H * 4)).toBe(true);
+    const composite = new Float64Array(W * H * 3), alpha = new Float64Array(W * H);
+    for (const l of layers) {
+      for (let i = 0; i < W * H; i++) {
+        const a = l[i * 4 + 3]! / 255;
+        alpha[i] = a + alpha[i]! * (1 - a);
+        for (let c = 0; c < 3; c++) composite[i * 3 + c] = (l[i * 4 + c]! / 255) * a + composite[i * 3 + c]! * (1 - a);
+      }
+    }
+    // Flat, opaque pixels of the models (3 × 3 neighbourhoods within 2 CV):
+    // the viewer scales the composition up, so edges are interpolated.
+    const at = (x: number, y: number, c: number) => Math.round(composite[(y * W + x) * 3 + c]! * 255);
+    const points: [number, number][] = [];
+    for (let y = 2; y < H - 2; y += 3) {
+      for (let x = 2; x < W - 2; x += 3) {
+        if (alpha[y * W + x]! < 0.999) continue;
+        let flat = true;
+        for (let dy = -1; dy <= 1 && flat; dy++) for (let dx = -1; dx <= 1 && flat; dx++) for (let c = 0; c < 3; c++) if (Math.abs(at(x + dx, y + dy, c) - at(x, y, c)) > 2 || alpha[(y + dy) * W + x + dx]! < 0.999) flat = false;
+        if (flat) points.push([x, y]);
+      }
+    }
+    expect(points.length).toBeGreaterThan(20);
+    const viewport = (await frameTag()).overlay.viewport as { x: number; y: number; width: number; height: number };
+    const sample = async (list: [number, number][]) => {
+      const out: number[][] = [];
+      for (const [x, y] of list) {
+        const css = { x: viewport.x + ((x + 0.5) / W) * viewport.width, y: viewport.y + ((y + 0.5) / H) * viewport.height };
+        const origin = await page.evaluate(() => { const r = (window as any).PM.Kernel.services.get('viewer').stage.getBoundingClientRect(); return { x: r.left, y: r.top }; });
+        out.push(await app.evaluate(async ({ BrowserWindow }, p) => {
+          const w = BrowserWindow.getAllWindows().find((b) => !b.isDestroyed() && b.webContents.getURL().startsWith('app:')) ?? BrowserWindow.getAllWindows()[0]!;
+          const bitmap = (await w.webContents.capturePage({ x: Math.round(p.x), y: Math.round(p.y), width: 1, height: 1 })).toBitmap();
+          return [bitmap[2]!, bitmap[1]!, bitmap[0]!];
+        }, { x: origin.x + css.x, y: origin.y + css.y }));
+      }
+      return out;
+    };
+    const step = Math.max(1, Math.floor(points.length / 24));
+    const chosen = points.filter((_, i) => i % step === 0).slice(0, 24);
+    const shown = await sample(chosen);
+    const error = (px: number[][]) => px.map((p, i) => Math.max(...[0, 1, 2].map((c) => Math.abs(p[c]! - at(chosen[i]![0], chosen[i]![1], c)))));
+    const material = error(shown);
+    // Solid shading of the same frame (native three.js shading) for scale.
+    await page.evaluate(() => (window as any).PM.Kernel.api('blender-viewer').scene3d.viewport.run('shading', 'solid'));
+    await page.waitForTimeout(1_000);
+    const solid = error(await sample(chosen));
+    const within = material.filter((e) => e <= 6).length / material.length;
+    console.log(`viewer pixels vs the Blender surfaces composited at ${chosen.length} points: Material Preview max ${Math.max(...material)} CV (${(100 * within).toFixed(1)}% within 6 CV); Solid (native) max ${Math.max(...solid)} CV`);
+    expect(within).toBeGreaterThanOrEqual(0.95);
+    expect(Math.max(...solid)).toBeGreaterThan(Math.max(...material));
+    // Playback draws natively: no Blender job starts while it plays.
+    await page.evaluate(() => (window as any).PM.Kernel.api('blender-viewer').scene3d.viewport.run('shading', 'material'));
+    await page.waitForTimeout(1_000);
+    const beforePlay = await preview();
+    await page.evaluate(() => { const PM = (window as any).PM; PM.loop = true; PM.play(); });
+    await page.waitForTimeout(1_500);
+    expect((await preview()).runs).toBe(beforePlay.runs);
+    // Paused at another time: that frame renders (the box turns).
+    await page.evaluate(() => { const PM = (window as any).PM; PM.pause(); PM.setTime(0.125); });
+    await expect.poll(async () => (await preview()).surfaces, { timeout: 180_000 }).toBeGreaterThanOrEqual(4);
+    const after = await preview();
+    expect(after.failed).toBe(0);
+    const today = await app.evaluate(() => (globalThis as any).__todayPreviewRuns as number);
+    console.log(`viewer Blender preview after playback: ${JSON.stringify(after)}; today's preview runs at main's IPC: ${today}`);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
