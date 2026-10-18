@@ -261,6 +261,28 @@ fn motion_corpus_parity() {
                 if worst > 1 {
                     failed.push(line);
                 }
+                // The legacy capture's blurred static clip shows the stale
+                // frame 0 (the clip starts at 0, so the sharp render at t = 0
+                // is that frame), not the center frame.
+                let mut clip = interior(&reference, w, h);
+                for (i, m) in clip.iter_mut().enumerate() {
+                    let (x, y) = (i as u32 % w, i as u32 / w);
+                    *m &= (40..200).contains(&x) && (135..225).contains(&y);
+                }
+                let mut unblurred = request;
+                unblurred.motion_blur = MotionBlur::Off;
+                let first = opaque8(&render(&mut renderer, &unblurred, 0.0));
+                let (stale, n) = masked_max(&first, &reference, &clip);
+                let (center, _) = masked_max(&sharp, &reference, &clip);
+                let line = format!(
+                    "{:<34} t={:<5} capture's blurred static clip vs engine frame 0: max {stale} \
+                     over {n} px; vs the center frame: max {center}",
+                    p.name, s.time
+                );
+                eprintln!("{line}");
+                if n == 0 || stale > FRAME_IDENTITY_CV || center <= WRONG_FRAME_CV {
+                    failed.push(format!("{line}; expected the stale frame 0"));
+                }
             }
             // Transparent float frames: 20 samples, then every extra count.
             let mut floats: Vec<(u32, &std::path::PathBuf)> = Vec::new();
