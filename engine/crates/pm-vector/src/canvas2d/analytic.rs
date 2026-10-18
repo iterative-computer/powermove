@@ -798,7 +798,166 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
             }
         }
     }
+    if n > 1 && std::env::var_os("PM_SVG_S0_RULE").is_some() {
+        // Experimental; measured on Chromium 152 / Metal: in a multisampled pass the pixel
+        // takes one fragment of this step, the one from the mesh triangle
+        // covering the lowest-index sample, for every sample the mesh covers
+        // (the SVG canvas cases differ at exactly the pixels where the mesh
+        // edge separates sample 0 from the pixel center).
+        for px in out.coverage.chunks_exact_mut(n) {
+            if let Some(first) = px.iter().find_map(|c| *c) {
+                for c in px.iter_mut() {
+                    if c.is_some() {
+                        *c = Some(first);
+                    }
+                }
+            }
+        }
+    }
     out
+}
+
+/// Diagnostic: for pixel `(px, py)`, each sample's covering mesh triangle
+/// (index into the strip) and the coverage that triangle's varyings give at
+/// the pixel center, or `None` when no triangle covers the sample.
+pub fn explain(inst: &Instance, px: u32, py: u32, pattern: &[[f64; 2]]) -> Vec<Option<(usize, f32)>> {
+    let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
+    let one = 1i64 << SUBPIXEL_BITS;
+    let mut out = vec![None; pattern.len()];
+    for k in 2..INDICES.len() {
+        let tri = [verts[INDICES[k - 2] as usize], verts[INDICES[k - 1] as usize], verts[INDICES[k] as usize]];
+        let p: Vec<(i64, i64)> = tri.iter().map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1])))).collect();
+        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1);
+        if area == 0 {
+            continue;
+        }
+        let (x0, y0) = (p[0].0 as f64, p[0].1 as f64);
+        let (x1, y1) = (p[1].0 as f64, p[1].1 as f64);
+        let (x2, y2) = (p[2].0 as f64, p[2].1 as f64);
+        let det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        for (si, s) in pattern.iter().enumerate() {
+            if out[si].is_some() {
+                continue;
+            }
+            let sx = i64::from(px) * one + (s[0] * one as f64) as i64;
+            let sy = i64::from(py) * one + (s[1] * one as f64) as i64;
+            if !inside_triangle(&p, sx, sy) {
+                continue;
+            }
+            let cx = (f64::from(px) + 0.5) * one as f64;
+            let cy = (f64::from(py) + 0.5) * one as f64;
+            let b1 = ((cx - x0) * (y2 - y0) - (x2 - x0) * (cy - y0)) / det;
+            let b2 = ((x1 - x0) * (cy - y0) - (cx - x0) * (y1 - y0)) / det;
+            let b0 = 1.0 - b1 - b2;
+            let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
+            let mut v = tri[0];
+            for i in 0..4 {
+                v.jacobian[i] = lerp(tri[0].jacobian[i], tri[1].jacobian[i], tri[2].jacobian[i]);
+                v.edge[i] = lerp(tri[0].edge[i], tri[1].edge[i], tri[2].edge[i]);
+            }
+            for i in 0..2 {
+                v.control[i] = lerp(tri[0].control[i], tri[1].control[i], tri[2].control[i]);
+            }
+            // Coverage from this triangle's planes at other candidate
+            // evaluation points: each sample position and the centroid of
+            // the samples it covers.
+            let eval_at = |ex: f64, ey: f64| {
+                let b1 = ((ex - x0) * (y2 - y0) - (x2 - x0) * (ey - y0)) / det;
+                let b2 = ((x1 - x0) * (ey - y0) - (ex - x0) * (y1 - y0)) / det;
+                let b0 = 1.0 - b1 - b2;
+                let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
+                let mut w = tri[0];
+                for i in 0..4 {
+                    w.jacobian[i] = lerp(tri[0].jacobian[i], tri[1].jacobian[i], tri[2].jacobian[i]);
+                    w.edge[i] = lerp(tri[0].edge[i], tri[1].edge[i], tri[2].edge[i]);
+                }
+                for i in 0..2 {
+                    w.control[i] = lerp(tri[0].control[i], tri[1].control[i], tri[2].control[i]);
+                }
+                coverage(&w)
+            };
+            let at_samples: Vec<f32> = pattern.iter().map(|q| eval_at((f64::from(px) + q[0]) * one as f64, (f64::from(py) + q[1]) * one as f64)).collect();
+            let covered: Vec<usize> = pattern.iter().enumerate().filter(|(_, q)| {
+                let qx = i64::from(px) * one + (q[0] * one as f64) as i64;
+                let qy = i64::from(py) * one + (q[1] * one as f64) as i64;
+                inside_triangle(&p, qx, qy)
+            }).map(|(j, _)| j).collect();
+            let (mut mx, mut my) = (0.0, 0.0);
+            for &j in &covered {
+                mx += pattern[j][0];
+                my += pattern[j][1];
+            }
+            let nc = covered.len() as f64;
+            let at_centroid = eval_at((f64::from(px) + mx / nc) * one as f64, (f64::from(py) + my / nc) * one as f64);
+            eprintln!("    sample {si}: tri {k} verts {:?} covers {covered:?} center {:.4} centroid {at_centroid:.4} at_samples {:?}", [INDICES[k-2], INDICES[k-1], INDICES[k]], coverage(&v), at_samples.iter().map(|c| format!("{c:.4}")).collect::<Vec<_>>());
+            eprintln!("      varyings edge {:?} ctrl {:?} jac {:?} stroke {:?} xr {:?} yr {:?}", v.edge, v.control, v.jacobian, v.stroke, v.x_radii, v.y_radii);
+            out[si] = Some((k, coverage(&v)));
+        }
+    }
+    out
+}
+
+/// Diagnostic data for one pixel: each covering mesh triangle (strip index),
+/// the samples it covers and its center-evaluated coverage.
+pub fn explain_data(inst: &Instance, px: u32, py: u32, pattern: &[[f64; 2]]) -> Vec<(usize, Vec<usize>, f32)> {
+    let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
+    let one = 1i64 << SUBPIXEL_BITS;
+    let mut taken = vec![false; pattern.len()];
+    let mut out = Vec::new();
+    for k in 2..INDICES.len() {
+        let tri = [verts[INDICES[k - 2] as usize], verts[INDICES[k - 1] as usize], verts[INDICES[k] as usize]];
+        let p: Vec<(i64, i64)> = tri.iter().map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1])))).collect();
+        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1);
+        if area == 0 {
+            continue;
+        }
+        let covers: Vec<usize> = pattern
+            .iter()
+            .enumerate()
+            .filter(|(si, q)| {
+                !taken[*si] && inside_triangle(&p, i64::from(px) * one + (q[0] * one as f64) as i64, i64::from(py) * one + (q[1] * one as f64) as i64)
+            })
+            .map(|(si, _)| si)
+            .collect();
+        if covers.is_empty() {
+            continue;
+        }
+        for &si in &covers {
+            taken[si] = true;
+        }
+        let (x0, y0) = (p[0].0 as f64, p[0].1 as f64);
+        let (x1, y1) = (p[1].0 as f64, p[1].1 as f64);
+        let (x2, y2) = (p[2].0 as f64, p[2].1 as f64);
+        let det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        let cx = (f64::from(px) + 0.5) * one as f64;
+        let cy = (f64::from(py) + 0.5) * one as f64;
+        let b1 = ((cx - x0) * (y2 - y0) - (x2 - x0) * (cy - y0)) / det;
+        let b2 = ((x1 - x0) * (cy - y0) - (cx - x0) * (y1 - y0)) / det;
+        let b0 = 1.0 - b1 - b2;
+        let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
+        let mut v = tri[0];
+        for i in 0..4 {
+            v.jacobian[i] = lerp(tri[0].jacobian[i], tri[1].jacobian[i], tri[2].jacobian[i]);
+            v.edge[i] = lerp(tri[0].edge[i], tri[1].edge[i], tri[2].edge[i]);
+        }
+        for i in 0..2 {
+            v.control[i] = lerp(tri[0].control[i], tri[1].control[i], tri[2].control[i]);
+        }
+        out.push((k, covers, coverage(&v)));
+    }
+    out
+}
+
+/// The instance's mesh as a triangle strip of device-space positions, one
+/// vertex per strip index (so strip triangle `k` is vertices `k..k+3`).
+pub fn mesh_strip(inst: &Instance) -> Vec<[f32; 2]> {
+    let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
+    INDICES.iter().map(|&i| verts[i as usize].pos).collect()
+}
+
+/// Diagnostic: every template vertex's varyings.
+pub fn mesh_vertices(inst: &Instance) -> Vec<Varyings> {
+    (0..36).map(|i| vertex(inst, i)).collect()
 }
 
 /// The top-left sample test for one triangle in grid units.

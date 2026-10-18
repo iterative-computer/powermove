@@ -179,6 +179,10 @@ fn sorted(r: [f32; 4]) -> [f32; 4] {
 }
 
 #[inline]
+fn rect_union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
 fn rect_intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])]
 }
@@ -315,12 +319,25 @@ fn rrect_contains_rect(rr: &SkRRect, r: [f32; 4]) -> bool {
 /// `xform`, the translated rect, four circular radii).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnalyticClip {
+    /// `fBounds`: the device-space rect of the clip.
     pub rect: [f32; 4],
-    pub radii: [f32; 4],
-    /// `(rc00, rc10, rc01, rc11)` of the device-to-local matrix (column major).
-    pub xform: [f32; 4],
+    /// `fRadius`: the circular corner radius (`kRadiusMin` = 0.5 when the
+    /// corners are square or collapsed to square).
+    pub radius: f32,
+    /// `fEdgeFlags`: which edges (L, T, R, B as bits 0..3) meet circular
+    /// corners.
+    pub edge_flags: u32,
+    /// `fInverted`: true for intersect clips (the depth-draw convention).
     pub inverted: bool,
 }
+
+const EDGE_LEFT: u32 = 0b0001;
+const EDGE_TOP: u32 = 0b0010;
+const EDGE_RIGHT: u32 = 0b0100;
+const EDGE_BOTTOM: u32 = 0b1000;
+const EDGE_ALL: u32 = 0b1111;
+/// `kRadiusMin`.
+const RADIUS_MIN: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 struct RawElement {
@@ -331,17 +348,41 @@ struct RawElement {
     inner: [f32; 4],
     invalid: bool,
     save_depth: usize,
-    /// The device polygons for the depth-only clip draw (lazily built).
-    polygons: Option<Arc<DepthClip>>,
+    /// The pending depth-only clip draw's painter's order (`fOrder`), set
+    /// at the first draw that needs the element drawn into the depth
+    /// attachment; `None` until then.
+    order: Option<u32>,
+    /// The highest Z of the draws this element clips (`fMaxZ`).
+    max_z: u32,
+    /// The joined, snapped bounds of those draws (`fUsageBounds`).
+    usage: [f32; 4],
 }
 
-/// A depth-only clip draw: the device polygons under a fill rule; samples
-/// inside pass for intersect elements and fail for difference elements.
-#[derive(Debug)]
-pub struct DepthClip {
-    pub polys: Vec<Vec<[f64; 2]>>,
-    pub rule: Rule,
-    pub intersect: bool,
+/// Draws recorded in a device, with their painter's order bookkeeping
+/// (`Device::fColorDepthBoundsManager`, a naive exact manager: the SVG
+/// records are small).
+#[derive(Debug, Default)]
+pub struct BoundsManager {
+    rects: Vec<([f32; 4], u32)>,
+}
+
+/// `CompressedPaintersOrder::First()`.
+const FIRST_ORDER: u32 = 1;
+
+impl BoundsManager {
+    /// `getMostRecentDraw`: the highest order of a recorded draw whose
+    /// bounds intersect `bounds` (`First` when none does).
+    fn most_recent(&self, bounds: [f32; 4]) -> u32 {
+        self.rects
+            .iter()
+            .filter(|(r, _)| rect_intersects(*r, bounds))
+            .map(|(_, o)| *o)
+            .max()
+            .unwrap_or(FIRST_ORDER)
+    }
+    fn record(&mut self, bounds: [f32; 4], order: u32) {
+        self.rects.push((bounds, order));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +410,9 @@ struct ClipStack {
     device_bounds: [f32; 4],
     elements: Vec<RawElement>,
     saves: Vec<SaveRecord>,
+    /// Depth-only clip draws produced when elements leave the stack
+    /// (`RawElement::drawClip`), taken by the device when recorded.
+    clip_draws: Vec<Draw>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,6 +557,56 @@ impl ClipStack {
                 intersect: true,
                 deferred_saves: 0,
             }],
+            clip_draws: Vec::new(),
+        }
+    }
+
+    /// `RawElement::drawClip` for element `i`: the deferred depth-only draw
+    /// of its shape (inverse-filled for intersect elements), at one Z past
+    /// the draws it clipped, sorted at the order fixed by its first use.
+    fn draw_clip(&mut self, i: usize) {
+        let e = &mut self.elements[i];
+        let Some(order) = e.order.take() else {
+            return;
+        };
+        let device = self.device_bounds;
+        let snapped_outer = snap_scissor(e.outer, device);
+        let mut scissor = rect_intersect(e.usage, snapped_outer);
+        let area = |r: [f32; 4]| (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
+        if 0.5 * area(snapped_outer) < area(scissor) {
+            scissor = snapped_outer;
+        }
+        let draw_bounds = if e.intersect { scissor } else { rect_intersect(e.outer, scissor) };
+        let z = e.max_z + 1;
+        e.max_z = 0;
+        e.usage = INFINITE_INVERTED;
+        if rect_empty(draw_bounds) {
+            return;
+        }
+        let (path, rule) = e.shape.as_path();
+        let local = tess::fill_polygons_local(&path, &e.local_to_device.m);
+        let polys = tess::to_device(&local, &e.local_to_device.m, 0, 0);
+        let inverse = e.intersect;
+        self.clip_draws.push(Draw {
+            geom: Geom::Polygons { polys, rule, msaa: true },
+            paint: Paint::Solid([0.0; 4]),
+            clip: DrawClip {
+                scissor: [scissor[0] as i32, scissor[1] as i32, scissor[2] as i32, scissor[3] as i32],
+                analytic: None,
+                clip_order: FIRST_ORDER,
+                draw_bounds,
+            },
+            z,
+            order,
+            depth_only: true,
+            inverse,
+        });
+    }
+
+    /// `recordDeferredClipDraws`: every pending element's clip draw.
+    fn record_deferred_clip_draws(&mut self) {
+        for i in 0..self.elements.len() {
+            self.draw_clip(i);
         }
     }
 
@@ -527,6 +621,10 @@ impl ClipStack {
             return;
         }
         let start = top.starting_element_index;
+        // Elements leaving the stack draw their pending depth-only clips.
+        for i in start..self.elements.len() {
+            self.draw_clip(i);
+        }
         self.elements.truncate(start);
         self.saves.pop();
         let depth = self.saves.len();
@@ -568,7 +666,9 @@ impl ClipStack {
             inner: INFINITE_INVERTED,
             invalid: false,
             save_depth: self.saves.len(),
-            polygons: None,
+            order: None,
+            max_z: 0,
+            usage: INFINITE_INVERTED,
         };
         if matches!(e.shape, Shape::Line(_)) || !local_to_device.valid() {
             e.shape = Shape::Empty;
@@ -605,14 +705,16 @@ impl ClipStack {
         }
         // SaveRecord::addElement.
         let depth = self.saves.len();
-        let top = self.saves.last_mut().unwrap();
+        let top_i = self.saves.len() - 1;
         if matches!(e.shape, Shape::Empty) {
             if e.intersect {
+                let top = &mut self.saves[top_i];
                 top.state = ClipState::Empty;
                 top.outer = [0.0; 4];
                 top.inner = [0.0; 4];
-                for el in &mut self.elements {
-                    el.invalid = true;
+                for i in 0..self.elements.len() {
+                    self.draw_clip(i);
+                    self.elements[i].invalid = true;
                 }
             }
             return;
@@ -644,9 +746,10 @@ impl ClipStack {
             let _ = a_only;
             match simplify_elements(&existing, &added) {
                 SimplifyResult::Empty => {
-                    top.state = ClipState::Empty;
-                    for el in &mut self.elements {
-                        el.invalid = true;
+                    self.saves[top_i].state = ClipState::Empty;
+                    for i in 0..self.elements.len() {
+                        self.draw_clip(i);
+                        self.elements[i].invalid = true;
                     }
                     return;
                 }
@@ -656,12 +759,14 @@ impl ClipStack {
             }
         }
         for i in invalidate {
+            self.draw_clip(i);
             self.elements[i].invalid = true;
         }
         if skip_added {
             return;
         }
         // Update the record's bounds and state.
+        let top = &mut self.saves[top_i];
         if e.intersect {
             top.outer = rect_intersect(top.outer, e.outer);
             top.inner = rect_intersect(top.inner, e.inner);
@@ -698,7 +803,7 @@ impl ClipStack {
 
     /// `visitClipStackForDraw`: the clip a draw is subject to, with the
     /// draw's shape possibly replaced (geometric intersection).
-    fn visit(&mut self, draw: &mut DrawShape, stroke_outset: f32) -> Option<DrawClip> {
+    fn visit(&mut self, draw: &mut DrawShape, stroke_outset: f32, bm: &BoundsManager, z: u32) -> Option<DrawClip> {
         let cs = self.saves.last().unwrap().clone();
         if cs.state == ClipState::Empty {
             return None;
@@ -717,12 +822,12 @@ impl ClipStack {
         };
         match simplify(&save, &draw.tshape()) {
             Influence::ClipsOut => return None,
-            Influence::None => return Some(draw.to_clip(None, Vec::new())),
+            Influence::None => return Some(draw.to_clip(None, FIRST_ORDER)),
             Influence::Replaces => draw.reset_to_flood_fill(),
             Influence::Complex => {}
         }
         let mut analytic: Option<AnalyticClip> = None;
-        let mut depth: Vec<Arc<DepthClip>> = Vec::new();
+        let mut effective: Vec<usize> = Vec::new();
         let oldest = cs.oldest_valid_index;
         for i in (0..self.elements.len()).rev() {
             if i < oldest {
@@ -770,12 +875,39 @@ impl ClipStack {
                             continue;
                         }
                     }
-                    let polys = self.elements[i].depth_clip();
-                    depth.push(polys);
+                    effective.push(i);
                 }
             }
         }
-        Some(draw.to_clip(analytic, depth))
+        let mut clip = draw.to_clip(analytic, FIRST_ORDER);
+        if !effective.is_empty() {
+            // `RawElement::updateForDraw` for every element drawn into the
+            // depth attachment: the first use fixes the clip draw's order
+            // right after the most recent draw under the element's bounds.
+            let snapped = snap_scissor(clip.draw_bounds, device);
+            let mut max_order = FIRST_ORDER;
+            for i in effective {
+                let e = &mut self.elements[i];
+                let order = match e.order {
+                    None => {
+                        let snapped_outer = snap_scissor(e.outer, device);
+                        e.usage = snapped;
+                        e.max_z = z;
+                        let o = bm.most_recent(snapped_outer) + 1;
+                        e.order = Some(o);
+                        o
+                    }
+                    Some(o) => {
+                        e.usage = if rect_empty(e.usage) { snapped } else { rect_union(e.usage, snapped) };
+                        e.max_z = e.max_z.max(z);
+                        o
+                    }
+                };
+                max_order = max_order.max(order);
+            }
+            clip.clip_order = max_order;
+        }
+        Some(clip)
     }
 }
 
@@ -796,125 +928,99 @@ fn simplify_elements(a: &TShape, b: &TShape) -> SimplifyResult {
     }
 }
 
-impl RawElement {
-    fn depth_clip(&mut self) -> Arc<DepthClip> {
-        if let Some(p) = &self.polygons {
-            return p.clone();
-        }
-        let (path, rule) = self.shape.as_path();
-        let local = tess::fill_polygons_local(&path, &self.local_to_device.m);
-        let polys = tess::to_device(&local, &self.local_to_device.m, 0, 0);
-        let d = Arc::new(DepthClip { polys, rule, intersect: self.intersect });
-        self.polygons = Some(d.clone());
-        d
-    }
-}
-
-/// `can_apply_analytic_clip`.
+/// `can_apply_analytic_clip` (Chromium's build defines
+/// `SK_GRAPHITE_USE_LEGACY_RRECT_CLIP_SHADER`): rects, and round rects whose
+/// rounded corners are relatively circular and share one radius; an
+/// elliptical oval (a non-uniformly scaled circle) is drawn into the depth
+/// attachment with MSAA instead.
 fn can_apply_analytic_clip(shape: &Shape, ltd: &Transform, intersect: bool) -> Option<AnalyticClip> {
-    if ltd.ty > TransformType::Affine {
+    if ltd.ty != TransformType::Identity {
         return None;
     }
-    let inv = ltd.inv;
-    let xform = [inv.sx, inv.ky, inv.kx, inv.sy];
-    let tx = xform[0] * ltd.m.tx + xform[2] * ltd.m.ty;
-    let ty = xform[1] * ltd.m.tx + xform[3] * ltd.m.ty;
-    let inverted = !intersect;
-    match shape {
-        Shape::Rect(r) => Some(AnalyticClip {
-            rect: [r[0] + tx, r[1] + ty, r[2] + tx, r[3] + ty],
-            radii: [0.0; 4],
-            xform,
-            inverted,
-        }),
-        Shape::RRect(rr) => {
-            let tolerance = ltd.local_aa_radius() * PIXEL_TOLERANCE;
-            let mut scale_y: Option<f32> = None;
-            let mut radii = [0.0f32; 4];
-            for i in 0..4 {
-                let r = rr.radii[i];
-                let corner_scale = if SkRRect::is_relatively_circular(r[0], r[1], tolerance) { 1.0 } else { r[0] / r[1] };
-                if r[0] < tolerance || r[1] < tolerance {
-                    radii[i] = 0.0;
-                } else if scale_y.is_none() {
-                    scale_y = Some(corner_scale);
-                    radii[i] = r[0];
-                } else {
-                    if (corner_scale - scale_y.unwrap()).abs() > tolerance {
-                        return None;
-                    }
-                    radii[i] = r[0];
-                }
-            }
-            let mut rect = [rr.rect[0] + tx, rr.rect[1] + ty, rr.rect[2] + tx, rr.rect[3] + ty];
-            let mut xf = xform;
-            if let Some(s) = scale_y
-                && (s - 1.0).abs() > tolerance
-            {
-                rect[1] *= s;
-                rect[3] *= s;
-                xf[1] *= s;
-                xf[3] *= s;
-            }
-            Some(AnalyticClip { rect, radii, xform: xf, inverted })
+    let inverted = intersect;
+    let rr = match shape {
+        Shape::Rect(r) => return Some(AnalyticClip { rect: *r, radius: RADIUS_MIN, edge_flags: 0, inverted }),
+        Shape::RRect(rr) => rr,
+        _ => return None,
+    };
+    if rr.is_oval() || rr.is_simple() {
+        let radii = rr.radii[0];
+        if radii[0] < RADIUS_MIN || radii[1] < RADIUS_MIN {
+            return Some(AnalyticClip { rect: rr.rect, radius: RADIUS_MIN, edge_flags: 0, inverted });
         }
-        _ => None,
+        return if SkRRect::is_relatively_circular(radii[0], radii[1], PIXEL_TOLERANCE) {
+            Some(AnalyticClip { rect: rr.rect, radius: radii[0], edge_flags: EDGE_ALL, inverted })
+        } else {
+            None
+        };
+    }
+    const CORNER_FLAGS: [u32; 4] = [
+        EDGE_TOP | EDGE_LEFT,
+        EDGE_TOP | EDGE_RIGHT,
+        EDGE_BOTTOM | EDGE_RIGHT,
+        EDGE_BOTTOM | EDGE_LEFT,
+    ];
+    let mut circular_radius = 0.0f32;
+    let mut edge_flags = 0u32;
+    let mut square = 0;
+    for corner in 0..4 {
+        let radii = rr.radii[corner];
+        if !SkRRect::is_relatively_circular(radii[0], radii[1], PIXEL_TOLERANCE) {
+            return None;
+        }
+        if radii[0] < RADIUS_MIN || radii[1] < RADIUS_MIN {
+            square += 1;
+            continue;
+        }
+        if edge_flags == 0 {
+            circular_radius = radii[0];
+        } else if !SkRRect::is_relatively_circular(radii[0], circular_radius, PIXEL_TOLERANCE) {
+            return None;
+        }
+        edge_flags |= CORNER_FLAGS[corner];
+    }
+    if edge_flags == 0 {
+        Some(AnalyticClip { rect: rr.rect, radius: RADIUS_MIN, edge_flags, inverted })
+    } else if edge_flags == EDGE_ALL && square != 0 {
+        None
+    } else {
+        Some(AnalyticClip { rect: rr.rect, radius: circular_radius, edge_flags, inverted })
     }
 }
 
-/// `sk_analytic_clip` evaluated at a device coordinate.
+/// `sk_analytic_clip_legacy` evaluated at a device coordinate, with the
+/// uniforms `ShadingParams::handleClipping` packs: the bounds outset by
+/// half a pixel, `radiusPlusHalf = (±(r + 0.5), 1 / (r + 0.5))` (positive
+/// for an inverted, i.e. intersect, clip) and the edge selector.
 pub fn analytic_clip_coverage(c: &AnalyticClip, coords: [f32; 2]) -> f32 {
-    let x = c.xform;
-    // float2x2(xform) * coords: column-major (x, y) = (xform.x, xform.y), (xform.z, xform.w).
-    let cx = x[0] * coords[0] + x[2] * coords[1];
-    let cy = x[1] * coords[0] + x[3] * coords[1];
-    // The uniform encodes abs(r) - 1 with signs for scale/bias.
-    let radii_with_inverse: [f32; 4] = if c.inverted {
-        [-(c.radii[0] + 1.0), c.radii[1] + 1.0, c.radii[2] + 1.0, c.radii[3] + 1.0]
-    } else {
-        [c.radii[0] + 1.0, -(c.radii[1] + 1.0), c.radii[2] + 1.0, c.radii[3] + 1.0]
-    };
-    let sign = |v: f32| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 };
-    let signs = radii_with_inverse.map(sign);
-    let scale = signs[0];
-    let bias = 0.5 * (signs[1] + signs[2]);
-    let radii = radii_with_inverse.map(|v| v.abs() - 1.0);
-    let r = c.rect;
-    let lrrl = [r[0], r[2], r[2], r[0]];
-    let ttbb = [r[1], r[1], r[3], r[3]];
-    let sx = [-1.0f32, 1.0, 1.0, -1.0];
-    let sy = [-1.0f32, -1.0, 1.0, 1.0];
-    let mut dxs = [0.0f32; 4];
-    let mut dys = [0.0f32; 4];
-    for i in 0..4 {
-        dxs[i] = cx + sx[i] * radii[i] - lrrl[i];
-        dys[i] = cy + sy[i] * radii[i] - ttbb[i];
-    }
-    let is_edge = [
-        dxs[0] >= 0.0 || dys[0] >= 0.0,
-        dxs[1] <= 0.0 || dys[1] >= 0.0,
-        dxs[2] <= 0.0 || dys[2] <= 0.0,
-        dxs[3] >= 0.0 || dys[3] <= 0.0,
+    let radius_plus_half = c.radius + 0.5;
+    let rp = [if c.inverted { radius_plus_half } else { -radius_plus_half }, 1.0 / radius_plus_half];
+    let r = [c.rect[0] - 0.5, c.rect[1] - 0.5, c.rect[2] + 0.5, c.rect[3] + 0.5];
+    let sel = [
+        if c.edge_flags & EDGE_LEFT != 0 { 1.0f32 } else { 0.0 },
+        if c.edge_flags & EDGE_TOP != 0 { 1.0f32 } else { 0.0 },
+        if c.edge_flags & EDGE_RIGHT != 0 { 1.0f32 } else { 0.0 },
+        if c.edge_flags & EDGE_BOTTOM != 0 { 1.0f32 } else { 0.0 },
     ];
-    let edx = [-0.5f32, 0.0, 0.5, 0.0];
-    let edy = [0.0f32, -0.5, 0.0, -0.5];
+    let radius = rp[0].abs();
+    let dxy0 = [sel[0] * ((r[0] + radius) - coords[0]), sel[1] * ((r[1] + radius) - coords[1])];
+    let dxy1 = [sel[2] * (coords[0] - (r[2] - radius)), sel[3] * (coords[1] - (r[3] - radius))];
+    let dxy = [dxy0[0].max(dxy1[0]).max(0.0), dxy0[1].max(dxy1[1]).max(0.0)];
+    let len = ((dxy[0] * rp[1]) * (dxy[0] * rp[1]) + (dxy[1] * rp[1]) * (dxy[1] * rp[1])).sqrt();
+    let circle = half((radius * (1.0 - len)).clamp(0.0, 1.0));
+    let mut edges = [
+        half((coords[0] - r[0]).clamp(0.0, 1.0)),
+        half((coords[1] - r[1]).clamp(0.0, 1.0)),
+        half((r[2] - coords[0]).clamp(0.0, 1.0)),
+        half((r[3] - coords[1]).clamp(0.0, 1.0)),
+    ];
     for i in 0..4 {
-        if is_edge[i] {
-            dxs[i] = edx[i];
-            dys[i] = edy[i];
+        if sel[i] != 0.0 {
+            edges[i] = 1.0;
         }
     }
-    let mut alphas = [0.0f32; 4];
-    let edge_dist = [cx - r[0], cy - r[1], r[2] - cx, r[3] - cy];
-    for i in 0..4 {
-        let gx = dxs[i] * x[0] + dys[i] * x[1];
-        let gy = dxs[i] * x[2] + dys[i] * x[3];
-        let inv_grad_len = 0.5 / (gx.abs() + gy.abs());
-        let dist = if is_edge[i] { edge_dist[i] } else { radii[i] * radii[i] - dxs[i] * dxs[i] - dys[i] * dys[i] };
-        alphas[i] = half(0.5 + half(inv_grad_len * dist)).clamp(0.0, 1.0);
-    }
-    let min_alpha = half(half(half(alphas[0] * alphas[1]) * alphas[2]) * alphas[3]);
-    half(bias + scale * min_alpha)
+    let alpha = half(half(half(half(circle * edges[0]) * edges[1]) * edges[2]) * edges[3]);
+    if rp[0] < 0.0 { half(1.0 - alpha) } else { alpha }
 }
 
 /// `half(x)`: round to the nearest `f16`.
@@ -1037,7 +1143,11 @@ impl DrawShape {
 
     /// `intersectClipElement`: geometric intersection with a rect or rrect.
     fn intersect_clip_element(&mut self, clip: &RawElement) -> bool {
+        let dbg = std::env::var_os("PM_SVG_DEBUG").is_some();
         if !(self.can_modify && self.matches_geometry) {
+            if dbg {
+                eprintln!("  intersect: cannot modify (can_modify={} matches_geometry={})", self.can_modify, self.matches_geometry);
+            }
             return false;
         }
         let other_intersectable = matches!(clip.shape, Shape::Rect(_) | Shape::RRect(_));
@@ -1070,7 +1180,13 @@ impl DrawShape {
         }
         let aa = self.local_to_device.local_aa_radius();
         if !aa.is_finite() || local_other_rect[2] - local_other_rect[0] <= aa || local_other_rect[3] - local_other_rect[1] <= aa {
+            if dbg {
+                eprintln!("  intersect: too small for aa {aa} rect {local_other_rect:?}");
+            }
             return false;
+        }
+        if dbg {
+            eprintln!("  intersect: shape {:?} clip {:?} local_other_rect {local_other_rect:?} lto {}", self.shape, clip.shape, local_to_other.is_some());
         }
         let other_rrect: SkRRect = match &clip.shape {
             Shape::Rect(_) => {
@@ -1106,6 +1222,9 @@ impl DrawShape {
             _ => return false,
         };
         let Some(local_rrect) = conservative_intersect(&other_rrect, &own) else {
+            if dbg {
+                eprintln!("  intersect: conservative_intersect failed for {other_rrect:?} and {own:?}");
+            }
             return false;
         };
         if local_rrect.is_rect() {
@@ -1131,7 +1250,7 @@ impl DrawShape {
         self.modified = true;
     }
 
-    fn to_clip(&mut self, analytic: Option<AnalyticClip>, depth: Vec<Arc<DepthClip>>) -> DrawClip {
+    fn to_clip(&mut self, analytic: Option<AnalyticClip>, clip_order: u32) -> DrawClip {
         if self.modified {
             self.transformed_bounds = self.local_to_device.map_rect(self.shape.bounds());
             self.outer = rect_intersect(self.transformed_bounds, self.scissor);
@@ -1140,7 +1259,7 @@ impl DrawShape {
         DrawClip {
             scissor: [s[0] as i32, s[1] as i32, s[2] as i32, s[3] as i32],
             analytic,
-            depth,
+            clip_order,
             draw_bounds: if self.flood { self.scissor } else { self.outer },
         }
     }
@@ -1230,13 +1349,14 @@ fn conservative_intersect(a: &SkRRect, b: &SkRRect) -> Option<SkRRect> {
             return None;
         }
     }
-    // AreRectAndRadiiValid and no radii scaling.
-    let (w, h) = (r[2] - r[0], r[3] - r[1]);
-    let valid = radii.iter().all(|c| c[0] >= 0.0 && c[1] >= 0.0)
-        && radii[0][0] + radii[1][0] <= w
-        && radii[2][0] + radii[3][0] <= w
-        && radii[0][1] + radii[3][1] <= h
-        && radii[1][1] + radii[2][1] <= h;
+    // `SkRRect::AreRectAndRadiiValid` (`are_radius_check_predicates_valid`
+    // per radius, in float: a top of 10.000001 rejects a radius of 30 in a
+    // rect of height 30 because `bottom - radius >= top` fails) and no
+    // radii scaling.
+    let ok = |rad: f32, min: f32, max: f32| min <= max && rad <= max - min && min + rad <= max && max - rad >= min && rad >= 0.0;
+    let valid = radii
+        .iter()
+        .all(|c| ok(c[0], r[0], r[2]) && ok(c[1], r[1], r[3]));
     if !valid {
         return None;
     }
@@ -1253,7 +1373,9 @@ fn conservative_intersect(a: &SkRRect, b: &SkRRect) -> Option<SkRRect> {
 pub struct DrawClip {
     pub scissor: [i32; 4],
     pub analytic: Option<AnalyticClip>,
-    pub depth: Vec<Arc<DepthClip>>,
+    /// The highest painter's order of the clip elements drawn into the
+    /// depth attachment for this draw (`First` when none).
+    pub clip_order: u32,
     pub draw_bounds: [f32; 4],
 }
 
@@ -1295,6 +1417,17 @@ pub struct Draw {
     pub geom: Geom,
     pub paint: Paint,
     pub clip: DrawClip,
+    /// `PaintersDepth`: recording order, 1-based; the depth test passes
+    /// where this is greater than the stored Z (`kDirectDepthLessPass` on
+    /// `1 - z / max`).
+    pub z: u32,
+    /// `CompressedPaintersOrder`: the primary sort key of the draw pass.
+    pub order: u32,
+    /// A depth-only clip draw (no color).
+    pub depth_only: bool,
+    /// The geometry is inverse-filled (an intersect clip element covers
+    /// everything outside its shape).
+    pub inverse: bool,
 }
 
 /// What the filter evaluation needs to know about the device it draws into.
@@ -1316,6 +1449,9 @@ struct Device {
     filter: Option<ImageFilter>,
     /// The clip stack depth when the layer began (restored on pop).
     layer_bounds_in_parent: [i32; 4],
+    /// `fCurrentDepth`: the last Z handed out.
+    current_z: u32,
+    bm: BoundsManager,
 }
 
 struct Mc {
@@ -1349,6 +1485,8 @@ impl<'a> Canvas<'a> {
                 alpha: 1.0,
                 filter: None,
                 layer_bounds_in_parent: [0, 0, width as i32, height as i32],
+                current_z: 0,
+                bm: BoundsManager::default(),
             }],
             clip: ClipStack::new(width, height),
             clip_saves: Vec::new(),
@@ -1461,6 +1599,8 @@ impl<'a> Canvas<'a> {
             alpha,
             filter,
             layer_bounds_in_parent: bounds,
+            current_z: 0,
+            bm: BoundsManager::default(),
         });
         // The layer starts with a wide-open clip of its own bounds.
         let saved = std::mem::replace(&mut self.clip, ClipStack::new(w, h));
@@ -1469,6 +1609,8 @@ impl<'a> Canvas<'a> {
     }
 
     fn restore_layer(&mut self) -> Result<(), SvgError> {
+        self.clip.record_deferred_clip_draws();
+        self.take_clip_draws();
         let layer = self.devices.pop().unwrap();
         self.clip = self.clip_saves.pop().unwrap();
         // The layer's clip stack state was saved at saveLayer; restore it.
@@ -1504,15 +1646,35 @@ impl<'a> Canvas<'a> {
         }
         for (rect, img) in pending {
             let mut shape = DrawShape::new(Shape::Rect(rect), Transform::IDENTITY);
-            let Some(clip) = self.clip.visit(&mut shape, 0.0) else {
+            let z = self.next_z();
+            let dev = self.devices.last().unwrap();
+            let Some(clip) = self.clip.visit(&mut shape, 0.0, &dev.bm, z) else {
                 continue;
             };
             let Some(geom) = fill_geometry(&shape.geometry, &shape.local_to_device)? else {
                 continue;
             };
-            self.record(Draw { geom, paint: Paint::Image(img), clip });
+            self.record(geom, Paint::Image(img), clip, z);
         }
         Ok(())
+    }
+
+    /// `fCurrentDepth.next()` for the current device.
+    fn next_z(&mut self) -> u32 {
+        let dev = self.devices.last_mut().unwrap();
+        dev.current_z += 1;
+        dev.current_z
+    }
+
+    /// Moves the clip stack's pending depth-only draws into the device,
+    /// advancing its Z past theirs (`Device::drawClipShape`).
+    fn take_clip_draws(&mut self) {
+        let draws = std::mem::take(&mut self.clip.clip_draws);
+        let dev = self.devices.last_mut().unwrap();
+        for d in draws {
+            dev.current_z = dev.current_z.max(d.z);
+            dev.draws.push(d);
+        }
     }
 
     // -- draws ------------------------------------------------------------
@@ -1594,7 +1756,9 @@ impl<'a> Canvas<'a> {
             inflation_radius(p.join, effective_miter, effective_cap, p.radius * 2.0)
         });
         let mut draw = DrawShape::new(shape, ltd);
-        let Some(clip) = self.clip.visit(&mut draw, outset) else {
+        let z = self.next_z();
+        let dev = self.devices.last().unwrap();
+        let Some(clip) = self.clip.visit(&mut draw, outset, &dev.bm, z) else {
             return Ok(());
         };
         let shape = draw.geometry.clone();
@@ -1608,7 +1772,7 @@ impl<'a> Canvas<'a> {
                 [s[2] as f64, s[3] as f64],
                 [s[0] as f64, s[3] as f64],
             ]];
-            self.record(Draw { geom: Geom::Polygons { polys, rule: Rule::NonZero, msaa: false }, paint, clip });
+            self.record(Geom::Polygons { polys, rule: Rule::NonZero, msaa: false }, paint, clip, z);
             return Ok(());
         }
         let geom = match &stroke {
@@ -1616,12 +1780,30 @@ impl<'a> Canvas<'a> {
             Some((params, cap, _)) => stroke_geometry(&shape, &ltd, *params, *cap)?,
         };
         let Some(geom) = geom else { return Ok(()) };
-        self.record(Draw { geom, paint, clip });
+        self.record(geom, paint, clip, z);
         Ok(())
     }
 
-    fn record(&mut self, d: Draw) {
-        self.devices.last_mut().unwrap().draws.push(d);
+    /// Records a draw with its painter's order (`Device::drawGeometry`): a
+    /// draw that reads the destination (coverage AA or a translucent paint)
+    /// sorts after the most recent draw it overlaps; every draw sorts after
+    /// the clip elements it needs drawn.
+    fn record(&mut self, geom: Geom, paint: Paint, clip: DrawClip, z: u32) {
+        self.take_clip_draws();
+        let depends_on_dst = match (&geom, &paint) {
+            (Geom::Analytic(_), _) => true,
+            (_, Paint::Solid(c)) => c[3] < 1.0,
+            (_, Paint::Gradient { shader, alpha, .. }) => *alpha < 1.0 || shader.colors.iter().any(|c| c[3] < 1.0),
+            (_, Paint::Image(_)) => true,
+        };
+        let dev = self.devices.last_mut().unwrap();
+        let mut order = FIRST_ORDER.max(clip.clip_order + u32::from(clip.clip_order > FIRST_ORDER || true) - 1);
+        order = order.max(clip.clip_order);
+        if depends_on_dst {
+            order = order.max(dev.bm.most_recent(clip.draw_bounds) + 1);
+        }
+        dev.bm.record(clip.draw_bounds, order);
+        dev.draws.push(Draw { geom, paint, clip, z, order, depth_only: false, inverse: false });
     }
 
     pub fn draw_text(&mut self, t: &usvg::Text) -> Result<(), SvgError> {
@@ -1635,13 +1817,15 @@ impl<'a> Canvas<'a> {
         let img = Arc::new(LayerImage { origin: [0, 0], width: w, height: h, rgba, alpha: 1.0 });
         let rect = [0.0, 0.0, w as f32, h as f32];
         let mut draw = DrawShape::new(Shape::Rect(rect), Transform::IDENTITY);
-        let Some(clip) = self.clip.visit(&mut draw, 0.0) else {
+        let z = self.next_z();
+        let dev = self.devices.last().unwrap();
+        let Some(clip) = self.clip.visit(&mut draw, 0.0, &dev.bm, z) else {
             return Ok(());
         };
         let Some(geom) = fill_geometry(&draw.geometry, &draw.local_to_device)? else {
             return Ok(());
         };
-        self.record(Draw { geom, paint: Paint::Image(img), clip });
+        self.record(geom, Paint::Image(img), clip, z);
         Ok(())
     }
 
@@ -1667,7 +1851,9 @@ impl<'a> Canvas<'a> {
         Ok(())
     }
 
-    pub fn finish(&self) -> Vec<u8> {
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.clip.record_deferred_clip_draws();
+        self.take_clip_draws();
         render_device(&self.devices[0])
     }
 }
@@ -1793,7 +1979,7 @@ fn stroke_geometry(shape: &Shape, t: &Transform, params: StrokeParams, cap: Cap)
 
 fn needs_msaa(d: &Draw) -> bool {
     match &d.geom {
-        Geom::Polygons { msaa, .. } => *msaa,
+        Geom::Polygons { msaa, .. } => *msaa || d.depth_only,
         Geom::Triangles(_) => true,
         Geom::Analytic(_) => false,
     }
@@ -1801,8 +1987,86 @@ fn needs_msaa(d: &Draw) -> bool {
 
 /// Renders a device's draws: MSAA when any draw or clip element requires it.
 fn render_device(dev: &Device) -> Vec<u8> {
+    if let Ok(path) = std::env::var("PM_SVG_MESH") {
+        // The analytic draws' device-space mesh strips (36 vertices, index
+        // strip expanded to sequential vertices) for the hardware probe
+        // (tools/canvas-ref/wgpu-probe.ts).
+        let mut meshes = Vec::new();
+        for d in &dev.draws {
+            if let Geom::Analytic(inst) = &d.geom {
+                meshes.push(analytic::mesh_strip(inst));
+            }
+        }
+        if std::env::var_os("PM_SVG_MESH_VERTS").is_some() {
+            for d in &dev.draws {
+                if let Geom::Analytic(inst) = &d.geom {
+                    for (i, v) in analytic::mesh_vertices(inst).iter().enumerate() {
+                        eprintln!("VERT {i} pos {:?} edge {:?} ctrl {:?}", v.pos, v.edge, v.control);
+                    }
+                }
+            }
+        }
+        let strips: Vec<String> = meshes
+            .iter()
+            .map(|m| format!("[{}]", m.iter().map(|p| format!("[{},{}]", p[0], p[1])).collect::<Vec<_>>().join(",")))
+            .collect();
+        let doc = format!("{{\"width\":{},\"height\":{},\"meshes\":[{}]}}", dev.width, dev.height, strips.join(","));
+        std::fs::write(&path, doc).unwrap();
+    }
+    if std::env::var_os("PM_SVG_STRADDLE").is_some() {
+        // Every pixel where an analytic draw's mesh splits the samples
+        // between triangles (MSAA devices only): "STRADDLE draw x y
+        // tri:covers:center;..." for offline comparison with a capture.
+        let msaa = dev.draws.iter().any(needs_msaa);
+        if msaa {
+            for (i, d) in dev.draws.iter().enumerate() {
+                if let Geom::Analytic(inst) = &d.geom {
+                    for py in 0..dev.height {
+                        for px in 0..dev.width {
+                            let e = analytic::explain_data(inst, px, py, &SAMPLES_4X);
+                            let all = std::env::var("PM_SVG_STRADDLE").is_ok_and(|v| v == "all");
+                            if e.len() >= 2 || (all && !e.is_empty()) {
+                                let parts: Vec<String> = e.iter().map(|(k, c, cov)| format!("{k}:{}:{cov}", c.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(""))).collect();
+                                println!("STRADDLE {i} {px} {py} {}", parts.join(";"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if std::env::var_os("PM_SVG_DEBUG").is_some() {
         eprintln!("render device origin={:?} size={}x{} draws={} alpha={} filter={}", dev.origin, dev.width, dev.height, dev.draws.len(), dev.alpha, dev.filter.is_some());
+        if let Some(probe) = std::env::var("PM_SVG_PROBE").ok().and_then(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some((x.trim().parse::<u32>().ok()?, y.trim().parse::<u32>().ok()?))
+        }) {
+            let msaa = dev.draws.iter().any(needs_msaa);
+            let pattern: &[[f64; 2]] = if msaa { &SAMPLES_4X } else { &SAMPLES_1X };
+            for (i, d) in dev.draws.iter().enumerate() {
+                eprintln!("  probe draw {i} at ({},{}) msaa={msaa}", probe.0, probe.1);
+                match &d.geom {
+                    Geom::Analytic(inst) => {
+                        eprintln!("    instance {inst:?}");
+                        let e = analytic::explain(inst, probe.0, probe.1, pattern);
+                        eprintln!("    coverage per sample {e:?}");
+                    }
+                    Geom::Polygons { polys, rule, .. } => {
+                        let mut m = SampleMask::new(dev.width, dev.height, pattern);
+                        fill_polygons(&mut m, polys, *rule);
+                        eprintln!("    polygon sample bits {:04b}", m.bits[(probe.1 * dev.width + probe.0) as usize]);
+                    }
+                    Geom::Triangles(tris) => {
+                        let mut m = SampleMask::new(dev.width, dev.height, pattern);
+                        fill_triangles(&mut m, tris);
+                        eprintln!("    triangle sample bits {:04b}", m.bits[(probe.1 * dev.width + probe.0) as usize]);
+                    }
+                }
+                if let Some(a) = &d.clip.analytic {
+                    eprintln!("    analytic clip coverage {}", analytic_clip_coverage(a, [probe.0 as f32 + 0.5, probe.1 as f32 + 0.5]));
+                }
+            }
+        }
         for d in &dev.draws {
             let g = match &d.geom {
                 Geom::Polygons { polys, rule, msaa } => format!("Polygons n={} rule={rule:?} msaa={msaa}", polys.len()),
@@ -1813,39 +2077,27 @@ fn render_device(dev: &Device) -> Vec<u8> {
                 Paint::Image(i) => format!("{g} image origin={:?} {}x{} alpha={}", i.origin, i.width, i.height, i.alpha),
                 _ => g,
             };
-            eprintln!("  {g} scissor={:?} analytic_clip={} depth={} bounds={:?}", d.clip.scissor, d.clip.analytic.is_some(), d.clip.depth.len(), d.clip.draw_bounds);
+            eprintln!("  {g} scissor={:?} analytic_clip={} z={} order={} depth_only={} inverse={} bounds={:?}", d.clip.scissor, d.clip.analytic.is_some(), d.z, d.order, d.depth_only, d.inverse, d.clip.draw_bounds);
         }
     }
-    let msaa = dev.draws.iter().any(|d| needs_msaa(d) || !d.clip.depth.is_empty());
+    let msaa = dev.draws.iter().any(needs_msaa);
     let pattern = if msaa { &SAMPLES_4X[..] } else { &SAMPLES_1X[..] };
     let mut target = MsaaTarget::new(dev.width.max(1), dev.height.max(1), pattern);
     if dev.width == 0 || dev.height == 0 {
         return Vec::new();
     }
-    let mut depth_cache: Vec<(*const DepthClip, SampleMask)> = Vec::new();
-    for d in &dev.draws {
-        render_draw(&mut target, d, &mut depth_cache);
+    // `DrawPass::Make` sorts by painter's order; the depth test resolves
+    // the rest. Depth-only clip draws precede the draws of their order.
+    let mut draws: Vec<&Draw> = dev.draws.iter().collect();
+    draws.sort_by_key(|d| (d.order, !d.depth_only, d.z));
+    let mut depth = vec![0u32; (target.width * target.height) as usize * pattern.len()];
+    for d in draws {
+        render_draw(&mut target, &mut depth, d);
     }
     target.resolve()
 }
 
-fn depth_mask(target: &MsaaTarget, cache: &mut Vec<(*const DepthClip, SampleMask)>, clip: &DepthClip) -> SampleMask {
-    let key = clip as *const DepthClip;
-    if let Some((_, m)) = cache.iter().find(|(k, _)| *k == key) {
-        return m.clone();
-    }
-    let mut m = target.mask();
-    fill_polygons(&mut m, &clip.polys, clip.rule);
-    if !clip.intersect {
-        for b in &mut m.bits {
-            *b = !*b & ((1u8 << target.pattern.len()) - 1);
-        }
-    }
-    cache.push((key, m.clone()));
-    m
-}
-
-fn render_draw(target: &mut MsaaTarget, d: &Draw, cache: &mut Vec<(*const DepthClip, SampleMask)>) {
+fn render_draw(target: &mut MsaaTarget, depth: &mut [u32], d: &Draw) {
     let n = target.pattern.len();
     let (w, h) = (target.width as usize, target.height as usize);
     let scissor = [
@@ -1857,19 +2109,6 @@ fn render_draw(target: &mut MsaaTarget, d: &Draw, cache: &mut Vec<(*const DepthC
     if scissor[2] <= scissor[0] || scissor[3] <= scissor[1] {
         return;
     }
-    // Depth-only clip elements: the samples that pass every element.
-    let mut pass: Option<SampleMask> = None;
-    for c in &d.clip.depth {
-        let m = depth_mask(target, cache, c);
-        match &mut pass {
-            None => pass = Some(m),
-            Some(p) => {
-                for (a, b) in p.bits.iter_mut().zip(&m.bits) {
-                    *a &= *b;
-                }
-            }
-        }
-    }
     // Coverage per sample.
     let mut mask = target.mask();
     let mut coverage: Option<analytic::Samples> = None;
@@ -1878,6 +2117,16 @@ fn render_draw(target: &mut MsaaTarget, d: &Draw, cache: &mut Vec<(*const DepthC
         Geom::Triangles(tris) => fill_triangles(&mut mask, tris),
         Geom::Analytic(inst) => coverage = Some(analytic::rasterize(inst, target.width, target.height, target.pattern)),
     }
+    if d.inverse {
+        // An inverse fill covers every sample of the draw bounds outside
+        // the shape.
+        let all = (1u8 << n) - 1;
+        for b in &mut mask.bits {
+            *b = !*b & all;
+        }
+    }
+    let db = d.clip.draw_bounds;
+    let pass: Option<SampleMask> = None;
     for py in scissor[1]..scissor[3] {
         for px in scissor[0]..scissor[2] {
             let p = py * w + px;
@@ -1896,7 +2145,20 @@ fn render_draw(target: &mut MsaaTarget, d: &Draw, cache: &mut Vec<(*const DepthC
             if let Some(pm) = &pass {
                 covered &= pm.bits[p];
             }
-            if covered == 0 {
+            if d.inverse && !rect_intersects(db, [px as f32, py as f32, px as f32 + 1.0, py as f32 + 1.0]) {
+                continue;
+            }
+            // The depth test per sample: later draws (greater Z) pass and
+            // write; a depth-only clip draw writes its Z outside its shape.
+            let mut passed = 0u8;
+            for s in 0..n {
+                if covered & (1 << s) != 0 && d.z > depth[p * n + s] {
+                    depth[p * n + s] = d.z;
+                    passed |= 1 << s;
+                }
+            }
+            covered = passed;
+            if covered == 0 || d.depth_only {
                 continue;
             }
             // The fragment: shader color at the pixel center, times the

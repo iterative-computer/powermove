@@ -6,7 +6,7 @@
 //! Portions are derived from Skia, Copyright Google LLC, used under the BSD
 //! 3-Clause license.
 
-use super::skpath::{Mat, P, SkPath};
+use super::skpath::{Verb, Mat, P, SkPath};
 
 /// `SkRRect::Type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,44 +203,62 @@ impl SkRRect {
         matches!(self.ty, RRectType::Empty)
     }
 
-    /// `SkRRect::transform` for a scale + translate matrix (the only kind
-    /// Graphite's clip stack pre-transforms with).
+    /// `SkRRect::transform` (the current, non-legacy implementation): the
+    /// mapped rect for rects and ovals (an oval's radii are rebuilt from the
+    /// new rect, so its extreme points stay on the rect); other round rects
+    /// map their contour points and deduce the radii from the mapped conics
+    /// (`SkPathPriv::DeduceRRectFromContour`).
     pub fn transform(&self, m: &Mat) -> Option<SkRRect> {
-        if m.kx != 0.0 || m.ky != 0.0 {
-            return None;
+        if *m == Mat::IDENTITY {
+            return Some(*self);
         }
-        if self.is_empty() {
-            return Some(Self::make_rect(map_rect(m, self.rect)));
+        let axis_aligned = (m.kx == 0.0 && m.ky == 0.0) || (m.sx == 0.0 && m.sy == 0.0);
+        if !axis_aligned {
+            return None;
         }
         let new_rect = sort(map_rect(m, self.rect));
         if !new_rect.iter().all(|v| v.is_finite()) {
             return None;
         }
-        let x_scale = m.sx;
-        let y_scale = m.sy;
-        let flip_x = x_scale < 0.0;
-        let flip_y = y_scale < 0.0;
-        let (ax, ay) = (x_scale.abs(), y_scale.abs());
+        match self.ty {
+            RRectType::Empty => return Some(Self::make_rect([0.0; 4])),
+            RRectType::Rect => return Some(Self::make_rect(new_rect)),
+            RRectType::Oval => return Some(Self::make_oval(new_rect)),
+            _ => {}
+        }
+        let path = rrect_path(self, true, 0);
+        let pts: Vec<P> = path.pts.iter().map(|p| m.map(*p)).collect();
         let mut radii = [[0.0f32; 2]; 4];
-        for i in 0..4 {
-            radii[i] = [self.radii[i][0] * ax, self.radii[i][1] * ay];
+        let mut pi = 0usize;
+        for v in &path.verbs {
+            match v {
+                Verb::Move | Verb::Line => pi += 1,
+                Verb::Conic(_) => {
+                    let (prev, ctrl, end) = (pts[pi - 1], pts[pi], pts[pi + 1]);
+                    let v1_0 = [ctrl[0] - prev[0], ctrl[1] - prev[1]];
+                    let v2_1 = [end[0] - ctrl[0], end[1] - ctrl[1]];
+                    let dxdy = if v1_0[0] != 0.0 {
+                        [v1_0[0].abs(), v2_1[1].abs()]
+                    } else if v1_0[1] == 0.0 {
+                        [v2_1[0].abs(), v2_1[1].abs()]
+                    } else {
+                        [v2_1[0].abs(), v1_0[1].abs()]
+                    };
+                    let corner = if ctrl[0] == new_rect[0] {
+                        if ctrl[1] == new_rect[1] { 0 } else { 3 }
+                    } else if ctrl[1] == new_rect[1] {
+                        1
+                    } else {
+                        2
+                    };
+                    radii[corner] = dxdy;
+                    pi += 2;
+                }
+                Verb::Quad | Verb::Cubic => return None,
+                Verb::Close => {}
+            }
         }
-        if flip_x {
-            radii.swap(0, 1);
-            radii.swap(2, 3);
-        }
-        if flip_y {
-            radii.swap(0, 3);
-            radii.swap(1, 2);
-        }
-        let mut out = SkRRect { rect: new_rect, radii, ty: self.ty };
-        // Since the only transforms that were allowed are axis aligned, the type
-        // remains unchanged (except that the radii may need re-scaling).
-        if !out.are_rect_and_radii_valid() {
-            out.scale_radii();
-            out.compute_type();
-        }
-        Some(out)
+        Some(Self::make_rect_radii(new_rect, radii))
     }
 
     fn are_rect_and_radii_valid(&self) -> bool {
