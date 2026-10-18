@@ -26,14 +26,15 @@
  * document revision after the call).
  *
  * Versioning: adding an optional field or a service method the worker does
- * not require is compatible. Changing a message, a failure code, or which
+ * not require is compatible (the `extensions` service and its
+ * `extensionsChanged` message were added this way). Changing a message, a failure code, or which
  * side runs a tool bumps `DOCUMENT_HOST_PROTOCOL`.
  */
 import type { AgentToolRequestEvent, AgentToolResponseEvent } from '../../shared/ipc';
 import type { MediaPathLookupRequest, MediaPathResult } from '../../shared/media-tools';
 import type { TranscribeProgress, TranscribeRequest, TranscribeResult, TranscriptionStatus } from '../../shared/transcription';
 import type { Patch } from '../../shared/patch';
-import type { ExtensionRecord } from '../../shared/extensions';
+import type { ExtensionRecord, ExtensionsChangedEvent } from '../../shared/extensions';
 import type { ExtensionRegistered, PersistReason, ProjectOpened } from '../../shared/engine-protocol';
 
 export const DOCUMENT_HOST_PROTOCOL = 1;
@@ -131,6 +132,24 @@ export interface DocumentHostServices {
     /** Progress events for every request; the worker filters by `requestId`. */
     onProgress(listener: (progress: TranscribeProgress) => void): () => void;
   };
+  /**
+   * The user's extensions, as the editor's Mods panel lists them: user and
+   * project extensions, overrides and forks of built-ins (`replaces`),
+   * enabled state, health, and Store extensions (run in the contained
+   * sandbox, `sandbox.ts`). Absent: built-ins only. A worker loads them
+   * through the kernel's own loader (load order, `replaces`, `dependsOn`,
+   * blocked states), as the editor does.
+   */
+  extensions?: {
+    /** `EXT_IPC.list`: every record, with `bundleUrl` as the host serves it. */
+    list(): Promise<ExtensionRecord[]>;
+    /** The ES module source a record's `bundleUrl` names. */
+    bundle(url: string): Promise<string>;
+    /** `EXT_IPC.changed`: records changed (installed, enabled, rebuilt). */
+    onChanged(listener: (event: ExtensionsChangedEvent) => void): () => void;
+    /** Values for an extension's declared vars; absent or rejecting: none. */
+    values?(id: string): Promise<Record<string, string>>;
+  };
   log?(line: string): void;
 }
 
@@ -213,7 +232,9 @@ export type ToWorker =
   /** The answer to a `service` request. */
   | { t: 'serviceReply'; id: number; ok: boolean; value?: unknown; error?: string }
   /** A transcription progress event. */
-  | { t: 'progress'; progress: TranscribeProgress };
+  | { t: 'progress'; progress: TranscribeProgress }
+  /** The host's extension records changed (`DocumentHostServices.extensions.onChanged`). */
+  | { t: 'extensionsChanged'; event: ExtensionsChangedEvent };
 
 export type FromWorker =
   | { t: 'ready'; protocol: number; pid: number }
@@ -227,7 +248,8 @@ export type ServiceName =
   | 'store.read' | 'store.write' | 'store.remove'
   | 'session.join' | 'session.patch' | 'session.leave'
   | 'mediaPath.lookup'
-  | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe';
+  | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe'
+  | 'extensions.list' | 'extensions.bundle' | 'extensions.values';
 
 /** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host). */
 export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout'] as const;

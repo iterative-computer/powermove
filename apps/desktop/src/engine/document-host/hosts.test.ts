@@ -14,7 +14,7 @@ import type { ExtensionRecord } from '../../shared/extensions';
 import type { TranscribeProgress, TranscribeRequest } from '../../shared/transcription';
 import { DocumentHostPool } from './pool';
 import type { DocumentHostServices } from './protocol';
-import { BRIDGE, FIXTURE, WASM, buildEngineBundle, hostServices } from './test-host';
+import { BRIDGE, FIXTURE, WASM, buildEngineBundle, effectSource, extensionHost, hostServices, userRecord } from './test-host';
 
 let bundle: { script: string; dispose(): void } | null = null;
 beforeAll(async () => { bundle = await buildEngineBundle(); }, 180_000);
@@ -168,33 +168,93 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
     expect(layer.d.fontAnchorBounds).toBeUndefined();
   }, 60_000);
 
-  it('registers a local extension so the next call uses it, and refuses a Store extension by name', async () => {
+  it("loads the user's extensions as the editor does: overrides, forks, dependencies, disabled records, live changes", async () => {
     revisions.clear();
     const host = hostServices();
     host.seed('Pext', 'Extensions');
+    const ext = extensionHost([
+      // A user effect pack.
+      userRecord('user-glow'),
+      // A fork of effects-basic: it replaces the built-in, with its own blur.
+      userRecord('my-effects', { replaces: ['effects-basic'] }),
+      // Needs an extension that is not installed: skipped, as in the editor.
+      userRecord('needs-missing', { dependsOn: ['not-installed'] }),
+      // Turned off in Mods.
+      userRecord('turned-off', {}, { enabled: false, health: { state: 'disabled' } }),
+    ], {
+      'app://powermove/ext/user-glow/bundle.js?v=h9': `export default function activate(api) { ${effectSource('user-glow.glow', 0.25)} }`,
+      'app://powermove/ext/my-effects/bundle.js?v=h10': `export default function activate(api) { ${effectSource('blur', 42)} }`,
+      'app://powermove/ext/needs-missing/bundle.js?v=h13': `export default function activate(api) { ${effectSource('needs-missing.fx')} }`,
+      'app://powermove/ext/turned-off/bundle.js?v=h10': `export default function activate(api) { ${effectSource('turned-off.fx')} }`,
+    });
+    host.services.extensions = ext.service;
+    const pool = newPool(host.services);
+    await pool.open('Pext');
+    const stats = await pool.stats('Pext');
+    expect(stats.extensions.active).toEqual(expect.arrayContaining(['user-glow', 'my-effects', 'timeline', 'inspector']));
+    expect(stats.extensions.active).not.toContain('effects-basic');
+    expect(stats.extensions.active).not.toContain('needs-missing');
+    expect(stats.extensions.active).not.toContain('turned-off');
+    // Bundles of records that do not load are never fetched.
+    expect(ext.fetched).not.toContain('app://powermove/ext/turned-off/bundle.js?v=h10');
+
+    const effects = async (commands: unknown[]) => {
+      const r = await ask(pool, 'Pext', 'run-x', 'apply_commands', { commands, label: 'fx' });
+      return r;
+    };
+    const ok = await effects([
+      { type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate' },
+      { type: 'add_effect', target: 'Lplate', effect: 'user-glow.glow' },
+      { type: 'add_effect', target: 'Lplate', effect: 'blur' },
+    ]);
+    expect(ok.error ?? null).toBeNull();
+    expect((await effects([{ type: 'add_effect', target: 'Lplate', effect: 'invert' }])).error).toMatch(/Unknown effect: invert/);
+    expect((await effects([{ type: 'add_effect', target: 'Lplate', effect: 'turned-off.fx' }])).error).toMatch(/Unknown effect/);
+    await ask(pool, 'Pext', 'run-x', '__finish_run', { commit: true });
+    const plate = (host.sessions.document('Pext') as any).layers.find((l: any) => l.id === 'Lplate');
+    expect(plate.fx.map((f: any) => [f.type, f.p.amount.v])).toEqual([['user-glow.glow', 0.25], ['blur', 42]]);
+
+    // The user turns the fork off in Mods: the host's list changes and the built-in comes back.
+    ext.records = ext.records.map((r) => (r.id === 'my-effects' ? { ...r, enabled: false, health: { state: 'disabled' } } : r));
+    ext.changed({ ids: ['my-effects'], reason: 'disable' });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const after = await pool.stats('Pext');
+    expect(after.extensions.active).toContain('effects-basic');
+    expect(after.extensions.active).not.toContain('my-effects');
+    expect((await effects([{ type: 'add_effect', target: 'Lplate', effect: 'invert' }])).error ?? null).toBeNull();
+  }, 120_000);
+
+  it('registers and hot-reloads an extension through the loader, so the next call uses it', async () => {
+    revisions.clear();
+    const host = hostServices();
+    host.seed('Pext', 'Extensions');
+    const ext = extensionHost();
+    host.services.extensions = ext.service;
     const pool = newPool(host.services);
     const dir = path.join(path.dirname(bundle!.script), 'ext-glow');
     mkdirSync(dir, { recursive: true });
     const entry = path.join(dir, 'index.mjs');
-    writeFileSync(entry, `export default function activate(api) {
-  api.effects.register({ id: 'test.glow', label: 'Test Glow', group: 'Stylize', params: [{ k: 'amount', label: 'Amount', def: 0.5, min: 0, max: 1 }],
-    frag: '#version 300 es\\nprecision highp float;\\nin vec2 v_st;\\nuniform sampler2D u_tex;\\nuniform float u_p0;\\nout vec4 o;\\nvoid main(){ o = texture(u_tex, v_st) * (1.0 + u_p0); }' });
-}\n`);
-    const record = (id: string, trust?: string): ExtensionRecord => ({
-      id, scope: 'user', dir, enabled: true, bundleUrl: pathToFileURL(entry).href, bundleHash: null, health: { state: 'ok' }, updatedAt: 0,
-      manifest: { id, name: id, version: '1.0.0', apiVersion: 3 } as never, ...(trust ? { trust } : {}),
+    const record = (enabled = true): ExtensionRecord => ({
+      ...userRecord('test-glow'), bundleUrl: pathToFileURL(entry).href, enabled, ...(enabled ? {} : { health: { state: 'disabled' } }),
     } as ExtensionRecord);
-    const before = await ask(pool, 'Pext', 'run-x', 'apply_commands', { commands: [{ type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate' }, { type: 'add_effect', target: 'Lplate', effect: 'test.glow' }], label: 'glow' });
-    expect(before.ok).toBe(false);
-    expect(before.error).toMatch(/Unknown effect: test\.glow/);
-    const registered = await pool.registerExtension('Pext', record('test-glow'));
+    const add = () => ask(pool, 'Pext', 'run-x', 'apply_commands', { commands: [{ type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate' }, { type: 'add_effect', target: 'Lplate', effect: 'test.glow' }], label: 'glow' });
+    expect((await add()).error).toMatch(/Unknown effect: test\.glow/);
+    writeFileSync(entry, `export default function activate(api) { ${effectSource('test.glow', 0.5)} }\n`);
+    // A disabled record stays off (planLoad), as in the editor.
+    expect(await pool.registerExtension('Pext', record(false))).toMatchObject({ extension: 'test-glow', active: false });
+    expect((await add()).error).toMatch(/Unknown effect: test\.glow/);
+    const registered = await pool.registerExtension('Pext', record());
     expect(registered).toMatchObject({ extension: 'test-glow', active: true });
     expect(registered.definitionsGeneration).toBeGreaterThan(0);
-    const after = await ask(pool, 'Pext', 'run-x', 'apply_commands', { commands: [{ type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate' }, { type: 'add_effect', target: 'Lplate', effect: 'test.glow' }], label: 'glow' });
-    expect(after.error ?? null).toBeNull();
-    const store = await pool.registerExtension('Pext', record('store-ext', 'store')).catch((e) => e);
-    expect(store.code).toBe('sandbox-unavailable');
+    expect((await add()).error ?? null).toBeNull();
+    // A rebuilt bundle: the next registration runs the new code.
+    writeFileSync(entry, `export default function activate(api) { ${effectSource('test.glow', 0.9)} }\n`);
+    await pool.registerExtension('Pext', record());
+    await ask(pool, 'Pext', 'run-x', 'apply_commands', { commands: [{ type: 'add_effect', target: 'Lplate', effect: 'test.glow' }], label: 'glow 2' });
+    await ask(pool, 'Pext', 'run-x', '__finish_run', { commit: true });
+    const plate = (host.sessions.document('Pext') as any).layers.find((l: any) => l.id === 'Lplate');
+    expect(plate.fx.map((f: any) => f.p.amount.v)).toEqual([0.5, 0.9]);
     expect((await pool.stats('Pext')).extensions.active).toContain('test-glow');
-    expect(text(after)).toBeTruthy();
+    expect(text(await ask(pool, 'Pext', 'run-y', 'get_project_state', {}))).toBeTruthy();
   }, 120_000);
 });

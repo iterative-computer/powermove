@@ -17,12 +17,15 @@
  *   node engine.mjs <url> <token>         the supervisor (serve's child)
  *   node engine.mjs --document-worker     one project's worker (the pool forks it)
  */
+import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent } from '../shared/ipc';
 import { Connection } from '../shared/link';
 import { WEB } from '../shared/wire';
+import { EXT_IPC, type ExtensionRecord, type ExtensionsChangedEvent } from '../shared/extensions';
 import { MEDIA_PATH_IPC, type MediaPathResult } from '../shared/media-tools';
 import { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from '../main/engine/flag';
 import type { Patch } from '../shared/patch';
@@ -42,8 +45,39 @@ export interface EngineOptions {
 /** A tool request the host forwards to the engine, tagged with its project. */
 export interface EngineToolRequest extends AgentToolRequestEvent { projectId: string }
 
+/**
+ * GETs a path from the serve host with the session cookie: extension bundles
+ * (`/ext/<id>/bundle.js`), as the tab's loader imports them.
+ */
+export function hostFetch(url: string, token: string, path: string): Promise<string> {
+  const base = new URL(url);
+  const target = new URL(path, `${base.protocol === 'wss:' ? 'https:' : 'http:'}//${base.host}`);
+  const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const req = request(target, { method: 'GET', headers: { cookie: `pm_session=${token}` }, rejectUnauthorized: false }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if ((response.statusCode ?? 500) >= 400) reject(new Error(`${target.pathname}: ${response.statusCode} ${body.slice(0, 200)}`));
+        else resolve(body);
+      });
+      response.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** `app://powermove/ext/…` (main's bundle URL) → the serve host's `/ext/…` path. */
+export const bundlePathOf = (bundleUrl: string): string => {
+  if (bundleUrl.startsWith('app://powermove/')) return `/${bundleUrl.slice('app://powermove/'.length)}`;
+  const parsed = new URL(bundleUrl);
+  return `${parsed.pathname}${parsed.search}`;
+};
+
 /** The host's services over the link to the serve host. */
-export function linkServices(link: Connection, log: (line: string) => void): DocumentHostServices {
+export function linkServices(link: Connection, log: (line: string) => void, fetchPath: (path: string) => Promise<string> = () => Promise.reject(new Error('no host to fetch from'))): DocumentHostServices {
   const patchListeners = new Set<(patch: SessionPatch) => void>();
   link.on(WEB.syncPatch, (payload) => {
     const message = payload as { projectId?: unknown; seq?: unknown; patches?: unknown };
@@ -69,6 +103,14 @@ export function linkServices(link: Connection, log: (line: string) => void): Doc
     /* Agent media tools and captions find a project's media in the host's own
        store by key; the engine has no bytes of its own to stage. */
     mediaPath: { lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request) },
+    /* The user's extensions as a tab's loader sees them (web-bridge.ts): the
+       list over the link, bundles from the host's /ext/ route. Values for
+       declared vars stay on the Mac that runs Powermove (none over serve). */
+    extensions: {
+      list: () => link.invoke<ExtensionRecord[]>(EXT_IPC.list),
+      bundle: (bundleUrl) => fetchPath(bundlePathOf(bundleUrl)),
+      onChanged: (listener) => link.on(EXT_IPC.changed, (event) => listener(event as ExtensionsChangedEvent)),
+    },
     log,
   };
 }
@@ -88,7 +130,7 @@ export async function startEngine(options: EngineOptions): Promise<{ close(): Pr
     socket.once('error', (error) => reject(error));
   });
   const link = new Connection(socket as unknown as ConstructorParameters<typeof Connection>[0]);
-  const services = linkServices(link, log);
+  const services = linkServices(link, log, (path) => hostFetch(options.url, options.token, path));
   const stored = await services.store.read(NEW_ENGINE_STORE_KEY).catch(() => null);
   const newEngine = newEngineEnabled({ [NEW_ENGINE_ENV]: process.env[NEW_ENGINE_ENV] }, stored);
   const pool = new DocumentHostPool({ services, newEngine, script: bundlePath() });

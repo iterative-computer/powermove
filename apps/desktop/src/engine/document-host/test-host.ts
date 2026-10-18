@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { ProjectSessions, type SessionMember } from '../../server/sessions';
+import type { ExtensionRecord, ExtensionsChangedEvent } from '../../shared/extensions';
 import type { DocumentHostServices, SessionPatch } from './protocol';
 
 const desktop = path.resolve(__dirname, '../../..');
@@ -76,3 +77,48 @@ export function hostServices(values = new Map<string, unknown>(), extra: Partial
   };
   return { values, sessions, services, seed, tab, log };
 }
+
+/** A host's extension list and bundles (main's registry and the /ext/ route, in memory). */
+export interface TestExtensions {
+  records: ExtensionRecord[];
+  sources: Map<string, string>;
+  service: NonNullable<DocumentHostServices['extensions']>;
+  changed(event: ExtensionsChangedEvent): void;
+  fetched: string[];
+}
+
+export function extensionHost(records: ExtensionRecord[] = [], sources: Record<string, string> = {}): TestExtensions {
+  const listeners = new Set<(event: ExtensionsChangedEvent) => void>();
+  const host: TestExtensions = {
+    records,
+    sources: new Map(Object.entries(sources)),
+    fetched: [],
+    changed: (event) => { for (const l of listeners) l(event); },
+    service: {
+      list: async () => copy(host.records),
+      bundle: async (url) => {
+        host.fetched.push(url);
+        const source = host.sources.get(url);
+        if (source === undefined) throw new Error(`404 ${url}`);
+        return source;
+      },
+      onChanged: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    },
+  };
+  return host;
+}
+
+/** A user extension record as main's registry lists it. */
+export function userRecord(id: string, manifest: Record<string, unknown> = {}, extra: Partial<ExtensionRecord> = {}): ExtensionRecord {
+  return {
+    id, scope: 'user', dir: `/extensions/${id}`, enabled: true,
+    bundleUrl: `app://powermove/ext/${id}/bundle.js?v=h${id.length}`, bundleHash: `h${id.length}`,
+    health: { state: 'ok' }, updatedAt: 0,
+    manifest: { id, name: id, version: '1.0.0', apiVersion: 3, ...manifest },
+    ...extra,
+  } as ExtensionRecord;
+}
+
+/** An effect definition source line for a test bundle. */
+export const effectSource = (id: string, def = 0.5) => `api.effects.register({ id: '${id}', label: '${id}', group: 'Stylize', params: [{ k: 'amount', label: 'Amount', def: ${def}, min: 0, max: 100 }],
+    frag: '#version 300 es\\nprecision highp float;\\nin vec2 v_st;\\nuniform sampler2D u_tex;\\nuniform float u_p0;\\nout vec4 o;\\nvoid main(){ o = texture(u_tex, v_st) * (1.0 + u_p0); }' });`;

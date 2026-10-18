@@ -85,12 +85,17 @@ export class DocumentHostPool implements DocumentHostPoolApi {
   private restarts = new Map<string, number>();
   private stopped = false;
   private offPatch: () => void;
+  private offExtensions: () => void;
 
   constructor(private readonly options: PoolOptions) {
     this.offPatch = options.services.session.onPatch((patch) => {
       const instance = this.byProject.get(patch.projectId);
       if (instance && !instance.exited) instance.handle.send({ t: 'remote', patch });
     });
+    // Every open project reloads what changed, as every editor window does.
+    this.offExtensions = options.services.extensions?.onChanged((event) => {
+      for (const instance of this.byProject.values()) if (!instance.exited) instance.handle.send({ t: 'extensionsChanged', event });
+    }) ?? (() => {});
   }
 
   private log(line: string): void { this.options.services.log?.(line); }
@@ -204,6 +209,10 @@ export class DocumentHostPool implements DocumentHostPoolApi {
         return s.transcription.status();
       case 'transcription.transcribe': return s.transcription ? s.transcription.transcribe(args[0] as never) : missing('Transcription');
       case 'transcription.cancelTranscribe': return s.transcription ? s.transcription.cancelTranscribe(String(args[0])) : null;
+      // No extensions service: the built-ins only (an empty list, as a bridge-less editor boots).
+      case 'extensions.list': return s.extensions ? s.extensions.list() : null;
+      case 'extensions.bundle': return s.extensions ? s.extensions.bundle(String(args[0])) : missing('Extension bundles');
+      case 'extensions.values': return s.extensions?.values ? s.extensions.values(String(args[0])) : {};
     }
   }
 
@@ -294,6 +303,7 @@ export class DocumentHostPool implements DocumentHostPoolApi {
   async shutdown(): Promise<void> {
     this.stopped = true;
     this.offPatch();
+    this.offExtensions();
     // Persist every instance first (contract 15 invariant 5), then stop them.
     await Promise.all([...this.byProject.keys()].map((projectId) => this.close(projectId)));
   }

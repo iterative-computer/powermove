@@ -19,7 +19,9 @@ import type { PersistReason } from '../../shared/engine-protocol';
 import type { TranscribeProgress } from '../../shared/transcription';
 import { bootChain, memoryStore, type Chain, type EnginePolicy } from './chain';
 import { deterministicSeam } from './contract';
-import { recordFor, records as storeRecords, setRecords } from '../../renderer/src/kernel/extensions.svelte';
+import { recordFor } from '../../renderer/src/kernel/extensions.svelte';
+import { BUILTIN_EXTENSIONS } from '../../renderer/src/kernel/builtins';
+import { WorkerExtensions } from './extensions';
 import {
   DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
   type DocumentHostFailure, type FromWorker, type InstanceOpened, type InstancePersisted, type InstanceStats,
@@ -59,9 +61,16 @@ export class DocumentWorker {
   private onRequest: ((request: AgentToolRequestEvent) => void) | null = null;
   private extensions = { active: [] as string[], failed: [] as Array<{ id: string; error: string }> };
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly ext: WorkerExtensions;
 
   constructor(private readonly port: WorkerPort, private readonly policy: EnginePolicy) {
     port.onMessage((message) => this.receive(message));
+    this.ext = new WorkerExtensions({
+      list: () => this.service<ExtensionRecord[] | null>('extensions.list'),
+      bundle: (url) => this.service<string>('extensions.bundle', url),
+      values: (id) => this.service<Record<string, string>>('extensions.values', id),
+      log: (line) => this.log(line),
+    }, Object.keys(BUILTIN_EXTENSIONS));
   }
 
   start(): void {
@@ -93,6 +102,11 @@ export class DocumentWorker {
       case 'remote':
         this.applyRemote(message.patch);
         return;
+      case 'extensionsChanged':
+        // The kernel's loader reloads what changed, in its own queue, as in the editor.
+        this.ext.emit(message.event);
+        void this.chain?.loader()?.whenIdle().then(() => { this.extensions = this.extensionState(); });
+        return;
       case 'tool':
         // Tool calls run concurrently (the harness keeps one transaction per run).
         void this.answer(message.id, () => this.tool(message.request));
@@ -114,7 +128,7 @@ export class DocumentWorker {
     }
   }
 
-  private lifecycle(message: Exclude<ToWorker, { t: 'tool' | 'remote' | 'serviceReply' | 'progress' }>): Promise<unknown> {
+  private lifecycle(message: Exclude<ToWorker, { t: 'tool' | 'remote' | 'serviceReply' | 'progress' | 'extensionsChanged' }>): Promise<unknown> {
     switch (message.t) {
       case 'open': return this.open(message.projectId, message.instance);
       case 'persist': return this.persist(message.reason);
@@ -138,6 +152,8 @@ export class DocumentWorker {
     const unavailable = (what: string) => () => Promise.reject(new Error(`${what} is not available in the document host.`));
     return {
       agentTools,
+      // The user's extensions through the kernel's own loader (extensions.ts).
+      ...(this.ext.available ? { extensions: this.ext.bridge(), vars: this.ext.vars() as never } : {}),
       remote: true,
       versions: { electron: '', chrome: '', node: process.versions.node },
       log: (level: string, text: string) => this.log(`[engine:${level}] ${text}`),
@@ -171,6 +187,7 @@ export class DocumentWorker {
     this.readOnly = needsNewerReader(joined.doc);
     if (this.readOnly) this.log(`[engine] ${projectId}: ${NEWER_PROJECT_MESSAGE}. It is open read-only, so changes are not saved.`);
     const saved = await this.service<InstanceState | null>('store.read', INSTANCE_STATE_KEY(projectId)).catch(() => null);
+    await this.ext.probe();
     this.chain = await bootChain({ bridge: this.bridge(), store: memoryStore(), log: (line) => this.log(line), policy: this.policy });
     const PM = this.chain.PM;
     if (!this.onRequest) throw new DocumentHostError('worker-error', 'The agent tool harness did not register.');
@@ -188,7 +205,8 @@ export class DocumentWorker {
       if (PM['hist'].import(saved.history)) restored = PM['hist'].export({ copy: false }).entries.length;
       if (saved.hash !== canonicalProjectHash(PM['proj'])) this.log(`[engine] ${projectId}: the document changed since its history was saved (another member edited it); undo applies on top`);
     }
-    this.extensions = await this.chain.bootExtensions();
+    await this.chain.bootExtensions();
+    this.extensions = this.extensionState();
     // The contract tests' deterministic ids and clock (contract.ts), tests only.
     if (process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED']) deterministicSeam();
     this.log(`[engine] opened ${projectId} (seq ${joined.seq}, ${restored} undo entries, extensions ${this.extensions.active.length} active)`);
@@ -235,28 +253,42 @@ export class DocumentWorker {
     await this.persist('close');
     await this.service('session.leave', this.projectId);
     await this.chain.loader()?.dispose();
+    this.ext.dispose();
     return null;
   }
 
+  /** Active ids, and the extensions whose health is not ok (the worker's own). */
+  private extensionState(): { active: string[]; failed: Array<{ id: string; error: string }> } {
+    const loader = this.chain?.loader();
+    if (!loader) return { active: [], failed: [] };
+    const failed = loader.records()
+      .filter((r) => r.health && !['ok', 'disabled', 'replaced'].includes(r.health.state))
+      .map((r) => ({ id: r.id, error: 'error' in r.health && r.health.error ? String(r.health.error) : r.health.state }));
+    return { active: loader.activeIds(), failed };
+  }
+
+  /**
+   * Registers (or hot-reloads) a record through the loader's own path, as an
+   * `extensionsChanged` for that id: `planLoad` decides (a disabled record
+   * stays off, a fork replaces its built-in, a missing dependency or a
+   * blocked state skips it), and a Store record runs in the contained
+   * sandbox. Resolves once the loader settled, so the next call sees its
+   * contributions (contract 15, invariant 4).
+   */
   private async register(record: ExtensionRecord): Promise<ExtensionRegistration> {
-    const chain = this.requireChain();
-    const loader = chain.loader();
+    const loader = this.requireChain().loader();
     if (!loader) throw new DocumentHostError('worker-error', 'The extension loader has not booted.');
-    if (record.trust === 'store') {
-      throw new DocumentHostError('sandbox-unavailable', `"${record.manifest?.name ?? record.id}" is a Store extension; the document host has no contained sandbox for it yet, so it was not loaded.`);
+    if (!this.ext.available) throw new DocumentHostError('service-unavailable', 'This host gives document hosts no extensions service, so extensions cannot be registered.');
+    this.ext.register(record);
+    this.ext.emit({ ids: [record.id], reason: 'reload' });
+    await loader.whenIdle();
+    this.extensions = this.extensionState();
+    const health = recordFor(record.id)?.health as { state?: string; error?: unknown } | undefined;
+    const active = loader.activeIds().includes(record.id);
+    if (!active && (health?.state === 'activation-error' || health?.state === 'runtime-error')) {
+      throw new DocumentHostError('worker-error', `Extension ${record.id} failed to activate: ${health.error ? String(health.error) : health.state}`);
     }
-    if (loader.activeIds().includes(record.id)) await loader.deactivate(record.id);
-    // The kernel's record list is what the Mods panel and health read on the desktop.
-    setRecords([...storeRecords().filter((r) => r.id !== record.id), record]);
-    const active = await loader.activate(record);
-    if (!active) {
-      const health = recordFor(record.id)?.health as { state?: string; error?: unknown } | undefined;
-      throw new DocumentHostError('worker-error', `Extension ${record.id} failed to activate: ${health?.error ? String(health.error) : health?.state ?? 'unknown error'}`);
-    }
-    // The kernel's registries changed synchronously during activation, so the
-    // next tool call in this instance sees them (contract 15, invariant 4).
     this.definitionsGeneration += 1;
-    this.extensions = { active: loader.activeIds(), failed: this.extensions.failed.filter((f) => f.id !== record.id) };
     return { instance: this.instance, extension: record.id, definitionsGeneration: this.definitionsGeneration, active };
   }
 

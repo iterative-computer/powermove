@@ -5,7 +5,7 @@
  * sees a worker's edits as session patches, and the worker sees the tab's.
  */
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -17,7 +17,7 @@ import { Connection, type LinkSocket } from '../../shared/link';
 import { IPC } from '../../shared/ipc';
 import { WEB } from '../../shared/wire';
 import { serve, type RunningServer } from '../../server/index';
-import { linkServices } from '../main';
+import { hostFetch, linkServices } from '../main';
 import { DocumentHostPool } from './pool';
 import { INSTANCE_STATE_KEY } from './protocol';
 import { BRIDGE, FIXTURE, WASM, buildEngineBundle } from './test-host';
@@ -41,6 +41,15 @@ beforeAll(async () => {
   process.env['POWERMOVE_FONTCONFIG'] = '0';
   bundle = await buildEngineBundle();
   dir = await mkdtemp(path.join(tmpdir(), 'pm-dochost-serve-'));
+  // A user's own extension in the host profile: the serve host builds it, as main does.
+  const extension = path.join(dir, 'profile', 'extensions', 'serve-glow');
+  await mkdir(extension, { recursive: true });
+  await writeFile(path.join(extension, 'manifest.json'), JSON.stringify({ id: 'serve-glow', name: 'Serve Glow', version: '1.0.0', apiVersion: 3 }));
+  await writeFile(path.join(extension, 'index.ts'), `export default function activate(api: any) {
+  api.effects.register({ id: 'serve-glow.glow', label: 'Serve Glow', group: 'Stylize', params: [{ k: 'amount', label: 'Amount', def: 7, min: 0, max: 10 }],
+    frag: '#version 300 es\\nprecision highp float;\\nin vec2 v_st;\\nuniform sampler2D u_tex;\\nout vec4 o;\\nvoid main(){ o = texture(u_tex, v_st); }' });
+}
+`);
   server = await serve({
     host: '127.0.0.1', port: 0, userData: path.join(dir, 'profile'), exportsDir: path.join(dir, 'exports'),
     rendererDir: path.join(dir, 'renderer'), resourcesDir: path.join(dir, 'resources'), appPath: dir, ffmpeg: 'ffmpeg',
@@ -65,7 +74,8 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host beh
 
     const engine = await connect('?engine=1');
     await engine.invoke(WEB.hello);
-    const pool = new DocumentHostPool({ services: linkServices(engine, () => {}), newEngine: true, script: bundle!.script, env: { POWERMOVE_PM_WASM: WASM, POWERMOVE_PM_BRIDGE: BRIDGE } });
+    const services = linkServices(engine, () => {}, (route) => hostFetch(server.url.replace(/^http/, 'ws'), server.token, route));
+    const pool = new DocumentHostPool({ services, newEngine: true, script: bundle!.script, env: { POWERMOVE_PM_WASM: WASM, POWERMOVE_PM_BRIDGE: BRIDGE } });
     try {
       const tabPatches: any[] = [];
       tab.on(WEB.syncPatch, (patch) => tabPatches.push(patch));
@@ -82,8 +92,13 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host beh
       expect(JSON.stringify(state.content)).toContain('Renamed in the tab');
       expect(JSON.stringify(state.content)).toContain('From the worker');
 
+      // The user's extension, listed and served by the host, loaded by the worker's loader.
+      expect((await pool.stats('Pserve')).extensions.active).toContain('serve-glow');
+      const glow = await pool.call('Pserve', { runId: 'run-g', callId: 's4', tool: 'apply_commands', arguments: { commands: [{ type: 'add_layer', id: 'Lglow', layerType: 'solid', name: 'Glow' }, { type: 'add_effect', target: 'Lglow', effect: 'serve-glow.glow' }], label: 'glow' }, baseRevision: state.revision ?? 0 });
+      expect(glow.error ?? null).toBeNull();
+
       const saved = JSON.parse((await engine.sync<string | null>(IPC.storeGetSync, { key: INSTANCE_STATE_KEY('Pserve') })) ?? 'null');
-      expect(saved?.history?.entries?.map((e: any) => e.label)).toEqual(['Agent · serve']);
+      expect(saved?.history?.entries?.map((e: any) => e.label)).toEqual(['Agent · serve', 'glow']);
     } finally {
       await pool.shutdown();
     }
