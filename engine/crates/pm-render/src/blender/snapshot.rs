@@ -578,6 +578,44 @@ fn scene_assets(
 }
 
 /// Builds the snapshot of `frame` (`scope` is the frame's composition).
+/// Whether a model source names an imported glTF scene (`format` `gltf`
+/// or `glb`, or a `.gltf`/`.glb` name without a format), as
+/// `DocumentModels` reads it.
+fn names_gltf(root: &Node, object: Option<&Node>) -> bool {
+    let text = |n: Option<&Node>, k: &str| {
+        node::string(node::member(n, k))
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default()
+    };
+    let asset = text(node::member(object, "source"), "assetId");
+    if asset.is_empty() {
+        return false;
+    }
+    let Some(record) = node::member(node::member(Some(root), "assets"), &asset) else {
+        return false;
+    };
+    let format = text(Some(record), "format");
+    let name = text(Some(record), "name").to_ascii_lowercase();
+    matches!(format.as_str(), "gltf" | "glb")
+        || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
+}
+
+/// Whether the composition draws an imported glTF model: 3D object layers
+/// and legacy scenes' objects.
+fn imports_gltf(scope: &Scope<'_, '_>) -> bool {
+    let root = scope.comp.root();
+    scope.layers().iter().any(|l| {
+        let data = node::member(node::member(Some(l), "d"), "data");
+        if names_gltf(root, node::member(data, "object")) {
+            return true;
+        }
+        node::array(node::member(node::member(data, "scene"), "objects"))
+            .unwrap_or(&[])
+            .iter()
+            .any(|o| names_gltf(root, Some(o)))
+    })
+}
+
 pub fn build<'d>(
     scope: &mut Scope<'_, 'd>,
     frame: &BlenderFrame,
@@ -595,6 +633,12 @@ pub fn build<'d>(
             }
         }
     };
+    // The 3D pass now loads imported glTF scenes, but this snapshot does
+    // not yet match today's glTF meshes and embedded textures: such
+    // frames stay routed until it does.
+    if imports_gltf(scope) {
+        return Ok(Err("imported models".into()));
+    }
     let evaluated = scope.composition_scene(time)?;
     if !evaluated.recipe_parts.is_empty() {
         return Ok(Err("model-group recipe parts".into()));
