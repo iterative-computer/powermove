@@ -7,4 +7,9 @@ export type ShaderFallbackCall = {
 /**
  * `1f`, `2f`, `3f`, `4f`, `1i`, or `m3` (column-major).
  */
-fn: string, name: string, v: Array<number>, };
+fn: string, name: string, v: Array<number>, 
+/**
+ * Applied to this uniform instead when `name` is not active in the
+ * linked program (`setParam`'s positional alias `u_p<i>` or `u_c<i>`).
+ */
+alias?: string, };
