@@ -44,6 +44,32 @@ pub struct SubsetInfo {
 
 /// Builds the metrics-and-shaping subset of face `index` of `data` as a
 /// single-face sfnt (its index is 0).
+/// Face `index` of `data` whole, outlines included, as a single-face font
+/// (read at index 0): a single-face file's own bytes, or every table of the
+/// collection's face assembled into one sfnt. What a host that measures
+/// glyph ink (text bounds, raster placement) loads instead of the
+/// metrics-and-shaping subset.
+pub fn whole_face(data: &[u8], index: u32) -> Result<Vec<u8>, ReadError> {
+    match FileRef::new(data)? {
+        FileRef::Font(_) if index == 0 => Ok(data.to_vec()),
+        FileRef::Font(_) => Err(ReadError::OutOfBounds),
+        FileRef::Collection(collection) => {
+            let font = collection.get(index)?;
+            let mut tables: Vec<(u32, Vec<u8>)> = font
+                .table_directory()
+                .table_records()
+                .iter()
+                .filter_map(|record| {
+                    let tag = record.tag();
+                    font.table_data(tag)
+                        .map(|bytes| (u32::from_be_bytes(tag.to_be_bytes()), bytes.as_bytes().to_vec()))
+                })
+                .collect();
+            Ok(build_sfnt(&mut tables))
+        }
+    }
+}
+
 pub fn metrics_subset(data: &[u8], index: u32) -> Result<(Vec<u8>, SubsetInfo), ReadError> {
     let file = FileRef::new(data)?;
     let font = file

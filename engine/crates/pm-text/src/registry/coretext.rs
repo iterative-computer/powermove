@@ -695,6 +695,20 @@ impl CoreTextRegistry {
         Ok(bytes)
     }
 
+    /// Face `index` of blob `key` whole, outlines included, as a single-face
+    /// font (`subset::whole_face`). Not cached: a host loads each face once.
+    pub fn whole(&self, key: &str, index: u32) -> Result<Vec<u8>, RegistryError> {
+        let data = self
+            .blobs
+            .get(key)
+            .ok_or_else(|| RegistryError::UnknownBlob(key.to_string()))?;
+        crate::subset::whole_face(data.as_slice(), index).map_err(|source| RegistryError::Subset {
+            blob: key.to_string(),
+            index,
+            source,
+        })
+    }
+
     // ------------------------------------------------------------ faces
 
     fn file_bytes(&mut self, path: &std::path::Path) -> Option<(FontBytes, String)> {
