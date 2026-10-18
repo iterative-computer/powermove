@@ -54,37 +54,71 @@ fn hex(s: &str) -> Option<Rgba> {
     }
 }
 
+/// A CSS `<number>` token: an optional sign, digits with an optional
+/// fraction (or a fraction alone), and an optional exponent. Rust's float
+/// parser also takes `5.`, `inf`, `infinity` and `NaN`, none of which is a
+/// CSS number, so the token is checked before it is parsed. A value that
+/// overflows to infinity is refused too.
+fn css_number(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if matches!(b.first(), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while b.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i += 1;
+        }
+        *i - start
+    };
+    let int = digits(&mut i);
+    let frac = if b.get(i) == Some(&b'.') {
+        i += 1;
+        let n = digits(&mut i);
+        if n == 0 {
+            return None;
+        }
+        n
+    } else {
+        0
+    };
+    if int == 0 && frac == 0 {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        if digits(&mut i) == 0 {
+            return None;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    let v: f64 = s.parse().ok()?;
+    v.is_finite().then_some(v)
+}
+
 /// One `rgb()`/`rgba()` component: a number (0..255) or a percentage.
 fn channel(s: &str) -> Option<f64> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
-        let v: f64 = p.trim().parse().ok()?;
-        if !v.is_finite() {
-            return None;
-        }
         // A percentage channel is stored as 8 bits too.
-        return Some(byte_channel(v / 100.0));
-    }
-    let v: f64 = s.parse().ok()?;
-    if !v.is_finite() {
-        return None;
+        return Some(byte_channel(css_number(p)? / 100.0));
     }
     // CSS rounds the 0..255 value to the 8-bit color the canvas stores.
-    Some((v.clamp(0.0, 255.0)).round() / 255.0)
+    Some((css_number(s)?.clamp(0.0, 255.0)).round() / 255.0)
 }
 
 fn alpha(s: &str) -> Option<f64> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
-        let v: f64 = p.trim().parse().ok()?;
-        return Some((v / 100.0).clamp(0.0, 1.0));
+        return Some((css_number(p)? / 100.0).clamp(0.0, 1.0));
     }
-    let v: f64 = s.parse().ok()?;
-    // `inf` and `NaN` are not CSS numbers.
-    if !v.is_finite() {
-        return None;
-    }
-    Some(v.clamp(0.0, 1.0))
+    Some(css_number(s)?.clamp(0.0, 1.0))
 }
 
 /// `rgb()`/`rgba()` arguments.
@@ -158,11 +192,7 @@ fn hue(s: &str) -> Option<f64> {
     } else {
         (lower.as_str(), 1.0)
     };
-    let v: f64 = num.trim().parse().ok()?;
-    if !v.is_finite() {
-        return None;
-    }
-    Some((v * factor).rem_euclid(360.0))
+    Some((css_number(num)? * factor).rem_euclid(360.0))
 }
 
 /// An `hsl()`/`hwb()` percentage component as 0..1: a percentage, or in
@@ -173,17 +203,13 @@ fn percent(s: &str, number_ok: bool) -> Option<f64> {
         return Some(0.0);
     }
     let (num, ok) = match s.strip_suffix('%') {
-        Some(p) => (p.trim(), true),
+        Some(p) => (p, true),
         None => (s, number_ok),
     };
     if !ok {
         return None;
     }
-    let v: f64 = num.parse().ok()?;
-    if !v.is_finite() {
-        return None;
-    }
-    Some((v / 100.0).clamp(0.0, 1.0))
+    Some((css_number(num)? / 100.0).clamp(0.0, 1.0))
 }
 
 /// HSL to sRGB (CSS Color 4 `hslToRgb`), unrounded.
@@ -578,6 +604,23 @@ mod tests {
             "rgb(0 0 0 / inf)",
             "rgb(0 0 0 / NaN)",
             "rgb(0, 0, 0, infinity)",
+            "rgb(0 0 0 / NaN%)",
+            "rgb(0 0 0 / inf%)",
+            "rgb(0 0 0 / infinity%)",
+            "hsl(0 100% 50% / NaN%)",
+            "hwb(0 0% 0% / inf%)",
+            "hsl(infdeg 100% 50%)",
+            "hsl(0 NaN% 50%)",
+            "rgb(NaN%, 0%, 0%)",
+            "rgb(5., 0, 0)",
+            "rgb(0 0 0 / 1.)",
+            "rgb(1e, 0, 0)",
+            "rgb(1e+, 0, 0)",
+            "rgb(., 0, 0)",
+            "rgb(+-1, 0, 0)",
+            "rgb(0x10, 0, 0)",
+            "rgb(1e999, 0, 0)",
+            "hsl(.deg 100% 50%)",
             "rgb(1,,2,3)",
             "rgb(1 2 3 /)",
         ] {
@@ -585,6 +628,11 @@ mod tests {
         }
         assert_eq!(parse("rgb(100%, 0%, 50%)"), Some(rgb8(255, 0, 128, 1.0)));
         assert_eq!(parse("rgb( 1 , 2 , 3 , .5 )"), Some(rgb8(1, 2, 3, 0.5)));
+        // Every spelling of a CSS number still parses.
+        assert_eq!(parse("rgb(+1, 2e0, 3E+0, 5e-1)"), Some(rgb8(1, 2, 3, 0.5)));
+        assert_eq!(parse("rgb(-5 0 0 / -.5)"), Some(rgb8(0, 0, 0, 0.0)));
+        assert_eq!(parse("rgb(0 0 0 / 2.5e1%)"), Some(rgb8(0, 0, 0, 0.25)));
+        assert_eq!(parse("hsl(1.2e2deg 1e2% 25%)"), Some(rgb8(0, 128, 0, 1.0)));
     }
 
     #[test]

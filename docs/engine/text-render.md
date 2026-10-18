@@ -250,6 +250,20 @@ branch: `text_colors` all cases as above; `text_raster` 495 cases, 80 pinned,
 their gate (min 0.9799, layers min 0.9907); `text_gpu` max |Δ| ≤ 1e-6, ink
 SSIM ≥ 0.9994; `text_corpus` 123 frames, 0 failed.
 
+Every numeric component (channel, alpha, hue, percentage, in either branch)
+is checked against the CSS `<number>` token grammar before it is parsed
+(2026-10-18): an optional sign, digits with an optional fraction or a
+fraction alone, an optional exponent. Rust's float parser also takes `5.`,
+`inf`, `infinity` and `NaN`, so before this `rgb(0 0 0 / NaN%)` parsed to a
+NaN alpha and `rgb(0 0 0 / inf%)` to opaque, where the canvas keeps the
+previous style; both, and `rgb(5., 0, 0)`, `rgb(1e, 0, 0)` and values that
+overflow to infinity, are now `Unsupported`. Valid spellings (`+1`, `.5`,
+`2e0`, `5e-1`, `1.2e2deg`) parse to the same values as before. Rerun:
+`pm_text` lib 50/50; `text_colors` all cases equal or refused as above;
+`text_raster` 495 cases, 80 pinned, 0 failed, captions min 0.985;
+`text_level2` 400 cases and 20 layers, 0 below their gate; `text_corpus`
+123 frames, 0 failed, text SSIM min 0.9890, other pixels max 0.
+
 **Typing** (`examples/text_typing.rs`, the engine's share: layout, scene,
 coverage, paint, composite at 1920 × 1080, GPU finished; 71 keystrokes): a
 96 px title p50 1.39 ms, p95 2.18 ms; a 48 px paragraph in a 1400 px box p50
