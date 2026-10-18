@@ -35,6 +35,7 @@ use pm_protocol::color::{
 use crate::capability::Feature;
 use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
+pub use crate::stills::StillReader;
 
 /// Why a media file cannot be drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,19 +284,55 @@ fn image_source(
     })
 }
 
-/// Whether an image file can be drawn: readable, not animated, in a tested
-/// still class ([`crate::stills`]), a color profile the engine converts.
+/// The still samples a layer draws: Chromium's bitmap at level 1, the
+/// native-depth source at level 2.
+pub fn still_reader(level1: bool) -> StillReader {
+    if level1 {
+        StillReader::Chromium
+    } else {
+        StillReader::Native
+    }
+}
+
+/// Whether an image file can be drawn by a level 1 layer (Chromium's
+/// compatibility bitmap): [`probe_still`] with [`StillReader::Chromium`].
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
-    static CACHE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
-    per_stamp(&CACHE, path, || {
+    probe_still(path, StillReader::Chromium)
+}
+
+/// Whether an image file can be drawn with `reader`'s samples: readable,
+/// not animated, in a tested still class ([`crate::stills`]), a color
+/// reading the engine converts. Level 1 layers read Chromium's bitmap;
+/// level 2 layers and 3D maps read the native-depth source, whose classes
+/// are narrower (it reads neither PNG cICP/cHRM nor HDR transfers, and
+/// ImageIO converts CMYK and other models to sRGB).
+pub fn probe_still(path: &Path, reader: StillReader) -> Result<(), ProbeIssue> {
+    static CHROMIUM: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
+    static NATIVE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
+    let cache = match reader {
+        StillReader::Chromium => &CHROMIUM,
+        StillReader::Native => &NATIVE,
+    };
+    per_stamp(cache, path, || {
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         let pool = FramePool::new(0);
-        let still = image_source(path, &pool, true)
+        let chromium = reader == StillReader::Chromium;
+        let still = image_source(path, &pool, chromium)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        if !chromium {
+            crate::stills::check(path, &still, reader).map_err(ProbeIssue::Unsupported)?;
+            // The level 2 source pass converts profiles other than sRGB and
+            // Display P3 through ColorSync (`MediaCache::image`); every other
+            // reading must be one it draws.
+            if still.color.icc_class == Some(IccClass::Other) {
+                return Ok(());
+            }
+            return image_color(&still).map(|_| ());
+        }
         // Chromium cannot show an AVIF its decoder cannot parse, whatever
         // ImageIO reads: a named failure, not a class.
         if pm_media::image::avif_compat::applies(&still) {
@@ -306,7 +343,7 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
                 ))
             })?;
         }
-        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
+        crate::stills::check(path, &still, reader).map_err(ProbeIssue::Unsupported)?;
         if pm_media::image::avif_compat::applies(&still) {
             let bitmap = pm_media::image::avif_compat::read(path, &still, &pool)
                 .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
@@ -882,7 +919,7 @@ impl MediaCache {
         };
         match interpret {
             Some(i) => probe_interpreted_image(path, i),
-            None => probe_image(path),
+            None => probe_still(path, still_reader(compat)),
         }
         .map_err(issue)?;
         let mut still = image_source(path, &self.pool, compat && interpret.is_none())

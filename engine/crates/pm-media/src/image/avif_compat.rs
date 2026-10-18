@@ -147,15 +147,18 @@ unsafe fn profile(image: &a::avifImage) -> Result<crate::sys::skcms::skcms_ICCPr
 /// Why the container's color description (what Blink's
 /// `AVIFImageDecoder` reads after `avifDecoderParse`) is outside the class
 /// this module reproduces.
-fn colorimetry(image: &a::avifImage) -> Option<String> {
+/// With `wide`, the CICP pairs of [`super::compat::cicp_supported`] (BT.2020,
+/// P3 and PQ/HLG, measured for Chromium's bitmap); otherwise SDR sRGB only,
+/// the class the native (ImageIO) reader was compared in.
+fn colorimetry(image: &a::avifImage, wide: bool) -> Option<String> {
     if image.icc.size != 0 {
         // ICC overrides CICP in Blink. Validate the same RGB/gray model
         // here; the ImageBitmap conversion applies it in `read`.
         return unsafe { profile(image).err().map(|e| e.to_string()) };
     }
     let (p, t) = (image.colorPrimaries, image.transferCharacteristics);
-    (!srgb_cicp(p, t) && !super::compat::cicp_supported(p, t))
-        .then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
+    let drawn = srgb_cicp(p, t) || (wide && super::compat::cicp_supported(p, t));
+    (!drawn).then(|| format!("AVIF stills with color primaries {p} and transfer {t}"))
 }
 
 /// Why an AVIF is outside the class compared with Chromium: SDR 8/10/12-bit
@@ -164,11 +167,22 @@ fn colorimetry(image: &a::avifImage) -> Option<String> {
 /// Gain maps keep the SDR base image, as the shipped
 /// ImageBitmap-to-WebGL upload does, including HDR base images.
 pub fn unmeasured(path: &Path) -> Result<Option<String>> {
+    unmeasured_in(path, true)
+}
+
+/// [`unmeasured`] for the native-depth (ImageIO) reader of level 2 layers
+/// and 3D maps, which has no PQ/HLG or wide-primaries reading: only SDR
+/// sRGB color descriptions (or a supported ICC profile) are in its class.
+pub fn unmeasured_sdr(path: &Path) -> Result<Option<String>> {
+    unmeasured_in(path, false)
+}
+
+fn unmeasured_in(path: &Path, wide: bool) -> Result<Option<String>> {
     let bytes = std::fs::read(path)?;
     unsafe {
         let decoder = parse(&bytes)?;
         let image = &*(*decoder.0).image;
-        if let Some(what) = colorimetry(image) {
+        if let Some(what) = colorimetry(image, wide) {
             return Ok(Some(what));
         }
         Ok(match image.yuvFormat {
@@ -204,7 +218,7 @@ pub fn read_bitmap(path: &Path, pool: &FramePool) -> Result<StillImage> {
         // Blink reads the color description from the container, before any
         // frame is decoded. Callers gate on `unmeasured`; this is an
         // internal invariant, not a property of the file.
-        if let Some(what) = colorimetry(&*(*decoder.0).image) {
+        if let Some(what) = colorimetry(&*(*decoder.0).image, true) {
             return Err(MediaError::decode(format!(
                 "AVIF compatibility bitmap outside its class: {what}"
             )));
