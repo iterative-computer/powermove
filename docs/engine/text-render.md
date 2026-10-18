@@ -214,6 +214,10 @@ The three failures above 18 px: synthesized bold at 36 and 80 px (0.951,
 frames of 24 corpus projects (every `text/*` project, including all eleven
 animators, range styles, and variable axes, and every `captions/*` project)
 all pass: text pixels SSIM min 0.989, every other pixel exact (max 0 CV).
+Rerun 2026-10-17 after merging the wave 4 lanes: the corpus now holds 31
+projects with text (the 24 above plus `animation/interpolation`,
+`composition/fps-*`, `layers/null-parenting` and `retiming/precomp`), 123
+frames, all pass, text SSIM min 0.989, every other pixel exact.
 
 **Level 2 against CoreText with smoothing** (`tests/text_level2.rs`): 400
 outline-text cases at their exact positions: 399 ≥ 0.98 (min 0.9799, black
@@ -235,12 +239,24 @@ those Chromium's `fillStyle` reports (Electron 44, checked 2026-10-16). The
 rerun of `text_raster`, `text_corpus`, `text_level2` and `text_gpu` after the
 fix gave the numbers above unchanged.
 
+The parser refuses every form it is not sure of rather than guess
+(2026-10-17): `none` in the legacy comma syntax, `rgb()` channels mixing
+numbers and percentages, split tokens such as `50 %`, and non-finite alpha
+are `Unsupported`, so no such string draws as a parsed color or as the
+fallback. Percentage `rgb()` channels round to 8 bits as number channels do
+(`rgb(100%, 0%, 50%)` is `#ff0080`). Rerun after this change on the merged
+branch: `text_colors` all cases as above; `text_raster` 495 cases, 80 pinned,
+0 failed, captions min 0.985; `text_level2` 400 cases and 20 layers, 0 below
+their gate (min 0.9799, layers min 0.9907); `text_gpu` max |Δ| ≤ 1e-6, ink
+SSIM ≥ 0.9994; `text_corpus` 123 frames, 0 failed.
+
 **Typing** (`examples/text_typing.rs`, the engine's share: layout, scene,
 coverage, paint, composite at 1920 × 1080, GPU finished; 71 keystrokes): a
 96 px title p50 1.39 ms, p95 2.18 ms; a 48 px paragraph in a 1400 px box p50
 1.85 ms, p95 3.16 ms; 36 px p50 1.26 ms, p95 1.75 ms. Rerun 2026-10-16 23:30
 (load 9.6 to 11.6): p95 1.65, 3.49 and 1.79 ms; an independent rerun under
-load measured p95 2.7, 4.2 and 2.2 ms, so expect ±1 ms with machine load. The viewer bridge and
+load measured p95 2.7, 4.2 and 2.2 ms, and a rerun on 2026-10-17 (load
+about 11) p95 2.51, 4.34 and 2.66 ms, so expect ±1 ms with machine load. The viewer bridge and
 the editor's own handling are not included; the section 25 row is end to
 end (Phase 3a gate).
 
@@ -302,6 +318,16 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
 - `COLR` color fonts are refused rather than drawn.
 - Level 2: animated and range-styled text and typography anchoring are
   refused; routing keeps `compat` level 2 content on the legacy path.
+- Routing does not yet separate the measured sub-gate classes (level 1 text
+  at 18 px and below, synthesized bold, emoji below 10 px):
+  `unsupported_with_fonts` treats all level 1 text as drawn. This has no
+  effect while hosts give no fonts; whether to gate those classes before
+  fonts are wired is a plan-owner decision.
+- Animated text evaluates its posed glyphs twice per frame (inside
+  `Scope::text_raster` for the placement and again through
+  `animated_raster_glyphs` for the draws). Typing stays at p95 ≤ 4.4 ms for
+  the engine's share, so this is left to a `pm-eval` change that returns
+  both at once.
 
 ## Changes outside the lane
 
