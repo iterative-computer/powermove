@@ -223,6 +223,7 @@ mod review {
             let mut painter = Painter {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
+                masks: None,
                 profile: Profile::CORETEXT,
                 unsupported: Vec::new(),
             };

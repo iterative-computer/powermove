@@ -136,10 +136,62 @@ pub struct Run<'a> {
     pub bitmap_size: Option<f32>,
 }
 
+/// A glyph's mask as the platform's text rasterizer makes it (CoreGraphics
+/// on macOS, `cgmask`), before the paint's preblend.
+#[derive(Debug)]
+pub struct GlyphMask {
+    pub width: u32,
+    pub height: u32,
+    /// The mask's top-left pixel relative to the glyph's whole-pixel origin
+    /// (x right, y down; the origin is the pixel corner left of the pen on
+    /// the baseline).
+    pub left: i32,
+    pub top: i32,
+    /// Coverage before the preblend, row by row.
+    pub coverage: Vec<u8>,
+}
+
+/// Where level 1 glyph masks come from when the platform rasterizes them as
+/// Canvas2D does (`cgmask` on macOS).
+pub trait MaskSource {
+    /// The mask of `glyph` of `face` at `size` device px and variation
+    /// `coords`, drawn `quarter`/4 px right of a whole pixel; `bounds` is the
+    /// glyph's outline box at that size (device px, y down).
+    fn mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        quarter: u8,
+        bounds: Rect,
+    ) -> Option<Arc<GlyphMask>>;
+    /// The preblend table for straight E-encoded paint `rgb`.
+    fn preblend(&self, rgb: [f64; 3]) -> [u8; 256];
+    /// A color glyph (`sbix` emoji) as the platform draws it at `size`
+    /// device px, `quarter`/4 px right of a whole pixel: a premultiplied
+    /// image and its top-left pixel relative to the whole-pixel origin.
+    /// `em` is the size of the glyph's em box (`FontResolver::em_advance`).
+    fn color(
+        &mut self,
+        face: FaceRef<'_>,
+        glyph: u16,
+        size: f32,
+        quarter: u8,
+        em: f32,
+    ) -> Option<(Arc<Rgba8>, i32, i32)> {
+        let _ = (face, glyph, size, quarter, em);
+        None
+    }
+}
+
 /// What a glyph draw needs: the caches and the profile.
 pub struct Painter<'c> {
     pub outlines: &'c mut Outlines,
     pub bitmaps: &'c mut Bitmaps,
+    /// Level 1 glyph masks from the platform rasterizer, when it has one;
+    /// glyphs Canvas2D draws from masks are then drawn from these.
+    pub masks: Option<&'c mut dyn MaskSource>,
     pub profile: Profile,
     /// What the scene could not draw (color vector glyphs): the renderer
     /// refuses such a layer rather than drawing it wrong.
@@ -223,11 +275,24 @@ impl Painter<'_> {
         let mut mask = (Vec::new(), None::<Rect>);
         let mut path = (Vec::new(), None::<Rect>);
         let mut images = Vec::new();
+        // Platform masks of this call, at whole device pixels.
+        let mut platform: Vec<(i64, i64, Arc<GlyphMask>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
             let dsize = device_size as f32;
             let bitmap_face = has_bitmaps(run.face);
+            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
+            // Canvas2D draws Apple Color Emoji lower than CoreGraphics does,
+            // by whole pixels (`apple_emoji_shift`, measured on `fit-emoji`).
+            let emoji_shift = if color_face && super::bitmap::is_apple_color_emoji(run.face) {
+                Some(
+                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize))
+                        as i32,
+                )
+            } else {
+                None
+            };
             let colr = super::bitmap::has_colr(run.face);
             let large = self.profile.is_large(device_size);
             let (ex, ey) = if large {
@@ -249,6 +314,39 @@ impl Painter<'_> {
             for g in run.glyphs {
                 let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
                 let bsize = run.bitmap_size.unwrap_or(dsize);
+                if color_face
+                    && place.axis_aligned
+                    && let Some(masks) = self.masks.as_deref_mut()
+                    && let Some((image, left, top)) = {
+                        let (x, y) = self.profile.snap.apply(p.x, p.y);
+                        let ix = x.floor();
+                        let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
+                        // Drawn at the em size CoreText uses for the strike.
+                        let shift = emoji_shift.unwrap_or(0);
+                        masks
+                            .color(run.face, g.id as u16, bsize, quarter, bsize)
+                            .map(|(i, l, t)| (i, l + ix as i32, t + y as i32 + shift))
+                    }
+                {
+                    let t = Affine::translate((f64::from(left), f64::from(top)));
+                    let b = Rect::new(
+                        f64::from(left),
+                        f64::from(top),
+                        f64::from(left) + f64::from(image.width),
+                        f64::from(top) + f64::from(image.height),
+                    );
+                    images.push(Item {
+                        content: ItemContent::Image {
+                            image,
+                            transform: t,
+                        },
+                        color,
+                        opacity,
+                        blur,
+                        bounds: b,
+                    });
+                    continue;
+                }
                 if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
                     let (x, y) = if place.axis_aligned {
                         self.profile.position(p.x, p.y, device_size, true)
@@ -285,6 +383,24 @@ impl Painter<'_> {
                     continue;
                 };
                 let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                if !as_path
+                    && !large
+                    && place.axis_aligned
+                    && !run.synthetic_bold
+                    && skew_of(run) == 0.0
+                    && let (Some(masks), Coords::User(coords)) =
+                        (self.masks.as_deref_mut(), run.coords)
+                {
+                    let (x, y) = self.profile.snap.apply(p.x, p.y);
+                    let ix = x.floor();
+                    let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
+                    if let Some(m) =
+                        masks.mask(run.face, coords, g.id as u16, dsize, quarter, bare.bounds)
+                    {
+                        platform.push((ix as i64, y as i64, m));
+                    }
+                    continue;
+                }
                 let dy = if as_path {
                     0.0
                 } else if large {
@@ -327,6 +443,17 @@ impl Painter<'_> {
                     curve_size = curve_size.max(device_size);
                 }
             }
+        }
+        if !platform.is_empty()
+            && let Some(masks) = self.masks.as_deref_mut()
+        {
+            out.extend(mask_image(
+                &platform,
+                masks.preblend([color[0], color[1], color[2]]),
+                color,
+                opacity,
+                blur,
+            ));
         }
         if let Some(bounds) = mask.1 {
             out.push(Item {
@@ -438,6 +565,68 @@ impl Painter<'_> {
             });
         }
     }
+}
+
+/// One image item holding the platform masks of a `fillText` call, each
+/// glyph composited over the earlier ones (Skia draws glyph quads one by
+/// one with source-over), in `color` through the preblend `table`.
+fn mask_image(
+    masks: &[(i64, i64, Arc<GlyphMask>)],
+    table: [u8; 256],
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Option<Item> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for (x, y, m) in masks {
+        x0 = x0.min(x + i64::from(m.left));
+        y0 = y0.min(y + i64::from(m.top));
+        x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
+        y1 = y1.max(y + i64::from(m.top) + i64::from(m.height));
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    // Coverage composited source-over in float.
+    let mut cov = vec![0.0f32; w * h];
+    for (x, y, m) in masks {
+        let ox = (x + i64::from(m.left) - x0) as usize;
+        let oy = (y + i64::from(m.top) - y0) as usize;
+        for row in 0..m.height as usize {
+            let src = &m.coverage[row * m.width as usize..(row + 1) * m.width as usize];
+            let dst = &mut cov[(oy + row) * w + ox..(oy + row) * w + ox + m.width as usize];
+            for (d, &c) in dst.iter_mut().zip(src) {
+                if c != 0 {
+                    let a = f32::from(table[c as usize]) / 255.0;
+                    *d = a + *d * (1.0 - a);
+                }
+            }
+        }
+    }
+    let a = color[3].clamp(0.0, 1.0) as f32;
+    let mut data = Vec::with_capacity(w * h * 4);
+    for c in cov {
+        let alpha = c * a;
+        for ch in 0..3 {
+            data.push((color[ch].clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
+        }
+        data.push((alpha * 255.0).round() as u8);
+    }
+    let image = Arc::new(Rgba8 {
+        width: w as u32,
+        height: h as u32,
+        data,
+    });
+    let transform = Affine::translate((x0 as f64, y0 as f64));
+    Some(Item {
+        content: ItemContent::Image { image, transform },
+        // The image holds the color; the item keeps only `globalAlpha`.
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity,
+        blur,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
+    })
 }
 
 /// The shear of a run's synthesized italic or oblique.
@@ -639,6 +828,7 @@ mod tests {
             let mut painter = Painter {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
+                masks: None,
                 profile: Profile::CANVAS2D,
                 unsupported: Vec::new(),
             };

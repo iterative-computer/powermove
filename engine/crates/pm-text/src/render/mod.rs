@@ -16,10 +16,13 @@
 
 pub mod atlas;
 pub mod bitmap;
+#[cfg(all(target_os = "macos", feature = "cg-masks"))]
+pub mod cgmask;
 pub mod color;
-#[cfg(all(target_os = "macos", feature = "coretext-reference"))]
+#[cfg(all(target_os = "macos", feature = "cg-masks"))]
 pub mod coretext;
 pub mod cpu;
+pub mod mask_tables;
 pub mod outline;
 pub mod paint;
 pub mod profile;

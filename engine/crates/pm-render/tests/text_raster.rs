@@ -71,6 +71,11 @@ fn main() {
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or(p)).expect("profile json");
         renderer.text().set_profile(profile);
     }
+    // `PM_TEXT_OUTLINES=1`: the outline path with the Canvas2D profile (no
+    // platform masks), for comparison.
+    if std::env::var("PM_TEXT_OUTLINES").as_deref() == Ok("1") {
+        renderer.text().set_masks(None);
+    }
     if std::env::var("PM_TEXT_COVERAGE").as_deref() == Ok("cpu") {
         renderer
             .text_gpu()
@@ -164,8 +169,16 @@ fn main() {
         if pin.is_some() && ink < 0.98 {
             pinned_below += 1;
         }
+        // The largest channel difference, and the share of pixels off by
+        // more than one code value (exactness, not only the text class).
+        let (mut max_diff, mut off) = (0u8, 0usize);
+        for (a, b) in reference.chunks_exact(4).zip(ours.chunks_exact(4)) {
+            let d = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap();
+            max_diff = max_diff.max(d);
+            off += usize::from(d > 1);
+        }
         let line = format!(
-            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3} {geometry}",
+            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
             cw, ch
         );
         println!("{line}");
@@ -191,7 +204,14 @@ fn main() {
                 }
             }
         }
-        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "pass": pass}));
+        // Raw premultiplied buffers of every case, for fitting tools.
+        if let Ok(d) = std::env::var("PM_TEXT_DUMP") {
+            let d = PathBuf::from(d);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("{id}.{cw}x{ch}.engine.rgba")), &ours).unwrap();
+            std::fs::write(d.join(format!("{id}.{cw}x{ch}.legacy.rgba")), &reference).unwrap();
+        }
+        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass}));
     }
     // Per group summary.
     let mut groups: std::collections::BTreeMap<String, (usize, f64, f64)> = Default::default();

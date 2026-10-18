@@ -131,11 +131,28 @@ impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<
     }
 }
 
+/// Level 1 glyph masks as Canvas2D gets them on this platform: CoreGraphics
+/// on macOS (`pm_text::render::cgmask`); elsewhere none (outlines with the
+/// Canvas2D profile).
+fn platform_masks() -> Option<Box<dyn pm_text::render::scene::MaskSource + Send>> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(Box::new(pm_text::render::cgmask::CgMasks::new()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Everything text rendering keeps across frames.
 pub struct TextContext {
     pub(crate) fonts: Option<Box<dyn TextFonts>>,
     outlines: Outlines,
     bitmaps: Bitmaps,
+    /// Level 1 glyph masks from the platform rasterizer (CoreGraphics on
+    /// macOS), as Canvas2D draws them.
+    masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>,
     /// The level 1 profile (Canvas2D).
     profile: Profile,
     generation: u64,
@@ -151,6 +168,7 @@ impl Default for TextContext {
             fonts: None,
             outlines: Outlines::new(),
             bitmaps: Bitmaps::new(),
+            masks: platform_masks(),
             profile: Profile::CANVAS2D,
             generation: 0,
             fonts_generation: 0,
@@ -185,6 +203,13 @@ impl TextContext {
 
     pub fn has_fonts(&self) -> bool {
         self.fonts.is_some()
+    }
+
+    /// Where level 1 glyph masks come from (`None`: outlines with the
+    /// profile's stem darkening).
+    pub fn set_masks(&mut self, masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>) {
+        self.masks = masks;
+        self.generation += 1;
     }
 
     /// The level 1 profile (tests and the fitting tool).
@@ -446,6 +471,10 @@ impl TextContext {
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
+                masks: self
+                    .masks
+                    .as_deref_mut()
+                    .map(|m| m as &mut dyn pm_text::render::scene::MaskSource),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
@@ -658,6 +687,7 @@ impl TextContext {
         let mut painter = Painter {
             outlines: &mut self.outlines,
             bitmaps: &mut self.bitmaps,
+            masks: None,
             profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };

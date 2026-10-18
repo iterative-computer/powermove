@@ -34,6 +34,11 @@ regex = "1"
 sha2 = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 
+# Level 1 glyph masks from CoreGraphics, as Canvas2D draws them
+# (docs/engine/text-render.md, "Glyph masks").
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2", "cg-masks"] }
+
 [dev-dependencies]
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }

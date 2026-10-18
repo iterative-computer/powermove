@@ -49,7 +49,7 @@ impl CoreTextReference {
         Self::default()
     }
 
-    fn font(&mut self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+    pub(crate) fn font(&mut self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
         let id = run.data.as_ptr() as usize;
         let key = (
             id,
