@@ -723,6 +723,23 @@ fn pass_through_candidates() {
         .unwrap()
         .unwrap();
     assert!(!p.facts.untransformed);
+    // An interpreted source is read differently from its file.
+    let v = layer(
+        "v",
+        "video",
+        json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }),
+        80.0,
+        45.0,
+        2.0,
+    );
+    let mut doc = project(160, 90, 2.0, no_fill(), vec![v]);
+    asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
+    doc["assets"]["clip"]["interpret"] = json!({ "range": "full" });
+    assert!(
+        r.pass_through(&load(&doc), "Ptest-root", ticks(0.5), &request, &resolver)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
