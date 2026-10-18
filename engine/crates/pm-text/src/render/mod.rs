@@ -19,6 +19,7 @@ pub mod bitmap;
 #[cfg(all(target_os = "macos", feature = "cg-masks"))]
 pub mod cgmask;
 pub mod color;
+pub mod color4;
 #[cfg(all(target_os = "macos", feature = "cg-masks"))]
 pub mod coretext;
 pub mod cpu;

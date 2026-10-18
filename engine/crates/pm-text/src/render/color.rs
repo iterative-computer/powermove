@@ -1,13 +1,15 @@
 //! CSS colors as a canvas `fillStyle` or `strokeStyle` setter parses them.
 //!
-//! Parsed: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, every CSS
+//! Parsed here: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, every CSS
 //! named color and `transparent` (the sRGB colors a canvas stores as 8-bit
-//! channels). A string the setter rejects keeps the context's previous
-//! style; callers pass that fallback ([`Rejected::Invalid`]). Valid CSS
-//! colors this module does not reproduce (`lab()`, `lch()`, `oklab()`,
-//! `oklch()`, `color()`, `color-mix()`, relative colors, `calc()`,
-//! `currentcolor`, system colors) are [`Rejected::Unsupported`]: the
-//! renderer refuses such a layer rather than drawing the fallback. Any
+//! channels). CSS Color 4/5 (`lab()`, `lch()`, `oklab()`, `oklch()`,
+//! `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`, and
+//! the system colors a detached canvas resolves) come from
+//! [`super::color4`], Blink's color model, as unclamped sRGB. A string the
+//! setter rejects keeps the context's previous style; callers pass that
+//! fallback ([`Rejected::Invalid`]). Valid CSS colors neither module
+//! reproduces (system colors not measured) are [`Rejected::Unsupported`]:
+//! the renderer refuses such a layer rather than drawing the fallback. Any
 //! functional notation that fails to parse counts as unsupported, so a
 //! string is only ever drawn as the fallback when it is certainly not a
 //! color.
@@ -344,7 +346,12 @@ pub fn classify(value: &str) -> Result<Rgba, Rejected> {
                 _ => None,
             }
         });
-        return parsed.ok_or(Rejected::Unsupported);
+        // CSS Color 4/5 (`lab()`, `color()`, `color-mix()`, relative
+        // colors, `calc()`): Blink's color model (`color4`). A functional
+        // notation neither parses is refused rather than guessed.
+        return parsed
+            .or_else(|| super::color4::parse(s))
+            .ok_or(Rejected::Unsupported);
     }
     if lower == "transparent" {
         return Ok([0.0, 0.0, 0.0, 0.0]);
@@ -357,10 +364,38 @@ pub fn classify(value: &str) -> Result<Rgba, Rejected> {
             1.0,
         ]);
     }
+    // `currentcolor` and the system colors a detached canvas resolves
+    // (measured); `AccentColor` is not a color to Chromium's canvas.
+    if matches!(lower.as_str(), "accentcolor" | "accentcolortext") {
+        return Err(Rejected::Invalid);
+    }
+    if let Some(c) = super::color4::parse(&lower) {
+        return Ok(c);
+    }
     if DOCUMENT_COLORS.contains(&lower.as_str()) {
         return Err(Rejected::Unsupported);
     }
     Err(Rejected::Invalid)
+}
+
+/// A hex color (`#` dropped), as `color4` reads one inside a function.
+pub(super) fn hex_rgba(h: &str) -> Option<Rgba> {
+    hex(h)
+}
+
+/// A named color or `transparent`, as `color4` reads one inside a function.
+pub(super) fn named_rgba(name: &str) -> Option<Rgba> {
+    if name == "transparent" {
+        return Some([0.0, 0.0, 0.0, 0.0]);
+    }
+    named(name).map(|[r, g, b]| {
+        [
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+            1.0,
+        ]
+    })
 }
 
 /// Parses a CSS color as the canvas setter does, or `None` (the setter
@@ -598,7 +633,6 @@ mod tests {
             "hsl(none, 100%, 50%)",
             "rgb(none, 0, 0)",
             "rgb(255, 50%, 0)",
-            "rgb(255 50% 0)",
             "rgb(50 % 0% 0%)",
             "hsl(0 100 % 50%)",
             "rgb(0 0 0 / inf)",
@@ -626,6 +660,9 @@ mod tests {
         ] {
             assert_eq!(classify(s), Err(Rejected::Unsupported), "{s}");
         }
+        // The modern syntax may mix numbers and percentages (Blink's
+        // color model, `color4`).
+        assert_eq!(parse("rgb(255 50% 0)"), Some([1.0, 0.5, 0.0, 1.0]));
         assert_eq!(parse("rgb(100%, 0%, 50%)"), Some(rgb8(255, 0, 128, 1.0)));
         assert_eq!(parse("rgb( 1 , 2 , 3 , .5 )"), Some(rgb8(1, 2, 3, 0.5)));
         // Every spelling of a CSS number still parses.
@@ -637,6 +674,7 @@ mod tests {
 
     #[test]
     fn refuses_colors_it_does_not_reproduce() {
+        // CSS Color 4/5 colors parse (`color4`).
         for s in [
             "oklch(70% 0.1 200)",
             "oklab(0.5 0.1 0.1)",
@@ -647,12 +685,17 @@ mod tests {
             "rgb(from red r g b)",
             "rgb(calc(255) 0 0)",
             "rgb(255 none 0)",
-            "light-dark(red, blue)",
             "currentcolor",
             "CanvasText",
         ] {
+            assert!(classify(s).is_ok(), "{s}");
+        }
+        // Valid colors not reproduced: refused.
+        for s in ["light-dark(red, blue)", "ButtonFace", "Highlight"] {
             assert_eq!(classify(s), Err(Rejected::Unsupported), "{s}");
         }
+        // Not colors to Chromium's canvas.
+        assert_eq!(classify("AccentColor"), Err(Rejected::Invalid));
         for s in ["", "nonsense", "undefined", "null", "#12", "#ggg", "5"] {
             assert_eq!(classify(s), Err(Rejected::Invalid), "{s:?}");
         }

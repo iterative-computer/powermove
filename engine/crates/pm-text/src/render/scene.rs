@@ -589,7 +589,11 @@ impl Painter<'_> {
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                let mut as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // A glyph whose distance field is beyond the atlas is drawn
+                // as a direct mask when its mask fits (`SubRunContainer`
+                // hands the SDFT run's rejects to the direct mask case).
+                let mut sdf_rejected = false;
                 #[cfg(feature = "cg-masks")]
                 if let (Some(strike), Coords::User(coords), Some(masks)) =
                     (sdf_strike, run.coords, self.masks.as_deref_mut())
@@ -615,7 +619,7 @@ impl Painter<'_> {
                         }
                         continue;
                     }
-                    as_path = true;
+                    sdf_rejected = true;
                 }
                 #[cfg(not(feature = "cg-masks"))]
                 let _ = sdf_strike;
@@ -650,6 +654,7 @@ impl Painter<'_> {
                 // Synthesized bold: Skia draws the glyph image from its path
                 // with a stroke-and-fill frame (`skpath`).
                 #[cfg(feature = "cg-masks")]
+                let large = large && !sdf_rejected;
                 if !as_path
                     && !large
                     && place.axis_aligned
@@ -1012,7 +1017,10 @@ impl Painter<'_> {
         };
         // `SubRunContainer`: text at or beyond the 256 px maximum draws
         // paths, not glyph images.
-        if runs.iter().any(|r| f64::from(r.size) * place.scale >= 256.0) {
+        if runs
+            .iter()
+            .any(|r| f64::from(r.size) * place.scale >= 256.0)
+        {
             return false;
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
@@ -1203,7 +1211,9 @@ fn mask_image(
     // of a translucent paint build up, and the target is quantized after
     // every glyph, as the GPU canvas blends them.
     let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
-    let rgb = [color[0], color[1], color[2]].map(|c| c.clamp(0.0, 1.0) as f32);
+    // A CSS Color 4 paint outside sRGB stays unclamped (Skia's
+    // `SkColor4f`); the target clamps what is written.
+    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
     let mut data = vec![0u8; w * h * 4];
     for (x, y, m, path) in masks {
         let table = tables[usize::from(*path)];
