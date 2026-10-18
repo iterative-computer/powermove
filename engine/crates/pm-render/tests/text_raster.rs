@@ -206,8 +206,11 @@ fn main() {
             }
         );
         println!("{line}");
+        let write_diff = !pass || (pin.is_some() && std::env::var("PM_TEXT_DIFFS_PINNED").is_ok());
         if !pass {
             failed.push(line);
+        }
+        if write_diff {
             if let Some(d) = &diffs {
                 std::fs::create_dir_all(d).unwrap();
                 let diff: Vec<u8> = reference
