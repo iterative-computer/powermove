@@ -192,6 +192,10 @@ pub trait MaskSource {
         let _ = (face, glyph, size, quarter, em);
         None
     }
+    /// Forget everything drawn so far: the fonts behind the faces' ids
+    /// changed (ids are never reused, so this frees memory; it is not
+    /// needed for correctness).
+    fn reset(&mut self) {}
 }
 
 /// What a glyph draw needs: the caches and the profile.
@@ -1060,7 +1064,7 @@ mod tests {
         let face = FaceRef {
             data: &colr,
             index: 0,
-            id: colr.as_ptr() as usize,
+            id: 1,
         };
         assert!(super::super::bitmap::has_colr(face));
         assert!(super::super::bitmap::is_colr_glyph(face, a));

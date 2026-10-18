@@ -45,7 +45,7 @@ pub struct BitmapGlyph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
-    font: usize,
+    font: u64,
     index: u32,
     glyph: u32,
     size: u32,

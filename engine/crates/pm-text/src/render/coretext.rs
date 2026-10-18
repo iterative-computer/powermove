@@ -34,13 +34,24 @@ pub struct RefRun<'a> {
     pub color: [f64; 4],
 }
 
-/// Font identity: buffer, face index, size bits, variation coordinates.
-type FontKey = (usize, u32, u32, Vec<(u32, u32)>);
+/// Which font bytes a cached CTFont was made from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Source {
+    /// A caller's buffer by address (the reference renderer: the caller
+    /// keeps its fonts alive and unchanged while this renderer lives).
+    Address(usize),
+    /// A [`crate::font::FontBytes::id`]: unique in the process, so new
+    /// bytes at a reused address never reach an old font.
+    Font(u64),
+}
+
+/// Font identity: source, face index, size bits, variation coordinates.
+type FontKey = (Source, u32, u32, Vec<(u32, u32)>);
 
 /// A CoreText reference renderer (keeps fonts across calls).
 #[derive(Default)]
 pub struct CoreTextReference {
-    descriptors: HashMap<(usize, u32), CFRetained<CTFontDescriptor>>,
+    descriptors: HashMap<(Source, u32), CFRetained<CTFontDescriptor>>,
     fonts: HashMap<FontKey, CFRetained<CTFont>>,
 }
 
@@ -50,7 +61,22 @@ impl CoreTextReference {
     }
 
     pub(crate) fn font(&mut self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
-        let id = run.data.as_ptr() as usize;
+        self.font_from(Source::Address(run.data.as_ptr() as usize), run)
+    }
+
+    /// [`Self::font`] for bytes with a [`crate::font::FontBytes::id`]
+    /// (glyph masks of served fonts).
+    pub(crate) fn font_of(&mut self, font: u64, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+        self.font_from(Source::Font(font), run)
+    }
+
+    /// Forget every font (the fonts behind the ids changed).
+    pub(crate) fn clear(&mut self) {
+        self.descriptors.clear();
+        self.fonts.clear();
+    }
+
+    fn font_from(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
         let key = (
             id,
             run.index,

@@ -39,7 +39,7 @@ impl GlyphMask {
 
 /// Face buffer, face index, glyph, size bits, variation (tag, value bits),
 /// quarter-pixel offset.
-type MaskKey = (usize, u32, u16, u32, Vec<(u32, u32)>, u8, u32);
+type MaskKey = (u64, u32, u16, u32, Vec<(u32, u32)>, u8, u32);
 
 /// CoreGraphics glyph masks, cached.
 #[derive(Default)]
@@ -51,7 +51,7 @@ pub struct CgMasks {
 }
 
 /// Face buffer, face index, glyph, size bits, em bits, quarter offset.
-type ColorKey = (usize, u32, u16, u32, u32, u8);
+type ColorKey = (u64, u32, u16, u32, u32, u8);
 type ColorGlyph = Option<(Arc<super::bitmap::Rgba8>, i32, i32)>;
 
 // SAFETY: CoreText fonts are immutable and thread-safe (CTFont is
@@ -71,6 +71,10 @@ impl super::scene::MaskSource for CgMasks {
         bounds: kurbo::Rect,
     ) -> Option<Arc<GlyphMask>> {
         CgMasks::mask(self, face, coords, glyph, size, style, bounds)
+    }
+
+    fn reset(&mut self) {
+        CgMasks::reset(self);
     }
 
     fn preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
@@ -106,7 +110,7 @@ impl super::scene::MaskSource for CgMasks {
         };
         let built = self
             .fonts
-            .font(&run)
+            .font_of(face.id, &run)
             .and_then(|f| draw_color(&f, glyph, f64::from(quarter) / 4.0, em.max(size)));
         if self.colors.len() > 4096 {
             self.colors.clear();
@@ -124,10 +128,18 @@ impl CgMasks {
         Self::default()
     }
 
+    /// Forget every mask and color glyph (the cache is full).
     pub fn clear(&mut self) {
         self.masks.clear();
         self.colors.clear();
         self.bytes = 0;
+    }
+
+    /// Forget everything drawn from the fonts, CTFonts included (the fonts
+    /// changed).
+    pub fn reset(&mut self) {
+        self.clear();
+        self.fonts.clear();
     }
 
     /// The mask of `glyph` at `size` device px and variation `coords`
@@ -164,7 +176,7 @@ impl CgMasks {
             glyphs: Vec::new(),
             color: [0.0, 0.0, 0.0, 1.0],
         };
-        let font = self.fonts.font(&run);
+        let font = self.fonts.font_of(face.id, &run);
         let mask = font.and_then(|f| draw(&f, glyph, style, bounds).map(Arc::new));
         if self.bytes > CACHE_BYTES {
             self.clear();
@@ -418,7 +430,7 @@ mod tests {
         let face = FaceRef {
             data: &data,
             index: 0,
-            id: data.as_ptr() as usize,
+            id: 1,
         };
         let gid = {
             use read_fonts::TableProvider;
@@ -449,5 +461,100 @@ mod tests {
             &masks.mask(face, &[], gid, 16.0, style(0), bounds).unwrap(),
             &m
         ));
+    }
+
+    /// A font replaced by other bytes at the very same address (a project
+    /// font swapped for a same-size file the allocator puts where the old
+    /// one was) never gets the old font's masks, CTFont, or outlines: the
+    /// caches key on `FontBytes::id`, which is never reused.
+    #[test]
+    fn new_font_bytes_at_a_reused_address_never_hit_old_glyphs() {
+        use crate::font::FontBytes;
+        use crate::render::outline::{Coords, GlyphStyle, Outlines};
+        use std::cell::UnsafeCell;
+        let (Ok(arial), Ok(georgia)) = (
+            std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            std::fs::read("/System/Library/Fonts/Supplemental/Georgia.ttf"),
+        ) else {
+            panic!("Arial and Georgia ship with macOS");
+        };
+        // One buffer holds Arial, then Georgia (trailing zeros pad the
+        // shorter file; fonts ignore bytes past their tables).
+        struct Slot(UnsafeCell<Vec<u8>>);
+        // SAFETY: the test writes the buffer only while no `FontBytes`
+        // over it is alive, on one thread.
+        unsafe impl Sync for Slot {}
+        impl AsRef<[u8]> for Slot {
+            fn as_ref(&self) -> &[u8] {
+                unsafe { &*self.0.get() }
+            }
+        }
+        let len = arial.len().max(georgia.len());
+        let pad = |mut v: Vec<u8>| {
+            v.resize(len, 0);
+            v
+        };
+        let slot: Arc<Slot> = Arc::new(Slot(UnsafeCell::new(pad(arial.clone()))));
+        let address = slot.as_ref().as_ref().as_ptr();
+        let gid = |data: &[u8]| {
+            use read_fonts::TableProvider;
+            read_fonts::FontRef::new(data)
+                .unwrap()
+                .cmap()
+                .unwrap()
+                .map_codepoint('g' as u32)
+                .unwrap()
+                .to_u32() as u16
+        };
+        let bounds = kurbo::Rect::new(-2.0, -30.0, 30.0, 12.0);
+        let style = MaskStyle { quarter: 0, skew: 0.0 };
+        let glyph_style = GlyphStyle {
+            size: 40.0,
+            synthetic_bold: (0.0, 0.0),
+            skew: 0.0,
+            expand: (0.0, 0.0),
+        };
+        let mut masks = CgMasks::new();
+        let mut outlines = Outlines::new();
+        let old = {
+            let bytes = FontBytes::from_shared(slot.clone());
+            let face = FaceRef { data: bytes.as_slice(), index: 0, id: bytes.id() };
+            let g = gid(bytes.as_slice());
+            let mask = masks.mask(face, &[], g, 40.0, style, bounds).unwrap();
+            let outline = outlines.get(face, Coords::User(&[]), u32::from(g), glyph_style);
+            (g, mask, outline.map(|o| o.path.to_svg()))
+        };
+        // Georgia lands in the same buffer, at the same address.
+        unsafe { (*slot.0.get()).copy_from_slice(&pad(georgia.clone())) };
+        assert_eq!(slot.as_ref().as_ref().as_ptr(), address);
+        let bytes = FontBytes::from_shared(slot.clone());
+        let face = FaceRef { data: bytes.as_slice(), index: 0, id: bytes.id() };
+        let g = gid(bytes.as_slice());
+        let mask = masks.mask(face, &[], g, 40.0, style, bounds).unwrap();
+        let outline = outlines.get(face, Coords::User(&[]), u32::from(g), glyph_style);
+        // Equal to Georgia drawn by fresh caches, unequal to Arial.
+        let fresh = {
+            let mut masks = CgMasks::new();
+            let mut outlines = Outlines::new();
+            let own = FontBytes::new(pad(georgia.clone()));
+            let face = FaceRef { data: own.as_slice(), index: 0, id: own.id() };
+            (
+                masks.mask(face, &[], g, 40.0, style, bounds).unwrap(),
+                outlines
+                    .get(face, Coords::User(&[]), u32::from(g), glyph_style)
+                    .map(|o| o.path.to_svg()),
+            )
+        };
+        assert_eq!(mask.coverage, fresh.0.coverage);
+        assert_eq!((mask.left, mask.top), (fresh.0.left, fresh.0.top));
+        assert_eq!(outline.map(|o| o.path.to_svg()), fresh.1);
+        if old.0 == g {
+            assert_ne!(mask.coverage, old.1.coverage, "Arial's mask came back");
+        }
+        assert_ne!(fresh.1, old.2, "Arial's outline came back");
+        // After a reset the masks are drawn again and still Georgia's.
+        masks.reset();
+        let again = masks.mask(face, &[], g, 40.0, style, bounds).unwrap();
+        assert_eq!(again.coverage, fresh.0.coverage);
     }
 }

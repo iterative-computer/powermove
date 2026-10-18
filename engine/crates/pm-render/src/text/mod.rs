@@ -181,8 +181,7 @@ impl Default for TextContext {
 impl TextContext {
     pub fn set_fonts(&mut self, fonts: Option<Box<dyn TextFonts>>) {
         self.fonts = fonts;
-        self.outlines.clear();
-        self.bitmaps.clear();
+        self.forget_glyphs();
         self.generation += 1;
         self.fonts_generation = self.fonts.as_ref().map_or(0, |f| f.generation());
     }
@@ -197,7 +196,20 @@ impl TextContext {
             if g != self.fonts_generation {
                 self.fonts_generation = g;
                 self.generation += 1;
+                self.forget_glyphs();
             }
+        }
+    }
+
+    /// Drops every glyph drawn from the previous fonts: outlines, color
+    /// bitmaps, platform masks and their CTFonts. Glyph caches key on
+    /// `FontBytes::id`, which is never reused, so a replaced font can never
+    /// hit an old entry; this releases the old entries.
+    fn forget_glyphs(&mut self) {
+        self.outlines.clear();
+        self.bitmaps.clear();
+        if let Some(masks) = self.masks.as_deref_mut() {
+            masks.reset();
         }
     }
 
@@ -705,7 +717,7 @@ impl TextContext {
             let face = pm_text::render::outline::FaceRef {
                 data: data.as_slice(),
                 index: 0,
-                id: data.ptr_id(),
+                id: data.id(),
             };
             let refs = [pm_text::render::scene::Run {
                 face,
@@ -1003,5 +1015,66 @@ mod tests {
             hex_to_rgba("#1g0000", 1.0),
             Some([1.0 / 255.0, 0.0, 0.0, 1.0])
         );
+    }
+
+    /// A font change (a new generation from the registry, or new fonts)
+    /// drops every glyph cache, platform masks and their CTFonts included,
+    /// and makes later raster keys new.
+    #[test]
+    fn font_changes_drop_glyph_caches() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        struct Fonts(Arc<AtomicU64>);
+        impl TextFonts for Fonts {
+            fn measure(&mut self) -> &mut dyn TextMeasure {
+                unreachable!("not laid out")
+            }
+            fn line_runs(&mut self, _: &TextContent) -> Vec<LineRuns> {
+                unreachable!("not laid out")
+            }
+            fn text_runs(&mut self, _: &TextContent, _: &str, _: f64) -> Vec<GlyphRun> {
+                unreachable!("not laid out")
+            }
+            fn face(&mut self, _: FaceId) -> &FaceInfo {
+                unreachable!("not laid out")
+            }
+            fn generation(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        struct Masks(Arc<AtomicUsize>);
+        impl pm_text::render::scene::MaskSource for Masks {
+            fn mask(
+                &mut self,
+                _: pm_text::render::outline::FaceRef<'_>,
+                _: &[(u32, f32)],
+                _: u16,
+                _: f32,
+                _: pm_text::render::scene::MaskStyle,
+                _: kurbo::Rect,
+            ) -> Option<Arc<pm_text::render::scene::GlyphMask>> {
+                None
+            }
+            fn preblend(&self, _: [f64; 3]) -> [u8; 256] {
+                [0; 256]
+            }
+            fn reset(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let generation = Arc::new(AtomicU64::new(1));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let mut cx = TextContext::default();
+        cx.set_masks(Some(Box::new(Masks(resets.clone()))));
+        cx.set_fonts(Some(Box::new(Fonts(generation.clone()))));
+        assert_eq!(resets.load(Ordering::SeqCst), 1, "new fonts reset the masks");
+        let key = cx.generation;
+        cx.sync_fonts();
+        assert_eq!((resets.load(Ordering::SeqCst), cx.generation), (1, key));
+        generation.store(2, Ordering::SeqCst);
+        cx.sync_fonts();
+        assert_eq!(resets.load(Ordering::SeqCst), 2, "a new generation resets the masks");
+        assert_ne!(cx.generation, key, "and re-keys rasters");
+        cx.sync_fonts();
+        assert_eq!(resets.load(Ordering::SeqCst), 2);
     }
 }
