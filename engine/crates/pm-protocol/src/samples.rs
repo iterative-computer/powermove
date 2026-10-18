@@ -799,6 +799,13 @@ pub fn requests() -> Vec<Envelope> {
                 arguments: serde_json::json!({ "commands": [{ "op": "set", "path": "layers.title.opacity", "value": 0.5 }] }),
             }),
         ),
+        request(
+            id(26),
+            Request::ProbeMedia(crate::media::ProbeMedia {
+                handle: handle(13),
+                interpret: Some(r#"{"primaries":"displayP3","fieldOrder":"progressive"}"#.into()),
+            }),
+        ),
     ]
 }
 
@@ -998,6 +1005,43 @@ pub fn responses() -> Vec<Envelope> {
                 content: serde_json::json!([{ "type": "text", "text": "Applied 1 command." }]),
                 is_error: false,
             }),
+        ),
+        response(
+            24,
+            Response::MediaFacts(Box::new(crate::media::MediaFacts {
+                kind: crate::media::MediaKind::Video,
+                facts: vec![crate::media::FactLine {
+                    label: "Codec".into(),
+                    value: "ProRes 422 HQ".into(),
+                }],
+                settings: vec![
+                    crate::media::InterpretSetting {
+                        member: "primaries".into(),
+                        value: "displayP3".into(),
+                        automatic: "bt709".into(),
+                        origin: crate::media::FactOrigin::Override,
+                    },
+                    crate::media::InterpretSetting {
+                        member: "range".into(),
+                        value: "limited".into(),
+                        automatic: "limited".into(),
+                        origin: crate::media::FactOrigin::Default {
+                            rule: "Untagged Y′CbCr video is limited range".into(),
+                        },
+                    },
+                    crate::media::InterpretSetting {
+                        member: "fieldOrder".into(),
+                        value: "progressive".into(),
+                        automatic: "topFirst".into(),
+                        origin: crate::media::FactOrigin::File {
+                            source: "fiel".into(),
+                        },
+                    },
+                ],
+                issues: vec![],
+                display_size: Some([1920, 1080]),
+                duration: Some(12.5),
+            })),
         ),
     ]
 }
@@ -1360,9 +1404,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::RegisterExtension(_) => 22,
         Request::ToolCall(_) => 23,
         Request::ResolveHandle(_) => 24,
+        Request::ProbeMedia(_) => 25,
     }
 }
-pub const REQUEST_VARIANTS: usize = 25;
+pub const REQUEST_VARIANTS: usize = 26;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {
@@ -1390,9 +1435,10 @@ pub const fn response_index(response: &Response) -> usize {
         Response::ExtensionRegistered(_) => 20,
         Response::ToolResult(_) => 21,
         Response::HandleResolved(_) => 22,
+        Response::MediaFacts(_) => 23,
     }
 }
-pub const RESPONSE_VARIANTS: usize = 23;
+pub const RESPONSE_VARIANTS: usize = 24;
 
 /// Exhaustive index of event variants.
 pub const fn event_index(event: &Event) -> usize {

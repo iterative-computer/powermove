@@ -16,6 +16,12 @@ pub enum IccClass {
     GraySrgb,
     /// Anything else: converted by the color pipeline.
     Other,
+    /// The samples are already sRGB: ImageIO drew a still whose color model
+    /// is neither RGB nor gray (CMYK, Lab, indexed) or whose packing has no
+    /// direct reading into 16-bit sRGB, converting through the file's
+    /// profile with ColorSync. The profile bytes are the file's and are kept
+    /// for its facts only; they must not be applied again.
+    ConvertedToSrgb,
 }
 
 fn be32(b: &[u8], at: usize) -> Option<u32> {

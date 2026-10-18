@@ -5,10 +5,12 @@
 #
 # dav1d and meson are the same archives as engine/third_party/ffmpeg/sources.lock
 # (checksums identical). OpenEXR, Imath, and libdeflate checksums were computed
-# on 2026-10-12 from the release archives below.
+# on 2026-10-12 from the release archives below. libjpeg-turbo's was computed on
+# 2026-10-15 and equals Homebrew's jpeg-turbo 3.2.0 formula.
 #
 # Linked statically into pm-media:
 dav1d      1.5.4   686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5  dav1d-1.5.4       BSD-2-Clause        https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz
+libjpeg-turbo 3.2.0 6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e libjpeg-turbo-3.2.0 IJG/BSD-3-Clause/Zlib https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz
 openexr    3.5.2   e5750af57bbed556b462cbf0c39550d9063b2028c0184ec65fe42fdae458cdea  openexr-3.5.2     BSD-3-Clause        https://github.com/AcademySoftwareFoundation/openexr/releases/download/v3.5.2/openexr-3.5.2.tar.gz
 #
 # Build inputs only (OpenEXR's configure step requires Imath; OpenEXRCore, the C

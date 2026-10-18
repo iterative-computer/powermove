@@ -1,0 +1,24 @@
+/* ── Interpret Footage ──────────────────────────────────────
+   The sheet (renderer/src/media/InterpretSheet.svelte) borrows the account
+   sheet's frame (.account-modal) and Settings sections and rows. Each row's
+   quiet second line says where its value comes from; the file's facts are a
+   quiet list of label and value. */
+
+.interp-sheet:focus{outline:0}
+.interp-form.sg-column{width:auto;max-width:none;margin:18px 0 0;display:flex;flex-direction:column}
+.interp-form .sg-group{margin:0 -14px;border-radius:var(--r-lg)}
+.interp-section{margin-top:14px}
+.interp-section:first-child{margin-top:0}
+.interp-row .settings-copy>span.interp-override{color:var(--accent-tx)}
+.interp-form .pm-select.settings-select{min-width:170px}
+.interp-matte.settings-input{width:110px;font-variant-numeric:tabular-nums;text-transform:uppercase}
+.interp-facts{display:flex;flex-direction:column;gap:2px;margin:6px 0 0;font-size:var(--fs-sm);line-height:18px}
+.interp-facts>div{display:flex;gap:12px;min-width:0}
+.interp-facts dt{flex:none;width:132px;color:var(--tx-4)}
+.interp-facts dd{flex:1;min-width:0;margin:0;color:var(--tx-2);overflow-wrap:anywhere}
+.interp-note{margin:4px 0 0;font-size:var(--fs-md);line-height:18px;color:var(--tx-3)}
+.interp-error{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--danger);text-wrap:pretty;overflow-wrap:anywhere}
+.interp-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+.interp-foot .btn{height:30px;padding:0 14px;border-radius:var(--r-md)}
+.interp-modal .btn.pri:disabled{opacity:1;background:var(--ink-1);color:var(--tx-4)}
+.interp-sheet :is(.btn,.toggle),.interp-sheet label{cursor:default;user-select:none;-webkit-user-select:none}

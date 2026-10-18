@@ -17,7 +17,7 @@ import path from 'node:path';
 import { BrowserWindow, dialog, MessageChannelMain, Notification, powerSaveBlocker, screen, sharedTexture, shell, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
 import { extensionOf, isRenderFormat, migrateFormat, normalizeDelivery } from '../../shared/delivery';
-import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
+import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
 import { discoverBlender } from '../blender-service';
 import { routeToCurrentExporter } from '../render-encoder';
@@ -29,6 +29,7 @@ import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
 import { askAboutOfflineMedia, offlineClips } from './offline-media';
+import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import type { ChildLike, PortLike } from './ports';
 
@@ -156,6 +157,23 @@ function validStageRequest(value: unknown): value is StageDocumentRequest {
 /** Largest project JSON an export may carry (the largest corpus history is 60 MB). */
 const MAX_EXPORT_PROJECT = 256 * 1024 ** 2;
 
+const MAX_INTERPRET_JSON = 16 * 1024;
+
+function validProbeRequest(value: unknown): value is EngineProbeRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const asset = v['asset'];
+  const interpret = v['interpret'];
+  if (!isId(asset)) return false;
+  if (interpret === null) return true;
+  if (typeof interpret !== 'object' || Array.isArray(interpret)) return false;
+  try {
+    return JSON.stringify(interpret).length <= MAX_INTERPRET_JSON;
+  } catch {
+    return false;
+  }
+}
+
 function validExportRequest(value: unknown): value is EngineExportRequest {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -185,12 +203,26 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     return statusMessage(options.enabled, engine?.status() ?? null);
   });
+  /* Interpret Footage (section 9): the job engine reads the asset's file. */
+  options.ipc.handle(ENGINE_IPC.probeMedia, async (event, request: unknown): Promise<EngineProbeResult> => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!validProbeRequest(request)) throw new Error('A probe names an asset and its interpretation.');
+    if (!engine) return { status: 'unavailable', reason: 'Interpret Footage needs the new engine (Settings › General › Use New Engine).' };
+    if (!engine.isReady('job')) return { status: 'unavailable', reason: 'The engine is starting. Try again in a moment.' };
+    try {
+      const facts = await engine.probeMedia(request.asset, request.interpret ? JSON.stringify(request.interpret) : null);
+      return { status: 'facts', facts };
+    } catch (error) {
+      return { status: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
   options.ipc.on(ENGINE_IPC.enabledSync, (event) => {
     event.returnValue = options.isTrustedSender(event) && options.enabled;
   });
 
   if (!options.enabled) {
-    return { engine: null, agentJobs: null, attachWindow: () => {}, dispose: async () => {} };
+    // The probe stays answerable (with the reason it cannot run) while the engine is off.
+    return { engine: null, agentJobs: null, attachWindow: () => {}, dispose: async () => options.ipc.removeHandler(ENGINE_IPC.probeMedia) };
   }
 
   const addon = engineAddonPath({ isPackaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env });
@@ -539,6 +571,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      options.ipc.removeHandler(ENGINE_IPC.probeMedia);
       options.ipc.removeHandler(ENGINE_IPC.hostTime);
       options.ipc.removeAllListeners(ENGINE_IPC.requestPorts);
       options.ipc.removeHandler(ENGINE_IPC.exportVideo);

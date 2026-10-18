@@ -143,13 +143,15 @@ fn untested_still_classes_are_unsupported() {
 /// drawn and compared in `tests/corpus.rs` (`render/still-photo-gray-jpg`);
 /// header classes are covered by `stills::tests::jpeg_classes`.
 #[test]
-fn ycbcr_jpeg_is_unsupported() {
+fn ycbcr_jpeg_is_drawn() {
+    // Decoded by libjpeg-turbo, as Chromium decodes it (corpus
+    // `render/still-photo-*-jpg` within 1 CV).
     let d = dir().join("jpeg");
     std::fs::create_dir_all(&d).unwrap();
     for fmt in ["yuvj420p", "yuvj422p", "yuvj444p"] {
         let path = d.join(format!("{fmt}.jpg"));
         ffmpeg(&path, &["-pix_fmt", fmt, "-q:v", "3"]);
-        assert!(unsupported(&path).contains("Y'CbCr JPEG"), "{fmt}");
+        assert_eq!(probe_image(&path), Ok(()), "{fmt}");
     }
     std::fs::remove_dir_all(&d).ok();
 }

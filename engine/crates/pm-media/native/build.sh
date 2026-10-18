@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds the native libraries pm-media links statically: dav1d (AV1 decode
-# straight into Metal-shared memory, plan section 26 amendment 6) and
-# OpenEXRCore (OpenEXR's C library, plan section 13 "Images").
+# straight into Metal-shared memory, plan section 26 amendment 6), OpenEXRCore
+# (OpenEXR's C library, plan section 13 "Images"), and libjpeg-turbo (JPEG
+# decoded as today's viewer decodes it: the same library, accurate integer
+# IDCT, fancy upsampling).
 #
 #   engine/crates/pm-media/native/build.sh
 #
@@ -12,7 +14,8 @@
 # Output (outside the repository):
 #   $PM_MEDIA_NATIVE_DIR (default ~/Library/Caches/powermove-engine/media-native/out)
 #     lib/libdav1d.a, lib/libOpenEXRCore*.a (plus OpenEXR's vendored deflate,
-#     zstd, and OpenJPH objects), include/, stamp (the sources.lock checksum)
+#     zstd, and OpenJPH objects), lib/libturbojpeg.a, include/, stamp (the
+#     sources.lock checksum)
 #
 # Environment: PM_MEDIA_NATIVE_DIR, PM_MEDIA_NATIVE_WORK, PM_MEDIA_NATIVE_DOWNLOADS,
 # PM_MEDIA_NATIVE_JOBS (default 4), PM_MEDIA_NATIVE_PYTHON (python >= 3.10 for meson).
@@ -116,11 +119,23 @@ CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of openex
   -DOPENEXR_ENABLE_THREADING=ON
 "$CMAKE" --build "$WORK/build/openexr" --target OpenEXRCore -j "$JOBS"
 
+log "build libjpeg-turbo"
+# Static TurboJPEG API with the NEON SIMD extensions; no tools or Java.
+CFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libjpeg-turbo)" -B "$WORK/build/libjpeg-turbo" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+  -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON \
+  -DWITH_JAVA=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF -DWITH_SIMD=ON
+"$CMAKE" --build "$WORK/build/libjpeg-turbo" --target turbojpeg-static -j "$JOBS"
+
 log "stage $OUT"
 rm -rf "$OUT.partial"
 mkdir -p "$OUT.partial/lib" "$OUT.partial/include/openexr"
 cp "$PREFIX/lib/libdav1d.a" "$OUT.partial/lib/"
 cp -R "$PREFIX/include/dav1d" "$OUT.partial/include/"
+cp "$WORK/build/libjpeg-turbo/libturbojpeg.a" "$OUT.partial/lib/"
+mkdir -p "$OUT.partial/include/turbojpeg"
+cp "$(src_of libjpeg-turbo)/src/turbojpeg.h" "$OUT.partial/include/turbojpeg/"
 # OpenEXRCore and every static library it was built with (vendored deflate, zstd, OpenJPH).
 while IFS= read -r lib; do cp "$lib" "$OUT.partial/lib/"; done < <(find "$WORK/build/openexr" -name '*.a' -not -path '*Imath*')
 cp "$(src_of openexr)"/src/lib/OpenEXRCore/openexr*.h "$OUT.partial/include/openexr/"
@@ -131,17 +146,22 @@ cp "$WORK/build/openexr/_deps/imath-build/config/ImathConfig.h" "$OUT.partial/in
 # The public C headers must compile on their own (bindgen parses them).
 clang -fsyntax-only -x c -I"$OUT.partial/include/openexr" - <<<'#include "openexr.h"' || die "staged OpenEXR headers do not compile"
 clang -fsyntax-only -x c -I"$OUT.partial/include" - <<<'#include <dav1d/dav1d.h>' || die "staged dav1d headers do not compile"
+clang -fsyntax-only -x c -I"$OUT.partial/include" - <<<'#include <stddef.h>
+#include <turbojpeg/turbojpeg.h>' || die "staged TurboJPEG header does not compile"
 [[ -f "$OUT.partial/include/openexr/openexr_config.h" ]] || die "openexr_config.h missing"
 # Nothing may link outside the archives except libc++ and the system.
 DEFINED="$(nm "$OUT.partial"/lib/*.a 2>/dev/null | awk '$2 == "T" { print $3 }' | sort -u)"
-for sym in _ZSTD_createDCtx _libdeflate_alloc_decompressor _dav1d_open _exr_start_read; do
+for sym in _ZSTD_createDCtx _libdeflate_alloc_decompressor _dav1d_open _exr_start_read _tj3Init _tj3Decompress8 _tj3Decompress12; do
   grep -qx "$sym" <<<"$DEFINED" || die "$sym is not defined in the staged archives"
 done
-for n in dav1d openexr; do
+for n in dav1d openexr libjpeg-turbo; do
   mkdir -p "$OUT.partial/share/licenses/$n"
 done
 cp "$(src_of dav1d)/COPYING" "$OUT.partial/share/licenses/dav1d/"
 cp "$(src_of openexr)/LICENSE.md" "$OUT.partial/share/licenses/openexr/"
+cp "$(src_of libjpeg-turbo)/LICENSE.md" "$(src_of libjpeg-turbo)/README.ijg" "$OUT.partial/share/licenses/libjpeg-turbo/"
+cp "$(src_of libjpeg-turbo)/src/spng/LICENSE" "$OUT.partial/share/licenses/libjpeg-turbo/spng-LICENSE"
+cp "$(src_of libjpeg-turbo)/src/spng/zlib/LICENSE" "$OUT.partial/share/licenses/libjpeg-turbo/zlib-LICENSE"
 ls "$OUT.partial/lib" > "$OUT.partial/libs.txt"
 echo "$STAMP" > "$OUT.partial/stamp"
 rm -rf "$OUT"

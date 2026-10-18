@@ -1,7 +1,8 @@
-//! Still and animated image readers (section 13 "Images"): the `image`
-//! crate for PNG (8 and 16-bit), JPEG, TIFF (8, 16, 32f), BMP, ICO, GIF, and
-//! WebP; ImageIO for HEIF/HEIC, AVIF, animation frames, and anything else
-//! macOS reads; OpenEXR's C library for EXR; FFmpeg for DPX.
+//! Still and animated image readers (section 13 "Images"): libjpeg-turbo for
+//! JPEG (the decoder today's viewer uses); the `image` crate for PNG (8 and
+//! 16-bit), TIFF (8, 16, 32f), BMP, ICO, GIF, and WebP; ImageIO for
+//! HEIF/HEIC, AVIF, CMYK JPEG, animation frames, and anything else macOS
+//! reads; OpenEXR's C library for EXR; FFmpeg for DPX; resvg for SVG.
 //!
 //! Pixels are returned as they are stored, never color managed: an RGBA
 //! plane in pool memory at the file's depth (8 or 16-bit integer, half or
@@ -12,8 +13,10 @@
 pub mod exr;
 pub mod icc;
 pub mod imageio;
+pub mod jpeg;
 pub mod raster;
 pub mod sequence;
+pub mod svg;
 
 use crate::error::{MediaError, Result};
 use crate::frame::{
@@ -29,10 +32,12 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ImageBackend {
+    LibjpegTurbo,
     ImageCrate,
     ImageIo,
     OpenExr,
     Ffmpeg,
+    Resvg,
 }
 
 /// Formats recognized from the first bytes of a file.
@@ -50,6 +55,7 @@ pub enum ImageFormat {
     Dpx,
     Heif,
     Avif,
+    Svg,
     Other,
 }
 
@@ -74,13 +80,31 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
     } else if at(0, b"SDPX") || at(0, b"XPDS") {
         ImageFormat::Dpx
     } else if at(4, b"ftyp") {
+        // Only image brands: MOV and MP4 movies carry `ftyp` too.
+        let size = head
+            .get(..4)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
         let brand = head.get(8..12).unwrap_or(&[]);
-        let compat = head.get(16..64).unwrap_or(&[]);
-        if brand == b"avif" || brand == b"avis" || compat.windows(4).any(|w| w == b"avif") {
+        let compat: Vec<&[u8]> = head
+            .get(16..size.clamp(16, head.len()))
+            .unwrap_or(&[])
+            .chunks_exact(4)
+            .collect();
+        let any = |set: &[&[u8; 4]]| {
+            set.iter()
+                .any(|b| brand == &b[..] || compat.iter().any(|c| *c == &b[..]))
+        };
+        if any(&[b"avif", b"avis"]) {
             ImageFormat::Avif
-        } else {
+        } else if any(&[
+            b"mif1", b"msf1", b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis",
+        ]) {
             ImageFormat::Heif
+        } else {
+            ImageFormat::Other
         }
+    } else if svg::sniff(head) {
+        ImageFormat::Svg
     } else {
         ImageFormat::Other
     }
@@ -129,7 +153,7 @@ pub struct Animation {
 
 /// Reads a still (the first frame of an animation).
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
-    let mut head = [0u8; 64];
+    let mut head = [0u8; 512];
     let n = {
         use std::io::Read;
         std::fs::File::open(path)?.read(&mut head)?
@@ -137,8 +161,16 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     let format = sniff(&head[..n]);
     match format {
         ImageFormat::Exr => exr::read(path, pool),
+        ImageFormat::Jpeg => jpeg::read(path, pool),
+        ImageFormat::Svg => svg::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
         ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
+            imageio::read_frame(path, 0, pool, format)
+        }
+        // The `image` crate reads RGB and gray TIFFs only: it fails on
+        // palette, YCbCr, and Lab, and turns CMYK into RGB without its
+        // profile. ImageIO converts those through their profile.
+        ImageFormat::Tiff if !matches!(raster::tiff_photometric(path)?, Some(0..=2)) => {
             imageio::read_frame(path, 0, pool, format)
         }
         _ => raster::read(path, pool, format),
@@ -340,6 +372,15 @@ mod tests {
             ImageFormat::Heif
         );
         assert_eq!(sniff(b"\0\0\0\x1cftypavif\0\0\0\0"), ImageFormat::Avif);
+        // Movies are not images.
+        assert_eq!(
+            sniff(b"\0\0\0\x14ftypqt  \0\0\x02\0qt  \0\0\0\x08wide"),
+            ImageFormat::Other
+        );
+        assert_eq!(
+            sniff(b"\0\0\0\x20ftypisom\0\0\x02\0isomiso2avc1mp41"),
+            ImageFormat::Other
+        );
         assert_eq!(
             sniff(&[0x76, 0x2F, 0x31, 0x01, 2, 0, 0, 0]),
             ImageFormat::Exr

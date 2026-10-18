@@ -221,6 +221,8 @@ pub enum Request {
     RegisterExtension(RegisterExtension),
     /// Host → document host. Answer: `toolResult`.
     ToolCall(ToolCall),
+    /// Host → job engine. Answer: `mediaFacts`.
+    ProbeMedia(crate::media::ProbeMedia),
 }
 
 /// Responses, one per request kind.
@@ -255,6 +257,7 @@ pub enum Response {
     Persisted(Persisted),
     ExtensionRegistered(ExtensionRegistered),
     ToolResult(ToolResult),
+    MediaFacts(Box<crate::media::MediaFacts>),
 }
 
 /// One-way messages. Each names its direction.
@@ -338,6 +341,7 @@ pub enum ResponseKind {
     Persisted,
     ExtensionRegistered,
     ToolResult,
+    MediaFacts,
 }
 
 impl Request {
@@ -369,6 +373,7 @@ impl Request {
             Request::Persist(_) => ResponseKind::Persisted,
             Request::RegisterExtension(_) => ResponseKind::ExtensionRegistered,
             Request::ToolCall(_) => ResponseKind::ToolResult,
+            Request::ProbeMedia(_) => ResponseKind::MediaFacts,
         }
     }
 
@@ -388,7 +393,8 @@ impl Request {
             | Request::ResolveHandle(_)
             | Request::OutputDestination(_)
             | Request::CommitOutput(_)
-            | Request::HardwareSessions(_) => ContractId::HostServices,
+            | Request::HardwareSessions(_)
+            | Request::ProbeMedia(_) => ContractId::HostServices,
             Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
                 ContractId::Blender
             }
@@ -440,6 +446,7 @@ impl Response {
             Response::Persisted(_) => ResponseKind::Persisted,
             Response::ExtensionRegistered(_) => ResponseKind::ExtensionRegistered,
             Response::ToolResult(_) => ResponseKind::ToolResult,
+            Response::MediaFacts(_) => ResponseKind::MediaFacts,
         }
     }
 }
@@ -511,6 +518,7 @@ impl Validate for Request {
             Request::BlenderModel(job) => job.validate(),
             Request::SubmitJob(job) => job.validate(),
             Request::ToolCall(call) => call.validate(),
+            Request::ProbeMedia(probe) => probe.validate(),
             Request::CloseSession
             | Request::Resync(_)
             | Request::CheckConsistency(_)
@@ -536,6 +544,7 @@ impl Validate for Response {
             Response::LeaseUsage(usage) => usage.validate(),
             Response::Lease(lease) => lease.validate(),
             Response::HandleResolved(resolved) => resolved.validate(),
+            Response::MediaFacts(facts) => facts.validate(),
             _ => Ok(()),
         }
     }

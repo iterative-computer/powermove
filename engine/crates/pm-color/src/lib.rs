@@ -12,6 +12,7 @@
 //! | [`chroma`] | Chroma siting, siting-aware upsampling (exact at co-sited samples), output decimation, pass-through eligibility |
 //! | [`alpha`] | Premultiplication rules for sources and outputs |
 //! | [`primaries`] | Linear-light conversion between primaries (P3 stills, the P3 viewer canvas), no clipping |
+//! | [`tonemap`] | HDR input tone mapping in Standard projects: BT.2446 Method A from PQ and HLG |
 //! | [`linear`] | Linear-light helpers for linear blending (Phase 3a): input and output transforms and the HDR-safe blend formulas |
 //! | [`dither`] | The deterministic blue-noise RPDF dither of section 17 |
 //! | [`cicp`] | Output tags (amendment 7) and reading H.273 code points |
@@ -29,6 +30,7 @@ pub mod key;
 pub mod linear;
 pub mod primaries;
 pub mod standard;
+pub mod tonemap;
 pub mod transfer;
 pub mod wgsl;
 pub mod ycbcr;

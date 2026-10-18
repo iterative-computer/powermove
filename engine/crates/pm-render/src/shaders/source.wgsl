@@ -7,6 +7,9 @@
 //   horizontally and linear vertically for 4:2:0; then the matrix.
 // - Transfer and primaries into the working encoding. In Standard an
 //   E-encoded Rec.709 source is the identity: code values pass through.
+//   HDR sources (transfer 5 PQ, 6 HLG) are tone mapped with BT.2446 Method A
+//   to Rec.709 SDR code values, which Standard reads as E
+//   (pm_color::tonemap; `PM_TONEMAP` is prepended too).
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -31,6 +34,8 @@ struct Params {
     p2: vec4<f32>,
     // Matte color for "premultiplied with color".
     matte: vec4<f32>,
+    // HDR tone mapping: x the content peak in cd/m².
+    hdr: vec4<f32>,
 };
 
 @group(0) @binding(0) var luma: texture_2d<f32>;
@@ -123,6 +128,15 @@ fn to_working(c: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
         return c;
+    }
+    if (P.a.y == 5u || P.a.y == 6u) {
+        // BT.2020 HDR signal to Rec.709 SDR codes (E in Standard); the
+        // primaries columns hold BT.2020 to Rec.709.
+        let sdr = pm_hdr_to_sdr(c, P.a.y == 6u, P.hdr.x, mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz));
+        if (P.a.z == 0u) {
+            return sdr;
+        }
+        return pm_e_decode3(sdr);
     }
     var l = transfer_to_linear(c);
     if (P.c.w == 1u) {

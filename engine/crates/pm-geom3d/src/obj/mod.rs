@@ -4,6 +4,21 @@
 //! scaled to a unit bounding sphere, flattened to one vertex per triangle
 //! corner. Numbers follow JavaScript (`Number(string)`, `Math.hypot` as V8
 //! computes it), so the f32 buffers equal the kernel's.
+//!
+//! With the `import` feature, [`prepare_import`] is `prepareModelImport`
+//! (`core/scene3d/import-bundle.ts`): an OBJ chosen with its MTL and texture
+//! files becomes one GLB, as three.js r180's `OBJLoader`, `MTLLoader`, and
+//! `GLTFExporter` make it, with Phong materials turned standard and bump
+//! maps turned into normal maps. It validates the geometry with
+//! [`parse_obj`] first, as `prepareModelImport` calls `parseObj`.
+
+#[cfg(feature = "import")]
+mod loader;
+#[cfg(feature = "import")]
+mod pack;
+
+#[cfg(feature = "import")]
+pub use pack::{ImportFile, Prepared, prepare_import};
 
 /// A parsed OBJ mesh (`ObjMesh`).
 #[derive(Debug, Clone, PartialEq)]

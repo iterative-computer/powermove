@@ -44,26 +44,20 @@ impl Pitch {
     }
 }
 
-/// The conformed rate of an asset record (`interpret.frameRateRational`,
-/// else `interpret.frameRate`), when it sets one.
+/// The conformed rate of an asset record (`interpret.frameRate`, with
+/// `frameRateRational` beside it or as an exact `[num, den]`), when it sets
+/// one. The same reading as the video's (`pm_media::interpret`), so picture
+/// and sound conform together.
 pub fn conformed_rate(asset: Option<&Node>) -> Option<Rate> {
     let interpret = node::member(asset, "interpret");
     if node::is_nullish(interpret) {
         return None;
     }
-    let rational = node::array(node::member(interpret, "frameRateRational")).and_then(|a| {
-        let num = node::to_number(a.first());
-        let den = node::to_number(a.get(1));
-        (num.is_finite() && den.is_finite() && num.fract() == 0.0 && den.fract() == 0.0)
-            .then_some([num as i64, den as i64])
-    });
-    let fps = node::to_number(node::member(interpret, "frameRate"));
-    if rational.is_none() && !(fps.is_finite() && fps > 0.0) {
-        return None;
-    }
-    pm_time::rate_from_document(rational, if fps.is_finite() { fps } else { 0.0 })
-        .ok()
-        .map(|r| r.rate)
+    let text = pm_model::json::write::to_canonical_string(interpret?);
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    pm_media::interpret::Interpretation::from_json(&value)
+        .0
+        .frame_rate
 }
 
 type Key = (PathBuf, u64, Option<SystemTime>);
@@ -131,6 +125,8 @@ mod tests {
                 "float":{"interpret":{"frameRate":25}},
                 "none":{"interpret":{"primaries":"bt709"}},
                 "auto":{"interpret":{"frameRate":null}},
+                "pair":{"interpret":{"frameRate":[30000,1001]}},
+                "bad":{"interpret":{"frameRate":[24.5,1]}},
                 "bare":{}}"#,
         );
         let root = doc.root();
@@ -145,6 +141,11 @@ mod tests {
         assert_eq!(conformed_rate(node::member(root, "none")), None);
         assert_eq!(conformed_rate(node::member(root, "auto")), None);
         assert_eq!(conformed_rate(node::member(root, "bare")), None);
+        assert_eq!(
+            conformed_rate(node::member(root, "pair")),
+            Some(Rate::FPS_29_97)
+        );
+        assert_eq!(conformed_rate(node::member(root, "bad")), None);
     }
 
     #[test]

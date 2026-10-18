@@ -28,6 +28,7 @@ import type {
   Event,
   InFlight,
   JobStatus,
+  MediaFacts,
   Request,
   Response,
   SlicingPolicy
@@ -115,6 +116,13 @@ function validInFlight(value: unknown): value is InFlight {
 /** A 60 Hz frame, when the display's refresh rate is unknown. */
 export const DEFAULT_FRAME_BUDGET_US = 16_667;
 
+/** Why a waiting Interpret Footage probe was dropped. */
+export const PROBE_SUPERSEDED = 'A newer probe of the same asset replaced this one.';
+
+interface ProbeSlot {
+  waiting: { interpret: string | null; resolve: (facts: MediaFacts) => void; reject: (cause: unknown) => void } | null;
+}
+
 export class NativeEngine {
   readonly services: HostServicesCore;
   /** Blender supervision for both engines (contract 11, `blender.ts`). */
@@ -139,6 +147,11 @@ export class NativeEngine {
   /** Set by `stop()`: no control messages go to engines that are shutting
    *  down (they would be dropped anyway; see `Launch.exiting`). */
   private stopping = false;
+  /** Interpret Footage probes per asset: the one in flight and the newest
+   *  request waiting behind it (the sheet probes on every change and keeps
+   *  only its latest answer, so a waiting request a newer one replaces is
+   *  superseded and never reaches the engine). */
+  private probes = new Map<string, ProbeSlot>();
 
   get handles(): HandleTable {
     return this.services.handles;
@@ -354,6 +367,56 @@ export class NativeEngine {
   /** Marks a job session as a draft render: offline media resolves to proxies. */
   setDraftSession(session: number, draft: boolean): void {
     this.services.setDraftSession(session, draft);
+  }
+
+  /** Interpret Footage's facts of an asset's file. Main resolves the asset
+   *  (the media store) and mints a `mediaRead` handle bound to the job
+   *  engine's host port and session 0; the job engine resolves it, reads
+   *  the file, and answers `mediaFacts`. The handle is revoked after. */
+  async probeMedia(asset: string, interpret: string | null): Promise<MediaFacts> {
+    const slot = this.probes.get(asset);
+    if (slot) {
+      slot.waiting?.reject(new Error(PROBE_SUPERSEDED));
+      return new Promise<MediaFacts>((resolve, reject) => {
+        slot.waiting = { interpret, resolve, reject };
+      });
+    }
+    const mine: ProbeSlot = { waiting: null };
+    this.probes.set(asset, mine);
+    try {
+      return await this.probeOnce(asset, interpret);
+    } finally {
+      this.nextProbe(asset, mine);
+    }
+  }
+
+  /** Runs the request waiting on `asset`'s probe, or frees the slot. */
+  private nextProbe(asset: string, slot: ProbeSlot): void {
+    const next = slot.waiting;
+    if (!next) {
+      this.probes.delete(asset);
+      return;
+    }
+    slot.waiting = null;
+    void this.probeOnce(asset, next.interpret)
+      .then(next.resolve, next.reject)
+      .finally(() => this.nextProbe(asset, slot));
+  }
+
+  private async probeOnce(asset: string, interpret: string | null): Promise<MediaFacts> {
+    const launch = this.supervisors.job.current;
+    if (!launch) throw new Error('the job engine is not running');
+    const resolved = await this.options.resolveAsset?.(asset);
+    if (!resolved) throw new Error('The asset’s file is not available.');
+    const handle = this.handles.mint({ kind: { kind: 'mediaRead', asset }, session: 0, port: launch.hostPort, path: resolved.path });
+    try {
+      const answer = await this.request('job', { type: 'probeMedia', handle, interpret });
+      if (answer.type !== 'mediaFacts') throw new Error(`the job engine answered ${answer.type}`);
+      const { type: _type, ...facts } = answer;
+      return facts as MediaFacts;
+    } finally {
+      this.handles.revoke(handle);
+    }
   }
 
   /** Whether an engine's current launch is connected and answering. */

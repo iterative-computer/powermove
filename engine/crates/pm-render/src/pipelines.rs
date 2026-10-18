@@ -37,6 +37,8 @@ pub struct SourceUniform {
     pub m: [[f32; 4]; 3],
     pub p: [[f32; 4]; 3],
     pub matte: [f32; 4],
+    /// HDR input tone mapping: x is the content peak in cd/m² (L_HDR).
+    pub hdr: [f32; 4],
 }
 
 /// The bytes of a plain `repr(C)` value.
@@ -333,8 +335,9 @@ impl Pipelines {
         ]
         .map(|(_, name, layout)| {
             let code = format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
                 pm_color::wgsl::COLOR,
+                pm_color::tonemap::WGSL,
                 include_str!("shaders/source.wgsl").replace("OUT_FORMAT", name)
             );
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { PROTOCOL_BUILD, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
-import { NativeEngine } from './native-engine';
+import { NativeEngine, PROBE_SUPERSEDED } from './native-engine';
 import type { ChildLike, ClientPortInfo, EngineControl, PortLike } from './ports';
 import { decodeEnvelope, encodeEnvelope, envelope, eventMessage, localRanges, requestMessage, responseMessage } from './protocol';
 
@@ -180,6 +180,18 @@ class FakeEngine implements ChildLike {
         categories: { frameCache: 0, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
       };
       this.send(port, envelope(responseMessage(body.id, response)));
+    } else if (body.kind === 'request' && body.body.type === 'probeMedia') {
+      // A job engine resolves the handle through the host, then answers.
+      const id = body.id;
+      const handle = body.body.handle;
+      void this.ask({ type: 'resolveHandle', handle, session: 0 }).then((answer) => {
+        const resolved = answer.message.kind === 'response' && answer.message.body.type === 'handleResolved' ? answer.message.body : null;
+        const facts: Response = {
+          type: 'mediaFacts', kind: 'video', facts: [{ label: 'Path', value: resolved?.path ?? 'refused' }],
+          settings: [], issues: [], displaySize: [320, 180], duration: 2
+        };
+        this.send(port, envelope(responseMessage(id, facts)));
+      });
     } else if (body.kind === 'response' || body.kind === 'error') {
       this.answers.get(body.id)?.(message);
     }
@@ -481,6 +493,66 @@ describe('NativeEngine with fake engines', () => {
     expect(ok.message.kind === 'response' && ok.message.body.type === 'handleResolved' && ok.message.body.access).toBe('readWrite');
     const otherEngine = await live('job').ask({ type: 'resolveHandle', handle: staged.handle, session: 3 });
     expect(otherEngine.message.kind).toBe('error');
+  });
+
+  it('probes media through a mediaRead handle bound to the job engine and session 0, revoked after', async () => {
+    const file = path.join(dir, 'clip.mov');
+    const probing = new NativeEngine({
+      spawn: (process) => {
+        const engine = new FakeEngine(process);
+        engines.push(engine);
+        return engine;
+      },
+      channel,
+      cacheDirectory: path.join(dir, 'cache-probe'),
+      automaticOutputDirectory: path.join(dir, 'Powermove'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: () => {},
+      hostNow: () => 42,
+      resolveAsset: async (asset) => (asset === 'clip' ? { path: file, contentHash: null } : null),
+      schedule: (fn, ms) => {
+        const timer = { fn, ms, cancelled: false };
+        timers.push(timer);
+        return { cancel: () => { timer.cancelled = true; } };
+      }
+    });
+    await probing.start();
+    await settle();
+    try {
+      const facts = await probing.probeMedia('clip', '{"range":"full"}');
+      expect(facts.facts[0]).toEqual({ label: 'Path', value: file });
+      expect(facts.displaySize).toEqual([320, 180]);
+      const job = engines.filter((e) => e.process === 'job' && !e.dead).at(-1)!;
+      const probe = job.received.find((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia');
+      const body = probe?.message.kind === 'request' && probe.message.body.type === 'probeMedia' ? probe.message.body : null;
+      expect(body?.interpret).toBe('{"range":"full"}');
+      // The handle is gone once the answer arrived.
+      const again = await job.ask({ type: 'resolveHandle', handle: body!.handle, session: 0 });
+      expect(again.message.kind).toBe('error');
+      await expect(probing.probeMedia('missing', null)).rejects.toThrow('not available');
+      // One probe per asset in flight: a request waiting behind it is
+      // superseded by a newer one and never reaches the engine.
+      const sent = () => job.received.filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia').length;
+      const before = sent();
+      const first = probing.probeMedia('clip', '{"range":"limited"}');
+      const second = probing.probeMedia('clip', '{"range":"full"}');
+      const third = probing.probeMedia('clip', null);
+      await expect(second).rejects.toThrow(PROBE_SUPERSEDED);
+      await expect(first).resolves.toMatchObject({ displaySize: [320, 180] });
+      await expect(third).resolves.toMatchObject({ displaySize: [320, 180] });
+      const bodies = job.received
+        .slice()
+        .filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia')
+        .slice(before)
+        .map((m) => (m.message.kind === 'request' && m.message.body.type === 'probeMedia' ? m.message.body.interpret : undefined));
+      expect(sent() - before).toBe(2);
+      expect(bodies).toEqual(['{"range":"limited"}', null]);
+      // The slot is free again: the next probe goes straight out.
+      await expect(probing.probeMedia('clip', '{"range":"full"}')).resolves.toMatchObject({ duration: 2 });
+      expect(sent() - before).toBe(3);
+    } finally {
+      await probing.stop();
+    }
   });
 
   it('does not restart an engine that cannot load', async () => {

@@ -17,8 +17,8 @@
 //!   is first quantized down to the start of the child's own frame
 //!   (section 5 rule 4).
 
+use pm_eval::Comp;
 use pm_eval::node;
-use pm_eval::{Comp, JsValue};
 use pm_model::Node;
 use pm_time::{Rate, TICKS_PER_SECOND, Tick};
 
@@ -34,32 +34,10 @@ pub fn playback_time(time: f64, dur: f64, padding: f64) -> f64 {
 /// The Interpret Footage frame-rate override of an asset record:
 /// `interpret.frameRate` as `[num, den]` or a positive number (a float
 /// within 0.02% of an NTSC or integer rate maps to it, as composition
-/// rates do).
+/// rates do), or the sheet's `frameRateRational` beside its float. One
+/// reading for the renderer and the sheet: `pm_media::interpret`.
 pub fn rate_override(record: &Node) -> Option<Rate> {
-    let fr = node::member(node::member(Some(record), "interpret"), "frameRate")?;
-    if let Some(list) = node::array(Some(fr)) {
-        let num = node::to_number(list.first());
-        let den = node::to_number(list.get(1));
-        if list.len() == 2
-            && num.fract() == 0.0
-            && den.fract() == 0.0
-            && num >= 1.0
-            && den >= 1.0
-            && num <= f64::from(u32::MAX)
-            && den <= f64::from(u32::MAX)
-        {
-            return Rate::new(num as i64, den as i64).ok();
-        }
-        return None;
-    }
-    match node::js_value_opt(Some(fr)) {
-        JsValue::Number(f) if f.is_finite() && f > 0.0 => {
-            pm_model::IngestRate::from_document(None, Some(f))
-                .ok()
-                .map(|r| r.rate)
-        }
-        _ => None,
-    }
+    crate::footage::interpretation(record).and_then(|i| i.frame_rate)
 }
 
 /// The frame showing at source time `seconds` when frame n is shown at n /
@@ -71,7 +49,12 @@ pub fn override_frame(seconds: f64, rate: Rate) -> Option<usize> {
     if !ticks.is_finite() {
         return None;
     }
-    let t = ticks as i128;
+    override_frame_at(ticks as Tick, rate)
+}
+
+/// [`override_frame`] at a tick.
+pub fn override_frame_at(ticks: Tick, rate: Rate) -> Option<usize> {
+    let t = i128::from(ticks);
     // n ≤ (t / TICKS + 1 / (8 · rate)) · rate
     //   = (8 · t · num + TICKS · den) / (8 · TICKS · den).
     let num = i128::from(rate.num());
