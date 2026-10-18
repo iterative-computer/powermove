@@ -181,6 +181,58 @@ test.describe('Use New Engine: J/K/L, play around, and audio scrub', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('paused exact and silent scrub seeks prepare audio before Play, including before device open', async ({ session }) => {
+    const { page } = session;
+    await openEngine(session);
+    await solidsProject(page);
+    await waitDriving(page);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.setAudioScrub(false);
+      PM.EngineConnection.transport.seek(0.4, false);
+      const input = document.createElement('input');
+      input.id = 'a6-audio'; input.type = 'file'; input.hidden = true;
+      document.body.appendChild(input);
+    });
+    await page.locator('#a6-audio').setInputFiles(fixturePath('tone.wav'));
+    await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const input = document.getElementById('a6-audio') as HTMLInputElement;
+      const asset = await PM.assets.add(input.files![0], { newAsset: true, silent: true });
+      PM.proj.layers.push(PM.mkLayer('audio', { from: 0, dur: 1.5, d: { asset: asset.id, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 } }, PM.proj));
+      PM.touch(); PM.bus.emit('layers'); PM.bus.emit('project'); PM.bus.emit('assets'); PM.invalidate();
+    });
+    const prepared = async (): Promise<number[]> => {
+      const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+      return (Object.values(report.presenter.audio)[0] as any)?.preparedStarts ?? [];
+    };
+    // The device opens on the audible update, at the pre-open exact seek.
+    await expect.poll(prepared, { timeout: 5_000 }).toContain(19_200);
+    const grainAt = async (time: number, enabled: boolean): Promise<number> => page.evaluate(async ({time, enabled}) => {
+      const PM = (window as any).PM;
+      PM.setAudioScrub(enabled);
+      let peak = 0;
+      const off = PM.EngineConnection.audio.onLevels((l: any) => { peak = Math.max(peak, ...l.master.peak); });
+      PM.EngineConnection.transport.seek(time, true);
+      await new Promise(r => setTimeout(r, 300));
+      off();
+      return peak;
+    }, {time, enabled});
+    expect(await grainAt(0.8, false)).toBe(0);
+    await expect.poll(prepared, { timeout: 5_000 }).toContain(38_400);
+    await page.evaluate(() => (window as any).PM.EngineConnection.transport.seek(1.2, false));
+    await expect.poll(prepared, { timeout: 5_000 }).toContain(57_600);
+    expect(await grainAt(0.6, true)).toBeGreaterThan(0.05);
+    await expect.poll(async () => (await status(page)).clock?.state).toBe('stopped');
+    await expect.poll(prepared, { timeout: 5_000 }).toContain(28_800);
+    const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+    expect(report.presenter.hostClockRuns).toBe(0);
+    const audio = Object.values(report.presenter.audio) as any[];
+    expect(audio[0].error).toBeNull();
+    expect(audio[0].problems).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('audio scrub plays grains while scrubbing and stepping; meters and waveforms come from the engine', async ({ session }) => {
     const { page } = session;
     await openEngine(session);

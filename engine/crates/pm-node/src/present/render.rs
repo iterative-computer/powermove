@@ -1155,6 +1155,9 @@ impl Thread {
                     }
                 } else if mode == SeekMode::Scrub {
                     self.scrub_grain(key, time.get());
+                } else if !host_clock && let Some(audio) = self.audio_for(key) {
+                    // Paused exact seeks prepare the next audio start too.
+                    audio.send(AudioCtl::Seek(time.get()));
                 }
                 let view = self.views.get_mut(&key).expect("checked");
                 view.schedule.reset();
@@ -1192,11 +1195,10 @@ impl Thread {
         }
     }
 
-    /// An audio grain at `media` for a scrub while paused, when the
-    /// session's audio scrub is on.
+    /// Update the paused audio playhead; AudioCtl::Scrub plays a grain
+    /// only when enabled, otherwise it silently prepares the next start.
     fn scrub_grain(&mut self, key: Key, media: i64) {
         if self.config.host_clock
-            || !self.audio_prefs.get(&key).is_some_and(|p| p.scrub)
             || self.views.get(&key).and_then(|v| v.reported.as_ref()) != Some(&Route::Engine)
         {
             return;
@@ -1234,6 +1236,7 @@ impl Thread {
             let doc = self.docs.get(&key)?;
             let composition = self.views.get(&key)?.state.composition.as_str().to_owned();
             let loop_range = self.views.get(&key)?.clock.loop_range();
+            let media = self.views.get(&key)?.clock.media_at(now());
             let sink = self.sink.clone();
             let levels: super::audio::LevelsSink = Box::new(move |levels| {
                 let envelope = Envelope::new(Message::Event {
@@ -1252,6 +1255,7 @@ impl Thread {
             ) {
                 Ok(link) => {
                     link.send(AudioCtl::SetLoop(loop_range));
+                    link.send(AudioCtl::Seek(media));
                     let prefs = self.audio_prefs.get(&key).cloned().unwrap_or_default();
                     link.send(AudioCtl::AudioScrub(prefs.scrub));
                     link.send(AudioCtl::Solo(prefs.solo));
