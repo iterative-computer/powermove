@@ -438,7 +438,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(render::Failure::Usage(m)) => fail_usage(&m),
-                Err(render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons)) => {
+                Err(
+                    render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons),
+                ) => {
                     eprintln!("pm-cli: the new engine cannot render this project yet:");
                     for r in reasons {
                         eprintln!("  {r}");

@@ -123,10 +123,65 @@ fn built_in_effects_draw_from_the_built_in_definitions() {
     let file = dir.join("p.json");
     std::fs::write(&file, project(invert()).to_string()).unwrap();
     let out = dir.join("still.png");
-    let s = ok(&cli(&[file.to_str().unwrap(), "-o", out.to_str().unwrap(), "--format", "still"]));
+    let s = ok(&cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+    ]));
     assert_eq!(s["definitions"], json!("built-in"));
     // #3FCF8E inverted.
     assert!(near(corner(&out), [0xC0, 0x30, 0x71]), "{:?}", corner(&out));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn rendering_with_the_built_in_set_warns_when_the_project_draws_definitions() {
+    let dir = scratch("builtin-warning");
+    let file = dir.join("p.json");
+    std::fs::write(&file, project(invert()).to_string()).unwrap();
+    let out = dir.join("still.png");
+    let run = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+    ]);
+    ok(&run);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("warning: drawing the built-in definitions for")
+            && stderr.contains("--definitions"),
+        "{stderr}"
+    );
+    // With a snapshot, or with nothing that draws a definition, no warning.
+    let set = definitions_file(&dir, |_| {});
+    let out2 = dir.join("still2.png");
+    let run = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out2.to_str().unwrap(),
+        "--format",
+        "still",
+        "--definitions",
+        set.to_str().unwrap(),
+    ]);
+    ok(&run);
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("warning: drawing the built-in"));
+    let plain = dir.join("plain.json");
+    std::fs::write(&plain, project(json!([])).to_string()).unwrap();
+    let out3 = dir.join("still3.png");
+    let run = cli(&[
+        plain.to_str().unwrap(),
+        "-o",
+        out3.to_str().unwrap(),
+        "--format",
+        "still",
+    ]);
+    ok(&run);
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("warning: drawing the built-in"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -154,7 +209,11 @@ fn a_definitions_snapshot_overrides_built_ins_by_id() {
         defs.to_str().unwrap(),
     ]));
     assert_eq!(s["definitions"], json!(defs.to_str().unwrap()));
-    assert!(near(corner(&out), [0, 0, 255]), "the fork draws: {:?}", corner(&out));
+    assert!(
+        near(corner(&out), [0, 0, 255]),
+        "the fork draws: {:?}",
+        corner(&out)
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -165,8 +224,19 @@ fn an_effect_without_a_snapshot_fails_naming_it_unless_marked_missing() {
     let fx = json!([{ "id": "fx1", "type": "acme.glow", "on": true, "p": {} }]);
     std::fs::write(&file, project(fx).to_string()).unwrap();
     let out = dir.join("still.png");
-    let run = cli(&[file.to_str().unwrap(), "-o", out.to_str().unwrap(), "--format", "still"]);
-    assert_eq!(run.status.code(), Some(3), "{}", String::from_utf8_lossy(&run.stderr));
+    let run = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+    ]);
+    assert_eq!(
+        run.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&run.stderr).contains("no definition for effect acme.glow"),
         "{}",

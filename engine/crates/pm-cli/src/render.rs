@@ -623,6 +623,9 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
     let (definitions, source) = definitions(options)?;
+    if options.definitions.is_none() {
+        warn_built_in(&job.document, &job.composition);
+    }
     // Programs WebGL refuses too are skipped, as the app skips them; the
     // capability check reads the rest of each definition's status.
     for refused in renderer
@@ -701,6 +704,38 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "fps": r.frames as f64 / seconds.max(1e-9),
         "definitions": source,
     }))
+}
+
+/// Says so when a project that draws definitions (effects, transitions,
+/// adjustment layers, extension layers) is rendered with the built-in set:
+/// a project file does not carry the definitions it was made with, and an
+/// extension's, an override by id, or a fork of a built-in under its id
+/// draws differently in the app.
+fn warn_built_in(document: &pm_model::Document, composition: &str) {
+    let uses: std::collections::BTreeSet<String> =
+        pm_render::capability::unsupported(document, composition)
+            .into_iter()
+            .filter(|u| {
+                matches!(
+                    u.feature,
+                    pm_render::Feature::Effects
+                        | pm_render::Feature::Transition
+                        | pm_render::Feature::Adjustment
+                        | pm_render::Feature::ExtensionDefinition(_)
+                )
+            })
+            .map(|u| u.to_string())
+            .collect();
+    if uses.is_empty() {
+        return;
+    }
+    let list: Vec<String> = uses.into_iter().collect();
+    eprintln!(
+        "pm-cli: warning: drawing the built-in definitions for {}. A project whose effects, \
+         transitions, or layers came from an extension, an override by id, or a fork of a \
+         built-in draws differently in the app: pass --definitions <snapshot>.",
+        list.join(", ")
+    );
 }
 
 /// The definitions a render draws with: the `--definitions` snapshot, or
