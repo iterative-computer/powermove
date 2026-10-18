@@ -191,6 +191,16 @@ export function blenderSurface(
   const surface = frame.surfaces.get(layer.id);
   return surface ? { ...surface, version: frame.version } : null;
 }
+/** The new engine draws the viewer (Use New Engine): it renders the paused
+ *  Blender preview itself (docs/engine/blender.md), so this one would only
+ *  run Blender a second time. */
+const engineDrawsViewer = (PM: any): boolean => {
+  try {
+    return PM.EngineConnection?.status?.().route === "engine";
+  } catch {
+    return false;
+  }
+};
 export function schedulePreview(PM: any) {
   const s = state(PM);
   if (
@@ -198,12 +208,13 @@ export function schedulePreview(PM: any) {
     s.timer ||
     s.busy ||
     PM.playing ||
-    PM.Export?.busy
+    PM.Export?.busy ||
+    engineDrawsViewer(PM)
   )
     return;
   s.timer = setTimeout(() => {
     s.timer = null;
-    if (s.mode !== "rendered" || s.busy || s.running) return;
+    if (s.mode !== "rendered" || s.busy || s.running || engineDrawsViewer(PM)) return;
     const request = ++s.request;
     s.running = renderBlenderPreview(PM)
       .catch((e) => {

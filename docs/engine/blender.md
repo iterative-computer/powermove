@@ -213,6 +213,10 @@ playback draw natively. The interactive engine does the same:
   and stop that view's previews until its shading changes, as today's
   `error` stops `schedulePreview` until `setShading`. A host without a
   Blender path (`unsupported`) stops previews for the launch.
+- **Today's preview stands aside** when the engine draws the viewer
+  (`schedulePreview` in `core/scene3d/rendering.ts` checks the engine
+  connection's route), so Blender runs once per preview; the current
+  viewer, and the routes it still draws, keep today's preview.
 - **Host services** (`native-engine.ts`): `blenderRender` is served for
   both engines (one serialized worker and one queue of 16). The utility
   process calls `pump` on every empty action batch (a wake-up from a thread
@@ -232,10 +236,14 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 | same | Batched against one invocation per layer (EEVEE), and two batched runs | Decoded surfaces equal; files byte-identical; no text chunks |
 | same | Cancel 1.5 s into a Cycles CPU render (1920 × 1080, 4,096 samples) | `Cancelled`, the worker's process group is gone |
 | same | No Blender; a backend that drops a surface | `blenderMissing` with appendix D's sentence; `blenderFailed`; nothing written; without a Blender stage the job still routes |
+| `pm-node` `present::blender` tests (stand-in host services: the Blender Surfaces area in a temporary directory, 16-bit PNGs, cancellation as main does it) | A paused frame's wanted set; debounce; a new launch with the same area; a new frame, Solid shading, and the view closing during a job; Blender missing; the memory budget | One request for a frame's two layers (`preview-<port>-<session>-blender-<n>`), surfaces decoded at the snapshot size; a new launch renders nothing (2 cache hits); each change cancels the running job (`cancelJobs` for it) and nothing stays open; `blenderMissing` reported once as a session failure and not retried until the shading changes; least recently drawn surfaces evicted first |
+| `pm-node` `present::document` | Routing of a Blender composition | The same route as the scene without `render3d.enabled` (the static check still lists Blender for exports) |
 | `pm-blender` unit tests | Settings parse, canonical hashing, key inputs (every input changes the key, asset order does not), surface decoding and crops, cache bounds and disk, device record, discovery, flags, the stage's per-key rendering and failures | Pass |
 | `apps/desktop` `src/main/engine/blender.test.ts` | Main's supervision with a stand-in executable: flags, scrubbed environment, surfaces before the answer, batching off, worker-script hash, foreign handles, missing Blender, cancel kills the process, playback stops and continues the process (`ps` state `T`) and holds new jobs | Pass |
 | same | Cycles with `device: cpu` and `auto` | Recorded per job: `Cpu`, then `Metal {Apple M4 Max (GPU - 40 cores)}` |
 | `apps/desktop` `e2e/engine-blender.spec.ts` (under the Electron lock) | The app, 192 × 108, a turning box and a sphere, EEVEE 8 samples: today's still (Use New Engine off, today's surfaces recorded at main's IPC), then the job engine's still and a 6-frame H.264 MP4 (on) | The MP4 is the job engine's (AVAssetWriter, 6 frames); 12 surfaces in the cache (2 layers × 6 frames; the still reused frame 0's); the job engine's still is 100% within 2 CV of today's surfaces composited per layer (max 2 CV) |
+
+| `apps/desktop` `e2e/engine-blender.spec.ts`, second test (under the Electron lock), 2026-10-17 | The same project in the app with Use New Engine on: the viewer in Solid, then Material Preview paused at 0, Solid again, playback, and a pause at 0.125 s | The engine draws the viewer (route `engine`); 1 Blender request for both layers (EEVEE, `Metal {Apple M4 Max (GPU - 40 cores)}`); the viewer's pixels at 24 flat points equal the two surfaces composited within 1 CV (Solid, native shading: up to 61 CV off them); no Blender run during playback; the paused frame at 0.125 s renders its own 2 surfaces; 0 runs of today's preview at main's IPC; no page errors |
 
 ## Found along the way
 
@@ -285,6 +293,8 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   without `Feature::Blender`.
 - `apps/desktop/src/extensions/viewer/engine-present/view-state.ts`: a 3D
   composition always sends its shading.
+- `apps/desktop/src/renderer/src/core/scene3d/rendering.ts`:
+  `schedulePreview` stands aside while the engine draws the viewer.
 - `pm-render/tests/motion.rs`: the request is cloned (as on the integration
   branch).
 
@@ -298,10 +308,6 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   today's renderer-side preview; the engine's preview jobs and failures
   are in the presenter's status (`blenderPreview`) and the viewer's log,
   not in that UI.
-- **Today's preview still runs alongside** when the engine draws the
-  viewer: `setShading` schedules today's `renderBlenderPreview` regardless
-  of who presents (renderer code outside this lane); the e2e reports how
-  many of today's runs happen next to the engine's.
 - **The editor camera** is not sent by the viewer yet (`view-params.ts`:
   `camera: null` until the 3D lane exposes it), so previews in the editor
   view use the composition camera, as the engine's native frames do.

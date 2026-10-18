@@ -183,6 +183,9 @@ test('the paused viewer draws Blender surfaces in Material Preview, and native s
     await ready(session);
     await session.openEditor();
     test.skip(!(await project(session)), 'Install Blender 4.5 or newer to run the Blender viewer integration');
+    // Installed as the editor installs a project, so the viewer's session
+    // mirrors it to the engine.
+    await page.evaluate(() => { const PM = (window as any).PM; PM.replaceProject(PM.proj); PM.Projects?.put?.(PM.proj); PM.setTime(0); });
     // Today's own preview runs at main's IPC (they would double Blender's work).
     await app.evaluate(({ ipcMain }) => {
       const ipc = ipcMain as any, original = ipc._invokeHandlers.get('blender:run');
@@ -195,8 +198,12 @@ test('the paused viewer draws Blender surfaces in Material Preview, and native s
     });
     const report = async () => (await app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'))) as any;
     const preview = async () => (await report()).presenter.blenderPreview as { runs: number; jobs: number; rendered: number; cached: number; failed: number; lastError: string | null; device: string | null; surfaces: number };
-    const route = () => page.evaluate(() => (window as any).PM.EngineConnection.status().route as string);
-    await expect.poll(route, { timeout: 45_000 }).toBe('engine');
+    const route = async () => {
+      const s = await page.evaluate(() => { const PM = (window as any).PM; return { ...PM.EngineConnection.status(), service: !!PM.Kernel.services.get('engine.viewer'), presenting: !!PM.Kernel.services.get('viewer')?.enginePresentation }; });
+      const r = await report();
+      return `${s.route} (${JSON.stringify(s)}; presenter ${JSON.stringify(r?.presenter?.routes ?? {})} sessions ${JSON.stringify(r?.sessions ?? null)})`;
+    };
+    await expect.poll(route, { timeout: 45_000 }).toMatch(/^engine /);
     await expect.poll(() => page.evaluate(() => document.getElementById('engine-present')?.style.visibility), { timeout: 20_000 }).toBe('visible');
     expect((await preview()).runs).toBe(0);
     const frameTag = () => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.engineFrame?.() ?? null);
@@ -282,6 +289,8 @@ test('the paused viewer draws Blender surfaces in Material Preview, and native s
     expect(after.failed).toBe(0);
     const today = await app.evaluate(() => (globalThis as any).__todayPreviewRuns as number);
     console.log(`viewer Blender preview after playback: ${JSON.stringify(after)}; today's preview runs at main's IPC: ${today}`);
+    // The engine draws the viewer, so today's preview does not run Blender too.
+    expect(today).toBe(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();
