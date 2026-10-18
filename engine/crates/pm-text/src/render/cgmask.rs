@@ -51,6 +51,8 @@ pub struct CgMasks {
     paths: HashMap<PathKey, Option<Arc<GlyphMask>>>,
     /// Glyph outlines at the canonical 64 px, for text drawn as paths.
     canonical: HashMap<PathKey, Option<Arc<pm_skia_path::Path>>>,
+    /// Masks of glyphs under a rotated, skewed or non-uniform matrix.
+    matrix_masks: HashMap<MatrixKey, Option<Arc<GlyphMask>>>,
     bytes: usize,
 }
 
@@ -68,6 +70,10 @@ struct PathKey {
     scale: u32,
     frame: (u32, bool, u8, u32),
 }
+
+/// Face, face index, glyph, text size bits, variation, subpixel offsets,
+/// and the strike's remaining transform.
+type MatrixKey = (u64, u32, u16, u32, Vec<(u32, u32)>, (u8, u8), [u32; 4]);
 
 /// Face buffer, face index, glyph, size bits, em bits, quarter offset.
 type ColorKey = (u64, u32, u16, u32, u32, u8);
@@ -142,6 +148,52 @@ impl super::scene::MaskSource for CgMasks {
         }
         self.bytes += mask.as_ref().map_or(0, |m| m.coverage.len() + 64);
         self.paths.insert(key, mask.clone());
+        mask
+    }
+
+    fn matrix_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        post: [f32; 4],
+        skew: f32,
+        sub: (u8, u8),
+    ) -> Option<Arc<GlyphMask>> {
+        let strike = StrikeMatrix::new(size, post, skew)?;
+        let key = (
+            face.id,
+            face.index,
+            glyph,
+            strike.text_size.to_bits(),
+            coords
+                .iter()
+                .map(|(t, v)| (*t, v.to_bits()))
+                .collect::<Vec<_>>(),
+            sub,
+            strike.transform.map(f32::to_bits),
+        );
+        if let Some(m) = self.matrix_masks.get(&key) {
+            return m.clone();
+        }
+        let run = RefRun {
+            data: face.data,
+            index: face.index,
+            size: strike.text_size,
+            coords,
+            glyphs: Vec::new(),
+            color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mask = self
+            .fonts
+            .font_of(face.id, &run)
+            .and_then(|font| draw_transformed(&font, glyph, &strike, sub).map(Arc::new));
+        if self.bytes > CACHE_BYTES {
+            self.clear();
+        }
+        self.bytes += mask.as_ref().map_or(0, |m| m.coverage.len() + 64);
+        self.matrix_masks.insert(key, mask.clone());
         mask
     }
 
@@ -244,6 +296,7 @@ impl CgMasks {
         self.colors.clear();
         self.paths.clear();
         self.canonical.clear();
+        self.matrix_masks.clear();
         self.bytes = 0;
     }
 
@@ -510,6 +563,177 @@ fn draw_color(font: &CFRetained<CTFont>, glyph: u16, sub_x: f64, em: f32) -> Col
 /// bounds by one pixel; two keep every smoothed pixel).
 const PAD: i32 = 3;
 
+/// `SkScalarContextRec::computeMatrices(kVertical)` for a glyph under a
+/// non-axis-aligned device matrix, as the Mac scaler uses it: the total
+/// matrix `A` (text size and synthetic skew, then the device 2×2, each
+/// product in `double` rounded to `float` as `SkMatrix::setConcat`), its
+/// Givens rotation `G`, the text size `|(GA).scaleY|`, and the remaining
+/// transform `sA = A · scale(1 / size)`.
+pub struct StrikeMatrix {
+    pub text_size: f32,
+    /// `sA` as `[scaleX, skewY, skewX, scaleY]` (Skia's names).
+    pub transform: [f32; 4],
+}
+
+impl StrikeMatrix {
+    /// `post` is the device 2×2 `[scaleX, skewY, skewX, scaleY]`, already
+    /// kept to 1/1024 (`sk_relax`).
+    pub fn new(size: f32, post: [f32; 4], skew: f32) -> Option<StrikeMatrix> {
+        let mam = |a: f32, b: f32, c: f32, d: f32| {
+            (f64::from(a) * f64::from(b) + f64::from(c) * f64::from(d)) as f32
+        };
+        // The text matrix: scale(size), then skew(skewX, 0).
+        let (l_sx, l_kx, l_ky, l_sy) = (size, mam(1.0, 0.0, skew, size), 0.0f32, size);
+        let [p_sx, p_ky, p_kx, p_sy] = post;
+        let a_sx = mam(p_sx, l_sx, p_kx, l_ky);
+        let a_kx = mam(p_sx, l_kx, p_kx, l_sy);
+        let a_ky = mam(p_ky, l_sx, p_sy, l_ky);
+        let a_sy = mam(p_ky, l_kx, p_sy, l_sy);
+        // h = A(1, 0); Givens rotation zeroing its y.
+        let (a, b) = (a_sx, a_ky);
+        let (c, s) = if b == 0.0 {
+            (1.0f32.copysign(a), 0.0f32)
+        } else if a == 0.0 {
+            (0.0, -(1.0f32.copysign(b)))
+        } else if b.abs() > a.abs() {
+            let t = a / b;
+            let u = (1.0 + t * t).sqrt().copysign(b);
+            let s = -1.0 / u;
+            (-s * t, s)
+        } else {
+            let t = b / a;
+            let u = (1.0 + t * t).sqrt().copysign(a);
+            let c = 1.0 / u;
+            (c, -c * t)
+        };
+        // G = [c, -s; s, c]; (GA).scaleY = s·A.skewX + c·A.scaleY.
+        let ga_sy = mam(s, a_kx, c, a_sy);
+        let text_size = ga_sy.abs();
+        if text_size.is_nan() || text_size <= 1.0 / 4096.0 || !text_size.is_finite() {
+            return None;
+        }
+        let inv = 1.0 / text_size;
+        Some(StrikeMatrix {
+            text_size,
+            transform: [a_sx * inv, a_ky * inv, a_kx * inv, a_sy * inv],
+        })
+    }
+
+    /// `MatrixToCGAffineTransform(sA)`.
+    fn cg(&self) -> objc2_core_foundation::CGAffineTransform {
+        let [sx, ky, kx, sy] = self.transform.map(f64::from);
+        objc2_core_foundation::CGAffineTransform {
+            a: sx,
+            b: -ky,
+            c: -kx,
+            d: sy,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+}
+
+/// A glyph mask as `SkScalerContext_Mac` generates it under a strike
+/// matrix: the bounds from `CTFontGetBoundingRectsForGlyphs` through the
+/// strike's transform (y down, the subpixel offsets added on the right and
+/// bottom, rounded out, outset by 1), and the glyph drawn by CoreGraphics
+/// with the transform as the text matrix at the point mapped back through
+/// its inverse.
+fn draw_transformed(
+    font: &CFRetained<CTFont>,
+    glyph: u16,
+    strike: &StrikeMatrix,
+    sub: (u8, u8),
+) -> Option<GlyphMask> {
+    use objc2_core_foundation::{CGAffineTransform, CGRect};
+    let t = strike.cg();
+    let mut rect = CGRect::default();
+    unsafe {
+        font.bounding_rects_for_glyphs(
+            objc2_core_text::CTFontOrientation::Horizontal,
+            NonNull::new(&glyph as *const u16 as *mut u16).expect("non-null"),
+            &mut rect,
+            1,
+        )
+    };
+    let r = objc2_core_graphics::CGRectApplyAffineTransform(rect, t);
+    if r.size.width <= 0.0 || r.size.height <= 0.0 {
+        return None;
+    }
+    let (sub_x, sub_y) = (f32::from(sub.0) / 4.0, f32::from(sub.1) / 4.0);
+    let x = r.origin.x as f32;
+    let y = (-r.origin.y - r.size.height) as f32;
+    let (l, tp) = (x, y);
+    let (rt, bt) = (
+        x + r.size.width as f32 + sub_x,
+        y + r.size.height as f32 + sub_y,
+    );
+    let left = l.floor() as i32 - 1;
+    let top = tp.floor() as i32 - 1;
+    let right = rt.ceil() as i32 + 1;
+    let bottom = bt.ceil() as i32 + 1;
+    let (w, h) = ((right - left) as usize, (bottom - top) as usize);
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut pixels = vec![0xffff_ffffu32; w * h];
+    let space = CGColorSpace::new_device_rgb()?;
+    let info = CGImageAlphaInfo::NoneSkipFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            pixels.as_mut_ptr().cast(),
+            w,
+            h,
+            8,
+            w * 4,
+            Some(&space),
+            info,
+        )
+    }?;
+    let c = Some(&*ctx);
+    CGContext::set_allows_font_subpixel_quantization(c, false);
+    CGContext::set_should_subpixel_quantize_fonts(c, false);
+    CGContext::set_allows_font_subpixel_positioning(c, true);
+    CGContext::set_should_subpixel_position_fonts(c, true);
+    CGContext::set_text_drawing_mode(c, objc2_core_graphics::CGTextDrawingMode::Fill);
+    CGContext::set_gray_fill_color(c, 0.0, 1.0);
+    CGContext::set_text_matrix(c, t);
+    CGContext::set_should_antialias(c, true);
+    CGContext::set_allows_font_smoothing(c, true);
+    CGContext::set_should_smooth_fonts(c, true);
+    let point = CGPoint {
+        x: f64::from(-left as f32 + sub_x),
+        y: f64::from(top as f32 + h as f32 - sub_y),
+    };
+    let inv: CGAffineTransform = objc2_core_graphics::CGAffineTransformInvert(t);
+    let point = objc2_core_graphics::CGPointApplyAffineTransform(point, inv);
+    unsafe {
+        font.draw_glyphs(
+            NonNull::new(&glyph as *const u16 as *mut u16).expect("non-null"),
+            NonNull::new(&point as *const CGPoint as *mut CGPoint).expect("non-null"),
+            1,
+            &ctx,
+        )
+    };
+    CGContext::flush(c);
+    drop(ctx);
+    let coverage = pixels
+        .iter()
+        .map(|p| {
+            let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+            let (r, g, b) = (255 - r, 255 - g, 255 - b);
+            ((r * 54 + g * 183 + b * 19) >> 8) as u8
+        })
+        .collect();
+    Some(GlyphMask {
+        width: w as u32,
+        height: h as u32,
+        left,
+        top,
+        coverage,
+    })
+}
+
 fn draw(
     font: &CFRetained<CTFont>,
     glyph: u16,
@@ -640,6 +864,23 @@ pub fn mask_table(rgb: [f64; 3]) -> &'static [u8; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `computeMatrices(kVertical)`: a rotation keeps the text size and
+    /// leaves the rotation in the transform; a non-uniform scale keeps the
+    /// vertical scale as the size; a degenerate matrix makes no strike.
+    #[test]
+    fn strike_matrices_follow_compute_matrices() {
+        let r = StrikeMatrix::new(20.0, [0.0, 1.0, -1.0, 0.0], 0.0).unwrap();
+        assert_eq!(r.text_size, 20.0);
+        assert_eq!(r.transform, [0.0, 1.0, -1.0, 0.0]);
+        let s = StrikeMatrix::new(10.0, [2.0, 0.0, 0.0, 0.5], 0.0).unwrap();
+        assert_eq!(s.text_size, 5.0);
+        assert_eq!(s.transform, [4.0, 0.0, 0.0, 1.0]);
+        let (sin, cos) = (0.5f32, 0.75f32.sqrt());
+        let t = StrikeMatrix::new(30.0, [cos, sin, -sin, cos], -0.25).unwrap();
+        assert!((t.text_size - 30.0).abs() < 1e-4);
+        assert!(StrikeMatrix::new(10.0, [0.0, 0.0, 0.0, 0.0], 0.0).is_none());
+    }
 
     #[test]
     fn luminance_buckets_follow_the_mac_scaler() {

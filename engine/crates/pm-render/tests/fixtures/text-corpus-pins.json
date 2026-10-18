@@ -8,18 +8,6 @@
   "text/animator-blur t=0.4": {
    "over2": 5,
    "max": 3
-  },
-  "text/animator-tumble t=0.1": {
-   "over2": 262,
-   "max": 13
-  },
-  "text/animator-tumble t=0.4": {
-   "over2": 1371,
-   "max": 64
-  },
-  "text/animator-tumble t=0.8": {
-   "over2": 2431,
-   "max": 51
   }
  }
 }

@@ -197,6 +197,26 @@ pub trait MaskSource {
         let _ = (face, coords, glyph, size, style, scale, frame);
         None
     }
+    /// The mask of `glyph` at text size `size` under the device 2×2
+    /// `post` (`[scaleX, skewY, skewX, scaleY]`, kept to 1/1024) with the
+    /// synthetic skew `skew`, at quarter offsets `sub` in x and y, as the
+    /// platform generates glyphs under a rotated, skewed or non-uniform
+    /// matrix. `None` when the platform does not draw glyphs this way.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn matrix_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        post: [f32; 4],
+        skew: f32,
+        sub: (u8, u8),
+    ) -> Option<Arc<GlyphMask>> {
+        let _ = (face, coords, glyph, size, post, skew, sub);
+        None
+    }
     /// A glyph's outline as Skia draws text as paths
     /// (`SkStrikeSpec::MakePath`): the platform's outline at the canonical
     /// 64 px (`SkFontPriv::kCanonicalTextSizeForPaths`), y down, no
@@ -309,6 +329,15 @@ impl Placement {
     fn strike_scale(&self) -> f32 {
         let x = self.scale as f32;
         (x * 1024.0 + 0.5).floor() / 1024.0
+    }
+
+    /// The device 2×2 as the strike descriptor keeps it (each entry to
+    /// 1/1024, `sk_relax`), `[scaleX, skewY, skewX, scaleY]`.
+    #[cfg(feature = "cg-masks")]
+    fn relaxed_post(&self) -> [f32; 4] {
+        let [a, b, c, d, _, _] = self.m.as_coeffs();
+        let relax = |v: f64| ((v as f32) * 1024.0 + 0.5).floor() / 1024.0;
+        [relax(a), relax(b), relax(c), relax(d)]
     }
 
     fn of(m: Affine) -> Placement {
@@ -547,6 +576,34 @@ impl Painter<'_> {
                         bare.bounds.inflate(grow_x, 0.0),
                     ) {
                         platform.push((ix as i64, y as i64, m, false));
+                    }
+                    continue;
+                }
+                // Under a rotated, skewed or non-uniform matrix Skia still
+                // draws glyph masks, generated with the whole matrix and
+                // positioned to quarter pixels in x and y.
+                #[cfg(feature = "cg-masks")]
+                if !as_path
+                    && !large
+                    && !place.axis_aligned
+                    && !run.synthetic_bold
+                    && let (Some(masks), Coords::User(coords)) =
+                        (self.masks.as_deref_mut(), run.coords)
+                {
+                    let qx = (p.x * 4.0 + 0.5).floor() / 4.0;
+                    let qy = (p.y * 4.0 + 0.5).floor() / 4.0;
+                    let (ix, iy) = (qx.floor(), qy.floor());
+                    let sub = (((qx - ix) * 4.0) as u8, ((qy - iy) * 4.0) as u8);
+                    if let Some(m) = masks.matrix_mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        run.size,
+                        place.relaxed_post(),
+                        skew_of(run) as f32,
+                        sub,
+                    ) {
+                        platform.push((ix as i64, iy as i64, m, false));
                     }
                     continue;
                 }
@@ -1639,6 +1696,6 @@ mod tests {
         let (_, _, _, h, counts) =
             tessellated_coverage(&quad, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).unwrap();
         assert_eq!(h, 32, "the curve reaches y = 32, not its control point");
-        assert!(counts.iter().any(|&c| c == 4) && counts.iter().all(|&c| c <= 4));
+        assert!(counts.contains(&4) && counts.iter().all(|&c| c <= 4));
     }
 }
