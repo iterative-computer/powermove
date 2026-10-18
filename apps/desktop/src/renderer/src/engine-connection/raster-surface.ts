@@ -3,7 +3,7 @@
  * transport, RFC 16): the engine paints the layer's raster and this module
  * gives it today's `RasterSurface` shape (`legacy/gl/raster.ts`):
  *
- *   text      { cv, w, h, anchorX, anchorY, selection, blank, sourceWindow? }
+ *   text      { cv, w, h, anchorX, anchorY, selection, blank, sourceWindow?, fontOffset? }
  *   captions  { cv, w, h, anchorX, anchorY, selection, blank }
  *   paths     { cv, w, h, anchorX, anchorY, selection }
  *   shapes    { cv, w, h, anchorX, anchorY, selection, uv }
@@ -36,6 +36,8 @@ export type EngineRasterSurface = {
   blank?: boolean;
   sourceWindow?: [number, number, number, number];
   uv?: [number, number, number, number];
+  /** Typography anchoring's shift of a text layer (today's `fontOffset`). */
+  fontOffset?: { x: number; y: number };
   /** The engine's tags: the revision and quality the pixels show. */
   revision: number;
 };
@@ -81,6 +83,7 @@ export function toRasterSurface(snapshot: EngineSnapshot, layer: any, crop: Retu
   const surface: EngineRasterSurface = { cv: canvas(snapshot), w, h, anchorX: snapshot.origin[0], anchorY: snapshot.origin[1], revision: snapshot.revision };
   if (selection) surface.selection = selection;
   if (kind === 'text' || kind === 'captions') surface.blank = false;
+  if (kind === 'text' && geometry?.fontOffset) surface.fontOffset = { x: geometry.fontOffset[0], y: geometry.fontOffset[1] };
   const [cw, ch] = geometry?.canvas ?? [snapshot.width, snapshot.height];
   if (kind === 'text' && crop && geometry?.cropped) surface.sourceWindow = [crop.x, crop.y, cw, ch];
   if (kind === 'shape') surface.uv = crop && geometry?.cropped ? [-crop.x / crop.width, -crop.y / crop.height, cw / crop.width, ch / crop.height] : undefined;

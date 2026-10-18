@@ -529,6 +529,25 @@ mod child {
             "the raster is the registry's raster"
         );
         println!("layer raster: {}x{}", raster.width, raster.height);
+        // Today's placement: the selection of the text geometry; with
+        // typography anchoring, the shift as `fontOffset` and in the anchor.
+        let geometry = raster.raster.clone().expect("raster geometry");
+        assert!(geometry.selection.is_some());
+        assert_eq!(geometry.font_offset, None);
+        let mut anchored = text_layer("Engine fonts", "Helvetica");
+        anchored["d"]["fontAnchorBounds"] = json!({ "x0": -100, "y0": -30, "x1": 100, "y1": 10 });
+        let content = Bytes(anchored.to_string().into_bytes());
+        let shifted = rendered(c.snapshot(
+            13,
+            SnapshotTarget::Layer { layer: "title".into(), scale: 1.0, crop: None, content: Some(content) },
+            Size::new(6000, 6000),
+            SnapshotPixels::Premultiplied,
+        ));
+        let offset = shifted.raster.clone().unwrap().font_offset.expect("a font offset");
+        assert!(offset[0] != 0.0 || offset[1] != 0.0, "{offset:?}");
+        assert!((raster.origin[0] - offset[0] - shifted.origin[0]).abs() < 1e-9);
+        assert!((raster.origin[1] - offset[1] - shifted.origin[1]).abs() < 1e-9);
+        println!("font anchor: offset {offset:?}");
 
         // 4. A project font: a new generation, and the next frame draws with it.
         let before = c.host.font_broker().generation();

@@ -426,6 +426,11 @@ pub struct RasterGeometry {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub selection: Option<[f64; 4]>,
+    /// Today's `fontOffset` (`x`, `y`): a text layer's typography anchoring
+    /// shift, when it has one.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub font_offset: Option<[f64; 2]>,
 }
 
 impl Validate for SnapshotResult {

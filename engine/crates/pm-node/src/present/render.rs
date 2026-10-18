@@ -3386,6 +3386,7 @@ impl Thread {
                 window: origin_in_canvas,
                 cropped: window.is_some(),
                 selection: raster.selection,
+                font_offset: raster.font_offset.map(|(x, y)| [x, y]),
             }),
             quality: FrameQuality {
                 resolution: PreviewResolution::Full,

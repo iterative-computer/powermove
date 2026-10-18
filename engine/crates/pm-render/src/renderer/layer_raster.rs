@@ -47,8 +47,22 @@ pub struct LayerRaster {
     pub anchor: (f64, f64),
     /// Today's `selection` (`x0, y0, x1, y1`, layer pixels).
     pub selection: Option<[f64; 4]>,
+    /// Today's `fontOffset` (a text layer with typography anchoring).
+    pub font_offset: Option<(f64, f64)>,
     /// Whether today's raster honors a crop window for this layer.
     pub crops: bool,
+}
+
+/// `min(scale, 8192 / w, 8192 / h)`: today's raster density.
+fn js_density(w: f64, h: f64, scale: f64) -> f64 {
+    let min = |a: f64, b: f64| {
+        if a.is_nan() || b.is_nan() {
+            f64::NAN
+        } else {
+            a.min(b)
+        }
+    };
+    min(min(scale, 8192.0 / w), 8192.0 / h)
 }
 
 impl Renderer {
@@ -122,6 +136,35 @@ impl Renderer {
             if !refused.is_empty() {
                 return Err(RenderError::Unsupported(refused));
             }
+            // Today's placement (`PM.raster`'s anchor, selection, and font
+            // offset): pm-eval's, as pm-wasm answers it; captions have no
+            // selection or font offset.
+            let (selection, font_offset) = if ty == "text" {
+                let fonts = self.text.fonts.as_deref_mut().expect("checked above");
+                let placed = scope
+                    .text_raster(node, seconds, fonts.measure())
+                    .map_err(|e| RenderError::Request(e.to_string()))?;
+                let s = placed.selection;
+                // `L.d.fontAnchorBounds`, as `PM.raster` tests it.
+                let anchored = pm_eval::node::truthy(pm_eval::node::member(
+                    pm_eval::node::member(Some(node), "d"),
+                    "fontAnchorBounds",
+                ));
+                let offset = if anchored {
+                    let free = scope
+                        .text_raster_with(node, seconds, fonts.measure(), true, false)
+                        .map_err(|e| RenderError::Request(e.to_string()))?;
+                    Some((
+                        free.anchor_x - placed.anchor_x,
+                        free.anchor_y - placed.anchor_y,
+                    ))
+                } else {
+                    None
+                };
+                (Some([s.x0, s.y0, s.x1, s.y1]), offset)
+            } else {
+                (None, None)
+            };
             let Some(quad) = quad else {
                 if ty != "text" {
                     return Ok(None);
@@ -129,13 +172,13 @@ impl Renderer {
                 // Text with no ink (blank, transparent): today's raster is a
                 // transparent canvas of the text's geometry, never null.
                 let fonts = self.text.fonts.as_deref_mut().expect("checked above");
-                let g = scope
-                    .text_geometry(node, seconds, fonts.measure())
+                let placed = scope
+                    .text_raster(node, seconds, fonts.measure())
                     .map_err(|e| RenderError::Request(e.to_string()))?;
-                let density = g.density(scale);
+                let density = js_density(placed.w, placed.h, scale);
                 let canvas = (
-                    (g.w * density).ceil().max(1.0) as u32,
-                    (g.h * density).ceil().max(1.0) as u32,
+                    (placed.w * density).ceil().max(1.0) as u32,
+                    (placed.h * density).ceil().max(1.0) as u32,
                 );
                 return Ok(Some(LayerRaster {
                     pixels: LayerPixels::Float {
@@ -143,44 +186,12 @@ impl Renderer {
                         crop: [0, 0, 0, 0],
                     },
                     canvas,
-                    box_size: (g.w, g.h),
-                    anchor: (g.anchor_x, g.anchor_y),
-                    selection: Some([
-                        g.selection.x0,
-                        g.selection.y0,
-                        g.selection.x1,
-                        g.selection.y1,
-                    ]),
+                    box_size: (placed.w, placed.h),
+                    anchor: (placed.anchor_x, placed.anchor_y),
+                    selection,
+                    font_offset,
                     crops: !animated,
                 }));
-            };
-            // Today's selection: the plain text geometry (moved with the
-            // raster by a font anchor), or the raster's box for styled
-            // animated text; captions have none.
-            let selection = if ty != "text" {
-                None
-            } else if animated
-                && pm_eval::node::member(pm_eval::node::member(Some(node), "d"), "styles")
-                    .map(|n| pm_eval::node::get(n, b"length").truthy())
-                    .unwrap_or(false)
-            {
-                Some([-quad.ax, -quad.ay, quad.w - quad.ax, quad.h - quad.ay])
-            } else {
-                let fonts = self.text.fonts.as_deref_mut().expect("checked above");
-                let g = scope
-                    .text_geometry(node, seconds, fonts.measure())
-                    .map_err(|e| RenderError::Request(e.to_string()))?;
-                let (dx, dy) = if animated {
-                    (0.0, 0.0)
-                } else {
-                    (g.anchor_x - quad.ax, g.anchor_y - quad.ay)
-                };
-                Some([
-                    g.selection.x0 + dx,
-                    g.selection.y0 + dy,
-                    g.selection.x1 + dx,
-                    g.selection.y1 + dy,
-                ])
             };
             let mut encoder = self
                 .device
@@ -214,6 +225,7 @@ impl Renderer {
                 box_size: (quad.w, quad.h),
                 anchor: (quad.ax, quad.ay),
                 selection,
+                font_offset,
                 crops: ty == "text" && !animated,
             }));
         }
@@ -230,6 +242,7 @@ impl Renderer {
                 box_size: (b.w, b.h),
                 anchor: (raster.anchor_x, raster.anchor_y),
                 selection: Some([b.x0, b.y0, b.x1, b.y1]),
+                font_offset: None,
                 crops: false,
             }));
         }
@@ -248,6 +261,7 @@ impl Renderer {
             box_size: (g.w, g.h),
             anchor: (g.pad, g.pad),
             selection: Some([s.x0, s.y0, s.x1, s.y1]),
+            font_offset: None,
             crops: true,
         }))
     }

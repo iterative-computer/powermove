@@ -12,6 +12,8 @@ const snap = (over: Partial<EngineSnapshot> & { raster: RasterGeometry | null })
 });
 const canvas = (s: EngineSnapshot) => Object.assign(document.createElement('canvas'), { width: s.width, height: s.height });
 
+const whole0 = () => toRasterSurface(snap({ raster: { canvas: [48, 28], window: [0, 0], cropped: false, selection: [0, 0, 1, 1] } }), { id: 't', type: 'text', d: {} }, null, canvas);
+
 describe('engine rasters in today’s RasterSurface shape', () => {
   it('a shape: box, anchor, selection, and uv for a crop (as rasterShape)', () => {
     const shape = { id: 'b', type: 'solid', d: { w: 40, h: 20 } };
@@ -33,6 +35,10 @@ describe('engine rasters in today’s RasterSurface shape', () => {
     // Animated text ignores the crop today: the engine says it did not cut.
     const animated = toRasterSurface(snap({ raster: { canvas: [48, 28], window: [0, 0], cropped: false, selection: null } }), text, { x: 5, y: 6, width: 20, height: 10 }, canvas);
     expect(animated.sourceWindow).toBeUndefined();
+    // Typography anchoring's shift comes back as today's fontOffset.
+    const anchored = toRasterSurface(snap({ raster: { canvas: [48, 28], window: [0, 0], cropped: false, selection: [0, 0, 1, 1], fontOffset: [-0.5, -30] } }), text, null, canvas);
+    expect(anchored.fontOffset).toEqual({ x: -0.5, y: -30 });
+    expect('fontOffset' in whole0()).toBe(false);
   });
 
   it('captions take today’s caption block as their selection', () => {

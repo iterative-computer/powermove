@@ -22,4 +22,9 @@ cropped: boolean,
 /**
  * Today's `selection` (`x0`, `y0`, `x1`, `y1` in layer pixels).
  */
-selection?: [number, number, number, number] | null, };
+selection?: [number, number, number, number] | null, 
+/**
+ * Today's `fontOffset` (`x`, `y`): a text layer's typography anchoring
+ * shift, when it has one.
+ */
+fontOffset?: [number, number] | null, };
