@@ -157,6 +157,20 @@ matte passes render over the pass rectangle.
   Undo step through history; the default removes the field, so migrated projects
   open in Standard with linear blending off. A non-default setting stamps
   `requiresEngine: "native"` (`shared/engine-stamp.ts`).
+- **The stamp draws natively.** The static check used to route every stamped
+  project, so linear blending was drawn by the legacy engine in the app. The
+  stamp is now only the legacy engine's refusal: every stamping field is drawn
+  (linked media, interpretation, `keepFrameRate`) or judged by its own check
+  (project color, clip pitch). Measured with
+  `e2e/native-engine-p3a-measure.spec.ts -g 23.976` (Use New Engine on, three
+  UHD ProRes 422 HQ layers with Blur 24, 60 s loop, load average 5 to 7):
+  linear off 1,438 frames shown, 0 skipped, 0 repeated, display interval p50
+  41.5 ms, max 49.8 ms; **"Blend in linear light" on (stamped `requiresEngine:
+  "native"`), drawn by the engine: 1,439 shown, 0 skipped, 0 repeated, p50
+  41.5 ms, max 49.8 ms**, engine compose mean 1.8 ms. The same run at
+  `feat/native-engine` 9263858a routed the linear row to the legacy engine.
+  (A first run of this branch found the display asleep: 0 frames presented;
+  rerun with the display awake as above.)
 
 ## Tests
 
