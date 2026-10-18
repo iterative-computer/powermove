@@ -4,6 +4,7 @@
  * (server/sessions.ts) over an in-memory profile store. Used by the pool
  * tests and the hidden-host contract tests; not part of any bundle.
  */
+import { execFile } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { ProjectSessions, type SessionMember } from '../../server/sessions';
@@ -19,14 +20,12 @@ export async function buildEngineBundle(): Promise<{ script: string; dispose(): 
   // Inside the package (out/ is ignored), so the bundle resolves `ws` from node_modules as it does when installed.
   mkdirSync(path.join(desktop, 'out'), { recursive: true });
   const out = mkdtempSync(path.join(desktop, 'out', 'dochost-test-'));
-  const previous = process.env['POWERMOVE_ENGINE_OUT'];
-  process.env['POWERMOVE_ENGINE_OUT'] = out;
-  try {
-    const { build } = await import('vite');
-    await build({ configFile: path.join(desktop, 'engine.vite.config.ts'), root: desktop, logLevel: 'error' });
-  } finally {
-    if (previous === undefined) delete process.env['POWERMOVE_ENGINE_OUT']; else process.env['POWERMOVE_ENGINE_OUT'] = previous;
-  }
+  // A child process: Playwright's module hooks cannot load vite's config in-process.
+  await new Promise<void>((resolve, reject) => {
+    execFile(path.join(desktop, 'node_modules/.bin/vite'), ['build', '-c', 'engine.vite.config.ts', '--logLevel', 'error'], {
+      cwd: desktop, env: { ...process.env, POWERMOVE_ENGINE_OUT: out }, maxBuffer: 16 * 1024 * 1024,
+    }, (error, _stdout, stderr) => (error ? reject(new Error(`engine bundle build failed: ${stderr || error.message}`)) : resolve()));
+  });
   return { script: path.join(out, 'engine.mjs'), dispose: () => rmSync(out, { recursive: true, force: true }) };
 }
 
