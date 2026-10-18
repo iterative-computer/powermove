@@ -256,6 +256,8 @@ export type EngineSnapshotReply =
       origin: [number, number];
       /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
       layerBox: [number, number] | null;
+      /** A layer raster's canvas, crop window, and selection. */
+      raster: import('./engine-protocol').RasterGeometry | null;
       quality: import('./engine-protocol').FrameQuality;
       waitedUs: number;
       renderUs: number;

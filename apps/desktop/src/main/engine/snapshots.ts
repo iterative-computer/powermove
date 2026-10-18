@@ -49,6 +49,8 @@ export const READY_POLL_MS = 25;
 export const MAX_PER_WINDOW = 8;
 /** Result bytes outstanding across every window. */
 export const MAX_OUTSTANDING_BYTES = 1024 ** 3;
+/** Largest layer object a raster may carry (pm_protocol MAX_LAYER_CONTENT_BYTES). */
+export const MAX_LAYER_CONTENT_BYTES = 4 * 1024 * 1024;
 /** Largest output edge (pm_protocol MAX_OUTPUT_DIMENSION). */
 const MAX_EDGE = 16384;
 const MAX_ID = 256;
@@ -85,7 +87,9 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (target['kind'] === 'layer') {
     const crop = target['crop'] as Record<string, unknown> | null;
     const cropOk = crop === null || (crop && typeof crop === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(crop[k])) && (crop['width'] as number) > 0 && (crop['height'] as number) > 0);
-    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) >= 0.01 && (target['scale'] as number) <= 16 && !!cropOk;
+    const content = target['content'];
+    const contentOk = content === undefined || content === null || (content instanceof Uint8Array && content.byteLength > 0 && content.byteLength <= MAX_LAYER_CONTENT_BYTES);
+    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) >= 0.01 && (target['scale'] as number) <= 16 && !!cropOk && contentOk;
   }
   return false;
 }
@@ -217,6 +221,7 @@ export class SnapshotService {
       data,
       origin: [outcome.origin[0], outcome.origin[1]],
       layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
+      raster: outcome.raster ?? null,
       quality: outcome.quality,
       waitedUs: outcome.waitedUs,
       renderUs: outcome.renderUs,

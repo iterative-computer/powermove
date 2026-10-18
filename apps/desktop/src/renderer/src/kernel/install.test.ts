@@ -42,6 +42,61 @@ describe('installKernel', () => {
     expect(PM.raster).toBe(native);
   });
 
+  it('rasterAsync has raster’s shape and passes the crop as raster’s fifth argument (engine off)', async () => {
+    const PM = fakePM();
+    const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10, anchorX: 1, anchorY: 2 }));
+    PM.raster = native;
+    installed = installKernel(PM);
+    const api = installed.api('typing');
+    const layer = { id: 'S1', type: 'shape', d: {} } as any;
+    const crop = { x: 1, y: 2, width: 3, height: 4 } as any;
+    const sync = api.render.raster(layer, 2, 0.5, undefined, crop);
+    const later = await (api.render as any).rasterAsync(layer, 2, 0.5, crop);
+    expect(Object.keys(later).sort()).toEqual(Object.keys(sync!).sort());
+    expect(native).toHaveBeenLastCalledWith(layer, 2, 0.5, undefined, crop);
+  });
+
+  it('with the engine on, render.raster’s base is the engine’s raster beneath extension wrappers; internal PM.raster calls keep today’s rasterizer', async () => {
+    const PM = fakePM();
+    const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10, anchorX: 1, anchorY: 2 }));
+    PM.raster = native;
+    const layer = { id: 'L1', type: 'solid', d: { w: 40, h: 20 } } as any;
+    PM.proj = { ...(PM.proj ?? {}), id: 'P', compId: 'P-root', layers: [layer], comps: {} };
+    const snapshot = (width: number) => ({
+      width, height: 28, data: new Uint8ClampedArray(width * 28 * 4), pixels: 'premultiplied', revision: 3, viewSeq: null,
+      origin: [4, 4], layerBox: [width, 28], raster: { canvas: [width, 28], window: [0, 0], cropped: false, selection: [-20, -10, 20, 10] },
+      quality: {}, waitedUs: 0, renderUs: 0, mainMs: 0
+    });
+    PM.EngineRender = {
+      rasterSync: vi.fn(() => snapshot(48)),
+      raster: vi.fn(async () => snapshot(48)),
+      toCanvas: (s: any) => Object.assign(document.createElement('canvas'), { width: s.width, height: s.height })
+    };
+    installed = installKernel(PM);
+    const api = installed.api('typing');
+    const surface = api.render.raster(layer, 1, 0.25)!;
+    expect(surface).toMatchObject({ w: 48, h: 28, anchorX: 4, anchorY: 4, selection: { x0: -20, x1: 20 } });
+    expect(PM.EngineRender.rasterSync).toHaveBeenLastCalledWith('L1', 1, 0.25, null, { composition: 'P-root', content: null });
+    expect(native).not.toHaveBeenCalled();
+    // A wrapper (an extension override by id) runs around the engine's raster.
+    const original = api.services.get<(...args: any[]) => any>('raster')!;
+    const override = api.services.register('raster', (L: any, ...rest: any[]) => ({ ...original({ ...L, d: { ...L.d, w: 80 } }, ...rest), wrapped: true }));
+    const wrapped = api.render.raster(layer, 1, 0.25) as any;
+    expect(wrapped.wrapped).toBe(true);
+    const content = (PM.EngineRender.rasterSync.mock.calls.at(-1) as any[])[4].content as Uint8Array;
+    expect(JSON.parse(new TextDecoder().decode(content)).d.w).toBe(80);
+    // Async with a wrapper: the same surface, through the wrapper.
+    expect(((await (api.render as any).rasterAsync(layer, 1, 0.25)) as any).wrapped).toBe(true);
+    override.dispose();
+    // Without wrappers rasterAsync never blocks: the engine's async raster.
+    const asynced = await (api.render as any).rasterAsync(layer, 1, 0.25, { x: 0, y: 0, w: 4, h: 4 });
+    expect(asynced).toMatchObject({ w: 48, anchorX: 4 });
+    expect(PM.EngineRender.raster).toHaveBeenLastCalledWith('L1', 1, 0.25, { x: 0, y: 0, width: 4, height: 4 }, { composition: 'P-root', content: null });
+    // The compositor's and editing helpers' own calls keep today's rasterizer.
+    PM.raster(layer, 1, 0.25);
+    expect(native).toHaveBeenCalledTimes(1);
+  });
+
   it('accepts the rasterizer installed after kernel boot and forwards all arguments', () => {
     const PM = fakePM();
     installed = installKernel(PM);

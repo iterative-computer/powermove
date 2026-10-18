@@ -8,7 +8,7 @@ import { EngineRenderTransport, EngineSnapshotError, type TransportSession, unpr
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
 const rendered = (width: number, height: number, fill = 7, revision = 12): EngineSnapshotReply => ({
-  status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], layerBox: null, quality, waitedUs: 1, renderUs: 2, mainMs: 3
+  status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], layerBox: null, raster: null, quality, waitedUs: 1, renderUs: 2, mainMs: 3
 });
 
 const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '' });
@@ -165,6 +165,15 @@ describe('EngineRenderTransport', () => {
     expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
     // An empty raster is not a failure.
     expect(transport.stats.failed).toBe(1);
+  });
+
+  it('a Blender composition without its prepared frame throws today’s error, never an empty snapshot', () => {
+    const words = 'The Blender frame is not prepared. Render this frame before capturing it.';
+    const { transport } = setup([{ status: 'failed', code: 'blenderFailed', message: words }, { status: 'failed', code: 'blenderFailed', message: words }, { status: 'failed', code: 'timeout', message: 'slow' }]);
+    expect(() => transport.snapshotDataUrlSync(0, 320, { w: 640, h: 360 })).toThrow(words);
+    expect(() => transport.renderFrameToCanvasSync(0, 64, 36)).toThrow(EngineSnapshotError);
+    // Other failures keep today's '' for render.snapshot.
+    expect(transport.snapshotDataUrlSync(0, 320, { w: 640, h: 360 })).toBe('');
   });
 
   it('unpremultiplies like a canvas', () => {

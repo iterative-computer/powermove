@@ -32,7 +32,7 @@
  *   context) on the session's port; `provideCompat` registers the producer
  *   the job engine's export frames are drawn by (main asks the window).
  */
-import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest } from '../../../shared/engine-protocol';
+import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest } from '../../../shared/engine-protocol';
 import type { EngineBridge, EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
@@ -42,6 +42,11 @@ export const MAX_ROUNDS = 3;
 export const SYNC_WAIT_MS = 5_000;
 export const ASYNC_WAIT_MS = 30_000;
 export const IDLE_WAIT_MS = 120_000;
+/** Options of a layer raster: the composition it is in (default: the open
+ *  one), the caller's layer object (JSON) when it is not the document's,
+ *  and the largest side. */
+export type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };
+
 /** Largest side of a layer raster asked for: 6,000² is under the engine's
  *  40-million-pixel snapshot cap. */
 export const MAX_RASTER_EDGE = 6000;
@@ -68,8 +73,10 @@ export type EngineSnapshotOptions = {
   draft3d?: boolean;
   /** How long the engine may wait for the revision and its turn (ms). */
   waitMs?: number;
-  /** A layer's raster instead of the frame (`render.raster` base pixels). */
-  layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null };
+  /** A layer's raster instead of the frame (`render.raster` base pixels).
+   *  `content`: the layer object the caller passed, as JSON, when it is not
+   *  the document's own (a wrapper's modified copy). */
+  layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -83,6 +90,8 @@ export type EngineSnapshot = {
   origin: [number, number];
   /** A layer raster's box in layer pixels (`RasterSurface` w, h); null for frames. */
   layerBox: [number, number] | null;
+  /** A layer raster's canvas, crop window, and selection; null for frames. */
+  raster: RasterGeometry | null;
   quality: FrameQuality;
   /** Time spent in the engine waiting and rendering (µs), and in main (ms). */
   waitedUs: number;
@@ -197,7 +206,7 @@ export class EngineRenderTransport {
       time: ticks(time),
       outputSize: { width, height },
       target: layer
-        ? { kind: 'layer', layer: layer.id, scale: layer.scale, crop: layer.crop ?? null }
+        ? { kind: 'layer', layer: layer.id, scale: layer.scale, crop: layer.crop ?? null, content: layer.content ?? null }
         : { kind: 'frame', motionBlurSamples: Math.max(0, Math.min(256, Math.round(options.motionBlurSamples ?? 0))), background: options.background !== false, draft3d: options.draft3d === true },
       pixels: options.pixels ?? 'opaque',
       class: cls,
@@ -210,7 +219,7 @@ export class EngineRenderTransport {
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
     const data = new Uint8ClampedArray(reply.data.buffer, reply.data.byteOffset, reply.data.byteLength);
-    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
+    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
   }
 
   private fail(error: unknown, where: string): EngineSnapshotError {
@@ -307,28 +316,34 @@ export class EngineRenderTransport {
   }
 
   /**
-   * A layer's raster (the base pixels of `render.raster()`): the raster
-   * of a text or captions layer at `scale`, cut to `crop`, premultiplied,
-   * with its anchor (`origin`) and box (`layerBox`) in layer pixels. Null
-   * when the layer draws nothing then (today's `raster()` returns null).
-   * At most `maxEdge` pixels a side (`MAX_RASTER_EDGE`).
+   * A layer's raster (the base pixels of `render.raster()`): the raster at
+   * `scale`, cut to `crop` where today's raster cuts (plain text, shapes),
+   * premultiplied, with its anchor (`origin`), box (`layerBox`), and
+   * canvas, window, and selection (`raster`) in today's terms. Null when
+   * the layer draws nothing then (a captions layer between cues). At most
+   * `maxEdge` pixels a side (`MAX_RASTER_EDGE`, today's 8,192 cap).
    */
-  rasterSync(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, maxEdge = MAX_RASTER_EDGE): EngineSnapshot | null {
+  rasterSync(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): EngineSnapshot | null {
     try {
-      return this.snapshotSync({ time, width: maxEdge, height: maxEdge, pixels: 'premultiplied', layer: { id: layer, scale, crop } });
+      return this.snapshotSync(this.rasterOptions(layer, scale, time, crop, options));
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;
     }
   }
 
-  async raster(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, maxEdge = MAX_RASTER_EDGE): Promise<EngineSnapshot | null> {
+  async raster(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
     try {
-      return await this.snapshot({ time, width: maxEdge, height: maxEdge, pixels: 'premultiplied', layer: { id: layer, scale, crop } });
+      return await this.snapshot(this.rasterOptions(layer, scale, time, crop, options));
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;
     }
+  }
+
+  private rasterOptions(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null, options: RasterOptions): EngineSnapshotOptions {
+    const edge = options.maxEdge ?? MAX_RASTER_EDGE;
+    return { time, width: edge, height: edge, pixels: 'premultiplied', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
   }
 
   /* ── today's render API shapes (apiVersion 1 to 3 and the async siblings) ── */
@@ -358,10 +373,15 @@ export class EngineRenderTransport {
 
   renderFrameToSync(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement | null {
     try {
-      return this.canvas(this.snapshotSync(this.frameOptions(time, width, height, options)));
+      return this.renderFrameToCanvasSync(time, width, height, options);
     } catch {
       return null;
     }
+  }
+
+  /** The same, throwing `EngineSnapshotError` with the engine's reason. */
+  renderFrameToCanvasSync(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement {
+    return this.canvas(this.snapshotSync(this.frameOptions(time, width, height, options)));
   }
 
   async renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): Promise<HTMLCanvasElement> {
@@ -378,7 +398,10 @@ export class EngineRenderTransport {
   snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }): string {
     try {
       return this.canvas(this.snapshotSync(this.snapshotOptions(time, maxWidth, size))).toDataURL('image/jpeg', 0.74);
-    } catch {
+    } catch (error) {
+      // Today's capture of a Blender composition with no prepared frame
+      // throws (`compositor.ts`); it does not come back empty.
+      if (error instanceof EngineSnapshotError && error.code === 'blenderFailed') throw new Error(error.message);
       return '';
     }
   }
