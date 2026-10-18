@@ -517,6 +517,35 @@ part of its documented contract). New code must not use them.
 - `api.host.pm`, `api.host.state` and the standalone `PM` identifier also fail
   the built-in extension boundary lint.
 
+### The compatibility WebGL context
+
+`api.render.gl.context` is null until a viewer hands a canvas to
+`api.render.gl.init`, then a WebGL2 context of that canvas
+(`context.canvas === api.render.gl.canvas`), with "Use New Engine" on or off.
+Old custom viewers that find their canvas through it, or call `init` only
+while it is null, behave as before. With the engine on, the engine presents
+the composition over that canvas, which stays in the document under the
+presentation. Drawing into the context and reading the composite back from it
+(`readPixels`) are not supported with the engine yet. Read frames with
+`api.render.renderFrameToAsync` and draw with a registered GLSL layer or
+effect instead; find the canvas with `api.render.gl.canvas`.
+
+### Raster overrides with the new engine
+
+A `raster` service override keeps working in the viewer, in snapshots and
+captures, and in exports. For every text, captions, and shape layer, the
+engine runs the override chain at the layer's own time and raster density,
+as today's compositor did, over the engine's raster of the layer. A layer
+the override returns unchanged (the captured service's own result object)
+is drawn by the engine itself; any other result is drawn on the quad it
+describes (`w`, `h`, `anchorX`, `anchorY`, `uv`). Return the captured
+service's result object itself for layers you do not change: a copy (`{
+...surface }`) is treated as changed pixels. Give changed surfaces a `key`
+that changes whenever the pixels do: an unchanged key is not sent to the
+engine again. An export asks the window that has the project open; with no
+such window it fails with that reason rather than drawing the layer
+without the override.
+
 **When Powermove finds one.** Reading, writing or compiling extension source
 in an agent run, validating and publishing staged extensions (every agent
 provider, and `publish_extensions` over MCP), and preparing a Store publish
