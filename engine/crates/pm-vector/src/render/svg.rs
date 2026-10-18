@@ -80,12 +80,130 @@ fn options(text: bool) -> usvg::Options<'static> {
     options
 }
 
+/// The deepest element nesting Blink's XML parser accepts
+/// (`kMaxXMLTreeDepth`); a deeper document is a broken image in Chromium.
+pub const MAX_ELEMENT_DEPTH: usize = 5000;
+
+/// The deepest element nesting in `data`, counted without recursion over
+/// comments, CDATA, processing instructions, declarations and quoted
+/// attribute values (entity expansions are not counted).
+pub fn element_depth(data: &[u8]) -> usize {
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    let skip_past = |i: &mut usize, end: &[u8]| {
+        match data[*i..].windows(end.len()).position(|w| w == end) {
+            Some(at) => *i += at + end.len(),
+            None => *i = data.len(),
+        }
+    };
+    while i < data.len() {
+        let Some(lt) = data[i..].iter().position(|&b| b == b'<') else {
+            break;
+        };
+        i += lt;
+        let rest = &data[i..];
+        if rest.starts_with(b"<!--") {
+            i += 4;
+            skip_past(&mut i, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            skip_past(&mut i, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            skip_past(&mut i, b"?>");
+        } else if rest.starts_with(b"</") {
+            i += 2;
+            skip_past(&mut i, b">");
+            depth = depth.saturating_sub(1);
+        } else if rest.starts_with(b"<!") {
+            // DOCTYPE: skip to its end over an internal subset.
+            i += 2;
+            let mut bracket = 0usize;
+            while i < data.len() {
+                match data[i] {
+                    b'[' => bracket += 1,
+                    b']' => bracket = bracket.saturating_sub(1),
+                    b'"' | b'\'' => {
+                        let q = data[i];
+                        i += 1;
+                        skip_past(&mut i, &[q]);
+                        continue;
+                    }
+                    b'>' if bracket == 0 => {
+                        i += 1;
+                        break;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        } else {
+            i += 1;
+            let mut empty = false;
+            while i < data.len() {
+                match data[i] {
+                    b'>' => {
+                        i += 1;
+                        break;
+                    }
+                    b'/' if data.get(i + 1) == Some(&b'>') => {
+                        empty = true;
+                        i += 2;
+                        break;
+                    }
+                    b'"' | b'\'' => {
+                        let q = data[i];
+                        i += 1;
+                        skip_past(&mut i, &[q]);
+                    }
+                    _ => i += 1,
+                }
+            }
+            max = max.max(depth + 1);
+            if !empty {
+                depth += 1;
+            }
+        }
+    }
+    max
+}
+
+/// Runs `f` on a thread whose stack fits a document nested `depth` levels.
+/// roxmltree, usvg's converter and the paint-record walk each recurse once
+/// per element level; engine worker threads have 2 MiB, so a deep document
+/// gets its own stack instead of overflowing the caller's. Documents deeper
+/// than [`MAX_ELEMENT_DEPTH`] are rejected before any recursive parse.
+fn with_document_stack<T: Send>(data: &[u8], f: impl FnOnce() -> Result<T, SvgError> + Send) -> Result<T, SvgError> {
+    with_document_stack_depth(element_depth(data), f)
+}
+
+fn with_document_stack_depth<T: Send>(depth: usize, f: impl FnOnce() -> Result<T, SvgError> + Send) -> Result<T, SvgError> {
+    if depth > MAX_ELEMENT_DEPTH {
+        return Err(SvgError(format!(
+            "elements nest {depth} deep; Chromium's XML parser stops at {MAX_ELEMENT_DEPTH}"
+        )));
+    }
+    // 16 MiB plus 64 KiB per level (at most ~330 MiB of reserved, lazily
+    // committed address space).
+    let stack = (16 << 20) + depth * (64 << 10);
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("svg-parse".into())
+            .stack_size(stack)
+            .spawn_scoped(s, f)
+            .map_err(|e| SvgError(format!("could not start the parse thread: {e}")))?
+            .join()
+            .map_err(|_| SvgError("the parse thread panicked".into()))?
+    })
+}
+
 impl SvgDocument {
     /// Parses SVG bytes (SVGZ is not read: usvg's compression feature is
-    /// off).
+    /// off). Deeply nested documents parse on a dedicated stack; deeper than
+    /// [`MAX_ELEMENT_DEPTH`] is an error, as Chromium shows a broken image.
     pub fn parse(data: &[u8]) -> Result<Self, SvgError> {
-        let tree = usvg::Tree::from_data(data, &options(contains_text(data))).map_err(|e| SvgError(e.to_string()))?;
-        let has_text = contains_text(data);
+        let (tree, has_text) = with_document_stack(data, || {
+            let has_text = contains_text(data);
+            let tree = usvg::Tree::from_data(data, &options(has_text)).map_err(|e| SvgError(e.to_string()))?;
+            Ok((tree, has_text))
+        })?;
         Ok(Self {
             tree,
             has_text,
@@ -162,11 +280,12 @@ impl SvgDocument {
         if self.has_text {
             return Err(SvgError("SVG text needs pm-text".into()));
         }
-
-        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
-        let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
-        crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut |_, _, _, _| {
-            Err(SvgError("SVG text needs pm-text".into()))
+        with_document_stack(&self.data, || {
+            let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
+            let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
+            crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut |_, _, _, _| {
+                Err(SvgError("SVG text needs pm-text".into()))
+            })
         })
     }
 
@@ -178,10 +297,23 @@ impl SvgDocument {
         height: u32,
         compat: &mut pm_text::compat::Compat<R>,
     ) -> Result<Bitmap, SvgError> {
-        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
-        let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
-        let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
-        crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
+        // The resolver is used only by the parse thread while this thread
+        // blocks on it (a scoped join), so the exclusive borrow moves across
+        // threads without a `Send` bound on the resolver type.
+        struct Exclusive<T>(*mut T);
+        unsafe impl<T> Send for Exclusive<T> {}
+        let compat = Exclusive(compat as *mut pm_text::compat::Compat<R>);
+        let (data, has_text) = (&self.data, self.has_text);
+        with_document_stack(data, move || {
+            let compat = compat;
+            // SAFETY: the pointer came from an exclusive borrow that outlives
+            // the scoped thread, and nothing else touches it meanwhile.
+            let compat: &mut pm_text::compat::Compat<R> = unsafe { &mut *compat.0 };
+            let (annotated, elements) = crate::canvas2d::svg::annotate(data)?;
+            let tree = usvg::Tree::from_data(&annotated, &options(has_text)).map_err(|e| SvgError(e.to_string()))?;
+            let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
+            crate::canvas2d::svg::raster(&annotated, &tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
+        })
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter
