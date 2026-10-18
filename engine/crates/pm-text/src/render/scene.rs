@@ -248,6 +248,27 @@ struct Placement {
 }
 
 impl Placement {
+    /// A glyph's device origin as Skia maps it for `drawTextBlob` at
+    /// `origin`: the canvas matrix in `f32`, pre-translated by the blob's
+    /// origin (`SkMatrix::preTranslate`), then the glyph's blob position
+    /// mapped (`SkMatrix::mapPoints`), all in `f32` (Chromium builds Skia
+    /// without floating-point contraction).
+    fn glyph_origin(&self, origin: (f64, f64), g: (f64, f64)) -> kurbo::Point {
+        let [sx, ky, kx, sy, tx, ty] = self.m.as_coeffs().map(|v| v as f32);
+        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
+        let translate_only = sx == 1.0 && sy == 1.0 && kx == 0.0 && ky == 0.0;
+        let (tx, ty) = if translate_only {
+            (tx + ox, ty + oy)
+        } else {
+            (tx + (sx * ox + kx * oy), ty + (ky * ox + sy * oy))
+        };
+        let (gx, gy) = (g.0 as f32, g.1 as f32);
+        kurbo::Point::new(
+            f64::from(gx * sx + gy * kx + tx),
+            f64::from(gy * sy + gx * ky + ty),
+        )
+    }
+
     fn of(m: Affine) -> Placement {
         let [a, b, c, d, _, _] = m.as_coeffs();
         let det = a * d - b * c;
@@ -354,7 +375,7 @@ impl Painter<'_> {
                 ..style
             };
             for g in run.glyphs {
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let p = place.glyph_origin(origin, (g.x, g.y));
                 let bsize = run.bitmap_size.unwrap_or(dsize);
                 if color_face
                     && place.axis_aligned
@@ -649,7 +670,7 @@ impl Painter<'_> {
                 let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
                     continue;
                 };
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let p = place.glyph_origin(origin, (g.x, g.y));
                 let (x, y) = if place.axis_aligned {
                     self.profile.stroke_position(p.x, p.y)
                 } else {
@@ -764,7 +785,7 @@ impl Painter<'_> {
                 });
             for g in run.glyphs {
                 let bsize = run.bitmap_size.unwrap_or(device_size as f32);
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let p = place.glyph_origin(origin, (g.x, g.y));
                 if bitmap_face
                     && self
                         .bitmaps

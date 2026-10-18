@@ -199,7 +199,11 @@ fn main() {
                 Some((most, max)) => format!(" (pinned ≤{most}, ≤{max})"),
                 None => String::new(),
             },
-            if stale { " exact now: remove its pin" } else { "" }
+            if stale {
+                " exact now: remove its pin"
+            } else {
+                ""
+            }
         );
         println!("{line}");
         if !pass {
