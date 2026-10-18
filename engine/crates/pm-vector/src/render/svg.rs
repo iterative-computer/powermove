@@ -720,6 +720,9 @@ mod tests {
         for body in admitted {
             assert_eq!(gate(body), Ok(()), "{body}");
         }
+        // The document `apps/desktop/e2e/import-svg.spec.ts` imports.
+        let card = br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect width="64" height="32" rx="8" fill="#ff5a1f"/><circle cx="48" cy="16" r="8" fill="#ffffff"/></svg>"##;
+        assert_eq!(SvgDocument::parse(card).unwrap().compat_supported(64.0, 32.0), Ok(()));
         let routed = [
             (r##"<style>rect{fill:red}</style><rect width="10" height="10"/>"##, "<style>"),
             (r##"<defs><rect id="a" width="5" height="5"/></defs><use href="#a"/>"##, "<use>"),
