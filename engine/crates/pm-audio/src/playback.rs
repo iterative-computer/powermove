@@ -315,6 +315,11 @@ pub struct PlaybackStats {
     pub dropped_renders: u64,
     /// Project output frames silenced for missing input (summed over voices).
     pub dropped_voice_frames: u64,
+    /// Output device I/O cycles that missed their real-time deadline
+    /// (CoreAudio processor overloads; 0 for a headless side).
+    pub device_overloads: u64,
+    /// Output device callbacks so far (0 for a headless side).
+    pub device_callbacks: u64,
 }
 
 impl Playback {
@@ -560,6 +565,8 @@ impl Playback {
             starve_retries: self.shared.starve_retries.load(Ordering::Relaxed),
             dropped_renders: self.shared.dropped_renders.load(Ordering::Relaxed),
             dropped_voice_frames: self.shared.dropped_voice_frames.load(Ordering::Relaxed),
+            device_overloads: self.stream.as_ref().map_or(0, OutputStream::overloads),
+            device_callbacks: self.stream.as_ref().map_or(0, OutputStream::callbacks),
         }
     }
 

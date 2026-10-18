@@ -212,6 +212,7 @@ pub struct OutputStream {
     failed: Arc<AtomicBool>,
     cpal_delay_us: Arc<AtomicU64>,
     callbacks: Arc<AtomicU64>,
+    overloads: Arc<AtomicU64>,
 }
 
 impl OutputStream {
@@ -229,7 +230,7 @@ impl OutputStream {
         let config = cpal::StreamConfig {
             channels: info.channels as u16,
             sample_rate: info.sample_rate,
-            buffer_size: interactive_buffer(supported.buffer_size()),
+            buffer_size: interactive_buffer(supported.buffer_size(), info.sample_rate),
         };
         let channels = info.channels;
         let failed = Arc::new(AtomicBool::new(false));
@@ -238,6 +239,8 @@ impl OutputStream {
         let delay = cpal_delay_us.clone();
         let callbacks = Arc::new(AtomicU64::new(0));
         let count = callbacks.clone();
+        let overloads = Arc::new(AtomicU64::new(0));
+        let overload = overloads.clone();
         let stream = device
             .build_output_stream::<f32, _, _>(
                 config,
@@ -254,7 +257,16 @@ impl OutputStream {
                     count.fetch_add(1, Ordering::Relaxed);
                     callback(data, channels, host_us);
                 },
-                move |_e| flag.store(true, Ordering::Relaxed),
+                move |e: cpal::Error| {
+                    // CoreAudio's kAudioDeviceProcessorOverload: an I/O
+                    // cycle missed its deadline (heard as a glitch). The
+                    // stream keeps running, as WebAudio's does.
+                    if e.kind() == cpal::ErrorKind::Xrun {
+                        overload.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                },
                 None,
             )
             .map_err(|e| AudioError::Device(e.to_string()))?;
@@ -274,6 +286,7 @@ impl OutputStream {
             failed,
             cpal_delay_us,
             callbacks,
+            overloads,
         })
     }
 
@@ -289,6 +302,11 @@ impl OutputStream {
         self.callbacks.load(Ordering::Relaxed)
     }
 
+    /// Device I/O cycles that overran their deadline (HAL overloads).
+    pub fn overloads(&self) -> u64 {
+        self.overloads.load(Ordering::Relaxed)
+    }
+
     /// The stream reported an error (device removed, ...).
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
@@ -301,14 +319,22 @@ impl OutputStream {
     }
 }
 
-/// One WebAudio render quantum when supported. The inherited HAL default can
-/// be 512 frames: both the callback phase and its scheduling lead then add a
-/// full 10.7 ms to an interactive start. Respect devices with larger minima
-/// (the producer adapts its reserve to the actual callback size).
-fn interactive_buffer(supported: &cpal::SupportedBufferSize) -> cpal::BufferSize {
+/// The output I/O buffer today's app runs at, so the real-time deadline,
+/// callback rate and underrun margin are the same. Chromium's macOS output
+/// (`AudioManagerMac::ChooseBufferSize`, used by WebAudio's "interactive"
+/// latency hint) asks for 256 frames up to 96 kHz and 512 above, clamped to
+/// the device's I/O range; the app measured `AudioContext.baseLatency`
+/// 5.333 ms (256 frames at 48 kHz). The 128-frame WebAudio render quantum
+/// is not the device buffer: requesting it halves the deadline and doubles
+/// wakeups, which Chromium avoids because CoreAudio underruns under load.
+/// Without a fixed size the HAL default can be 512 frames, adding up to a
+/// further 10.7 ms to an interactive start. Devices with larger minima keep
+/// them (the producer adapts its reserve to the actual callback size).
+fn interactive_buffer(supported: &cpal::SupportedBufferSize, sample_rate: u32) -> cpal::BufferSize {
+    let frames = if sample_rate > 96_000 { 512 } else { 256 };
     match *supported {
         cpal::SupportedBufferSize::Range { min, max } => {
-            cpal::BufferSize::Fixed(128u32.clamp(min, max))
+            cpal::BufferSize::Fixed(frames.clamp(min, max))
         }
         cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
     }
@@ -319,22 +345,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interactive_buffer_respects_device_limits() {
+    fn interactive_buffer_matches_todays_output_buffer() {
         use cpal::{BufferSize::*, SupportedBufferSize::Range};
+        let wide = Range { min: 14, max: 4096 };
+        for rate in [44_100, 48_000, 88_200, 96_000] {
+            assert_eq!(interactive_buffer(&wide, rate), Fixed(256), "{rate}");
+        }
+        for rate in [176_400, 192_000] {
+            assert_eq!(interactive_buffer(&wide, rate), Fixed(512), "{rate}");
+        }
         assert_eq!(
-            interactive_buffer(&Range { min: 32, max: 4096 }),
-            Fixed(128)
+            interactive_buffer(&Range { min: 32, max: 64 }, 48_000),
+            Fixed(64)
         );
-        assert_eq!(interactive_buffer(&Range { min: 32, max: 64 }), Fixed(64));
         assert_eq!(
-            interactive_buffer(&Range {
-                min: 4096,
-                max: 8192
-            }),
+            interactive_buffer(
+                &Range {
+                    min: 4096,
+                    max: 8192
+                },
+                48_000
+            ),
             Fixed(4096)
         );
         assert_eq!(
-            interactive_buffer(&cpal::SupportedBufferSize::Unknown),
+            interactive_buffer(&cpal::SupportedBufferSize::Unknown, 48_000),
             Default
         );
     }

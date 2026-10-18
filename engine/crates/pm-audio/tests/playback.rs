@@ -2803,7 +2803,7 @@ fn paused_prefetch_starts_within_one_callback() {
         SR,
         &[tone(SR, 12.0, 997.0, 0.2), tone(SR, 12.0, 631.0, 0.1)],
     );
-    for buffer in [128, BUFFER] {
+    for buffer in [256, BUFFER] {
         for warm in [false, true] {
             let cache = SourceCache::new(64 << 20, 2);
             let source = cache.open(&file, None).unwrap();
