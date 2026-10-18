@@ -1203,12 +1203,13 @@ Measured: `child_blender` (a stand-in for main's supervision) prepared the
 frame in 66 ms and drew the magenta surface; a held Blender failed the
 snapshot at 1.52 s against a 1.5 s bound and was cancelled.
 `e2e/engine-blender-captures.spec.ts` on Blender 4.5.14 (EEVEE, 192 × 108):
-the async capture took 1.15 to 1.26 s through the engine's Blender stage
-(three runs) with playback paused and resumed around it; the engine's
+the async capture took 1.15 to 1.49 s through the engine's Blender stage
+(four runs) with playback paused and resumed around it; the engine's
 pixels equal today's Blender surfaces composited (100% within 2 CV, max
 1 CV); `render.snapshotAsync` and the sync capture after it equal it
 exactly (mean 0.00 CV); before preparation the sync capture fails with
-today's words in both engines.
+today's words in both engines. Together with `engine-blender.spec.ts` (2)
+and `engine-render-transport.spec.ts` (7): 10 of 10.
 
 ### Measured (2026-10-18, M4 Max)
 
