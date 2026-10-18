@@ -151,6 +151,7 @@ struct Shared {
     dropped_renders: AtomicU64,
     dropped_voice_frames: AtomicU64,
     device_rate: u32,
+    prepared: Mutex<Vec<i64>>,
 }
 
 /// Pending diagnostics, each reported once per episode however often the
@@ -300,6 +301,7 @@ impl Playback {
             dropped_renders: AtomicU64::new(0),
             dropped_voice_frames: AtomicU64::new(0),
             device_rate,
+            prepared: Mutex::new(Vec::new()),
         });
         let (tx, rx) = channel();
         let empty = Arc::new(Document::new(None, 0));
@@ -479,6 +481,16 @@ impl Playback {
             dropped_renders: self.shared.dropped_renders.load(Ordering::Relaxed),
             dropped_voice_frames: self.shared.dropped_voice_frames.load(Ordering::Relaxed),
         }
+    }
+
+    /// Paused starts whose source and DSP pre-roll is ready (test probe).
+    #[cfg(feature = "test-hooks")]
+    pub fn prepared_starts(&self) -> Vec<i64> {
+        self.shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn device(&self) -> Option<&crate::device::DeviceInfo> {
@@ -827,12 +839,15 @@ impl Converter {
 }
 
 /// The ring depth `fill` keeps, in chunks: `ahead` frames, and at least
-/// half of that beyond the refill reserve (two of the largest device
-/// callbacks), so large callbacks (2,048-frame Bluetooth or AirPlay buffers
-/// against the 3,840-frame default) still leave a transient decode miss a
-/// wait before it drops. Bounded by the ring's capacity.
+/// one callback plus half of that beyond the refill reserve (two of the
+/// largest observed callbacks). The callback waking the producer has already
+/// spent one buffer; even then a newly missing voice keeps a wait budget.
+/// The producer grows the ring before computing this bounded target.
 fn fill_target(ahead: usize, reserve: usize, capacity: usize) -> usize {
-    let frames = ahead.max(reserve + ahead / 2);
+    // The callback that wakes the producer has already spent one buffer.
+    // Keep that buffer in addition to the two-buffer refill reserve, so
+    // every newly missing voice still gets a wait, regardless of alignment.
+    let frames = ahead.max(reserve + reserve / 2 + ahead / 2);
     (frames / CHUNK).max(2).min(capacity - 1)
 }
 
@@ -871,7 +886,7 @@ struct RenderThread {
     /// Each voice owns its deadline and notification until it recovers.
     stalls: HashMap<String, VoiceStall>,
     /// The device frame a play or seek began pre-rolling, until its first
-    /// segment commits. Nothing of the run is queued yet, so holding for a
+    /// device output chunk is queued. Until then, holding for a
     /// cold voice is start latency, not a gap: every missing voice gets the
     /// whole A3 hold from here.
     startup: Option<u64>,
@@ -946,6 +961,7 @@ impl RenderThread {
                     self.stop_pending = false;
                     self.publish_stopped();
                 }
+                self.prepare_paused();
                 continue;
             }
             if need_preroll {
@@ -1026,6 +1042,11 @@ impl RenderThread {
 
     /// Applies a control; returns whether playback must pre-roll.
     fn control(&mut self, c: Control) -> bool {
+        self.shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         match c {
             Control::Command(cmd, reply) => {
                 // A pause, a step, a play around, or a new J/K/L rate while
@@ -1167,6 +1188,65 @@ impl RenderThread {
         self.stopped_published = true;
     }
 
+    /// Idle work is cancellable between turns: decode around the playhead
+    /// first, then both work-area edges. Each target has its own vocoder.
+    fn prepare_paused(&mut self) {
+        if self.stop_pending {
+            return;
+        }
+        let rate = self.transport.rate() as i64;
+        let mut starts = vec![self.transport.position()];
+        if let Some(range) = self.transport.loop_range() {
+            starts.push(crate::offline::sample_of_ticks(
+                range.start.get(),
+                rate as u32,
+            ));
+            starts.push(
+                crate::offline::sample_of_ticks(range.end.get(), rate as u32)
+                    .saturating_sub(CHUNK as i64)
+                    .max(0),
+            );
+        }
+        if let Ok(comp) = pm_eval::Comp::resolve(self.mixer.document(), &self.mixer.graph().comp_id)
+            && let Some(work) = pm_eval::node::array(comp.member("work"))
+        {
+            for edge in work.iter().take(2) {
+                if let Some(seconds) = pm_eval::node::number(Some(edge)).filter(|t| t.is_finite()) {
+                    let at = (seconds * rate as f64).round() as i64;
+                    // Bound retained DSP histories to the playhead and
+                    // work-area boundaries, regardless of work-area length.
+                    if starts.len() < 3 && !starts.contains(&at) {
+                        starts.push(at.max(0));
+                    }
+                }
+            }
+        }
+        starts.dedup();
+        self.mixer.retain_prepared(&starts);
+        let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
+            .max(CHUNK as i64);
+        let mut ready = Vec::new();
+        for start in starts {
+            // Read bounds include stretch's deterministic pre-roll. Do not
+            // block commands evaluating a large work area all in one turn.
+            if !self
+                .mixer
+                .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS)
+            {
+                continue;
+            }
+            let first = (self.config.preroll_ms as usize * rate as usize / 1000).max(CHUNK);
+            if self.mixer.is_ready(start, first) && self.mixer.prepare_start(start) {
+                ready.push(start);
+            }
+        }
+        *self
+            .shared
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ready;
+    }
+
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
@@ -1182,6 +1262,9 @@ impl RenderThread {
         self.mixer.end_glides();
         self.mixer.abandon_retries();
         let position = self.transport.position();
+        if self.transport.play_rate() == 1 {
+            self.mixer.use_prepared(position);
+        }
         let rate = self.transport.rate() as i64;
         let speed = self.transport.play_rate();
         let frames = self.config.preroll_ms as i64 * rate / 1000 * speed.abs().max(1);
@@ -1218,8 +1301,14 @@ impl RenderThread {
 
     /// Renders until the ring holds `ahead_ms`.
     fn fill(&mut self) {
+        let ahead = self.config.ahead_ms as usize * self.device_rate as usize / 1000;
+        let reserve = self.ring.refill_reserve() as usize;
+        // Callback only observes its size. Allocation and growth stay on the
+        // producer, preserving queued audio across first observation/changes.
+        self.ring
+            .grow((ahead.max(reserve + reserve / 2 + ahead / 2)).div_ceil(CHUNK) + 2);
         let target = fill_target(
-            self.config.ahead_ms as usize * self.device_rate as usize / 1000,
+            ahead,
             self.ring.refill_reserve() as usize,
             self.ring.capacity(),
         );
@@ -1266,18 +1355,10 @@ impl RenderThread {
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
                 let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
-                // A4.1: the reserve bounds a wait only while it protects a
-                // voice that is heard. At a start nothing of the run plays
-                // yet, and with every heard voice missing nothing would be
-                // heard by dropping: both keep the A3 hold. Voices count by
-                // id, so a retune glide's outgoing copies of the missing
-                // voice cannot outnumber the ready ones, and a voice the
-                // monitor solo silences protects nothing.
-                let protects = self.startup.is_none()
-                    && report
-                        .heard_whole
-                        .iter()
-                        .any(|id| !report.starved_voices.contains(id));
+                // A6: every mid-run miss is bounded by the ring reserve,
+                // including an all-missing mix. Tagged silence advances the
+                // device clock and picture; only a cold start keeps its hold.
+                let protects = self.startup.is_none();
                 let reserve = self
                     .ring
                     .buffered_frames()
@@ -1370,8 +1451,6 @@ impl RenderThread {
                     }
                 }
             }
-            // The run's first segment commits: its start hold is over.
-            self.startup = None;
             if seg.rate < 0 {
                 for c in &mut planar {
                     c.reverse();
@@ -1497,6 +1576,9 @@ impl RenderThread {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            // Stateful DSP can consume many input segments before emitting
+            // a device frame. Keep the cold-start hold until output exists.
+            self.startup = None;
             done += n;
         }
     }
@@ -1527,11 +1609,12 @@ impl RenderThread {
         self.push_chunks(chunks);
     }
 
-    fn push_chunks(&self, chunks: Vec<(Tag, Vec<f32>)>) {
+    fn push_chunks(&mut self, chunks: Vec<(Tag, Vec<f32>)>) {
         for (tag, inter) in chunks {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.startup = None;
         }
     }
 }
@@ -1563,17 +1646,17 @@ mod tests {
 
     #[test]
     fn large_callbacks_keep_a_decode_wait_budget() {
-        // 48 kHz, 80 ms ahead (3,840 frames), a 30-chunk ring.
-        let (ahead, capacity) = (3_840, 30);
+        // 48 kHz, 80 ms ahead (3,840 frames), an expanded ring.
+        let (ahead, capacity) = (3_840, 128);
         // 512-frame callbacks: the target is unchanged.
         assert_eq!(fill_target(ahead, 1_024, capacity), 15);
         // 2,048-frame callbacks reserve 4,096 frames, more than the 80 ms
-        // target: the ring keeps 40 ms beyond the reserve instead.
+        // target: keep the wake-up callback plus 40 ms beyond the reserve.
         let target = fill_target(ahead, 4_096, capacity);
-        assert_eq!(target, 23);
+        assert_eq!(target, 31);
         assert!(target * CHUNK - 4_096 >= 1_664);
         // Never past the ring.
-        assert_eq!(fill_target(ahead, 16_384, capacity), 29);
+        assert_eq!(fill_target(ahead, 16_384, 30), 29);
         assert_eq!(fill_target(100, 0, capacity), 2);
     }
 }

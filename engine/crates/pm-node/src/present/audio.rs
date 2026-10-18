@@ -143,7 +143,7 @@ impl AudioLink {
                     watch_until: None,
                     warm: false,
                     warm_due: None,
-                    warmed: false,
+                    paused_at: 0,
                 }
                 .run()
             },
@@ -219,16 +219,16 @@ struct Control {
     warm: bool,
     /// When to check, once the controls rested ([`WARM_IDLE`]).
     warm_due: Option<Instant>,
-    /// The device opened ahead of Play and the mixer has no project yet.
-    warmed: bool,
+    /// Latest paused playhead, including seeks before the device opens.
+    paused_at: i64,
 }
 
 impl Control {
     fn run(mut self) {
         loop {
-            // A device opened ahead of Play gets the project at Play, with
-            // the media the engine has resolved by then (as before).
-            let feeding = self.playback.is_some() && !self.warmed;
+            // Feed warmed devices while paused too: their mixers decode and
+            // pre-roll at the playhead before the first Play arrives.
+            let feeding = self.playback.is_some();
             let timeout = match (feeding, self.dirty, self.last_project) {
                 (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
                 (true, true, None) => Duration::ZERO,
@@ -274,7 +274,7 @@ impl Control {
             let due = self
                 .last_project
                 .is_none_or(|last| last.elapsed() >= PROJECT_INTERVAL);
-            if self.playback.is_some() && !self.warmed && self.dirty && due {
+            if self.playback.is_some() && self.dirty && due {
                 self.set_project();
             }
             self.send_levels();
@@ -351,12 +351,21 @@ impl Control {
             }
             AudioCtl::Pause => self.command(TransportCommand::Pause),
             AudioCtl::Warm => self.warm = true,
-            AudioCtl::Seek(at) => self.command(TransportCommand::Seek {
-                time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
-                mode: SeekMode::Exact,
-            }),
+            AudioCtl::Seek(at) => {
+                self.paused_at = at.max(0);
+                self.command(TransportCommand::Seek {
+                    time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                    mode: SeekMode::Exact,
+                });
+            }
             AudioCtl::Scrub(at) => {
+                self.paused_at = at.max(0);
                 if !self.audio_scrub {
+                    // Paused timeline moves must still reach the warm mixer.
+                    self.command(TransportCommand::Seek {
+                        time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
+                        mode: SeekMode::Exact,
+                    });
                     return true;
                 }
                 if self.playback.is_none() && !self.open() {
@@ -400,7 +409,7 @@ impl Control {
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
-                self.warmed = false;
+                self.paused_at = from.max(0);
                 if self.dirty {
                     self.set_project();
                 }
@@ -428,7 +437,12 @@ impl Control {
         if pm_audio::graph::audible(&self.doc, &self.composition, &mut ev).unwrap_or(false)
             && self.open()
         {
-            self.warmed = true;
+            self.set_project();
+            self.command(TransportCommand::SetLoop { range: self.loop_range });
+            self.command(TransportCommand::Seek {
+                time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                mode: SeekMode::Exact,
+            });
         }
     }
 

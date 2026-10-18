@@ -232,6 +232,14 @@ pub struct Mixer {
     glide_strips: Vec<Vec<Vec<f32>>>,
     /// Read bounds of time-mapped voices, per (voice, control-point group).
     reads: HashMap<(usize, i64), Spans>,
+    /// Paused playhead/work-area vocoders. Separate histories keep each
+    /// prepared start identical to a fresh offline render at that point.
+    prepared: HashMap<i64, Prepared>,
+}
+
+struct Prepared {
+    runs: Vec<Option<Arc<std::sync::Mutex<StretchRun>>>>,
+    ready: bool,
 }
 
 impl Mixer {
@@ -272,6 +280,7 @@ impl Mixer {
             glide_tmp: vec![],
             glide_strips: vec![],
             reads: HashMap::new(),
+            prepared: HashMap::new(),
         };
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
@@ -284,6 +293,7 @@ impl Mixer {
 
     /// Replaces the evaluator (an expression engine, hooks).
     pub fn set_evaluator(&mut self, ev: Evaluator) {
+        self.prepared.clear();
         self.ev = ev;
         self.retime.clear();
         self.reads.clear();
@@ -358,12 +368,75 @@ impl Mixer {
         }
     }
 
+    /// Prepare one paused start without touching the live vocoder histories,
+    /// meters, transport, or device. Missing input never blocks this worker.
+    pub(crate) fn prepare_start(&mut self, start: i64) -> bool {
+        if self.prepared.get(&start).is_some_and(|p| p.ready) {
+            return true;
+        }
+        let mut prepared = self.prepared.remove(&start).unwrap_or_else(|| Prepared {
+            runs: self
+                .voices
+                .iter()
+                .map(|v| {
+                    v.stretch.as_ref().map(|run| {
+                        let run = run.lock().unwrap_or_else(|e| e.into_inner());
+                        Arc::new(std::sync::Mutex::new(StretchRun::new(
+                            run.channels(),
+                            self.format.sample_rate,
+                            run.key(),
+                        )))
+                    })
+                })
+                .collect(),
+            ready: false,
+        });
+        for (v, run) in self.voices.iter_mut().zip(&mut prepared.runs) {
+            std::mem::swap(&mut v.stretch, run);
+        }
+        let mut out = vec![Vec::new(); self.format.channels()];
+        // Outgoing glides belong to the previous audible run. Preparing
+        // a new start must neither advance them nor touch their vocoders.
+        let result = self.render_current(
+            start,
+            crate::ring::CHUNK,
+            &mut out,
+            &RenderOptions::default(),
+            None,
+        );
+        for (v, run) in self.voices.iter_mut().zip(&mut prepared.runs) {
+            std::mem::swap(&mut v.stretch, run);
+        }
+        prepared.ready = result.is_ok_and(|r| r.starved == 0 && r.errors.is_empty());
+        let ready = prepared.ready;
+        if self.prepared.len() >= 3 {
+            self.prepared.clear();
+        }
+        self.prepared.insert(start, prepared);
+        ready
+    }
+
+    pub(crate) fn retain_prepared(&mut self, starts: &[i64]) {
+        self.prepared.retain(|start, _| starts.contains(start));
+    }
+
+    /// Install the exact pre-rolled history for this paused start, if ready.
+    pub(crate) fn use_prepared(&mut self, start: i64) {
+        if let Some(prepared) = self.prepared.remove(&start).filter(|p| p.ready) {
+            for (v, run) in self.voices.iter_mut().zip(prepared.runs) {
+                v.stretch = run;
+            }
+        }
+        self.prepared.clear();
+    }
+
     /// Whether a retune glide is in progress.
     pub fn is_gliding(&self) -> bool {
         !self.outgoing.is_empty()
     }
 
     fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
+        self.prepared.clear();
         let p = self.format.sample_rate;
         // Stretches in progress carry over to voices whose map did not
         // change (a fader drag during playback must not restart them).
