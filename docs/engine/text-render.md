@@ -294,6 +294,23 @@ Evaluation (`pm-cli parity eval --wasm`, corpus v1): native and pm-wasm
 variable-font ink class, max 1.191e-4 px); text sub-gate 6,162 layouts,
 identical breaks, max advance error 0.000000 px.
 
+Canvas text typing, end to end in the app with "Use New Engine" on and the
+engine drawing the text (`e2e/native-engine-text-typing.spec.ts`, 60
+keystrokes each; keydown to the first animation frame showing an engine
+frame of a newer revision; 1920 × 1080; the window on a 2x display): a 96 px
+title p50 11.6 ms, p95 16.7 ms; a 48 px paragraph in a 1400 px box p50 11.2
+ms, p95 19.6 ms; 24 px `system-ui` p50 11.4 ms, p95 13.1 ms (the row's gate
+is p95 ≤ 33 ms). Every keystroke routed to the engine, with no layer
+failures or render errors; the hub served 3 to 4 registry round trips per
+run.
+
+E2E with "Use New Engine" on (`POWERMOVE_NEW_ENGINE=1`, `--workers=1`):
+`canvas-text`, `captions` (import, edit, burn-in export, export back),
+`font-anchor`, `split-text`, `text-animators`, `text-layout-resize`: 16 of
+16 pass. `engine-fonts-integration.mjs` (real utility processes): both
+engines get a font port, the job engine answers with the mirrored project
+font, and each engine replays project fonts after a SIGKILL (about 0.33 s).
+
 Earlier measurements (2026-10-16), before the glyph masks: Apple M4 Max,
 macOS 27, Electron 44 (Chromium 152) for references, machine load 9 to 20. Captures (private, not in the
 repository): `text-raster-20261016-061928` (495 cases),
@@ -377,6 +394,12 @@ end (Phase 3a gate).
 
 ## Review sheets
 
+2026-10-18 (glyph masks): `~/Library/Application Support/Powermove Engine
+Corpus/review/text-1792322940/index.html`, 420 sheets (every text case:
+today's Canvas2D, engine level 1, CoreText with smoothing, engine level 2),
+regenerated after the change; it supersedes the sheets below.
+
+
 `cargo run --release -p pm-render --example text_review` writes one sheet per
 text case (rows: today's Canvas2D, engine level 1, CoreText with smoothing,
 engine level 2) and an `index.html` with the scores. Emoji cases are marked:
@@ -450,6 +473,12 @@ Each of these is a visible difference on level 1 content today (amendment
   renderer without fonts, an unsupported color, a `COLR` glyph, or an
   unanswered registry question refuses a layer. Hosts with fonts no longer
   emit it for ordinary text; the derouter lane retires the routing.
+- An app web font loaded by the page is available to Canvas2D but not to
+  the engine's registry: `Geist` (`onboarding/welcome.css`) is loaded only
+  once the onboarding window's styles are in the document, so a text layer
+  naming `Geist` draws in Geist after onboarding in that window and in the
+  fallback otherwise; the engine always draws the fallback. Not seen in the
+  corpus.
 - The tables and the emoji shift are data measured from one Electron
   (Chromium 152) on macOS 27; an update that changes Skia's tables or
   CoreText's emoji placement needs them measured again.
