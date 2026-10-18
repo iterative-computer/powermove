@@ -195,6 +195,9 @@ pub enum Command {
     FrameCache {
         bytes: usize,
     },
+    /// A host snapshot of a session's document (the Phase 3c render
+    /// transport, [`super::snapshot`]).
+    Snapshot(Box<super::snapshot::SnapshotJob>),
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
     /// The paused viewer's Blender previews (sent once, at start).
@@ -366,6 +369,14 @@ pub struct Stats {
     pub frame_cache: u64,
     /// The display decode workers (scrubbing, look-ahead, cancellation).
     pub scrub: Option<pm_media::decode::scrub::ScrubStats>,
+    /// Snapshots (the Phase 3c render transport): answered with pixels,
+    /// answered `needsRenderer`, failed (including timeouts and refusals),
+    /// the slowest render, and how many went through shared memory.
+    pub snapshots: u64,
+    pub snapshot_needs: u64,
+    pub snapshot_failures: u64,
+    pub snapshot_us_max: i64,
+    pub snapshot_shared: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -477,6 +488,13 @@ struct Thread {
     fallback: Fallback,
     /// The viewer's frame-cache share ([`Command::FrameCache`]).
     frame_cache: usize,
+    /// Host snapshots waiting for their revision or their turn.
+    snapshots: super::snapshot::SnapshotQueue,
+    /// Shared-memory segments published for main and not reaped yet.
+    segments: pm_bridge::shm::Segments,
+    /// Host µs of the newest frame drawn for a gesture, scrub, or edit
+    /// (idle snapshots wait for these to stop).
+    last_interactive: Option<i64>,
 }
 
 /// The decision 19 fallback runner's state on this thread.
@@ -530,6 +548,9 @@ pub fn run(
         generations,
         blender: None,
         fallback: Fallback::default(),
+        snapshots: super::snapshot::SnapshotQueue::default(),
+        segments: pm_bridge::shm::Segments::default(),
+        last_interactive: None,
     };
     thread.check_in();
     loop {
@@ -847,6 +868,13 @@ impl Thread {
                     composer.renderer().apply_media_lease(media_lease(bytes));
                 }
             }
+            Command::Snapshot(job) => {
+                if let Err(refused) = self.snapshots.push(*job) {
+                    let (job, refused) = *refused;
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
+                }
+            }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
                     gpu.lost.store(true, Ordering::Release);
@@ -925,6 +953,14 @@ impl Thread {
     fn forget_session(&mut self, key: Key) {
         if let Some(blender) = &self.blender {
             blender.forget(key);
+        }
+        for job in self.snapshots.take_session(key) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session closed.",
+            );
         }
         // Requests the session was asked for, with the bands that arrived.
         let fallback = &mut self.fallback;
@@ -1779,6 +1815,15 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if self.snapshots.waiting() {
+            // Jobs wait for patches (their commands wake the thread), for
+            // room between frames, or for a gesture to end: poll, and never
+            // past a deadline.
+            wake = wake.min(now + 4_000);
+            if let Some(deadline) = self.snapshots.earliest_deadline() {
+                wake = wake.min(deadline);
+            }
+        }
         for view in self.views.values() {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
@@ -1831,6 +1876,7 @@ impl Thread {
         for key in keys {
             self.work_view(key);
         }
+        self.work_snapshots();
         #[cfg(feature = "remote-layer")]
         if self.config.remote_layer {
             self.collect_remote();
@@ -2498,6 +2544,11 @@ impl Thread {
         } else {
             stats.immediate_frames += 1;
         }
+        drop(stats);
+        if timing.is_none() {
+            self.last_interactive = Some(gpu_done);
+        }
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(shown) = stand_in_shown
             && self.config.stand_in_log
             && stats.stand_in_log.len() < STAND_IN_LOG_CAP
@@ -2525,6 +2576,304 @@ impl Thread {
             });
         }
         Some(descriptor)
+    }
+
+    /// Answers a snapshot with an error on main's host port.
+    fn snapshot_error(&self, job: &super::snapshot::SnapshotJob, code: ErrorCode, message: &str) {
+        let error = EngineError::new(code, ErrorScope::Request { id: job.id }, message);
+        self.send(
+            job.host,
+            Envelope::new(Message::Error { id: job.id, error }),
+        );
+    }
+
+    /// What the views are doing, for the snapshot queue's scheduling.
+    fn pressure(&self) -> super::snapshot::Pressure {
+        let now = now();
+        let mut pressure = super::snapshot::Pressure {
+            last_interactive: self.last_interactive,
+            ..Default::default()
+        };
+        for view in self.views.values() {
+            if !(view.clock.is_playing() || view.awaiting.is_some()) {
+                continue;
+            }
+            pressure.playing = true;
+            let mut schedule = view.schedule.clone();
+            let phase = Self::phase(&self.config, &view.state);
+            let due = match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
+                Next::WaitUntil(at) => Some(at.ceil() as i64 - now),
+                Next::Render { .. } | Next::Skip { .. } => Some(0),
+                Next::Idle => None,
+            };
+            if let Some(due) = due {
+                pressure.due_in_us = Some(pressure.due_in_us.map_or(due, |d| d.min(due)));
+            }
+        }
+        pressure
+    }
+
+    /// Runs the snapshots that may run now: every `sync` and `async` job
+    /// that is ready, then at most one `idle` job (so a gesture that starts
+    /// is served after one).
+    fn work_snapshots(&mut self) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        let now = now();
+        for job in self.snapshots.take_expired(now) {
+            self.stats().snapshot_failures += 1;
+            let have = self.docs.get(&job.key).map(|d| d.revision());
+            let message = match (job.min_revision, have) {
+                (Some(want), Some(have)) if have < want.get() => format!(
+                    "The engine did not reach revision {} (it has {have}) within {} ms.",
+                    want.get(),
+                    job.request.wait_ms
+                ),
+                _ => format!(
+                    "The snapshot did not render within {} ms.",
+                    job.request.wait_ms
+                ),
+            };
+            self.snapshot_error(&job, ErrorCode::Timeout, &message);
+        }
+        self.segments.reap(pm_bridge::shm::ORPHAN_AFTER);
+        let mut idle_done = false;
+        loop {
+            let pressure = self.pressure();
+            let docs = &self.docs;
+            let revision = |key: Key| {
+                docs.get(&key)
+                    .filter(|d| d.has_document())
+                    .map(|d| d.revision())
+            };
+            let Some(job) = self.snapshots.next(revision, pressure, now) else {
+                return;
+            };
+            let idle = job.request.class == pm_protocol::snapshot::SnapshotClass::Idle;
+            if idle && idle_done {
+                self.snapshots.requeue(job);
+                return;
+            }
+            idle_done |= idle;
+            self.run_snapshot(job);
+        }
+    }
+
+    /// Renders one snapshot and answers it.
+    fn run_snapshot(&mut self, job: super::snapshot::SnapshotJob) {
+        use pm_protocol::snapshot::{
+            PixelPayload, SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
+        };
+        let started = now();
+        if self.gpu().is_none() {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(&job, ErrorCode::DeviceLost, "The engine has no GPU device.");
+            return;
+        }
+        let (layer_target, motion_blur, background, draft_3d) = match &job.request.target {
+            SnapshotTarget::Frame {
+                motion_blur_samples,
+                background,
+                draft_3d,
+            } => (false, *motion_blur_samples, *background, *draft_3d),
+            SnapshotTarget::Layer { .. } => (true, 0, true, false),
+        };
+        if layer_target {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Unsupported,
+                "Layer raster pixels are not drawn by the new engine yet (pm-render has no single-layer raster pass).",
+            );
+            return;
+        }
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(doc) = self.docs.get(&job.key) else {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::UnknownSession,
+                "The window's engine session has no document.",
+            );
+            return;
+        };
+        let composer = gpu.composer.get_or_insert_with(|| {
+            composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
+        });
+        // The session's definitions, without consuming the re-registrations
+        // its viewer's next frame applies.
+        let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
+        composer.set_blender(pm_render::blender::BlenderRender::Native);
+        composer.set_playing(false);
+        let renderer = composer.renderer();
+        renderer.set_scrub(false);
+        let purpose = match job.request.class {
+            SnapshotClass::Idle => pm_protocol::frame::FramePurpose::Thumbnail,
+            SnapshotClass::Sync | SnapshotClass::Async => pm_protocol::frame::FramePurpose::Export,
+        };
+        let request = pm_render::RenderRequest {
+            output_size: job.request.output_size,
+            // Today's capture derives the scale from the composition size
+            // (`W / comp.w`, `H / comp.h`).
+            scale: None,
+            region: None,
+            precision: pm_protocol::color::Precision::Float16,
+            depth_id: false,
+            background,
+            export: purpose == pm_protocol::frame::FramePurpose::Export,
+            view: None,
+            blender: pm_render::blender::BlenderRender::Native,
+            motion_blur: if motion_blur == 0 {
+                pm_render::motion::MotionBlur::Off
+            } else {
+                pm_render::motion::MotionBlur::Samples(motion_blur)
+            },
+            sampling: pm_render::sampling::Sampling::Final,
+            video_end: pm_render::VideoEnd::of(purpose),
+        };
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let rendered = renderer
+            .render(
+                doc.document(),
+                job.request.composition.as_str(),
+                job.request.time,
+                &request,
+                doc.media(),
+            )
+            .and_then(|frame| {
+                let raw = pm_gpu::readback::read_raw(
+                    renderer.device(),
+                    renderer.queue(),
+                    &frame.color.texture,
+                )?;
+                Ok((frame.color.width(), frame.color.height(), raw))
+            });
+        let (width, height, raw) = match rendered {
+            Ok(done) => done,
+            Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
+                // The renderer draws these: name them so it draws and asks
+                // again. Its bands are accepted as for the viewer's asks.
+                let fallback: Vec<_> = requests
+                    .into_iter()
+                    .take(pm_protocol::shader_fallback::MAX_REQUESTS)
+                    .collect();
+                for r in &fallback {
+                    self.fallback.asked.insert(r.key.clone(), job.key);
+                }
+                self.stats().snapshot_needs += 1;
+                let outcome = SnapshotOutcome::NeedsRenderer {
+                    revision,
+                    fallback,
+                    compat: Vec::new(),
+                };
+                let mut envelope = Envelope::new(Message::Response {
+                    id: job.id,
+                    body: Response::Snapshot(Box::new(outcome)),
+                });
+                envelope.revision = Some(revision);
+                self.send(job.host, envelope);
+                return;
+            }
+            Err(pm_render::RenderError::Unsupported(list)) => {
+                // A visible, named failure: never another engine's pixels.
+                let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+                self.stats().snapshot_failures += 1;
+                let mut message = format!(
+                    "The new engine cannot draw this frame: {}.",
+                    reasons.join("; ")
+                );
+                message.truncate(2_000);
+                self.snapshot_error(&job, ErrorCode::Unsupported, &message);
+                return;
+            }
+            Err(pm_render::RenderError::Composition(id)) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::InvalidMessage,
+                    &format!("The document has no composition {id:?}."),
+                );
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The snapshot could not be rendered: {error}"),
+                );
+                return;
+            }
+        };
+        let pixels = super::snapshot::encode_rgba8(&raw, job.request.pixels);
+        drop(raw);
+        let length = pixels.len();
+        let payload = if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+            PixelPayload::Inline {
+                bytes: pm_protocol::common::Bytes(pixels),
+            }
+        } else {
+            match pm_bridge::shm::publish(&pixels) {
+                Ok(name) => {
+                    self.segments.add(name.clone());
+                    self.snapshots.published(
+                        now(),
+                        length as u64,
+                        pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
+                    );
+                    self.stats().snapshot_shared += 1;
+                    PixelPayload::SharedMemory {
+                        name,
+                        length: pm_protocol::common::ByteSize::new(length as u64)
+                            .unwrap_or(pm_protocol::common::ByteSize::MAX),
+                    }
+                }
+                Err(error) => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &job,
+                        ErrorCode::BudgetExceeded,
+                        &format!("The snapshot's pixels could not be shared: {error}"),
+                    );
+                    return;
+                }
+            }
+        };
+        let done = now();
+        let render_us = (done - started).max(0);
+        self.snapshots.observe(render_us as f64);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [0.0, 0.0],
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        let mut envelope = Envelope::new(Message::Response {
+            id: job.id,
+            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+        });
+        envelope.revision = Some(revision);
+        self.send(job.host, envelope);
     }
 
     fn shutdown(&mut self) {

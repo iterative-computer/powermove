@@ -1086,26 +1086,28 @@ pub fn responses() -> Vec<Envelope> {
         ),
         response(
             25,
-            Response::Snapshot(Box::new(crate::snapshot::SnapshotOutcome::Rendered(crate::snapshot::SnapshotResult {
-                revision: rev(42),
-                view_seq: Some(seq(12)),
-                width: 2,
-                height: 1,
-                pixels: crate::snapshot::SnapshotPixels::Opaque,
-                payload: crate::snapshot::PixelPayload::Inline {
-                    bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
+            Response::Snapshot(Box::new(crate::snapshot::SnapshotOutcome::Rendered(
+                crate::snapshot::SnapshotResult {
+                    revision: rev(42),
+                    view_seq: Some(seq(12)),
+                    width: 2,
+                    height: 1,
+                    pixels: crate::snapshot::SnapshotPixels::Opaque,
+                    payload: crate::snapshot::PixelPayload::Inline {
+                        bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
+                    },
+                    origin: [0.0, 0.0],
+                    quality: FrameQuality {
+                        resolution: PreviewResolution::Full,
+                        representation: Representation::Original,
+                        draft_3d: false,
+                        cached: false,
+                        stand_in: false,
+                    },
+                    waited_us: 1_200,
+                    render_us: 8_400,
                 },
-                origin: [0.0, 0.0],
-                quality: FrameQuality {
-                    resolution: PreviewResolution::Full,
-                    representation: Representation::Original,
-                    draft_3d: false,
-                    cached: false,
-                    stand_in: false,
-                },
-                waited_us: 1_200,
-                render_us: 8_400,
-            }))),
+            ))),
         ),
         response(
             26,

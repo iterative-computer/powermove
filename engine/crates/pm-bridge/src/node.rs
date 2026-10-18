@@ -159,7 +159,9 @@ pub fn now_us() -> f64 {
 #[napi]
 pub fn take_pixels(name: String, length: f64) -> Result<napi::bindgen_prelude::Buffer> {
     if !length.is_finite() || length < 1.0 || length > crate::shm::MAX_SEGMENT as f64 {
-        return Err(napi::Error::from_reason(format!("a {length}-byte pixel segment")));
+        return Err(napi::Error::from_reason(format!(
+            "a {length}-byte pixel segment"
+        )));
     }
     crate::shm::take(&name, length as usize)
         .map(Into::into)

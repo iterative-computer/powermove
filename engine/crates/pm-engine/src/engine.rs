@@ -1033,9 +1033,10 @@ impl Engine {
         revision: Option<Revision>,
         out: &mut Out,
     ) {
-        let owned = self.sessions.get(&snapshot.session).is_some_and(|s| {
-            s.port == snapshot.renderer && s.role == SessionRole::Interactive
-        });
+        let owned = self
+            .sessions
+            .get(&snapshot.session)
+            .is_some_and(|s| s.port == snapshot.renderer && s.role == SessionRole::Interactive);
         let renderer = self
             .ports
             .get(&snapshot.renderer)
@@ -1051,7 +1052,15 @@ impl Engine {
         }
         let result = self
             .with_presenter(out, |p, ctx| {
-                p.snapshot(ctx, port, id, snapshot.renderer, snapshot.session, snapshot.snapshot, revision)
+                p.snapshot(
+                    ctx,
+                    port,
+                    id,
+                    snapshot.renderer,
+                    snapshot.session,
+                    snapshot.snapshot,
+                    revision,
+                )
             })
             .unwrap_or(Ok(()));
         if let Err(error) = result {

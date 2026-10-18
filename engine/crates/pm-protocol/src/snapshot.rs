@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::{
-    ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq, SessionId,
-    Size, Ticks,
+    ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
+    SessionId, Size, Ticks,
 };
 use crate::frame::{FrameQuality, MAX_OUTPUT_DIMENSION};
 use crate::host::PortId;
@@ -162,7 +162,12 @@ impl Validate for SnapshotRequest {
                 && self.output_size.width <= MAX_OUTPUT_DIMENSION
                 && self.output_size.height <= MAX_OUTPUT_DIMENSION,
             C,
-            || format!("snapshot size {:?} outside 1..{MAX_OUTPUT_DIMENSION}", self.output_size),
+            || {
+                format!(
+                    "snapshot size {:?} outside 1..{MAX_OUTPUT_DIMENSION}",
+                    self.output_size
+                )
+            },
         )?;
         ensure(self.max_bytes() <= MAX_SNAPSHOT_BYTES, C, || {
             format!(
@@ -173,7 +178,12 @@ impl Validate for SnapshotRequest {
         ensure(
             (1..=MAX_SNAPSHOT_WAIT_MS).contains(&self.wait_ms),
             C,
-            || format!("snapshot wait {} ms outside 1..{MAX_SNAPSHOT_WAIT_MS}", self.wait_ms),
+            || {
+                format!(
+                    "snapshot wait {} ms outside 1..{MAX_SNAPSHOT_WAIT_MS}",
+                    self.wait_ms
+                )
+            },
         )?;
         match &self.target {
             SnapshotTarget::Frame {
@@ -375,11 +385,9 @@ impl Validate for SnapshotResult {
                     "inline pixels over the inline limit".into()
                 })
             }
-            PixelPayload::SharedMemory { name, .. } => {
-                ensure(shared_name_ok(name), C, || {
-                    "invalid shared-memory name".into()
-                })
-            }
+            PixelPayload::SharedMemory { name, .. } => ensure(shared_name_ok(name), C, || {
+                "invalid shared-memory name".into()
+            }),
         }?;
         ensure(self.origin.iter().all(|v| v.is_finite()), C, || {
             "raster origin must be finite".into()
@@ -507,8 +515,7 @@ impl Validate for CompatMessage {
                     C,
                     || format!("rows {} + {} of {}", p.row, p.rows, p.height),
                 )?;
-                let expected =
-                    u64::from(p.width) * u64::from(p.rows) * p.format.bytes_per_pixel();
+                let expected = u64::from(p.width) * u64::from(p.rows) * p.format.bytes_per_pixel();
                 ensure(
                     p.data.0.len() as u64 == expected && p.data.0.len() <= MAX_COMPAT_BAND_BYTES,
                     C,
@@ -530,11 +537,11 @@ impl Validate for CompatMessage {
                     || "compatibility origin and scale must be finite".into(),
                 )
             }
-            CompatMessage::Forget { composition, layer } => ensure(
-                composition.is_valid() && layer.is_valid(),
-                C,
-                || "invalid compatibility layer".into(),
-            ),
+            CompatMessage::Forget { composition, layer } => {
+                ensure(composition.is_valid() && layer.is_valid(), C, || {
+                    "invalid compatibility layer".into()
+                })
+            }
         }
     }
 }
@@ -732,14 +739,26 @@ mod tests {
             render_us: 0,
         };
         assert!(
-            result(2, 2, PixelPayload::Inline { bytes: Bytes(vec![0; 16]) })
-                .validate()
-                .is_ok()
+            result(
+                2,
+                2,
+                PixelPayload::Inline {
+                    bytes: Bytes(vec![0; 16])
+                }
+            )
+            .validate()
+            .is_ok()
         );
         assert!(
-            result(2, 2, PixelPayload::Inline { bytes: Bytes(vec![0; 15]) })
-                .validate()
-                .is_err()
+            result(
+                2,
+                2,
+                PixelPayload::Inline {
+                    bytes: Bytes(vec![0; 15])
+                }
+            )
+            .validate()
+            .is_err()
         );
         let shm = |name: &str| PixelPayload::SharedMemory {
             name: name.into(),
@@ -750,7 +769,12 @@ mod tests {
                 .validate()
                 .is_ok()
         );
-        for bad in ["/pm.0123", "/etc/passwd", "/pm.0123456789ABCDEF01234567", "pm.0123456789abcdef012345678"] {
+        for bad in [
+            "/pm.0123",
+            "/etc/passwd",
+            "/pm.0123456789ABCDEF01234567",
+            "pm.0123456789abcdef012345678",
+        ] {
             assert!(result(1024, 1024, shm(bad)).validate().is_err(), "{bad}");
         }
     }
@@ -777,9 +801,25 @@ mod tests {
                 data: Bytes(vec![0; len]),
             })
         };
-        assert!(band(0, 4, 64, CompatFormat::Rgba8Premultiplied).validate().is_ok());
-        assert!(band(2, 2, 64, CompatFormat::Rgba16fPremultiplied).validate().is_ok());
-        assert!(band(3, 2, 32, CompatFormat::Rgba8Premultiplied).validate().is_err());
-        assert!(band(0, 1, 15, CompatFormat::Rgba8Straight).validate().is_err());
+        assert!(
+            band(0, 4, 64, CompatFormat::Rgba8Premultiplied)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            band(2, 2, 64, CompatFormat::Rgba16fPremultiplied)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            band(3, 2, 32, CompatFormat::Rgba8Premultiplied)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            band(0, 1, 15, CompatFormat::Rgba8Straight)
+                .validate()
+                .is_err()
+        );
     }
 }

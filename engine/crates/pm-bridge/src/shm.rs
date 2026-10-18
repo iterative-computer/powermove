@@ -267,8 +267,18 @@ mod tests {
 
     #[test]
     fn foreign_names_are_refused_before_any_open() {
-        for bad in ["/etc/passwd", "/pm.", "/pm.0123456789ABCDEF01234567", "pm.0123456789abcdef012345678", "/pm.0123456789abcdef0123456/"] {
-            assert_eq!(take(bad, 4).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{bad}");
+        for bad in [
+            "/etc/passwd",
+            "/pm.",
+            "/pm.0123456789ABCDEF01234567",
+            "pm.0123456789abcdef012345678",
+            "/pm.0123456789abcdef0123456/",
+        ] {
+            assert_eq!(
+                take(bad, 4).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{bad}"
+            );
         }
         assert!(publish(&[]).is_err());
     }

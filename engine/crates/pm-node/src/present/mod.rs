@@ -26,6 +26,7 @@ mod layer_reports;
 pub mod peaks;
 pub mod render;
 pub mod schedule;
+pub mod snapshot;
 pub mod view;
 
 use std::collections::BTreeMap;
@@ -488,6 +489,35 @@ impl FramePresenter for BridgePresenter {
             request: Box::new(request),
             revision,
         });
+        Ok(())
+    }
+
+    fn snapshot(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        host: PortId,
+        id: RequestId,
+        renderer: PortId,
+        session: SessionId,
+        request: pm_protocol::snapshot::SnapshotRequest,
+        revision: Option<Revision>,
+    ) -> Result<(), Box<EngineError>> {
+        if self.config.source != Some(FrameSource::Document) {
+            return Err(Box::new(EngineError::new(
+                ErrorCode::Unsupported,
+                ErrorScope::Request { id },
+                "This engine draws no documents (it runs the bridge test source).",
+            )));
+        }
+        let job = snapshot::SnapshotJob::new(
+            host,
+            id,
+            (renderer, session),
+            request,
+            revision,
+            render::now_us(),
+        );
+        self.send(Command::Snapshot(Box::new(job)));
         Ok(())
     }
 
