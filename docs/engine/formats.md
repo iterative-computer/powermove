@@ -439,3 +439,43 @@ float32 targets):
   straight alpha) against their converted samples: as the file says, alpha
   ignore, and primaries Display P3 within 1e-4 CV; without `interpret`
   both route to the legacy renderer.
+
+## Phase 3c media closure status
+
+The native source-preview API and original animation timing reader are in
+`pm-media::preview` and `image::animation`; see `media.md` for the caller
+contract and the distinction between source frames and encoded thumbnails.
+Fixture regressions cover original GIF/APNG/WebP timing, alpha, non-monotonic
+reads, mixed-padding selected sequences with gaps, replacement/offline media,
+filmstrip cancellation, retained frame accounting, and shared decode leases.
+The opt-in format test also compares original AVIF animation frames.
+
+H.273 matrix code 10 now remains `Bt2020Cl` throughout probing,
+interpretation, color cache keys, and CICP conversion. It is distinct from
+code 9 (`Bt2020Ncl`). The source shader performs the nonlinear
+constant-luminance decode: sign-dependent chroma scales, green recovered in
+linear light, and R′G′B′ returned to the selected source interpretation. A
+12-bit FFV1 fixture verifies the probe and GPU against the f64 table-4
+reference, including neutral and both chroma signs. The scalar NCL gate
+oracle refuses CL rather than silently applying another matrix. The
+normative equations and smooth transfer constants are in
+[BT.2020-2, table 4](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2020-2-201510-I!!PDF-E.pdf).
+This fix does not establish legacy parity for un-interpreted wide-gamut
+video or remove that gate.
+
+The still compatibility work is not closed. Diagnostic corpus comparisons
+of the native as-file reading (reached with an explicit neutral straight-alpha
+interpretation, without changing the original class gate) found maxima of
+83 CV for P3 PNG and 94 CV for AVIF. Deep PNG and alpha WebP each reached
+2 CV in opaque exports. These are failures, not permitted differences.
+A single orientation-6 JPEG stayed within 1 CV; the other orientations,
+containers, transparent outputs, and scales have not been proved, so the
+oriented class remains gated. Y′CbCr JPEG uses the integration branch's
+libjpeg-turbo fix; it is not a new decoder change from this closure work.
+ICC TIFF and other ICC/model classes retain their existing gates pending
+Chromium parity. Existing P3 projects must keep today's decode-time clipping;
+keeping out-of-gamut samples is a level-2 decision, not a level-1 exception.
+
+The lane report retains the diagnostic comparisons and their side-by-side
+artifacts outside the public repository. No corpus image, app trace, or
+machine-local operational report is checked in.

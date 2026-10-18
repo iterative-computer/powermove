@@ -235,3 +235,67 @@ for a 108,000-frame H.264 MP4, 2.7 to 5.4 ms with a decode-order pass.
   the normalization reference in `pm-gpu`.
 - Base M1/M2 behavior (no ProRes engine, no AV1 hardware) is untested
   (decision 11).
+
+## Media closure: source previews and failures (Phase 3c)
+
+`pm_media::preview::PreviewReader` is the engine-side source API for poster
+and filmstrip consumers. `open_with_service` shares the engine's
+lease-controlled `DecodeService`; `open` supplies a small convenience service.
+`poster` selects `min(0.5, duration * 0.1)` seconds, `frame_at` reads an exact
+source time, and `filmstrip` streams up to 64 caller-ordered requests through
+a callback, stopping on cancellation or an error. All requested times are
+validated before the first callback. Dropping the reader releases its decode
+sessions. `image_bytes` counts outstanding still frames, including frames a
+caller retains across source replacement.
+
+The API returns native-depth frames and their color facts. Image orientation
+is already applied; `video_probe` supplies video geometry, field, and HDR
+facts for the renderer. The consumer must apply source interpretation, video
+geometry, resizing, and thumbnail encoding. This is a source decode API;
+the renderer's browser poster and filmstrip consumers have not been switched
+to it in this change.
+
+`image::animation::read_timing` reads original GIF, APNG, WebP, and AVIF timing.
+`AnimationTiming` implements the shipped importer's delay normalization, GCD
+slots, cumulative resampling, frame budget, boundary epsilon, and final-frame
+hold. It does not change the stored project representation: existing imports
+still persist their WebM conversion. `PreviewReader::open_sequence` reads
+exactly the host's selected numbered paths, permits mixed padding, rejects
+duplicate numbers, and plays available frames consecutively across gaps.
+The older directory-discovery and numbered-gap-hold APIs remain available.
+Neither API introduces an original-sequence persistence format or changes
+copy/link import semantics.
+
+Media probing now distinguishes unsupported readings from unreadable bytes.
+Offline or corrupt PNG, SVG, video, and sequence sources produce a named
+`LayerFailure`; they do not add an unsupported-rendering reason. The native
+presenter also keeps offline media in the engine and sends runtime layer
+failure events before the frame, deduplicated until the error or revision
+changes. A recovered layer can report a later failure at the same revision.
+Other existing capability gates remain.
+
+Imports await the host's media-binding acknowledgement before returning.
+This closes the 250 ms binding window in which an immediate native export
+could mistake an imported asset for offline media. Linked originals still
+resolve through their link; a generated rendition does not replace that
+binding. A hidden app regression covers UHD ProRes rendition creation and
+asset restore while preserving the original hash and modification time.
+
+### Compatibility work still required
+
+Level-1 SVG images, including SVG text, retain their gate. `resvg` coverage,
+filters, and system-font text do not equal Chromium's SVG raster; SVG text
+has not been connected to `pm-text`. The output-resolution level-2 path is
+unchanged.
+
+Sequences and animations retain their gate too. An attempted native WebM
+rendition path corrected the shipped slot timing and the converter's
+untagged BT.601 reading, but complete app exports still differed at chroma
+edges and in integer conversion. It was not enabled. Passing import, seek,
+portable-save, or selected-pixel tests alone does not establish full-frame
+parity. Original animated containers are available to source preview callers,
+not yet to the composition renderer.
+
+Still class gates remain as described in `formats.md` and `pm-render.md`.
+Decoder breadth alone does not establish the old viewer's color management,
+alpha rounding, clipping, or resampling. No pixel tolerance was changed.
