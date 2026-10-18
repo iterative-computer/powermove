@@ -1037,10 +1037,14 @@ impl Engine {
             .sessions
             .get(&snapshot.session)
             .is_some_and(|s| s.port == snapshot.renderer && s.role == SessionRole::Interactive);
-        let renderer = self
-            .ports
-            .get(&snapshot.renderer)
-            .is_some_and(|c| c.kind == PeerKind::Renderer);
+        // A window's renderer session, or a session the host opened itself
+        // for a window (main's snapshot sessions: a sync snapshot that cannot
+        // wait for the renderer's own session, RFC 16).
+        let renderer = snapshot.renderer == port
+            || self
+                .ports
+                .get(&snapshot.renderer)
+                .is_some_and(|c| c.kind == PeerKind::Renderer);
         if !owned || !renderer {
             let error = request_error(
                 id,
@@ -1471,6 +1475,26 @@ impl Engine {
                 self.on_deadline(&signal, now, out)
             }
             (Event::Crash(report), PeerKind::Host) => self.on_crash_report(&report, out),
+            // The host posts fallback and compatibility pixels for the
+            // snapshot sessions it opened itself (RFC 16).
+            (event @ (Event::ShaderFallback(_) | Event::Compat(_)), PeerKind::Host)
+                if self.presenter.is_some() =>
+            {
+                let Some(sid) =
+                    session.filter(|sid| self.sessions.get(sid).is_some_and(|s| s.port == port))
+                else {
+                    out.log(
+                        LogLevel::Warn,
+                        format!("{name} for an unknown session on port {}", port.0),
+                    );
+                    return;
+                };
+                self.with_presenter(out, |p, ctx| match event {
+                    Event::ShaderFallback(message) => p.shader_fallback(ctx, port, sid, message),
+                    Event::Compat(message) => p.compat(ctx, port, sid, message),
+                    _ => {}
+                });
+            }
             (
                 event @ (Event::ReleaseFrame(_)
                 | Event::Viewer(_)

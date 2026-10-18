@@ -2940,9 +2940,12 @@ impl Thread {
         loop {
             let pressure = self.pressure();
             let docs = &self.docs;
+            // A document whose media the host has not answered yet is not
+            // ready: the snapshot waits (within its wait) rather than draw
+            // media missing that is on its way.
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document())
+                    .filter(|d| d.has_document() && d.media_ready())
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;

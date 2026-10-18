@@ -89,6 +89,17 @@ pub struct ViewDocument {
 }
 
 impl ViewDocument {
+    /// Whether the host answered for every asset the document names (a
+    /// frame never shows media missing that is only on its way).
+    pub fn media_ready(&self) -> bool {
+        let Some(root) = self.doc.root() else {
+            return true;
+        };
+        asset_records(Some(root))
+            .iter()
+            .all(|(id, _)| self.media.0.contains_key(id.as_str()))
+    }
+
     /// Whether the renderer that draws this view has fonts.
     pub fn set_fonts(&mut self, fonts: bool) {
         if self.fonts != fonts {

@@ -126,6 +126,11 @@ fn blender_compositions_are_captured_as_today() {
     run_child("child_blender");
 }
 
+#[test]
+fn the_host_snapshots_sessions_it_opened_for_a_window() {
+    run_child("child_host_session");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -1100,4 +1105,96 @@ fn child_blender() {
         other => panic!("unexpected {other:?}"),
     }
     println!("CHILD-OK blender: refused without draft 3D, drawn natively with it");
+}
+
+#[test]
+#[ignore = "run by the_host_snapshots_sessions_it_opened_for_a_window"]
+fn child_host_session() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    // Main opens a session of its own (a window's sync snapshot that cannot
+    // wait for the renderer's session: none yet, or its resync is staged).
+    let mut c = Child::start();
+    let window_session = c.session;
+    c.host_sends(Envelope::new(Message::Request {
+        id: RequestId::new(40).unwrap(),
+        body: Request::OpenSession(OpenSession {
+            document: "Psnap".into(),
+            role: SessionRole::Interactive,
+            process: EngineProcess::Interactive,
+            color: ProjectColor::DEFAULT,
+        }),
+    }));
+    let host_session = c
+        .inbox
+        .wait(Duration::from_secs(5), |port, m| match &m.message {
+            Message::Response {
+                id,
+                body: Response::SessionOpened { session },
+            } if port == HOST && id.get() == 40 => Some(*session),
+            _ => None,
+        });
+    let doc = project(100.0);
+    let parsed = pm_model::json::parse(&doc.to_string()).unwrap();
+    c.host_sends(
+        Envelope::new(Message::Request {
+            id: RequestId::new(41).unwrap(),
+            body: Request::Resync(Resync {
+                document: "Psnap".into(),
+                revision: Revision::new(5).unwrap(),
+                encoding: DocumentEncoding::CanonicalJsonV1,
+                source: ResyncSource::Inline {
+                    body: Bytes(doc.to_string().into_bytes()),
+                },
+                hash: ContentHash(pm_model::hash::canonical_digest(&parsed)),
+            }),
+        })
+        .with_session(host_session),
+    );
+    c.inbox
+        .wait(Duration::from_secs(5), |port, m| match &m.message {
+            Message::Response {
+                id,
+                body: Response::PatchesApplied(_),
+            } if port == HOST && id.get() == 41 => Some(()),
+            _ => None,
+        });
+    let small = Size::new(320, 180);
+    c.snapshot(
+        42,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(5),
+        HOST,
+        host_session,
+    );
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(42)));
+    assert_eq!(result.revision.get(), 5);
+    let px = pixels_of(&result);
+    assert_eq!(at(&px, 320, 120, 70), BOX);
+    // The host cannot name itself for a window's own session, nor a window
+    // for its own session.
+    c.snapshot(
+        43,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 500),
+        None,
+        HOST,
+        window_session,
+    );
+    assert_eq!(
+        c.inbox.wait(Duration::from_secs(5), answer(43)),
+        Err(ErrorCode::UnknownSession)
+    );
+    c.snapshot(
+        44,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 500),
+        None,
+        WINDOW,
+        host_session,
+    );
+    assert_eq!(
+        c.inbox.wait(Duration::from_secs(5), answer(44)),
+        Err(ErrorCode::UnknownSession)
+    );
+    println!("CHILD-OK host session");
 }
