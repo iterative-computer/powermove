@@ -1153,6 +1153,63 @@ glyph and raster caches go) and the views draw again. With fonts, routing
 uses `unsupported_with_fonts`, so text and captions no longer route the
 viewer to the current engine.
 
+### Blender frames in async captures (2026-10-18, second round)
+
+Today's `PM.Export.snapshotAsync` (the agent's `look` and `observe`, and
+apiVersion 4's `render.snapshotAsync`) runs `prepareFrame` (Blender renders
+the frame at the capture's size with the composition's settings) and then
+captures it. With the engine on:
+
+- `SnapshotRequest.blenderWaitMs` (protocol, async and idle only, at most
+  900,000 ms): above 0, the render thread plans the frame's Blender
+  snapshots exactly as the render plans them (`Renderer::blender_snapshots`,
+  final, no preview options), and hands the missing ones to the paused
+  viewer's Blender worker (`present/blender.rs`, `PreviewBlender::capture`):
+  captures run before previews and never halt them; their surfaces go
+  through the same Blender stage, surface cache, and host services'
+  supervised Blender as previews and exports. The job waits outside the
+  queue (`BlenderPrep::Running`, `present/snapshot.rs`), with Blender's
+  time not counted against `waitMs`; the worker's answer
+  (`Command::BlenderCaptured`) puts it back with the surfaces, and it
+  draws them with `BlenderRender::Final`. An edit while Blender rendered
+  re-plans and asks again (at most 3 times). Blender failing, missing, or
+  past `blenderWaitMs` (Blender is then stopped) fails the snapshot with
+  `blenderFailed`, `blenderMissing`, or `timeout`; never native shading in
+  place of a surface, never the current engine.
+- `blenderWaitMs` 0 (sync captures): draws a frame an earlier capture
+  prepared (its surfaces stay in the worker's map, under today's 512 MB
+  budget) or fails with today's sentence, as today's prepared frame is
+  drawn by the next capture.
+- Main answers such a request within twice `waitMs` plus `blenderWaitMs`
+  plus the render allowance (`answerBoundMs`), and refuses a Blender wait
+  on a sync request.
+- The renderer asks for it only for async captures in documents with a
+  Blender composition (`usesBlender`): `PM.EngineCaptures.snapshotAsync`
+  (which also keeps today's refusal while an export or another capture
+  runs, and pauses and resumes playback around the capture) and
+  `render.snapshotAsync`, which goes through `PM.Export.snapshotAsync` like
+  the flag-off path. `project.snapshot` stays today's synchronous capture
+  shape: an unprepared Blender frame rejects with today's words.
+
+Also in this round: sync snapshots flush pending edits before choosing
+between the window's session and main's (a flush that starts a staged
+resync no longer waits out the engine); thumbnails require the window's
+revision when they asked by default; the built-in text editor measures its
+font-anchor offset once per revision and time instead of a synchronous
+engine raster per overlay draw and hit test (layers without recorded font
+bounds have none and never ask).
+
+Measured: `child_blender` (a stand-in for main's supervision) prepared the
+frame in 66 ms and drew the magenta surface; a held Blender failed the
+snapshot at 1.52 s against a 1.5 s bound and was cancelled.
+`e2e/engine-blender-captures.spec.ts` on Blender 4.5.14 (EEVEE, 192 × 108):
+the async capture took 1.15 to 1.26 s through the engine's Blender stage
+(three runs) with playback paused and resumed around it; the engine's
+pixels equal today's Blender surfaces composited (100% within 2 CV, max
+1 CV); `render.snapshotAsync` and the sync capture after it equal it
+exactly (mean 0.00 CV); before preparation the sync capture fails with
+today's words in both engines.
+
 ### Measured (2026-10-18, M4 Max)
 
 - `pm-node/tests/render_fonts.rs`: a text frame's pixels through the
@@ -1209,12 +1266,27 @@ viewer to the current engine.
   `compatFrame`, but pm-render does not draw a layer from them yet and
   pm-export does not ask for them yet; `needsRenderer.compat` is always
   empty (lanes L1, L4, L6).
-- **Blender in snapshots.** A Blender composition without `draft3d` fails
-  with today's words, as today's sync capture does; today's async capture
-  (`PM.Export.snapshotAsync`) first renders the frame with Blender, which
-  the interactive engine's snapshot path cannot do yet, so the agent's
-  `look` of a Blender composition fails where today's draws it (3D and
-  export lanes: a Blender job for an async snapshot).
+- **Today's capture draws Blender surfaces about a pixel off (decision).**
+  The engine's async capture of a Blender composition equals today's own
+  Blender surfaces of the frame composited (100% within 2 CV, max 1 CV),
+  but today's capture itself draws them about a pixel larger with a light
+  edge (against those surfaces: mean 3.58 CV, p99 149 CV; the engine's
+  JPEG against today's JPEG: mean 3.36 CV, p99 130 CV, 93.8% within
+  8 CV). Today's still export does the same (docs/engine/blender.md).
+  Reproducing today's offset or accepting the engine's exact drawing is
+  the orchestrator's call; side by side (outside the repository):
+  `/tmp/ne-bridge-blender/captures/side-by-side-today-surfaces-engine.png`
+  (today's capture, today's surfaces composited, the engine's capture).
+- **Blender frames that cannot be built** (imported models, model-group
+  recipe parts: the snapshot builder's refusals that exports route) fail
+  an async capture with `unsupported`, where today's capture has Blender
+  convert and render them (3D lane).
+- **Playback with no viewer session.** The engine transport is exclusive
+  with the flag on: with no viewer session open (the viewer panel
+  closed), Play is held until a viewer session draws, so the playhead does
+  not move and no audio plays; today's playback runs with the viewer
+  closed. The engine needs a session that plays without a view (a
+  headless clock and audio) to match it.
 - **What the engine still refuses** (masks the renderer cannot draw yet,
   and the other `pm_render::unsupported` reasons) fails a snapshot with
   the engine's reasons, while the viewer still routes such compositions to

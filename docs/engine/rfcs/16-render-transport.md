@@ -36,7 +36,7 @@ for all of that.
 ### Snapshot request
 
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
-class, viewSeq, waitMs, uploaded }`:
+class, viewSeq, waitMs, blenderWaitMs?, uploaded }`:
 
 - `target`: `frame { motionBlurSamples, background, draft3d }` or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
@@ -55,6 +55,16 @@ class, viewSeq, waitMs, uploaded }`:
   no `sync` or `async` job waits; one per turn of the render thread).
 - `waitMs` (1 to 120,000): how long the engine waits for the revision and
   its turn before it answers `timeout`.
+- `blenderWaitMs` (optional, 0 to 900,000; never above 0 for `sync`): a
+  `frame` of a composition Blender renders, without `draft3d`. Above 0
+  (today's `snapshotAsync`, which runs `prepareFrame`): the engine has
+  Blender render the frame's missing surfaces first, through the paused
+  viewer's Blender worker and host services' supervised Blender, for at
+  most this long; that time does not count against `waitMs`, which counts
+  afresh once Blender is done. 0 or absent (today's synchronous capture):
+  draws a frame an earlier capture prepared, or fails `blenderFailed`
+  with today's words. Main waits at most `2 × waitMs + blenderWaitMs`
+  plus its render allowance.
 - `uploaded`: shader fallback keys the caller drew and posted on the
   session's port after a `needsRenderer` answer (see below).
 
@@ -118,9 +128,10 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
 6. **Failures are named, never another engine's pixels.** `unsupported`
    (with the engine's reasons), `timeout`, `unknownSession`,
    `budgetExceeded`, `deviceLost`, `invalidMessage`, `internal`,
-   `blenderFailed` (a Blender composition captured without `draft3d`:
-   today's words, "The Blender frame is not prepared. Render this frame
-   before capturing it."); main adds `unavailable` (engine off or not
+   `blenderFailed` (a Blender composition captured without `draft3d` and
+   without a prepared frame: today's words, "The Blender frame is not
+   prepared. Render this frame before capturing it."; or Blender's own
+   failure while preparing), `blenderMissing` (Blender not installed); main adds `unavailable` (engine off or not
    running), `refused` (main's caps), and `needsDocument` (see below).
    `render.snapshot` returns `''` only then, and throws today's error for
    `blenderFailed` as today's capture does.
@@ -219,7 +230,8 @@ renderFrameToSync(time, width, height, options?): HTMLCanvasElement | null; // t
 renderFrameToCanvasSync(time, width, height, options?): HTMLCanvasElement; // throws EngineSnapshotError
 renderFrameTo(time, width, height, options?): Promise<HTMLCanvasElement>;
 snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
-snapshotDataUrl(time, maxWidth, size): Promise<string>;
+snapshotDataUrl(time, maxWidth, size, options?: { prepareBlender?: boolean }): Promise<string>; // prepareBlender: today's snapshotAsync
+currentRevision(): number | null;                                      // flushes pending edits
 rasterSync(layer: string, scale, time, crop?, options?: RasterOptions): EngineSnapshot | null;  // null: draws nothing then
 raster(layer: string, scale, time, crop?, options?: RasterOptions): Promise<EngineSnapshot | null>;
 toCanvas(snapshot: EngineSnapshot): HTMLCanvasElement;
@@ -230,24 +242,32 @@ provideCompat(source: CompatSource, producer: CompatProducer): () => void;
 readonly stats: TransportStats;
 
 type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; background?; draft3d?; waitMs?;
+  prepareBlender?;  // async and idle frames: Blender renders the frame first (only in documents with a Blender composition)
   layer?: { id: string; scale: number; crop?: { x; y; width; height } | null; content?: Uint8Array | null } };
 type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };
 type EngineSnapshot = { width; height; data: Uint8ClampedArray; pixels; revision; viewSeq; origin; layerBox: [number, number] | null;
   raster: RasterGeometry | null; quality; waitedUs; renderUs; mainMs };
 class EngineSnapshotError extends Error { code: string }
 
-EngineThumbnails.request({ key, ...EngineSnapshotOptions, minRevision? }, revision?): Promise<EngineSnapshot | null>; // null: stale or superseded
+EngineThumbnails.request({ key, ...EngineSnapshotOptions, minRevision? }, revision?): Promise<EngineSnapshot | null>; // null: stale or superseded; default minimum: the window's revision when asked
 EngineThumbnails.cancel(key): void;
 ```
 
 ### Kernel render facade (`kernel/install.ts`)
 
 With the engine on: `render.snapshot` and `render.renderFrameTo` come from
-the engine through `snapshotSync`; `project.snapshot` through `snapshot`;
+the engine through `snapshotSync`; `project.snapshot` through `snapshot`
+(today's synchronous capture: an unprepared Blender frame rejects with
+today's words, other failures are `''`); `render.snapshotAsync` through
+`PM.Export.snapshotAsync`, as with the flag off;
 `PM.Export.snapshot` and `snapshotAsync` (the agent's look and observe, the
 Library's thumbnails) through `PM.EngineCaptures`, which the exporter's own
 methods ask first (`engine-connection/app-captures.ts`), so wrappers and
 overrides of them reach the engine in any install order.
+`PM.EngineCaptures.snapshotAsync` keeps today's contract: it refuses while
+an export or another capture runs ("Wait for the current frame capture or
+export to finish."), pauses playback around the capture and resumes it,
+and prepares a Blender frame first (`prepareBlender`).
 `render.raster(layer, scale, time, uploaded, crop)` returns today's
 `RasterSurface` (`cv, w, h, anchorX, anchorY, selection`, plus `blank`
 and `sourceWindow` for text, `uv` for shapes, and the engine's `revision`)
