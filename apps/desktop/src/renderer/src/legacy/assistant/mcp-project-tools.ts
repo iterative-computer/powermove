@@ -10,7 +10,9 @@ const video = z.object({ name: z.string().min(1).max(120).optional(), format: z.
 export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<string, unknown>): Promise<unknown> {
   if (tool === '__mcp_context') {
     empty.parse(args);
-    return { projectId: PM.proj.id, projectName: PM.proj.name, projectJSON: JSON.stringify(PM.proj), home: PM.isHomeProject?.() === true };
+    const project = PM.proj, home = PM.isHomeProject?.() === true;
+    await PM.HostMedia?.flushBindings(project);
+    return { projectId: project.id, projectName: project.name, projectJSON: JSON.stringify(project), home };
   }
   if (tool === '__mcp_list_projects') {
     empty.parse(args); return { currentProjectId: PM.isHomeProject?.() ? null : PM.proj.id, projects: PM.Projects.list() };
