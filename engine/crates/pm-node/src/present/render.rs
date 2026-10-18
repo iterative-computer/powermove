@@ -209,6 +209,9 @@ pub enum Command {
     },
     /// Destroys the GPU device as a real loss would (the recovery test).
     LoseDevice,
+    /// The font service's generation moved (project fonts): views draw
+    /// again with fresh fonts.
+    FontsChanged,
     /// The paused viewer's Blender previews (sent once, at start).
     UseBlender(Arc<super::blender::PreviewBlender>),
     /// Preview surfaces of the view arrived: draw it again when paused.
@@ -253,7 +256,16 @@ pub struct ThreadConfig {
     pub host_clock: bool,
     /// The program cache folder (`SHADER_CACHE_ENV`).
     pub shader_cache: Option<PathBuf>,
+    /// The engine's render fonts (the host's font broker): text and
+    /// captions layers are drawn natively. `None`: no fonts, those layers
+    /// are refused.
+    pub fonts: Option<crate::fonts::render::RenderFonts>,
 }
+
+/// Today's capture error for a Blender composition whose frame was not
+/// rendered by Blender first (`legacy/gl/compositor.ts`), word for word.
+pub const BLENDER_NOT_PREPARED: &str =
+    "The Blender frame is not prepared. Render this frame before capturing it.";
 
 /// The device's composer, keeping translated programs in the configured
 /// cache folder.
@@ -412,8 +424,26 @@ struct Gpu {
     display: DisplayTransform,
     /// Draws documents (made with the first document frame).
     composer: Option<Composer>,
+    /// The font generation the composer's renderer lays text out with.
+    fonts_installed: Option<u64>,
     /// Set by the device-lost callback; the thread rebuilds the device.
     lost: Arc<AtomicBool>,
+}
+
+impl Gpu {
+    /// The device's composer (made on first use), its renderer holding
+    /// fonts of the broker's current generation (`crate::fonts::render`).
+    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize) -> &mut Composer {
+        if self.composer.is_none() {
+            self.composer = Some(composer(&self.device, &self.queue, config, frame_cache));
+            self.fonts_installed = None;
+        }
+        let composer = self.composer.as_mut().expect("made above");
+        if let Some(fonts) = &config.fonts {
+            fonts.sync(composer.renderer(), &mut self.fonts_installed);
+        }
+        composer
+    }
 }
 
 struct Live {
@@ -697,6 +727,7 @@ impl Thread {
                         queue,
                         display,
                         composer: None,
+                        fonts_installed: None,
                         lost,
                     });
                 }
@@ -885,9 +916,7 @@ impl Thread {
                 if self.config.document
                     && let Some(gpu) = self.gpu.as_mut()
                 {
-                    let composer = gpu.composer.get_or_insert_with(|| {
-                        composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-                    });
+                    let composer = gpu.composer_with(&self.config, self.frame_cache);
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
@@ -945,6 +974,7 @@ impl Thread {
                     gpu.device.destroy();
                 }
             }
+            Command::FontsChanged => self.sync_font_generation(),
             Command::UseBlender(blender) => self.blender = Some(blender),
             Command::BlenderReady { key } => {
                 if let Some(view) = self.views.get_mut(&key)
@@ -2034,7 +2064,23 @@ impl Thread {
         Duration::from_micros((wake - now).max(0) as u64)
     }
 
+    /// Views draw again when the font generation moved (project fonts):
+    /// the composer installs fresh fonts at its next use.
+    fn sync_font_generation(&mut self) {
+        let Some(fonts) = &self.config.fonts else {
+            return;
+        };
+        let generation = fonts.broker.generation();
+        let installed = self.gpu.as_ref().and_then(|g| g.fonts_installed);
+        if installed.is_some_and(|g| g != generation) {
+            for view in self.views.values_mut() {
+                view.dirty = true;
+            }
+        }
+    }
+
     fn work(&mut self) {
+        self.sync_font_generation();
         if self
             .gpu
             .as_ref()
@@ -2159,7 +2205,10 @@ impl Thread {
             view.sample_due = true;
         }
         let composition = view.state.composition.as_str().to_owned();
-        let route = self.docs.entry(key).or_default().route(&composition);
+        let fonts = self.config.fonts.is_some();
+        let doc = self.docs.entry(key).or_default();
+        doc.set_fonts(fonts);
+        let route = doc.route(&composition);
         let view = self.views.get_mut(&key).expect("checked");
         let changed = view.reported.as_ref() != Some(&route);
         let mut stop = false;
@@ -2486,9 +2535,7 @@ impl Thread {
         let mut stand_in_shown = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu.composer.get_or_insert_with(|| {
-                composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-            });
+            let composer = gpu.composer_with(&self.config, self.frame_cache);
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
@@ -2547,6 +2594,16 @@ impl Thread {
             }
             composer.renderer().set_scrub(false);
             let scrub_stats = composer.renderer().scrub_stats();
+            // Text laid out while the font service did not answer must not
+            // be shown: keep the frame on screen and draw again.
+            if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+                view.dirty = true;
+                (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!("viewer: a frame waited for fonts and is drawn again ({why})"),
+                }]);
+                return None;
+            }
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
@@ -2938,9 +2995,20 @@ impl Thread {
             );
             return;
         };
-        let composer = gpu.composer.get_or_insert_with(|| {
-            composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-        });
+        // Today's capture of a Blender composition draws its prepared
+        // Blender frame or fails (`compositor.ts`, "The Blender frame is not
+        // prepared"); native shading is only for `draft3d` captures. The
+        // engine never answers with native shading labelled final.
+        if !draft_3d
+            && pm_render::unsupported(doc.document(), job.request.composition.as_str())
+                .iter()
+                .any(|u| u.feature == pm_render::Feature::Blender)
+        {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(&job, ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED);
+            return;
+        }
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -2989,6 +3057,15 @@ impl Thread {
                 )?;
                 Ok((frame.color.width(), frame.color.height(), raw))
             });
+        if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Timeout,
+                &format!("The engine's fonts did not answer for this frame ({why})."),
+            );
+            return;
+        }
         let (width, height, raw) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
@@ -3123,9 +3200,7 @@ impl Thread {
             );
             return;
         };
-        let composer = gpu.composer.get_or_insert_with(|| {
-            composer(&gpu.device, &gpu.queue, &self.config, self.frame_cache)
-        });
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let composition = job.request.composition.as_str();
@@ -3149,6 +3224,15 @@ impl Thread {
             *scale,
             pm_protocol::color::Precision::Float16,
         );
+        if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Timeout,
+                &format!("The engine's fonts did not answer for this layer ({why})."),
+            );
+            return;
+        }
         let reply = |this: &Self, outcome: SnapshotOutcome| {
             let mut envelope = Envelope::new(Message::Response {
                 id: job.id,

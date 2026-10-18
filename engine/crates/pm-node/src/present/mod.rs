@@ -150,6 +150,7 @@ impl PresenterConfig {
                 shader_cache: env(SHADER_CACHE_ENV)
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
+                fonts: None,
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),
@@ -169,6 +170,12 @@ impl PresenterControl {
     /// rebuilds it, makes every pool again, and redraws.
     pub fn lose_device(&self) {
         let _ = self.0.send(Command::LoseDevice);
+    }
+
+    /// The font service's generation moved: views draw again with fresh
+    /// fonts.
+    pub fn fonts_changed(&self) {
+        let _ = self.0.send(Command::FontsChanged);
     }
 }
 
