@@ -329,18 +329,31 @@ mod tests {
         let t0 = Instant::now();
         let mut r = Retries::default();
         assert_eq!(r.failed("p", lost(), t0), Duration::ZERO);
-        assert_eq!(r.state("p", t0), Some(RetryState::Due), "the first retry is at once");
+        assert_eq!(
+            r.state("p", t0),
+            Some(RetryState::Due),
+            "the first retry is at once"
+        );
         assert_eq!(r.failed("p", lost(), t0), Duration::from_millis(250));
         assert_eq!(
             r.state("p", t0),
-            Some(RetryState::Wait { failure: lost(), report: true })
+            Some(RetryState::Wait {
+                failure: lost(),
+                report: true
+            })
         );
         assert_eq!(
             r.state("p", t0 + Duration::from_millis(100)),
-            Some(RetryState::Wait { failure: lost(), report: false }),
+            Some(RetryState::Wait {
+                failure: lost(),
+                report: false
+            }),
             "reported once per streak"
         );
-        assert_eq!(r.state("p", t0 + Duration::from_millis(250)), Some(RetryState::Due));
+        assert_eq!(
+            r.state("p", t0 + Duration::from_millis(250)),
+            Some(RetryState::Due)
+        );
         assert_eq!(r.next_at(), Some(t0 + Duration::from_millis(250)));
         for expected in [1_000, 4_000, 8_000, 8_000] {
             assert_eq!(r.failed("p", lost(), t0), Duration::from_millis(expected));
@@ -360,7 +373,10 @@ mod tests {
             ("unavailable", false),
             ("size", false),
         ] {
-            let f = FallbackFailure { reason: reason.into(), message: String::new() };
+            let f = FallbackFailure {
+                reason: reason.into(),
+                message: String::new(),
+            };
             assert_eq!(f.is_final(), fin, "{reason}");
         }
     }

@@ -118,7 +118,11 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     let blur_ms = Arc::new(AtomicU64::new(300));
     let builtins = Arc::new({
         let mut set = pm_render::builtin_definitions();
-        for d in set.definitions.iter_mut().filter(|d| d.id.as_str() == "blur") {
+        for d in set
+            .definitions
+            .iter_mut()
+            .filter(|d| d.id.as_str() == "blur")
+        {
             d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
         }
         set

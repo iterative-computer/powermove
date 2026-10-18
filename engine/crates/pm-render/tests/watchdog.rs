@@ -144,7 +144,11 @@ fn slow_programs_are_recorded_and_never_turned_off_in_the_viewer() {
     assert_eq!(r.effects().watchdog.budget(), None, "records only");
     assert_eq!(r.effects().watchdog.hang(), Duration::from_secs(10));
     let source = Scripted::new(
-        vec![("acme.invert", ms(3_000)), ("invert", ms(3_000)), ("sky", ms(3_000))],
+        vec![
+            ("acme.invert", ms(3_000)),
+            ("invert", ms(3_000)),
+            ("sky", ms(3_000)),
+        ],
         9_500,
     );
     r.effects_mut().watchdog.set_timing_source(Some(source));
@@ -182,10 +186,16 @@ fn an_enforced_budget_never_turns_a_built_in_off() {
     let _gpu = gpu();
     let mut r = Renderer::headless().unwrap();
     assert!(r.set_definitions(&with_user_invert()).unwrap().is_empty());
-    r.effects_mut().watchdog.set_budget(Duration::from_millis(250));
+    r.effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
     let source = Scripted::new(vec![("invert", ms(900)), ("acme.invert", ms(900))], 1_900);
     r.effects_mut().watchdog.set_timing_source(Some(source));
-    render(&mut r, &document(vec![solid_with(&["invert", "acme.invert"])])).unwrap();
+    render(
+        &mut r,
+        &document(vec![solid_with(&["invert", "acme.invert"])]),
+    )
+    .unwrap();
     r.wait_idle();
     let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
@@ -199,7 +209,9 @@ fn an_enforced_budget_never_turns_a_built_in_off() {
 fn an_enforced_budget_turns_a_shader_layer_off_until_its_code_changes() {
     let _gpu = gpu();
     let mut r = Renderer::headless().unwrap();
-    r.effects_mut().watchdog.set_budget(Duration::from_millis(250));
+    r.effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
     let (span, frame) = (Arc::new(AtomicU64::new(300)), Arc::new(AtomicU64::new(16)));
     r.effects_mut()
         .watchdog

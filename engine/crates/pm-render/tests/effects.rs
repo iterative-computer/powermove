@@ -798,7 +798,11 @@ fn an_enforced_watchdog_budget_disables_an_overrunning_user_effect_from_the_next
     let mut r = builtins();
     let user_set = || {
         let mut set: DefinitionSetSnapshot = builtin_definitions();
-        for d in set.definitions.iter_mut().filter(|d| d.id.as_str() == "blur") {
+        for d in set
+            .definitions
+            .iter_mut()
+            .filter(|d| d.id.as_str() == "blur")
+        {
             d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
         }
         set

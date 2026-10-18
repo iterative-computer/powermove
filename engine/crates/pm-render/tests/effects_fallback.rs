@@ -499,7 +499,11 @@ fn a_lost_context_is_not_blamed_on_the_program_and_it_draws_again() {
     let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
-    assert!(reports[0].message.contains("contextLost"), "{}", reports[0].message);
+    assert!(
+        reports[0].message.contains("contextLost"),
+        "{}",
+        reports[0].message
+    );
     assert!(
         !r.effects()
             .watchdog
@@ -570,5 +574,8 @@ fn a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program() {
     let mut fresh = renderer();
     fresh.effects_mut().watchdog.set_policy(Policy::Job);
     fresh.set_fallback_host(Some(Arc::new(Cpu::default())));
-    assert_eq!(render(&mut job, &doc).unwrap(), render(&mut fresh, &doc).unwrap());
+    assert_eq!(
+        render(&mut job, &doc).unwrap(),
+        render(&mut fresh, &doc).unwrap()
+    );
 }
