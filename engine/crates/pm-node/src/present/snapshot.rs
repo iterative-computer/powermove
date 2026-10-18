@@ -62,6 +62,10 @@ pub struct SnapshotJob {
     /// Host µs it reached the render thread, and its deadline.
     pub received: i64,
     pub deadline: i64,
+    /// Shader fallback keys whose pixels the renderer posted before asking
+    /// (`SnapshotRequest::uploaded`) and that had not landed when the job
+    /// last rendered: it waits until none of them is outstanding.
+    pub waiting_for: Vec<String>,
 }
 
 impl SnapshotJob {
@@ -82,6 +86,7 @@ impl SnapshotJob {
             min_revision,
             received: now,
             deadline,
+            waiting_for: Vec::new(),
         }
     }
 
@@ -258,6 +263,7 @@ impl SnapshotQueue {
     pub fn next(
         &mut self,
         revision: impl Fn(Key) -> Option<u64>,
+        outstanding: impl Fn(&str) -> bool,
         pressure: Pressure,
         now: i64,
     ) -> Option<SnapshotJob> {
@@ -268,6 +274,7 @@ impl SnapshotQueue {
         ] {
             let found = self.jobs.iter().position(|j| {
                 j.request.class == class
+                    && !j.waiting_for.iter().any(|k| outstanding(k))
                     && self.ready(j, revision(j.key), pressure, now) == Ready::Run
             });
             if let Some(index) = found {
@@ -361,6 +368,7 @@ mod tests {
                 class,
                 view_seq: None,
                 wait_ms: 1_000,
+                uploaded: Vec::new(),
             },
             revision.map(|r| Revision::new(r).unwrap()),
             now,
@@ -376,9 +384,15 @@ mod tests {
         let mut q = SnapshotQueue::default();
         let k = key(3, 1);
         q.push(job(SnapshotClass::Sync, k, Some(5), 0)).unwrap();
-        assert!(q.next(|_| Some(4), idle(), 0).is_none(), "revision 4 < 5");
-        assert!(q.next(|_| None, idle(), 0).is_none(), "no document yet");
-        assert!(q.next(|_| Some(5), idle(), 0).is_some());
+        assert!(
+            q.next(|_| Some(4), |_| false, idle(), 0).is_none(),
+            "revision 4 < 5"
+        );
+        assert!(
+            q.next(|_| None, |_| false, idle(), 0).is_none(),
+            "no document yet"
+        );
+        assert!(q.next(|_| Some(5), |_| false, idle(), 0).is_some());
     }
 
     #[test]
@@ -393,28 +407,31 @@ mod tests {
         q.push(job(SnapshotClass::Idle, k, None, 0)).unwrap();
         q.push(job(SnapshotClass::Async, k, None, 0)).unwrap();
         q.push(job(SnapshotClass::Sync, k, None, 0)).unwrap();
-        let first = q.next(|_| Some(0), playing, 0).unwrap();
+        let first = q.next(|_| Some(0), |_| false, playing, 0).unwrap();
         assert_eq!(first.request.class, SnapshotClass::Sync);
         // A frame due in 4 ms: no room for a 30 ms async snapshot.
-        assert!(q.next(|_| Some(0), playing, 0).is_none());
+        assert!(q.next(|_| Some(0), |_| false, playing, 0).is_none());
         let room = Pressure {
             due_in_us: Some(100_000),
             ..playing
         };
         assert_eq!(
-            q.next(|_| Some(0), room, 0).unwrap().request.class,
+            q.next(|_| Some(0), |_| false, room, 0)
+                .unwrap()
+                .request
+                .class,
             SnapshotClass::Async
         );
         // Idle never runs during playback, however much room.
-        assert!(q.next(|_| Some(0), room, 0).is_none());
+        assert!(q.next(|_| Some(0), |_| false, room, 0).is_none());
         // Nor right after a gesture frame.
         let gesture = Pressure {
             last_interactive: Some(1_000_000 - 50_000),
             ..idle()
         };
-        assert!(q.next(|_| Some(0), gesture, 1_000_000).is_none());
+        assert!(q.next(|_| Some(0), |_| false, gesture, 1_000_000).is_none());
         assert_eq!(
-            q.next(|_| Some(0), idle(), 1_000_000)
+            q.next(|_| Some(0), |_| false, idle(), 1_000_000)
                 .unwrap()
                 .request
                 .class,
@@ -429,7 +446,17 @@ mod tests {
             .unwrap();
         q.push(job(SnapshotClass::Idle, key(3, 2), None, 0))
             .unwrap();
-        assert!(q.next(|_| Some(0), idle(), 0).is_none());
+        assert!(q.next(|_| Some(0), |_| false, idle(), 0).is_none());
+    }
+
+    #[test]
+    fn a_job_waits_for_fallback_pixels_already_on_their_way() {
+        let mut q = SnapshotQueue::default();
+        let mut j = job(SnapshotClass::Sync, key(3, 1), None, 0);
+        j.waiting_for = vec!["k1".into()];
+        q.push(j).unwrap();
+        assert!(q.next(|_| Some(0), |k| k == "k1", idle(), 0).is_none());
+        assert!(q.next(|_| Some(0), |_| false, idle(), 0).is_some());
     }
 
     #[test]
@@ -446,7 +473,7 @@ mod tests {
         q.push(job(SnapshotClass::Async, key(3, 1), None, 0))
             .unwrap();
         assert!(
-            q.next(|_| Some(0), playing, 0).is_some(),
+            q.next(|_| Some(0), |_| false, playing, 0).is_some(),
             "4 ms fits before a frame due in 9 ms"
         );
     }

@@ -2647,7 +2647,9 @@ impl Thread {
                     .filter(|d| d.has_document())
                     .map(|d| d.revision())
             };
-            let Some(job) = self.snapshots.next(revision, pressure, now) else {
+            let asked = &self.fallback.asked;
+            let outstanding = |k: &str| asked.contains_key(k);
+            let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
                 return;
             };
             let idle = job.request.class == pm_protocol::snapshot::SnapshotClass::Idle;
@@ -2754,9 +2756,23 @@ impl Thread {
         let (width, height, raw) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
-                // The renderer draws these: name them so it draws and asks
-                // again. Its bands are accepted as for the viewer's asks.
-                let fallback: Vec<_> = requests
+                // Pixels the caller says it already posted are on their way
+                // (the session's port, ahead of this request): wait for
+                // them. Name the rest so the renderer draws them and asks
+                // again; their bands are accepted as for the viewer's asks.
+                let (posted, missing): (Vec<_>, Vec<_>) = requests
+                    .into_iter()
+                    .partition(|r| job.request.uploaded.contains(&r.key));
+                if missing.is_empty() {
+                    let mut job = job;
+                    job.waiting_for = posted.into_iter().map(|r| r.key).collect();
+                    for key in &job.waiting_for {
+                        self.fallback.asked.entry(key.clone()).or_insert(job.key);
+                    }
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                let fallback: Vec<_> = missing
                     .into_iter()
                     .take(pm_protocol::shader_fallback::MAX_REQUESTS)
                     .collect();

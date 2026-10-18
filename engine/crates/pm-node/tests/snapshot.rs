@@ -111,6 +111,11 @@ fn snapshots_are_scheduled_around_playback() {
     run_child("child_scheduling");
 }
 
+#[test]
+fn snapshots_that_need_the_renderer_name_what_it_draws() {
+    run_child("child_fallback");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -361,6 +366,7 @@ fn frame_request(
         class,
         view_seq: Some(Seq::new(4).unwrap()),
         wait_ms,
+        uploaded: Vec::new(),
     }
 }
 
@@ -661,4 +667,134 @@ fn child_scheduling() {
     let result = rendered(c.inbox.wait(Duration::from_secs(5), answer(20)));
     assert_eq!((result.width, result.height), (160, 90));
     println!("CHILD-OK sync={sync_at:?}");
+}
+
+fn shader_project() -> Value {
+    let code = "uniform samplerCube uEnv;\nvoid main(){ fragColor = vec4(texture(uEnv, vec3(uv, 1.0)).rgb + vec3(uv, 0.0), 1.0); }";
+    let mut doc = project(100.0);
+    doc["layers"] = json!([{
+        "id": "sky", "type": "shader", "name": "sky", "from": 0, "dur": 2, "on": true, "lock": false,
+        "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
+        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
+        "p": {
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(0)),
+            "position.y": ch(json!(0)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": { "code": code, "uniforms": {}, "w": 80, "h": 45 }, "locked_intent": {}
+    }]);
+    doc
+}
+
+/// The renderer's pixels for a fallback request: one value everywhere.
+fn bands(request: &pm_protocol::shader_fallback::ShaderFallbackRequest, value: u16) -> Vec<Event> {
+    use pm_protocol::shader_fallback::{ShaderFallbackMessage, ShaderFallbackPixels};
+    let row: Vec<u8> = (0..request.width)
+        .flat_map(|_| [value, value, value, 0x3c00])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let half = request.height / 2;
+    [(0, half), (half, request.height - half)]
+        .into_iter()
+        .map(|(from, rows)| {
+            Event::ShaderFallback(ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
+                key: request.key.clone(),
+                width: request.width,
+                height: request.height,
+                row: from,
+                rows,
+                rgba16f: Bytes((0..rows).flat_map(|_| row.clone()).collect()),
+            }))
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "run by snapshots_that_need_the_renderer_name_what_it_draws"]
+fn child_fallback() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    c.resync(2, 1, &shader_project());
+    let small = Size::new(320, 180);
+    // The engine does not wait on the renderer: it names the program.
+    c.snapshot(
+        30,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let needs = match c.inbox.wait(Duration::from_secs(20), answer(30)) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            revision,
+            fallback,
+            compat,
+        }) => {
+            assert_eq!(revision.get(), 1);
+            assert!(compat.is_empty());
+            fallback
+        }
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!(needs.len(), 1);
+    let request = needs[0].clone();
+    assert_eq!(
+        (request.layer.as_str(), request.width, request.height),
+        ("sky", 80, 45)
+    );
+    // The renderer draws it, posts it on the session's port, and asks again.
+    for band in bands(&request, 0x3800) {
+        c.event(band);
+    }
+    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    again.uploaded = vec![request.key.clone()];
+    c.snapshot(31, again, Some(1), WINDOW, session);
+    let px = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(31))));
+    // binary16 0x3800 = 0.5 over the layer's box, the background elsewhere.
+    assert_eq!(at(&px, 320, 40, 20), [128, 128, 128, 255]);
+    assert_eq!(at(&px, 320, 200, 120), BACKGROUND);
+
+    // Pixels that reach the engine after the request (two ports race): the
+    // job waits for them rather than naming the program again. (A move
+    // alone reuses the pixels drawn above: the fallback key covers the
+    // program, its size, and its uniforms.)
+    c.resync(3, 2, &{
+        let mut doc = shader_project();
+        doc["layers"][0]["p"]["position.x"] = ch(json!(160));
+        // Another size is another program draw (another fallback key).
+        doc["layers"][0]["d"]["w"] = json!(100);
+        doc
+    });
+    c.snapshot(
+        32,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(2),
+        WINDOW,
+        session,
+    );
+    let request = match c.inbox.wait(Duration::from_secs(20), answer(32)) {
+        Ok(SnapshotOutcome::NeedsRenderer { fallback, .. }) => fallback[0].clone(),
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    again.uploaded = vec![request.key.clone()];
+    c.snapshot(33, again, Some(2), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(33))
+            .is_none(),
+        "answered before the pixels arrived"
+    );
+    for band in bands(&request, 0x3400) {
+        c.event(band);
+    }
+    let px = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(33))));
+    // binary16 0x3400 = 0.25 → 64, where the layer moved.
+    assert_eq!(at(&px, 320, 200, 20), [64, 64, 64, 255]);
+    assert_eq!(at(&px, 320, 40, 20), BACKGROUND);
+    println!("CHILD-OK");
 }

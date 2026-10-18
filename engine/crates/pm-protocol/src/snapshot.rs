@@ -141,6 +141,11 @@ pub struct SnapshotRequest {
     /// turn before it answers `timeout` (milliseconds, 1 to
     /// [`MAX_SNAPSHOT_WAIT_MS`]).
     pub wait_ms: u32,
+    /// Keys of shader fallback requests (from an earlier `needsRenderer`)
+    /// the caller drew and posted on the session's port before asking
+    /// again: the engine waits for those pixels (they are already on their
+    /// way) instead of naming them again.
+    pub uploaded: Vec<String>,
 }
 
 impl SnapshotRequest {
@@ -184,6 +189,15 @@ impl Validate for SnapshotRequest {
                     self.wait_ms
                 )
             },
+        )?;
+        ensure(
+            self.uploaded.len() <= crate::shader_fallback::MAX_REQUESTS
+                && self
+                    .uploaded
+                    .iter()
+                    .all(|k| !k.is_empty() && k.len() <= MAX_COMPAT_KEY),
+            C,
+            || "too many uploaded keys".into(),
         )?;
         match &self.target {
             SnapshotTarget::Frame {
@@ -683,6 +697,7 @@ mod tests {
             class: SnapshotClass::Sync,
             view_seq: None,
             wait_ms: 5_000,
+            uploaded: Vec::new(),
         }
     }
 

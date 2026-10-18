@@ -26,4 +26,11 @@ viewSeq: Seq | null,
  * turn before it answers `timeout` (milliseconds, 1 to
  * [`MAX_SNAPSHOT_WAIT_MS`]).
  */
-waitMs: number, };
+waitMs: number, 
+/**
+ * Keys of shader fallback requests (from an earlier `needsRenderer`)
+ * the caller drew and posted on the session's port before asking
+ * again: the engine waits for those pixels (they are already on their
+ * way) instead of naming them again.
+ */
+uploaded: Array<string>, };
