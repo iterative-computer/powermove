@@ -273,6 +273,14 @@ Recapture the corpus cases with
   and a blurred 3D shape, was bit-exact), so the route can go when the
   emulation's residuals close; level 2 shapes on planes are drawn. Evidence:
   `/tmp/ne-compclose/evidence/r2/groups-25d/`.
+- **Animated path masks fill on the CPU every frame.** An item is the whole
+  output-size canvas through pm-vector's emulation: 33 to 40 ms per mask at
+  1920 × 1080 with pm-vector optimized (`tests/mask_coverage.rs`, `hd-*`; 2 ms
+  at 480 × 300), about four times that at 3840 × 2160; the GPU blur and
+  composite are small next to it. Static masks are filled once (the item
+  cache). Filling only the path's device bounds (a windowed MSAA target in
+  canvas coordinates, so the samples stay exact) is the next step for real-time
+  animated masks at UHD; not measured in the viewer.
 - **Level 2 text the text lane does not lay out yet** (animators, range styles,
   typography anchoring) is reported as `Feature::Text` (`capability.rs`,
   `level2_text_gap`), which `support::routing_forbidden` does not cover: the text

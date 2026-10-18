@@ -59,7 +59,9 @@ fn main() {
     let mut measure = fonts();
     let mut failures = Vec::new();
     let mut checked = 0usize;
-    for capture in &captures {
+    // `PM_PICKS_LEVEL2_ONLY` runs the level 2 smoke test alone.
+    let corpus = std::env::var("PM_PICKS_LEVEL2_ONLY").is_err();
+    for capture in captures.iter().filter(|_| corpus) {
         for dir in projects(capture) {
             let p = load_project(capture, &dir);
             if !only.iter().any(|o| p.name == *o) || !p.missing_media.is_empty() {
@@ -244,7 +246,7 @@ fn main() {
     for f in &failures {
         println!("  FAILED {f}");
     }
-    assert!(checked > 0, "no 2.5D layer was checked");
+    assert!(checked > 0 || !corpus, "no 2.5D layer was checked");
     assert!(
         failures.is_empty(),
         "{} layers whose picks differ from what is drawn",
@@ -255,19 +257,16 @@ fn main() {
 /// A smoke test of `compat` level 2 text on 2.5D planes (rasterized in
 /// layer space at the plane's density and resampled through it; no legacy
 /// reference exists): a 3D layer with no rotation draws what the same flat
-/// layer draws, and a turned one draws inside the region picked as it.
+/// layer draws, and a turned one draws, through its plane, what the flat
+/// layer draws.
 #[cfg(target_os = "macos")]
 fn level2_text_on_planes(failures: &mut Vec<String>) {
-    use pm_eval::bounds::LayerHost;
     use pm_eval::{Comp, Evaluator, Scope};
     use pm_protocol::color::Precision;
     use pm_protocol::common::Size;
     use pm_render::{RenderRequest, Renderer};
     use serde_json::json;
     use support::doc::{layer, no_fill, project, set};
-
-    struct NoHost;
-    impl LayerHost for NoHost {}
 
     let families = ["SF Pro Display"];
     let mut registry = pm_text::registry::CoreTextRegistry::new();
@@ -278,8 +277,6 @@ fn level2_text_on_planes(failures: &mut Vec<String>) {
         measure,
         Some(l2),
     ))));
-    let mut pick_measure =
-        pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new());
     let (w, h) = (640usize, 360usize);
     let render = |r: &mut Renderer, three_d: bool, rotation_y: f64, scale: f64| {
         let d = json!({
@@ -336,39 +333,72 @@ fn level2_text_on_planes(failures: &mut Vec<String>) {
         if !(fb.within(&pb, 1) && pb.within(&fb, 1)) || mean > 0.5 {
             failures.push(format!("level 2 text on an unturned plane, scale {scale}: boxes {fb:?} vs {pb:?}, mean {mean:.4} CV"));
         }
-        // Turned: what it draws lies inside the region picked as it.
+        // Turned: every drawn pixel, mapped back through the plane into the
+        // layer and out through the flat layer's world matrix, lands on what
+        // the flat layer draws (within 2 pixels): the plane places the
+        // layer-space raster where the layer is. (Level 2 glyphs may reach
+        // past the text box the bounds and picks measure, flat or not.)
+        let flat_ink = {
+            let mut m = ink(&flat);
+            for _ in 0..2 {
+                m = pm_render::parity::dilate(&m, w, h);
+            }
+            m
+        };
         for rotation in [-40.0, 30.0] {
             let (doc, turned) = render(&mut renderer, true, rotation, scale);
+            let (flat_doc, _) = render(&mut renderer, false, 0.0, scale);
             let comp = Comp::resolve(&doc, "Ptest-root").unwrap();
+            let flat_comp = Comp::resolve(&flat_doc, "Ptest-root").unwrap();
             let mut ev = Evaluator::new();
             let mut scope = Scope::open(&mut ev, &comp);
-            let mask = ink(&turned);
-            let inner = erode(&mask, w, h);
-            let mut missed = 0;
-            for (i, v) in inner.iter().enumerate() {
-                if *v
-                    && scope
-                        .pick(
-                            (i % w) as f64 + 0.5,
-                            (i / w) as f64 + 0.5,
-                            0.0,
-                            &Default::default(),
-                            &mut pick_measure,
-                            &mut NoHost,
-                        )
-                        .unwrap()
-                        .is_none()
-                {
-                    missed += 1;
+            let layer = &pm_eval::node::array(pm_eval::node::member(Some(comp.root()), "layers"))
+                .unwrap()[0];
+            let plane = scope.plane_matrix(layer, 0.0, false).unwrap();
+            let inverse = pm_eval::space3d::inverse_plane(&plane).unwrap();
+            let mut ev2 = Evaluator::new();
+            let mut flat_scope = Scope::open(&mut ev2, &flat_comp);
+            let flat_layer =
+                &pm_eval::node::array(pm_eval::node::member(Some(flat_comp.root()), "layers"))
+                    .unwrap()[0];
+            let world = flat_scope.world_matrix(flat_layer, 0.0).unwrap();
+            let mask = erode(&ink(&turned), w, h);
+            let (mut drawn, mut off) = (0usize, Vec::new());
+            for (i, v) in mask.iter().enumerate() {
+                if !*v {
+                    continue;
+                }
+                drawn += 1;
+                let (lx, ly) = pm_eval::space3d::project_point(
+                    &inverse,
+                    (i % w) as f64 + 0.5,
+                    (i / w) as f64 + 0.5,
+                );
+                let (qx, qy) = (
+                    world[0] * lx + world[2] * ly + world[4],
+                    world[1] * lx + world[3] * ly + world[5],
+                );
+                let (qx, qy) = (qx.floor() as i64, qy.floor() as i64);
+                let hit = qx >= 0
+                    && qy >= 0
+                    && (qx as usize) < w
+                    && (qy as usize) < h
+                    && flat_ink[qy as usize * w + qx as usize];
+                if !hit {
+                    off.push((i % w, i / w));
                 }
             }
-            let drawn = inner.iter().filter(|v| **v).count();
             println!(
-                "level 2 text, scale {scale}, rotation.y {rotation}: {drawn} drawn, {missed} outside the picked region, box {:?}",
-                bbox(&mask)
+                "level 2 text, scale {scale}, rotation.y {rotation}: {drawn} drawn, {} off the flat layer's ink through the plane{}",
+                off.len(),
+                if off.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (first {:?})", &off[..off.len().min(6)])
+                }
             );
-            if drawn == 0 || missed > 0 {
-                failures.push(format!("level 2 text on a plane turned {rotation}°, scale {scale}: {missed} of {drawn} drawn pixels outside its pick region"));
+            if drawn == 0 || !off.is_empty() {
+                failures.push(format!("level 2 text on a plane turned {rotation}°, scale {scale}: {} of {drawn} drawn pixels off the flat layer's ink", off.len()));
             }
         }
     }

@@ -178,9 +178,15 @@ each pixel the layer draws (its frame against the frame with the layer at
 opacity 0, away from the antialiased edge) is picked as the layer or a layer
 drawn over it; what it draws lies inside the region picked as it; and shader and
 extension layers, which fill their bounds, draw exactly the picked region's
-box. A smoke test of level 2 text on planes (no legacy reference) checks that an
-unturned plane draws what the flat layer draws and that a turned one draws
-inside its pick region, at two scales.
+box. Measured: 338,211 drawn pixels checked, every one picked; shader and
+extension boxes exact. A smoke test of level 2 text on planes (no legacy
+reference) checks that an unturned plane draws what the flat layer draws (box
+within 1 pixel, mean alpha difference 0.22 and 0.45 CV at scales 1 and 1.75)
+and that every pixel a plane turned −40° or 30° draws maps, back through the
+plane and out through the flat layer's world matrix, onto the flat layer's ink
+(within 2 pixels): 0 misses of 2,421 to 9,305 drawn pixels. It found that level
+2 text's descenders reach up to 2 pixels below the text box that `bounds` and
+`pick` measure, flat or on a plane (Gaps).
 
 ## Retiming
 
@@ -383,6 +389,10 @@ unchanged, continuous precomp rasterization, level 2 routing.
   resampled from a layer-space raster rather than projected analytically (a smoke
   test covers level 2 text's placement; resvg rasters on planes have none).
 - Level 1 shapes on 2.5D planes stay routed (`Feature::PlaneShapeRaster`, above).
+- Level 2 text draws a few descender pixels (4 of 3,046 at 40 px, 18 of 10,048
+  at 1.75×) up to 2 pixels below the text box that `bounds` and `pick` measure
+  with level 1 metrics, so those pixels do not select the layer (new content,
+  no legacy reference): the text lane's.
 - Video decode differences at saturated chroma edges (up to 9 CV at a few pixels)
   belong to the media lane's decode path; an H.264 file tagged only with a BT.709
   matrix (no primaries or transfer) is read with BT.601 coefficients by Chromium and
