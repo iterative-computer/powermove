@@ -351,9 +351,14 @@ test.describe('Use New Engine: the render transport', () => {
       const layer = PM.proj.layers[0];
       PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'position.x', value: 260 }, { label: 'Move', origin: 'inspector' });
     });
-    await expect.poll(() => page.evaluate(() => (window as any).__frames.length), { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
+    // Frames of the earlier revision may still come first (the view
+    // settling); the edit's frame carries its revision's animVersion.
+    await expect.poll(() => page.evaluate(() => (window as any).__frames.some((f: any) => f.version === (window as any).PM.animVersion())), { timeout: 20_000 }).toBe(true);
     const seen = await page.evaluate(() => ({ frames: (window as any).__frames, order: (window as any).__order, version: (window as any).PM.animVersion() }));
     expect(seen.frames.every((f: any) => f.same)).toBe(true);
+    // Versions only move forward, and the newest is the edit's.
+    const versions = seen.frames.map((f: any) => f.version);
+    expect(versions).toEqual([...versions].sort((a: number, b: number) => a - b));
     expect(seen.frames.at(-1).version).toBe(seen.version);
     expect(seen.frames.at(-1).quality).toBeGreaterThan(0);
     // `overlay` follows each frame:rendered, as today's frame loop does.
