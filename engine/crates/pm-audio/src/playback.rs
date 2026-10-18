@@ -407,6 +407,7 @@ impl Playback {
         );
         let worker = RenderThread {
             rx,
+            deferred: None,
             shared: shared.clone(),
             ring: ring.clone(),
             transport: Transport::new(format.sample_rate),
@@ -968,6 +969,8 @@ fn stall_message(id: &str, by_reserve: bool) -> String {
 
 struct RenderThread {
     rx: Receiver<Control>,
+    /// A control that interrupted paused preparation; handled first.
+    deferred: Option<Control>,
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
@@ -1026,7 +1029,11 @@ impl RenderThread {
             } else {
                 Duration::from_millis(20)
             };
-            match self.rx.recv_timeout(wait) {
+            let next = match self.deferred.take() {
+                Some(c) => Ok(c),
+                None => self.rx.recv_timeout(wait),
+            };
+            match next {
                 Ok(Control::Shutdown) => return,
                 Ok(c) => {
                     if self.control(c) {
@@ -1333,9 +1340,16 @@ impl RenderThread {
         let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
             .max(CHUNK as i64);
         let mut ready = Vec::new();
-        for start in starts {
-            self.mixer
-                .prefetch_within(start - 2 * ahead, (2 * ahead) as usize, LOOKAHEAD_GROUPS);
+        // Forward starts first (the default transport), then the reverse
+        // look-behind: bounding a 6 s window behind every start before the
+        // playhead's own look-ahead tripled the time an edit leaves the
+        // playhead unprepared.
+        for start in starts.iter().copied() {
+            // Each start renders every voice (fresh stretch pre-roll after
+            // an edit); a Play or seek must not wait for the remaining ones.
+            if self.preempted() {
+                break;
+            }
             // Read bounds include stretch's deterministic pre-roll. Do not
             // block commands evaluating a large work area all in one turn.
             if !self
@@ -1349,11 +1363,28 @@ impl RenderThread {
                 ready.push(start);
             }
         }
+        for start in starts {
+            if self.preempted() {
+                break;
+            }
+            self.mixer
+                .prefetch_within(start - 2 * ahead, (2 * ahead) as usize, LOOKAHEAD_GROUPS);
+        }
         *self
             .shared
             .prepared
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ready;
+    }
+
+    /// A control arrived during idle preparation: keep it for the loop.
+    fn preempted(&mut self) -> bool {
+        if self.deferred.is_none()
+            && let Ok(c) = self.rx.try_recv()
+        {
+            self.deferred = Some(c);
+        }
+        self.deferred.is_some()
     }
 
     /// Decodes what the first moments of playback need before queueing.

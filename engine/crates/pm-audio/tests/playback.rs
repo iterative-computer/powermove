@@ -2908,3 +2908,113 @@ fn paused_prefetch_starts_within_one_callback() {
         }
     }
 }
+
+/// A6 review: paused preparation renders every voice for up to three starts.
+/// Right after an edit (which clears prepared starts) with many stretched
+/// voices, a Play arriving mid-pass must not wait for the remaining starts.
+#[test]
+fn play_preempts_paused_preparation_after_an_edit() {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir("a6-preempt");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 12.0, 997.0, 0.2), tone(SR, 12.0, 631.0, 0.1)],
+    );
+    let cache = SourceCache::new(128 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    for b in 0..12 {
+        cache.block(&source, b, true).unwrap();
+    }
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let voices = 16;
+    let doc = |gain: f64| {
+        let layers: Vec<String> = (0..voices)
+            .map(|i| {
+                audio(
+                    &format!("v{i}"),
+                    "s",
+                    0.0,
+                    8.0,
+                    &format!(r#", "speed":{}, "gain":{gain}"#, 1.25 + i as f64 * 0.05),
+                    "",
+                )
+            })
+            .collect();
+        Arc::new(project(30.0, 8.0, &layers, &[], ""))
+    };
+    let path = |_: &str| Some(file.clone());
+    playback.set_project(doc(1.0), "C", &path).unwrap();
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(4.0),
+                end: ticks(6.0),
+            }),
+        })
+        .unwrap();
+    // A whole pass: the playhead and both loop edges, every voice fresh.
+    let all = [
+        0,
+        4 * SR as i64,
+        6 * SR as i64 - pm_audio::ring::CHUNK as i64,
+    ];
+    playback.set_project(doc(0.9), "C", &path).unwrap();
+    let pass = std::time::Instant::now();
+    until(|| playback.prepared_starts().contains(&0));
+    let playhead_ms = pass.elapsed().as_secs_f64() * 1000.0;
+    until(|| all.iter().all(|s| playback.prepared_starts().contains(s)));
+    let pass_ms = pass.elapsed().as_secs_f64() * 1000.0;
+    let mut out = vec![0.0; 512 * 2];
+    let (mut acks, mut firsts) = (vec![], vec![]);
+    // Land Play at every phase of the restarted pass (2 ms steps).
+    for (trial, delay_ms) in (0..48u64).map(|i| i * 2).enumerate() {
+        playback.command(TransportCommand::Pause).unwrap();
+        side.callback(&mut out, 2, host_now_us());
+        // An edit invalidates every prepared start; preparation restarts.
+        let gain = if trial % 2 == 0 { 1.0 } else { 0.9 };
+        playback.set_project(doc(gain), "C", &path).unwrap();
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let at = std::time::Instant::now();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        acks.push(at.elapsed().as_secs_f64() * 1000.0);
+        // First device buffer queued (prepared or fresh pre-roll).
+        until(|| side.queued_frames() >= 512);
+        firsts.push(at.elapsed().as_secs_f64() * 1000.0);
+    }
+    firsts.sort_by(f64::total_cmp);
+    let worst = acks.iter().copied().fold(0.0, f64::max);
+    let mut sorted = acks.clone();
+    sorted.sort_by(f64::total_cmp);
+    let pct = |q: f64| sorted[((sorted.len() as f64 * q).ceil() as usize).max(1) - 1];
+    eprintln!(
+        "A6 preempt: {voices} stretched voices, playhead prepared {playhead_ms:.1} ms, all starts {pass_ms:.1} ms after an edit; Play acknowledged p50/p95/max {:.2}/{:.2}/{worst:.2} ms; first 512-frame buffer queued p50/p95/max {:.2}/{:.2}/{:.2} ms over {} trials",
+        pct(0.5),
+        pct(0.95),
+        firsts[firsts.len() / 2],
+        firsts[(firsts.len() * 95).div_ceil(100) - 1],
+        firsts[firsts.len() - 1],
+        acks.len()
+    );
+    // The pass is spread over idle turns; Play must never wait for a
+    // pass's remaining starts, only (at most) the one being rendered.
+    assert!(
+        worst < pass_ms / 3.0,
+        "Play waited {worst:.1} ms of a {pass_ms:.1} ms preparation pass: {acks:.2?}"
+    );
+    drop(playback);
+    cache.shutdown();
+}
