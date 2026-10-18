@@ -508,3 +508,13 @@ available; this round does not change the import persistence policy.
 The lane report retains the diagnostic comparisons and their side-by-side
 artifacts outside the public repository. No corpus image, app trace, or
 machine-local operational report is checked in.
+
+
+SVG/still closure extends the measured level-1 classes to translucent
+P3/Adobe RGB PNG/TIFF, BMP, ICO, static GIF, progressive gray JPEG,
+sub-8-bit/gamma-only PNG, ignored late PNG EXIF, 8-bit strip palette TIFF,
+uncompressed RGB float32 TIFF, and 10-bit SDR 4:2:0 AVIF. Twenty new
+rotated/filtered app compositions have max 1 CV; ICC source uploads are
+exact and float compositions stay below 0.125 CV. Remaining decoder and
+transparent-PNG export blockers are listed explicitly in `media.md`;
+SVG source parity still fails 12 of 27 cases (`vector.md`).

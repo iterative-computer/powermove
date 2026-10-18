@@ -16,7 +16,8 @@ the authority.
 |---|---|---|
 | Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
 | Image layers in the tested still classes below, including PNG16, Display P3, alpha WebP, SDR AVIF, ICC-tagged RGB TIFF, and container transforms as Chromium shows them (EXIF in PNG/JPEG/TIFF, HEIF and AVIF `irot`/`imir`/`clap`, WebP EXIF ignored) | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames below 1 CV; `media/still-*` fixtures: exact; 59 oriented, transformed and AVIF color-description app cases (`e2e/native-still-orientation-parity.spec.ts`): max ≤ 1 CV |
-| Other still structures (translucent wide-gamut ICC, progressive gray JPEG, GIF, BMP, ICO, OpenEXR, DPX, tiled or float TIFF) | Routed | Measured differences below; `tests/stills.rs` |
+| Translucent P3/Adobe ICC; BMP, ICO, static GIF, progressive gray JPEG, sub-8-bit/gamma PNG, late PNG EXIF, strip palette/raw float32 TIFF, 10-bit SDR 4:2:0 AVIF | Supported in measured classes | 20 rotated/filtered app compositions max 1 CV; ICC upload exact, float max < 0.125 CV; `media.md` |
+| HDR/chromaticity PNG, RGB/CMYK JPEG, tiled/compressed float/other-model TIFF, other AVIF structures | Routed | Unclosed decoder classes and app reachability in `media.md`; `tests/stills.rs` |
 | Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
 | Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
 | Normal blending (premultiplied source-over) | Supported | All of the above |
@@ -115,24 +116,20 @@ for the correct high-precision path. A render at levels 1 → 2 → 1 verifies
 that the texture cache never reuses an 8-bit bitmap for level 2. Unsigned
 RGB/RGBA 8/16-bit TIFF bitmaps also equal their shipped PNG conversion.
 An extra opaque P3/Adobe RGB PNG/TIFF app capture checks this color boundary.
-Translucent wide-gamut ICC images fail the extra capture's unchanged 2D bar;
-that combination retains its gate, with external side-by-side evidence.
+Translucent P3/Adobe RGB PNG/TIFF now reproduce the source premultiply and
+Skia color conversion byte-exactly; the transparent float comparison is
+below 0.125 CV. See `media.md`, "SVG/still closure".
 Opaque RGBA containers stay in the supported class. Matching SDR PNG cICP
 and ICC declarations are accepted; conflicting/HDR declarations stay gated.
 
-The header parser still restricts unmeasured structures. PNG gamma-only,
-conflicting CICP/HDR and sub-8-bit encodings; progressive gray and
-non-Y′CbCr RGB/CMYK,
-12-bit/arithmetic/lossless JPEG; tiled, other-model, float and other
-unmeasured TIFF structures; and AVIF outside the tested 8-bit 4:2:0 sRGB
-class (4:4:4, 4:2:2, monochrome) remain explicit gates. Container
-transforms are drawn only where an app comparison shows Chromium's result
-(`media.md`, "Container transforms"): the decoder's applied orientation must
-equal the container's, WebP EXIF is ignored as Blink ignores it, and AVIF
-`irot`/`imir`/`clap` follow Blink's `AVIFImageDecoder`. Late PNG EXIF stays
-gated when the decoder did not apply it. BMP, ICO, static GIF, OpenEXR and DPX still need composition parity
-or an Interpret Footage reading. Decoder breadth beyond these measured
-classes remains an open deliverable.
+The header parser still restricts unmeasured structures: HDR/independent
+chromaticity PNG; RGB/CMYK, 12-bit/arithmetic/lossless JPEG; tiled,
+compressed float and other-model TIFF; and AVIF outside the measured 8/10-bit
+4:2:0 SDR class. Container transforms match Chromium's measured behavior;
+late PNG EXIF and WebP EXIF are ignored. BMP, ICO and static GIF now have
+composition proof. EXR and DPX are rejected by today's importer even with
+forced image MIME types; native source APIs remain available through
+Interpret Footage. Full decoder breadth remains open (`media.md`).
 
 Existing animated-image and numbered-sequence WebM renditions now use the
 video path, with the shipped slot timing and converter matrix. The three

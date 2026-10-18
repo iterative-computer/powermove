@@ -243,6 +243,23 @@ text 157 CV. These are blockers, not accepted differences. The 34-project
 composition gate cannot pass while its source raster fails. No production
 level-1 bucket/cache hook is enabled from these measurements.
 
+### SVG/still closure audit
+
+The unchanged 27-case Chromium upload comparison still passes only 15 cases.
+The blockers remain solid 333×150 (44 CV), strokes (15/19), gradients
+(2–3 with too many pixels above 1), non-square clipping (103), larger blur
+(6/7), and SVG text (120–157). Interpolating fragment attributes from
+unsnapped vertex positions did not resolve the failures; using a tessellated
+non-square clip lowered its maximum to 84 but still failed the class. Neither
+experiment is enabled. The `--expect-parity` diagnostic fails with the
+original 2D thresholds, and all 27 side-by-sides remain external evidence.
+
+Masks, patterns, embedded images and non-Gaussian filter paint records are
+still explicit walker errors. Gaussian blur intermediates and pm-text glyph
+mask rasterization also remain unfinished. Consequently the 34-project SVG
+composition deliverable is unproven and `Feature::SvgImage` remains. A
+successful parse or the existing level-2 resvg output is not a level-1 proof.
+
 ## Memory
 
 `VectorCache` (pm-render) keeps level 1 rasters (`Rgba8Unorm`), level 2

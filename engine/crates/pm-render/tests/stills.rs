@@ -886,8 +886,8 @@ fn tagged_tiff_matches_the_shipped_png_conversion_and_retains_native_icc() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Gray JPEG is drawn only as baseline, the structure compared with the
-/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray now
+/// Baseline gray JPEG is compared with the legacy renderer in
+/// `render/still-photo-gray-jpg`; progressive gray now
 /// also has a rotated/filtered comparison through the app.
 #[test]
 fn progressive_gray_jpeg_is_supported() {

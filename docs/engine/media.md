@@ -516,3 +516,86 @@ resolver (`raster_compat_with_text`). This remains a diagnostic API: only
 blurs and some non-square bucket edges still fail. Level-1 `SvgImage` stays
 gated, and no 34-project composition pass is claimed. `vector.md` records
 the source pipeline and measured failures. No tolerance changed.
+
+
+### SVG/still closure: decoded bitmaps and remaining classes
+
+The level-1 ICC bitmap now reproduces Chromium's source-space premultiply,
+color conversion, and final byte store for translucent Display P3 and Adobe
+RGB PNG/TIFF. The native-depth reader remains unchanged for level 2 and
+Interpret Footage. The compatibility conversion:
+
+1. Quantizes source-space premultiplied RGBA8 as ImageBitmap does.
+2. Selects PNG's higher-precedence SDR cICP profile where present; otherwise
+   parses ICC with Blink's A2B priority. Near-sRGB and gamma-2.2 curves are
+   canonicalized as `SkColorSpace::MakeRGB` canonicalizes them.
+3. Runs the pinned Skia raster pipeline's matrix/TRC transform, including
+   fused multiply-add and its power approximation. Standalone skcms's
+   arithmetic changes a byte at some gamut edges. CLUT profiles retain
+   the skcms transform.
+4. Keeps converted, premultiplied values in float until the final RGBA8
+   store. Clipping unpremultiplied RGB first is incorrect: today's valid
+   uploaded RGB can exceed alpha.
+
+`native-still-icc-parity.spec.ts` captures both opaque and translucent source
+ramps in PNG and TIFF, their opaque compositions, and the legacy transparent
+float accumulator. `icc_alpha_compare` compares that accumulator directly to
+native float output. Measured: the four translucent uploads are byte-exact
+(24,576 pixels each); all eight float compositions are below 0.125 CV,
+including alpha. The alpha-ICC gate is removed. Opaque compositions keep the
+unchanged 2D bar. The optional `PM_MEDIA_PNG_ALPHA=1` variant measures the
+encoded transparent-PNG boundary separately from the float accumulator.
+That boundary still fails the 2D distribution bar on the translucent ramps:
+max 1.4981 premultiplied CV, with 454–505 of 6,144 pixels above 1 (alpha
+exact). This is an export blocker, not a source-upload discrepancy. Today's
+`alphaFrame` first quantizes the premultiplied accumulator to bytes, then
+truncates its unpremultiply; native export converts the float accumulator to
+straight alpha before its final quantization. The export owner must reproduce
+the level-1 boundary without changing level-2/high-precision output.
+
+The opt-in `playwright.svgstills.config.ts` harness captures through the real
+file picker (including Electron's real file path for TIFF conversion),
+records each import/upload outcome, and compares rotated, filtered native
+and legacy compositions. It requires the private format corpus and an
+external `PM_SVGSTILLS_EVIDENCE` directory. Capture success alone is not a
+parity pass. `still_compat_compare` consumes its raw premultiplied texture
+bytes and writes metrics and side-by-sides; `--expect-parity` fails on any
+unmatched or unusable reference.
+
+Newly drawn classes, each compared through the app:
+
+- BMP24/BMP32, ICO, and static GIF; baseline and progressive gray JPEG.
+- PNG grayscale and indexed 1/2/4-bit samples (including palette alpha),
+  gamma-only color information, and post-IDAT EXIF. Gamma-only PNG follows
+  `SkPngRustCodec`'s profile and neutral-gamma threshold; late EXIF is ignored,
+  matching the existing unrotated image.
+- 8-bit palette TIFF in strips: indices are decoded without ImageIO's
+  device-RGB conversion and expanded from the stored 16-bit ColorMap before
+  color conversion. Uncompressed RGB float32 TIFF without a non-sRGB ICC
+  profile reproduces the shipped PNG converter's early integer quantization.
+- 10-bit 4:2:0 SDR AVIF with the previously measured sRGB-equivalent CICP
+  descriptions, full/limited range. ImageIO's 16-bit sRGB description is
+  source metadata only; the compatibility bitmap still comes from the
+  pinned CrabbyAvif/dav1d/libyuv decoder. Container ICC, HDR, 12-bit,
+  monochrome and 4:2:2/4:4:4 remain distinct classes.
+
+The 20-case composition comparison has max 1 CV and no pixel above 1.
+The existing 21 detailed still corpus frames also pass unchanged.
+`tests/stills.rs` covers capability boundaries, source precision, ignored
+late EXIF, and palette equality with the shipped PNG conversion.
+
+Remaining decoder blockers are measurable, reachable sources: HDR PQ/HLG
+PNG, independent PNG chromaticity, CMYK JPEG/TIFF, tiled TIFF, compressed or
+other floating-point TIFF, other TIFF color models, and AVIF beyond the
+measured SDR 4:2:0 class. No gate is removed for these. The captured CMYK
+and tiled references differ from the native source reading; a tiled TIFF
+that the app converts to black is not evidence that every tiled TIFF should
+be black. JPEG12/lossless16 import as float ImageBitmaps but fail today's
+RGBA8 WebGL upload (`INVALID_VALUE`), so their successful import is not a
+usable parity reference. Their composition behavior remains unproven.
+
+OpenEXR and DPX are unreachable through today's importer: neither extension
+is in `media-formats.ts`, and both the ordinary picker import and forced
+`image/x-exr` / `image/x-dpx` MIME imports reject the captured originals.
+The original native decoding APIs remain available. No app import or
+persistence behavior changes in this lane.
