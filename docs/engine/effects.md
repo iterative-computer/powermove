@@ -180,34 +180,81 @@ from the kernel; `bun engine/crates/pm-render/tools/effects/builtins.ts` rewrite
 
 ## The watchdog
 
-Each effect instance and transition is timed between two marker dispatches: one-workgroup
-compute passes whose end-of-pass sample is the timestamp, the first reading a texel of
-the effect's input, the second a texel of its output (as `pm-export`'s `GpuSpan`). One
-query set and readback per renderer; a frame encoded while the previous timed frame is
-unread is not timed. The timestamps are resolved in a submission of their own once the
-frame's command buffer has completed (`Queue::on_submitted_work_done`): resolved inside the
-frame's own command buffer, Metal returned the previous frame's end sample, so every span
-after a renderer's first read as ending before it began and went unjudged (found
-2026-10-17; `the_watchdog_judges_every_timed_frame_not_only_the_first` judged 1 of 8
-frames before the fix, 8 of 8 after; `pm-export`'s `GpuSpan` resolves the same way).
-Nothing is waited for during rendering: each frame's start advances the timed frame
-(`Watchdog::collect`: completed → resolve submitted → readback mapped → judged), so a frame
-is judged two frames after it was drawn at the earliest. A definition over the budget (default 250 ms per
-instance per frame) is disabled from the next frame, skipped with its data kept, and
-reported (`WatchdogTimeout`, effect scope) until it is registered again: a kernel delta
-that upserts it (a register or hot reload of that id, even with the same source), a
-changed source in a full set, or its removal. A full update or an embedded set that
-repeats an unchanged definition (session start, after a refused push, another view's
-set) keeps it off. `Effects::apply` forgets the records of a delta's upserts; the
-interactive engine loads full sets per view, so pm-engine passes a delta's upserted ids
-to `FramePresenter::definitions` and pm-node's `Composer::use_definitions` forgets them.
+Issue A2 (2026-10-18) rebuilt it around two guards, judged when a frame's
+commands have completed (nothing waits during rendering: `Watchdog::collect`
+runs at the start of later frames), and a deterministic test hook.
 
-Measured: with eleven test renderers busy in one process, Metal left pass-boundary
-samples of render passes unwritten (zeros) in 4 of 10 spans (the stale end-of-pass
-samples of the marker dispatches seen then were the same-command-buffer resolve above);
-such spans are still not judged (a sample at or before the newest
-valid one, or an end not after its begin). The effect tests take turns on the GPU; the
-engines have one device per process.
+- **The budget** (interactive renderers): each effect instance, transition,
+  shader layer, and extension fragment layer of a timed frame is timed
+  between two marker dispatches (one-workgroup compute passes whose
+  end-of-pass sample is the timestamp, as `pm-export`'s `GpuSpan`: the first
+  reads a texel of the program's input, the second of its output). The
+  timestamps are resolved in a submission of their own once the frame's
+  command buffer has completed (resolved in the frame's own command buffer,
+  Metal returned the previous frame's end sample; found 2026-10-17). A
+  program over the budget (default 250 ms per program per frame) is
+  disabled from the next frame, skipped with its data kept, and reported
+  (`WatchdogTimeout`; effect scope for an instance, definition scope for a
+  transition, layer scope for a shader or fragment layer) until it is
+  registered again: a kernel delta that upserts it (a register or hot
+  reload of that id, even with the same source), a changed source in a full
+  set, or its removal. A shader layer's code is disabled until the code
+  changes (another source key) or `Watchdog::reset`. A full update or an
+  embedded set that repeats an unchanged definition (session start, after a
+  refused push, another view's set) keeps it off. `Effects::apply` forgets
+  the records of a delta's upserts; the interactive engine loads full sets
+  per view, so pm-engine passes a delta's upserted ids to
+  `FramePresenter::definitions` and pm-node's `Composer::use_definitions`
+  forgets them.
+- **The hang guard** (every renderer, every frame, not only the one frame
+  timed on the GPU): every frame drawing a program is followed from its
+  submission (`Queue::on_submitted_work_done` records the completion time).
+  A frame whose commands have not completed within the hang budget of wall
+  time (2 s interactive; 10 s for jobs, Chromium's own GPU watchdog, so an
+  export that finishes today finishes here) is a runaway: every program it
+  drew that is not a built-in (`DefinitionOrigin::BuiltIn`) is disabled at
+  once and reported, so a runaway user loop is never submitted again; it is
+  judged while still running, not when (if ever) it completes. Built-ins
+  cannot run away and are kept. A true hang ends when the operating
+  system's GPU timeout aborts the command buffer; device-loss recovery stays
+  the device owner's (Gaps).
+- **Trusted samples.** A timestamp sample is judged only when both samples
+  are after the newest trusted sample, it ends after it begins, and it is no
+  longer than the frame's own submission-to-completion wall time (+50 ms);
+  only trusted samples raise that floor (`watchdog::plausible_spans`, unit
+  tested). Before, one garbage end sample raised the floor past every later
+  sample, after which the watchdog judged nothing for the rest of the
+  process. Metal leaving a sample unwritten (seen with eleven test
+  renderers busy in one process: 4 of 10 spans) still leaves that frame
+  unjudged; the hang guard does not depend on samples.
+- **Policies.** `Policy::Interactive` (the viewer): the budget and the hang
+  guard, a disabled program is skipped. `Policy::Job` (export jobs and agent
+  stills; pm-node's job lanes set it and `reset` the watchdog per work item):
+  no per-program budget (today's exporter renders a slow effect slowly, and
+  a job never skips a program) and, after a runaway, every later frame fails
+  with `RenderError::Watchdog` naming the programs ("The render stopped:
+  acme.glow did not finish within 10 s of GPU time."), which the job reports
+  as `exportFailed` with that message.
+- **The test hook.** `Watchdog::set_timing_source(Some(Arc<dyn
+  TimingSource>))` replaces the GPU timestamps and the wall clock: every
+  frame is judged at its completion with the span and frame times the source
+  gives (`FnTiming` for closures). The budget, the hang guard, both
+  policies, and every re-enable rule are tested this way on any device and
+  under any load: `tests/effects.rs`
+  `the_watchdog_disables_an_overrunning_effect_from_the_next_frame`,
+  `tests/watchdog.rs` (shader layers, the hang guard with user and built-in
+  programs, the job policy, a frame judged while still running),
+  `pm-node/tests/definitions.rs`
+  `a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views`.
+  Production renderers never set a source. The GPU path keeps its own test,
+  `the_watchdog_judges_every_timed_frame_not_only_the_first`.
+
+Measured 2026-10-18 (M4 Max): `tests/watchdog.rs` 5 of 5 tests passing in
+each of 10 runs; `pm-node/tests/definitions.rs` passing in 20 of 20 runs
+(plus one before them). The two failures issue A2 recorded (the first test
+failing and the pm-node test passing 1 in 6) did not reproduce on this tip
+before the change either, idle or with two `effects` test binaries running
+beside it (5 runs each): they depended on Metal writing every sample.
 
 Built-in GPU times at UHD (3840 × 2160, defaults, a 3000 × 1700 image, release, M4 Max,
 the longest of 5 frames, measured again 2026-10-17 with every frame judged): Gaussian Blur
@@ -215,9 +262,6 @@ the longest of 5 frames, measured again 2026-10-17 with every frame judged): Gau
 Sharpen 0.95, every other built-in 0.66 to 0.77 ms. Translating the 20 built-ins in a cold
 process: 149 ms; from the in-memory cache: 0.10 ms. First frame per effect, pipeline build
 included: 63 to 112 ms.
-
-Not built: device-loss recovery (a true hang). The device's owner (pm-node, pm-export)
-rebuilds the device; see Gaps.
 
 ## Definition snapshots (contract 10)
 
@@ -268,6 +312,94 @@ of that definition (`shaderKey: extension:<id>`) and to `GL.compileError('fx:<id
 `missing` (missing definitions), `missingAsset` (offline media), or `sceneError`; a
 report older than one applied for the layer is ignored; a re-pushed definition clears
 its errors.
+
+**Jobs, stills, and `pm-cli`** (2026-10-18). Exports and agent stills draw
+effects, transitions, and extension layers instead of routing them:
+
+- Main's relay (`main/engine/definitions.ts`) versions each window's set.
+  Every job session main opens gets the owning window's set: export sheet,
+  agent export, and render queue snapshots (`AgentJobs.openSnapshot`), and
+  a window's agent frame session before any batch after the window pushed
+  (`AgentJobs.currentDefinitions`, in the window's frame-session chain so
+  pushes never race). The updates are a full update and, when some
+  definitions have no registration left, a delta removing them, so the job
+  skips those as missing as the window does. Each update is acknowledged
+  before the job or batch is submitted; a refused set fails the export
+  instead of rendering without it. Render queue jobs persist the set
+  captured when they were queued (`<id>.definitions.json`, owner-only,
+  removed with the job) and render with it after a relaunch.
+- Nothing is stale: the export sheet, the render queue, `export_video`'s
+  context, and `render_frames`' plan call `PM.EngineDefinitions.settle()`
+  first, which waits for queued extension reloads (`loader.whenIdle`) and
+  flushes the publisher, so a publication reaches main (IPC from one
+  renderer is ordered) before the render is asked for.
+- pm-engine: `JobDocument.definitions` is the session's
+  `DefinitionSetSnapshot`, shared per session and generation, frozen with
+  the document when the work is submitted.
+- pm-node's job lanes load that set into the lane renderer before planning
+  (`jobs/definitions.rs`; programs kept while their source is unchanged) and
+  plan with the renderer's own capability check
+  (`pm_export::render::plan_export_for`, `StillRouting::check` with the
+  renderer; `Renderer::unsupported_with_media` now checks against the
+  renderer's definitions when it holds them, and fonts when it has them:
+  `capability::unsupported_for`). A session without definitions reports its
+  effects unsupported, never drawn from a stale or built-in set.
+- **Compiled before acknowledged.** A `pushDefinitions` to a job session is
+  answered by the job service's compile worker (`jobs/compile.rs`), in
+  arrival order: every upsert goes through `pm_glsl`, and every user
+  definition also has its GPU pipeline built (`Effects::build`), so
+  `definitionsApplied.failures` is real (`shaderCompile` with diagnostics
+  in the author's lines for programs WebGL refuses too;
+  `notHeadlessRenderable` for programs only the fallback runner draws).
+  Translations are cached by source.
+- **`validate_effect`** (with the new engine on): the renderer runs the
+  kernel's registration validator and returns the wrapped snapshot
+  (`__validate_effect_snapshot`), main compiles it on a scratch job session
+  (`AgentJobs.compileDefinitions`). `shaderCompile` makes the answer
+  `valid: false` with the errors by line; `notHeadlessRenderable` stays
+  `valid: true` with a warning that headless renders cannot draw it, so the
+  tool never accepts less than WebGL does. With the engine off the tool is
+  unchanged.
+- **`pm-cli render`** draws with the built-in definitions, or with a
+  `--definitions` snapshot (the app's winning registrations; an override by
+  id draws the fork's GLSL). An effect with no snapshot that is not marked
+  missing fails naming it (exit 3, contract 10); one marked missing is
+  skipped; a program only the WebGL runner draws fails as not
+  headless-renderable, named per layer and definition, the same on every
+  run (exit 4). The summary names the definitions' source.
+
+Evidence: `pm-node/tests/jobs.rs`
+`agent_frames_and_exports_draw_the_definitions_their_session_holds` (no
+definitions: unsupported; the window's set: Invert drawn; an override by id
+draws the fork; disposing it restores the built-in; a removal skips it; an
+export with the set is done, one without it fails `unsupported` before
+anything is written) and
+`pushed_definitions_are_compiled_before_they_are_acknowledged`;
+`pm-cli/tests/definitions.rs` (4 tests); `main/engine/agent-jobs.test.ts`
+("definitions in the job engine", 5 tests: order and acknowledgment before
+submit, refusal fails the export, frame sessions after every publication
+and under concurrent batches, queue jobs, `compileDefinitions`);
+`render-queue.test.ts` (persisted across relaunch, removed with the job);
+`bridge.test.ts` (`validate_effect` through the engine);
+`e2e/engine-definitions-export.spec.ts` (written, not run: Gaps).
+
+**Compile errors are the engine's** (2026-10-18). With the new engine on,
+`GL.compileError` answers every engine key from engine reports only: `fx:`,
+`tr:`, `extension:`, `engine:`, and a shader layer's legacy `sh:<layer>:<hash>`
+key (read as that layer's `engine:` report). A program the engine compiles
+shows no error, and an error the legacy compositor recorded before for the
+same key is never shown again (before, `?? legacy(key)` resurrected it).
+Definition compile failures carry the definitions generation they were
+translated at in `FailureReport.revision` (pm-node `present/render.rs`); one
+older than the session stream's latest push of that definition
+(`SessionDefinitions.changedAt`) is the translation of a set already
+replaced and is ignored. A shader layer the watchdog turned off shows as its
+error until its code changes. At each new revision the engine sets the shader
+meta the legacy compositor set for every shader and fragment extension layer
+it draws without a report (`shaderKey`, the registered `definition`,
+`missing`); 3D, scene, and mesh layers keep theirs. Uniform metadata
+(`udefs`) stays the Inspector's, as today. Tests:
+`definition-snapshots.test.ts` (5 new).
 
 ## Parity
 
@@ -341,6 +473,25 @@ Those 3 samples pass the 99.9% rule and fail the maximum (and their float frames
 apart for review (`pm_render::effects::WEBGL_UNSTABLE`). Not decided here: the plan's
 gate wording needs the class reviewed by Jude.
 
+How the instability arises (2026-10-18). Posterize computes `floor(x * n +
+.5) / n` per channel: a value within rounding of a level boundary lands on
+either level, a full step apart (255 / (n − 1) CV: 16, 27, and 85 CV at the
+corpus's 16, 9.5, and 3 levels). Levels clamps, then raises to a steep
+`pow`, so a rounding-level input change near the clamp is amplified past a
+code value; Color's hue rotation is unstable at saturated extremes. Today's
+WebGL output itself moves by that much when its input moves one binary16
+step. In the app the engine's input to these effects (the layer buffer:
+pm-render's sampling and compositing) equals today's within 1 CV everywhere
+but not bit for bit, so isolated pixels whose input sits on a boundary land
+on the other level. They are not drawn "as today" bit for bit, and under
+amendment 22 they are a visible difference on existing projects: escalated
+with side-by-sides (`PM_RENDER_DIFFS` now also writes review frames:
+engine, legacy, and a map of the differing pixels). Measured 2026-10-18 on
+`effects-20261017-060101-ca4d364f`: `render/fx-posterize` t = 0, 1, 2 differ
+at 0.10%, 0.05%, 0.02% of pixels, max 16, 27, 85 CV (float 15.9, 26.9,
+85.0 CV). Matching them requires a layer buffer bit-identical to WebGL's
+for every input that reaches these effects; not attempted here (Gaps).
+
 **Store GLSL.** Fuzz (`pm-glsl-fuzz`, worker process, per-input deadline), 2026-10-16:
 
 | Run | Inputs | Outcomes | Crashes, hangs, panics | Slowest |
@@ -370,35 +521,59 @@ bun engine/corpus/src/capture.ts --only render/fx-,render/tr- --label effects --
 cargo test -p pm-render --release --test corpus -- --nocapture   # app-level parity
 cargo run --release -p pm-glsl --bin pm-glsl-fuzz -- --seeds <seeds.json> --iterations 3000
 cargo test -p pm-render --release --test effects builtin_costs -- --ignored --nocapture
+cargo test -p pm-render --test watchdog --test effects                    # watchdog (test hook)
+cargo test -p pm-node --test definitions --test jobs                      # views, jobs, compile
+cargo test -p pm-cli --test definitions                                   # pm-cli and snapshots
+PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
+  cargo test -p pm-render --test corpus -- --nocapture                    # review side-by-sides
 ```
 
 ## Gaps
 
-- **Fallback runner (decision 19)** not built: engine-only failures route the layer to
-  the legacy engine (`Feature::ShaderFallback`) instead of rendering through a minimal
-  WebGL runner; nothing is marked not headless-renderable beyond the error code.
+- **Fallback for effects and transitions** (decision 19 with texture inputs)
+  is not built: a definition only the runner could draw is still
+  `Feature::ShaderFallback` (the interactive engine routes it; jobs and
+  `pm-cli` name it as not headless-renderable). What it needs: an effect
+  pass node that plans a `FallbackRequest` carrying its input and backdrop
+  (read back from the frame's targets, keyed by the program, the calls, and
+  the inputs' content), the runner contract extended with input textures
+  (`u_tex`, `u_orig`, `u_backdrop`, `u_from`, `u_to`) and 1 to 8 ping-pong
+  passes, the pixels composed back into the chain; for desktop job exports a
+  host-services request that asks a window's runner (contract 14), so the
+  job waits for it like the interactive presenter does. Shader layers have
+  the runner today (`docs/engine/shaders.md`).
+- **The fallback runner's own draw deadline**: the runner relies on WebGL
+  context loss (Chromium's GPU watchdog) to stop a runaway program, and a
+  program that lost the context is not run again; there is no shorter
+  deadline of its own and no `WatchdogTimeout` report for it.
 - **Translation in a helper process** not built: a crash inside glslang or naga takes
   the engine process (the fuzz runs found none; limits stop every bomb found); a hang
-  costs one leaked thread past the deadline.
+  costs one leaked thread past the deadline. The job engine's compile worker
+  translates on its own thread, so a translation past the 20 s deadline
+  delays later acknowledgments, not rendering.
 - **Device-loss recovery** for a true GPU hang is the device owner's (pm-node, pm-export)
-  and not built here; the watchdog covers slow-but-finishing effects.
-- **Export jobs and pm-cli** do not pass definitions yet, so effects and transitions
-  stay routed there as before. The pieces are ready: `Renderer::set_definitions`,
-  `capability::unsupported_with_definitions`. What is left: `pm_engine::jobs::JobDocument`
-  carries the session's `DefinitionSetSnapshot` (`job_document`), pm-node's job runner
-  calls `set_definitions` on its renderer, and `pm_export::plan_export` and
-  `StillRouting` route with `unsupported_with_definitions`; `pm-cli` reads the
-  snapshot a collected project embeds.
-- **The engine process** (`pm-engine`) applies `pushDefinitions` to the session's
-  `DefinitionSet` without translating, so `definitionsApplied` carries no failures; the
-  interactive engine's presenter translates the set when it arrives and sends each
-  failure as a `failure` event instead (definition scope). On the first launch (an
-  empty shader cache folder) translating the 20 built-ins takes about 120 to 150 ms on
-  the presenter's render thread; later launches load them from the folder.
+  and not built here; the hang guard makes sure the program that hung is not
+  submitted again once the system's GPU timeout ends it.
+- **Collect Project and `.pmv` files do not embed definitions yet** (the save
+  lane's packer): `pm-cli` takes them with `--definitions` or uses the
+  built-ins; a project made with a fork of a built-in renders the built-in's
+  GLSL without the flag.
+- **The engine process** (`pm-engine`) applies `pushDefinitions` to an
+  interactive session's `DefinitionSet` without translating, so that
+  `definitionsApplied` carries no failures; the presenter translates and
+  sends each failure as a `failure` event (definition scope, at its
+  definitions generation). Job sessions are acknowledged by the compile
+  worker with real failures.
 - **Linear blending with an alpha above 1:** in Standard such a pixel darkens the stack
   beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
   composite is in linear light and there is no reference for it.
-- **WebGL-unstable class** pending review (above).
+- **WebGL-unstable class**: Posterize (and at other parameters Levels and
+  Color) differ from today at isolated pixels in the app (above); escalated
+  to Jude with side-by-sides. Not matched.
+- **Not run**: `e2e/engine-definitions-export.spec.ts` (needs the app and a
+  release engine build; free disk was below the 40 GB limit when this lane
+  ran, 24 to 38 GB, so no release build was started), the full pm-render
+  suite.
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); Store has 3 public extensions, not in this
   corpus (their sources stay outside the repository); one machine and one GPU family.

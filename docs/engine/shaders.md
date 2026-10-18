@@ -122,7 +122,8 @@ SPIR-V rewrite, the bind check (amendment 9: samplers other than a float
 | Host | What happens |
 |---|---|
 | Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure routes the composition to the legacy viewer |
-| Job engine, `pm-cli`, the hidden host | No runner: `Feature::ShaderFallback`, not headless-renderable (static check and render alike) |
+| Job engine, the hidden host | No runner: `Feature::ShaderFallback`, not headless-renderable (static check and render alike); a job fails before anything is written, naming the layer and the stage |
+| `pm-cli render` | No runner: exits 4, "not headless-renderable", naming each layer and definition, before anything is written; the same on every run (`pm-cli/tests/definitions.rs`) |
 
 The runner (`ShaderFallbackRunner`): one WebGL2 context on an
 `OffscreenCanvas` for the window, `EXT_color_buffer_float`, an RGBA16F target
@@ -215,6 +216,10 @@ Sources and provenance:
 | generated-agent | 37 prompts covering every contract feature (`tools/shaders/prompts.ts`, `CONTRACT`; the script fails when a feature has no prompt), answered by `claude --print` (Claude Code 2.1.300, `claude-opus-5-5`) with the in-app agent's own system prompt (`agentInstructions()`, the adapter's schema suffix), the API pack readable with Read/Glob/Grep, and the shader-layer runtime the Shader panel shows. The in-app harness itself needs a running Powermove with its MCP tools, which cannot run headlessly here; differences: no render_frames or validate_effect loop, the deliverable returned as JSON. Outputs with provenance in `tools/shaders/generated/` |
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
 
+Run again 2026-10-18 on the definitions lane's tip (corpus
+`shaders-20261018-022611`; routing and errors count as failures): the same
+table, cell for cell.
+
 Measured 2026-10-17 (M4 Max, macOS 27, wgpu 30.0.1 Metal; corpus
 `shaders-20261017-073721`, 144 cases, 522 variants), and reproduced on
 2026-10-18 after merging `feat/native-engine` at `f3bf2478` from a fresh
@@ -259,7 +264,16 @@ values scaled by max(1, |reference|).
   binary16 step away from zero moves 26 to 33 pixels by up to 67 CV
   (`webgl.ts --perturb-input`; the class is decided per variant from the
   perturbed runs). `zellzoi/liquid-glass-ios27` 2.0.1, a separate Store
-  extension of the same name, matches.
+  extension of the same name, matches. How it arises: the gate gives both
+  engines the same input texels, and the differing pixels sit in one small
+  region (the refracted highlight of the small square near the top right),
+  where the program's output changes discontinuously with its arithmetic (a
+  one-step input change moves WebGL's own output there); naga's MSL and
+  ANGLE's MSL round a few operations differently, which is enough. Under
+  amendment 22 this is a visible difference for a user with this effect:
+  escalated to Jude with side-by-sides (`PM_SHADER_GATE_DIFFS=<dir>` writes
+  the engine's output, WebGL's, and the differing pixels for every
+  WebGL-unstable variant). Not matched.
 - **Through the runner**: `env-cubemap-sky` (a `samplerCube`), above.
 
 App level: the v1 corpus's shader and extension projects
@@ -343,27 +357,27 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **Store:** 4 public releases, all effects; no Store extension registers a
   shader layer or a fragment layer yet. Local projects (`--local`) were not
   collected for this run.
-- **WebGL-unstable class** (one Store shader) awaits Jude's review, as in S3
-  and effects.md.
+- **WebGL-unstable class** (one Store shader): a visible difference,
+  escalated to Jude with side-by-sides (above); not matched.
 - **One machine, one GPU family** (M4 Max); the runner was measured in
   headless Chromium, not inside the Electron renderer (the session path is
   covered by the vitest and the pm-node test, the WebGL path by the gate).
 - **Fallback for effects and transitions** is not built: a definition only the
-  runner could draw still routes (`Feature::ShaderFallback`, effects.md); the
-  runner contract has no input textures yet (an effect needs its layer buffer
-  and backdrop read back and sent).
-- **GPU time limits for shader layers:** the effects lane's watchdog times
-  effect instances only; a runaway shader layer loop is not cut off.
+  runner could draw still routes in the viewer (`Feature::ShaderFallback`)
+  and is named not headless-renderable in jobs and `pm-cli`; the runner
+  contract has no input textures yet (an effect needs its layer buffer and
+  backdrop read back and sent; design in effects.md, Gaps).
+- **The runner's own draw deadline:** a runaway fallback program is
+  stopped by WebGL context loss (Chromium's GPU watchdog; a program that
+  lost the context is not run again); no shorter deadline, no
+  `WatchdogTimeout` report for it. Shader and fragment layers the engine
+  draws are timed, disabled, and guarded against runaways like effects
+  (effects.md, "The watchdog"; `tests/watchdog.rs`).
 - **Pixels per frame:** an animated fallback layer costs a WebGL draw,
   readback, and upload per frame shown; there is no render-ahead for it (a
   static one is uploaded once).
 - **Not run:** the full pm-render suite (targeted tests only, per the machine
   limits).
-- **Watchdog tests fail on the base too** (2026-10-18, base `f3bf2478` built
-  in a temporary worktree): `pm-render/tests/effects.rs`
-  `the_watchdog_disables_an_overrunning_effect_from_the_next_frame` fails
-  ("overran again") on the base and on this branch; `pm-node/tests/definitions.rs`
-  `a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views`
-  (`assert!(overran)`) passed 1 of 6 runs on the base and 1 of 6 on this
-  branch. Both are the effects lane's GPU-timestamp watchdog, not this lane's
-  code.
+- **Watchdog tests** (issue A2): fixed 2026-10-18 with the watchdog's
+  deterministic test hook (effects.md, "The watchdog"); the pm-node test
+  passed 20 of 20 runs.
