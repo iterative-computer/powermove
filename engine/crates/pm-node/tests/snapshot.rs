@@ -14,7 +14,12 @@
 //! * the engine never sends anything to the renderer while it serves a
 //!   snapshot (a renderer blocked in `sendSync` cannot deadlock it);
 //! * scheduling: during playback a `sync` snapshot is answered at once, an
-//!   `idle` one only after the transport stops.
+//!   `idle` one only after the transport stops;
+//! * Blender compositions: a synchronous capture draws a prepared frame or
+//!   fails with today's sentence; an async capture with a Blender wait has
+//!   Blender render the frame first (a stand-in for main's supervision) and
+//!   draws its surfaces, and Blender's failure, absence, and timeout are
+//!   named.
 #![cfg(target_os = "macos")]
 
 use std::process::{Command, Stdio};
@@ -381,6 +386,7 @@ fn frame_request(
         class,
         view_seq: Some(Seq::new(4).unwrap()),
         wait_ms,
+        blender_wait_ms: 0,
         uploaded: Vec::new(),
     }
 }
@@ -1049,19 +1055,304 @@ fn child_depth() {
     println!("CHILD-OK");
 }
 
-/// A composition Blender renders (`render3d.enabled`) with one 3D object.
+/// A 3D layer (`mkLayer`'s transform channels) of extension `definition`.
+fn layer3d(id: &str, definition: &str, data: Value, position: [f64; 3], w: u32, h: u32) -> Value {
+    json!({
+        "id": id, "type": "extension", "name": id, "from": 0, "dur": 2, "on": true, "lock": false,
+        "shy": false, "collapsed": true, "threeD": true, "solo": false, "color": "#4C8DFF",
+        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
+        "p": {
+            "perspective": ch(json!(50)), "position.z": ch(json!(position[2])), "anchor.z": ch(json!(0)),
+            "scale.z": ch(json!(100)), "rotation.x": ch(json!(0)), "rotation.y": ch(json!(0)),
+            "orientation.x": ch(json!(0)), "orientation.y": ch(json!(0)), "orientation.z": ch(json!(0)),
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(position[0])),
+            "position.y": ch(json!(position[1])), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": { "definition": definition, "version": 1, "w": w, "h": h, "params": {}, "data": data },
+        "locked_intent": {}
+    })
+}
+
+/// A composition Blender renders (`render3d.enabled`): a camera, a sun,
+/// and one box.
 fn blender_project() -> Value {
-    let object = json!({
-        "id": "o", "type": "extension", "name": "o", "on": true, "from": 0, "dur": 2, "blend": "normal",
-        "fx": [], "masks": [], "threeD": true, "p": {},
-        "d": { "definition": "powermove.3d.object", "version": 1, "w": 64, "h": 36, "params": {},
-            "data": { "object": { "source": { "primitive": "box", "parameters": {} },
-                "material": { "p": {}, "maps": {}, "doubleSided": true }, "useSourceMaterials": false,
-                "slots": [], "castShadow": true, "receiveShadow": true } } }
-    });
+    let camera = layer3d(
+        "cam",
+        "powermove.3d.camera",
+        json!({
+            "camera": { "projection": "perspective", "p": {
+                "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
+                "fov": ch(json!(45)), "zoom": ch(json!(1)), "near": ch(json!(0.01)), "far": ch(json!(1000))
+            } },
+            "environment": { "p": {
+                "ambient": ch(json!(0.5)), "ambientColor": ch(json!("#FFFFFF")), "exposure": ch(json!(1))
+            }, "background": null, "shadows": false }
+        }),
+        [0.0, 0.0, 4.0],
+        0,
+        0,
+    );
+    let sun = layer3d(
+        "sun",
+        "powermove.3d.light",
+        json!({ "light": { "type": "sun", "castShadow": false, "p": {
+            "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
+            "color": ch(json!("#FFFFFF")), "intensity": ch(json!(3)), "distance": ch(json!(0)),
+            "decay": ch(json!(2)), "angle": ch(json!(45)), "penumbra": ch(json!(0.4)),
+            "width": ch(json!(1)), "height": ch(json!(1))
+        } } }),
+        [-3.0, 5.0, 4.0],
+        0,
+        0,
+    );
+    let object = layer3d(
+        "o",
+        "powermove.3d.object",
+        json!({ "object": {
+            "source": { "primitive": "box", "parameters": {} },
+            "material": { "p": {
+                "color": ch(json!("#FF8040")), "roughness": ch(json!(0.4)), "metalness": ch(json!(0.1)),
+                "emissive": ch(json!("#000000")), "emissiveIntensity": ch(json!(1)), "opacity": ch(json!(1))
+            }, "maps": {}, "doubleSided": true },
+            "useSourceMaterials": false, "slots": [], "castShadow": true, "receiveShadow": true
+        } }),
+        [0.0, 0.0, 0.0],
+        320,
+        180,
+    );
     let mut p = project(100.0);
-    p["layers"] = json!([object]);
+    p["layers"] = json!([camera, sun, object]);
     p["render3d"] = json!({ "enabled": true, "engine": "eevee", "samples": 8 });
+    p
+}
+
+/// How the stand-in host services answer `blenderRender`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BlenderMode {
+    /// Every surface opaque magenta.
+    Render,
+    /// Blender failed.
+    Fail,
+    /// Blender is not installed.
+    Missing,
+    /// Never answers until cancelled.
+    Hold,
+}
+
+/// Main's Blender supervision as the engine sees it (contract 11 over the
+/// host port; `main/engine/blender.ts`): the Blender Surfaces area in a
+/// temporary directory, surfaces written as 16-bit PNGs before the answer.
+struct StandInHost {
+    area: std::path::PathBuf,
+    mode: BlenderMode,
+    renders: Vec<String>,
+    cancels: Vec<String>,
+    held: Vec<(RequestId, String)>,
+}
+
+const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+
+impl StandInHost {
+    fn new() -> StandInHost {
+        let area = std::env::temp_dir().join(format!("pm-snapshot-blender-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&area);
+        std::fs::create_dir_all(&area).unwrap();
+        StandInHost {
+            area,
+            mode: BlenderMode::Render,
+            renders: Vec::new(),
+            cancels: Vec::new(),
+            held: Vec::new(),
+        }
+    }
+
+    fn reply(c: &mut Child, id: RequestId, answer: Result<Response, (ErrorCode, &str)>) {
+        use pm_protocol::error::{EngineError, ErrorScope};
+        let message = match answer {
+            Ok(body) => Message::Response { id, body },
+            Err((code, text)) => Message::Error {
+                id,
+                error: EngineError::new(code, ErrorScope::Request { id }, text),
+            },
+        };
+        c.host_sends(Envelope::new(message));
+    }
+
+    fn serve(&mut self, c: &mut Child, id: RequestId, session: Option<SessionId>, body: Request) {
+        use pm_protocol::blender::{BlenderStatus, BlenderSurface, ResolvedDevice};
+        use pm_protocol::common::{ByteSize, PixelRect};
+        use pm_protocol::host::{
+            CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved,
+        };
+        use pm_protocol::priority::{CancelJobs, JobsCancelled};
+        match body {
+            Request::BlenderStatus => Self::reply(
+                c,
+                id,
+                Ok(Response::BlenderStatus(BlenderStatus {
+                    available: true,
+                    version: Some("4.5.14".into()),
+                    error: None,
+                })),
+            ),
+            Request::MintHandle(mint) => Self::reply(
+                c,
+                id,
+                Ok(Response::Handle(HandleGrant {
+                    handle: CapabilityHandle::from_random_bytes([9; 16]),
+                    kind: mint.kind,
+                    content_hash: None,
+                })),
+            ),
+            Request::ResolveHandle(r) => Self::reply(
+                c,
+                id,
+                Ok(Response::HandleResolved(HandleResolved {
+                    handle: r.handle,
+                    kind: CapabilityKind::Cache {
+                        cache: CacheKind::BlenderSurfaces,
+                    },
+                    access: HandleAccess::ReadWrite,
+                    path: self.area.to_string_lossy().into_owned(),
+                })),
+            ),
+            Request::BlenderRender(job) => {
+                self.renders.push(job.job.0.clone());
+                match self.mode {
+                    BlenderMode::Fail => {
+                        Self::reply(c, id, Err((ErrorCode::BlenderFailed, "Blender crashed")))
+                    }
+                    BlenderMode::Missing => Self::reply(
+                        c,
+                        id,
+                        Err((ErrorCode::BlenderMissing, "Install Blender 4.5 or later.")),
+                    ),
+                    BlenderMode::Hold => self.held.push((id, job.job.0.clone())),
+                    BlenderMode::Render => {
+                        for (i, sr) in job.surfaces.iter().enumerate() {
+                            let (w, h) = (sr.size.width, sr.size.height);
+                            let rgba: Vec<u16> = (0..w * h)
+                                .flat_map(|_| [65_535, 0, 65_535, 65_535])
+                                .collect();
+                            let png = pm_blender::surface::encode_rgba16(w, h, &rgba, &[]);
+                            let name = format!("{}.png", pm_blender::key::hex(&sr.key));
+                            std::fs::write(self.area.join(name), &png).unwrap();
+                            let event = Event::BlenderSurface(BlenderSurface {
+                                job: job.job.clone(),
+                                request_index: i as u32,
+                                key: sr.key,
+                                size: sr.size,
+                                crop: PixelRect {
+                                    x: 0,
+                                    y: 0,
+                                    width: w,
+                                    height: h,
+                                },
+                                handle: job.output.clone(),
+                                bytes: ByteSize::new(png.len() as u64).unwrap(),
+                                device: ResolvedDevice::Cpu,
+                            });
+                            let mut envelope = Envelope::new(Message::Event { body: event });
+                            envelope.session = session;
+                            c.host_sends(envelope);
+                        }
+                        Self::reply(c, id, Ok(Response::Ack));
+                    }
+                }
+            }
+            Request::CancelJobs(CancelJobs::Job { job }) => {
+                self.cancels.push(job.0.clone());
+                if let Some(i) = self.held.iter().position(|(_, j)| *j == job.0) {
+                    let (held, _) = self.held.remove(i);
+                    Self::reply(c, held, Err((ErrorCode::Cancelled, "Blender request cancelled")));
+                }
+                Self::reply(
+                    c,
+                    id,
+                    Ok(Response::JobsCancelled(JobsCancelled { jobs: vec![job] })),
+                );
+            }
+            other => {
+                eprintln!("stand-in host: unsupported {other:?}");
+                Self::reply(c, id, Err((ErrorCode::Unsupported, "not served by this test")));
+            }
+        }
+    }
+
+    /// Serves the engine's host requests until `done` matches.
+    fn serve_until<T>(
+        &mut self,
+        c: &mut Child,
+        timeout: Duration,
+        mut done: impl FnMut(PortId, &Envelope) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let actions = c.host.pump();
+            c.inbox.push(actions);
+            let request = c.inbox.try_wait(Duration::ZERO, &mut |port, m| match &m.message {
+                Message::Request { id, body } if port == HOST => {
+                    Some((*id, m.session, body.clone()))
+                }
+                _ => None,
+            });
+            if let Some((id, session, body)) = request {
+                self.serve(c, id, session, body);
+                continue;
+            }
+            if let Some(found) = c.inbox.try_wait(Duration::from_millis(5), &mut done) {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "timed out serving Blender");
+        }
+    }
+}
+
+impl StandInHost {
+    /// Serves the engine's host requests while `waiting` holds.
+    fn serve_while(&mut self, c: &mut Child, timeout: Duration, waiting: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + timeout;
+        while waiting(self) {
+            assert!(Instant::now() < deadline, "timed out serving Blender");
+            let actions = c.host.pump();
+            c.inbox.push(actions);
+            let request = c.inbox.try_wait(Duration::from_millis(5), &mut |port, m| {
+                match &m.message {
+                    Message::Request { id, body } if port == HOST => {
+                        Some((*id, m.session, body.clone()))
+                    }
+                    _ => None,
+                }
+            });
+            if let Some((id, session, body)) = request {
+                self.serve(c, id, session, body);
+            }
+        }
+    }
+}
+
+impl Drop for StandInHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.area);
+    }
+}
+
+fn blender_capture(wait_ms: u32, blender_wait_ms: u32) -> SnapshotRequest {
+    let mut r = frame_request(
+        SnapshotClass::Async,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        wait_ms,
+    );
+    r.blender_wait_ms = blender_wait_ms;
+    r
+}
+
+fn with_samples(samples: u32) -> Value {
+    let mut p = blender_project();
+    p["render3d"]["samples"] = json!(samples);
     p
 }
 
@@ -1073,9 +1364,10 @@ fn child_blender() {
     }
     let mut c = Child::start();
     let session = c.session;
+    let mut host = StandInHost::new();
     c.resync(2, 1, &blender_project());
-    // Today's capture draws the frame Blender prepared or fails; there is
-    // none, so the snapshot fails with today's error, never native shading
+    // Today's synchronous capture draws the frame Blender prepared or fails;
+    // there is none, so it fails with today's error, never native shading
     // labelled final.
     let small = Size::new(320, 180);
     c.snapshot(
@@ -1095,16 +1387,83 @@ fn child_blender() {
         draft_3d: true,
     };
     c.snapshot(11, draft, Some(1), WINDOW, session);
-    match c.inbox.wait(Duration::from_secs(20), answer(11)) {
-        Ok(SnapshotOutcome::Rendered(result)) => assert!(result.quality.draft_3d),
-        Err(code) => assert_ne!(
-            code,
-            ErrorCode::BlenderFailed,
-            "draft 3D is not refused for Blender"
-        ),
-        other => panic!("unexpected {other:?}"),
-    }
-    println!("CHILD-OK blender: refused without draft 3D, drawn natively with it");
+    let native = rendered(c.inbox.wait(Duration::from_secs(20), answer(11)));
+    assert!(native.quality.draft_3d);
+    assert_ne!(at(&pixels_of(&native), 320, 160, 90), MAGENTA);
+    assert!(host.renders.is_empty(), "no Blender for those");
+
+    // Today's `snapshotAsync`: Blender renders the frame first (with a 1 s
+    // wait that Blender's time does not count against), then the capture
+    // draws Blender's surfaces.
+    let started = Instant::now();
+    c.snapshot(12, blender_capture(1_000, 60_000), Some(1), WINDOW, session);
+    let result = rendered(host.serve_until(&mut c, Duration::from_secs(30), answer(12)));
+    let elapsed = started.elapsed();
+    assert!(!result.quality.draft_3d);
+    assert_eq!(result.revision.get(), 1);
+    let px = pixels_of(&result);
+    assert_eq!(at(&px, 320, 160, 90), MAGENTA, "Blender's surface, not native shading");
+    assert_eq!(host.renders.len(), 1);
+    assert!(
+        host.renders[0].starts_with(&format!("capture-{}-{}-", WINDOW.0, session.get())),
+        "{:?}",
+        host.renders
+    );
+    // A synchronous capture of the same frame now draws the prepared frame
+    // (today's prepared frame), without Blender.
+    c.snapshot(
+        13,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let again = rendered(host.serve_until(&mut c, Duration::from_secs(20), answer(13)));
+    assert_eq!(at(&pixels_of(&again), 320, 160, 90), MAGENTA);
+    // And an async capture of it asks Blender for nothing.
+    c.snapshot(14, blender_capture(1_000, 60_000), Some(1), WINDOW, session);
+    let cached = rendered(host.serve_until(&mut c, Duration::from_secs(20), answer(14)));
+    assert_eq!(at(&pixels_of(&cached), 320, 160, 90), MAGENTA);
+    assert_eq!(host.renders.len(), 1);
+
+    // Blender failing fails the capture with its reason.
+    c.resync(3, 2, &with_samples(16));
+    host.mode = BlenderMode::Fail;
+    c.snapshot(15, blender_capture(1_000, 60_000), Some(2), WINDOW, session);
+    assert_eq!(
+        host.serve_until(&mut c, Duration::from_secs(20), answer(15)),
+        Err(ErrorCode::BlenderFailed)
+    );
+    // Blender not installed: today's `blenderMissing`.
+    host.mode = BlenderMode::Missing;
+    c.snapshot(16, blender_capture(1_000, 60_000), Some(2), WINDOW, session);
+    assert_eq!(
+        host.serve_until(&mut c, Duration::from_secs(20), answer(16)),
+        Err(ErrorCode::BlenderMissing)
+    );
+    // Blender that never finishes: the capture fails at its Blender bound
+    // and Blender is stopped.
+    host.mode = BlenderMode::Hold;
+    let held = Instant::now();
+    c.snapshot(17, blender_capture(500, 1_500), Some(2), WINDOW, session);
+    assert_eq!(
+        host.serve_until(&mut c, Duration::from_secs(20), answer(17)),
+        Err(ErrorCode::Timeout)
+    );
+    let bounded = held.elapsed();
+    assert!(
+        bounded >= Duration::from_millis(1_400) && bounded < Duration::from_secs(5),
+        "{bounded:?}"
+    );
+    host.serve_while(&mut c, Duration::from_secs(10), |h| h.cancels.is_empty());
+    assert_eq!(host.cancels.len(), 1);
+    assert_eq!(host.cancels[0], host.renders[host.renders.len() - 1]);
+    assert!(host.held.is_empty(), "the held Blender request was answered as cancelled");
+    println!(
+        "CHILD-OK blender: refused when not prepared, native with draft 3D, prepared by Blender in {} ms, prepared frame reused, failure, missing and timeout ({} ms) named",
+        elapsed.as_millis(),
+        bounded.as_millis()
+    );
 }
 
 #[test]

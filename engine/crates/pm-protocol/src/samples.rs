@@ -847,6 +847,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         class: crate::snapshot::SnapshotClass::Sync,
         view_seq: Some(seq(12)),
         wait_ms: 5_000,
+        blender_wait_ms: 0,
         uploaded: vec!["5e".repeat(32)],
     }
 }

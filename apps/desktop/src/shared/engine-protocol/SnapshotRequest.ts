@@ -28,6 +28,18 @@ viewSeq: Seq | null,
  */
 waitMs: number, 
 /**
+ * Blender frames (a `Frame` target of a composition with
+ * `render3d.enabled`, not `draft_3d`): 0, today's synchronous capture,
+ * draws the Blender surfaces an earlier capture prepared or fails with
+ * today's "The Blender frame is not prepared" sentence; above 0,
+ * today's `snapshotAsync` (which runs `prepareFrame` first), the
+ * engine has Blender render the frame's missing surfaces before it
+ * draws, for at most this long (milliseconds, up to
+ * [`MAX_BLENDER_WAIT_MS`]). The time the Blender stage runs does not
+ * count against `wait_ms`.
+ */
+blenderWaitMs?: number, 
+/**
  * Keys of shader fallback requests (from an earlier `needsRenderer`)
  * the caller drew and posted on the session's port before asking
  * again: the engine waits for those pixels (they are already on their

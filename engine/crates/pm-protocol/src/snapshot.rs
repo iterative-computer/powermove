@@ -47,6 +47,9 @@ pub const MAX_BLUR_SAMPLES: u32 = 256;
 /// Longest a snapshot may wait in the engine (for its revision and its
 /// turn) before it fails with `timeout`.
 pub const MAX_SNAPSHOT_WAIT_MS: u32 = 120_000;
+/// Longest a snapshot's Blender stage may run ([`SnapshotRequest::blender_wait_ms`]):
+/// today's 10-minute Blender job timeout, plus the queue ahead of it.
+pub const MAX_BLENDER_WAIT_MS: u32 = 900_000;
 /// Longest shared-memory segment name (macOS `PSHMNAMLEN` is 31).
 pub const MAX_SHARED_NAME: usize = 31;
 /// Largest compatibility pixel band in one message.
@@ -149,6 +152,18 @@ pub struct SnapshotRequest {
     /// turn before it answers `timeout` (milliseconds, 1 to
     /// [`MAX_SNAPSHOT_WAIT_MS`]).
     pub wait_ms: u32,
+    /// Blender frames (a `Frame` target of a composition with
+    /// `render3d.enabled`, not `draft_3d`): 0, today's synchronous capture,
+    /// draws the Blender surfaces an earlier capture prepared or fails with
+    /// today's "The Blender frame is not prepared" sentence; above 0,
+    /// today's `snapshotAsync` (which runs `prepareFrame` first), the
+    /// engine has Blender render the frame's missing surfaces before it
+    /// draws, for at most this long (milliseconds, up to
+    /// [`MAX_BLENDER_WAIT_MS`]). The time the Blender stage runs does not
+    /// count against `wait_ms`.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub blender_wait_ms: u32,
     /// Keys of shader fallback requests (from an earlier `needsRenderer`)
     /// the caller drew and posted on the session's port before asking
     /// again: the engine waits for those pixels (they are already on their
@@ -197,6 +212,18 @@ impl Validate for SnapshotRequest {
                     self.wait_ms
                 )
             },
+        )?;
+        ensure(self.blender_wait_ms <= MAX_BLENDER_WAIT_MS, C, || {
+            format!(
+                "Blender wait {} ms over {MAX_BLENDER_WAIT_MS}",
+                self.blender_wait_ms
+            )
+        })?;
+        // A blocked thread never waits for Blender.
+        ensure(
+            self.blender_wait_ms == 0 || self.class != SnapshotClass::Sync,
+            C,
+            || "a sync snapshot cannot wait for Blender".into(),
         )?;
         ensure(
             self.uploaded.len() <= crate::shader_fallback::MAX_REQUESTS
@@ -767,6 +794,7 @@ mod tests {
             class: SnapshotClass::Sync,
             view_seq: None,
             wait_ms: 5_000,
+            blender_wait_ms: 0,
             uploaded: Vec::new(),
         }
     }
@@ -808,6 +836,19 @@ mod tests {
             content: None,
         };
         assert!(layer.validate().is_err());
+        // Blender waits: async and idle only, and bounded.
+        let mut blender = request(8, 8);
+        blender.blender_wait_ms = 60_000;
+        assert!(blender.validate().is_err(), "a sync snapshot never waits for Blender");
+        blender.class = SnapshotClass::Async;
+        assert!(blender.validate().is_ok());
+        blender.blender_wait_ms = MAX_BLENDER_WAIT_MS + 1;
+        assert!(blender.validate().is_err());
+        // An older peer's request without the field reads as 0.
+        let mut value = serde_json::to_value(request(8, 8)).unwrap();
+        value.as_object_mut().unwrap().remove("blenderWaitMs");
+        let read: SnapshotRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(read.blender_wait_ms, 0);
     }
 
     #[test]

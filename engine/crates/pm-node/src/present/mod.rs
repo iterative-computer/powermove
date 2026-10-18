@@ -257,8 +257,13 @@ impl BridgePresenter {
                 link.clone(),
                 sink,
                 stats.clone(),
-                Box::new(move |key| {
-                    let _ = ready.send(Command::BlenderReady { key });
+                Box::new(move |notice| {
+                    let _ = ready.send(match notice {
+                        blender::Notice::Ready(key) => Command::BlenderReady { key },
+                        blender::Notice::Captured { token, result } => {
+                            Command::BlenderCaptured { token, result }
+                        }
+                    });
                 }),
             )?;
             let _ = tx.send(Command::UseBlender(blender.clone()));

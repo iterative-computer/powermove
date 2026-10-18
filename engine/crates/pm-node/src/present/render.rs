@@ -218,6 +218,12 @@ pub enum Command {
     BlenderReady {
         key: Key,
     },
+    /// A snapshot's Blender frames are prepared, or why not
+    /// ([`super::blender::PreviewBlender::capture`]).
+    BlenderCaptured {
+        token: u64,
+        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
+    },
     Shutdown,
 }
 
@@ -396,6 +402,9 @@ pub struct Stats {
     pub snapshots: u64,
     pub snapshot_needs: u64,
     pub snapshot_failures: u64,
+    /// Snapshots whose Blender frames were sent to the Blender worker
+    /// first (today's `prepareFrame` before an async capture).
+    pub snapshot_blender: u64,
     pub snapshot_us_max: i64,
     pub snapshot_shared: u64,
     /// Compatibility rasters (the `raster` override, compatibility
@@ -543,6 +552,8 @@ struct Thread {
     generations: Generations,
     /// The paused viewer's Blender previews (document source).
     blender: Option<Arc<super::blender::PreviewBlender>>,
+    /// The last capture token handed to the Blender worker.
+    blender_token: u64,
     /// Shader fallback requests sent to each view's renderer and not yet
     /// answered (by request key), and the bands received so far.
     fallback: Fallback,
@@ -616,6 +627,7 @@ pub fn run(
         peaks,
         generations,
         blender: None,
+        blender_token: 0,
         fallback: Fallback::default(),
         snapshots: super::snapshot::SnapshotQueue::default(),
         segments: pm_bridge::shm::Segments::default(),
@@ -992,6 +1004,7 @@ impl Thread {
                     view.dirty = true;
                 }
             }
+            Command::BlenderCaptured { token, result } => self.blender_captured(token, result),
         }
         true
     }
@@ -2903,6 +2916,38 @@ impl Thread {
         );
     }
 
+    /// The Blender worker answered a snapshot's capture: the job renders
+    /// with the prepared surfaces, or fails with Blender's reason (never
+    /// with native shading in their place).
+    fn blender_captured(
+        &mut self,
+        token: u64,
+        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
+    ) {
+        match result {
+            Ok(frames) => {
+                if let Some(job) = self.snapshots.preparing_mut(token) {
+                    job.blender_done(frames, now());
+                }
+            }
+            Err(error) => {
+                let Some(job) = self.snapshots.take_preparing(token) else {
+                    return;
+                };
+                let (code, message) = match error {
+                    pm_blender::BlenderError::Missing(m) => (ErrorCode::BlenderMissing, m),
+                    pm_blender::BlenderError::Failed(m) => (ErrorCode::BlenderFailed, m),
+                    pm_blender::BlenderError::Cancelled => (
+                        ErrorCode::Cancelled,
+                        "The Blender frame was cancelled.".to_owned(),
+                    ),
+                };
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(&job, code, &message);
+            }
+        }
+    }
+
     /// What the views are doing, for the snapshot queue's scheduling.
     fn pressure(&self) -> super::snapshot::Pressure {
         let now = now();
@@ -2939,6 +2984,18 @@ impl Thread {
         let now = now();
         for job in self.snapshots.take_expired(now) {
             self.stats().snapshot_failures += 1;
+            if let Some(token) = job.preparing() {
+                // Blender did not finish within the snapshot's bound: stop it.
+                if let Some(blender) = &self.blender {
+                    blender.cancel_capture(token);
+                }
+                let message = format!(
+                    "Blender did not prepare the frame within {} s.",
+                    job.request.blender_wait_ms / 1_000
+                );
+                self.snapshot_error(&job, ErrorCode::Timeout, &message);
+                continue;
+            }
             let have = self.docs.get(&job.key).map(|d| d.revision());
             let message = match (job.min_revision, have) {
                 (Some(want), Some(have)) if have < want.get() => format!(
@@ -3016,19 +3073,13 @@ impl Thread {
             );
             return;
         };
-        // Today's capture of a Blender composition draws its prepared
-        // Blender frame or fails (`compositor.ts`, "The Blender frame is not
-        // prepared"); native shading is only for `draft3d` captures. The
-        // engine never answers with native shading labelled final.
-        if !draft_3d
+        // Today's capture of a Blender composition draws Blender's surfaces
+        // for its frame, never native shading labelled final; native
+        // shading is only for `draft3d` captures (thumbnails, posters).
+        let needs_blender = !draft_3d
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
-                .any(|u| u.feature == pm_render::Feature::Blender)
-        {
-            self.stats().snapshot_failures += 1;
-            self.snapshot_error(&job, ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED);
-            return;
-        }
+                .any(|u| u.feature == pm_render::Feature::Blender);
         let composer = gpu.composer_with(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
@@ -3041,7 +3092,7 @@ impl Thread {
             SnapshotClass::Idle => pm_protocol::frame::FramePurpose::Thumbnail,
             SnapshotClass::Sync | SnapshotClass::Async => pm_protocol::frame::FramePurpose::Export,
         };
-        let request = pm_render::RenderRequest {
+        let mut request = pm_render::RenderRequest {
             output_size: job.request.output_size,
             // Today's capture derives the scale from the composition size
             // (`W / comp.w`, `H / comp.h`).
@@ -3061,6 +3112,37 @@ impl Thread {
             sampling: pm_render::sampling::Sampling::Final,
             video_end: pm_render::VideoEnd::of(purpose),
         };
+        if needs_blender {
+            match blender_frames(
+                renderer,
+                doc,
+                &job,
+                &request,
+                self.blender.as_deref(),
+            ) {
+                BlenderFrames::Draw(surfaces) => {
+                    request.blender = pm_render::blender::BlenderRender::Final(surfaces);
+                }
+                BlenderFrames::Prepare(snapshots) => {
+                    let Some(blender) = self.blender.clone() else {
+                        return;
+                    };
+                    self.blender_token += 1;
+                    let token = self.blender_token;
+                    let mut job = job;
+                    job.start_blender(token, now());
+                    blender.capture(token, job.key, snapshots);
+                    self.stats().snapshot_blender += 1;
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                BlenderFrames::Fail(code, message) => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(&job, code, &message);
+                    return;
+                }
+            }
+        }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let rendered = renderer
             .render(
@@ -3452,6 +3534,127 @@ impl Thread {
             let _ = bridge.goodbye();
         }
     }
+}
+
+/// What a snapshot of a Blender composition draws.
+enum BlenderFrames {
+    /// The frame's surfaces, all prepared.
+    Draw(Arc<pm_blender::job::Surfaces>),
+    /// Blender renders these first (`blender_wait_ms` above 0).
+    Prepare(Vec<pm_blender::snapshot::Snapshot>),
+    Fail(ErrorCode, String),
+}
+
+/// Snapshot build failures the static check routes for exports
+/// (`pm_export::blender`): the engine cannot build these frames.
+fn blender_routed(why: &str) -> bool {
+    matches!(why, "imported models" | "model-group recipe parts")
+}
+
+/// The Blender frames a snapshot of `job` needs: planned exactly as the
+/// render plans them (sizes, times, shutter samples; today's
+/// `blenderFrameRequests`), with the composition's own settings, and drawn
+/// from this job's preparation or an earlier capture's (today's prepared
+/// frame). A synchronous capture (`blender_wait_ms` 0) of a frame nobody
+/// prepared fails with today's sentence.
+fn blender_frames(
+    renderer: &mut pm_render::Renderer,
+    doc: &super::document::ViewDocument,
+    job: &super::snapshot::SnapshotJob,
+    request: &pm_render::RenderRequest,
+    blender: Option<&super::blender::PreviewBlender>,
+) -> BlenderFrames {
+    use super::snapshot::BlenderPrep;
+    let composition = job.request.composition.as_str();
+    let snaps = match renderer.blender_snapshots(
+        doc.document(),
+        composition,
+        job.request.time,
+        request,
+        doc.media(),
+        false,
+        pm_render::blender::SnapshotOptions::default(),
+    ) {
+        Ok(snaps) => snaps,
+        Err(pm_render::RenderError::Unsupported(list)) => {
+            let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
+            let mut message = format!(
+                "The new engine cannot draw this frame: {}.",
+                reasons.join("; ")
+            );
+            message.truncate(2_000);
+            return BlenderFrames::Fail(ErrorCode::Unsupported, message);
+        }
+        Err(e) => {
+            return BlenderFrames::Fail(
+                ErrorCode::Internal,
+                format!("The snapshot could not be rendered: {e}"),
+            );
+        }
+    };
+    if let Some((frame, why)) = snaps.errors.first() {
+        return if blender_routed(why) {
+            BlenderFrames::Fail(
+                ErrorCode::Unsupported,
+                format!("The new engine cannot draw this frame: Blender-rendered 3D: {why}."),
+            )
+        } else {
+            BlenderFrames::Fail(
+                ErrorCode::BlenderFailed,
+                format!(
+                    "The Blender frame of {} at {} s could not be prepared: {why}",
+                    frame.composition(),
+                    frame.time
+                ),
+            )
+        };
+    }
+    if snaps.snapshots.is_empty() {
+        // No 3D object is active then: nothing for Blender to draw.
+        return BlenderFrames::Draw(Arc::new(pm_blender::job::Surfaces::new()));
+    }
+    let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
+    let own = match &job.blender {
+        Some(BlenderPrep::Ready(frames))
+            if hashes.iter().all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
+        {
+            Some(frames.clone())
+        }
+        _ => None,
+    };
+    let prepared = own.or_else(|| {
+        blender
+            .and_then(|b| b.prepared(&snaps.snapshots))
+            .map(Arc::new)
+    });
+    if let Some(frames) = prepared {
+        let mut surfaces = pm_blender::job::Surfaces::new();
+        for (hash, frame, layers) in frames.iter() {
+            if hashes.contains(hash) {
+                surfaces.insert(frame.clone(), layers.clone());
+            }
+        }
+        return BlenderFrames::Draw(Arc::new(surfaces));
+    }
+    if job.request.blender_wait_ms == 0 {
+        return BlenderFrames::Fail(ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED.to_owned());
+    }
+    if blender.is_none() {
+        return BlenderFrames::Fail(
+            ErrorCode::BlenderFailed,
+            "This engine has no Blender worker for snapshots.".to_owned(),
+        );
+    }
+    if job.blender_attempts >= super::snapshot::MAX_BLENDER_ATTEMPTS {
+        return BlenderFrames::Fail(
+            ErrorCode::BlenderFailed,
+            format!(
+                "The Blender frame changed {} times while Blender rendered it.",
+                job.blender_attempts
+            ),
+        );
+    }
+    BlenderFrames::Prepare(snaps.snapshots)
 }
 
 #[cfg(test)]

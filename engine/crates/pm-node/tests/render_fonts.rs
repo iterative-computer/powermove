@@ -312,6 +312,7 @@ mod child {
                         class: SnapshotClass::Sync,
                         view_seq: None,
                         wait_ms: 20_000,
+                        blender_wait_ms: 0,
                         uploaded: Vec::new(),
                     },
                 }),
