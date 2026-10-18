@@ -178,7 +178,11 @@ default". Shape (all members optional; `"auto"` and `null` mean absent):
 ```
 
 Members that cannot be used are reported (`interpret.<member>: <message>`)
-and read as absent.
+and read as absent. `frameRate` is also read in the exact form `[num, den]`
+(positive integers), which the motion lane's tests write; the sheet writes
+the float with `frameRateRational` beside it. The renderer has one reading
+of the member: `pm_render::retime::rate_override` and the video source's
+`interpret` both go through `pm_media::interpret::Interpretation`.
 
 Stills whose ICC profile is neither sRGB-equivalent nor Display P3
 (`pm_media::interpret::interpret_still`, which both the sheet and the
@@ -234,7 +238,12 @@ Routing below).
   with the source's siting as a progressive frame.
 - **Frame selection** follows section 5 rule 7 on presentation timestamps
   (VFR by timestamp, never by index) with amendment 2's tie-break; a
-  conformed rate shows presented frame n from n / rate.
+  conformed rate shows presented frame n from n / rate, by rule 7 on the
+  conformed grid (from an eighth of a frame before n / rate,
+  `retime::override_frame_at`; field-rate output uses the doubled grid),
+  clamped to the last frame. The source time is then not clamped to
+  `dur − 0.04`, as the motion lane's override reads it. An interpreted
+  video is never a pass-through candidate for export.
 - **Geometry.** Quarter-turn display rotations and the clean aperture are
   exact permutations and crops of the decoded picture, rotated as FFmpeg's
   autorotate rotates; other angles are unsupported.
