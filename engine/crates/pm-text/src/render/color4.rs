@@ -14,6 +14,16 @@
 //! (`Color::toSkColor4f`, sRGB, not clamped) is the same. Verified on the
 //! closure capture's `css-color` cases.
 
+// A port: Blink's arithmetic and constants are kept as written (the clamps
+// of `FromColorSpace` are `min(max())` in its order; its constants carry
+// their source precision).
+#![allow(
+    clippy::excessive_precision,
+    clippy::manual_clamp,
+    clippy::wrong_self_convention,
+    clippy::needless_range_loop
+)]
+
 use super::color::Rgba;
 
 // ---------------------------------------------------------------------
