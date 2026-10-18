@@ -10,6 +10,7 @@
 //! profiles pass through exactly). EXIF orientation is applied, as the
 //! browser applies it today.
 
+pub mod animation;
 pub mod exr;
 pub mod icc;
 pub mod imageio;
