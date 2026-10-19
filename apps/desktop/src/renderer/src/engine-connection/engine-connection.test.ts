@@ -300,9 +300,11 @@ describe('the engine connection', () => {
     const doc = stream();
     let id = 'P1';
     const loaded: number[] = [];
+    const loading = vi.fn();
     const session = new DocumentSession({
       connection, stream: doc, documentId: () => id, log: () => {},
       handlers: { message: () => {}, closed: () => {} },
+      onLoading: loading,
       onLoaded: () => loaded.push(port.requests('resync').length)
     });
     await session.start();
@@ -312,10 +314,12 @@ describe('the engine connection', () => {
     doc.emit({ revision: 6, baseRevision: 5 });
     await flush();
     expect(loaded).toEqual([]);
+    expect(loading).not.toHaveBeenCalled();
     // `PM.proj = PM.mkProject(…)`: the mirror loads another document. The
     // viewer is asked again only after the engine has it.
     id = 'P2';
     doc.emit({ revision: 7, origin: 'load' });
+    expect(loading).toHaveBeenCalledOnce(); // preserve UI time before asynchronous resync
     expect(loaded).toEqual([]);
     await flush();
     const last = port.requests('resync').at(-1)!.message as { body: { document: string } };
@@ -442,6 +446,35 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 4, state: 'stopped', hostTime: 5_000_000, mediaTime: ticks(2.5), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(5100)).toEqual({ time: 2.5, playing: false, ended: true });
     expect(driver.rate()).toBe(0);
+  });
+
+  it('wakes a headless session and replays Play without requiring a frame', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C');
+    const wake = vi.fn();
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake });
+    driver.setLoop([0.2, 1.2]);
+    driver.play(0.5);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(port.events('transport')).toHaveLength(0);
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    driver.refresh();
+    expect(session.route).toBe('pending'); // an untagged in-flight clock is not readiness
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    driver.refresh();
+    expect(session.route).toBe('engine');
+    expect(session.frames).toBe(0);
+    expect(port.events('transport').map(e => (e.message as any).body.command)).toEqual(['audioScrub', 'setLoop', 'seek', 'play']);
+    expect(port.events('viewer').at(-1)?.message).toMatchObject({ body: { headless: true, composition: 'C' } });
+    // Attaching presentation to the same session does not send another Play.
+    session.sendViewerState({ composition: 'C', viewSeq: 2, headless: false } as never);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', revision: 3 } } as never, 5));
+    driver.refresh();
+    expect(port.events('transport').filter(e => (e.message as any).body.command === 'play')).toHaveLength(1);
+    session.close(); connection.close('test complete');
   });
 
   it('wraps a looping line as contract 6 does', () => {

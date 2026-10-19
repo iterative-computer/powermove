@@ -1,6 +1,6 @@
-//! Uploading a Blender surface: its crop rectangle's premultiplied E values
-//! as `rgba32float` at 32-bit precision, `rgba16float` (rounded to nearest
-//! even) otherwise, top row first (an image, not a GL target).
+//! Blender surface uploads. Level 1 reproduces today's straight RGBA8
+//! ImageBitmap upload; level 2 uses premultiplied E as `rgba32float` or
+//! `rgba16float` (rounded to nearest even). Both are top row first.
 
 use pm_blender::DecodedSurface;
 use pm_protocol::color::Precision;
@@ -43,33 +43,108 @@ pub fn f16_bits(v: f32) -> u16 {
     sign | out as u16
 }
 
+/// Today's crop is measured after Canvas2D's 8-bit alpha conversion. The
+/// cropped ImageBitmap keeps straight RGB even where that alpha is zero.
+/// Uploads use normalized RGBA8 and premultiplied blending, exactly as the
+/// old compositor does. Do not apply this to compat level 2.
+pub(crate) fn crop(
+    surface: &DecodedSurface,
+    compatibility: bool,
+) -> pm_protocol::common::PixelRect {
+    if !compatibility {
+        return surface.crop;
+    }
+    let c = surface.crop;
+    let (mut x0, mut y0, mut x1, mut y1) = (c.width, c.height, 0, 0);
+    let mut any = false;
+    for y in 0..c.height {
+        for x in 0..c.width {
+            let i = ((y * c.width + x) * 4) as usize;
+            if code8(surface.straight[i + 3]) != 0 {
+                any = true;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if any {
+        let x = c.x + x0.saturating_sub(2);
+        let y = c.y + y0.saturating_sub(2);
+        pm_protocol::common::PixelRect {
+            x,
+            y,
+            width: (c.x + x1 + 2).min(c.x + c.width - 1) - x + 1,
+            height: (c.y + y1 + 2).min(c.y + c.height - 1) - y + 1,
+        }
+    } else {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }
+    }
+}
+
+fn compatibility_bytes(surface: &DecodedSurface, crop: pm_protocol::common::PixelRect) -> Vec<u8> {
+    let c = surface.crop;
+    let mut pixels = Vec::with_capacity((crop.width * crop.height * 4) as usize);
+    for y in crop.y..crop.y + crop.height {
+        for x in crop.x..crop.x + crop.width {
+            if x >= c.x && y >= c.y && x < c.x + c.width && y < c.y + c.height {
+                let i = (((y - c.y) * c.width + x - c.x) * 4) as usize;
+                pixels.extend(surface.straight[i..i + 4].iter().map(|v| code8(*v)));
+            } else {
+                pixels.extend([0; 4]);
+            }
+        }
+    }
+    pixels
+}
+
+fn code8(v: f32) -> u8 {
+    (v * 255.0).round_ties_even().clamp(0.0, 255.0) as u8
+}
+
 /// The texture of `surface`'s crop rectangle.
 pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     surface: &DecodedSurface,
     precision: Precision,
+    compatibility: bool,
 ) -> wgpu::TextureView {
-    let (w, h) = (surface.crop.width, surface.crop.height);
-    let (format, bytes, texel): (wgpu::TextureFormat, Vec<u8>, u32) = match precision {
-        Precision::Float32 => (
-            wgpu::TextureFormat::Rgba32Float,
-            surface
-                .pixels
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect(),
-            16,
-        ),
-        _ => (
-            wgpu::TextureFormat::Rgba16Float,
-            surface
-                .pixels
-                .iter()
-                .flat_map(|v| f16_bits(*v).to_le_bytes())
-                .collect(),
-            8,
-        ),
+    let crop = crop(surface, compatibility);
+    let (w, h) = (crop.width, crop.height);
+    let (format, bytes, texel): (wgpu::TextureFormat, Vec<u8>, u32) = if compatibility {
+        (
+            wgpu::TextureFormat::Rgba8Unorm,
+            compatibility_bytes(surface, crop),
+            4,
+        )
+    } else {
+        match precision {
+            Precision::Float32 => (
+                wgpu::TextureFormat::Rgba32Float,
+                surface
+                    .pixels
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+                16,
+            ),
+            _ => (
+                wgpu::TextureFormat::Rgba16Float,
+                surface
+                    .pixels
+                    .iter()
+                    .flat_map(|v| f16_bits(*v).to_le_bytes())
+                    .collect(),
+                8,
+            ),
+        }
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pm blender surface"),

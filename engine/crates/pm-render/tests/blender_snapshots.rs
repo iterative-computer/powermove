@@ -225,8 +225,34 @@ fn snapshots_equal_todays_render_snapshot() {
                             continue;
                         }
                     };
-                    let today = get(x, "snapshot").unwrap();
-                    let c: Comparison = compare(today, &snapshot.json);
+                    let mut today = get(x, "snapshot").unwrap().clone();
+                    // All captured fields remain compared. Add the new output
+                    // policy from the original layer compatibility, independently
+                    // of the snapshot builder's metadata.
+                    let compatible: Vec<Value> = get(&today, "objects")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|object| {
+                            let id = s(get(object, "id"));
+                            let layer = scope.layers().iter().find(|l| {
+                                pm_eval::node::string(pm_eval::node::member(Some(l), "id"))
+                                    .is_some_and(|name| name.to_string_lossy() == id)
+                            });
+                            let level2 = layer.is_some_and(|l| {
+                                pm_eval::node::to_number(pm_eval::node::member(Some(l), "compat"))
+                                    >= 2.0
+                            });
+                            (!level2).then(|| Value::String(id.into()))
+                        })
+                        .collect();
+                    if !compatible.is_empty() {
+                        today
+                            .as_object_mut()
+                            .unwrap()
+                            .insert("compatibilityLayers", Value::Array(compatible));
+                    }
+                    let c: Comparison = compare(&today, &snapshot.json);
                     // Assets: id, name, and bytes.
                     let want: Vec<(String, String, String)> = get(x, "assets")
                         .and_then(Value::as_array)

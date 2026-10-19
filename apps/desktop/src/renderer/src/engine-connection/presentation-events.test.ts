@@ -97,9 +97,9 @@ describe('the exclusive transport ("Use New Engine" on)', () => {
     sent.clear();
     transport.refresh();
     expect(sent.moves).toEqual([{ command: 'seek', time: 3 * 705_600_000, mode: 'exact' }]);
-    // Capability routing (scaffolding) still hands it over.
+    // An unsupported composition never hands the flag-on transport over.
     session = { closed: false, route: 'legacy', frames: 0, id: 5, clock: null, transport: () => {} } as never;
-    expect(transport.active()).toBe(false);
+    expect(transport.active()).toBe(true);
   });
 
   it('is unchanged when not exclusive', () => {

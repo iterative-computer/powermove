@@ -11,7 +11,11 @@ import type { VsyncHint } from "./VsyncHint";
 /**
  * The viewer's state, sent whenever it changes (section 18, view override).
  */
-export type ViewerState = { composition: CompositionId, 
+export type ViewerState = { 
+/**
+ * Keep the transport and audio alive without allocating or drawing a view.
+ */
+headless?: boolean | null, composition: CompositionId, 
 /**
  * Canvas size in device pixels.
  */

@@ -15,19 +15,15 @@
  * engine-blender.spec.ts does), and with the engine's native shading of the
  * same frame. Skipped without Blender 4.5 or newer.
  *
- * Asserted: the engine's pixels equal today's Blender surfaces composited
- * (the export gate's bound, engine-blender.spec.ts). Logged, not asserted:
- * the distance to today's capture itself, whose compositor draws the
- * surfaces about a pixel larger with a light edge (today's still export
- * does the same, docs/engine/blender.md). That difference is reported to
- * the orchestrator as a decision (docs/engine/bridge.md); it is not an
- * accepted difference.
+ * Asserted: the engine's capture JPEG matches today's capture JPEG at
+ * the Blender corpus bounds, including today's straight ImageBitmap
+ * upload and fringe. Raw-surface composites are diagnostics only.
  *
  * Run serially, one Electron at a time:
  *   pm-electron-lock bunx playwright test e2e/engine-blender-captures.spec.ts --workers=1
  *
  * PM_BLENDER_CAPTURE_KEEP=<dir> keeps today's, the engine's, and the
- * native captures as PNGs for a side-by-side.
+ * native capture files for a side-by-side.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -76,7 +72,7 @@ const decode = (session: LaunchedApp, url: string): Promise<number[]> => session
 }, url);
 
 /** Mean and 99th-percentile per-pixel max channel difference, and the share within `n`. */
-function compare(a: number[], b: number[], n = 8): { mean: number; p99: number; within: number } {
+function compare(a: number[], b: number[], n = 8): { mean: number; p99: number; within: number; max: number } {
   const diffs: number[] = [];
   let sum = 0;
   for (let i = 0; i < a.length; i += 4) {
@@ -86,7 +82,7 @@ function compare(a: number[], b: number[], n = 8): { mean: number; p99: number; 
     sum += m;
   }
   diffs.sort((x, y) => x - y);
-  return { mean: sum / diffs.length, p99: diffs[Math.floor(diffs.length * 0.99)]!, within: diffs.filter((d) => d <= n).length / diffs.length };
+  return { mean: sum / diffs.length, p99: diffs[Math.floor(diffs.length * 0.99)]!, max: diffs.at(-1)!, within: diffs.filter((d) => d <= n).length / diffs.length };
 }
 
 async function keep(name: string, url: string): Promise<void> {
@@ -126,8 +122,8 @@ test('an async capture of a Blender composition renders it with Blender first, a
       today = await decode(session, url);
       const recorded: { id: string; data: string }[] = await session.app.evaluate(() => (globalThis as any).__blenderSurfaces);
       expect(recorded.map((f) => f.id).sort()).toEqual(['ball', 'box']);
-      // Composited per layer over the black background, straight alpha, as
-      // today's compositor premultiplies them.
+      // An ideal premultiplied composite for diagnostics. Today's straight
+      // ImageBitmap upload differs at fringes; its capture is the reference.
       for (const f of recorded) {
         const file = path.join(root, `today-${f.id}.png`);
         await writeFile(file, Buffer.from(f.data, 'base64'));
@@ -198,19 +194,18 @@ test('an async capture of a Blender composition renders it with Blender first, a
     for (let i = 0; i < raw.length; i += 4) for (let c = 0; c < 3; c++) max = Math.max(max, Math.abs(raw[i + c]! - surfaces[i + c]!));
     const dir = process.env['PM_BLENDER_CAPTURE_KEEP'];
     if (dir) await writeFile(path.join(dir, 'surfaces.rgba'), Buffer.from(surfaces));
-    const ours = compare(engine, today), draft = compare(nativePx, today);
+    const ours = compare(engine, today, 2), draft = compare(nativePx, today);
     const oursToSurfaces = compare(engine, surfaces), todayToSurfaces = compare(today, surfaces), draftToSurfaces = compare(nativePx, surfaces);
     console.log(`Blender capture: ${result.ms.toFixed(0)} ms through the engine's Blender stage`);
-    console.log(`  against today's capture: engine mean ${ours.mean.toFixed(2)} CV, p99 ${ours.p99} CV, ${(100 * ours.within).toFixed(2)}% within 8 CV; native shading mean ${draft.mean.toFixed(2)} CV, p99 ${draft.p99} CV`);
+    console.log(`  against today's capture: engine mean ${ours.mean.toFixed(2)} CV, p99 ${ours.p99} CV, ${(100 * ours.within).toFixed(3)}% within 2 CV, max ${ours.max} CV; native shading mean ${draft.mean.toFixed(2)} CV, p99 ${draft.p99} CV`);
     console.log(`  against today's Blender surfaces composited: engine mean ${oursToSurfaces.mean.toFixed(2)} CV, p99 ${oursToSurfaces.p99} CV, ${(100 * oursToSurfaces.within).toFixed(2)}% within 8 CV; today's capture mean ${todayToSurfaces.mean.toFixed(2)} CV, p99 ${todayToSurfaces.p99} CV, ${(100 * todayToSurfaces.within).toFixed(2)}% within 8 CV; native shading mean ${draftToSurfaces.mean.toFixed(2)} CV`);
     console.log(`  the engine's pixels before JPEG against today's Blender surfaces composited: ${(100 * exact.within).toFixed(3)}% within 2 CV, max ${max} CV`);
     console.log(`  render.snapshotAsync and the prepared sync capture against the engine's capture: mean ${asynced.mean.toFixed(2)} and ${sync.mean.toFixed(2)} CV`);
-    // The engine's capture is Blender's frame: today's Blender surfaces
-    // composited (the export gate's bound: today's 8-bit dithered surfaces
-    // against the pinned 16-bit ones), and far from native shading.
-    expect(exact.within).toBeGreaterThanOrEqual(0.999);
-    expect(max).toBeLessThanOrEqual(4);
-    expect(draftToSurfaces.mean).toBeGreaterThan(oursToSurfaces.mean * 3);
+    // Today's capture, including its straight ImageBitmap upload and fringe,
+    // is the reference. Keep the existing Blender corpus bounds.
+    expect(ours.within).toBeGreaterThanOrEqual(0.999);
+    expect(ours.max).toBeLessThanOrEqual(4);
+    expect(draft.mean).toBeGreaterThan(ours.mean * 3);
     expect(asynced.mean).toBeLessThanOrEqual(1);
     expect(sync.mean).toBeLessThanOrEqual(1);
     expect(session.diagnostics.pageErrors).toEqual([]);

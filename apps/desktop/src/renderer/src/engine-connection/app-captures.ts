@@ -21,6 +21,7 @@
  * behind the paused viewer's Rendered shading), then captured. `snapshot`
  * draws a frame an earlier capture prepared, or fails with today's error.
  */
+import { engineBlenderCapture } from '../core/scene3d/rendering';
 import type { PMRegistry } from '../legacy/registry';
 
 export type CaptureEngine = {
@@ -56,7 +57,8 @@ export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () =>
       PM.pause?.();
       PM.agentFrameCapture = true;
       try {
-        return await engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true });
+        const capture = () => engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true });
+        return await (usesBlender(PM.proj) ? engineBlenderCapture(PM, capture) : capture());
       } finally {
         PM.agentFrameCapture = false;
         if (wasPlaying) PM.play?.();

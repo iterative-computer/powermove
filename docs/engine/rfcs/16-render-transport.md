@@ -358,3 +358,38 @@ TypeScript and rebuild their addons when this lands.
   exports still route as before (export lane).
 - **Compat level 2 text** needs level 2 fonts on the render thread
   (`TextFonts::level2`); the app creates no level 2 layers yet.
+
+## Headless playback (bridge continuation, 2026-10-18)
+
+`ViewerState.headless?: boolean | null` keeps the session's composition,
+transport and pm-audio device alive without a presentation pool or draws.
+Absent/false retains presentation. A headless clock is emitted only after
+the document and media are ready to accept transport; its envelope carries
+the document revision. Every transition to ready publishes a clock, including
+paused sessions. Each paused headless document update also refreshes that
+clock at the new revision, even if its route remains ready. Headless playback
+still publishes levels and periodic clocks.
+
+The renderer retains one document session per window. A presentation channel
+attaches to it and sends normal viewer states; closing the channel sends a
+headless state. Opening mid-play allocates presentation against the existing
+clock without a new Play, seek, epoch or audio device. Play/seek/snapshot with
+no viewer lazily creates this session and replays pending transport once ready.
+A document load synchronizes the UI time before resyncing, replacing any
+queued seek from the home screen. The protocol build changes; regenerate
+TypeScript and rebuild the addons.
+
+Headless playback carries playback pressure for idle snapshots but has no draw
+schedule against which foreground async captures should wait. A Blender
+capture's `blenderWaitMs` is one total wall-clock deadline across all replans;
+finishing an attempt resets only the ordinary render wait. Absence of its
+worker always yields a capture error. Native async Blender captures publish
+scene3d busy/error state around preparation, as today's capture does. Font
+bounds may be unavailable until font loading finishes; undefined font offsets
+are retried rather than cached for the revision/time.
+
+The native presenter retains one latest Play/play-around intent while its
+composition or media is pending. It replays that command when ready; Pause
+clears it. A pending-media transition during a run preserves its rate and
+resumes on readiness. This closes the race between an imported audio layer,
+a queued Play, and the renderer's still-current earlier readiness sample.
