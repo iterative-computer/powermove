@@ -437,6 +437,27 @@ impl Level2 {
             .box_height
             .filter(|h| h.is_finite() && *h > 0.0 && d.paragraph.unwrap_or(false));
         let mut out = Level2Layout::default();
+        if text.is_empty() {
+            // Parley gives an empty layout an internal 0..1 sentinel line.
+            // Keep its font metrics, but expose only the authored empty
+            // source, one caret and no sentinel glyphs or units.
+            let mut line = Line {
+                height: line_height_floor,
+                ..Default::default()
+            };
+            if let Some(empty) = layout.lines().next() {
+                line.height = (empty.metrics().line_height as f64).max(line_height_floor);
+                line.baseline = empty.metrics().baseline as f64;
+                for run in empty.runs() {
+                    line.ascent = line.ascent.max(run.font_metrics().ascent as f64);
+                    line.descent = line.descent.max(run.font_metrics().descent as f64);
+                }
+            }
+            out.height = line.height;
+            out.lines.push(line);
+            out.caret.push(vec![Boundary { index: 0, x: 0.0 }]);
+            return out;
+        }
         let mut top = 0.0f64;
         let (mut char_index, mut word_index) = (0usize, 0usize);
         for (row, line) in layout.lines().enumerate() {

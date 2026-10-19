@@ -21,6 +21,34 @@ fn copy(fonts: &Fonts) -> Fonts {
     }
 }
 
+#[test]
+fn empty_text_shapes_after_nonempty_text_with_one_caret_and_no_sentinel() {
+    let mut fonts = Fonts::new();
+    fonts.add("Sans", 400, "sans", FontBytes::new(font(400, 500, 400)), 0);
+    let mut measure = CompatMeasure::new(fonts);
+    for text in ["", "abc", "", "\n", ""] {
+        let d = TextContent {
+            size: Some(8.0),
+            leading: Some(1.25),
+            ..content(text, "Sans", 400.0)
+        };
+        let layout = measure.level2(&d, &[]).unwrap().layout;
+        if text.is_empty() {
+            assert_eq!(layout.lines.len(), 1);
+            assert_eq!((layout.lines[0].start, layout.lines[0].end), (0, 0));
+            assert_eq!(layout.lines[0].text, "");
+            assert_eq!(layout.width, 0.0);
+            assert!(layout.height >= 10.0);
+            assert!(layout.runs.is_empty());
+            assert!(layout.units.characters.is_empty());
+            assert_eq!(layout.missing_glyphs, 0);
+            assert_eq!(layout.caret.len(), 1);
+            assert_eq!(layout.caret[0].len(), 1);
+            assert_eq!((layout.caret[0][0].index, layout.caret[0][0].x), (0, 0.0));
+        }
+    }
+}
+
 /// What a fresh collection (today's per-request `Level2::new()`) lays out.
 fn fresh(fonts: &Fonts, d: &TextContent, spans: &[StyleSpan]) -> Level2Layout {
     let mut compat = Compat::new(copy(fonts));
