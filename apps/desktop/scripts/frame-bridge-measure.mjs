@@ -179,7 +179,15 @@ function tracerRuns() {
     // A/V sync and cadence at each rate, idle and under the gate load.
     { name: 'tracer-playback-engine-30', ...playback, app: true, tracer: true, mode: 'tracer', load: false, synthetic: { ...s500, dur: 90 }, startS: 0, env: doc },
     { name: 'tracer-playback-engine-25-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25, env: doc },
-    { name: 'tracer-playback-engine-23976-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc }
+    { name: 'tracer-playback-engine-23976-load', ...playback, app: true, tracer: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001, env: doc },
+    // Today's WebGL viewer on the same projects: the cadence bar is today's
+    // irregular intervals or fewer at each rate (amendment 22, perf.md).
+    { name: 'tracer-playback-today-30', ...playback, app: true, tracer: true, mode: 'today', load: false, synthetic: { ...s500, dur: 90 }, startS: 0 },
+    { name: 'tracer-playback-today-25', ...playback, app: true, tracer: true, mode: 'today', load: false, synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25 },
+    { name: 'tracer-playback-today-23976', ...playback, app: true, tracer: true, mode: 'today', load: false, synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001 },
+    { name: 'tracer-playback-today-30-load', ...playback, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, dur: 90 }, startS: 0 },
+    { name: 'tracer-playback-today-25-load', ...playback, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fps: 25, dur: 90 }, startS: 0, fps: 25 },
+    { name: 'tracer-playback-today-23976-load', ...playback, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001 }
   ];
 }
 const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
@@ -567,6 +575,8 @@ function avSync(raw, presented, ctx, fps) {
   const out = [];
   /** Frames outside ±10 ms, by the main-process load event near them. */
   const outsideNear = {};
+  /** Every frame's signed offset, by the load event near it (diagnostics). */
+  const nearOffsets = {};
   for (const p of presented) {
     const host = ctx.traceToHost(p.presentUs);
     let lo = 0;
@@ -579,13 +589,13 @@ function avSync(raw, presented, ctx, fps) {
     const sample = samples[Math.max(0, lo - 1)];
     const offset = (host - hostOfMedia(sample, p.k * frameTicks)) / 1000;
     out.push(offset);
-    if (Math.abs(offset) > 10) {
-      const near = nearLoad(raw, host);
-      outsideNear[near] = (outsideNear[near] ?? 0) + 1;
-    }
+    const near = nearLoad(raw, host);
+    (nearOffsets[near] ??= []).push(offset);
+    if (Math.abs(offset) > 10) outsideNear[near] = (outsideNear[near] ?? 0) + 1;
   }
   return {
     outsideNear,
+    offsetNearMs: Object.fromEntries(Object.entries(nearOffsets).map(([k, xs]) => [k, { ...dist(xs, 2), p5: +pct(xs, 0.05).toFixed(2) }])),
     offsetMs: dist(out, 2),
     absOffsetMs: dist(out.map(Math.abs), 2),
     p5Ms: out.length ? +pct(out, 0.05).toFixed(2) : null,
