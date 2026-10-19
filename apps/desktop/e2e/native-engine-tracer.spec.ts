@@ -36,8 +36,7 @@ const status = (page: Page): Promise<Status> => page.evaluate(() => (window as a
 async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boolean } = {}): Promise<string> {
   return page.evaluate((extra) => {
     const PM = (window as any).PM;
-    // A bezier path mask (still routed to the current engine: the new
-    // engine draws parametric masks, not path masks).
+    // A bezier path mask (drawn by the engine since compclose).
     const pathMask = (PM: any, comp: any) => {
       const P = PM.P;
       const vertex = (i: number, x: number, y: number) => ({ id: `mv${i}`, p: { x: P(x), y: P(y), inX: P(0), inY: P(0), outX: P(0), outY: P(0) } });
@@ -293,9 +292,9 @@ test.describe('Use New Engine: the tracer bullet', () => {
 
   test('a composition the engine cannot draw names why on the stage and keeps the transport on the engine', async ({ session }) => {
     const { page } = session;
-    await openTracer(session, { pathMask: true });
-    await waitRoute(page, 'legacy');
-    expect((await status(page)).routeReason).toMatch(/path masks/);
+    await openTracer(session);
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
     /** The stage: the current engine's canvas, the engine's state line. */
     const stage = () => page.evaluate(() => {
       const V = (window as any).PM.Kernel.services.get('viewer');
@@ -303,9 +302,21 @@ test.describe('Use New Engine: the tracer bullet', () => {
       const box = line?.getBoundingClientRect();
       return { legacy: V.el.style.visibility as string, status: line?.textContent ?? null, role: line?.getAttribute('role') ?? null, visible: !!box && box.width > 0 && box.height > 0 };
     });
+    /** A project color setting this engine does not know (a project saved
+     *  by a newer app, say): one of the remaining `pm_render::unsupported`
+     *  reasons, which the current engine ignores. */
+    const unknownColor = () => page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.hist.do('Color', () => { PM.proj.color = { mode: 'unknown-to-this-engine' }; });
+      PM.touch(); PM.bus.emit('project');
+    });
+    const why = /cannot draw this composition yet: .*project color/;
+    await unknownColor();
+    await waitRoute(page, 'legacy');
+    expect((await status(page)).routeReason).toMatch(/project color/);
     // Amendment 21: nothing hands the viewer to the current engine. Its
     // canvas stays hidden and the stage says what the engine cannot draw.
-    await expect.poll(async () => (await stage()).status, { timeout: 20_000 }).toMatch(/cannot draw this composition yet: .*path masks/);
+    await expect.poll(async () => (await stage()).status, { timeout: 20_000 }).toMatch(why);
     expect(await stage()).toMatchObject({ legacy: 'hidden', role: 'status', visible: true });
     expect(await enginePresenting(page)).toBe(false);
     // The transport and its clock stay with the engine: Play plays.
@@ -317,35 +328,34 @@ test.describe('Use New Engine: the tracer bullet', () => {
     expect((await stage()).legacy).toBe('hidden');
     await page.evaluate(() => (window as any).PM.pause());
     await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('stopped');
-    // Removing the path mask brings engine frames back and clears the line;
-    // adding one says so again.
+    // Removing the setting brings engine frames back and clears the line;
+    // setting it again says so again.
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      const box = PM.proj.layers.find((l: any) => l.id === 'box');
-      (window as any).__tracerPathMask = structuredClone(box.masks[0]);
-      PM.hist.do('Remove mask', () => { box.masks = []; });
-      PM.touch();
+      PM.hist.do('Color', () => { delete PM.proj.color; });
+      PM.touch(); PM.bus.emit('project');
     });
     await waitRoute(page, 'engine');
     await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
     // Cleared once that frame is on screen (the canvas shows it a few
     // animation frames after the GPU finished it).
     await expect.poll(async () => (await stage()).status, { timeout: 5_000 }).toBeNull();
-    await page.evaluate(() => {
-      const PM = (window as any).PM;
-      PM.hist.do('Path mask', () => {
-        const bar = PM.proj.layers.find((l: any) => l.id === 'bar');
-        bar.masks = [(window as any).__tracerPathMask];
-      });
-      PM.touch();
-    });
+    await unknownColor();
     await waitRoute(page, 'legacy');
-    expect((await status(page)).routeReason).toMatch(/path masks/);
     await expect.poll(() => enginePresenting(page)).toBe(false);
-    await expect.poll(async () => (await stage()).status).toMatch(/cannot draw this composition yet: .*path masks/);
+    await expect.poll(async () => (await stage()).status).toMatch(why);
     expect((await stage()).legacy).toBe('hidden');
     const errors = session.diagnostics.console.filter((c) => c.type === 'error');
     expect(errors.map((e) => e.text)).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('path masks are drawn by the engine', async ({ session }) => {
+    const { page } = session;
+    await openTracer(session, { pathMask: true });
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').stage.querySelector('[data-engine-status]'))).toBeNull();
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
