@@ -1303,6 +1303,7 @@ pub fn events() -> Vec<Envelope> {
                 data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
                 size: None,
                 uv: None,
+                crop: None,
             },
         ))),
         event(Event::Compat(crate::snapshot::CompatMessage::Forget {
@@ -1320,6 +1321,7 @@ pub fn events() -> Vec<Envelope> {
                 source: crate::snapshot::CompatSource::RasterOverride,
                 scale: 2.0,
                 revision: rev(42),
+                crop: None,
             },
         ))),
         event(Event::Compat(crate::snapshot::CompatMessage::Reuse {
@@ -1332,6 +1334,7 @@ pub fn events() -> Vec<Envelope> {
             },
             scale: 2.0,
             revision: rev(43),
+            crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
         })),
         event(Event::Compat(crate::snapshot::CompatMessage::Needs {
             revision: rev(43),
@@ -1341,6 +1344,7 @@ pub fn events() -> Vec<Envelope> {
                 time: ticks(705_600_000),
                 source: crate::snapshot::CompatSource::RasterOverride,
                 scale: 2.0,
+                crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
             }],
         })),
         event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {

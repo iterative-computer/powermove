@@ -43,7 +43,13 @@ export const TICKS_PER_SECOND = 705_600_000;
 
 const LAZY = Symbol('powermove.lazyRaster');
 
-type LazyMark = { layer: unknown; scale: number; time: number; crop: unknown };
+type LazyMark = {
+  layer: unknown; scale: number; time: number; crop: unknown;
+  /** The wrapper wrote a field, or read the canvas (it may have drawn on it). */
+  touched: boolean;
+  /** The engine raster the fields came from, once read. */
+  loaded: () => any;
+};
 
 export interface RasterCompatOptions {
   /** Whether `fn` is the base raster (the kernel's own `raster` registration). */
@@ -52,16 +58,22 @@ export interface RasterCompatOptions {
   chain: () => Raster | null;
   /** `fn` runs when the chain changes (`kernel.services.onChange`). */
   onChainChange: (fn: () => void) => Disposable;
-  /** The engine's raster of a layer object (today's surface shape), or null. */
-  engineRaster: (layer: unknown, scale: number, time: number) => any;
+  /** The engine's raster of a layer object (today's surface shape, with
+   *  today's crop window applied: `sourceWindow` for text, `uv` for shapes), or null. */
+  engineRaster: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => any;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
   log?: (message: string) => void;
 }
 
+/** Today's crop window (`legacy/gl/shape-raster-window.ts` `RasterWindow`). */
+export type RasterWindowLike = { x: number; y: number; width: number; height: number };
+
 export interface RasterCompatHandle {
   /** True while the chain runs for the engine: the base returns lazy engine rasters. */
   readonly producing: boolean;
+  /** Whether a wrapper is installed (the chain is not the base). */
+  wrapped(): boolean;
   /** The base raster while producing. */
   base(args: Parameters<Raster>): any;
   /** Answers the transport's needs while a wrapper is registered. */
@@ -111,8 +123,11 @@ export function snapshotLayer(PM: LegacyPM, composition: string, layer: string, 
   }
 }
 
+/** The canvas fields of a surface: reading one hands out the pixels. */
+const CANVAS_KEYS = new Set<PropertyKey>(['cv', 'canvas', 'bitmap']);
+
 /** A surface whose fields come from `load` on first read. */
-function lazySurface(mark: LazyMark, load: () => any): any {
+function lazySurface(mark: Omit<LazyMark, 'touched' | 'loaded'>, load: () => any): any {
   let done = false;
   let value: any = null;
   const get = () => {
@@ -122,10 +137,12 @@ function lazySurface(mark: LazyMark, load: () => any): any {
     }
     return value;
   };
+  const full: LazyMark = { ...mark, touched: false, loaded: () => (done ? value : null) };
   return new Proxy(Object.create(null), {
     get(_target, key) {
-      if (key === LAZY) return mark;
+      if (key === LAZY) return full;
       const surface = get();
+      if (CANVAS_KEYS.has(key)) full.touched = true;
       return surface == null ? undefined : surface[key];
     },
     has(_target, key) {
@@ -146,10 +163,34 @@ function lazySurface(mark: LazyMark, load: () => any): any {
     },
     set(_target, key, v) {
       const surface = get();
+      full.touched = true;
       if (surface != null) surface[key] = v;
+      return true;
+    },
+    defineProperty(_target, key, descriptor) {
+      const surface = get();
+      full.touched = true;
+      if (surface != null) Object.defineProperty(surface, key, descriptor);
+      return true;
+    },
+    deleteProperty(_target, key) {
+      const surface = get();
+      full.touched = true;
+      if (surface != null) delete surface[key];
       return true;
     }
   });
+}
+
+/** Today's quad sampling of a result (`contentQuad`): `uv` through the
+ *  vertex shader, then `sourceWindow` in the bitmap's pixels (the
+ *  draw-window program) — one `[ox, oy, sx, sy]` over the uploaded raster. */
+export function resultUv(result: any, width: number, height: number): [number, number, number, number] | undefined {
+  const finite = (v: unknown, n: number) => Array.isArray(v) && v.length === n && v.every((x: unknown) => typeof x === 'number' && Number.isFinite(x));
+  const uv: [number, number, number, number] = finite(result?.uv, 4) ? result.uv : [0, 0, 1, 1];
+  if (!finite(result?.sourceWindow, 4) || !(width > 0 && height > 0)) return finite(result?.uv, 4) ? uv : undefined;
+  const [x, y, w, h] = result.sourceWindow as [number, number, number, number];
+  return [(uv[0] * w - x) / width, (uv[1] * h - y) / height, (uv[2] * w) / width, (uv[3] * h) / height];
 }
 
 let gl: WebGL2RenderingContext | null | undefined;
@@ -230,10 +271,12 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const handle: RasterCompatHandle = {
     get producing() { return producing > 0; },
 
+    wrapped,
+
     base([layer, scale = 1, time, , crop]: Parameters<Raster>): any {
       const s = Number(scale) || 1;
       const t = Number(time ?? PM?.time ?? 0);
-      const load = () => options.engineRaster(layer, s, t);
+      const load = () => options.engineRaster(layer, s, t, crop ?? undefined);
       // A captions layer between cues is null today: decide it now.
       if (layer?.type === 'captions') return load();
       return lazySurface({ layer, scale: s, time: t, crop }, load);
@@ -250,14 +293,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (layer.type === 'captions' && PM?.captionsHidden) return { kind: 'native' };
       const time = Number(need.time) / TICKS_PER_SECOND;
       const scale = Number(need.scale);
+      // Today's preview crop window, as the engine planned it for a viewer
+      // frame (pm_render::compat_crop); exports and snapshots have none.
+      const crop: RasterWindowLike | undefined = need.crop ? { x: need.crop.x, y: need.crop.y, width: need.crop.width, height: need.crop.height } : undefined;
       let result: any;
       producing++;
       try {
         // `uploaded`: today the compositor's lookup of a raster it holds by
         // key; here none is held (the engine keeps the pixels), so it answers
-        // undefined, a lookup miss. `crop`: today's preview-only viewport
-        // window; the engine draws whole rasters, as today's exports do.
-        result = chain(layer, scale, time, NOT_UPLOADED, undefined);
+        // undefined, a lookup miss.
+        result = chain(layer, scale, time, NOT_UPLOADED, crop);
       } catch (error) {
         // Today the exception leaves the compositor's draw and fails the
         // frame; here it fails the answer (render-transport.ts reports it,
@@ -269,9 +314,12 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         producing--;
       }
       const mark: LazyMark | undefined = result?.[LAZY];
-      if (mark && mark.layer === layer && mark.scale === scale && mark.crop === undefined) return { kind: 'native' };
+      // The base itself, for this layer, density and window, untouched: the
+      // engine draws it. A wrapper that wrote a field or took its canvas
+      // (it may have drawn on it) gets its result drawn as returned.
+      if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
       if (result == null) return TRANSPARENT;
-      const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}`;
+      const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
       const ownKey = typeof result.key === 'string' && result.key ? result.key : '';
       if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
       const source = canvasOf(result);
@@ -282,7 +330,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const h = Number(result.h) || pixels.height / scale;
       const centered = layer.type === 'shape' && !layer.d?.paths?.length;
       const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
-      const uv = Array.isArray(result.uv) && result.uv.length === 4 && result.uv.every((v: unknown) => Number.isFinite(v)) ? result.uv as [number, number, number, number] : undefined;
+      const uv = resultUv(result, pixels.width, pixels.height);
       const key = (ownKey || `powermove:${++serial}:${revision}`).slice(0, 512);
       if (!answerOptions?.fresh) posted.set(tag, key);
       if (posted.size > 8192) posted.clear();

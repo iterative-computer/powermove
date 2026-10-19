@@ -64,7 +64,9 @@ pub trait CompatRasters: Send + Sync {
     /// Whether the session has a producer for `source`.
     fn producing(&self, source: CompatSource) -> bool;
     /// The answer for `layer` of `composition` at composition time `time`
-    /// (seconds), drawn at `scale` output pixels per layer pixel.
+    /// (seconds), drawn at `scale` output pixels per layer pixel, for the
+    /// window `crop` of its raster (today's preview crop,
+    /// `crate::compat_crop`; `None`: the whole raster).
     fn answer(
         &self,
         composition: &str,
@@ -72,6 +74,7 @@ pub trait CompatRasters: Send + Sync {
         time: f64,
         scale: f64,
         source: CompatSource,
+        crop: Option<pm_protocol::common::PixelRect>,
     ) -> CompatAnswer;
 }
 

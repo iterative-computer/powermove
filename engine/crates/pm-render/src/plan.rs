@@ -209,6 +209,8 @@ pub struct Build<'r> {
     /// producer draws, and what the frame still needs from it.
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     pub compat_missing: Vec<crate::compat::CompatNeed>,
+    /// [`BuildOptions::preview`].
+    preview: Option<crate::compat_crop::PreviewWindow>,
     /// Layer draws kept from the last frame (`crate::reuse`): the
     /// interactive viewer's renders only.
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
@@ -249,6 +251,10 @@ pub struct BuildOptions {
     pub shader_fallback: bool,
     /// The end-of-clip padding of video sources ([`VideoEnd`]).
     pub video_end: VideoEnd,
+    /// The viewer's visible window when this is a viewer frame of the open
+    /// root composition (today's preview source clipping, which a `raster`
+    /// override sees as its `crop` argument: `crate::compat_crop`).
+    pub preview: Option<crate::compat_crop::PreviewWindow>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -403,6 +409,7 @@ pub(crate) fn build_blender<'r>(
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
+        preview: options.preview,
         reuse,
     };
     let mut scope = Scope::new(ev, root_comp, project);
@@ -1681,6 +1688,14 @@ fn compat_quad<'d>(
     }
     let world = scaled_world(scope, layer, time, scale)?;
     let raster_scale = crate::text::continuous_raster_scale(&world);
+    // Today's preview source clipping: the window the compositor passes to
+    // `PM.raster` in a viewer frame, or no raster call at all.
+    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale)? {
+        crate::compat_crop::CropPlan::Outside => return Ok(Some(None)),
+        crate::compat_crop::CropPlan::Solid => return Ok(None),
+        crate::compat_crop::CropPlan::Full => None,
+        crate::compat_crop::CropPlan::Crop(window) => Some(window),
+    };
     let comp_id = scope.comp.id().to_string_lossy();
     let id = js::layer_id(layer);
     match compat.answer(
@@ -1689,6 +1704,7 @@ fn compat_quad<'d>(
         time,
         raster_scale,
         CompatSource::RasterOverride,
+        crop,
     ) {
         CompatAnswer::Native => Ok(None),
         CompatAnswer::Raster(raster) => {
@@ -1711,6 +1727,7 @@ fn compat_quad<'d>(
                 time: crate::compat::ticks_of(time),
                 source: CompatSource::RasterOverride,
                 scale: raster_scale,
+                crop,
             };
             if !b.compat_missing.contains(&need) {
                 b.compat_missing.push(need);
@@ -1718,6 +1735,102 @@ fn compat_quad<'d>(
             Ok(Some(None))
         }
     }
+}
+
+/// Today's preview source clipping of a layer `PM.raster` draws
+/// (`nativeContentQuad`, `canClipPreviewSources`): only in a viewer frame
+/// of the open root composition, for a plain 2D text or shape layer (no
+/// paths, renderable effects, masks, track matte, or transitions; text
+/// without animators, styles, or typography anchoring). Anything else is
+/// drawn from the whole raster, as today.
+#[allow(clippy::too_many_arguments)]
+fn preview_crop<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+    raster_scale: f64,
+) -> JsResult<crate::compat_crop::CropPlan> {
+    use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
+    let Some(window) = b.preview else {
+        return Ok(CropPlan::Full);
+    };
+    if !matches!(ty, "text" | "shape") || !scope.comp.at_root() || b.precomp_depth > 0 {
+        return Ok(CropPlan::Full);
+    }
+    let d = node::member(Some(layer), "d");
+    let listed = |n: Option<&Node>, key: &str| {
+        node::member(n, key).is_some_and(|v| match v.kind() {
+            pm_model::NodeKind::Array(items) => !items.is_empty(),
+            _ => false,
+        })
+    };
+    if listed(d, "paths")
+        || listed(Some(layer), "masks")
+        || node::truthy(node::member(Some(layer), "matteSource"))
+        || node::truthy(node::member(Some(layer), "transitionIn"))
+        || node::truthy(node::member(Some(layer), "transitionOut"))
+        || scope.has_renderable_effects(layer, time)?
+    {
+        return Ok(CropPlan::Full);
+    }
+    // A 3D layer's plane: drawn from the whole raster here (see
+    // docs/engine/extensions-compat.md, "Crop").
+    if scope.is_3d_layer(layer)? {
+        return Ok(CropPlan::Full);
+    }
+    let mut visible = vector_world(scope, layer, time, scale)?;
+    visible[4] -= window.x;
+    visible[5] -= window.y;
+    if ty == "shape" {
+        let content = scope.ev.resolve_content(scope.comp, layer, time)?;
+        let (shape, _) = crate::vector::shape_content(&content);
+        let color = js::string(js::get(&content, "color"));
+        let hex6 = color.len() == 7
+            && color.starts_with('#')
+            && color[1..].bytes().all(|c| c.is_ascii_hexdigit());
+        let plain_rect = matches!(js::get(&content, "shape"), pm_eval::JsValue::String(s) if s.to_string_lossy() == "rect")
+            && hex6;
+        let facts = ShapeFacts {
+            w: shape.w,
+            h: shape.h,
+            stroke: shape.stroke,
+            plain_rect,
+            corner_inset: pm_vector::corner::corner_inset(&shape.corners()),
+        };
+        return Ok(crate::compat_crop::shape_plan(
+            &facts,
+            raster_scale,
+            &visible,
+            window.width,
+            window.height,
+        ));
+    }
+    if listed(d, "animators")
+        || listed(d, "styles")
+        || node::truthy(node::member(d, "fontAnchorBounds"))
+    {
+        return Ok(CropPlan::Full);
+    }
+    let Some(fonts) = b.text.as_deref_mut().and_then(|t| t.fonts.as_deref_mut()) else {
+        return Ok(CropPlan::Full);
+    };
+    let placed = scope.text_raster(layer, time, fonts.measure())?;
+    let g = TextGeometry::at(
+        placed.w,
+        placed.h,
+        placed.anchor_x,
+        placed.anchor_y,
+        raster_scale,
+    );
+    Ok(crate::compat_crop::text_plan(
+        &g,
+        &visible,
+        window.width,
+        window.height,
+    ))
 }
 
 /// The quad of a planned shader or extension fragment layer: `{tex, w, h,

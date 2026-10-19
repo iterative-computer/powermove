@@ -9,7 +9,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use pm_protocol::color::Precision;
-use pm_protocol::common::Size;
+use pm_protocol::common::{PixelRect, Size};
 use pm_render::compat::{CompatAnswer, CompatFormat, CompatRaster, CompatRasters, CompatSource};
 use pm_render::{MapResolver, RenderError, RenderRequest, Renderer};
 use serde_json::{Value, json};
@@ -23,6 +23,7 @@ struct Producer {
     producing: bool,
     answer: CompatAnswer,
     asked: Mutex<Vec<(String, String, f64, f64)>>,
+    crops: Mutex<Vec<Option<PixelRect>>>,
 }
 
 impl Producer {
@@ -31,6 +32,7 @@ impl Producer {
             producing,
             answer,
             asked: Mutex::new(Vec::new()),
+            crops: Mutex::new(Vec::new()),
         })
     }
 }
@@ -46,7 +48,9 @@ impl CompatRasters for Producer {
         time: f64,
         scale: f64,
         _source: CompatSource,
+        crop: Option<PixelRect>,
     ) -> CompatAnswer {
+        self.crops.lock().unwrap().push(crop);
         self.asked
             .lock()
             .unwrap()
@@ -184,4 +188,129 @@ fn rasters_are_premultiplied_canvas_values_with_the_layer_s_opacity_applied() {
     let out = render(&mut renderer, &d, 0.0).unwrap();
     let center = px(&out, 128, 128);
     assert!((center[3] - 0.5 * 128.0 / 255.0).abs() < 2e-3, "{center:?}");
+}
+
+/// One shape layer at `(x, y)` of a 256 × 256 composition.
+fn shape_doc(id: &str, d: Value, x: f64, y: f64) -> Value {
+    project(W, H, 2.0, no_fill(), vec![layer(id, "shape", d, x, y, 2.0)])
+}
+
+/// A viewer frame: the composition at `zoom` with the visible `region`.
+fn viewer(
+    renderer: &mut Renderer,
+    doc: &Value,
+    zoom: f64,
+    region: PixelRect,
+    export: bool,
+) -> Result<(), RenderError> {
+    let doc = load(doc);
+    let mut request = RenderRequest::at_scale(Size::new(W, H), zoom, Precision::Float32);
+    request.region = Some(region);
+    request.export = export;
+    renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .map(|_| ())
+}
+
+#[test]
+fn viewer_frames_ask_for_today_s_preview_crop_window() {
+    // A 200 × 100 rect (not a plain fill: half-transparent) at the centre
+    // (output 2048 × 2048 at 8×, the rect spans x 224..1824), viewed
+    // through a 512 × 512 window over its left edge.
+    let d = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#FFFFFF80", "stroke": 0 });
+    let doc = shape_doc("box", d, 128.0, 128.0);
+    let mut renderer = Renderer::headless().unwrap();
+    let producer = Producer::new(true, CompatAnswer::Missing);
+    renderer.set_compat_rasters(Some(producer.clone()));
+    let region = PixelRect {
+        x: 0,
+        y: 768,
+        width: 512,
+        height: 512,
+    };
+    match viewer(&mut renderer, &doc, 8.0, region, false) {
+        Err(RenderError::CompatPending(needs)) => {
+            assert_eq!(needs.len(), 1);
+            // Today's previewShapeRaster for the same inputs
+            // (`[8, 0, 0, 8, 1024, 256]` in a 512 × 512 canvas; raster
+            // 1664 × 864): `{ x: 0, y: 0, width: 512, height: 768 }`.
+            assert_eq!(
+                needs[0].crop,
+                Some(PixelRect {
+                    x: 0,
+                    y: 0,
+                    width: 512,
+                    height: 768
+                })
+            );
+            assert!((needs[0].scale - 8.0).abs() < 1e-12);
+        }
+        other => panic!("expected the crop need, got {:?}", other.err()),
+    }
+    // The producer was asked with the same window.
+    assert_eq!(
+        producer.crops.lock().unwrap().last().copied().flatten(),
+        Some(PixelRect {
+            x: 0,
+            y: 0,
+            width: 512,
+            height: 768
+        })
+    );
+    // An export of the same frame never crops.
+    producer.crops.lock().unwrap().clear();
+    let Err(RenderError::CompatPending(needs)) = viewer(&mut renderer, &doc, 8.0, region, true)
+    else {
+        panic!("expected a need");
+    };
+    assert_eq!(needs[0].crop, None);
+    assert_eq!(producer.crops.lock().unwrap().as_slice(), &[None]);
+}
+
+#[test]
+fn a_viewport_that_misses_the_shape_or_sits_in_its_plain_fill_does_not_ask() {
+    let mut renderer = Renderer::headless().unwrap();
+    let producer = Producer::new(true, CompatAnswer::Missing);
+    renderer.set_compat_rasters(Some(producer.clone()));
+    // Off to the right: nothing to draw, nobody asked.
+    let d = json!({ "shape": "rect", "w": 40, "h": 40, "color": "#FF0000", "stroke": 0 });
+    let away = PixelRect {
+        x: 1800,
+        y: 0,
+        width: 200,
+        height: 200,
+    };
+    viewer(
+        &mut renderer,
+        &shape_doc("box", d.clone(), 40.0, 40.0),
+        8.0,
+        away,
+        false,
+    )
+    .unwrap();
+    assert!(producer.asked.lock().unwrap().is_empty());
+    // Inside a plain #rrggbb rect's fill: today fills the viewport with
+    // its color without calling PM.raster; the engine draws it natively.
+    let big = json!({ "shape": "rect", "w": 200, "h": 200, "color": "#FF0000", "stroke": 0 });
+    let inside = PixelRect {
+        x: 1024 - 64,
+        y: 1024 - 64,
+        width: 128,
+        height: 128,
+    };
+    viewer(
+        &mut renderer,
+        &shape_doc("box", big, 128.0, 128.0),
+        8.0,
+        inside,
+        false,
+    )
+    .unwrap();
+    assert!(producer.asked.lock().unwrap().is_empty());
 }

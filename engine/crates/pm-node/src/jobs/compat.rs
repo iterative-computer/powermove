@@ -87,7 +87,11 @@ impl CompatRasters for JobCompat {
         time: f64,
         scale: f64,
         source: CompatSource,
+        crop: Option<pm_protocol::common::PixelRect>,
     ) -> CompatAnswer {
+        // Export frames never crop (today's `opt.exporting` turns preview
+        // source clipping off; `pm_render::compat_crop`).
+        debug_assert!(crop.is_none(), "an export frame asked for a crop");
         let ticks = ticks_of(time);
         let key = (
             composition.to_owned(),
@@ -220,9 +224,14 @@ mod tests {
         let (host, compat) = job(|r| Ok(frame(r.layer.as_str() == "plain")));
         assert!(compat.producing(CompatSource::RasterOverride));
         assert!(!compat.producing(CompatSource::CompatContext));
-        let CompatAnswer::Raster(raster) =
-            compat.answer("root", "typed", 0.5, 2.0, CompatSource::RasterOverride)
-        else {
+        let CompatAnswer::Raster(raster) = compat.answer(
+            "root",
+            "typed",
+            0.5,
+            2.0,
+            CompatSource::RasterOverride,
+            None,
+        ) else {
             panic!("expected a raster");
         };
         assert_eq!(
@@ -236,11 +245,25 @@ mod tests {
             (2, 1, [3.0, 4.0], [5.0, 6.0], &[9u8; 8][..])
         );
         assert!(matches!(
-            compat.answer("root", "typed", 0.5, 2.0, CompatSource::RasterOverride),
+            compat.answer(
+                "root",
+                "typed",
+                0.5,
+                2.0,
+                CompatSource::RasterOverride,
+                None
+            ),
             CompatAnswer::Raster(_)
         ));
         assert!(matches!(
-            compat.answer("root", "plain", 0.5, 2.0, CompatSource::RasterOverride),
+            compat.answer(
+                "root",
+                "plain",
+                0.5,
+                2.0,
+                CompatSource::RasterOverride,
+                None
+            ),
             CompatAnswer::Native
         ));
         let calls = host.calls.lock().unwrap();
@@ -260,7 +283,14 @@ mod tests {
     fn a_frame_the_host_cannot_answer_fails_with_its_reason() {
         let (_, compat) = job(|_| Err("open the project in a window to export it".into()));
         assert!(matches!(
-            compat.answer("root", "typed", 0.0, 1.0, CompatSource::RasterOverride),
+            compat.answer(
+                "root",
+                "typed",
+                0.0,
+                1.0,
+                CompatSource::RasterOverride,
+                None
+            ),
             CompatAnswer::Missing
         ));
         assert_eq!(

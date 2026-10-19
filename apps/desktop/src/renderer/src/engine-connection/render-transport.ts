@@ -32,7 +32,7 @@
  *   context) on the session's port; `provideCompat` registers the producer
  *   the job engine's export frames are drawn by (main asks the window).
  */
-import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
@@ -387,7 +387,8 @@ export class EngineRenderTransport {
     if (!answerer || this.answering > 0) return false;
     this.compatStats.needs++;
     const revision = this.options.revision() ?? 0;
-    const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}`;
+    const crop = need.crop ? { crop: { ...need.crop } } : {};
+    const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
     // Asked again after a `reuse` at this revision: the engine no longer
     // holds that raster (evicted), so this answer carries the pixels.
     const fresh = this.reused.has(`${tag}\u0000${revision}`);
@@ -414,20 +415,20 @@ export class EngineRenderTransport {
     const id = { composition: need.composition, layer: need.layer, time: need.time, source: need.source };
     if (answer.kind === 'native') {
       this.compatStats.natives++;
-      return session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision });
+      return session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision, ...crop });
     }
     if (answer.kind === 'reuse') {
       this.compatStats.reuses++;
       this.reused.add(`${tag}\u0000${revision}`);
       if (this.reused.size > 4096) this.reused.clear();
-      return session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision });
+      return session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision, ...crop });
     }
     this.compatStats.rasters++;
-    return this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer);
+    return this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
   }
 
   private postRaster(session: TransportSession, id: { composition: string; layer: string; time: number; source: CompatSource; key: string }, revision: number, scale: number,
-    raster: Extract<CompatAnswerResult, { kind: 'raster' }>): boolean {
+    raster: Extract<CompatAnswerResult, { kind: 'raster' }>, crop?: PixelRect): boolean {
     const bpp = raster.format === 'rgba16fPremultiplied' ? 8 : 4;
     if (raster.data.byteLength !== raster.width * raster.height * bpp) throw new EngineSnapshotError('invalidMessage', 'Compatibility pixels do not match their size.');
     const rowBytes = raster.width * bpp;
@@ -437,7 +438,7 @@ export class EngineRenderTransport {
       if (!session.post({
         type: 'compat', compat: 'pixels', id, revision, width: raster.width, height: raster.height, format: raster.format,
         origin: raster.anchor, scale, row, rows, data: raster.data.slice(row * rowBytes, (row + rows) * rowBytes),
-        size: raster.size, ...(raster.uv ? { uv: raster.uv } : {})
+        size: raster.size, ...(raster.uv ? { uv: raster.uv } : {}), ...(crop ? { crop: { ...crop } } : {})
       })) return false;
     }
     return true;

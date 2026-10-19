@@ -344,6 +344,14 @@ pub struct CompatNeed {
     pub source: CompatSource,
     /// Output pixels per layer pixel the frame draws the layer at.
     pub scale: f64,
+    /// Today's preview crop window (`legacy/gl/shape-raster-window.ts`, in
+    /// the raster's pixels at `scale`) the producer is called with, as the
+    /// compositor passes it to `PM.raster` for a viewer frame; absent: the
+    /// whole raster (exports and snapshots never crop). Part of the need's
+    /// identity: another window is another answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
 }
 
 /// The answer to a [`HostSnapshot`].
@@ -611,6 +619,10 @@ pub struct CompatPixels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub uv: Option<[f64; 4]>,
+    /// The crop window of the need this raster answers ([`CompatNeed::crop`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
 }
 
 /// A layer at one frame that a producer passed through: the engine draws it
@@ -627,6 +639,10 @@ pub struct CompatNative {
     pub scale: f64,
     /// The document revision the producer decided at.
     pub revision: Revision,
+    /// The crop window of the need it answers ([`CompatNeed::crop`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
 }
 
 /// Renderer ↔ interactive engine (session-bound, the viewer's port):
@@ -663,6 +679,10 @@ pub enum CompatMessage {
         id: CompatKey,
         scale: f64,
         revision: Revision,
+        /// The crop window of the need it answers ([`CompatNeed::crop`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        crop: Option<crate::common::PixelRect>,
     },
     /// Engine → renderer: what a viewer frame at `revision` needs before it
     /// can be drawn. The renderer answers each need with `Pixels`,
@@ -700,6 +720,7 @@ impl Validate for CompatMessage {
         match self {
             CompatMessage::Pixels(p) => {
                 p.id.validate()?;
+                valid_crop(p.crop)?;
                 ensure(
                     (1..=MAX_COMPAT_EDGE).contains(&p.width)
                         && (1..=MAX_COMPAT_EDGE).contains(&p.height),
@@ -754,10 +775,14 @@ impl Validate for CompatMessage {
                 ensure(n.composition.is_valid() && n.layer.is_valid(), C, || {
                     "invalid compatibility layer".into()
                 })?;
+                valid_crop(n.crop)?;
                 valid_scale(n.scale)
             }
-            CompatMessage::Reuse { id, scale, .. } => {
+            CompatMessage::Reuse {
+                id, scale, crop, ..
+            } => {
                 id.validate()?;
+                valid_crop(*crop)?;
                 valid_scale(*scale)
             }
             CompatMessage::Needs { needs, .. } => {
@@ -772,6 +797,7 @@ impl Validate for CompatMessage {
                         C,
                         || "invalid compatibility layer".into(),
                     )?;
+                    valid_crop(need.crop)?;
                     valid_scale(need.scale)?;
                 }
                 Ok(())
@@ -788,6 +814,23 @@ impl Validate for CompatMessage {
         }
     }
 }
+
+/// A crop window is a non-empty part of a raster no larger than today's
+/// largest (8192 × 8192 device pixels, `textRasterGeometry`).
+fn valid_crop(crop: Option<crate::common::PixelRect>) -> Result<(), Violation> {
+    crop.map_or(Ok(()), |c| {
+        ensure(
+            !c.is_empty()
+                && u64::from(c.x) + u64::from(c.width) <= MAX_COMPAT_CROP
+                && u64::from(c.y) + u64::from(c.height) <= MAX_COMPAT_CROP,
+            ContractId::Frame,
+            || format!("compatibility crop {c:?}"),
+        )
+    })
+}
+
+/// The largest crop edge: the raster edge today allows (8192 device pixels).
+pub const MAX_COMPAT_CROP: u64 = 8192;
 
 fn valid_scale(scale: f64) -> Result<(), Violation> {
     ensure(
@@ -1092,6 +1135,48 @@ mod tests {
     }
 
     #[test]
+    fn compat_crops_are_windows_of_a_raster() {
+        use crate::common::PixelRect;
+        let need = |crop: Option<PixelRect>| CompatMessage::Needs {
+            revision: Revision::ZERO,
+            needs: vec![CompatNeed {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 4.0,
+                crop,
+            }],
+        };
+        let rect = |x, y, width, height| {
+            Some(PixelRect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert!(need(None).validate().is_ok());
+        assert!(need(rect(256, 512, 1024, 768)).validate().is_ok());
+        assert!(need(rect(0, 0, 8192, 8192)).validate().is_ok());
+        assert!(need(rect(0, 0, 0, 10)).validate().is_err());
+        assert!(need(rect(8000, 0, 256, 10)).validate().is_err());
+        let native = |crop| {
+            CompatMessage::Native(CompatNative {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                revision: Revision::ZERO,
+                crop,
+            })
+        };
+        assert!(native(rect(0, 0, 256, 256)).validate().is_ok());
+        assert!(native(rect(0, 0, 256, 0)).validate().is_err());
+    }
+
+    #[test]
     fn compat_bands_must_fit_their_rows() {
         let band = |row: u32, rows: u32, len: usize, format: CompatFormat| {
             CompatMessage::Pixels(CompatPixels {
@@ -1113,6 +1198,7 @@ mod tests {
                 data: Bytes(vec![0; len]),
                 size: None,
                 uv: None,
+                crop: None,
             })
         };
         assert!(

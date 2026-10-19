@@ -2,6 +2,7 @@
 import type { CompatSource } from "./CompatSource";
 import type { CompositionId } from "./CompositionId";
 import type { LayerId } from "./LayerId";
+import type { PixelRect } from "./PixelRect";
 import type { Revision } from "./Revision";
 import type { Ticks } from "./Ticks";
 
@@ -17,4 +18,8 @@ scale: number,
 /**
  * The document revision the producer decided at.
  */
-revision: Revision, };
+revision: Revision, 
+/**
+ * The crop window of the need it answers ([`CompatNeed::crop`]).
+ */
+crop?: PixelRect, };

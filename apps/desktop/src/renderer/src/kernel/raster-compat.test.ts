@@ -97,7 +97,7 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('subs'), 2)).toEqual({ kind: 'native' });
   });
 
-  it('passes wrappers today\'s uploaded lookup (a miss) and no crop', () => {
+  it('passes wrappers today\'s uploaded lookup (a miss), and no crop for a need without a window', () => {
     const { services, compat, need } = setup();
     let args: any[] = [];
     services.register('raster', (...a: any[]) => { args = a; return { cv: { width: 2, height: 2 }, w: 2, h: 2, anchorX: 0, anchorY: 0 }; });
@@ -105,6 +105,60 @@ describe('the raster override producer', () => {
     expect(typeof args[3]).toBe('function');
     expect(args[3]('any-key')).toBeUndefined();
     expect(args[4]).toBeUndefined();
+  });
+
+  it('passes a viewer need\'s crop window to the chain and the engine\'s base, as today\'s compositor does', () => {
+    const { services, compat, engineRaster, need } = setup();
+    const original = services.get<any>('raster');
+    const crops: unknown[] = [];
+    services.register('raster', (layer: any, scale: number, time: number, uploaded: unknown, crop: unknown) => {
+      crops.push(crop);
+      return original(layer, scale, time, uploaded, crop);
+    });
+    const window = { x: 256, y: 0, width: 512, height: 256 };
+    // Passed through untouched, for this window: the engine draws it.
+    expect(compat.answer({ ...need('title', 0.5, 8), crop: window }, 3)).toEqual({ kind: 'native' });
+    expect(crops).toEqual([window]);
+    // A wrapper that reads the base gets the engine's raster of that window.
+    services.register('raster', (layer: any, scale: number, time: number, uploaded: unknown, crop: unknown) => {
+      const base = original(layer, scale, time, uploaded, crop);
+      return { ...base, cv: { width: 512, height: 256 }, key: 'typed' };
+    });
+    compat.answer({ ...need('title', 0.5, 8), crop: window }, 3);
+    expect(engineRaster).toHaveBeenLastCalledWith(text, 8, 0.5, window);
+  });
+
+  it('maps a cropped text result\'s sourceWindow onto the uploaded raster as today\'s draw-window program samples it', () => {
+    const { services, compat, need } = setup();
+    // Today: `uv = (v_uv * [gw, gh] - [x, y]) / textureSize`, the quad the whole layer box.
+    services.register('raster', () => ({ cv: { width: 512, height: 256 }, w: 400, h: 100, anchorX: 200, anchorY: 50, sourceWindow: [256, 0, 3200, 800], key: 'k' }));
+    expect(compat.answer({ ...need('title', 0.5, 8), crop: { x: 256, y: 0, width: 512, height: 256 } }, 1)).toMatchObject({
+      kind: 'raster', width: 512, height: 256, size: [400, 100], anchor: [200, 50], uv: [-0.5, 0, 6.25, 3.125]
+    });
+    // A shape's `uv` goes through unchanged.
+    services.register('raster', () => ({ cv: { width: 512, height: 256 }, w: 48, h: 24, uv: [-0.5, 0, 3.25, 3.375], key: 'k2' }));
+    expect(compat.answer({ ...need('box', 0.5, 8), crop: { x: 256, y: 0, width: 512, height: 256 } }, 1)).toMatchObject({ uv: [-0.5, 0, 3.25, 3.375] });
+  });
+
+  it('draws a base the wrapper changed in place: a written field or a canvas it took', () => {
+    const { services, compat, readPixels, need } = setup();
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => {
+      const base = original(layer, ...rest);
+      if (layer.id === 'title') base.anchorX -= 10;
+      if (layer.id === 'box') base.cv.getContext = undefined;
+      return base;
+    });
+    expect(compat.answer(need('title'), 2)).toMatchObject({ kind: 'raster', anchor: [-6, 18] });
+    expect(compat.answer(need('box'), 2)).toMatchObject({ kind: 'raster' });
+    expect(readPixels).toHaveBeenCalledTimes(2);
+    // Reading a field that is not the canvas leaves it the engine's.
+    services.register('raster', (layer: any, ...rest: any[]) => {
+      const base = original(layer, ...rest);
+      void base.selection;
+      return base;
+    });
+    expect(compat.answer(need('title', 1), 3)).toEqual({ kind: 'native' });
   });
 
   it('an export frame draws the snapshot\'s layer: the live one when equal, else the snapshot\'s copy', () => {

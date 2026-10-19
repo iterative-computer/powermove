@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pm_protocol::common::{CompositionId, LayerId, Revision, Ticks};
+use pm_protocol::common::{CompositionId, LayerId, PixelRect, Revision, Ticks};
 use pm_protocol::snapshot::{CompatFormat, CompatKey, CompatMessage, CompatNeed, CompatSource};
 
 use super::render::Key;
@@ -54,7 +54,15 @@ struct Partial {
 }
 
 /// One producer answer: a layer at a frame, drawn at a density.
-type AnswerId = (Key, CompositionId, LayerId, Ticks, CompatSource, u64);
+type AnswerId = (
+    Key,
+    CompositionId,
+    LayerId,
+    Ticks,
+    CompatSource,
+    u64,
+    Option<PixelRect>,
+);
 
 /// What a producer answered, at which document revision.
 #[derive(Debug, Clone)]
@@ -127,6 +135,7 @@ impl pm_render::compat::CompatRasters for CompatView {
         time: f64,
         scale: f64,
         source: CompatSource,
+        crop: Option<PixelRect>,
     ) -> pm_render::compat::CompatAnswer {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).answer(
             self.key,
@@ -135,6 +144,7 @@ impl pm_render::compat::CompatRasters for CompatView {
             time,
             scale,
             source,
+            crop,
             self.revision,
         )
     }
@@ -166,6 +176,7 @@ fn answer_id(
     time: Ticks,
     source: CompatSource,
     scale: f64,
+    crop: Option<PixelRect>,
 ) -> AnswerId {
     (
         key,
@@ -174,6 +185,7 @@ fn answer_id(
         time,
         source,
         scale.to_bits(),
+        crop,
     )
 }
 
@@ -246,7 +258,15 @@ impl CompatStore {
                 Applied::Producers
             }
             CompatMessage::Native(n) => {
-                let id = answer_id(key, &n.composition, &n.layer, n.time, n.source, n.scale);
+                let id = answer_id(
+                    key,
+                    &n.composition,
+                    &n.layer,
+                    n.time,
+                    n.source,
+                    n.scale,
+                    n.crop,
+                );
                 self.asked.remove(&id);
                 self.answers.insert(
                     id,
@@ -261,8 +281,17 @@ impl CompatStore {
                 id,
                 scale,
                 revision,
+                crop,
             } => {
-                let answer = answer_id(key, &id.composition, &id.layer, id.time, id.source, scale);
+                let answer = answer_id(
+                    key,
+                    &id.composition,
+                    &id.layer,
+                    id.time,
+                    id.source,
+                    scale,
+                    crop,
+                );
                 if !self.complete.contains_key(&(key, id.clone())) {
                     // Evicted meanwhile: the frame asks again at once, and
                     // the producer, having answered `reuse` for this need
@@ -364,6 +393,7 @@ impl CompatStore {
                     band.id.time,
                     band.id.source,
                     band.scale,
+                    band.crop,
                 );
                 self.asked.remove(&answer);
                 self.answers.insert(
@@ -485,6 +515,7 @@ impl CompatStore {
         time: f64,
         scale: f64,
         source: CompatSource,
+        crop: Option<PixelRect>,
         revision: Revision,
     ) -> pm_render::compat::CompatAnswer {
         use pm_render::compat::CompatAnswer;
@@ -498,6 +529,7 @@ impl CompatStore {
             pm_render::compat::ticks_of(time),
             source,
             scale,
+            crop,
         );
         let Some(answer) = self
             .answers
@@ -543,7 +575,15 @@ impl CompatStore {
         needs
             .into_iter()
             .filter(|n| {
-                let id = answer_id(key, &n.composition, &n.layer, n.time, n.source, n.scale);
+                let id = answer_id(
+                    key,
+                    &n.composition,
+                    &n.layer,
+                    n.time,
+                    n.source,
+                    n.scale,
+                    n.crop,
+                );
                 match self.asked.get(&id) {
                     Some((r, at)) if *r >= revision && now.duration_since(*at) < ASK_AGAIN => false,
                     _ => {
@@ -559,14 +599,18 @@ impl CompatStore {
     /// answer's identity).
     pub fn tag(key: Key, need: &CompatNeed) -> String {
         format!(
-            "compat:{}:{}:{}:{}:{}:{:?}:{:x}",
+            "compat:{}:{}:{}:{}:{}:{:?}:{:x}:{}",
             key.0.0,
             key.1.get(),
             need.composition.as_str(),
             need.layer.as_str(),
             need.time.get(),
             need.source,
-            need.scale.to_bits()
+            need.scale.to_bits(),
+            need.crop.map_or_else(String::new, |c| format!(
+                "{},{},{},{}",
+                c.x, c.y, c.width, c.height
+            ))
         )
     }
 
@@ -574,13 +618,14 @@ impl CompatStore {
     pub fn outstanding(&self, tag: &str) -> bool {
         self.asked
             .keys()
-            .any(|(key, composition, layer, time, source, scale)| {
+            .any(|(key, composition, layer, time, source, scale, crop)| {
                 let need = CompatNeed {
                     composition: composition.clone(),
                     layer: layer.clone(),
                     time: *time,
                     source: *source,
                     scale: f64::from_bits(*scale),
+                    crop: *crop,
                 };
                 Self::tag(*key, &need) == tag
             })
@@ -637,6 +682,7 @@ mod tests {
             data: Bytes(vec![fill; (w * rows * 4) as usize]),
             size: None,
             uv: None,
+            crop: None,
         })
     }
 
@@ -713,6 +759,7 @@ mod tests {
             time: Ticks::ZERO,
             source: CompatSource::RasterOverride,
             scale: 1.0,
+            crop: None,
         };
         let now = Instant::now();
         let r3 = Revision::new(3).unwrap();
@@ -735,12 +782,86 @@ mod tests {
                 id: id("L0", "k"),
                 scale: 1.0,
                 revision: r4,
+                crop: None,
             },
         );
         assert_eq!(applied, Applied::Evicted);
         assert!(applied.unblocks(), "the frame tries again");
         // Asked again now, not after ASK_AGAIN.
         assert_eq!(store.to_ask(session(1), r4, vec![need], now).len(), 1);
+    }
+
+    #[test]
+    fn another_crop_window_is_another_answer() {
+        use pm_render::compat::CompatAnswer;
+        let mut store = CompatStore::default();
+        let s = session(1);
+        store.apply(
+            s,
+            CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        );
+        let window = |x| {
+            Some(PixelRect {
+                x,
+                y: 0,
+                width: 256,
+                height: 256,
+            })
+        };
+        let r3 = Revision::new(3).unwrap();
+        let native = |crop| {
+            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 4.0,
+                revision: r3,
+                crop,
+            })
+        };
+        assert_eq!(store.apply(s, native(window(0))), Applied::Answered);
+        let answer = |store: &mut CompatStore, crop| {
+            store.answer(
+                s,
+                "c",
+                "L",
+                0.0,
+                4.0,
+                CompatSource::RasterOverride,
+                crop,
+                r3,
+            )
+        };
+        assert!(matches!(
+            answer(&mut store, window(0)),
+            CompatAnswer::Native
+        ));
+        // The viewport moved to the next bucket: a new need.
+        assert!(matches!(
+            answer(&mut store, window(256)),
+            CompatAnswer::Missing
+        ));
+        assert!(matches!(answer(&mut store, None), CompatAnswer::Missing));
+        // Its tag names the window, so a snapshot waits for that one.
+        let need = |crop| CompatNeed {
+            composition: "c".into(),
+            layer: "L".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 4.0,
+            crop,
+        };
+        assert_ne!(
+            CompatStore::tag(s, &need(window(0))),
+            CompatStore::tag(s, &need(window(256)))
+        );
+        let asked = store.to_ask(s, r3, vec![need(window(256))], Instant::now());
+        assert_eq!(asked.len(), 1);
+        assert!(store.outstanding(&CompatStore::tag(s, &need(window(256)))));
+        assert!(!store.outstanding(&CompatStore::tag(s, &need(window(512)))));
     }
 
     #[test]

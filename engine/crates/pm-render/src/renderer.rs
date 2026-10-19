@@ -164,7 +164,30 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
+        preview: preview_window(comp, request),
     }
+}
+
+/// The viewer's visible window when `request` is a viewer frame (not an
+/// export, a region of the output) of the open root composition: today's
+/// `canClipPreviewSources` (`crate::compat_crop`).
+fn preview_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if request.export
+        || !comp.at_root()
+        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+    {
+        return None;
+    }
+    let r = request.region?;
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
 }
 
 /// The renderer.

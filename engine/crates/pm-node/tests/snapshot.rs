@@ -705,6 +705,7 @@ fn child_snapshots() {
             data: Bytes(vec![200; (4 * rows * 4) as usize]),
             size: None,
             uv: None,
+            crop: None,
         })));
     }
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2065,6 +2066,7 @@ fn child_compat() {
         source: need.source,
         scale: need.scale,
         revision: Revision::new(1).unwrap(),
+        crop: None,
     })));
     assert_eq!(pixels_of(&rendered(ask(&mut c, 42, 1))), native);
     // An edit invalidates the answer: the next frame asks again. The
@@ -2109,6 +2111,7 @@ fn child_compat() {
         data: Bytes([255u8, 0, 0, 255].repeat(8)),
         size: Some([40.0, 20.0]),
         uv: None,
+        crop: None,
     })));
     let red = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(44))));
     assert_eq!(at(&red, 320, 200, 60), [255, 0, 0, 255]);
@@ -2130,6 +2133,7 @@ fn child_compat() {
         id,
         scale: need.scale,
         revision: Revision::new(3).unwrap(),
+        crop: None,
     }));
     assert_eq!(pixels_of(&rendered(ask(&mut c, 46, 3))), red);
     // The override disposed: nothing is asked and the shape is the engine's.

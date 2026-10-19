@@ -2,6 +2,7 @@
 import type { Bytes } from "./Bytes";
 import type { CompatFormat } from "./CompatFormat";
 import type { CompatKey } from "./CompatKey";
+import type { PixelRect } from "./PixelRect";
 import type { Revision } from "./Revision";
 
 /**
@@ -27,4 +28,8 @@ size?: [number, number],
  * The part of the raster the quad samples (today's `uv`: offset and
  * scale, 0..1). Absent: the whole raster.
  */
-uv?: [number, number, number, number], };
+uv?: [number, number, number, number], 
+/**
+ * The crop window of the need this raster answers ([`CompatNeed::crop`]).
+ */
+crop?: PixelRect, };
