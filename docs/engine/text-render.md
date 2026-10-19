@@ -1231,9 +1231,26 @@ Verification on macOS (debug unless stated):
   mean alpha difference **0.0014 CV**, boxes within 1 px. Pan Behind keeps
   the resting text in place on **8** anchored frames. Every frame picks at
   its selection's center, the hidden stagger frame included.
-  Log: `/tmp/ne-w5/textl2-r2/semantics-debug-10.log`.
+  Log: `/tmp/ne-w5/textl2-r2/semantics-debug-10.log`. After merging the
+  ltofix lane, the same gate and the 12 layout tests pass in the release
+  profile with its thin LTO (no `CARGO_PROFILE_RELEASE_LTO` override), with
+  identical minima: `/tmp/ne-w5/textl2-r2/release-lto.log`.
 - `pm-text` level 2 layout: **12** tests (two new: split glyph runs by line
   height and tracking, split RTL runs and the lam-alef ligature).
+- Level 1 unchanged (debug): **618 raster cases** (495 + 116 + 4 + 3) and
+  **576 composed frames** pass; the **23 FONTS-R** measurement lines are
+  identical to round 1's; **12/12** ratchet contracts; `text_gpu`,
+  `text_colors` and the original `text_level2` smoke gate (400 cases, 20
+  layers, none below 0.98) pass. Log: `/tmp/ne-w5/textl2-r2/level1-debug-gates.log`.
+- Evaluation corpus: 0 mismatches in every class (textLayout 6162, bounds
+  text 2157, textRaster 2157, textAnimators/Glyphs/Styles 57 each); layer
+  units 11/11. Log: `/tmp/ne-w5/textl2-r2/eval-gates.log`.
+- Native-on app matrix under the Electron lock, one worker: **18/18**
+  (the level 2 corpus test now picks every project at every time, and the
+  new Pan Behind test). Log: `/tmp/ne-w5/textl2-r2/e2e.log`.
+- `pm-wasm` queries 8/8, `pm-edit` tests, corpus 24/24, project sanitizer
+  15/15, Svelte check 0 errors (the existing IconCropper warning). WASM is
+  4,802,045 bytes (1,614,982 gzipped) after this round and the merges.
 
 ## Gaps
 
