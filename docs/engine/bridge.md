@@ -1973,7 +1973,9 @@ differences in red), outside the repository:
 The spec asserts the bound on the whole stage and outside the video for
 every case, and lists the cases above that are known to miss it, with
 their issue, in `KNOWN`; a known case that starts passing fails the test,
-so none can pass by accident.
+so none can pass by accident. A second run (`viewer-canvas-evidence4`)
+reproduced every number above within 0.002 points and passed in 1.4
+minutes.
 
 Also run after V1 (Electron lock, one worker; again after round 2 with
 the same results): `engine-svg.spec.ts` 6 of 7 (the seventh is the exported
