@@ -92,7 +92,17 @@ test('plays, shuttles, seeks and loops without a viewer; follows the open compos
     // No session yet is fine (Play opens one, viewerless); a session with
     // presentation, or a viewer service, voids the test.
     const s = PM.EngineConnection.session();
-    if (PM.Kernel.services.get('viewer') || (s && !s.headless)) throw new Error(`a viewer is attached: the premise of this test does not hold (viewer service ${Boolean(PM.Kernel.services.get('viewer'))}, session ${s ? `headless ${s.headless}` : 'none'})`);
+    if (PM.Kernel.services.get('viewer') || (s && !s.headless)) {
+      // Who presents: the built-in viewer, a render.gl.init binding, a stage.
+      const binding = PM.EngineCanvas;
+      const who = {
+        viewerService: Boolean(PM.Kernel.services.get('viewer')), session: s ? { headless: s.headless, state: { size: s.lastState?.size, viewSeq: s.viewSeq, composition: s.composition } } : null,
+        binding: { presenting: binding?.presenting ?? null, bound: binding?.bound ? { connected: binding.bound.isConnected, id: binding.bound.id } : null, made: binding?.made ?? null },
+        stages: [...document.querySelectorAll('[data-engine-stage]')].map((e: any) => ({ role: e.dataset.engineStage, connected: e.isConnected })),
+        canvases: document.querySelectorAll('canvas#engine-present').length
+      };
+      throw new Error(`a viewer is attached: the premise of this test does not hold ${JSON.stringify(who)}`);
+    }
     PM.loop = false; PM.setTime(0.1); PM.play();
   });
   try {
