@@ -524,6 +524,24 @@ describe('installKernel', () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it('queues browser key commands until readiness and drops them on uninstall', async () => {
+    for (const dispose of [false, true]) {
+      const PM = fakePM();
+      let release!: (ready: boolean) => void;
+      PM.EngineDoc = { enabled: true, ready: false, whenReady: new Promise<boolean>(resolve => { release = resolve; }) };
+      installed = installKernel(PM);
+      installed.api('boot-key').keybindings.bind({ key: 'cmd+shift+g', command: 'boot-key.go' });
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+      expect(PM.cmd).not.toHaveBeenCalled();
+      if (dispose) { installed.uninstall(); installed = null; }
+      PM.EngineDoc.ready = true;
+      release(true);
+      await Promise.resolve();
+      if (dispose) expect(PM.cmd).not.toHaveBeenCalled();
+      else { expect(PM.cmd).toHaveBeenCalledWith('boot-key.go'); installed!.uninstall(); installed = null; }
+    }
+  });
+
   it('falls back to the kernel command table when PM.cmd is absent', () => {
     const PM = fakePM();
     delete (PM as Record<string, unknown>).cmd;

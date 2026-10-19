@@ -163,7 +163,7 @@ Shared with the editor (docs/engine/write-path.md has the details):
 | `detached-prop`, `detached-parent`, `detached-path` | Gone: the channel, parent layer, or path goes to pm-wasm as JSON and is evaluated ad hoc (`hasKeyAt`, `transformParentMatrix`, `parent3D`, `pathValues`, `groupMatrix`); dual answers equal the legacy ones |
 | a non-object where a channel or path belongs | Native: the legacy TypeError and message (`p.kf`, `path.id`, `path.p`, `Object.entries`) thrown before the layer is read, as today |
 | `error:*` | Still counted; `pm-wasm-error` named failure with the new engine on |
-| `unavailable` | Workers never answer before the module is ready (open fails by name). In the editor, the boot window before `whenReady` remains (below) |
+| `unavailable` | Workers never answer before the module is ready (open fails by name). Editor async entry points queue until `whenReady` (B3, below) |
 | `fonts` | Synchronous registry answers and whole faces in workers and the editor; missing faces/services are named failures with Retry |
 | `ink` | Whole faces supply outlines in both hosts |
 | `legacy` (pm-edit `LEGACY_ONLY`, the self-space camera reparent) | Gone: pm-edit answers it natively, reproducing the legacy stale-cache read (docs/engine/pm-edit.md) |
@@ -548,12 +548,12 @@ and activates in its planned order when `EngineDoc.onReady` fires after a
 successful retry (`kernel/loader.ts`, `loader.test.ts`; `strict.test.ts` checks
 `onReady`). Answers never route to the legacy evaluator.
 
-**The remaining boot window.** Only extension activation waits for `whenReady`.
-A kernel or evaluator call from anything else that runs between the UI install and
-module readiness (renderer code, an agent or IPC kernel call) is still a named
-`unavailable` failure under strict. Module compilation overlaps preload, so the
-window is short: every measured launch (rounds 1 to 3, and this round's e2e) had
-zero such failures. It is not proven empty.
+**The boot window (B3).** Async project opens, agent/MCP/CLI renderer
+requests, scripts and IPC/kernel input wait for `whenReady` before evaluating
+the document. File parsing and media restoration overlap module loading. Blank
+project creation and the first scheduled editor frame also wait. A failed load
+keeps its named failure. The B3 follow-up below describes the boundaries and
+verification; synchronous compatibility signatures remain unchanged.
 
 Regression coverage: fresh root wrappers never send compJson and keep one interned
 channel; numeric answers invalidate on a write or dead module; detached scopes
@@ -600,3 +600,27 @@ module reset, JSON host-object serialization and the facade's cached address aft
 a reorder. The mandatory structural/read validation is still linear in the
 actual input set; nanosecond parity is a measured gate, not an implication of
 removing serialization (see `perf.md`).
+
+## B3: async document entries wait for readiness (2026-10-19)
+
+`engine-doc/readiness.ts` is the common async boundary. Live agent tool requests
+(including MCP/CLI renderer calls), project thread requests, script preparation,
+native menu commands and kernel input wait until the first mirror is attached.
+Project file parsing and media restoration happen before this await, retaining
+the overlap. Project tab open, blank-project creation and the first scheduled
+editor frame wait before publishing/evaluating a new document. Queued browser
+key commands are discarded if their kernel is uninstalled before readiness.
+A genuine failed module load keeps the named `pm-wasm-unavailable` error.
+
+Deterministic unit tests hold readiness, require that no evaluation/command runs,
+then release it and verify the existing keyed answer (10) and command. The boot
+e2e holds the actual preload wasm response over a renderer reload, sends a real
+agent IPC request while readiness is false, checks it stays pending, releases
+loading and requires the native answer with no fallback. The five-pair UI/editor
+harness alternates launch order and refuses timing under load above 8; results
+are in `perf.md`.
+
+Compatibility APIs such as `PM.ev` and `api.anim.evP` retain synchronous return
+types. Arbitrary third-party synchronous install code outside these async
+boundaries must still respect readiness; the patch does not claim those direct
+calls can await a promise. Extension activation already waits through its loader.

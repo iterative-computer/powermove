@@ -925,11 +925,26 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   /* Route through PM.cmd when present: it is the app's public command seam
      (native menu IPC and tests interpose on it). Falls back to the kernel. */
-  const keyListener = kernel.installKeyListener((command, args) =>
-    typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args)
-  );
+  let inputActive = true;
+  subscriptions.push(() => { inputActive = false; });
+  const keyListener = kernel.installKeyListener((command, args) => {
+    const run = () => typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args);
+    if (PM?.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+      void PM.EngineDoc.whenReady.then((ready: boolean) => { if (ready && inputActive && PM.EngineDoc.ready) run(); });
+      return;
+    }
+    return run();
+  });
   subscriptions.push(() => keyListener.dispose());
-  const inputKeyOff = hostBridge()?.onInputKey?.(input => kernel.dispatchTrustedKey(input));
+  const inputKeyOff = hostBridge()?.onInputKey?.(input => {
+    if (PM?.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+      void PM.EngineDoc.whenReady.then((ready: boolean) => {
+        if (ready && inputActive && PM.EngineDoc.ready) kernel.dispatchTrustedKey(input);
+      });
+      return false;
+    }
+    return kernel.dispatchTrustedKey(input);
+  });
   if (inputKeyOff) subscriptions.push(inputKeyOff);
 
   const signals = installKernelSignals(kernel);

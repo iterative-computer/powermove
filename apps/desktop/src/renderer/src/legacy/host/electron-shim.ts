@@ -3,6 +3,7 @@ import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
 import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { waitForDocumentReady } from '../../engine-doc/readiness';
 
 export function install(PM: PMRegistry): void {
   'use strict';
@@ -14,7 +15,9 @@ export function install(PM: PMRegistry): void {
   // File commands cannot wait for local-font enumeration or its permission prompt.
   bridge.onMenuCommand((command: any) => {
     const editorCommand = command === 'copy' ? 'copyLayers' : command === 'paste' ? 'pasteLayers' : command;
-    PM.cmd?.(editorCommand);
+    if (PM.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+      void waitForDocumentReady(PM).then(() => PM.cmd?.(editorCommand)).catch(() => {});
+    } else PM.cmd?.(editorCommand);
   });
 
   function bytesFromBase64(value: any) {

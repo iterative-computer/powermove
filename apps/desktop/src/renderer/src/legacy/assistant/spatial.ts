@@ -29,6 +29,7 @@ import { idlePreload } from './idle-preload';
 import { mediaStepLabels } from '../../panels/agent/media-activity';
 import { mediaOutcomeLabels, mediaToolOutcome } from '../../../../shared/media-tools';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { waitForDocumentReady } from '../../engine-doc/readiness';
 import { taskTrace } from '../../panels/agent/task-trace';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -545,6 +546,7 @@ async function performThreadControl(args: any): Promise<any> {
   }
   if (args.tool !== 'thread_launch' && args.tool !== 'thread_send') throw new Error('Unknown thread command.');
   if (args.projectId === APP_AGENT_PROJECT_ID && args.access === 'editor') throw new Error('Start an app thread with Project access. Planning threads need an attached project.');
+  if (args.projectId !== APP_AGENT_PROJECT_ID) await waitForDocumentReady(PM);
   const bytes = new TextEncoder().encode(JSON.stringify({ title: args.title, message: args.message, provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access }));
   const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
   if (threads !== archive) throw new Error('The active project changed before this thread command arrived.');
@@ -2771,6 +2773,7 @@ async function sendRequest(input: any) {
   S.pendingEntering = true;
   promoteToConversation(); touch(session, { focusComposer: true });
   try {
+    if (session.projectId !== APP_AGENT_PROJECT_ID) await waitForDocumentReady(PM);
     if (session.projectId === APP_AGENT_PROJECT_ID) {
       await runAppRequest({ session, request, token, controller, threadId: threadIdAtStart });
       if (token === session.requestToken && !controller.signal.aborted) notifyAgentFinished();
