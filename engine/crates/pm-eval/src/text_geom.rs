@@ -324,7 +324,10 @@ impl<'d> Scope<'_, 'd> {
         self.text_raster_with(layer, time, measure, true, true)
     }
 
-    fn text_raster_with(
+    /// [`Self::text_raster`] with character animators and typography
+    /// anchoring each on or off (the unanchored placement gives
+    /// `PM.raster`'s `fontOffset`).
+    pub fn text_raster_with(
         &mut self,
         layer: &'d Node,
         time: f64,

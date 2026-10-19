@@ -8,6 +8,8 @@
 //!
 //! `PM_BENCH_EDIT=drag` makes every frame a new revision that moves one
 //! layer (a layer drag: one leaf edit per frame at a fixed time);
+//! `PM_BENCH_LAYER=<n>` edits the n-th solid layer every frame (one layer
+//! dragged; layers are listed top first). `PM_BENCH_REUSE=0` plans every layer of every frame (no draw reuse).
 //! `PM_BENCH_EDIT=playback` edits one layer's opacity per frame while the
 //! time advances (inspector edits during playback, at the worst rate).
 //! docs/engine/perf.md records the runs.
@@ -63,6 +65,7 @@ fn main() {
     // Fit the composition in the view at DPR 2, as the viewer does.
     let zoom = (f64::from(width) / 2.0 / cw).min(f64::from(height) / 2.0 / ch);
     let state = ViewerState {
+        headless: None,
         composition: composition.as_str().into(),
         size: Size::new(width, height),
         device_pixel_ratio: 2.0,
@@ -76,14 +79,22 @@ fn main() {
         edr: false,
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
+        depth_id: None,
     };
     let gpu = pm_gpu::Gpu::new("compose bench").expect("a GPU");
     let working = WorkingTexture::new(&gpu.device, Size::new(width, height));
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    // PM_BENCH_REUSE=0: every frame plans every layer (no draw reuse).
+    if std::env::var("PM_BENCH_REUSE").is_ok_and(|v| v == "0") {
+        composer.set_draw_reuse(false);
+    }
     let media = MediaMap::default();
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
     let mut apply_ms = Vec::new();
+    let fixed: Option<usize> = std::env::var("PM_BENCH_LAYER")
+        .ok()
+        .and_then(|v| v.parse().ok());
     for k in 0..frames {
         let at = match edit.as_deref() {
             Some("drag") => 0,
@@ -94,7 +105,12 @@ fn main() {
         if let (Some(mode), false) = (edit.as_deref(), solids.is_empty()) {
             use pm_model::json::Value;
             use pm_model::patch::{Patch, PathPart};
-            let layer = solids[(k as usize * 37) % solids.len()];
+            // PM_BENCH_LAYER=<n>: every frame edits the n-th solid (a
+            // drag of one layer); else a different solid each frame.
+            let layer = match fixed {
+                Some(n) => solids[n.min(solids.len() - 1)],
+                None => solids[(k as usize * 37) % solids.len()],
+            };
             let (key, value) = match mode {
                 "drag" => ("position.x", 100.0 + f64::from(k)),
                 _ => ("opacity", 30.0 + f64::from(k % 60)),
@@ -151,7 +167,13 @@ fn main() {
     if !apply_ms.is_empty() {
         apply_summary = format!("edit apply: {}", summary(&mut apply_ms));
     }
-    for _ in 0..20 {
+    // PM_BENCH_ROUTES: how many routing decisions to time (a profile of
+    // the capability check wants many).
+    let routes: usize = std::env::var("PM_BENCH_ROUTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    for _ in 0..routes.max(2) {
         let start = Instant::now();
         let reasons = pm_render::unsupported_with_media(&doc, &composition, &media);
         route_ms.push(start.elapsed().as_secs_f64() * 1e3);
@@ -166,6 +188,7 @@ fn main() {
     println!("document copy: {}", summary(&mut clone_ms));
     println!("compose CPU: {}", summary(&mut cpu));
     println!("compose + GPU: {}", summary(&mut wall));
+    println!("draw reuse: {:?}", composer.renderer().draw_reuse_stats());
     if let Some(mode) = &edit {
         println!("edits ({mode}, one per frame): {apply_summary}");
     }

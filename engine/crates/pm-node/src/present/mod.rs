@@ -20,12 +20,16 @@
 pub mod audio;
 pub mod blender;
 pub mod clock;
+pub mod compat;
+pub mod complete;
 pub mod compose;
 pub mod document;
 mod layer_reports;
 pub mod peaks;
 pub mod render;
 pub mod schedule;
+pub mod snapshot;
+pub mod stats;
 pub mod view;
 
 use std::collections::BTreeMap;
@@ -44,7 +48,7 @@ use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 
 use render::{Command, Key};
-pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, TextFontsHub, ThreadConfig};
+pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, ThreadConfig};
 
 /// Environment main sets for the interactive engine: the per-launch
 /// bootstrap name.
@@ -147,7 +151,6 @@ impl PresenterConfig {
                 shader_cache: env(SHADER_CACHE_ENV)
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
-                // The engine host adds its font hub.
                 fonts: None,
             },
             source: match env(SOURCE_ENV).as_deref() {
@@ -169,11 +172,19 @@ impl PresenterControl {
     pub fn lose_device(&self) {
         let _ = self.0.send(Command::LoseDevice);
     }
+
+    /// The font service's generation moved: views draw again with fresh
+    /// fonts.
+    pub fn fonts_changed(&self) {
+        let _ = self.0.send(Command::FontsChanged);
+    }
 }
 
 /// What the JavaScript side remembers per viewer.
 struct Meta {
     pool: Option<(PoolSpec, u64)>,
+    /// The depth and object-id pool (`ViewerState::depth_id`), and its bytes.
+    depth: Option<(PoolSpec, u64)>,
 }
 
 pub struct BridgePresenter {
@@ -223,6 +234,7 @@ impl BridgePresenter {
         let generations = Generations::default();
         let thread_generations = generations.clone();
         let thread_sink = sink.clone();
+        let back = tx.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-present",
@@ -230,6 +242,7 @@ impl BridgePresenter {
                 render::run(
                     thread_config,
                     rx,
+                    back,
                     thread_sink,
                     thread_stats,
                     thread_generations,
@@ -247,8 +260,13 @@ impl BridgePresenter {
                 link.clone(),
                 sink,
                 stats.clone(),
-                Box::new(move |key| {
-                    let _ = ready.send(Command::BlenderReady { key });
+                Box::new(move |notice| {
+                    let _ = ready.send(match notice {
+                        blender::Notice::Ready(key) => Command::BlenderReady { key },
+                        blender::Notice::Captured { token, result } => {
+                            Command::BlenderCaptured { token, result }
+                        }
+                    });
                 }),
             )?;
             let _ = tx.send(Command::UseBlender(blender.clone()));
@@ -346,13 +364,66 @@ impl BridgePresenter {
             format,
             count,
         };
+        let depth = self.views.get(&key).and_then(|m| m.depth);
         self.views.insert(
             key,
             Meta {
                 pool: Some((spec, bytes)),
+                depth,
             },
         );
         Some(spec)
+    }
+
+    /// The depth and object-id pool for `state` (plan section 8; the Phase
+    /// 3c render transport): `rgbaf16` surfaces at the viewer's size, as
+    /// many as the color pool, made only while the viewer asks for them.
+    /// Returns `Some(Some(spec))` for a new pool, `Some(None)` to retire the
+    /// current one, `None` when nothing changes.
+    fn plan_depth(
+        &mut self,
+        ctx: &mut PresentContext<'_>,
+        key: Key,
+        state: &ViewerState,
+    ) -> Option<Option<PoolSpec>> {
+        let wanted = state.headless != Some(true)
+            && state.depth_id == Some(true)
+            && self.config.source == Some(FrameSource::Document);
+        let size = Size::new(state.size.width, state.size.height);
+        let count = pool_size(RING, self.config.thread.lead);
+        let meta = self.views.get_mut(&key)?;
+        let current = meta.depth;
+        if let Some((spec, _)) = current
+            && wanted
+            && spec.size == size
+            && spec.count == count
+        {
+            return None;
+        }
+        if let Some((_, bytes)) = current {
+            ctx.release_pool(bytes);
+            meta.depth = None;
+        }
+        if !wanted {
+            return current.map(|_| None);
+        }
+        let bytes = estimated_bytes(size, SurfaceFormat::Rgba16Float, count);
+        if !ctx.charge_pool(bytes) {
+            // The chrome asked for it; the pool is the last thing evicted.
+            ctx.charge_over(bytes);
+            ctx.log(
+                LogLevel::Warn,
+                format!("viewer depth pool: {bytes} bytes charged past the lease"),
+            );
+        }
+        let spec = PoolSpec {
+            generation: self.generations.next(),
+            size,
+            format: SurfaceFormat::Rgba16Float,
+            count,
+        };
+        self.views.get_mut(&key)?.depth = Some((spec, bytes));
+        Some(Some(spec))
     }
 
     /// Sizes the viewer's frame cache from the lease and reserves it there
@@ -378,11 +449,10 @@ impl BridgePresenter {
     }
 
     fn forget(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
-        if let Some(Meta {
-            pool: Some((_, bytes)),
-        }) = self.views.remove(&key)
-        {
-            ctx.release_pool(bytes);
+        if let Some(meta) = self.views.remove(&key) {
+            for (_, bytes) in meta.pool.into_iter().chain(meta.depth) {
+                ctx.release_pool(bytes);
+            }
         }
     }
 }
@@ -411,13 +481,27 @@ impl FramePresenter for BridgePresenter {
         // cache takes what the lease has left after it.
         ctx.release_frame_cache(self.frame_cache_reserved);
         self.frame_cache_reserved = 0;
-        let pool = self.plan_pool(ctx, key, &state);
+        let pool = if state.headless == Some(true) {
+            self.forget(ctx, key);
+            self.views.insert(
+                key,
+                Meta {
+                    pool: None,
+                    depth: None,
+                },
+            );
+            None
+        } else {
+            self.plan_pool(ctx, key, &state)
+        };
+        let depth = self.plan_depth(ctx, key, &state);
         self.sync_frame_cache(ctx);
         self.send(Command::Configure {
             key,
             state: Box::new(state),
             revision,
             pool,
+            depth,
         });
     }
 
@@ -493,6 +577,48 @@ impl FramePresenter for BridgePresenter {
         Ok(())
     }
 
+    fn compat(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        message: pm_protocol::snapshot::CompatMessage,
+    ) {
+        self.send(Command::Compat {
+            key: (port, session),
+            message,
+        });
+    }
+
+    fn snapshot(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        host: PortId,
+        id: RequestId,
+        renderer: PortId,
+        session: SessionId,
+        request: pm_protocol::snapshot::SnapshotRequest,
+        revision: Option<Revision>,
+    ) -> Result<(), Box<EngineError>> {
+        if self.config.source != Some(FrameSource::Document) {
+            return Err(Box::new(EngineError::new(
+                ErrorCode::Unsupported,
+                ErrorScope::Request { id },
+                "This engine draws no documents (it runs the bridge test source).",
+            )));
+        }
+        let job = snapshot::SnapshotJob::new(
+            host,
+            id,
+            (renderer, session),
+            request,
+            revision,
+            render::now_us(),
+        );
+        self.send(Command::Snapshot(Box::new(job)));
+        Ok(())
+    }
+
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
         self.sync_frame_cache(ctx);
     }
@@ -545,6 +671,7 @@ impl FramePresenter for BridgePresenter {
         self.send(Command::Document {
             key: (port, session),
             update,
+            posted: render::now_us(),
         });
     }
 

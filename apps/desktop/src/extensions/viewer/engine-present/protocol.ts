@@ -59,7 +59,9 @@ export type FrameDescriptor = {
   format: SurfaceFormat;
   quality: FrameQuality;
   overlay: OverlayGeometry | null;
-  depthId: { poolIndex: number; seq: number } | null;
+  /** The frame's depth and object-id surface in the depth pool (r depth,
+   *  g/b object id − 1, a coverage), when the viewer asked for it. */
+  depthId: { poolIndex: number; seq: number; poolGeneration: number } | null;
   viewSeq: number;
   /** Ticks; `null` for frames shown at the next refresh. */
   duration: number | null;
@@ -68,6 +70,8 @@ export type FrameDescriptor = {
 export type SurfacePool = {
   generation: number;
   surfaces: { poolIndex: number; size: { width: number; height: number }; format: SurfaceFormat }[];
+  /** `depthId`: the depth and object-id pool, never the frames' pool. */
+  role?: 'color' | 'depthId' | null;
 };
 
 export type ClockSample = {
@@ -106,6 +110,8 @@ export type ViewerState = {
   viewSeq: number;
   /** The display's refresh grid (amendment 18); a change alone keeps `viewSeq`. */
   vsync?: VsyncHint | null;
+  /** Ask for each frame's depth and object-id surface (the 3D chrome). */
+  depthId?: boolean | null;
 };
 
 /** Refreshes (BeginFrame times) fall at `hostTime + n × periodUs` (host µs). */

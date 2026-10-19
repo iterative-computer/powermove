@@ -1,0 +1,896 @@
+{
+  "run": "tracer-playback-today-30-load-perf2f1",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000,
+    "synthetic": {
+      "layers": 500,
+      "images": 2,
+      "dur": 90
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 30,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      7.9345703125,
+      10.15380859375,
+      13.4482421875
+    ],
+    "after": [
+      8.21826171875,
+      9.7529296875,
+      13.03271484375
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 90,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 96,
+    "offsetUs": 556493789506
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.000458000002254,
+        "max": 50.04041599999982
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1189,
+      "replies": 1189,
+      "replyBytes": 93564946,
+      "mainMsP50": 0.06658299999980954
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14516
+    },
+    "presentation": {
+      "thread": "main",
+      "timing": "PipelineReporter"
+    },
+    "app": {
+      "project": {
+        "name": "Synthetic 500 layers",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 450
+      },
+      "stage": {
+        "width": 1228,
+        "height": 632,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 5715.600000023842,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1800,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 0,
+      "notPresented": 138,
+      "drops": 138,
+      "presented": 1655,
+      "offSlot": 1058
+    },
+    "jitterAbsMs": {
+      "n": 1655,
+      "p50": 4.316,
+      "p95": 24.554,
+      "p99": 33.014,
+      "max": 41.696
+    },
+    "intervalErrorAbsMs": {
+      "n": 1566,
+      "p50": 0.001,
+      "p95": 16.666,
+      "p99": 24.999,
+      "max": 33.334
+    },
+    "irregularIntervals": 624,
+    "rafToPresentMs": {
+      "n": 1655,
+      "p50": 11.68,
+      "p95": 28.34,
+      "p99": 36.65,
+      "max": 53.22
+    },
+    "dueToPresentMs": {
+      "n": 1655,
+      "p50": 17.78,
+      "p95": 42.33,
+      "p99": 50.8,
+      "max": 59.48
+    },
+    "rafGapMs": {
+      "n": 6607,
+      "p50": 8.3,
+      "p95": 16.6,
+      "p99": 25,
+      "max": 41.7
+    },
+    "rafGapsOver25Ms": 33,
+    "missing": [
+      {
+        "k": 75,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 79,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 81,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 83,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 87,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 91,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 93,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 94,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 95,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 96,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 99,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 100,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 104,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 223,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 225,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 226,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 227,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 228,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 231,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 233,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 235,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 236,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 237,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 242,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 244,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 376,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 378,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 379,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 382,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 384,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 387,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 388,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 395,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 396,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 397,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 403,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 406,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 523,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 526,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 532,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 533,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 535,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 538,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 539,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 542,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 549,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 678,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 680,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 682,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 684,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 687,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 693,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 698,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 700,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 701,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 703,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 705,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 824,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 827,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 831,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 835,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 838,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 839,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 840,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 841,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 842,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 843,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 844,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 845,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 847,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 854,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 855,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 857,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 858,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 982,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 984,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 986,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 987,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 988,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 989,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 990,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 996,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1002,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1004,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1124,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1125,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1129,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1130,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1131,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1137,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1138,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1140,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1141,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1142,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1143,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1145,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1147,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1151,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1153,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1154,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1155,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1285,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1286,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1287,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1289,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1291,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1305,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1306,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1307,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1423,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1425,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1434,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1442,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1444,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1447,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1449,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1458,
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 1576,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1577,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1578,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1585,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1590,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1595,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1600,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1601,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1608,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1609,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1724,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1730,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1735,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1738,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1739,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1740,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1741,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1743,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1744,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1750,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1756,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 966,
+      "2": 421,
+      "3": 224,
+      "4": 29,
+      "5": 12,
+      "6": 3
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}

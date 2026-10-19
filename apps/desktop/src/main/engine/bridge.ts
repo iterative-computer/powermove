@@ -102,6 +102,11 @@ export interface BridgeAddon {
   BridgeHost: new (name: string, allowUnsignedDev: boolean) => BridgeHostLike;
   serviceName(): string;
   nowUs(): number;
+  /** The render transport's shared-memory pixels (pm-bridge `shm`): take an
+   *  engine's segment once, publish one for an engine, unlink one. */
+  takePixels?(name: string, length: number): Uint8Array;
+  publishPixels?(bytes: Uint8Array): string;
+  unlinkPixels?(name: string): void;
 }
 
 /** Electron's `SharedTextureImported`. */

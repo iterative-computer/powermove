@@ -184,6 +184,7 @@ fn model(v: &Value) -> pm_model::Value {
 
 fn state(view_seq: u64) -> ViewerState {
     ViewerState {
+        headless: None,
         composition: "Ptracer-root".into(),
         size: Size::new(1280, 720),
         device_pixel_ratio: 2.0,
@@ -197,6 +198,7 @@ fn state(view_seq: u64) -> ViewerState {
         edr: false,
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 

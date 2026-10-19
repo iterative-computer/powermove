@@ -142,6 +142,40 @@ pub trait FramePresenter: Send {
     ) {
     }
 
+    /// Compatibility pixels the renderer uploaded for one layer at one
+    /// frame, or their disposal (the Phase 3c render transport). Presenters
+    /// that draw no documents ignore them.
+    fn compat(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _message: pm_protocol::snapshot::CompatMessage,
+    ) {
+    }
+
+    /// A host snapshot of `session` (owned by `renderer`): the presenter
+    /// answers later on `host` with `Response::Snapshot` (or an error) for
+    /// `id`; an `Err` here is sent at once. `revision` is the minimum
+    /// document revision to render.
+    #[allow(clippy::too_many_arguments)]
+    fn snapshot(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _host: PortId,
+        id: RequestId,
+        _renderer: PortId,
+        _session: SessionId,
+        _request: pm_protocol::snapshot::SnapshotRequest,
+        _revision: Option<Revision>,
+    ) -> Result<(), Box<EngineError>> {
+        Err(Box::new(EngineError::new(
+            pm_protocol::error::ErrorCode::Unsupported,
+            pm_protocol::error::ErrorScope::Request { id },
+            "This engine draws no document snapshots.",
+        )))
+    }
+
     /// A viewer or scrub frame request. The presenter answers later on the
     /// port with `Response::Frame` (or an error) for `id`; an `Err` here is
     /// sent at once.

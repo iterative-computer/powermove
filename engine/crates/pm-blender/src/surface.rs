@@ -27,6 +27,10 @@ pub struct DecodedSurface {
     pub crop: PixelRect,
     /// Premultiplied, E-encoded RGBA of the crop rectangle, top row first.
     pub pixels: Arc<[f32]>,
+    /// Straight E codes, including RGB under alpha zero. Level 1's
+    /// createImageBitmap(premultiplyAlpha: none) uploads these to WebGL,
+    /// whose ImageBitmap path ignores UNPACK_PREMULTIPLY_ALPHA_WEBGL.
+    pub straight: Arc<[f32]>,
     /// 8 or 16.
     pub bit_depth: u8,
 }
@@ -34,7 +38,7 @@ pub struct DecodedSurface {
 impl DecodedSurface {
     /// Bytes this surface holds in memory.
     pub fn bytes(&self) -> u64 {
-        (self.pixels.len() * std::mem::size_of::<f32>()) as u64
+        ((self.pixels.len() + self.straight.len()) * std::mem::size_of::<f32>()) as u64
     }
 
     /// The crop rectangle as fractions of the full size (today's `rect`:
@@ -150,9 +154,11 @@ pub fn decode_surface(bytes: &[u8]) -> Result<DecodedSurface, SurfaceError> {
     };
     debug_assert!(n > 0);
     let mut pixels = Vec::with_capacity(crop.width as usize * crop.height as usize * 4);
+    let mut straight = Vec::with_capacity(pixels.capacity());
     for y in crop.y..crop.y + crop.height {
         for x in crop.x..crop.x + crop.width {
             let i = (y as usize * w as usize + x as usize) * 4;
+            straight.extend((0..4).map(|k| f32::from(code(i + k)) / max));
             let a = f32::from(code(i + 3)) / max;
             for k in 0..3 {
                 pixels.push(f32::from(code(i + k)) / max * a);
@@ -164,6 +170,7 @@ pub fn decode_surface(bytes: &[u8]) -> Result<DecodedSurface, SurfaceError> {
         size: Size::new(w, h),
         crop,
         pixels: pixels.into(),
+        straight: straight.into(),
         bit_depth: depth,
     })
 }
@@ -224,6 +231,7 @@ mod tests {
         put(&mut rgba, 4, 3, [40000, 20000, 10000, 16384]);
         // Straight color under zero alpha stays out of the crop and the output.
         put(&mut rgba, 7, 5, [65535, 65535, 65535, 0]);
+        put(&mut rgba, 6, 5, [40000, 20000, 10000, 0]);
         let png = encode_rgba16(
             w,
             h,
@@ -255,6 +263,13 @@ mod tests {
             ]
         );
         assert_eq!(s.pixel(7, 5), [0.0; 4]);
+        let i = (((5 - s.crop.y) * s.crop.width + 6 - s.crop.x) * 4) as usize;
+        assert_eq!(s.straight.len(), s.pixels.len());
+        assert_eq!(s.bytes(), ((s.straight.len() + s.pixels.len()) * 4) as u64);
+        assert_eq!(
+            &s.straight[i..i + 4],
+            &[40000.0 / 65535.0, 20000.0 / 65535.0, 10000.0 / 65535.0, 0.0]
+        );
         assert_eq!(s.rect(), [1.0 / 8.0, 0.0, 6.0 / 8.0, 1.0]);
         assert!(check_size(&s, 8, 6).is_ok());
         assert!(check_size(&s, 16, 12).is_err());

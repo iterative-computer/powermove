@@ -173,6 +173,8 @@ export type WorkerPresenterOptions = {
 
 export class WorkerPresenter implements Presenter {
   private generation: number;
+  /** The depth and object-id pool's generation (`role: depthId`). */
+  private depthGeneration = 0;
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private parkTimer = 0;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
@@ -239,6 +241,11 @@ export class WorkerPresenter implements Presenter {
     this.options.link.sendViewerState(state);
   }
 
+  noteResize(): void {
+    if (this.disposed) return;
+    this.options.host.post({ type: 'resize', session: this.options.session });
+  }
+
   start(): void {}
 
   /** The worker's animation frames follow its canvas; only the display's rate changes here. */
@@ -252,6 +259,13 @@ export class WorkerPresenter implements Presenter {
     return () => this.listeners.delete(listener);
   }
 
+  private readonly doneListeners = new Set<(seq: number) => void>();
+
+  onDone(listener: (seq: number) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
   receive(message: EngineFrameMessage, arrivedMs = this.now()): void {
     if (this.disposed) return;
     const session = this.options.session;
@@ -260,6 +274,16 @@ export class WorkerPresenter implements Presenter {
       if (this.options.hostOffsetUs) this.options.host.post({ type: 'hostOffset', session, us: this.options.hostOffsetUs() });
     } else if (message.type === 'surfacePool') {
       const pool = message.pool;
+      if (pool.role === 'depthId') {
+        // The depth and object-id pool: the worker's presenter tags frames
+        // with it; the imports are read on this side (`depthFrame`).
+        if (pool.generation <= this.depthGeneration) return;
+        const previous = this.depthGeneration;
+        this.depthGeneration = pool.generation;
+        this.options.host.post({ type: 'pool', session, pool });
+        if (previous) this.options.source.retire(previous);
+        return;
+      }
       if (pool.generation <= this.generation) return;
       const previous = this.generation;
       this.generation = pool.generation;
@@ -367,6 +391,10 @@ export class WorkerPresenter implements Presenter {
         this.remote = message.stats;
         if (this.disposed) return;
         for (const listener of this.listeners) listener(message.frame);
+        return;
+      case 'done':
+        if (this.disposed) return;
+        for (const listener of this.doneListeners) listener(message.seq);
         return;
       case 'vsync':
         if (!this.disposed) this.options.onVsync?.(message.hint);

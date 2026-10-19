@@ -44,6 +44,12 @@ impl MediaMap {
     pub fn path(&self, asset: &str) -> Option<PathBuf> {
         self.0.get(asset).cloned().flatten()
     }
+
+    /// The host's answer for an asset: `None` before it answered,
+    /// `Some(None)` when the file is offline.
+    pub fn answer(&self, asset: &str) -> Option<Option<PathBuf>> {
+        self.0.get(asset).cloned()
+    }
 }
 
 impl pm_render::AssetResolver for MediaMap {
@@ -83,13 +89,24 @@ pub struct ViewDocument {
         pm_protocol::common::DefinitionId,
     )>,
     cached: Option<Cached>,
-    /// The renderer lays text out over the engine's fonts: text and
-    /// captions layers are drawn.
+    /// The renderer has fonts (`crate::fonts::render`): text and captions
+    /// layers are drawn, not routed.
     fonts: bool,
 }
 
 impl ViewDocument {
-    /// Whether the renderer has fonts (`pm_render::unsupported_with_fonts`).
+    /// Whether the host answered for every asset the document names (a
+    /// frame never shows media missing that is only on its way).
+    pub fn media_ready(&self) -> bool {
+        let Some(root) = self.doc.root() else {
+            return true;
+        };
+        asset_records(Some(root))
+            .iter()
+            .all(|(id, _)| self.media.0.contains_key(id.as_str()))
+    }
+
+    /// Whether the renderer that draws this view has fonts.
     pub fn set_fonts(&mut self, fonts: bool) {
         if self.fonts != fonts {
             self.fonts = fonts;
@@ -250,12 +267,12 @@ impl ViewDocument {
         // The host has answered: an offline file is now a named layer
         // failure from the renderer, not a different rendering engine.
         let mut reasons = Vec::new();
-        let issues = if self.fonts {
-            pm_render::unsupported_with_fonts(&self.doc, composition, Some(&self.media))
+        let unsupported = if self.fonts {
+            pm_render::capability::unsupported_with_fonts(&self.doc, composition, Some(&self.media))
         } else {
             pm_render::unsupported_with_media(&self.doc, composition, &self.media)
         };
-        for u in issues {
+        for u in unsupported {
             // With definitions, effects, transitions, adjustment layers
             // with effects, and extension layers are drawn; one the renderer cannot draw (no
             // definition, a program that needs the fallback runner) fails

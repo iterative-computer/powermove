@@ -200,6 +200,26 @@ describe('preload bridge', () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.menuCommand, menuListener);
   });
 
+  it('sends engine snapshot requests as plain data with their bytes intact', () => {
+    electronMocks.sendSync.mockReturnValue({ status: 'empty', revision: 1 });
+    const engine = (bridge() as unknown as { nativeEngine: { snapshotSync(request: unknown): unknown } }).nativeEngine;
+    const content = new TextEncoder().encode('{"id":"L1"}');
+    const json = new TextEncoder().encode('{}');
+    engine.snapshotSync({
+      generation: 1, session: null, revision: 4,
+      snapshot: { composition: 'c', time: 0, outputSize: { width: 8, height: 8 }, target: { kind: 'layer', layer: 'L1', scale: 1, crop: null, content }, pixels: 'premultiplied', class: 'sync', viewSeq: null, waitMs: 10, uploaded: [] },
+      document: { id: 'doc', revision: 4, hash: 'ab'.repeat(32), json },
+      fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }]
+    });
+    const sent = electronMocks.sendSync.mock.calls[0]![1] as any;
+    expect(sent.snapshot.target.content).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(sent.snapshot.target.content)).toBe('{"id":"L1"}');
+    expect(sent.document).toMatchObject({ id: 'doc', revision: 4, hash: 'ab'.repeat(32) });
+    expect(sent.document.json).toBeInstanceOf(Uint8Array);
+    expect(sent.fallbackPixels[0].rgba16f).toBeInstanceOf(Uint8Array);
+    expect(sent.session).toBeNull();
+  });
+
   it('uses the synchronous store snapshot boot barrier', () => {
     electronMocks.sendSync.mockReturnValue({ theme: 'dark' });
     expect(bridge().store.snapshotSync()).toEqual({ theme: 'dark' });

@@ -86,6 +86,9 @@ pub struct EngineHost {
     font_ports: std::collections::BTreeSet<u32>,
     /// Render threads' requests to the font service (`fonts::hub`).
     font_hub: std::sync::Arc<fonts::hub::FontHub>,
+    /// Where the engine's rendering threads ask the font service for
+    /// registry answers and full fonts (`fonts::render`).
+    broker: fonts::render::FontBroker,
 }
 
 impl EngineHost {
@@ -123,13 +126,21 @@ impl EngineHost {
         let mut job_stats = None;
         #[cfg(target_os = "macos")]
         let mut control = None;
+        let broker = fonts::render::FontBroker::new();
+        if let Some(sink) = sink.clone() {
+            // An empty action list makes the utility process call `pump`,
+            // which answers the asks on this (the main) thread.
+            broker.set_wake(std::sync::Arc::new(move || sink(Vec::new())));
+        }
         #[cfg(target_os = "macos")]
         {
             if let (Some(sink), Some(mut config)) = (
                 sink.clone(),
                 present::PresenterConfig::from_env(process, &env),
             ) {
-                config.thread.fonts = render_fonts.clone().map(present::TextFontsHub);
+                config.thread.fonts = render_fonts
+                    .clone()
+                    .map(|hub| fonts::render::RenderFonts::with_hub(broker.clone(), hub));
                 let bridge = present::BridgePresenter::start(config, sink)?;
                 presenter = Some(bridge.stats_handle());
                 control = Some(bridge.control());
@@ -159,7 +170,62 @@ impl EngineHost {
             fonts: font_service,
             font_ports: Default::default(),
             font_hub,
+            broker,
         })
+    }
+
+    /// Answers the rendering threads' font asks (on this thread, which
+    /// AppKit's font manager needs). The service is created on the first ask
+    /// when main has not attached a font port yet; main's port then opens
+    /// it at its generation base and replays the project fonts.
+    fn serve_broker_fonts(&mut self) {
+        let asks = self.broker.take_asks();
+        if asks.is_empty() {
+            return;
+        }
+        if self.fonts.is_none() {
+            match fonts::FontService::new() {
+                Ok(service) => self.fonts = Some(service),
+                Err(error) => {
+                    for ask in asks {
+                        ask.answer(Err(format!(
+                            "the engine's font registry is unavailable: {error}"
+                        )));
+                    }
+                    return;
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(service) = self.fonts.as_mut() {
+            self.broker.set_generation(service.generation());
+            fonts::render::serve(service, asks);
+        }
+        #[cfg(not(target_os = "macos"))]
+        for ask in asks {
+            ask.answer(Err("the native font registry is macOS only".into()));
+        }
+    }
+
+    /// The font service's generation moved (a project font, a variable
+    /// source, a reopened port): rendering threads install fresh fonts and
+    /// the viewer draws again.
+    fn fonts_changed(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(service) = self.fonts.as_ref() {
+            let generation = service.generation();
+            if generation != self.broker.generation() {
+                self.broker.set_generation(generation);
+                if let Some(control) = &self.control {
+                    control.fonts_changed();
+                }
+            }
+        }
+    }
+
+    /// The broker rendering threads ask (tests and the job engine).
+    pub fn font_broker(&self) -> &fonts::render::FontBroker {
+        &self.broker
     }
 
     /// Simulates a GPU device loss in the viewer presenter (the recovery
@@ -212,11 +278,13 @@ impl EngineHost {
             self.fonts = Some(fonts::FontService::new()?);
         }
         self.font_ports.insert(port);
+        self.fonts_changed();
         Ok(Vec::new())
     }
 
     /// Answers render threads' font requests (on this thread).
     fn serve_fonts(&mut self) {
+        self.serve_broker_fonts();
         if !self.font_hub.has_requests() {
             return;
         }
@@ -242,6 +310,7 @@ impl EngineHost {
 
     pub fn receive(&mut self, port: u32, bytes: &[u8]) -> Vec<Action> {
         if self.font_ports.contains(&port) {
+            let generation = pm_text::served::FontServer::generation(&*self.font_hub);
             let reply = match self.fonts.as_mut() {
                 Some(service) => {
                     let reply = service.handle(bytes);
@@ -257,6 +326,15 @@ impl EngineHost {
                 }
                 None => return Vec::new(),
             };
+            self.fonts_changed();
+            #[cfg(target_os = "macos")]
+            if generation != pm_text::served::FontServer::generation(&*self.font_hub)
+                && let Some(control) = &self.control
+            {
+                control.fonts_changed();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = generation;
             self.serve_fonts();
             return vec![Action::Send {
                 port: PortId(port),
@@ -279,7 +357,7 @@ impl EngineHost {
     }
 
     /// What the job service produced off this thread (`Engine::pump`), and
-    /// the render threads' font requests.
+    /// the rendering threads' font asks.
     pub fn pump(&mut self) -> Vec<Action> {
         self.serve_fonts();
         self.engine.pump()
@@ -299,6 +377,11 @@ impl EngineHost {
             object.insert(
                 "fonts".into(),
                 serde_json::to_value(self.font_hub.stats()).unwrap_or_default(),
+            );
+            let (asked, answered, failed) = self.broker.counts();
+            object.insert(
+                "renderFonts".into(),
+                serde_json::json!({ "asked": asked, "answered": answered, "failed": failed, "generation": self.broker.generation() }),
             );
             #[cfg(target_os = "macos")]
             if let Some(jobs) = &self.jobs {
@@ -325,6 +408,7 @@ impl Drop for EngineHost {
     /// Render threads waiting for fonts stop waiting before the presenter
     /// and the job lanes are joined (the engine drops after this).
     fn drop(&mut self) {
+        self.broker.close();
         self.font_hub.shutdown();
     }
 }

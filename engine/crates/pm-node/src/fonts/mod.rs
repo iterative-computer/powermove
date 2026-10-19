@@ -24,6 +24,7 @@
 //! process's main thread.
 
 pub mod hub;
+pub mod render;
 pub mod wire;
 
 use serde::Deserialize;
@@ -478,6 +479,24 @@ impl FontService {
         use pm_text::font::FontResolver;
         let registry = self.layout.resolver();
         ((id as usize) < registry.faces().count()).then(|| registry.face(id))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl render::FontSource for FontService {
+    fn generation(&self) -> u64 {
+        FontService::generation(self)
+    }
+
+    fn answer(
+        &mut self,
+        queries: &[pm_text::answers::Query],
+    ) -> Result<pm_text::answers::Answers, String> {
+        self.registry().answer(queries).map_err(|e| e.to_string())
+    }
+
+    fn blob(&self, key: &str) -> Option<pm_text::font::FontBytes> {
+        self.layout.resolver().blob(key)
     }
 }
 
