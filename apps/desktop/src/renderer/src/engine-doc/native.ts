@@ -29,6 +29,7 @@ import { compositionScene, layer3DRole } from '../core/scene3d/layers';
 import { ZodError } from 'zod';
 import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
+import { ExpressionFrames, type ExpressionFrameSlot } from './expression-frame';
 
 type Legacy = Record<string, any>;
 
@@ -213,6 +214,13 @@ export function liveMemberOrder(L: any, entries: any[]): any[] {
 
 /** The value at a path of own members (null when missing). */
 export function at(root: any, path: readonly PathPart[]): any {
+  // Resident transform/content properties use two own members. Unroll that
+  // revision check without weakening the missing/inherited-member guards.
+  if (path.length === 2) {
+    if (!root || typeof root !== 'object' || !Object.hasOwn(root, path[0]!)) return undefined;
+    const owner = root[path[0]!];
+    return owner && typeof owner === 'object' && Object.hasOwn(owner, path[1]!) ? owner[path[1]!] : undefined;
+  }
   let node = root;
   for (const part of path) {
     if (!node || typeof node !== 'object' || !Object.prototype.hasOwnProperty.call(node, part)) return undefined;
@@ -305,12 +313,13 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number }>();
+  private props = new WeakMap<object, { layer: object; layerId: unknown; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
-  private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
+  private channels = new WeakMap<object, { layer: object; layerId: unknown; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
   private refs = new Map<number, number>();
+  private expressionFrames = new ExpressionFrames();
   /**
    * The module instance the interned ids belong to. `reset()` (a replaced
    * instance) moves it on; a registration from an earlier instance names an
@@ -323,6 +332,10 @@ export class NativeApi {
   private indexed = new WeakMap<any[], Indexed>();
   /** `expressionErrors` for channels evaluated natively (live objects). */
   readonly errors = new WeakMap<object, string>();
+  /** Entries set in `errors` and not deleted since (an upper bound: a
+   * collected key is not subtracted). Zero lets a frame skip a WeakMap delete
+   * per channel read. */
+  private errorEntries = 0;
   private definitions = new Map<string, string>();
   /** Where text layout gets registry answers and subsets (null: none). */
   fonts: FontLoader | null = null;
@@ -822,6 +835,7 @@ export class NativeApi {
     const n = this.refs.get(id)! - 1;
     if (n > 0) { this.refs.set(id, n); return; }
     this.refs.delete(id);
+    this.expressionFrames.release(id);
     const wasm = this.wasm();
     if (wasm && !wasm.dead) try { wasm.release(id); } catch { /* the instance is gone */ }
   }
@@ -834,18 +848,28 @@ export class NativeApi {
     this.detachedProps = new WeakMap();
     this.channels = new WeakMap();
     this.refs.clear();
+    this.expressionFrames = new ExpressionFrames();
     this.indexed = new WeakMap();
     this.shapes = new WeakMap();
     this.rootsAnswer = null;
   }
 
-  private noteError(prop: any, wasm: PmWasm, id: number) {
+  private noteError(prop: any, wasm: PmWasm, id: number, comp?: string) {
     if (!prop || typeof prop !== 'object') return;
     const raw = this.unwrap(prop);
-    if (!raw.expr) { this.errors.delete(raw); return; }
-    const message = wasm.expressionError(id);
-    if (message == null) this.errors.delete(raw);
-    else this.errors.set(raw, message);
+    if (!raw.expr) {
+      this.clearError(raw);
+      this.expressionFrames.release(id);
+      return;
+    }
+    if (comp && !this.dual) {
+      const slot = this.expressionFrames.register(comp, id);
+      const entry = this.props.get(raw);
+      if (entry?.id === id) entry.frame = slot;
+    }
+    const message = (wasm.evaluationStatus() & 0x80) ? wasm.expressionError(id) : null;
+    if (message == null) this.clearError(raw);
+    else this.setError(raw, message);
   }
 
   private evById(wasm: PmWasm, id: number, t: number): Native<any> {
@@ -883,16 +907,57 @@ export class NativeApi {
    * rootComp: checked on every call, since the scope object can change
    * without the barrier seeing it.
    */
-  private current(entry: { revision: number; cur: unknown }, raw: any): boolean {
-    if (this.wrapperFreeChannel(raw)) {
-      const barrier = this.barrier();
-      if (!barrier) return false;
-      barrier.flush();
-      return entry.revision === barrier.revision;
+  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
+    const barrier = this.barrier();
+    if (!barrier) return false;
+    barrier.flush();
+    const revision = barrier.revision;
+    // An unchanged layer shape keeps the interned address in the same owner.
+    // A leaf edit may have changed the expression's reads; pm-wasm validates
+    // and rebinds that id against the new revision on its next evaluation.
+    const revised = entry.revision !== revision;
+    if (revised) {
+      const project = this.unwrap(this.PM.proj);
+      if (entry.project !== project || entry.layerId !== (entry.layer as any)?.id
+        || entry.path && at(entry.layer, entry.path) !== raw) return false;
+      if (entry.shape !== barrier.shapeRevision) {
+        // An added, removed, or reordered layer need not discard every ID.
+        // Check the open composition's membership and first-ID rule once per
+        // layer shape (index() shares its map across all channels in a frame).
+        const open = project?.compId ?? project?.id ?? '';
+        if ((entry.comp !== open && entry.comp !== ROOT_VIEW + open)
+          || !Array.isArray(project?.layers)) return false;
+        const indexed = this.index(project.layers);
+        const atIndex = indexed.index.get(entry.layer);
+        if (atIndex === undefined || indexed.firstById.get(String(entry.layerId)) !== atIndex) return false;
+      }
     }
-    const stamp = this.stamp();
-    return !!stamp && entry.revision === stamp.revision && entry.cur === stamp.cur
-      && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));
+    let scopeValid: boolean;
+    if (this.wrapperFreeChannel(raw)) scopeValid = true;
+    // The ordinary open-project scope has no wrapper to validate. Avoid
+    // constructing a scope stamp for every resident channel of the frame.
+    else if (!this.PM.scope?.length) scopeValid = entry.cur === null;
+    else {
+      const stamp = this.stamp();
+      scopeValid = !!stamp && stamp.revision === revision && entry.cur === stamp.cur
+        && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));
+    }
+    if (!scopeValid) return false;
+    if (revised) {
+      entry.revision = revision;
+      entry.shape = barrier.shapeRevision;
+      entry.time = undefined;
+    }
+    return true;
+  }
+
+  private setError(raw: object, message: string): void {
+    if (!this.errors.has(raw)) this.errorEntries += 1;
+    this.errors.set(raw, message);
+  }
+
+  private clearError(raw: object): void {
+    if (this.errorEntries && this.errors.delete(raw)) this.errorEntries -= 1;
   }
 
   private wrapperFreeChannel(raw: any): boolean {
@@ -904,14 +969,27 @@ export class NativeApi {
   private fastValue(id: number, T: number, prop: any): unknown {
     const wasm = this.wasm();
     if (!wasm || wasm.dead) return MISS;
-    let n: number;
-    try { n = wasm.x.pm_ev(id, T); } catch { wasm.dead = true; return MISS; }
-    if (n !== n && wasm.x.pm_kind() !== 0) return MISS; // not a number, or a throw: ask the slow path
-    this.stats.fastPath += 1;
     const raw = prop && typeof prop === 'object' ? this.unwrap(prop) : null;
+    // The ID still names this channel after a source removal, but it must no
+    // longer occupy a resident expression slot in subsequent frame batches.
+    if (!raw?.expr && this.expressionFrames.has(id)) this.expressionFrames.release(id);
+    let n: number, status: number;
+    try {
+      if (raw?.expr) {
+        const slot = this.expressionFrames.slot(id);
+        status = slot ? this.expressionFrames.read(wasm, slot, T, this.barrier()!.revision) : -1;
+        if (status >= 0) n = this.expressionFrames.value;
+        else { n = wasm.x.pm_ev(id, T); status = wasm.evaluationStatus(); }
+      } else {
+        n = wasm.x.pm_ev(id, T);
+        status = n === n ? 0 : wasm.x.pm_kind();
+      }
+    } catch { wasm.dead = true; return MISS; }
+    if ((status & 0x7f) !== 0) return MISS; // not a number, or a throw: ask the slow path
+    this.stats.fastPath += 1;
     if (raw) {
-      if (raw.expr) { const m = wasm.expressionError(id); if (m == null) this.errors.delete(raw); else this.errors.set(raw, m); }
-      else this.errors.delete(raw);
+      if (raw.expr) { const m = (status & 0x80) ? wasm.expressionError(id) : null; if (m == null) this.clearError(raw); else this.setError(raw, m); }
+      else this.clearError(raw);
     }
     return n;
   }
@@ -921,8 +999,9 @@ export class NativeApi {
       const raw = this.unwrap(L);
       const entry = this.channels.get(raw);
       const id = entry?.ids.get(key);
-      if (id !== undefined && this.current(entry!, raw.p?.[key])) {
+      if (id !== undefined && Object.prototype.hasOwnProperty.call(raw.p ?? {}, key) && this.current(entry!, raw.p?.[key])) {
         const value = this.fastValue(id, T, raw.p?.[key]);
+        if (value !== MISS && raw.p?.[key]?.expr && !this.expressionFrames.has(id)) this.noteError(raw.p[key], this.wasm()!, id, entry!.comp);
         if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
       }
     }
@@ -937,8 +1016,10 @@ export class NativeApi {
       }
       const stamp = this.stamp()!;
       let entry = this.channels.get(ctx.raw);
-      if (!entry || entry.comp !== ctx.comp) { entry = { comp: ctx.comp, ids: new Map(), revision: stamp.revision, cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+      if (!entry || entry.comp !== ctx.comp || entry.project !== this.unwrap(this.PM.proj)
+        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
       entry.revision = stamp.revision;
+      entry.shape = this.barrier()!.shapeRevision;
       entry.cur = stamp.cur;
       let id = entry.ids.get(key);
       if (id === undefined) {
@@ -947,7 +1028,7 @@ export class NativeApi {
         entry.ids.set(key, id);
       }
       const got = this.evById(wasm, id, T);
-      this.noteError(ctx.raw.p?.[key], wasm, id);
+      this.noteError(ctx.raw.p?.[key], wasm, id, ctx.comp);
       return got;
     }, () => this.legacy.ev(L, key, T), () => ({ layer: L?.id, key, t: T }));
   }
@@ -958,6 +1039,11 @@ export class NativeApi {
       const rawProp = this.unwrap(prop);
       const entry = this.props.get(rawProp);
       if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
+        if (!rawProp.expr && entry.frame) {
+          this.expressionFrames.release(entry.id);
+          entry.frame = undefined;
+          this.clearError(rawProp);
+        }
         // The value was already answered by pm-wasm at this exact time and
         // revision. Like its own last-answer memo, keep numeric answers only.
         if (entry.time !== undefined && Object.is(entry.time, T)) {
@@ -968,7 +1054,28 @@ export class NativeApi {
             return entry.number;
           }
         }
+        // A resident expression reads its frame run (see ExpressionFrames).
+        // Anything but a number takes fastValue, which decodes or falls back.
+        const frame = entry.frame;
+        if (rawProp.expr && frame && !frame.released && !entry.wasm.dead) {
+          let status = -1;
+          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { entry.wasm.dead = true; }
+          if (status >= 0 && (status & 0x7f) === 0) {
+            const value = this.expressionFrames.value;
+            const message = (status & 0x80) ? entry.wasm.expressionError(entry.id) : null;
+            if (message == null) this.clearError(rawProp); else this.setError(rawProp, message);
+            entry.time = T; entry.number = value;
+            this.stats.fastPath += 1;
+            this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+            return value;
+          }
+        }
         const value = this.fastValue(entry.id, T, rawProp);
+        if (value !== MISS && rawProp.expr && (!entry.frame || entry.frame.released)) {
+          const slot = this.expressionFrames.slot(entry.id);
+          if (slot) entry.frame = slot;
+          else this.noteError(rawProp, entry.wasm, entry.id, entry.comp);
+        }
         if (typeof value === 'number') { entry.time = T; entry.number = value; }
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
       }
@@ -1000,7 +1107,10 @@ export class NativeApi {
       if (!ctx) return { fallback: 'context' };
       const stamp = this.stamp()!;
       let entry = this.props.get(rawProp);
-      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key && at(ctx.raw, entry.path) === rawProp;
+      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key
+        && ctx.first && entry.layerId === ctx.raw.id && entry.project === this.unwrap(this.PM.proj)
+        && (!rawProp.expr || entry.cur === stamp.cur)
+        && at(ctx.raw, entry.path) === rawProp;
       if (!valid) {
         const path = findPath(ctx.raw, rawProp);
         if (!path || !ctx.first || typeof ctx.layer !== 'number' || typeof key !== 'string' || typeof T !== 'number') {
@@ -1012,15 +1122,16 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur, wasm };
+        entry = { layer: ctx.raw, layerId: ctx.raw.id, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
+      entry!.shape = this.barrier()!.shapeRevision;
       entry!.cur = stamp.cur;
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
       if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
-      this.noteError(rawProp, wasm, entry!.id);
+      this.noteError(rawProp, wasm, entry!.id, ctx.comp);
       return got;
     }, () => this.legacy.evP(L, prop, T, key), () => ({ layer: L?.id, key, t: T }));
   }

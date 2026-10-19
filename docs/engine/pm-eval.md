@@ -236,3 +236,52 @@ independent. pm-wasm can also evaluate a replacement-time `compJson` through
 Ad-hoc scope queries clear per-document evaluator caches (interned ids remain
 valid), because their temporary nodes must never share cached answers with a
 later replacement scope at the same document revision.
+
+## P6 resident expression plans (2026-10-19)
+
+Interned static and keyed expressions now retain their compiled source in a
+plan. Same-revision frames reuse the validated layer position and resolve each
+composition once per batch. `CompiledExpression::bind` optionally binds pure
+document inputs. The initial implementation discarded bindings on every root
+revision; EXPR-1 now validates their fixed inputs and refreshes changed bindings
+only (see `perf.md`, round 3). Time, local time,
+frame and the keyed base stay dynamic. Mixed/keyed bases still use the existing
+keyframe evaluator. Last-answer keys remain the exact f64 bits and revision.
+`expression_error_at` accepts the address's original JS strings, returning at
+once for an empty error map without allocating UTF-8 strings per channel.
+The 400-source regression, invalidation vectors and native/wasm V8 comparisons
+cover this path; measurements and remaining gates are in `perf.md`.
+
+`binding_matches` defaults to unknown for extension expression engines, so
+their bindings are conservatively refreshed. Production numeric plans compare
+all fixed input bits and retain the original source separately for rebinding.
+Nonnumeric fixed leaves decline binding; general bytecode keeps fresh document
+reads and invalidates its answer memo on root edits. Unchanged layer lists
+preserve validated positions, and changed lists still check unique first IDs.
+Immutable composition views carry unique tokens for sharing validation within
+a batch without trusting pointer reuse across documents. Source/shape pools
+hold weak plan references, so cache eviction does not invalidate resident IDs.
+
+`document_patched` can advance a bound layer-local slot from the exact applied
+base revision when patch paths prove its layer/index unchanged: parameter and
+provenance writes, or leaf writes inside another layer excluding its ID.
+Structural operations, layer replacements, unknown composition paths and slots
+older than that base keep ordinary validation. The notification is called only
+after successful document apply. Regressions cover an unevaluated layer edit
+followed by a parameter edit and another layer becoming the first duplicate ID.
+
+### Expression plans, round 4
+
+An expression slot's plan now holds its keyed base's temporal track, prepared
+once with the plan by the same `PreparedTrack::prepare` that `evalKfs` runs on
+every call (only a numeric temporal track is kept; discrete keys and
+non-finite times still read the nodes). A keyed expression channel cost about
+186 µs per 400-channel native frame for that preparation alone; it now costs
+about 10 µs in total. `ExpressionPlan::scalar` serves static and keyed bases
+alike, and `eval_expression_plan` takes it even while other channels hold
+expression errors, clearing this channel's own entry exactly as the full
+`evaluate` does. The same-revision warm path no longer indexes the
+composition's layers by the slot's proven position unchecked: a missing layer
+takes ordinary revalidation. General bindings (pm-expr's partial evaluation,
+see `expressions.md`) plug in through the existing `CompiledExpression::bind`
+/ `binding_matches` / `binding_is_layer_local` hooks, unchanged.

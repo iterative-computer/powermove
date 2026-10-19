@@ -28,11 +28,13 @@ export interface PmWasmExports {
   pm_release(id: number): void;
   pm_ev(id: number, t: number): number;
   pm_kind(): number;
+  pm_status_ptr(): number;
   pm_last(): number;
   pm_batch_ids(n: number): number;
   pm_batch_out(n: number): number;
   pm_batch_kinds(n: number): number;
   pm_ev_batch(n: number, t: number): number;
+  pm_ev_batch_range(start: number, n: number, t: number): number;
   pm_expr_error(id: number): number;
   pm_query(len: number): number;
   pm_define(len: number): void;
@@ -96,6 +98,14 @@ export class PmWasm {
   private u8: Uint8Array | null = null;
   private inPtr = 0;
   private inCap = 0;
+  private statusPtr = 0;
+  private statusWord: Uint32Array | null = null;
+  private batchCapacity = 0;
+  private batchVersion = 0;
+  private batchIdsPtr = 0;
+  private batchOutPtr = 0;
+  private batchKindsPtr = 0;
+  private activeBatch: object | null = null;
 
   constructor(instance: WebAssembly.Instance) {
     this.x = instance.exports as unknown as PmWasmExports;
@@ -247,13 +257,67 @@ export class PmWasm {
   evBatch(ids: ArrayLike<number>, t: number): { values: Float64Array; kinds: Uint8Array } {
     return this.call(() => {
       const n = ids.length;
-      const idsPtr = this.x.pm_batch_ids(n);
-      const outPtr = this.x.pm_batch_out(n);
-      const kindsPtr = this.x.pm_batch_kinds(n);
-      this.u32(idsPtr, n).set(ids);
+      this.reserveBatch(n);
+      this.activeBatch = null;
+      this.u32(this.batchIdsPtr, n).set(ids);
       if (this.x.pm_ev_batch(n, t) !== 0) throw new Error('pm-wasm: batch buffers too small');
-      return { values: this.f64(outPtr, n), kinds: this.bytes(kindsPtr, n) };
+      return { values: this.f64(this.batchOutPtr, n), kinds: this.bytes(this.batchKindsPtr, n) };
     });
+  }
+
+  /** The shared batch buffers hold at least `n` entries. Growing them moves
+   * them, which `batchVersion` tells prepared batches. */
+  private reserveBatch(n: number) {
+    if (n <= this.batchCapacity && this.batchIdsPtr) return;
+    const capacity = Math.max(n, this.batchCapacity, 1);
+    this.batchIdsPtr = this.x.pm_batch_ids(capacity);
+    this.batchOutPtr = this.x.pm_batch_out(capacity);
+    this.batchKindsPtr = this.x.pm_batch_kinds(capacity);
+    this.batchCapacity = capacity;
+    this.batchVersion += 1;
+    this.activeBatch = null;
+  }
+
+  /** Freeze resident ids once. Each call evaluates the run
+   * `[start, start + count)` of them (all by default) into the same positions of
+   * the returned views, which stay valid until the next batch call. The ids
+   * are copied in again only after another caller used the shared buffers.
+   * Memory growth renews views. */
+  prepareBatch(ids: ArrayLike<number>): (time: number, start?: number, count?: number) => { values: Float64Array; kinds: Uint8Array } {
+    const resident = Uint32Array.from(ids), n = resident.length, token = {};
+    let version = -1, buffer: ArrayBuffer | null = null;
+    let input: Uint32Array, values: Float64Array, kinds: Uint8Array;
+    const views = () => {
+      buffer = this.x.memory.buffer;
+      version = this.batchVersion;
+      input = new Uint32Array(buffer, this.batchIdsPtr, n);
+      values = new Float64Array(buffer, this.batchOutPtr, n);
+      kinds = new Uint8Array(buffer, this.batchKindsPtr, n);
+    };
+    return (time, start = 0, count = n - start) => {
+      if (this.dead) throw new Error('pm-wasm instance is dead');
+      if (!(start >= 0 && count >= 0 && start + count <= n)) throw new RangeError('pm-wasm: batch run outside its ids');
+      try {
+        this.reserveBatch(n);
+        if (version !== this.batchVersion || buffer !== this.x.memory.buffer) views();
+        // Another batch (or evBatch) wrote the shared ids since this one ran.
+        if (this.activeBatch !== token) { input.set(resident); this.activeBatch = token; }
+        if (this.x.pm_ev_batch_range(start, count, time) !== 0) throw new Error('pm-wasm: batch buffers too small');
+        // Evaluation itself can grow memory (cold plans, errors, keyed values).
+        if (buffer !== this.x.memory.buffer) views();
+        return { values, kinds };
+      } catch (error) {
+        this.dead = true;
+        throw error;
+      }
+    };
+  }
+
+  /** Reacquire after growth; no per-expression wasm/error-string crossing. */
+  evaluationStatus(): number {
+    this.statusPtr ||= this.x.pm_status_ptr();
+    if (!this.statusWord || this.statusWord.buffer !== this.x.memory.buffer) this.statusWord = this.u32(this.statusPtr, 1);
+    return this.statusWord[0]!;
   }
 
   expressionError(id: number): string | null {

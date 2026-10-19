@@ -3,6 +3,15 @@ import type { PMRegistry } from '../registry';
 import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
 import { timelineService } from './services';
 
+/** The generated scene control's live drag write. */
+export function setSceneParameterValue(PM: PMRegistry, param: { name?: string; value: unknown }, value: unknown, name = param.name): void {
+  param.value = value;
+  if (typeof name === 'string' && Object.hasOwn(PM.proj.params ?? {}, name) && PM.proj.params[name] === param) {
+    PM.touch([['params', name, 'value']]);
+  } else PM.touch();
+  PM.invalidate();
+}
+
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
 function persistProjectWorkspace() {
@@ -923,6 +932,7 @@ function registerCustom(w: any) {
           const binding: any = sourceBinding(ct);
           const local: any = !!ct.stateKey;
           const param: any = binding || local ? null : ensureParam(ct);
+          const paramName: any = ct.param || ct.label;
           /* History may restore the project object. Resolve generated scene
              parameters by stable name so the mounted control follows undo,
              redo, agent edits, and direct edits to the current source. */
@@ -930,7 +940,7 @@ function registerCustom(w: any) {
           const get: any = binding ? binding.get : local ? () => toolState[ct.stateKey] ?? ct.def : () => currentParam().value;
           const set: any = binding ? () => {} : local
             ? (v: any) => { toolState[ct.stateKey] = v; persistState(); preview.hidden = true; }
-            : (v: any) => { const active: any = currentParam(); active.value = v; applyParam(active); };
+            : (v: any) => setSceneParameterValue(PM, currentParam(), v, paramName);
           const edit: any = local ? { label: ct.label, local: true } : binding ? {
             label: ct.label, origin: 'generated-ui', command: binding.command,
           } : {
@@ -1046,10 +1056,6 @@ function ensureParam(ct: any) {
   const ps: any = PM.proj.params;
   if (!ps[name]) ps[name] = { name, label: ct.label, control: ct.type === 'slider' ? 'num' : ct.type, value: ct.def, min: ct.min, max: ct.max, options: ct.options };
   return ps[name];
-}
-function applyParam(param: any) {
-  /* bound layers pick this up through param("name") in expressions */
-  PM.touch(); PM.invalidate();
 }
 WS.registerCustom = registerCustom;
 WS.sourceBinding = sourceBinding;

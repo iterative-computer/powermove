@@ -142,12 +142,12 @@ for (const scenario of [
         }
         await page.waitForTimeout(60);
       }
-      const result = await page.evaluate(async () => {
+      const result = await page.evaluate(async (mode) => {
         const w = window as any;
         const PM = w.PM;
         const viewer = PM.Kernel.services.get('viewer');
         return { details:{keys:w.__typing.keys,batches:w.__typing.batches,frames:w.__typing.frames,hostOffsetUs:PM.EngineConnection?.status().hostOffsetUs,trace:mode === 'native' ? await viewer.enginePresentation.takeTrace() : null}, samples: w.__typing.samples as number[], route: PM.EngineConnection?.status()?.route ?? 'legacy', text: PM.L(PM.sel.layers?.[0] ?? '')?.d?.text };
-      });
+      }, mode);
       await page.keyboard.press('Escape');
       const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive') ?? null);
       const displayAfter = await session.app.evaluate(({}, harnessPath) => process.getBuiltinModule('module').createRequire(harnessPath)(harnessPath).displayState(), process.env.POWERMOVE_PM_BRIDGE_HARNESS ?? path.join(os.homedir(),'Library/Caches/powermove-engine/pm_bridge_harness.node'));

@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+smallvec = "=1.16.3"
 pm-model = { path = "../pm-model" }
 # Correctly rounded sin, cos, tan, asin, acos, atan2, exp, log (CORE-MATH and
 # LLVM libc algorithms); see src/jsmath/mod.rs. BSD-3-Clause OR Apache-2.0.
