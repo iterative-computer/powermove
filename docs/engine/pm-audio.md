@@ -2052,3 +2052,245 @@ relaxed. Completing all final captures, the all-ready control and sixty
 repetition suites remains required before sign-off. Only one additional
 line changed pm-node's presenter in this round: its evaluator-factory
 opt-in. No render.rs change was needed.
+
+### A8 round 3: complete and simultaneous starts
+
+The round-2 ordinary-start omission path is superseded. Play now waits
+until every stretched voice has complete first-output PCM. The mix is
+published in one interleaved buffer at one project sample. A CPU preparation
+job cannot release a partial mix. Only source input still missing after
+120 ms of device callbacks can use the A3 per-voice safety net; exports
+continue to wait for input.
+
+The start's independent workers still begin on Project/Seek, before Play.
+Repeated voices can now share an immutable prefix of their stretched source
+signal. Reuse requires the same source identity, exact voice bounds and
+bit-identical compiled static map at every ancestor, including active state
+and conform factor. The standard evaluator opts in; hooks, expressions and
+animated maps keep their configured evaluation. Each voice still applies
+its own gain, fades, layout matrix and strip in the original order.
+
+The prefix contains 4,096 frames at 48 kHz (85.333 ms), scales with project
+rate, and rounds up to a ring chunk. A representative job prepares it first.
+Dependent jobs then prime independent vocoder histories while complete PCM
+is already available for every voice. The producer uses that PCM until
+the independent history can continue. Failed input reads retry from the
+original start's phase. The canonical 11,520-sample pre-roll at 48 kHz is
+unchanged; the existing short-prefix experiment and exact mapped
+comparisons remain in place.
+
+The process-wide pool remains capped at max(1, cores - 2), fourteen workers
+on the measured machine. Foreground preparation requests user-interactive
+QoS; boundary replenishment keeps one utility job at a time. The start's
+control batch and producer request the same foreground class through scoped
+guards, then restore the previous effective class. The guards stay on their
+creating thread, and a nested-scope regression verifies restoration.
+
+A live gain edit preserves the immutable prefix and original phase across
+retune glides, including a canonical-grid boundary. Cancelled histories
+return to the audible mix instead of receiving new detached jobs.
+Replacing an evaluator clears the previous factory's histories and PCM.
+Deterministic regressions cover both cases, different gain/fade/map
+identities, independent-history handoff and two grouped decoder-stalled
+voices recovering after the A3 bound.
+
+The native I/O request is now 64 frames through 48 kHz, 256 above 48 through
+96 kHz, and 512 above 96 kHz, clamped to the device's supported range.
+Unknown ranges keep the device default. This reduces callback phase and
+scheduling lead: the callback copies premixed PCM and publishes the clock,
+while DSP and allocation remain on the producer/workers. Today's measured
+WebAudio base latency is 5.333 ms, equivalent to 256 frames at 48 kHz.
+The smaller native callback has a tighter real-time deadline; the paired
+stressed loop captures below qualify this choice on the measured device.
+
+StartTiming records each voice's first project sample, spread, summed
+omitted prefix, A3 safety-net use and callbacks that ran out of program PCM
+after first onset. Captures assert sixteen voices at the target sample and
+zero for every loss/spread counter. The existing cumulative ring counter
+still includes intentionally empty paused/start-wait callbacks; the A7
+loop gate measures its change inside the steady playing window.
+prefillReadyUs additionally records worker completion before the
+producer's readyUs, separating compute from publication handoff.
+
+#### All-ready scope profile
+
+The baseline profile enabled the all-ready policy before adding shared
+prefill. In eleven actual speed changes, the producer waited 7.260 ms.
+Summed worker DSP took 63.668 ms; map evaluation took 0.127 ms and cached
+reads 0.707 ms. A second split-scope capture measured DSP initialization
+4.292 ms, output-seek priming 6.107 ms and processing 44.033 ms. Ready-to-queue
+was only 0.091 ms in the baseline. These timed wall scopes identified
+processing as the critical preparation cost.
+
+The final opt-in captures separate these stages as follows (mean ms):
+
+| Stage | Final speed edit | Final unprepared seek/edit |
+| --- | ---: | ---: |
+| Frontend/IPC/graph before audio command | 1.755 | 0.810 |
+| Audio command channel delivery | 0.053 | 0.111 |
+| Applied command to worker prefill ready | 3.697 | 3.646 |
+| Worker ready to producer continuation | 0.010 | 0.077 |
+| Producer join/poll scope | 3.695 | 3.674 |
+| First mix | 0.036 | 0.036 |
+| Ready to queue | 0.096 | 0.387 |
+| Queue to callback | 0.622 | 0.506 |
+| Callback to HAL presentation host time | 2.340 | 2.340 |
+| Explicit source hold | 0.000 | 0.000 |
+| Accepted worker DSP before first queue, summed | 6.709 | 31.146 |
+| Accepted DSP initialization, summed | 0.323 | 1.587 |
+| Accepted DSP seek, summed | 0.639 | 2.815 |
+| Accepted DSP processing, summed | 5.744 | 26.735 |
+| Accepted map evaluations, summed | 0.002 | 0.001 |
+| Accepted source reads, summed | 0.050 | 0.213 |
+
+Worker sums overlap the producer join. With prefill, only jobs accepted
+before the first queue appear in that snapshot; the remaining independent
+jobs finish afterward. The table does not claim their total CPU work was
+eliminated. Cached prefill completion can precede Play, so handoff intervals
+clamp their origin to command application. Speed scope averages exclude
+the first unchanged-speed sample (eleven actual changes); the seek profile
+has twelve samples. Normal qualification captures leave profiling off.
+
+Smaller foreground pools did not improve the measured wait: 8/10/12-worker
+sweeps averaged 7.023/6.986/6.159 ms, so the fourteen-worker cap remains.
+The start-priority guards and shorter I/O phase complement the prefill;
+the final captures measure their combined behavior.
+
+#### Final paired qualification
+
+Each row has thirty starts per engine on the same sixteen-voice project.
+The plain and three stressed level-edit rows each include a 60-second
+[4 s, 6 s) loop per engine. Stress uses four busy-loop processes. Cold
+seek/edit cases alternate 2 s and 3 s, neither in the pre-edit prepared
+start list; seek/edit/Play occur in one renderer task. Prepared cases
+allow 250 ms before the edit. Starts continue for 120 ms after first clock
+observation, covering prefill handoff. Each speed sequence retains its
+first unchanged-speed sample and twenty-nine actual changes.
+
+The clock reports scheduled device presentation, using the same method
+for both engines. This is not an acoustic loopback. All native samples
+use 48 kHz, 64-frame callbacks and 15.625 ms reported device latency;
+clock and status metadata agree. Today's base latency is 5.333 ms
+(256 frames) and output latency is 24 ms. The two all-ready control rows
+use the same shipping policy and binary, with every completeness assertion
+enabled.
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Raw misses |
+| --- | ---: | ---: | --- |
+| Prepared level edit, plain | 29.703/32.426/32.432 | 19.680/20.575/20.619 | None |
+| Speed edit, plain | 31.027/32.717/32.736 | 24.026/24.785/24.891 | None |
+| Unprepared seek/edit, plain | 29.823/32.411/32.604 | 24.040/24.710/25.803 | None |
+| Prepared level edit, stress 1 | 29.236/32.237/32.404 | 20.093/20.702/20.740 | None |
+| Prepared level edit, stress 2 | 30.137/32.436/32.529 | 19.973/20.685/20.738 | None |
+| Prepared level edit, stress 3 | 30.531/32.533/32.630 | 19.981/20.608/21.061 | None |
+| Speed edit, stressed | 29.037/32.534/32.636 | 23.806/24.828/24.921 | None |
+| Unprepared seek/edit, stressed | 29.322/32.527/32.660 | 23.765/24.862/25.965 | None |
+| All-ready speed control | 30.333/31.821/32.216 | 23.998/24.769/24.810 | None |
+| All-ready seek control | 30.125/32.509/32.617 | 23.950/24.706/26.830 | None |
+
+All ten final paired cases meet today at every requested percentile.
+Every final native start has sixteen voices at its exact target sample,
+zero start spread, zero omitted frames, zero A3 safety-net use and zero
+program underruns. All four paired loop windows have zero underruns in
+both engines, with zero native source starvation and device overloads.
+
+| Stressed repeat | Today p50/p95/max (ms) | Native p50/p95/max (ms) |
+| --- | ---: | ---: |
+| 1 | 29.236/32.237/32.404 | 20.093/20.702/20.740 |
+| 2 | 30.137/32.436/32.529 | 19.973/20.685/20.738 |
+| 3 | 30.531/32.533/32.630 | 19.981/20.608/21.061 |
+
+Observed maximum ranges: **32.404–32.630 ms today**, **20.738–21.061 ms native**. They do not overlap. The three distributions are reported without a noise exemption for earlier misses.
+
+The prepared level-edit capture also records transport stages without DSP
+profiling overhead (thirty plain starts, p50/p95/max in ms). Its immutable
+prefill is already ready before Play; zero-valued disabled DSP scopes are
+not interpreted as zero CPU work.
+
+| Prepared level-edit stage | p50/p95/max (ms) |
+| --- | ---: |
+| Frontend/IPC/graph before audio command | 1.090/1.192/1.217 |
+| Audio command delivery | 0.093/0.114/0.116 |
+| Applied command to all-ready | 0.004/0.005/0.005 |
+| Ready to queue | 0.199/0.228/0.517 |
+| Queue to callback | 0.356/1.196/1.302 |
+| Callback to HAL presentation host time | 2.337/2.343/2.343 |
+
+#### Retained failed qualification attempts
+
+An intermediate 256-frame/2,048-frame-prefill speed pair measured
+28.950/32.006/33.410 ms native against 28.818/31.915/32.202 ms today.
+Its raw p50/p95/max misses were +0.131667/+0.090667/+1.207667 ms.
+After prefill review fixes, the first 128-frame qualification pass completed
+four pairs before the speed maximum still failed. Those data remain
+separate from the final revision:
+
+| Earlier 128-frame case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Raw misses |
+| --- | ---: | ---: | --- |
+| Prepared level edit | 31.033/32.533/32.812 | 22.309/23.143/23.241 | None |
+| Speed edit | 29.419/31.609/32.421 | 26.209/28.651/32.587 | max +0.165667 ms |
+| Unprepared seek/edit | 29.417/31.826/32.327 | 25.785/26.976/28.437 | None |
+| Stressed prepared edit | 30.826/32.033/32.535 | 21.652/22.892/23.160 | None |
+
+The earlier maximum's trace contained 6.336 ms of delivery/build work,
+6.557 ms from applied command to readiness, 0.103 ms ready-to-queue,
+0.302 ms queue-to-callback, 3.664 ms callback host lead and 15.625 ms
+device latency. It had zero omission/spread and no host-offset error.
+The qualification stopped at the next source guard before another pair
+or any repetition suite. The final source adds scoped start priorities,
+an independent prefill-ready timestamp and the 64-frame request; all final
+captures and repetitions were restarted. Earlier failed numbers remain
+raw failures rather than being reclassified as noise.
+
+#### Final repeated correctness and delivery checks
+
+The frozen final playback executable passed **30/30 plain and 30/30 stressed
+suites**, 38 tests each (2,280 executions). Stress includes the shared CPU
+load and 8 ms cold-decode delay. The original mapped comparisons retain
+their assertions and patience: 360 comparisons of 80,000 stereo frames,
+57,600,000 sample values, exact PCM and zero mapped source starvation or
+ring underruns. The cold sixteen-voice comparison also checks complete
+output through its independent-history handoff.
+
+The earlier round-2 plain-run-nine loaded-remap underrun was not reproduced
+in these sixty final runs. Its failed log remains preserved. The bounded
+prefix-input queue regression and source-prefetch fix remain in place;
+no tolerance, mapped case or underrun assertion was relaxed.
+
+| First 512 frames, sixteen voices | p50/p95/max (ms) |
+| --- | ---: |
+| plain, prepared level edit, 120 starts | 0.343/5.522/10.062 |
+| plain, cold seek/speed edit, 120 starts | 4.640/8.287/11.810 |
+| stress, prepared level edit, 120 starts | 0.330/3.944/5.703 |
+| stress, cold seek/speed edit, 120 starts | 4.495/9.064/14.046 |
+
+The elapsed-time observer also reports values above the 10.667 ms first-buffer
+target, despite every existing queue/PCM assertion passing. The polling loop
+checks queue readiness, tests the deadline separately and prints elapsed
+time afterward. These are not an atomic publication timestamp: the raw data
+cannot distinguish a late queue from a delayed observer. No test bound is
+relaxed, and these exceedances are retained without a noise exemption. They
+are separate from the paired app's scheduled-presentation gates above.
+
+| Suite observation | Raw elapsed (ms) | Excess above 10.667 ms |
+| --- | ---: | ---: |
+| plain-22, cold=true, line 24 | 11.810 | +1.143333 |
+| stress-15, cold=true, line 18 | 14.039 | +3.372333 |
+| stress-15, cold=true, line 20 | 13.831 | +3.164333 |
+| stress-15, cold=true, line 24 | 12.020 | +1.353333 |
+| stress-23, cold=true, line 18 | 14.046 | +3.379333 |
+| stress-5, cold=true, line 24 | 11.410 | +0.743333 |
+
+Final targeted checks pass: 61 library tests (one existing ignored catch-up
+measurement), 11 decode-readiness, 14 mixer, 6 stretch and 37 presenter
+tests. Strict release clippy for pm-audio/pm-node all targets, formatting,
+the default production-profile pm-node library check without test hooks
+and the production native addon build pass. Test/addon links use the
+existing local CARGO_PROFILE_RELEASE_LTO=off workaround; no fresh default
+thin-LTO runtime link is claimed.
+
+The only additional pm-node source change in this round is the four-line
+control-batch priority guard in present/audio.rs. No render.rs change is
+needed. The capture/repetition manifest verifies unchanged native addons
+and playback executable throughout the final campaign. Raw evidence stays
+outside the repository.
