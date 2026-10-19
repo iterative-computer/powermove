@@ -158,7 +158,7 @@ pub struct Build<'r> {
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
     pub(crate) retime: RetimeCache,
-    precomp_depth: u32,
+    pub(crate) precomp_depth: u32,
     /// The 3D state of the compositing passes being built (innermost last).
     pass3d: Vec<crate::scene3d::Pass3d>,
     options3d: crate::scene3d::Options3d,
@@ -167,10 +167,10 @@ pub struct Build<'r> {
     effects: Option<&'r dyn EffectHost>,
     /// Today's `opt.matteDepth`: matte passes entered so far (carried into
     /// precomps, as `PM._renderOptions3D` carries it).
-    matte_depth: u32,
+    pub(crate) matte_depth: u32,
     /// The matte source a matte pass renders, which draws even when it is
     /// switched off (`{ ...source, on: true }`).
-    forced_on: Option<*const Node>,
+    pub(crate) forced_on: Option<*const Node>,
     /// A decision 19 fallback runner draws programs the native pipeline
     /// cannot (`crate::shader_layers::fallback`); without one they route.
     shader_fallback: bool,
@@ -192,6 +192,9 @@ pub struct Build<'r> {
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
     passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+    /// Layer draws kept from the last frame (`crate::reuse`): the
+    /// interactive viewer's renders only.
+    pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
 }
 
 /// Facts of a composition's layer list a compositing pass reads.
@@ -320,7 +323,7 @@ pub fn build_with<'r>(
     let blender = crate::blender::PlanState::new(options3d.blender.clone());
     build_blender(
         ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
-        options, blender,
+        options, blender, None,
     )
 }
 
@@ -341,7 +344,23 @@ pub(crate) fn build_blender<'r>(
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
     blender: crate::blender::PlanState,
+    reuse: Option<&'r mut crate::reuse::DrawReuse>,
 ) -> (CompPlan, Build<'r>) {
+    let video_padding = video_padding(options.video_end, root_comp);
+    let mut reuse = reuse;
+    if let Some(r) = reuse.as_deref_mut() {
+        r.begin(
+            root_comp.root(),
+            root_comp.revision(),
+            time,
+            crate::reuse::BuildKey {
+                sampling: options.sampling,
+                blur: options.blur,
+                video_padding: video_padding.to_bits(),
+                view_override: options3d.view.is_some(),
+            },
+        );
+    }
     let mut b = Build {
         assets,
         failures: Vec::new(),
@@ -359,13 +378,17 @@ pub(crate) fn build_blender<'r>(
         blur: options.blur,
         video_center: None,
         sampling: options.sampling,
-        video_padding: video_padding(options.video_end, root_comp),
+        video_padding,
         passes: Vec::new(),
+        reuse,
     };
     let mut scope = Scope::new(ev, root_comp, project);
     // One frame at one time: each layer's local matrix once per scope.
     scope.memoize_transforms();
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
+    if let Some(reuse) = b.reuse.as_deref_mut() {
+        reuse.end();
+    }
     (plan, b)
 }
 
@@ -472,7 +495,11 @@ pub(crate) fn comp_pass<'d>(
         if facts.matte_sources.contains(&id) {
             continue;
         }
-        match draw_layer(scope, b, layer, time, width, height, scale, solo, &all) {
+        let drawn =
+            crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
+                draw_layer(s, b, layer, time, width, height, scale, solo, &all)
+            });
+        match drawn {
             Ok(Some(draws)) => plan.draws.extend(draws),
             Ok(None) => {}
             Err(e) => {

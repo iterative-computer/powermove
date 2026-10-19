@@ -187,6 +187,10 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// Layer draws kept across frames of one paused time
+    /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
+    reuse: crate::reuse::DrawReuse,
+    reuse_enabled: bool,
 }
 
 impl Renderer {
@@ -217,7 +221,29 @@ impl Renderer {
             effect_host: None,
             shaders: Default::default(),
             explicit_meshes: Default::default(),
+            reuse: crate::reuse::DrawReuse::new(),
+            reuse_enabled: false,
         }
+    }
+
+    /// Whether [`Renderer::render_into`] plans with the layer draws kept
+    /// from the last frame that used them (`crate::reuse`). Off by
+    /// default; the interactive viewer turns it on around its own frames
+    /// of a long-lived document, which changes in place, and off for
+    /// everything else the renderer draws. Entries stay while it is off
+    /// (they are validated by revision when it is on again).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.reuse_enabled = enabled;
+    }
+
+    /// Drops the kept layer draws.
+    pub fn clear_draw_reuse(&mut self) {
+        self.reuse.clear();
+    }
+
+    /// The draw reuse's counters.
+    pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
+        self.reuse.stats()
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -748,7 +774,9 @@ impl Renderer {
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
-        let (mut plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -758,9 +786,11 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -1181,11 +1211,13 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
     }
 
-    /// The plan of a frame without rendering it (tests, `pm-cli parity`).
+    /// The plan of a frame without rendering it (tests, `pm-cli parity`),
+    /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
     pub fn plan(
         &mut self,
         document: &Document,
@@ -1207,7 +1239,9 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1217,9 +1251,11 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

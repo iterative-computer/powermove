@@ -39,6 +39,7 @@ pub mod plan;
 mod renderer;
 mod request;
 pub mod retime;
+pub mod reuse;
 pub mod sampling;
 pub mod scene3d;
 pub mod shader_layers;
