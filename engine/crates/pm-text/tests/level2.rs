@@ -372,8 +372,14 @@ fn split_rtl_runs_and_ligatures_keep_sources() {
     let out = l2.layout(&ligature);
     let sources = &sources_by_line(&out)[0];
     assert_eq!(sources.len(), 3, "lam-alef ligates: {sources:?}");
-    assert!(sources.contains(&1), "the ligature takes its first grapheme's source");
-    assert!(!sources.contains(&2), "the continuation draws nothing of its own");
+    assert!(
+        sources.contains(&1),
+        "the ligature takes its first grapheme's source"
+    );
+    assert!(
+        !sources.contains(&2),
+        "the continuation draws nothing of its own"
+    );
 }
 
 #[test]
