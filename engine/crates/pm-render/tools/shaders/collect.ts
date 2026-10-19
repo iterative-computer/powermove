@@ -500,6 +500,49 @@ for (const path of localPaths) {
   }
 }
 
+/* ── real user setups (real extension loader, both settings) ────────── */
+const userRoot = join(CORPUS_ROOT, 'user-setups');
+const userLoader = flag('--user-loader') ?? join(OUT, 'user-loader.json');
+if (!existsSync(userRoot) && !flag('--user-loader')) {
+  notes.push('SKIP user-setups: private corpus directory is absent');
+} else {
+  if (!flag('--user-loader')) {
+    const child = Bun.spawn([join(homedir(), 'Library/Caches/powermove-engine/bin/pm-electron-lock'), process.execPath, join(import.meta.dir, 'user-setups.ts'), '--out', userLoader], { stdout: 'inherit', stderr: 'inherit' });
+    if (await child.exited !== 0) throw new Error('real user-setup loader capture failed');
+  }
+  const loader = JSON.parse(await readFile(userLoader, 'utf8'));
+  for (const [si, setup] of loader.captures.entries()) {
+    const [off, on] = setup.modes;
+    if (JSON.stringify(off.registrations) !== JSON.stringify(on.registrations) || JSON.stringify(off.uses) !== JSON.stringify(on.uses)) throw new Error(`user setup ${si}: registrations/parameters differ with the engine setting`);
+    if (JSON.stringify(off.health) !== JSON.stringify(on.health)) throw new Error(`user setup ${si}: extension failures differ with the engine setting`);
+    for (const health of off.health) {
+      if (health.health.state !== 'ok') notes.push(`user setup ${si} extension ${hash8(health.id)}: identical ${health.health.state} in both engines (see private loader capture)`);
+    }
+    for (const [index, item] of off.registrations.entries()) {
+      const id = `setup-${si}/${hash8(item.owner)}/${index}`;
+      let c = item.kind === 'effect' ? effectCase('user-setups', id, item.def, 'real extension loader (private)', { private: true })
+        : item.kind === 'transition' ? transitionCase('user-setups', id, item.def, 'real extension loader (private)', { private: true })
+        : extensionCase('user-setups', id, item.def, 'real extension loader (private)', { private: true });
+      if (!c) continue;
+      c.label = 'User program';
+      const uses = off.uses.filter((u: any) => u.registration === index);
+      for (const [ui, use] of uses.entries()) {
+        // Real evaluated channels, including every key and segment midpoint,
+        // replayed with both production renderers on identical inputs.
+        const v: Variant = structuredClone(c.variants[0]!);
+        v.name = `project-${use.project}-sample-${ui}`; v.time = use.time; v.params = use.params;
+        for (const pass of v.passes) {
+          const time = pass.calls.find(call => call.name === 'u_time');
+          if (time) time.v = [use.time];
+          pass.calls.splice(pass.calls.length - item.def.params.length, item.def.params.length, ...item.def.params.map((param: Param, pi: number) => paramCall(param, pi, use.params[pi] ?? param.def)));
+        }
+        c.variants.push(v);
+      }
+      push(c);
+    }
+  }
+}
+
 /* ── write ─────────────────────────────────────────────────────────── */
 await mkdir(join(OUT, 'images'), { recursive: true });
 const images = makeImages();
