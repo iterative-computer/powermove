@@ -14,6 +14,7 @@ if (!['--launchd', '--ssh'].includes(mode)) throw new Error('Use --launchd or --
 const root = await mkdtemp(path.join(os.tmpdir(), 'pm-native-service-'));
 const script = fileURLToPath(new URL('./test-mcp.mjs', import.meta.url));
 const env = Object.fromEntries(['PATH', 'POWERMOVE_TEST_CLI', 'POWERMOVE_ENGINE_ADDON', 'POWERMOVE_PM_BRIDGE', 'POWERMOVE_CHROMIUM', 'PM_FFMPEG_DIR', 'POWERMOVE_MCP_EVIDENCE'].filter(k => process.env[k]).map(k => [k, process.env[k]]));
+env.POWERMOVE_REQUIRE_BACKGROUND = '1';
 if (env.POWERMOVE_MCP_EVIDENCE) env.POWERMOVE_MCP_EVIDENCE = path.join(env.POWERMOVE_MCP_EVIDENCE, mode.slice(2));
 const xml = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]);
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;

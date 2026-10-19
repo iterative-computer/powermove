@@ -20,6 +20,11 @@ import { fileURLToPath } from 'node:url';
 const desktop = process.argv.includes('--desktop');
 const missingBrowser = process.argv.includes('--missing-browser');
 const native = process.argv.includes('--native') || missingBrowser;
+if (process.env.POWERMOVE_REQUIRE_BACKGROUND === '1') {
+  const manager = execFileSync('/bin/launchctl', ['managername'], { encoding: 'utf8' }).trim();
+  assert.equal(manager, 'Background', 'the native service must run outside the Aqua launch session');
+  console.log(`Native MCP launch session: ${manager}`);
+}
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // Powermove's FFmpeg build, found the way the CLI host finds it (src/server/cli.ts hostFfmpeg).
