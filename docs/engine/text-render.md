@@ -1001,11 +1001,21 @@ retain the original references. These ports are not started in Round 7.
 
 The Round 7 integration merge also retains the window-scoped served-font
 provider when installing the bridge lane's `RenderFonts`. Both viewer frames
-and frame/layer snapshots select their originating port's seeds. The scoped
+and frame/layer snapshots select their originating port/session's seeds.
+Main-owned fallback snapshot sessions wait for their window's seed-owner
+binding before sending the document and release that binding on close;
+a rejected binding refuses the capture. The scoped
 provider reports a failed registry query through the bridge's font-health
 boundary, so later fallback queries in that frame fail immediately and a later
 frame can retry. The incoming unscoped broker API remains available for its
 independent callers; exports and jobs retain the served hub.
+
+The merged bridge's app-capture path initially omitted `PM.captionsHidden`,
+so the existing burn-in e2e found identical shown/hidden frames. Round 7 carries
+that state per snapshot request through the typed IPC/protocol and restores
+normal visibility for the next capture or viewer frame. A visibility change
+also clears draw reuse. The burn-in test now checks shown → hidden → shown,
+and transport/IPC/protocol tests cover the flag's default and forwarding.
 
 ## Gaps
 
@@ -1014,7 +1024,8 @@ their exact recorded snapshot budgets and are not owner-rule blockers.
 Every unlisted case keeps its original strict bound; any regression, new
 residual or improvement with a stale budget still fails. The Round 4–6
 strict-failure counts above are historical; Round 7 adds the explicit
-orchestrator-approved ratchet without changing the renderer or references.
+orchestrator-approved ratchet while keeping glyph rasterization and reference
+captures unchanged. The separate capture-transport fixes are described above.
 
 - Caption-pop, colored caption stroke, whisper and paper remain nonexact.
   Counts and review filenames are in the ratchet; the lane report resolves
@@ -1081,8 +1092,25 @@ orchestrator-approved ratchet without changing the renderer or references.
 - `pm-render/tests/{text_raster,text_corpus,text_residuals}.rs`,
   `tests/support/{mod,text_residuals}.rs` and
   `tests/fixtures/text-residuals.json`: shared FONTS-R enforcement,
-  metadata-only snapshots and contract tests. No production rendering,
-  font selection, pixel-reference or tolerance changes.
+  metadata-only snapshots and contract tests. Pixel references and strict
+  bounds are unchanged.
+- `pm-node/src/{lib.rs,fonts/{mod,render}.rs,present/{mod,document,render}.rs}`:
+  reconcile bridge integration with the existing scoped font hub; propagate
+  the window seed scope to snapshots and retain named font failures.
+  `tests/{render_fonts,snapshot}.rs` retain the owner-aware attach signature.
+- `apps/desktop/src/preload/index.ts`: retain seed-change notifications alongside
+  the bridge's new capture types.
+- `pm-protocol/src/{snapshot,samples}.rs`, generated TypeScript and the snapshot
+  wire fixture: additive per-capture `captionsHidden`, default false.
+  `docs/engine/rfcs/16-render-transport.md` records the field and API options.
+- `apps/desktop/src/renderer/src/engine-connection/{install,app-captures,render-transport}.ts`
+  and `apps/desktop/src/main/engine/{snapshots,window-sessions,index}.ts`:
+  carry and validate caption visibility, and bind main-owned snapshot sessions
+  to the window's font seeds. Their tests cover defaults, forwarding, overrides
+  and refusal when the window seeds are not accepted.
+- `pm-node/src/present/render.rs` and `pm-render/src/renderer.rs`: scope caption
+  hiding to one capture and invalidate cached draws when visibility changes.
+  `e2e/captions.spec.ts` checks shown → hidden → shown without changing its bound.
 
 2026-10-18 (lane ne-fonts, round 6):
 

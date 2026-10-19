@@ -313,6 +313,7 @@ mod child {
                         view_seq: None,
                         wait_ms: 20_000,
                         blender_wait_ms: 0,
+                        captions_hidden: false,
                         uploaded: Vec::new(),
                     },
                 }),

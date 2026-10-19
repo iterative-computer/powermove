@@ -369,7 +369,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const windowSessions = new WindowSnapshotSessions(
     { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
     engine.definitions,
-    log
+    log,
+    undefined,
+    (session, owner) => fontClient.setSessionOwner(session, owner)
   );
   snapshots = new SnapshotService({
     engine,

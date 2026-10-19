@@ -110,9 +110,11 @@ test('subtitles import onto a caption track, edit in place, burn into frames and
     PM.captionsHidden = true;
     const hidden = await shot();
     PM.captionsHidden = false;
-    return { shown, hidden };
+    const restored = await shot();
+    return { shown, hidden, restored };
   });
   expect(frames.shown).not.toBe(frames.hidden);
+  expect(frames.restored).toBe(frames.shown);
   const framePath = path.join(SHOTS, 'caption-frame.png');
   await (await import('node:fs/promises')).writeFile(framePath, Buffer.from(String(frames.shown).split(',')[1]!, 'base64'));
 

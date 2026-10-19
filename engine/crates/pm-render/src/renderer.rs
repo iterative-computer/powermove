@@ -538,6 +538,9 @@ impl Renderer {
     /// `PM.captionsHidden` for the following frames: an export without
     /// burned-in captions (`captionsBurn: false`) draws no captions layer.
     pub fn set_captions_hidden(&mut self, hidden: bool) {
+        if self.text.captions_hidden() != hidden {
+            self.clear_draw_reuse();
+        }
         self.text.set_captions_hidden(hidden);
     }
 

@@ -392,6 +392,7 @@ fn frame_request(
         view_seq: Some(Seq::new(4).unwrap()),
         wait_ms,
         blender_wait_ms: 0,
+        captions_hidden: false,
         uploaded: Vec::new(),
     }
 }

@@ -25,8 +25,8 @@ import { engineBlenderCapture } from '../core/scene3d/rendering';
 import type { PMRegistry } from '../legacy/registry';
 
 export type CaptureEngine = {
-  snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }): string;
-  snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options?: { prepareBlender?: boolean }): Promise<string>;
+  snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }, options?: { captionsHidden?: boolean }): string;
+  snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options?: { prepareBlender?: boolean; captionsHidden?: boolean }): Promise<string>;
 };
 
 /** Today's refusal while an export or another frame capture runs. */
@@ -50,14 +50,15 @@ export type EngineCaptures = {
 /** Installs `PM.EngineCaptures`; returns its removal. */
 export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () => void {
   const captures: EngineCaptures = {
-    snapshot: (time, maxWidth = 480) => engine.snapshotDataUrlSync(Number(time) || 0, Number(maxWidth) || 480, PM.proj),
+    snapshot: (time, maxWidth = 480) => engine.snapshotDataUrlSync(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { captionsHidden: PM.captionsHidden === true }),
     snapshotAsync: async (time, maxWidth = 480) => {
       if (PM.Export?.busy || PM.agentFrameCapture) throw new Error(CAPTURE_BUSY);
       const wasPlaying = !!PM.playing;
       PM.pause?.();
       PM.agentFrameCapture = true;
+      const captionsHidden = PM.captionsHidden === true;
       try {
-        const capture = () => engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true });
+        const capture = () => engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true, captionsHidden });
         return await (usesBlender(PM.proj) ? engineBlenderCapture(PM, capture) : capture());
       } finally {
         PM.agentFrameCapture = false;

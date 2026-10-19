@@ -164,6 +164,11 @@ pub struct SnapshotRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
     pub blender_wait_ms: u32,
+    /// `PM.captionsHidden`: omit caption layers from this frame capture.
+    /// Per request; it never changes the viewer or a later capture.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub captions_hidden: bool,
     /// Keys of shader fallback requests (from an earlier `needsRenderer`)
     /// the caller drew and posted on the session's port before asking
     /// again: the engine waits for those pixels (they are already on their
@@ -795,6 +800,7 @@ mod tests {
             view_seq: None,
             wait_ms: 5_000,
             blender_wait_ms: 0,
+            captions_hidden: false,
             uploaded: Vec::new(),
         }
     }
@@ -839,7 +845,10 @@ mod tests {
         // Blender waits: async and idle only, and bounded.
         let mut blender = request(8, 8);
         blender.blender_wait_ms = 60_000;
-        assert!(blender.validate().is_err(), "a sync snapshot never waits for Blender");
+        assert!(
+            blender.validate().is_err(),
+            "a sync snapshot never waits for Blender"
+        );
         blender.class = SnapshotClass::Async;
         assert!(blender.validate().is_ok());
         blender.blender_wait_ms = MAX_BLENDER_WAIT_MS + 1;
@@ -849,6 +858,19 @@ mod tests {
         value.as_object_mut().unwrap().remove("blenderWaitMs");
         let read: SnapshotRequest = serde_json::from_value(value).unwrap();
         assert_eq!(read.blender_wait_ms, 0);
+    }
+
+    #[test]
+    fn caption_visibility_defaults_to_shown_and_round_trips_per_request() {
+        let mut value = serde_json::to_value(request(8, 8)).unwrap();
+        value.as_object_mut().unwrap().remove("captionsHidden");
+        let mut capture: SnapshotRequest = serde_json::from_value(value).unwrap();
+        assert!(!capture.captions_hidden);
+        capture.captions_hidden = true;
+        let bytes = rmp_serde::to_vec_named(&capture).unwrap();
+        let read: SnapshotRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(read.captions_hidden);
+        assert!(read.validate().is_ok());
     }
 
     #[test]

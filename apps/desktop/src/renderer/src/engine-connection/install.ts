@@ -299,6 +299,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    captionsHidden: () => PM.captionsHidden === true,
     log
   });
   (PM as any).EngineRender = renderTransport;

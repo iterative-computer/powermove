@@ -96,7 +96,9 @@ export class WindowSnapshotSessions {
     private readonly engine: WindowSessionEngine,
     private readonly definitions: WindowDefinitions,
     private readonly log: Log,
-    private readonly idleCloseMs = IDLE_CLOSE_MS
+    private readonly idleCloseMs = IDLE_CLOSE_MS,
+    /** Font-cache seeds for main-owned sessions still belong to the window. */
+    private readonly sessionOwner?: (session: number, owner: number | null) => Promise<void>
   ) {}
 
   /** The window's session at `document`, ready for a snapshot: `{ port,
@@ -135,6 +137,13 @@ export class WindowSnapshotSessions {
       record = { launch: host.generation, port: host.port, session: (opened as unknown as { session: number }).session, document: document.id, revision: null, hash: null, definitions: null, pushes: 0, timer: null };
       this.windows.set(windowId, record);
       this.stats.opened++;
+      try {
+        await this.sessionOwner?.(record.session, windowId);
+      } catch (error) {
+        // Never capture with a different window's optical-size cache seeds.
+        this.drop(windowId, true);
+        throw error;
+      }
     }
     this.touch(windowId, record);
     // Definitions before the document, as a renderer session sends them
@@ -207,6 +216,9 @@ export class WindowSnapshotSessions {
     this.windows.delete(windowId);
     if (record.timer) clearTimeout(record.timer);
     this.stats.closed++;
+    void this.sessionOwner?.(record.session, null).catch((error: unknown) => {
+      this.log('info', `forgetting snapshot font owner: ${error instanceof Error ? error.message : String(error)}`);
+    });
     if (!close) return;
     const host = this.engine.hostPort('interactive');
     if (!host || host.generation !== record.launch) return;

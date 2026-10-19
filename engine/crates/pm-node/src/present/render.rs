@@ -2788,11 +2788,16 @@ impl Thread {
             // serves every view on the device).
             let registered = doc.take_registered();
             let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            // A preceding capture's hide-captions option is scoped to it.
+            composer.renderer().set_captions_hidden(false);
             // Text measures with the font cache seeds of the window the view
             // belongs to (each window is its own renderer).
             composer
                 .renderer()
-                .set_text_seed_scope(pm_render::text::served::SeedScope::port(key.0.0));
+                .set_text_seed_scope(pm_render::text::served::SeedScope {
+                    port: Some(key.0.0),
+                    session: Some(key.1.get()),
+                });
             composer.set_playing(timing.is_some());
             // Paused in Material Preview or Rendered: Blender surfaces
             // (`super::blender`); playback and draft shadings draw natively.
@@ -3384,7 +3389,11 @@ impl Thread {
         composer.set_playing(false);
         let renderer = composer.renderer();
         renderer.set_scrub(false);
-        renderer.set_text_seed_scope(pm_render::text::served::SeedScope::port(job.key.0.0));
+        renderer.set_captions_hidden(job.request.captions_hidden);
+        renderer.set_text_seed_scope(pm_render::text::served::SeedScope {
+            port: Some(job.key.0.0),
+            session: Some(job.key.1.get()),
+        });
         let purpose = match job.request.class {
             SnapshotClass::Idle => pm_protocol::frame::FramePurpose::Thumbnail,
             SnapshotClass::Sync | SnapshotClass::Async => pm_protocol::frame::FramePurpose::Export,
@@ -3653,9 +3662,14 @@ impl Thread {
                 return;
             }
         };
+        // Layer rasters retain their own content, independent of frame captures.
+        composer.renderer().set_captions_hidden(false);
         composer
             .renderer()
-            .set_text_seed_scope(pm_render::text::served::SeedScope::port(job.key.0.0));
+            .set_text_seed_scope(pm_render::text::served::SeedScope {
+                port: Some(job.key.0.0),
+                session: Some(job.key.1.get()),
+            });
         let painted = composer.renderer().layer_raster(
             doc.document(),
             composition,
