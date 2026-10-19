@@ -16,7 +16,11 @@ font service and Blender supervision. `main/engine/engine-runtime.ts` is shared
 with Electron's utility process; `server/native/ports.ts` transports its existing
 port protocol over Node IPC. The native bridge supplies the same host clock and
 shared pixel storage. Job definitions and CPU snapshot definitions have separate
-owners and increasing generations.
+owners and increasing generations. The interactive child receives a fresh,
+authenticated pm-bridge rendezvous on every launch so its native document
+presenter can serve headless CPU snapshots. It creates no viewer pools or
+Chromium texture imports; a bridge failure restarts the child through the
+existing supervisor.
 
 ## Media, jobs and persistence
 

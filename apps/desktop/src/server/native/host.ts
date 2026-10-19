@@ -1,3 +1,5 @@
+import { NativeSnapshotBridge } from './snapshot-bridge';
+import type { BridgeAddon } from '../../main/engine/bridge';
 import { prepareHostMedia } from './media';
 import { profileStore } from './profile-store';
 import { createRequire } from 'node:module';
@@ -69,6 +71,7 @@ export class NativeHiddenHost {
   readonly snapshots: SnapshotService;
   private readonly unlinkPixels: (name: string) => void;
   private readonly windowSessions: WindowSnapshotSessions;
+  private readonly snapshotBridge: NativeSnapshotBridge;
   private readonly interactiveProjects = new Map<number, string>();
   private readonly cpuProjects = new Map<number, string>();
   private readonly definitionBytes = new Map<number, string>();
@@ -89,17 +92,20 @@ export class NativeHiddenHost {
     const addon = process.env['POWERMOVE_ENGINE_ADDON'] ?? path.join(bundled, 'pm_node.node');
     const bridge = process.env['POWERMOVE_PM_BRIDGE'] ?? path.join(bundled, 'pm_bridge.node');
     if (!existsSync(addon) || !existsSync(bridge)) throw new Error(`native-runtime-unavailable: Build/install the ${process.platform}-${process.arch} native CLI addons.`);
-    const loaded = createRequire(path.join(distDir, 'server.mjs'))(bridge) as { takePixels(name: string, length: number): Uint8Array; nowUs(): number; publishPixels(bytes: Uint8Array): string; unlinkPixels(name: string): void };
+    const loaded = createRequire(path.join(distDir, 'server.mjs'))(bridge) as BridgeAddon & { takePixels(name: string, length: number): Uint8Array; nowUs(): number; publishPixels(bytes: Uint8Array): string; unlinkPixels(name: string): void };
     this.nowUs = () => loaded.nowUs();
     this.unlinkPixels = name => loaded.unlinkPixels(name);
     const probeDirectory = shaderCacheDirectory(userData);
     const transport = new NodeEngineTransport();
     this.hashes = new WorkerPool(path.join(distDir, 'native-media-hash.cjs'), 1);
     this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true });
-    this.engine = new NativeEngine({ spawn: transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
+    this.snapshotBridge = new NativeSnapshotBridge(loaded, log);
+    const spawn = (role: 'interactive' | 'job', env: Record<string, string> = {}) => transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
       POWERMOVE_ENGINE_PARITY_ENV: process.env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(probeDirectory),
-      POWERMOVE_ENGINE_SHADER_CACHE: probeDirectory
-    }), channel: transport.channel,
+      POWERMOVE_ENGINE_SHADER_CACHE: probeDirectory, ...env
+    })(role);
+    this.engine = new NativeEngine({ spawn: role => role === 'interactive'
+      ? this.snapshotBridge.spawn(env => spawn(role, env)) : spawn(role), channel: transport.channel,
       cacheDirectory: path.join(userData, 'Engine Cache'), automaticOutputDirectory: options.exportsDir,
       physicalMemory: os.totalmem(), hostNow: this.nowUs,
       log: (level, message) => log(`[native:${level}] ${message}`), resolveAsset: (id, context) => this.probes.has(id) ? Promise.resolve(this.probes.get(id)!) : context?.process === 'interactive' && this.interactiveProjects.has(context.session)
@@ -267,7 +273,7 @@ export class NativeHiddenHost {
     for (const owner of this.owners.values()) owner.destroy();
     try { await this.pool.shutdown(); } finally {
       this.windowSessions.dispose(); this.jobs.dispose();
-      try { await this.engine.stop(); } finally { await this.hashes.close(); }
+      try { await this.engine.stop(); } finally { this.snapshotBridge.dispose(); await this.hashes.close(); }
     }
   }
 }
