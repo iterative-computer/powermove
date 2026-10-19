@@ -890,11 +890,14 @@ export interface RenderAPI {
      * effect with `api.effects.register`; to read the frame, use
      * `await api.render.renderFrameToAsync(time, width, height)`.
      *
-     * Null until a viewer called `init`, then a WebGL2 context of the bound
-     * canvas (`context.canvas === render.gl.canvas`), as today. With "Use New
-     * Engine" on, the engine presents over that canvas, which stays hidden
-     * under the presentation: the context is a compatibility context (see
-     * "The compatibility WebGL context" in EXTENSIONS.md).
+     * Null until a viewer called `init`, then a WebGL2 context whose
+     * `canvas` is the bound canvas (`context.canvas === render.gl.canvas`),
+     * as today. With "Use New Engine" on it is a compatibility context on an
+     * offscreen canvas: its default framebuffer holds the frame on screen
+     * when you read it (`readPixels`, bottom row first) or draw on it, and
+     * what you draw into it shows in the viewer until the next frame; exports
+     * and captures never include it, as before (see "The compatibility WebGL
+     * context" in EXTENSIONS.md).
      */
     readonly context: WebGL2RenderingContext | null;
   };
@@ -1243,9 +1246,12 @@ export interface CaptionsService {
  * The host registers `raster` (RenderAPI['raster']). Capture that service before
  * wrapping it; calling api.render.raster from inside its override would recurse.
  * Native surfaces expose their pixels as `cv`; preserve key, dimensions, anchor
- * and selection geometry. Overrides affect preview and export and must delegate
- * unaffected layers to the captured service: return the captured service's own
- * result object for a layer you do not change.
+ * and selection geometry. Overrides affect the viewer, snapshots and exports
+ * (with "Use New Engine" on, the engine asks the window for each such layer;
+ * an export with no editor window that has the override fails by name) and
+ * must delegate unaffected layers to the captured service: return the captured
+ * service's own result object for a layer you do not change. A wrapper that
+ * throws fails the frame (and an export), never drawing the plain layer.
  *
  * Overriding the `raster` service is a deprecated compatibility pattern
  * (apiVersion 1 to 3; it keeps working fully). New code changes pixels with
@@ -1253,7 +1259,20 @@ export interface CaptionsService {
  * pixels with `await api.render.rasterAsync(layer)`.
  */
 export interface ServicesAPI {
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3; it keeps working
+   * fully). Overriding the `raster` service: change pixels with
+   * `api.layers.register` or `api.effects.register` (GLSL) instead, and read
+   * a layer's pixels with `await api.render.rasterAsync(layer)`.
+   */
+  register(name: 'raster', implementation: RenderAPI['raster']): Disposable;
   register<T>(name: string, implementation: T): Disposable;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3; it keeps working
+   * fully). Capturing the `raster` service to wrap it: read a layer's pixels
+   * with `await api.render.rasterAsync(layer)` instead.
+   */
+  get(name: 'raster'): RenderAPI['raster'] | null;
   get<T>(name: string): T | null;
 }
 

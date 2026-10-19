@@ -496,7 +496,7 @@ part of its documented contract). New code must not use them.
 | `render.snapshot` | `await api.render.snapshotAsync(time, maxWidth)` | Resolves to the same JPEG data URL without blocking the editor while the engine draws the frame. |
 | `render.renderFrameTo` | `await api.render.renderFrameToAsync(time, width, height, options)` | Resolves to the same opaque canvas without blocking the editor. |
 | `render.raster` | `await api.render.rasterAsync(layer, scale, time, crop)` | Resolves to the same raster surface (pixels, anchor, selection, fontOffset) without blocking the editor. |
-| `render.gl.context` | `api.layers.register({ renderer: { kind: 'fragment', fragment } }) to draw, await api.render.renderFrameToAsync(time, width, height) to read the frame` | A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is an offscreen copy. |
+| `render.gl.context` | `api.layers.register({ renderer: { kind: 'fragment', fragment } }) to draw, await api.render.renderFrameToAsync(time, width, height) to read the frame` | A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is a separate offscreen context that reads the frame on screen back and shows its drawing only in the viewer, until the next frame. |
 | `services.raster` | `api.layers.register or api.effects.register (GLSL) to change pixels, await api.render.rasterAsync(layer) to read a layer` | Engine-drawn layers and effects need no synchronous round trip per layer and frame. |
 | `media.assets.get().el` | `await api.media.assets.source(id) and an element of your own` | Resolves to a browser-playable URL for the asset; your element owns its playback state. |
 | `media.assets.get().url` | `await api.media.assets.source(id)` | Resolves once a browser-playable rendition exists, instead of reading a field that may not be set yet. |
@@ -520,31 +520,65 @@ part of its documented contract). New code must not use them.
 ### The compatibility WebGL context
 
 `api.render.gl.context` is null until a viewer hands a canvas to
-`api.render.gl.init`, then a WebGL2 context of that canvas
+`api.render.gl.init`, then a WebGL2 context whose `canvas` is that canvas
 (`context.canvas === api.render.gl.canvas`), with "Use New Engine" on or off.
 Old custom viewers that find their canvas through it, or call `init` only
-while it is null, behave as before. With the engine on, the engine presents
-the composition over that canvas, which stays in the document under the
-presentation. Drawing into the context and reading the composite back from it
-(`readPixels`) are not supported with the engine yet. Read frames with
-`api.render.renderFrameToAsync` and draw with a registered GLSL layer or
-effect instead; find the canvas with `api.render.gl.canvas`.
+while it is null, behave as before.
+
+With the engine off it is the compositor's own context, as it always was.
+With the engine on there is no compositor context; the context is a WebGL2
+context on an offscreen canvas with the compositor's attributes (no alpha,
+premultiplied, `preserveDrawingBuffer`, no antialiasing), sized like the bound
+canvas's drawing buffer. It behaves like the compositor's context:
+
+- **Reading the frame back.** Its default framebuffer holds the frame the
+  viewer shows: before the first `readPixels`, `copyTexImage2D`,
+  `copyTexSubImage2D` or `blitFramebuffer` that reads it, or the first draw
+  into it, after a frame was presented, the engine's frame on screen (the part
+  under the bound canvas) is put into it over opaque black. Reads return
+  today's layout: bottom row first, opaque.
+- **Drawing into it.** What you draw into the default framebuffer (clears,
+  draw calls, blits) shows in the viewer on top of the frame, under the
+  viewer's overlay, until the next frame is presented, as drawing into the
+  compositor's canvas did. Draw in a `frame:rendered` handler to draw on every
+  frame: the context holds the new frame by then.
+- **Exports and captures** (`render.snapshot`, `renderFrameTo`, exports,
+  thumbnails) never include what you draw into it, as before: they draw their
+  own frames.
+- **Its own resources** (textures, framebuffers, programs) work as in any
+  WebGL2 context. It is not the context that draws the frame, so state you set
+  does not affect the engine's drawing (it could break the compositor's).
+
+The context stays the same object while the same canvas is bound. The
+offscreen canvas is `context.compatCanvas`. Reading back costs one copy of the
+frame per presented frame, and only for frames you read or draw on. Draw
+layers with a registered GLSL layer or effect, read frames with
+`api.render.renderFrameToAsync`, and find the canvas with
+`api.render.gl.canvas` instead.
 
 ### Raster overrides with the new engine
 
 A `raster` service override keeps working in the viewer, in snapshots and
-captures, and in exports. For every text, captions, and shape layer, the
-engine runs the override chain at the layer's own time and raster density,
-as today's compositor did, over the engine's raster of the layer. A layer
-the override returns unchanged (the captured service's own result object)
-is drawn by the engine itself; any other result is drawn on the quad it
-describes (`w`, `h`, `anchorX`, `anchorY`, `uv`). Return the captured
-service's result object itself for layers you do not change: a copy (`{
-...surface }`) is treated as changed pixels. Give changed surfaces a `key`
-that changes whenever the pixels do: an unchanged key is not sent to the
-engine again. An export asks the window that has the project open; with no
-such window it fails with that reason rather than drawing the layer
-without the override.
+captures, and in exports, with "Use New Engine" on or off. For every text,
+captions, and shape layer, the engine runs the override chain at the layer's
+own time and raster density, as today's compositor did, over the engine's
+raster of the layer. A layer the override returns unchanged (the captured
+service's own result object) is drawn by the engine itself; any other result
+is drawn on the quad it describes (`w`, `h`, `anchorX`, `anchorY`, `uv`).
+Return the captured service's result object itself for layers you do not
+change: a copy (`{ ...surface }`) is treated as changed pixels. Give changed
+surfaces a `key` that changes whenever the pixels do: an unchanged key is not
+sent to the engine again. A wrapper that throws fails the frame, as it did:
+the viewer keeps the last frame and reports the error, and an export fails
+with its message. The plain layer is never drawn in its place.
+
+Exports from the export sheet, the render queue and `export_video` ask an
+editor window for these layers frame by frame, and the window draws the layer
+as the export's snapshot holds it (a queued job draws the project as it was
+queued). With no editor window that has the override, the export fails with
+that reason rather than drawing the layer without the override. The hidden
+host (`powermove mcp` without the app) and `pm-cli` have no window, so such an
+export fails there by name.
 
 **When Powermove finds one.** Reading, writing or compiling extension source
 in an agent run, validating and publishing staged extensions (every agent
