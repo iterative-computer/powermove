@@ -86,18 +86,48 @@ struct Totals {
     converted: usize,
 }
 
-/// A PNG's 8-bit RGBA pixels (`None` when it does not decode to that).
-fn png_pixels(bytes: &[u8]) -> Option<Option<Vec<u8>>> {
+#[derive(Debug, PartialEq, Eq)]
+struct PngPixels {
+    width: u32,
+    height: u32,
+    rgba: Vec<u16>,
+}
+
+/// Decode every PNG channel and depth Blender reads. Never treat two
+/// unhandled layouts (or two decode failures) as equal.
+fn png_pixels(bytes: &[u8]) -> Option<PngPixels> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
-    Some(
-        (info.bit_depth == png::BitDepth::Eight && info.color_type == png::ColorType::Rgba)
-            .then_some(buf),
-    )
+    let samples: Vec<u16> = match info.bit_depth {
+        png::BitDepth::Eight => buf.into_iter().map(|v| u16::from(v) * 257).collect(),
+        png::BitDepth::Sixteen => buf
+            .chunks_exact(2)
+            .map(|v| u16::from_be_bytes([v[0], v[1]]))
+            .collect(),
+        _ => return None,
+    };
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => samples,
+        png::ColorType::Rgb => samples
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 65535])
+            .collect(),
+        png::ColorType::GrayscaleAlpha => samples
+            .chunks_exact(2)
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .collect(),
+        png::ColorType::Grayscale => samples.iter().flat_map(|&p| [p, p, p, 65535]).collect(),
+        _ => return None,
+    };
+    Some(PngPixels {
+        width: info.width,
+        height: info.height,
+        rgba,
+    })
 }
 
 #[test]
@@ -310,14 +340,18 @@ fn snapshots_equal_todays_render_snapshot() {
                                                 a.bytes,
                                                 pm_blender::snapshot::AssetBytes::Bytes(_)
                                             )
-                                            && png_pixels(&a.bytes.read().unwrap())
-                                                == std::fs::read(
-                                                    blender
-                                                        .join("assets")
-                                                        .join(format!("{}.png", w.2)),
-                                                )
-                                                .ok()
-                                                .and_then(|b| png_pixels(&b))
+                                            && png_pixels(&a.bytes.read().unwrap()).is_some_and(
+                                                |ours| {
+                                                    Some(ours)
+                                                        == std::fs::read(
+                                                            blender
+                                                                .join("assets")
+                                                                .join(format!("{}.png", w.2)),
+                                                        )
+                                                        .ok()
+                                                        .and_then(|b| png_pixels(&b))
+                                                },
+                                            )
                                     }))
                         });
                     if converted_equal && want != got {
@@ -346,7 +380,10 @@ fn snapshots_equal_todays_render_snapshot() {
                                 .ok()
                                 .and_then(|b| png_pixels(&b));
                                 let diff = match (&ours, &today) {
-                                    (Some(Some(a)), Some(Some(b))) if a.len() == b.len() => {
+                                    (Some(a), Some(b))
+                                        if a.width == b.width && a.height == b.height =>
+                                    {
+                                        let (a, b) = (&a.rgba, &b.rgba);
                                         let d = a
                                             .iter()
                                             .zip(b)
@@ -358,14 +395,43 @@ fn snapshots_equal_todays_render_snapshot() {
                                             .zip(b.chunks(4))
                                             .filter(|(x, y)| x != y)
                                             .count();
-                                        format!("max {d}, {n} pixels differ")
+                                        format!(
+                                            "max {:.3} CV, {n} pixels differ",
+                                            f64::from(d) / 257.0
+                                        )
                                     }
                                     _ => format!(
                                         "ours {:?} today {:?}",
-                                        ours.as_ref().map(|o| o.as_ref().map(Vec::len)),
-                                        today.as_ref().map(|o| o.as_ref().map(Vec::len))
+                                        ours.as_ref().map(|o| (o.width, o.height, o.rgba.len())),
+                                        today.as_ref().map(|o| (o.width, o.height, o.rgba.len()))
                                     ),
                                 };
+                                if ours != today
+                                    && let Ok(dir) = std::env::var("PM_BLENDER_DIFFS")
+                                {
+                                    let dir = std::path::Path::new(&dir);
+                                    std::fs::create_dir_all(dir).unwrap();
+                                    let id: String = g
+                                        .0
+                                        .chars()
+                                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                                        .collect();
+                                    if let Some(asset) =
+                                        snapshot.assets.iter().find(|a| a.id == g.0)
+                                    {
+                                        std::fs::write(
+                                            dir.join(format!("{id}-engine.png")),
+                                            asset.bytes.read().unwrap().as_slice(),
+                                        )
+                                        .unwrap();
+                                    }
+                                    let bytes = std::fs::read(
+                                        blender.join("assets").join(format!("{}.png", w.2)),
+                                    )
+                                    .unwrap();
+                                    std::fs::write(dir.join(format!("{id}-today.png")), bytes)
+                                        .unwrap();
+                                }
                                 lines.push(format!(
                                     "  asset {} {}: today {} engine {} ({diff})",
                                     w.0, w.1, w.2, g.2
@@ -398,4 +464,80 @@ fn snapshots_equal_todays_render_snapshot() {
         assert!(t.equal > 0, "nothing compared");
     }
     let _ = (JsString::new(), Map::new());
+}
+
+#[test]
+fn tiff_renditions_equal_todays_blender_textures_at_full_depth() {
+    let Some(capture) = newest_capture("threed-2") else {
+        return;
+    };
+    let dir = capture.join("projects/3d/maps-level1");
+    let p = load_project(&capture, &dir);
+    let record = read_json(&dir.join("blender/t0.000000.json"));
+    let entry = record
+        .get("final")
+        .unwrap()
+        .get("snapshots")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    let request = entry.get("request").unwrap();
+    let loaded = read_json(&dir.join("loaded.json"));
+    let composition = s(get(request, "comp"));
+    let doc = pm_model::Document::new(
+        Some(with_blender(
+            &loaded,
+            &[composition.clone()],
+            record.get("settings").unwrap(),
+        )),
+        1,
+    );
+    let comp = Comp::resolve(&doc, &composition).unwrap();
+    let mut ev = Evaluator::new().with_expressions(Arc::new(PmExprEngine));
+    let mut scope = pm_eval::Scope::new(&mut ev, &comp, &comp);
+    let frame = BlenderFrame {
+        composition_path: vec![composition],
+        time: 0.0,
+        width: pm_eval::node::to_number(comp.member("w")) as u32,
+        height: pm_eval::node::to_number(comp.member("h")) as u32,
+        shutter: None,
+        preview: false,
+    };
+    let built = build(&mut scope, &frame, &p.resolver, &SnapshotOptions::default())
+        .unwrap()
+        .unwrap();
+    let mut compared = 0;
+    for asset in &built.assets {
+        let source = loaded
+            .get("assets")
+            .and_then(|a| a.get(asset.id.as_str()))
+            .unwrap();
+        if source.get("format").and_then(Value::as_str) != Some("tiff") {
+            continue;
+        }
+        let want = entry
+            .get("assets")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a.get("id").and_then(Value::as_str) == Some(asset.id.as_str()))
+            .unwrap();
+        let bytes = std::fs::read(dir.join("blender/assets").join(format!(
+            "{}.png",
+            want.get("sha256").and_then(Value::as_str).unwrap()
+        )))
+        .unwrap();
+        let today = png_pixels(&bytes).unwrap();
+        assert_eq!(
+            png_pixels(&asset.bytes.read().unwrap()).unwrap(),
+            today,
+            "{}",
+            asset.id
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 6);
 }

@@ -128,6 +128,15 @@ pub fn read_tiff_source(path: &std::path::Path, pool: &FramePool) -> Result<Stil
     super::compat_tiff::read(path, orientation, pool)
 }
 
+/// The shipped TIFF PNG rendition's samples at their original integer
+/// depth, before Chromium's bitmap conversion (Blender passes it through).
+pub fn read_tiff_png_source(path: &std::path::Path, pool: &FramePool) -> Result<StillImage> {
+    let orientation = super::raster::tiff_short(path, 274)?
+        .filter(|o| (1..=8).contains(o))
+        .unwrap_or(1) as u8;
+    super::compat_tiff::read_source(path, orientation, pool, true)
+}
+
 /// AVIF CICP pairs Chromium's bitmap draws through Skia's PQ/HLG/primaries
 /// transform: primaries BT.709, unspecified, BT.2020 or P3-D65 with every
 /// SDR sRGB-family transfer, PQ or HLG. Every one of these 32 pairs was

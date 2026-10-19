@@ -421,12 +421,70 @@ fn image_extension(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// PNG samples of the TIFF rendition the shipped importer gives Blender
+/// without a canvas conversion. Preserve its 16-bit data and straight alpha.
+fn tiff_to_png(path: &Path) -> Result<Vec<u8>, String> {
+    let source =
+        pm_media::image::compat::read_tiff_png_source(path, &pm_media::pool::FramePool::new(0))
+            .map_err(|e| e.to_string())?;
+    let f = &source.frame.format;
+    let wide = source.bit_depth == 16;
+    let data = source
+        .frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::new();
+            for y in 0..f.height {
+                if wide {
+                    // SAFETY: RGBA16 rows are aligned, with width × 4 samples.
+                    let row = unsafe {
+                        std::slice::from_raw_parts(
+                            p.ptr.add(y * p.stride).cast::<u16>(),
+                            f.width * 4,
+                        )
+                    };
+                    out.extend(row.iter().flat_map(|v| v.to_be_bytes()));
+                } else {
+                    // SAFETY: RGBA8 rows hold width × 4 bytes.
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), f.width * 4)
+                    });
+                }
+            }
+            out
+        })
+        .map_err(|e| e.to_string())?;
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, f.width as u32, f.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(if wide {
+            png::BitDepth::Sixteen
+        } else {
+            png::BitDepth::Eight
+        });
+        encoder
+            .write_header()
+            .and_then(|mut w| w.write_image_data(&data))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(png)
+}
+
 /// An image Blender should not load as it is, as an 8-bit straight-alpha
 /// PNG. Today the asset's `ImageBitmap` (Chromium's level 1 bitmap,
 /// premultiplied) is drawn 1:1 into a canvas and `toBlob('image/png')`
 /// reads it back unpremultiplied ([`unpremultiply`]). The PNG container
 /// bytes are this engine's encoder's; the pixels are today's.
 fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut head = [0; 16];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .map_err(|e| e.to_string())?;
+    if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Tiff {
+        return tiff_to_png(path);
+    }
     let pool = pm_media::pool::FramePool::new(0);
     let (bitmap, _) = crate::media::level1_bitmap(path, &pool).map_err(|e| match e {
         crate::media::ProbeIssue::Unsupported(f) => f.to_string(),

@@ -390,3 +390,19 @@ was 3.47e-16. All 23 previously unbuilt glTF snapshots now compare equal.
 The six snapshots with external converted TIFF/AVIF maps still fail; this
 change does not close that separate blocker. The same focused comparison with
 `PM_BLENDER_ONLY=3d/gltf` passes. The full comparison continues to fail honestly.
+
+### TIFF conversion and the remaining AVIF differences
+
+Round 4 also preserves the full TIFF rendition samples, including 16-bit
+precision and straight alpha; all six captured TIFF maps now match exactly.
+The comparison decodes RGBA, RGB, gray, and gray-alpha PNGs at both 8 and
+16 bits, compares dimensions, and compares samples at 16-bit precision.
+Two unhandled layouts or failed decodes can no longer compare equal.
+`PM_BLENDER_DIFFS` optionally writes differing texture pairs outside Git.
+
+The full comparison remains 176/182 equal: each of the six map snapshots
+still contains AVIF differences. The five distinct AVIF maps are PQ HDR
+(max 174 CV), HLG HDR (117 CV), HDR alpha (210 CV), P3 SDR (1 CV on 66
+pixels), and BT.2020 SDR (1 CV on 29 pixels). The previous round's prose
+misattributed the PQ failure to a 16-bit TIFF: asset `a1xwvwot` is
+`hdr-pq.avif`. The full-depth TIFF comparisons now pass independently.
