@@ -32,7 +32,7 @@ and validation, about 0.03 ms). `translate` does both.
 |---|---|---|
 | 0 | Source limits: size, a budgeted GLSL ES preprocessor (macro expansion, statements), WebGL's identifier and struct-nesting rules, `#extension` placement | `limits::check_source` |
 | 1 | WebGL's compile and link: glslang's ES 3.00 front end on the unmodified program with `PM.VERT` | `compile::validate_es` |
-| 2 | `#version 450`, precision removed, GLSL 4.50 and Vulkan keywords renamed, polyfills (`inverse`, `outerProduct`, `modf`, scalar `normalize`/`faceforward`/`reflect`/`refract`), line counts unchanged | `normalize` |
+| 2 | `#version 450`, precision removed, GLSL 4.50 and Vulkan keywords renamed, polyfills (`inverse`, `outerProduct`, `modf`, scalar `normalize`/`faceforward`/`reflect`/`refract`, `round`, `radians`, `degrees`), line counts unchanged | `normalize` |
 | 3 | glslang, relaxed Vulkan rules, automatic bindings and locations | `compile::compile` |
 | 4 | Sampler arrays, distinct bindings, varyings by name, the fragment interface (narrow, array, and depth outputs; unused inputs), signed `%` as `OpSRem`, `uint` negation, `texelFetchOffset`, 2-row matrix strides, non-finite constants, the combined-sampler split; SPIR-V limits (call depth, recursion, private variables, uniform vectors); the bind check | `rewrite`, `limits::check_spirv`, `reflect::unbound_resources` |
 | 5 | naga SPIR-V front end with `adjust_coordinate_space` (GL row order), derivative uniformity off, validation | `pipeline::Prepared::finish` |
@@ -41,6 +41,45 @@ and validation, about 0.03 ms). `translate` does both.
 
 Pipeline creation (the Metal compiler) happens in pm-render on first use per target
 format; Metal's own cache makes later builds cheap.
+
+**ANGLE's Metal calls** (`pm_render::glsl`, 2026-10-19). Today's compositor
+runs on ANGLE's Metal back end, which translates GLSL to its own MSL; Metal
+compiles both translations with fast math, and where the two call different
+built-ins they round differently. The engine no longer lets wgpu write the
+MSL: `GpuProgram::new` writes it with naga's writer and wgpu-hal's options and
+Metal slots (`glsl::slots`, from `create_pipeline_layout`), makes ANGLE's
+calls, and compiles it as a passthrough module with Metal's default fast math
+(a device without passthrough MSL keeps wgpu's translation). The calls come
+from ANGLE's own output: `WEBGL_debug_shaders`' `getTranslatedShaderSource`
+in headless Chromium with `--use-angle=metal --enable-privileged-webgl-extensions`
+over all 604 programs of the `glsl-20261018-193347` and `shaders-20261018-022611`
+corpora, compared call by call with naga's MSL (the dump script and the
+comparison are kept outside the repository with the review evidence).
+
+| GLSL | naga writes | ANGLE writes | Now |
+|---|---|---|---|
+| `pow` | `metal::pow` | `metal::powr` | `powr` |
+| `normalize` (vectors) | `metal::normalize` | `metal::fast::normalize` | `fast::normalize` |
+| `tanh` | `metal::tanh` | `metal::precise::tanh` | `precise::tanh` |
+| `round` | `metal::rint` (glslang and naga fold it into `roundEven`) | `metal::round` (ties away from zero) | `metal::round` inside `pm_glsl`'s `pm_round` polyfill (`ANGLE_POLYFILL_CALLS`) |
+| `radians`, `degrees` | `(x) * c` | `ANGLE_radians`: `c * x` | `pm_glsl` polyfill, `c * x` |
+
+`round` is a correctness fix as well: `round(0.5)` was 0 in the engine and is
+1 in WebGL (`tests/effects.rs` `round_ties_away_from_zero_as_in_webgl`, which
+fails without the mapping). The other calls ANGLE writes as its own helpers
+(`ANGLE_inverse`, `ANGLE_mod`, `ANGLE_outerProduct`, the scalar
+`faceforward`/`reflect`/`refract`/`distance`, `ANGLE_componentWiseMultiply`)
+have the same expressions as `pm_glsl`'s polyfills or naga's output; `dFdx`
+and `dFdy` are ANGLE's `dfdx`/`dfdy` times its flip uniforms (±1 or 0),
+numerically the same as the engine's. Measured on `glsl-20261018-193347`
+(`effects_webgl`, `PM_SHADER_STATS=1`): variants not bit-exact against WebGL
+went from 56 to 16 (every built-in effect and transition variant now
+bit-exact; Levels and Gradient were not), the rest within 1 CV at a few
+pixels of probes (`radians`/`degrees`, `halftone-fragcoord`,
+`outer-product-twist`, `mix-bool`, `matrixCompMult`, `outerProduct`,
+`modf-infinity`) and the known-open probes (`gl_FragCoord`, `output-vec3`,
+undefined behaviour). The app corpus is unchanged (one 3D studio frame
+closer).
 
 **Isolation.** Translation runs on its own thread with a 1 GiB stack (a 100,000-deep
 swizzle chain overflows 8 MiB) and a 20 s deadline (`cache::prepare_isolated`). A
@@ -62,6 +101,37 @@ engine-only: WebGL draws the program, so it runs in the decision 19 fallback run
 its textures (`Status::NeedsFallback`, reported as `NotHeadlessRenderable`; "The fallback
 runner" below). A renderer without a runner (`pm-cli`) names it as not
 headless-renderable. Nothing is drawn wrong, and nothing is routed.
+
+**ANGLE-only programs** (`effects::ANGLE_ONLY`, orchestrator decision DEFS-2,
+2026-10-19). One Store program still differs natively with ANGLE's calls:
+`mrsigma/liquid-glass-ios27` 2.0.8 (`liquid-glass-ios27.glass`). Its rim
+search bisects the bilinear alpha of `u_orig` at coordinates built from
+screen-space derivatives, a 2×2 inverse, and `cos`/`sin`, and branches on
+`alpha < 0.5`; the hardware filter weighs texels with 8-bit fractions, so a
+coordinate one ulp apart can move the rim a bisection step. Intermediate
+probes of the program against WebGL (a private copy of the gate case whose
+output is replaced by each stage's values) localise it: the Jacobian and
+`lgP2S` match at 8 bits, the ray-seeded `best` distance already differs at
+44 pixels, and everything after it inherits that. MSL `fp contract` pragmas
+(`off`, `on`, `fast`) change nothing. So the program is listed, by the
+SHA-256 of its user body with every number written as `0` (the extension
+bakes the composition size into the body), and where a fallback runner is
+attached (the app's viewer and its exports) it draws through it, the same
+ANGLE that draws it today; a renderer without one (`pm-cli`) draws the
+native translation. Its GPU program is still built, so `validate_effect`
+compiles it. Built-ins (all bit-exact natively) and layers are never
+listed; the Store's other `liquid-glass-ios27` (zellzoi 2.0.1) matches
+natively and has another fingerprint. Through the runner the program is
+bit-exact against WebGL in all four variants (`effects_webgl`
+`fallback_effects_match_webgl` on a private mini corpus of the gate case,
+`PM_SHADER_STATS=1`: 36,864 of 36,864 pixels each); the shader gate draws
+it with a runner host (`<corpus>/fallback-effects`) and counts it as via the
+runner. Tests: `effects_fallback.rs`
+`an_angle_only_program_draws_through_the_runner_where_one_is_attached`
+(viewer request with stage `angle-parity`, the runner's pixels drawn, a job
+through its host, native without a runner, the built-in it copies stays
+native); `glsl::tests::fingerprints_ignore_numbers_and_spacing_only`. The
+cost is the runner's (see the throughput gap).
 
 ## Where effects run
 
@@ -402,6 +472,58 @@ context loss: `compositor.ts:746-760` clears `GL.errors` and `GL.progs` on
   most 32 requests waiting for their textures (the engine's own bound),
   failing the oldest as transient.
 
+**Target size** (review fix, 2026-10-19). The runner used to refuse any
+target edge over 4,096 px (`maxSize ?? 4096`) with `size`, retried as
+transient: a 5K to 8K export of a project with a fallback-only effect failed
+after three attempts and the viewer retried every 8 s, while today's
+`runEffects` and `runTransition` draw at the composition's size (up to
+16,384 px, `editing.ts`). The 4,096 px cap is the shader layers' alone
+(`compositor.ts:1040`; the engine caps those requests itself,
+`shader_layers::plan`). Now:
+- The runner's limit is its context's `MAX_TEXTURE_SIZE` (16,384 on Apple
+  GPUs), the limit today's `grab` buffers have. A target past it fails with
+  `tooLarge` before compiling (`maxSize` is a test option only).
+- `tooLarge` is final (`FallbackFailure::is_final`) and kept for the program
+  at that size only (`sized_program_id`), so a lower preview resolution or a
+  smaller export still draws it. The viewer skips the step and reports it
+  once as `BudgetExceeded`; a job stops with an error naming the program and
+  the limit, after one attempt. Main's relay sends it as `budgetExceeded`,
+  which the job host reads back as `tooLarge`.
+- A malformed request (texture count or length) stays `size`, transient.
+- Tests: `effects_fallback.rs`
+  `a_job_draws_a_runner_step_wider_than_4096_px_at_the_compositions_size`
+  (4,500 px), `a_target_past_the_gpus_webgl_limit_is_a_final_named_failure`;
+  `shader-fallback.test.ts` "draws effect targets up to the context's
+  MAX_TEXTURE_SIZE" (7,680 px) and "fails a target past MAX_TEXTURE_SIZE
+  with tooLarge"; `shader_layers::fallback` unit tests.
+
+**Rounds** (review note, 2026-10-19). A waiting step blocks every later
+runner step of the frame (`EffectFallback::blocked`, frame-wide): its
+pixels may feed them (a request is keyed by its textures' pixels), and the
+engine does not track which targets derive from a left-out step. So a frame
+takes one runner round trip per runner step it draws, even when the steps
+are on independent layers, and each round renders the frame again; in the
+viewer each such step adds a serial round trip. The job loop's old fixed
+limit (16 rounds, then a failure today does not have) is replaced by a
+progress rule: each round must ask for a request not asked before in the
+frame, with a 1,024-round backstop. Job frames pin every result the host
+answers until the frame is delivered (`FallbackStore::pin`): two 8K
+results (265 MB each) are past the store's 512 MB budget and used to evict
+each other, so a chain of them would have asked forever. Test:
+`a_job_draws_more_runner_steps_than_a_fixed_round_limit` (20 steps; the
+job's 20 requests are all new and its frame equals the viewer's);
+`shader_layers::fallback`
+`a_pinned_frame_keeps_every_result_past_the_budget_until_unpinned`.
+
+**Compile deadline** (review note, 2026-10-19). A request waits up to 10 s
+for its program to compile (`KHR_parallel_shader_compile`). A compile past
+it is no longer deleted: it goes on in the driver, and the program's next
+request (the engine retries `deadline` as transient) waits for the same
+compile, so a program WebGL takes long to compile draws once it has, as
+today's compositor waits for it (`shader-fallback.test.ts` "a program WebGL
+takes long to compile"). A job's three attempts give a compile 30 s before
+the job stops naming the program; the viewer keeps retrying with backoff.
+
 The runner (`ShaderFallbackRunner.render(request, textures)`) uploads each
 texture as RGBA16F (linear, clamp to edge, as the compositor's `grab`
 buffers), leaves units no request names empty (samplers read (0, 0, 0, 1),
@@ -710,6 +832,51 @@ parameters; at parameters where they are step functions they have
 Posterize's exposure. Side-by-sides of Posterize: `PM_RENDER_DIFFS`
 (review copies outside the repository).
 
+**Resolved 2026-10-19: Posterize, Color, and Levels render as today, bit
+for bit.** Two causes, both now removed:
+- *Input.* The layer buffer feeding them was within 1 CV of WebGL's but not
+  bit-identical: today's image layers sample Blink's 8-bit premultiplied
+  bitmap as an `RGBA8` texture, and the GPU's bilinear filter weighs 8-bit
+  texels differently from half-float ones. The compositing lane now uploads
+  and samples Level 1 stills as `Rgba8Unorm` (`docs/engine/composite.md`,
+  merged into this branch). The differing Posterize pixels were all inside
+  the rotated, resampled photo.
+- *Arithmetic.* naga writes GLSL's `pow` as `metal::pow`, ANGLE as
+  `metal::powr`; under Metal's fast math they round differently, so Levels'
+  continuous path (`pow(x, 1/gamma)`, at gamma 1 too) differed by one
+  binary16 step in about 10% of pixels. Legacy programs now compile from
+  MSL the engine writes with ANGLE's calls (`pm_render::glsl`, below).
+
+Measured 2026-10-19 (M4 Max, debug build):
+- App level, capture `effects-20261017-060101-ca4d364f` (`tests/corpus.rs`,
+  `PM_RENDER_ONLY=render/fx-`): `render/fx-posterize`, `render/fx-color`,
+  and `render/fx-levels` at t = 0, 1, 2: the transparent float frames
+  equal today's exactly (max 0.0000 CV; before: Posterize 15.9, 26.9,
+  85.0 CV), the opaque 8-bit frames 100.00% exact (rounded) with max 1 CV,
+  as every effect project's opaque frame. 63 frames compared, 0 failed, 0
+  listed apart; `CORPUS_UNSTABLE` is now empty, so a departing frame fails.
+- Shader level with bit-identical inputs (`effects_webgl`,
+  `PM_SHADER_STATS=1`, `glsl-20261018-193347`), every variant including the
+  step-function parameters that move WebGL itself under a one-step input
+  perturbation (Color `max`; Levels `alt`, `max`, `random2`, `coerced`,
+  `viewport-alt`, `hdr-alt`; Posterize `alt`, `max`, `random2`, `coerced`,
+  `hdr`, `hdr-alt`): Color 11 of 11, Levels 11 of 11 (8 of 11 before
+  `powr`), Posterize 11 of 11 bit-exact. Every built-in effect and
+  transition variant is now bit-exact (Gradient's `defaults` and `hdr` were
+  2 px off by one binary16 step before).
+- App level at the step parameters themselves: `render/fx-steps-color`,
+  `-levels`, `-posterize` (`render-effects.ts`: the variants above on
+  rotated, stretched photos and the alpha image, plus Levels at gamma 1 and
+  a steep 45/55/0.2, Posterize at 2 and 3 levels), captured through the app
+  with every other effect and transition project as
+  `effects-20261019-055047-8d8a4ce4` (93 samples): `tests/corpus.rs`
+  compares 348 frames with the newest captures; all 93 effect and
+  transition float frames equal today's (max 0.0000 CV), the opaque frames
+  100.00% exact (rounded) with max 1 CV. The 5 failures of that run are
+  video-class frames outside this lane (`motion/blur-video`,
+  `retime/speed`, `space25d/precomps`), identical with this lane's changes
+  removed.
+
 The Store `mrsigma/liquid-glass-ios27` 2.0.8 glass effect is the shader
 gate's WebGL-unstable item (`docs/engine/shaders.md`): there both renderers
 get bit-identical inputs, so the difference is the arithmetic. ANGLE and
@@ -762,24 +929,42 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   (`unsupported_for`), `error.rs` (three `RenderError` variants:
   `WatchdogPending`, `Fallback(String)`, `Watchdog(String)`; outside
   pm-render they reach generic error arms, and pm-node's presenter handles
-  `WatchdogPending` itself), `exec.rs`, `lib.rs`.
+  `WatchdogPending` itself), `exec.rs`, `lib.rs` (`pub mod glsl`), and
+  `tests/corpus.rs` (the review side-by-side dump under `PM_RENDER_DIFFS`;
+  `CORPUS_UNSTABLE` is now empty). 2026-10-19: `renderer.rs` also pins a
+  job frame's runner results and replaces the 16-round limit with the
+  progress rule (`host_progress`).
 - **pm-engine**: `engine.rs`, `jobs.rs` (`job_definitions`;
   `JobService::definitions_pushed` defers the push's acknowledgement until
   the job engine holds the set).
 - **pm-protocol**: `envelope.rs` (`Request::ShaderFallback`,
   `Event::ShaderFallback` with `Input`), `samples.rs`, `shader_fallback.rs`,
   wire fixtures; the generated `shared/engine-protocol/` types.
+- **RFCs**: `rfcs/07-errors-and-isolation.md` and
+  `rfcs/10-definition-snapshots.md`: a definitions failure report's
+  `FailureReport.revision` carries the definitions generation it answers
+  (the field is overloaded: for document failures it is the document
+  revision).
+- **Kernel**: `kernel/definition-snapshots.ts` (`changedAt` and the latest
+  generation per entry, so a push is acknowledged against the generation it
+  carried).
 - **pm-node**: `present/render.rs` (texture bands, failures without
   routing, transient retry wake-ups), `jobs/{fallback,definitions,compile,mod}.rs`,
   `tests/document.rs`.
 - **pm-export** `render.rs`, **pm-cli** `main.rs`, `render.rs`,
-  `render_parity.rs`.
+  `render_parity.rs` (2026-10-19: `WEBGL_UNSTABLE` is empty, and its fx
+  stripping threads the type list through arrays).
+- **Corpus**: `engine/corpus/src/projects/render-effects.ts` (2026-10-19:
+  `render/fx-steps-{color,levels,posterize}`, the effects at their step
+  parameters).
 - **Desktop**: `preload/index.ts` (bridge's: the `onShaderFallback`
   listener and its acknowledgement), `shared/engine-ipc.ts`,
   `main/engine/{index,native-engine,protocol,definitions,agent-jobs,render-queue}.ts`,
   `main/agent-tools/{bridge,spec}.ts`, `engine-connection/{install,session}.ts`,
   `legacy/assistant/harness.ts` and `legacy/core/exporter.ts` (a
-  `PM.EngineDefinitions.settle()` call before a render or export).
+  `PM.EngineDefinitions.settle()` call before a render or export),
+  `main/engine/shader-fallback-relay.ts` (2026-10-19: `tooLarge` as
+  `budgetExceeded`).
   `kernel/api.ts`, `main/index.ts`, `legacy/core/editing.ts`, and
   `legacy/gl/raster.ts` are untouched.
 
@@ -792,6 +977,7 @@ bun engine/crates/pm-render/tools/effects/collect.ts             # shader corpus
   bun engine/crates/pm-render/tools/effects/webgl.ts [--perturb-input]
 bun engine/crates/pm-render/tools/effects/expectations.ts        # probe verdict fixture
 cargo test -p pm-render --test effects_webgl -- --nocapture      # shader parity
+PM_SHADER_STATS=1 cargo test -p pm-render --test effects_webgl -- --nocapture  # bit-exact counts per variant
 cargo test -p pm-render --release --test effects_linear -- --nocapture  # linear blending
 bun engine/corpus/src/capture.ts --only render/fx-,render/tr- --label effects --skip-real --skip-scenarios
 cargo test -p pm-render --release --test corpus -- --nocapture   # app-level parity
@@ -814,7 +1000,9 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   (Chromium's) is the only thing that turns a program off. Enforcing a
   budget (`Watchdog::set_budget`, user programs only) needs Jude's call
   before any renderer sets it.
-- **Uniform metadata (`udefs`) is not written by the engine**, by design:
+- **Uniform metadata (`udefs`) is not written by the engine**: descoped
+  from this lane by the orchestrator (decision DEFS-1, 2026-10-19; the
+  Inspector stays the only writer, exactly as today), by design:
   today's compositor never writes `shaderMeta.udefs`; the built-in
   Inspector extension does (`extensions/inspector/shader.ts:43`,
   `syncShaderUniforms`, from its own `parseUniforms`), and section 11 lists
@@ -826,7 +1014,8 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   `parseUniforms` (`shader_layers::uniforms`, `parse_uniforms_matches_the_app`).
   `sceneWarnings` and `sceneError` for 3D scene layers are the 3D lane's.
 - **Fallback runner throughput is below today's** (measured 2026-10-19, M4
-  Max, needs Jude's call). Each fallback step reads its textures back and
+  Max, needs Jude's call; the ANGLE-only listing adds the Store
+  liquid-glass-ios27 2.0.8 effect to the programs that pay it). Each fallback step reads its textures back and
   sends them to the renderer and the pixels back (binary16, about 16 MB per
   full-HD texture each way); results are cached by content key (512 MB), so
   a still frame costs one round trip, but an animated fallback effect does
@@ -867,11 +1056,23 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 - **Linear blending with an alpha above 1:** in Standard such a pixel darkens the stack
   beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
   composite is in linear light and there is no reference for it.
-- **WebGL-unstable class**: Posterize (and at other parameters Levels and
-  Color) differ from today at isolated pixels in the app, and the Store
-  liquid-glass-ios27 2.0.8 glass effect in the shader gate (above);
-  escalated to Jude with side-by-sides. Not matched.
-- **Not run**: the full pm-render suite and clippy (targeted tests only).
+- **WebGL-unstable class: resolved for level 1 content** (2026-10-19).
+  Posterize, Color, and Levels are bit-exact against today (Parity); the
+  Store liquid-glass-ios27 2.0.8 glass effect draws through WebGL's runner
+  in the app (ANGLE-only programs, above). What remains: `pm-cli` draws
+  that program natively (no WebGL runner there, and no "today" to match);
+  a user's own program with the same ill-conditioning (a decision on a
+  texture sample at computed coordinates) that is not in the Store and not
+  listed would draw natively and could differ at isolated pixels. The
+  listing is by fingerprint, so it is extended as the gate finds programs;
+  nothing detects such a program on its own.
+- **ANGLE parity residue** (shader level, within 1 CV): `radians`/`degrees`
+  probes (6 of 36,864 pixels at 1 CV even with ANGLE's operand order),
+  `halftone-fragcoord`, `outer-product-twist`, `mix-bool`,
+  `matrixCompMult`, `outerProduct`, `modf-infinity`; none of them in a
+  built-in or a Store or corpus program that differs at app level.
+- **Not run**: the full pm-render suite (targeted tests only; clippy is
+  clean on pm-render, pm-glsl, pm-cli, and pm-node).
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); the Store's 4 public releases (figuate
   chrome 1.0.0, zellzoi ascii-magic-effects 1.0.0 and liquid-glass-ios27 2.0.1, mrsigma

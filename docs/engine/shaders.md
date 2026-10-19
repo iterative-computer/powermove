@@ -250,6 +250,11 @@ pipeline path, and the upload cache landed (2026-10-18): the same table.
 | unit-tests | 21 | 79 | 79 | 0 | 0 | 0 | 0 |
 | **all** | **144** | **522** | **504** | **3** | **15** | **3** | **0** |
 
+Again on 2026-10-19 with ANGLE's built-in calls and the ANGLE-only listing
+(below): store 22 of 22 match (the 4 liquid-glass 2.0.8 variants through
+the runner); all groups 507 of 522 match (7 through the runner), 15 both
+refuse, 0 WebGL-unstable, 0 failures.
+
 By kind: 44 shader layers, 13 extension fragment layers, 73 effects, 14
 transitions. Variants: layers at their defaults (1.25 s), at 70% of each range
 with other colors and flipped toggles (3.7 s), and with coerced values (numbers
@@ -283,7 +288,15 @@ values scaled by max(1, |reference|).
   amendment 22 this is a visible difference for a user with this effect:
   escalated to Jude with side-by-sides (`PM_SHADER_GATE_DIFFS=<dir>` writes
   the engine's output, WebGL's, and the differing pixels for every
-  WebGL-unstable variant). Not matched.
+  WebGL-unstable variant). **Resolved 2026-10-19** (orchestrator decision
+  DEFS-2): the program is listed in `pm_render::effects::ANGLE_ONLY` and
+  draws through WebGL's runner wherever one is attached (the app's viewer
+  and exports), bit-exact against WebGL in all four variants; the gate now
+  draws it with a runner host (`<corpus>/fallback-effects`, answered by
+  `fallback-runner.ts --fallback`) and counts it as via the runner. Legacy
+  programs also compile with ANGLE's built-in calls now
+  (`docs/engine/effects.md`, "ANGLE's Metal calls"); that alone did not fix
+  this program (43, 1, 38, 46 pixels).
 - **Through the runner**: `env-cubemap-sky` (a `samplerCube`), above.
 
 App level: the v1 corpus's shader and extension projects
@@ -295,7 +308,11 @@ App level: the v1 corpus's shader and extension projects
 missing, as the capture app had only the built-ins. The whole corpus with this
 lane (newest v1, render, effects, and composite captures): 249 frames, 0
 failed, 6 listed apart (the effects lane's Posterize frames); the same on
-2026-10-18 after the merge.
+2026-10-18 after the merge. On 2026-10-19 (with the motion, compclose, and
+the new `effects-20261019-055047-8d8a4ce4` captures): 348 frames, 0 listed
+apart (Posterize is bit-exact now), 5 failed, all video-class frames
+outside this lane (`motion/blur-video`, `retime/speed`,
+`space25d/precomps`) and identical with this lane's changes removed.
 
 ## Layer reports for the Shader panel
 
@@ -353,6 +370,7 @@ C=~/Library/Application\ Support/Powermove\ Engine\ Corpus/shaders-<stamp>
 cargo test -p pm-render --test shader_gate -- --nocapture       # writes fallback requests
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --corpus "$C"
 cargo test -p pm-render --test shader_gate -- --nocapture       # with the runner's pixels
+~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --fallback "$C/fallback-effects"  # ANGLE-only effects
 cargo test -p pm-render --test shader_layers
 PM_RENDER_ONLY=layers/ cargo test -p pm-render --test corpus -- --nocapture
 cargo test -p pm-node --test shader_fallback --test layer_reports
