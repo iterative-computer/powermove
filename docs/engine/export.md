@@ -669,3 +669,14 @@ The native hidden host and its per-machine GLSL pin runner are not integrated.
 Its current refusal and remaining gates are in [hidden-host.md](hidden-host.md).
 CLI artifact assembly supports both macOS architectures, but distributing them
 requires separate matching FFmpeg artifacts and Node 22 load tests for each.
+
+After the definitions-lane merge, standalone CLI renders explicitly require a
+shader reference. An absent runner no longer disables parity checks: user effect,
+transition and shader-layer programs with unknown or runner-pinned verdicts fail
+naming the GLSL fallback runner, without delivering a native frame. Built-ins keep
+their proved native path. An embedder-provided desktop parity environment retains
+its persisted decisions. This is a safety boundary, not completion of the required
+CLI Chromium runner: unverified custom definitions still cannot export there.
+The CLI regression retains the fork/override case as an explicit missing-reference
+failure and checks the same refusal for a shader layer; it does not claim parity
+for a render that did not run.

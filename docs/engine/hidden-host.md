@@ -44,3 +44,9 @@ checks architecture, relocates dylibs, includes FFmpeg license/provenance files,
 requires Node 22 for addon loading, and launches `pm-cli`. The package build copies
 ignored `packages/cli/prebuilds` into `dist/native`. Both darwin-arm64 and darwin-x64
 need their own matching LGPL FFmpeg artifacts and clean Node 22 load test.
+
+`pm-cli render` now calls `Renderer::require_shader_reference`. The shared effect,
+transition and shader-layer gates consult a configured parity service even when no
+runner is attached. Unknown and pinned programs then fail by name, rather than
+using an unverified native frame. The CLI still needs the desktop environment/pin
+store integration and the on-demand ANGLE runner to export those projects.

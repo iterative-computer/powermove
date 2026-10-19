@@ -267,6 +267,18 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// CLI hosts without an ANGLE environment must fail closed for user
+    /// programs instead of treating the absence of a parity service as proof.
+    /// A host that supplied the desktop environment retains its persisted
+    /// decisions; unknown programs still need a runner before output.
+    pub fn require_shader_reference(&mut self) {
+        if !self.effects.parity.enabled() {
+            self.effects
+                .parity
+                .configure(Some("host-without-ANGLE-reference".into()), None);
+        }
+    }
+
     /// A renderer on a device. The device needs
     /// `pm_gpu::device::required_features()`; 32-bit precision also needs
     /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests

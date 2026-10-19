@@ -85,7 +85,9 @@ The second argument is the destination, including paths outside the exports fold
 Render options are the native `pm-cli render` options: definition snapshots
 (`--definitions`), media overrides, fonts via the host registry, composition, range,
 rate, size, presets and repeatable `--param NAME=JSON` values. Parameter overrides
-use the player's numeric bounds, toggle, color and select validation. Existing
+use the player's numeric bounds, toggle, color and select validation. Without a browser reference, unverified user GLSL programs fail naming the
+fallback runner; they are never delivered natively. Full CLI runner/pin-store
+integration is incomplete. Existing
 outputs require `--force`. Native process exit codes reach the caller.
 
 A source checkout can set `POWERMOVE_PM_CLI` to its built binary. A packaged build

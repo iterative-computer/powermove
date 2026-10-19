@@ -332,6 +332,12 @@ impl<'c> Gpu<'c> {
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
+        if probe.is_some_and(|verdict| verdict != super::parity::Verdict::NativeVerified)
+            && !self.effects.fallback.runner
+        {
+            self.fallback(layer, &step.definition);
+            return None;
+        }
         let present = source
             .as_ref()
             .is_some_and(|source| self.effects.parity.has_present(source));
@@ -493,6 +499,12 @@ impl<'c> Gpu<'c> {
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
+        if probe.is_some_and(|verdict| verdict != super::parity::Verdict::NativeVerified)
+            && !self.effects.fallback.runner
+        {
+            self.fallback(layer, &step.definition);
+            return None;
+        }
         let present = source
             .as_ref()
             .is_some_and(|source| self.effects.parity.has_present(source));

@@ -186,7 +186,7 @@ fn rendering_with_the_built_in_set_warns_when_the_project_draws_definitions() {
 }
 
 #[test]
-fn a_definitions_snapshot_overrides_built_ins_by_id() {
+fn an_unverified_override_requires_an_angle_reference_instead_of_drawing_natively() {
     let dir = scratch("override");
     let file = dir.join("p.json");
     std::fs::write(&file, project(invert()).to_string()).unwrap();
@@ -199,7 +199,7 @@ fn a_definitions_snapshot_overrides_built_ins_by_id() {
         )
     });
     let out = dir.join("still.png");
-    let s = ok(&cli(&[
+    let result = cli(&[
         file.to_str().unwrap(),
         "-o",
         out.to_str().unwrap(),
@@ -207,12 +207,14 @@ fn a_definitions_snapshot_overrides_built_ins_by_id() {
         "still",
         "--definitions",
         defs.to_str().unwrap(),
-    ]));
-    assert_eq!(s["definitions"], json!(defs.to_str().unwrap()));
+    ]);
+    assert_eq!(result.status.code(), Some(3));
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("GLSL fallback runner"), "{message}");
+    assert!(message.contains("invert"), "{message}");
     assert!(
-        near(corner(&out), [0, 0, 255]),
-        "the fork draws: {:?}",
-        corner(&out)
+        !out.exists(),
+        "an unverified native frame must never be delivered"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -328,5 +330,30 @@ fn cli_parameter_overrides_change_rendered_expression_values_and_refuse_invalid_
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("invalid value for parameter"));
     assert!(!invalid.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_unverified_shader_layer_is_not_delivered_without_its_browser_reference() {
+    let dir = scratch("unverified-layer");
+    let file = dir.join("p.json");
+    let mut p = project(json!([]));
+    p["layers"][0]["type"] = json!("shader");
+    p["layers"][0]["d"] = json!({ "code": "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0); }", "uniforms": {}, "w": 320, "h": 180 });
+    std::fs::write(&file, p.to_string()).unwrap();
+    let out = dir.join("shader.png");
+    let result = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+    ]);
+    assert!(
+        !result.status.success(),
+        "an unknown program must not render natively"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("fallback runner"));
+    assert!(!out.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }

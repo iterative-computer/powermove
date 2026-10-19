@@ -627,6 +627,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    renderer.require_shader_reference();
     crate::fonts::install(
         &mut renderer,
         options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
