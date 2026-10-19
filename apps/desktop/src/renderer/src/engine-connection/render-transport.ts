@@ -15,8 +15,9 @@
  *   pixels only this renderer draws (the shader fallback runner), the
  *   answer names them, the transport draws them on this thread
  *   (`renderSync`), posts them on the session's port, and asks again, at
- *   most `MAX_ROUNDS` times. So a call from inside a `raster` wrapper or a
- *   WebGL callback cannot deadlock. Failures return `null` (the facades
+ *   bounded dependency phases, rejecting repeated unresolved needs. A call
+ *   from inside a `raster` wrapper or a WebGL callback cannot deadlock.
+ *   Failures return `null` (the facades
  *   return `''` or `null` only then) and are logged with the engine's
  *   reason.
  * - **Async siblings** (`snapshot`, `renderFrameTo`, `snapshotDataUrl`,
@@ -36,8 +37,11 @@ import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQ
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
-/** Rounds of `needsRenderer` a snapshot goes through before it fails. */
+/** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
+/** The protocol admits 64 uploaded programs/SVG rasters. Allow their
+ * dependent passes plus compatibility/reuse phases and the final render. */
+const MAX_DEPENDENCY_PHASES = 64 + MAX_ROUNDS + 1;
 /** Default waits: a blocked thread waits less than an async caller. */
 export const SYNC_WAIT_MS = 5_000;
 export const ASYNC_WAIT_MS = 30_000;
@@ -117,6 +121,20 @@ export class EngineSnapshotError extends Error {
   override name = 'EngineSnapshotError';
   constructor(readonly code: string, message: string) {
     super(message);
+  }
+}
+
+/** A nested effect can reveal its next program only after its input was
+ * rendered. Count actual dependency progress, rather than treating three
+ * different successful source/program phases as a stuck renderer. */
+class SnapshotDependencies {
+  private readonly seen = new Map<string, number>();
+
+  observe(reply: Extract<EngineSnapshotReply, { status: 'needsRenderer' }>): void {
+    const key = JSON.stringify([reply.revision, reply.compat, reply.fallback.map((r) => r.key), reply.svg?.map((r) => r.key)]);
+    const count = (this.seen.get(key) ?? 0) + 1;
+    this.seen.set(key, count);
+    if (count >= MAX_ROUNDS) throw new EngineSnapshotError('internal', `The engine repeated the same unresolved snapshot dependencies ${MAX_ROUNDS} times.`);
   }
 }
 
@@ -661,8 +679,9 @@ export class EngineRenderTransport {
       }
     }
     const uploaded: string[] = [];
+    const dependencies = new SnapshotDependencies();
     try {
-      for (let round = 0; round < MAX_ROUNDS; round++) {
+      for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const reply = native.snapshotSync(this.request(options, 'sync', uploaded, false, revision));
         if (reply.status === 'rendered') {
           this.stats.sync++;
@@ -671,6 +690,7 @@ export class EngineRenderTransport {
         }
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
+        dependencies.observe(reply);
         this.stats.rounds++;
         this.answerRound(reply.compat);
         this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.drawSync(request));
@@ -684,7 +704,7 @@ export class EngineRenderTransport {
           uploaded.push(request.key);
         }
       }
-      throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
+      throw new EngineSnapshotError('internal', `The snapshot exceeded ${MAX_DEPENDENCY_PHASES} renderer dependency phases.`);
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
@@ -700,6 +720,7 @@ export class EngineRenderTransport {
     const doc = this.options.windowDocument!()!;
     const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
+    const dependencies = new SnapshotDependencies();
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
     // The window's producers go with every request (main's session then
     // asks for those layers), and the answers to a round's needs with the next.
@@ -707,7 +728,7 @@ export class EngineRenderTransport {
     let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
-    for (let round = 0; round < MAX_ROUNDS + 1; round++) {
+    for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
       if (send && !body) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
       const reply = native.snapshotSync!({
@@ -737,6 +758,7 @@ export class EngineRenderTransport {
       }
       if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
       if (reply.status === 'failed') throw failure(reply);
+      dependencies.observe(reply);
       this.stats.rounds++;
       if (reply.compat.length) compatEvents.push(...this.collectAnswers(reply.compat));
       // The SVG rasters go with the next ask: main posts them on its
@@ -752,7 +774,7 @@ export class EngineRenderTransport {
         uploaded.push(r.key);
       }
     }
-    throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
+    throw new EngineSnapshotError('internal', `The snapshot exceeded ${MAX_DEPENDENCY_PHASES} renderer dependency phases.`);
   }
 
   /** The same, asynchronously (`async` or `idle` class). */
@@ -760,6 +782,7 @@ export class EngineRenderTransport {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
     const uploaded: string[] = [];
+    const dependencies = new SnapshotDependencies();
     try {
       if (!this.ready) {
         // UI snapshots wait for the viewer's own session first (it opens at
@@ -767,7 +790,7 @@ export class EngineRenderTransport {
         if (cls === 'idle') await this.waitForSession(STANDBY_AFTER_MS);
         if (!this.ready) await this.options.wake?.();
       }
-      for (let round = 0; round < MAX_ROUNDS; round++) {
+      for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const reply = await native.snapshot(this.request(options, cls, uploaded));
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
@@ -776,6 +799,7 @@ export class EngineRenderTransport {
         }
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
         if (reply.status === 'failed') throw failure(reply);
+        dependencies.observe(reply);
         this.stats.rounds++;
         this.answerRound(reply.compat);
         await this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.draw(request));
@@ -789,7 +813,7 @@ export class EngineRenderTransport {
           uploaded.push(request.key);
         }
       }
-      throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
+      throw new EngineSnapshotError('internal', `The snapshot exceeded ${MAX_DEPENDENCY_PHASES} renderer dependency phases.`);
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
