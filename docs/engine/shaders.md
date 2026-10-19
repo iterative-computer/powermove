@@ -266,6 +266,33 @@ apart. On `shaders-20261018-022611` with the rule (and `PIPELINE_REVISION`
 2, `pm_round` exact): 507 of 522 match (7 through the runner), 15 both
 refuse, 0 failures, the same as before it.
 
+**A user's own programs: Chike's setup** (second review, 2026-10-19).
+`collect.ts --local <user-setups/chike-20261018/extensions>` adds a user's
+installed extensions (private group `local`; a local extension that does
+not load in the collector is noted, not fatal). Corpus
+`shaders-20261019-chike` (186 cases, 695 variants; the repository's cases
+as of the merge, the Store's 4 releases, and Chike's extensions): 34 of his
+38 extension folders load (`ae-workspace-theme`, `displacement-origin-guide`
+and `pexels-browser` need DOM APIs at activation and register no GLSL
+there; `rotoscope` imports a file its folder does not hold) and register
+38 effects and 2 extension layers, 166 variants: 163 match WebGL and 3
+both refuse (one extension layer compares a `uniform bool` with a float,
+which WebGL refuses too). No program of his differs natively, so none is
+listed in `ANGLE_ONLY`. All groups: 677 of 695 match (11 through the
+runner), 18 both refuse, 0 failures, after two gate changes the corpus
+called for:
+- A program WebGL links but whose draw raises a GL error (the kernel test
+  fixture `void main(){}`, GL error 1282) leaves the cleared target, which
+  is what today's compositor shows; the gate compares the engine's output
+  with it instead of failing unconditionally (both transparent here). A
+  link refusal still fails when the engine draws.
+- An effect the native pipeline cannot translate (the e2e's `sampler3D`
+  effect) used to be listed as awaiting the runner and passed; it now
+  draws through the gate's runner host and is compared with WebGL (4 of 4
+  match), and any request the runner has not answered fails the gate.
+This covers his programs at the gate's synthetic inputs and parameter
+sets, not his projects' own frames.
+
 By kind: 44 shader layers, 13 extension fragment layers, 73 effects, 14
 transitions. Variants: layers at their defaults (1.25 s), at 70% of each range
 with other colors and flipped toggles (3.7 s), and with coerced values (numbers
