@@ -225,7 +225,7 @@ fn preview_window(
     request: &RenderRequest,
 ) -> Option<crate::compat_crop::PreviewWindow> {
     if request.export
-        || !comp.at_root()
+        || !(comp.at_root() || comp.is_open_canonical())
         || !matches!(request.video_end, crate::request::VideoEnd::Preview)
     {
         return None;

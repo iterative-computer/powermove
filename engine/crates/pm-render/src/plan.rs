@@ -1757,7 +1757,10 @@ fn preview_crop<'d>(
     let Some(window) = b.preview else {
         return Ok(CropPlan::Full);
     };
-    if !matches!(ty, "text" | "shape") || !scope.comp.at_root() || b.precomp_depth > 0 {
+    if !matches!(ty, "text" | "shape")
+        || !(scope.comp.at_root() || scope.comp.is_open_canonical())
+        || b.precomp_depth > 0
+    {
         return Ok(CropPlan::Full);
     }
     let d = node::member(Some(layer), "d");

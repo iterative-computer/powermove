@@ -274,6 +274,42 @@ fn viewer_frames_ask_for_today_s_preview_crop_window() {
 }
 
 #[test]
+fn the_open_canonical_composition_gets_the_same_preview_crop_as_stored_projects() {
+    let d = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#FFFFFF80", "stroke": 0 });
+    let mut stored = shape_doc("box", d, 128.0, 128.0);
+    stored["compId"] = json!("Ptest-root");
+    stored["comps"] = json!({});
+    let canonical =
+        pm_model::canonical::canonical_project(pm_model::json::parse(&stored.to_string()).unwrap());
+    let canonical: Value =
+        serde_json::from_str(&pm_model::json::to_canonical_string(&canonical)).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let producer = Producer::new(true, CompatAnswer::Missing);
+    renderer.set_compat_rasters(Some(producer));
+    let region = PixelRect {
+        x: 0,
+        y: 768,
+        width: 512,
+        height: 512,
+    };
+    for doc in [&stored, &canonical] {
+        let Err(RenderError::CompatPending(needs)) = viewer(&mut renderer, doc, 8.0, region, false)
+        else {
+            panic!("expected a need");
+        };
+        assert_eq!(
+            needs[0].crop,
+            Some(PixelRect {
+                x: 0,
+                y: 0,
+                width: 512,
+                height: 768
+            })
+        );
+    }
+}
+
+#[test]
 fn a_viewport_that_misses_the_shape_or_sits_in_its_plain_fill_does_not_ask() {
     let mut renderer = Renderer::headless().unwrap();
     let producer = Producer::new(true, CompatAnswer::Missing);
