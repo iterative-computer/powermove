@@ -309,6 +309,26 @@ export function buildClosureCases(): RenderCase[] {
   return cases;
 }
 
+/** Canonical path strikes: fill/synthesis and strokeText above 256px.
+ * Kept separate so recapturing them never replaces the main/closure references. */
+export function buildPathCases(): RenderCase[] {
+  const caption = (id: string, style: any, scale = 1): CaptionCase => ({
+    id, group: 'canonical-path-stroke', kind: 'caption',
+    content: { cues: [cue('HIR SO')], style: { ...BASE_STYLE, size: 320,
+      maxWidth: 95, placement: 'middle', stroke: 9, ...style } },
+    local: 2.0, compositionWidth: 1920, compositionHeight: 1080, scale,
+  });
+  return [
+    caption('path-stroke-0000', {}),
+    caption('path-stroke-0001', { weight: 900, italic: true, highlight: true,
+      highlightScale: 116, strokeColor: '#FF3B30' }, 1.25),
+    { id: 'path-synthetic-0002', group: 'canonical-path-synthetic', kind: 'text',
+      d: text({ text: 'Hi', font: 'Chalkduster', weight: 700, size: 300 }), scale: 1 },
+    { id: 'path-synthetic-0003', group: 'canonical-path-synthetic', kind: 'text',
+      d: text({ text: 'Hi', font: 'Chalkduster', weight: 400, italic: true, size: 300 }), scale: 1 },
+  ];
+}
+
 /** The project fonts of the closure set: the corpus's COLR test fonts. */
 export function closureProjectFonts(): typeof PROJECT_FONTS {
   const root = process.env.PM_ENGINE_CORPUS_ROOT ?? `${process.env.HOME}/Library/Application Support/Powermove Engine Corpus`;
@@ -321,9 +341,9 @@ export function closureProjectFonts(): typeof PROJECT_FONTS {
 
 if (import.meta.main) {
   const out = process.argv[2];
-  if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit|probe|closure]');
+  if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit|probe|closure|paths]');
   const set = process.argv[3];
-  const cases = set === 'fit' ? buildFitCases() : set === 'probe' ? buildProbeCases() : set === 'closure' ? buildClosureCases() : buildRenderCases();
+  const cases = set === 'fit' ? buildFitCases() : set === 'probe' ? buildProbeCases() : set === 'closure' ? buildClosureCases() : set === 'paths' ? buildPathCases() : buildRenderCases();
   const projectFonts = set === 'closure' ? closureProjectFonts() : PROJECT_FONTS;
   await Bun.write(out, JSON.stringify({ variableSources: VARIABLE_SOURCES, projectFonts, cases }));
   const groups = new Map<string, number>();
