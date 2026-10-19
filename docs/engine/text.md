@@ -485,7 +485,13 @@ applied to each:
   stagger text therefore stays pickable. Range styling also preserves
   coverage of posed visible ink.
   Padding and authored paragraph dimensions do not change the ink box used
-  by typography anchoring.
+  by typography anchoring. As in `raster.ts`, any finite box width counts
+  (at least 1 px, so 0 or negative widths are 1 px paragraphs), and
+  centered and right-aligned boxes anchor on the whole-pixel canvas the box
+  and its widest line span (`ceil(max(boxWidth, widest line))`). The widest
+  line is Parley's advance without trailing whitespace, where Canvas2D's
+  `measureText` includes it; the two differ only for a line wider than its
+  box that ends in spaces.
 
 Anchor edits (`anchor_reference`, `capture_font_anchor`, `font_offset`)
 share `Scope::text_anchor_box`: today's raster selection at level 1 and the
@@ -493,18 +499,37 @@ resting styled box at level 2, the box `level2_text` anchors against. Pan
 Behind on font-anchored level 2 text therefore keeps the resting text in
 place whatever the animators do at that time.
 
-Cold WASM queries return `fonts` before reporting a failed level 2 shape,
-allowing the normal font handshake to converge. No provisional geometry is
-returned. Carets use Parley's UTF-16 boundaries and metric baselines. The
+A character no registered face covers keeps its place in the layout and
+draws the primary face's `.notdef` (glyph 0), as level 1 does through
+Blink's `FirstCandidateForNotdef` and as today's engine does; the rest of the
+text lays out and draws as usual, and its bounds, picks, raster and carets
+answer normally. (Round 3 refused such layouts outright, which turned one
+uncovered character into a failed layer and throwing queries.)
+`Level2Layout::missing_glyphs` counts those clusters for diagnostics only.
+Fonts that are still loading are the host's to report
+(`ServedFonts::incomplete`, WASM's `fonts` answer), not the layout's, and a
+face that arrives later changes the registration signature, so cached
+`.notdef` layouts never go stale.
+
+Cold WASM text queries (`bounds`, `groupBounds`, `pick`, `textLayout`,
+`textRaster`, `glyphLayout`, `textRasterGeometry`) check the font report and
+the ink requirement before surfacing a JavaScript throw, allowing the normal
+font handshake to converge. No provisional geometry is returned. This order
+applies to level 1 queries too: a level 1 query that throws while the mirror
+still lacks fonts now answers `fonts` (and is retried) instead of throwing;
+once the fonts arrive it answers, or throws, exactly as before. Carets use Parley's UTF-16 boundaries and metric baselines. The
 sanitizer preserves explicit `compat` 1/2 on text layers without adding it
 to old layers; other layer types drop it, as before this lane.
 
-Thirteen `text-level2/*` corpus projects share a synthetic fixture with the
+Fourteen `text-level2/*` corpus projects share a synthetic fixture with the
 native semantic gate and native-on app e2e: range position, word transform,
 line wave, stagger, styled wrap, anchor, unicode, variable, range leading
 (line-height and tracking ranges with colors under a partial selector),
 ligature (lam-alef under a rotating stagger), styled anchor (ranges and
-anchoring without animators), and centered and right-aligned tracking.
+anchoring without animators), centered and right-aligned tracking, and
+notdef (an unassigned code point, U+0378, in Georgia text under a range
+style and a keyframed character animator: one `.notdef` glyph at its
+source, every other check as for the rest).
 Range-position, anchor and styled-wrap values are keyframed so their four
 samples differ. The semantic gate invokes the actual
 `support::routing_forbidden` predicate and refuses any escape. Level 2 uses
@@ -513,14 +538,36 @@ references and FONTS-R fixture remain unchanged.
 Generate their standalone corpus with
 `bun engine/corpus/src/generate.ts --native-text --out <outside-repo-dir>`.
 `textLevel2Projects` is also included in `allProjects`, so default corpus
-validation, generation and every-corpus routing checks see every native
-case. All thirteen projects additionally run unconditionally in
+validation and generation see every native case.
+
+Legacy captures leave them out (`engine/corpus/src/legacy-capture.ts`,
+`capture.ts`; the manifest lists them under `nativeOnly`): today's engine
+ignores `compat` and draws level 2 text at level 1, so its picture is no
+level 2 reference, and the level 1 gates (`text_corpus`, the FONTS-R
+ratchet, `pm-eval`'s evaluation corpus) would fail it by design. A capture
+that still holds a level 2 text document (any text layer with `compat` ≥ 2,
+`pm_eval::text_level2::level2_text_layers`) is routed in `text_corpus`
+after its routing check, and in the evaluation corpus, to the semantic
+gate: counted and listed, never compared with the capture, and a failure
+when the semantic gate does not judge that project. The semantic gate
+asserts this routing for each of its documents and for level 1, judged and
+unjudged cases (`level2_routing_contract`).
+
+All fourteen projects additionally run unconditionally in
 `text_level2_semantics` against CoreText and semantic invariants, without
 private captures or a routing exemption. Rust and app interaction checks
 also exercise fixed/automatic paragraph boxes in all three alignments,
 minimum point-text padding, and empty/whitespace picks.
 
-**TEXTL2-2:** `CompatMeasure` owns reusable Parley font/layout contexts and
+Range styles resolve their content once per change of the covering styles
+(not once per grapheme), so building the spans is linear in the text.
+
+**TEXTL2-2** (closed by orchestrator decision, 2026-10-19: the combined
+query plus GPU cost decides; level 2 is 2-8x faster than level 1 in every
+workload's combined p95, so the caption-size typing render-only component,
+1.122 to 1.520 ms p95 while the combined keystroke goes from 4.08 to
+2.02 ms, is accepted; the TTC face-copy pool, about 210 MiB of the 256 MiB
+cap, is follow-up F4): `CompatMeasure` owns reusable Parley font/layout contexts and
 retains face registrations across frames and queries. Its split-face LRU
 has a 256 MiB payload budget and 32-entry limit. Eviction also releases the
 old collection/source-cache references, so Parley cannot retain evicted

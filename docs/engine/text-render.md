@@ -1343,10 +1343,80 @@ milliseconds, **level 1 → level 2**:
 Query p95 and combined p95 improve in all twelve pairs. Rendering alone
 improves in all eight static/animated pairs and three typing pairs. The
 remaining caption typing render-only component is **1.1220 → 1.5198 ms**
-(**35.4% slower**, 0.40 ms); the first run reproduced that direction. This
-is an open TEXTL2-2 performance gap even though its combined engine cost is
-lower. These timings exclude browser events, IPC and presentation; they do
+(**35.4% slower**, 0.40 ms); the first run reproduced that direction. The
+orchestrator accepted it (TEXTL2-2, 2026-10-19): the user-felt combined cost
+decides, and the same keystroke's combined p95 improves from 4.08 to
+2.02 ms. These timings exclude browser events, IPC and presentation; they do
 not replace the deferred legacy/native app typing pair.
+
+### Round 4 (uncovered characters and capture routing, 2026-10-19)
+
+- **Uncovered characters draw.** Round 3 refused a level 2 layout with any
+  cluster no face covers (`text whose fonts are not loaded`), so one such
+  character failed the whole layer and every bounds, pick, raster and caret
+  query threw; the CoreText registry skips LastResort, so this hit any
+  uncovered character. The layout now keeps the character and draws the
+  primary face's `.notdef`, as level 1 (`FirstCandidateForNotdef`) and
+  today's engine do (see `text.md`). A `text-level2/notdef` corpus case
+  (U+0378 in Georgia under a range style and a keyframed character
+  animator), a measure test and an app test cover it. `pm-cli render` of
+  the reviewer's word-transform repro, of the same text with no animators,
+  and of that text at level 1 all draw the box.
+- **Legacy captures leave level 2 out.** Today's engine ignores `compat`,
+  so its capture of a level 2 project is a level 1 picture the level 1
+  gates would fail by design. `capture.ts` leaves those projects to the
+  semantic gate (`legacy-capture.ts`, manifest `nativeOnly`), and
+  `text_corpus` and the evaluation corpus route any level 2 document an
+  older capture holds to the semantic gate after the routing check:
+  counted, listed and failing when the semantic gate does not judge it. No
+  level 1 gate gained an exemption or tolerance.
+- **Level 2 captions** draw with `Profile::CORETEXT`, so they inherit this
+  lane's `device_space_offset: true` (the smoothing offset of a rotated or
+  skewed glyph stays in device space) and `bitmap_snap: Round` (axis-aligned
+  color bitmap glyphs, emoji, at whole device pixels, as CoreText draws
+  them). Level 1 captions and text keep the Canvas2D profile, where both
+  fields are off. The semantic gate now pins the caption snap (same pixels
+  for x.3 and x.4, a one-pixel move at x.7); removing the snap fails it.
+- **Paragraph box edges** follow `raster.ts` exactly for degenerate and
+  fractional boxes (see `text.md`).
+- **Style spans** are built once per change of the covering styles instead
+  of per grapheme: 5,000 characters under three styles take 0.20 ms per
+  build instead of 6.0 ms (release, M4 Max, 10 builds each).
+
+Verification (shipping thin-LTO release profile):
+
+- Level 2: `text_level2_semantics` passes **14 projects × 4 times = 56
+  native frames** (the notdef case at ink SSIM 0.9950 to 0.9970), the 10
+  interaction cases, the routing contract and the caption snap. Minima are
+  unchanged: linear pose **0.9924**, blur **0.9966**, partial opacity
+  **0.9965**, translation **0.9894**, resting **0.9905**; plane mean alpha
+  difference at most **0.0014 CV**; 8 anchor-edit frames. `text_level2`
+  smoke: 400 cases and 20 level 2 layers, none below 0.98. Sampling **7/7**.
+- Level 1: `text_raster` **618 cases** (495 + 116 + 4 + 3, 9 FONTS-R
+  ratcheted, 0 failed) and `text_corpus` **576 composed frames** (572 exact
+  within 2 CV, 4 FONTS-R ratcheted, 0 failed; 0 level 2 projects in the
+  captures). The 13 FONTS-R lines are identical to round 3's; the other ten
+  round 3 lines are the residuals the textexact lane retired, and the
+  ratchet fixture equals `feat/native-engine`'s. `text_residuals` **13/13**.
+- Evaluation corpus (`v0-20261012`): 0 mismatches in every class (6,162
+  text layouts, 2,157 text bounds, 2,157 raster metrics, 57 animator, glyph
+  and style queries each); 0 level 2 projects routed.
+- `pm-eval` library **38/38**, `pm-text` library **35/35** and level 2
+  layout **12/12**, WASM queries **8/8**, corpus tests **25/25**, corpus
+  typecheck and `generate.ts --check` (252 projects, 0 invalid); clippy on
+  `pm-eval`, `pm-text` and `pm-render` with all targets is clean.
+- Rebuilt both addons (bridge 1.3 MB loads, node 36.2 MB speaks
+  `protocol-25292d6fdfffb933`) and WASM (5,448,126 bytes, 1,770,822
+  gzipped), installed at `engine/target/pm-bridge/pm_bridge.node` where
+  development runs load the bridge. Native-on app matrix under the Electron
+  lock, one worker: **20/20** (canvas text, captions, font anchor, the four
+  level 2 tests including the new `.notdef` test, split text, animators,
+  layout resize).
+- An integration checkout that has no `engine/target/pm-bridge` must run
+  `bun run build:engine` in `apps/desktop` (or set
+  `POWERMOVE_PM_BRIDGE=apps/desktop/native/pm_bridge.node`) before the
+  native-font e2e; otherwise the queries answer `fonts` and the session
+  stays `pending`.
 
 ## Textexact: source ports and ten retired residuals
 
@@ -1529,11 +1599,11 @@ captures unchanged. The separate capture-transport fixes are described above.
 - The full browser key-event/bridge/presentation typing pair for level 2 is
   deferred to the measurement window because the shared lock was unavailable
   within 20 minutes. The Rust pair measures engine work only.
-- **TEXTL2-2 remains open for caption typing's render-only component:** its
-  paired p95 rises from 1.1220 to 1.5198 ms. Combined engine work improves
-  from 4.0787 to 2.0188 ms; that improvement does not waive the component
-  regression. Profile it in the performance window before claiming the
-  whole no-regression requirement closed.
+- **TEXTL2-2 (closed by orchestrator decision, 2026-10-19):** caption
+  typing's render-only component rises from 1.1220 to 1.5198 ms p95 while
+  the combined engine work improves from 4.0787 to 2.0188 ms; the combined
+  user-felt cost decides, so the component is accepted. The TTC face-copy
+  pool (about 210 MiB of the 256 MiB cap) is follow-up F4.
 - A level 2 working set larger than the 256 MiB face budget is released on
   return and may split again on the next request. The corpus stays below
   that budget; overbudget correctness is tested, but its frame latency and
@@ -1563,6 +1633,18 @@ captures unchanged. The separate capture-transport fixes are described above.
   is verified since, see [release-build.md](release-build.md).
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-textl2, round 4):
+
+- `engine/corpus/src/{capture,legacy-capture}.ts` and
+  `engine/corpus/test/corpus.test.ts`: the legacy capture leaves level 2
+  text projects to the semantic gate and lists them in its manifest.
+- `pm-render/tests/{text_corpus,support/text}.rs` and
+  `pm-eval/tests/corpus.rs`: route level 2 documents a capture still holds
+  to the semantic gate, counted and asserted. No level 1 comparison,
+  tolerance or ratchet entry changed.
+- `engine/corpus/fixtures/text-level2.json`: the `notdef` case (shared
+  with the app test and the semantic gate).
 
 2026-10-19 (lane ne-textl2, round 3):
 
