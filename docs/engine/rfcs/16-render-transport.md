@@ -172,6 +172,30 @@ window declined the last reason is the answer (`notHeadlessRenderable`).
 One answer per ask, 30 s per ask, 32 asks in flight, segments the engine
 does not take unlinked after a minute.
 
+### SVG rasters (decision S1)
+
+Level 1 SVG images are Chromium's rasters of today's buckets, drawn by the
+renderer that owns the document (`engine-connection/svg-rasters.ts`) and
+composited by the engine (docs/engine/vector.md, "Level 1: Chromium's raster
+of today's bucket"). Module `pm_protocol::svg_raster`; additive members of
+the messages above:
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `CompatMessage::SvgRequests { requests }` | interactive engine → renderer (session-bound) | Buckets a viewer frame drew without: `SvgRasterRequest { key: { content, width, height }, asset }`, at most 64 per message. `content` is the lowercase SHA-256 of the SVG file's bytes |
+| `CompatMessage::SvgPixels { key, row, rows, data }` | renderer → interactive engine | One band (at most 8 MiB) of premultiplied RGBA8, top-down: the bytes today's `texImage2D` of the bucket canvas stores. Accepted from any session of the render thread, and kept for all of them |
+| `CompatMessage::SvgFailed { key, reason, message }` | renderer → interactive engine | `missing`, `stale` (the window's bytes hash differently), `decode`, `size`, `unavailable`. Asked again after 5 s |
+| `SnapshotOutcome::NeedsRenderer.svg` | engine → main → renderer | Buckets a snapshot needs; the renderer posts them (`SvgPixels`) and asks again naming `svg:<content>:<w>x<h>` in `uploaded`; the engine waits for those bands. Absent in older answers (empty) |
+| `CompatSource::SvgImage`, `CompatFrameRequest.svg` | job engine → host | An export or agent frame's bucket (`svg` is set exactly when the source is `svgImage`). The answer is a `CompatFrame` keyed `<content>:<w>x<h>`, `rgba8Premultiplied`, the bucket's size, origin 0, scale 1. With no window that has the document open: `notHeadlessRenderable`, "SVG images are drawn by the editor window that has this project open; open the project in a window to export it." |
+
+The renderer draws a request only from its own asset whose decoded bytes
+hash to `content`. A viewer frame never waits: it draws the content's latest
+bucket or nothing and is drawn again when the bands arrive; snapshots and job
+frames never draw a stand-in. TypeScript: `EngineSnapshotReply.needsRenderer`
+gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
+(`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
+`PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
+
 ### Depth and object-id surfaces
 
 `ViewerState.depthId: true` (the 3D viewport chrome) makes the interactive
@@ -328,6 +352,7 @@ TypeScript and rebuild their addons when this lands.
   the 3D lane's.
 - **Compatibility rasters in frames**: the store holds them; pm-render does
   not draw a layer from them yet, so `needsRenderer.compat` is always empty.
+  (Level 1 SVG rasters are drawn: "SVG rasters" above.)
 - **The job engine's fonts**: the job engine has no font service yet, and
   pm-export gates exports with the fonts-less capability check, so text
   exports still route as before (export lane).

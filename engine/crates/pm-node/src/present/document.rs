@@ -332,7 +332,7 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::ProjectColor => "project color settings".into(),
         Feature::RequiresEngine => "native-only features".into(),
         Feature::Blender => "Blender rendering".into(),
-        Feature::SvgImage => "SVG images".into(),
+        Feature::SvgImage => "level 2 SVG images with text".into(),
         Feature::ImageSequence => "animated images or sequences".into(),
         Feature::Media(m) => format!("media: {m}"),
         Feature::Request(r) => format!("request: {r}"),
