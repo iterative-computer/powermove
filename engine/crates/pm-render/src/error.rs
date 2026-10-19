@@ -36,6 +36,11 @@ pub enum RenderError {
     /// targets are left untouched.
     #[error("waiting for {} SVG raster(s) from the document's renderer", .0.len())]
     SvgRastersPending(Vec<crate::vector::svg_rasters::SvgRasterNeed>),
+    /// A level 1 SVG raster the renderer's source could not get (no window
+    /// has the document open, the window could not draw it): the frame is
+    /// not drawn.
+    #[error("{0}")]
+    SvgRaster(String),
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,

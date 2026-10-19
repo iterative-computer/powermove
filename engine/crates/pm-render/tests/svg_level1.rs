@@ -459,3 +459,60 @@ fn pm_cli_draws_an_approximation_with_resvg_and_counts_it() {
         [0x4C, 0x8D, 0xFF, 255]
     );
 }
+
+/// The job engine's source: an export frame fetches its missing rasters
+/// before it draws, and a source that cannot names why.
+#[test]
+fn exports_fetch_missing_rasters_from_the_source_before_drawing() {
+    use pm_render::vector::svg_rasters::{SvgRasterNeed, SvgRasterSource};
+    use std::sync::{Arc, Mutex};
+    struct Source(Mutex<Vec<SvgRasterKey>>, bool);
+    impl SvgRasterSource for Source {
+        fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String> {
+            assert_eq!(
+                (need.composition.as_str(), need.layer.as_str()),
+                ("Ptest-root", "svg")
+            );
+            self.0.lock().unwrap().push(need.request.key.clone());
+            if self.1 {
+                Ok(ramp(need.request.key.width, need.request.key.height, 255))
+            } else {
+                Err("No editor window has this project open to draw its SVG images.".into())
+            }
+        }
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let (doc, resolver) = svg_doc(
+        "source.svg",
+        ART.as_bytes(),
+        "contain",
+        60.0,
+        30.0,
+        100.0,
+        vec![],
+    );
+    let doc = load(&doc);
+    let source = Arc::new(Source(Mutex::new(Vec::new()), true));
+    renderer.set_svg_source(Some(source.clone()));
+    let (px, misses) = rgba(&mut renderer, &doc, &resolver, true).unwrap();
+    assert_eq!(misses, 0);
+    assert!(px.iter().any(|&v| v > 0.0));
+    // Once per bucket: the second frame uses what the first fetched.
+    rgba(&mut renderer, &doc, &resolver, true).unwrap();
+    assert_eq!(source.0.lock().unwrap().len(), 1);
+    // Preview frames never block on the source.
+    let mut preview = Renderer::headless().unwrap();
+    preview.set_svg_source(Some(source.clone()));
+    let (_, misses) = rgba(&mut preview, &doc, &resolver, false).unwrap();
+    assert_eq!(misses, 1);
+    assert_eq!(source.0.lock().unwrap().len(), 1);
+    // No window: the export fails with the source's words.
+    let mut lonely = Renderer::headless().unwrap();
+    lonely.set_svg_source(Some(Arc::new(Source(Mutex::new(Vec::new()), false))));
+    match lonely.render(&doc, "Ptest-root", ticks(0.0), &request(true), &resolver) {
+        Err(RenderError::SvgRaster(m)) => assert!(m.contains("No editor window"), "{m}"),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("drawn without the raster"),
+    }
+}
+

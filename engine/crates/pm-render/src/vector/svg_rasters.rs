@@ -57,6 +57,19 @@ pub struct SvgRasterNeed {
     pub request: SvgRasterRequest,
     /// The SVG's file (`pm-cli`, and hosts that rasterize from the file).
     pub path: std::path::PathBuf,
+    /// The first layer that drew it, and its composition (the job
+    /// engine's host request names them).
+    pub composition: String,
+    pub layer: String,
+}
+
+/// Where a renderer without a document window gets rasters (the job
+/// engine: host services ask the window that owns the document,
+/// `CompatFrameRequest` with source `svgImage`). Blocking.
+pub trait SvgRasterSource: Send + Sync {
+    /// The raster's pixels (premultiplied RGBA8, top-down), or why there
+    /// are none (shown as the frame's error).
+    fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String>;
 }
 
 struct Stored {
@@ -281,6 +294,8 @@ mod tests {
                 asset: "a1".into(),
             },
             path: "/x.svg".into(),
+            composition: "c".into(),
+            layer: "l".into(),
         };
         s.miss(need(key('a', 2, 2)));
         s.miss(need(key('a', 2, 2)));

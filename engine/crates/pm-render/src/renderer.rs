@@ -199,6 +199,9 @@ pub struct Renderer {
     /// Frames that are not exports wait for level 1 SVG rasters too
     /// (snapshots) instead of substituting ([`Renderer::set_svg_wait`]).
     svg_wait: bool,
+    /// Where a waiting frame gets missing level 1 SVG rasters itself (the
+    /// job engine's host services; [`Renderer::set_svg_source`]).
+    svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
 }
 
 impl Renderer {
@@ -230,7 +233,19 @@ impl Renderer {
             shaders: Default::default(),
             explicit_meshes: Default::default(),
             svg_wait: false,
+            svg_source: None,
         }
+    }
+
+    /// A source a frame that waits for level 1 SVG rasters (an export, a
+    /// snapshot) fetches them from before drawing, blocking (the job
+    /// engine: host services ask the document's window). Without one such
+    /// a frame fails with [`RenderError::SvgRastersPending`].
+    pub fn set_svg_source(
+        &mut self,
+        source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
+    ) {
+        self.svg_source = source;
     }
 
     /// Who draws level 1 SVG rasters (decision S1): Chromium, through
@@ -761,6 +776,54 @@ impl Renderer {
     /// On [`RenderError::Unsupported`] the targets are left untouched.
     #[allow(clippy::too_many_arguments)]
     pub fn render_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+    ) -> Result<Rendered, RenderError> {
+        // A frame that waits for level 1 SVG rasters with a source attached
+        // fetches them and draws again (each round can only meet rasters
+        // the last did not draw, as more layers resolve).
+        for _ in 0..3 {
+            match self.render_into_once(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+            ) {
+                Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
+                    let source = self.svg_source.clone().expect("checked");
+                    for need in &needs {
+                        let pixels = source.fetch(need).map_err(RenderError::SvgRaster)?;
+                        self.vector
+                            .svg
+                            .put(need.request.key.clone(), pixels)
+                            .map_err(RenderError::SvgRaster)?;
+                    }
+                }
+                other => return other,
+            }
+        }
+        self.render_into_once(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_once(
         &mut self,
         document: &Document,
         composition: &str,

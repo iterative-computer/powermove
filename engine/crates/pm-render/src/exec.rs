@@ -374,6 +374,7 @@ impl Exec<'_> {
                                 asset,
                                 path,
                                 self.svg_policy,
+                                (&plan.composition, &draw.layer),
                             ) {
                                 Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
                                     r.view = Some(view)

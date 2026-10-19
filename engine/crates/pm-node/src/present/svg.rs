@@ -235,6 +235,8 @@ mod tests {
                 asset: "a1".into(),
             },
             path: "/a.svg".into(),
+            composition: "c".into(),
+            layer: "l".into(),
         }
     }
 

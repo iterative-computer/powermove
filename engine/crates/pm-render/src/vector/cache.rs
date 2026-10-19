@@ -363,6 +363,7 @@ impl VectorCache {
                     asset,
                     path,
                     SvgMissPolicy::Wait,
+                    ("", ""),
                 )? {
                     SvgResolved::Drawn(view) | SvgResolved::Substitute(view) => Ok(view),
                     SvgResolved::Missing => Err(format!(
@@ -439,6 +440,7 @@ impl VectorCache {
     /// stores). On a miss the need is recorded ([`SvgRasters::take_misses`])
     /// and, under [`SvgMissPolicy::Substitute`], the content's latest
     /// bucket stands in.
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_svg(
         &mut self,
         device: &wgpu::Device,
@@ -447,6 +449,7 @@ impl VectorCache {
         asset: &str,
         path: &std::path::Path,
         policy: SvgMissPolicy,
+        at: (&str, &str),
     ) -> Result<SvgResolved, String> {
         self.tick += 1;
         let source_key = |k: &SvgRasterKey| {
@@ -484,6 +487,8 @@ impl VectorCache {
                 asset: asset.to_owned(),
             },
             path: path.to_path_buf(),
+            composition: at.0.to_owned(),
+            layer: at.1.to_owned(),
         });
         if policy == SvgMissPolicy::Substitute
             && let Some(latest) = self.svg.latest(key).cloned()
