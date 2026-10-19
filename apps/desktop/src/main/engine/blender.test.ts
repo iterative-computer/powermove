@@ -75,6 +75,7 @@ async function job(ids: string[], name: string, extra: Partial<BlenderJobRequest
   return {
     job: name,
     priority: 'userJob',
+    foregroundCapture: false,
     snapshot: { hash, encoding: 'renderSnapshotJsonV1', handle: cache, bytes: bytes.length },
     workerScriptHash: WORKER_SCRIPT_SHA256,
     assets: [],

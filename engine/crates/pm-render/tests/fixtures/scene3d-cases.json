@@ -12259,17 +12259,50 @@
        "shader": {
         "id": "m1",
         "name": "Clay",
+        "graph": {
+         "nodes": [
+          {
+           "id": "surface",
+           "type": "ShaderNodeBsdfPrincipled",
+           "inputs": {},
+           "properties": {}
+          },
+          {
+           "id": "output",
+           "type": "ShaderNodeOutputMaterial",
+           "inputs": {},
+           "properties": {}
+          }
+         ],
+         "links": [
+          {
+           "from": "surface",
+           "output": "BSDF",
+           "to": "output",
+           "input": "Surface"
+          }
+         ]
+        },
         "inputs": [
          {
           "id": "base",
+          "label": "Base Color",
+          "kind": "color",
+          "node": "surface",
           "socket": "Base Color"
          },
          {
           "id": "rough",
+          "label": "Roughness",
+          "kind": "number",
+          "node": "surface",
           "socket": "Roughness"
          },
          {
           "id": "glow",
+          "label": "Emission Strength",
+          "kind": "number",
+          "node": "surface",
           "socket": "Emission Strength"
          }
         ],

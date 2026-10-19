@@ -212,7 +212,7 @@ export function cases(): Case[] {
   add({ id: 'node-material-and-source', width: W, height: H,
     scene: { ...base([light('sun', 'sun')]),
       objects: [
-        object('noded', { primitive: 'sphere' }, material({ color: '#888888' }, { shader: { id: 'm1', name: 'Clay', inputs: [{ id: 'base', socket: 'Base Color' }, { id: 'rough', socket: 'Roughness' }, { id: 'glow', socket: 'Emission Strength' }],
+        object('noded', { primitive: 'sphere' }, material({ color: '#888888' }, { shader: { id: 'm1', name: 'Clay', graph: { nodes: [{ id: 'surface', type: 'ShaderNodeBsdfPrincipled', inputs: {}, properties: {} }, { id: 'output', type: 'ShaderNodeOutputMaterial', inputs: {}, properties: {} }], links: [{ from: 'surface', output: 'BSDF', to: 'output', input: 'Surface' }] }, inputs: [{ id: 'base', label: 'Base Color', kind: 'color', node: 'surface', socket: 'Base Color' }, { id: 'rough', label: 'Roughness', kind: 'number', node: 'surface', socket: 'Roughness' }, { id: 'glow', label: 'Emission Strength', kind: 'number', node: 'surface', socket: 'Emission Strength' }],
           p: p({ base: '#3366FF', rough: 0.15, glow: 0.5 }) } })),
         object('source', { primitive: 'box' }, material({ color: '#FF0000' }), { useSourceMaterials: true })] },
     matrices: { noded: matrix([-0.8, 0, 0]), source: matrix([0.9, 0, 0], [0, 30, 0]) }, outputs: set(['noded', 'source']) });
