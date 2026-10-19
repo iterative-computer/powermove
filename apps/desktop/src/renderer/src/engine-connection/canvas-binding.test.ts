@@ -2,8 +2,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
-import { ENGINE_STAGE_EVENT as PRESENTATION_STAGE_EVENT } from '../../../extensions/viewer/engine-present/presentation';
-import { ENGINE_STAGE_EVENT, EngineCanvasBinding, type BoundPresentation } from './canvas-binding';
+import { ENGINE_SELF_PRESENTS_ATTRIBUTE as PRESENTATION_SELF_PRESENTS, ENGINE_STAGE_EVENT as PRESENTATION_STAGE_EVENT } from '../../../extensions/viewer/engine-present/presentation';
+import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_STAGE_EVENT, EngineCanvasBinding, type BoundPresentation } from './canvas-binding';
 
 class FakePresentation implements BoundPresentation {
   readonly exclusive = true;
@@ -82,6 +82,25 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(made[0]!.disposed).toBe(true);
     // It hid its canvas itself; the binding leaves that alone.
     expect(canvas.style.visibility).toBe('hidden');
+    binding.resize();
+    expect(made).toHaveLength(1);
+  });
+
+  it('never presents over a viewer that presents by itself, before its presentation exists or after it is gone', () => {
+    const { binding, made, stage, canvas } = setup();
+    expect(ENGINE_SELF_PRESENTS_ATTRIBUTE).toBe(PRESENTATION_SELF_PRESENTS);
+    // The built-in viewer marks its stage at mount, before render.gl.init;
+    // its presentation comes once the engine connection is up.
+    stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
+    binding.bind(canvas);
+    binding.resize();
+    expect(made).toHaveLength(0);
+    expect(canvas.style.visibility).toBe('');
+    // It unmounts (disabled, say) and its WebGL canvas stays in the panel.
+    stage.removeAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE);
+    expect(made).toHaveLength(0);
+    // An old fork that mounts on the same skeleton and draws through the
+    // compositor gets the binding.
     binding.resize();
     expect(made).toHaveLength(1);
   });

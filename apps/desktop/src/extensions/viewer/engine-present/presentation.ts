@@ -115,6 +115,16 @@ export const MAX_REVEAL_FRAMES = 30;
 /** Dispatched (bubbling) by a viewer's own presentation on its stage. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
 
+/**
+ * The stage attribute (dataset key `engineSelfPresents`) of a viewer that
+ * presents engine frames by itself, set for as long as it is mounted, so a
+ * `render.gl.init` binding never presents over its canvas, before its own
+ * presentation exists (the engine connection comes up after the viewer
+ * mounts) and after it is gone (the built-in viewer's WebGL canvas outlives
+ * it in the panel skeleton).
+ */
+export const ENGINE_SELF_PRESENTS_ATTRIBUTE = 'data-engine-self-presents';
+
 /** The visible states of an exclusive presentation without a frame to show. */
 export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',

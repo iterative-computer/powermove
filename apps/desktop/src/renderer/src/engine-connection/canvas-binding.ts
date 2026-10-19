@@ -15,9 +15,9 @@
  * top), and the passed canvas rests hidden.
  *
  * No competing presenters: a viewer that presents by itself (the built-in
- * viewer's own presentation marks its stage `data-engine-stage="viewer"`)
- * owns the canvas, and the binding yields to it, at bind time and at every
- * resize. A new `init` with another canvas replaces the binding (one per
+ * viewer marks its stage `data-engine-self-presents` while mounted, and its
+ * presentation marks it `data-engine-stage="viewer"`) owns the canvas, and
+ * the binding yields to it, at bind time and at every resize. A new `init` with another canvas replaces the binding (one per
  * window), and a canvas that left the document unbinds: at the next
  * `resize`, or as soon as its size observer sees it go (a caller that
  * tears its canvas down calls nothing more; its presentation would keep a
@@ -27,6 +27,8 @@ import type { EngineViewerService, ViewParams } from '../../../extensions/viewer
 
 /** Mirrors engine-present/presentation.ts `ENGINE_STAGE_EVENT`. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
+/** Mirrors engine-present/presentation.ts `ENGINE_SELF_PRESENTS_ATTRIBUTE`. */
+export const ENGINE_SELF_PRESENTS_ATTRIBUTE = 'data-engine-self-presents';
 
 /** What the binding needs of a presentation (`ViewerPresentation`). */
 export interface BoundPresentation {
@@ -84,9 +86,10 @@ export class EngineCanvasBinding {
     return this.presentation !== null;
   }
 
-  /** Whether a viewer of its own presents over `canvas` (the built-in one). */
+  /** Whether a viewer of its own presents over `canvas` (the built-in one),
+   *  or is mounted to (it presents once the engine connection is up). */
   private owned(canvas: HTMLCanvasElement): boolean {
-    return !!canvas.closest('[data-engine-stage="viewer"]');
+    return !!canvas.closest(`[data-engine-stage="viewer"], [${ENGINE_SELF_PRESENTS_ATTRIBUTE}]`);
   }
 
   /**
