@@ -1126,3 +1126,44 @@ run tag; the extra hidden diagnostic is explicitly opt-in. After deleting
 `apps/desktop/native/pm_bridge.node` path (as this run did), so the development
 bridge remains available. The build target is deleted and all own app/build
 processes exited.
+
+## fixups2 round 4: the rootComp wrapper view and fresh scope objects
+
+`scope-bench.test.ts` (opt-in `PM_FIXUPS2_MEASURE=1`), the same 100-layer fixture
+with 40 keyed channels per layer and one expression channel per layer that reads
+the scope (`param("amp") + (comp.params ? 1000 : 0) + comp.layers.length + time`),
+under the Electron lock, M4 Max shared with other lanes. Five samples alternate
+native and today's order; each row asserts every answer equals today's. Medians
+(all five samples are in `/tmp/ne-w5/fixups2-r4/scope-final.json`, outside Git):
+
+| Scope, `evP` | Native | Today | No slower? |
+|---|---:|---:|---|
+| Fresh `rootComp` per `PM.curComp()`, keyed channel | 18.4 ns | 34.2 ns | Yes |
+| Held `rootComp` (`PM.scope = [Comps.get(id)]`), keyed | 18.5 ns | 34.0 ns | Yes |
+| Held `rootComp`, expression, repeated time | 81.1 ns | 210.0 ns | Yes |
+| Fresh `rootComp`, expression, repeated time | 305.2 ns | 695.1 ns | Yes |
+| Partial wrapper `{ id, fps, layers }` made per call, keyed | 27.1 ns | 33.9 ns | Yes |
+| Genuinely detached object, keyed (owner-accepted, decision 1) | 8.26 µs | 38.7 ns | Accepted |
+| Genuinely detached object, expression | 3.67 µs | 218.5 ns | Accepted (decision 1) |
+| Detached object made anew per call, keyed | 9.19 µs | 37.6 ns | Accepted class (was 92 ms, and an out-of-memory loop) |
+| Detached object made anew per call, expression | 4.18 µs | 225.5 ns | Accepted class (was about 97 µs to 113 ms) |
+| Held `rootComp`, expression, new time every call | 1.83 µs | 221.8 ns | **No** (see below) |
+| No scope, expression, new time every call | 2.09 µs | 228.5 ns | **No** (see below) |
+
+The wrapper check costs nothing measurable here: keyed channels no longer call
+`PM.curComp()` at all, and an expression's check is about 30 ns of named reads and
+one for-in walk. "Repeated time" rows hit the per-channel numeric memo on the
+native side (today re-runs the compiled function).
+
+**Not from this lane, and not fixed here: an expression at a new time costs about
+2 µs natively against about 0.22 µs today, with or without a scope.** Every call
+crosses into pm-wasm and runs pm-expr's interpreter, where today runs a V8-compiled
+function (expressions.md measures 0.5 to 0.9 µs inside Rust with document reads;
+the rest is the facade and the `expressionError` read-back per call). The two
+bottom rows show the wrapper view does not add to it (1.83 against 2.09 µs). This
+is a per-expression-channel cost on every frame of a project with expressions;
+it belongs with the perf3 lane's items and is reported to the orchestrator.
+
+Exactness for these paths is in `strict.test.ts` (wrapper members, held and
+changed wrappers, stale wrappers, the stored form, a scope object made anew per
+call with scope and channel edits) and `detached.test.ts`.
