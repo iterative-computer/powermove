@@ -376,3 +376,47 @@ fn unknown_primitives_fail_the_composition_scene_as_today() {
     let empty = render(&mut r, &without, &MapResolver::default()).unwrap();
     assert_eq!(drawn, empty, "the object layer draws nothing");
 }
+
+#[test]
+fn foreign_schema_corruption_fails_the_composition_scene() {
+    let mut renderer = Renderer::headless().unwrap();
+    let cases: [(&str, Value); 4] = [
+        (
+            "strict object keys",
+            json!({"primitive":"box", "foreign": true}),
+        ),
+        (
+            "primitive parameter range",
+            json!({"primitive":"sphere", "parameters":{"radius":-1}}),
+        ),
+        (
+            "mesh triangle indices",
+            json!({"mesh":{"positions":[0,0,0, 1,0,0, 0,1,0], "indices":[0,1,3]}}),
+        ),
+        ("unknown source", json!({"primitive":"knot"})),
+    ];
+    for (label, source) in cases {
+        let mut doc = textured(false);
+        let i = doc["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|l| l["id"] == "o")
+            .unwrap();
+        doc["layers"][i]["d"]["data"]["object"]["source"] = source;
+        let frame = renderer
+            .render(
+                &load(&doc),
+                "Ptest-root",
+                ticks(0.0),
+                &request(),
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(
+            frame.failures.iter().any(|f| f.layer == "o"),
+            "{label}: {:?}",
+            frame.failures
+        );
+    }
+}

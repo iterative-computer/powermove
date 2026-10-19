@@ -685,6 +685,23 @@ fn the_static_check_looks_inside_legacy_scenes() {
             }),
         ),
         (
+            "a foreign strict object key",
+            Box::new(move |doc: &mut Value| {
+                doc.pointer_mut(&format!("{scene}/objects/0"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("foreign".into(), json!(true));
+            }),
+        ),
+        (
+            "a material channel outside its range",
+            Box::new(move |doc: &mut Value| {
+                *doc.pointer_mut(&format!("{scene}/objects/0/material/p/roughness/v"))
+                    .unwrap() = json!(2);
+            }),
+        ),
+        (
             "no scene",
             Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut("/layers/0/d/data/scene").unwrap() = json!(null);

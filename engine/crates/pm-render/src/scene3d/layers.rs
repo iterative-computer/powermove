@@ -233,7 +233,11 @@ pub(crate) fn composition_scene<'d>(
 ) -> JsResult<Result<Scene3d, String>> {
     // Recipe parts of an animated model group carry the recipe's geometry
     // and base offset (`animatedPart`, `pm_eval::recipe`).
-    let evaluated = scope.composition_scene(time)?;
+    let evaluated = match scope.composition_scene(time) {
+        Ok(scene) => scene,
+        Err(error) if error.kind == "ZodError" => return Ok(Err(error.message)),
+        Err(error) => return Err(error),
+    };
     let Value::Object(scene) = &evaluated.scene else {
         return Ok(Err("the evaluated 3D scene".into()));
     };

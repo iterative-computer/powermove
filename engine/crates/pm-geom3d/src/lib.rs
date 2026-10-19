@@ -27,6 +27,7 @@ pub mod normals;
 pub mod obj;
 pub mod primitives;
 pub mod query;
+pub mod scene_validation;
 pub mod shapes;
 pub mod source;
 

@@ -7,7 +7,7 @@ use pm_eval::bounds::{HOST_ONLY, LayerHost, NoHost, PickOptions};
 use pm_eval::retime::{RetimeCache, Retiming};
 use pm_eval::text_geom::{MeasuredLine, TextMeasure};
 use pm_eval::{Comp, Evaluator, JsValue, Scope};
-use pm_model::json::parse;
+use pm_model::json::{Value, parse};
 use pm_model::{Document, JsString, Node};
 use pm_text::compat::{GlyphLayout, TextContent};
 
@@ -178,6 +178,18 @@ fn object_picks_raycast_the_scene() {
     let comp = Comp::resolve(&d, "C").unwrap();
     let mut ev = Evaluator::new();
     let mut scope = Scope::open(&mut ev, &comp);
+    // The synthetic layer has no name. JS `parseScene` fills the default.
+    let evaluated = scope.composition_scene(0.0).unwrap();
+    let Value::Object(scene) = &evaluated.scene else {
+        panic!("scene")
+    };
+    let Some(Value::Array(objects)) = scene.get("objects") else {
+        panic!("objects")
+    };
+    let Value::Object(first) = &objects[0] else {
+        panic!("object")
+    };
+    assert_eq!(first.get("name"), Some(&Value::String("Object".into())));
     let opts = PickOptions::default();
     let mut host = ObjectHost::default();
     let hit = scope

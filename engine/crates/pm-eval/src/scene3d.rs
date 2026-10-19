@@ -450,11 +450,14 @@ impl<'d> Scope<'_, 'd> {
                     .to_json()
                     .unwrap_or(Value::Null),
             );
+            // An absent JS `layer.name` is `undefined`: `parseScene` applies
+            // its default. Null is an explicit invalid name and stays null.
+            out.remove("name");
             out.insert(
                 "name",
                 node::js_value_opt(node::member(Some(layer), "name"))
                     .to_json()
-                    .unwrap_or(Value::Null),
+                    .unwrap_or_else(|| Value::String("Object".into())),
             );
             let parent = node::get(layer, b"parent").to_js();
             let parent_is_object = object_ids
@@ -565,11 +568,12 @@ impl<'d> Scope<'_, 'd> {
                     .to_json()
                     .unwrap_or(Value::Null),
             );
+            out.remove("name");
             out.insert(
                 "name",
                 node::js_value_opt(node::member(Some(layer), "name"))
                     .to_json()
-                    .unwrap_or(Value::Null),
+                    .unwrap_or_else(|| Value::String("Light".into())),
             );
             validate_position(&p, "light")?;
             let Value::Object(sun) = default_sun("") else {
@@ -659,6 +663,10 @@ impl<'d> Scope<'_, 'd> {
         scene.insert("lights", Value::Array(lights));
         scene.insert("camera", camera);
         scene.insert("environment", environment);
+        pm_geom3d::scene_validation::validate_scene(&scene).map_err(|message| JsThrow {
+            kind: "ZodError",
+            message: format!("Invalid 3D scene: {message}"),
+        })?;
         Ok(EvaluatedScene {
             scene: Value::Object(scene),
             recipe_parts,

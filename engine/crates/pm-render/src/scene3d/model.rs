@@ -959,6 +959,8 @@ impl SceneBuilder {
         textures: &dyn TextureSource,
         models: &dyn ModelSource,
     ) -> Result<Scene3d, Unsupported> {
+        pm_geom3d::scene_validation::validate_scene(scene)
+            .map_err(|reason| format!("Invalid 3D scene: {reason}"))?;
         let mut warnings = Vec::new();
         let environment = obj(scene, "environment").ok_or("the 3D environment")?;
         let shadows = boolean(environment, "shadows") != Some(false);

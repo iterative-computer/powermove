@@ -1125,6 +1125,10 @@ impl<'d> Scope<'_, 'd> {
             let Value::Object(scene) = scene_node.to_value() else {
                 return Ok(None);
             };
+            pm_geom3d::scene_validation::validate_scene(&scene).map_err(|message| JsThrow {
+                kind: "ZodError",
+                message: format!("Invalid 3D scene: {message}"),
+            })?;
             let mut ch = OnLayer {
                 scope: self,
                 layer,

@@ -25,11 +25,26 @@ import type { DualAnswers } from './dual';
 import { geometryRequest, meshFields, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
 import { sceneForLayer } from '../core/scene3d/service';
 import { parseScene, SCENE3D_DEFINITION } from '../core/scene3d/schema';
-import { layer3DRole } from '../core/scene3d/layers';
+import { compositionScene, layer3DRole } from '../core/scene3d/layers';
+import { ZodError } from 'zod';
 import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
+
+/** Only the editor-reachable size caps waived by the native 3D engine. */
+export function approvedSceneLimit(error: unknown): boolean {
+  if (error instanceof Error && error.message === '3D scene exceeds the 8 MB geometry budget') return true;
+  const issues = (error as { issues?: unknown } | null)?.issues;
+  return Array.isArray(issues) && issues.length > 0 && issues.every((issue: any) => {
+    if (issue?.code !== 'too_big') return false;
+    const path = issue.path;
+    if (!Array.isArray(path)) return false;
+    if (path.length === 1 && path[0] === 'objects' && issue.maximum === 512) return true;
+    if (path.length === 1 && path[0] === 'lights' && issue.maximum === 16) return true;
+    return path.at(-1) === 'name' && issue.maximum === 160;
+  });
+}
 
 /** `runtime.objects.get(id)` as Edit Mode reads it (`NativeApi.objectMesh3d`). */
 export type ObjectMesh3d =
@@ -568,7 +583,8 @@ export class NativeApi {
             parseScene(raw);
           }
         } catch (error) {
-          sceneErrors.set(layer.id, error instanceof Error ? error : new Error(String(error)));
+          if (!approvedSceneLimit(error))
+            sceneErrors.set(layer.id, error instanceof Error ? error : new Error(String(error)));
         }
       }
     }
@@ -611,6 +627,27 @@ export class NativeApi {
       if (reply.throw.kind === 'SceneValidation') {
         const exact = sceneErrors.get(reply.throw.message);
         if (exact) return { threw: exact };
+      }
+      if (reply.throw.kind === 'ZodError') {
+        // This is an exception path only. Reproduce today's composition
+        // parser exception without constructing SceneRuntime or geometry.
+        const context = this.comps();
+        const address = request.comp;
+        const matching = context && (address === context.comp || address === context.open
+          || address === ROOT_VIEW + context.open);
+        if (matching) {
+          try { compositionScene(this.PM, Number(request.t), context.liveCur); }
+          catch (error) {
+            if (!approvedSceneLimit(error))
+              return { threw: error instanceof Error ? error : new Error(String(error)) };
+          }
+        }
+        // An approved 8 MB cap can mask a second schema issue in the JS
+        // parser. The native validator still refuses it; preserve the Zod
+        // exception class for this otherwise unrepresentable combination.
+        const error = new ZodError([{ code: 'custom', path: [], message: reply.throw.message }]);
+        Object.defineProperty(error, 'message', { value: reply.throw.message, configurable: true });
+        return { threw: error };
       }
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
       return { threw: error };
