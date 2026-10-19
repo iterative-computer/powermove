@@ -385,16 +385,18 @@ pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
         }
     };
     match name {
-        "NORMAL" => {
-            if shadow {
-                p.displacement_map
-            } else {
-                matches!(
-                    p.shader_type.as_str(),
-                    "MeshStandardMaterial" | "MeshPhysicalMaterial"
-                ) && !p.flat_shading
-            }
-        }
+        // r180's physical vertex shader includes `beginnormal_vertex`
+        // unconditionally, so `normal` stays active under flat shading too.
+        // `meshbasic.glsl.js` includes it under `USE_ENVMAP || USE_SKINNING`,
+        // which also covers the viewport chrome's MeshBasicMaterial
+        // override on a skinned mesh (Chromium capture: GL error 1282).
+        "NORMAL" => match p.shader_type.as_str() {
+            "MeshDepthMaterial" | "MeshDistanceMaterial" => p.displacement_map,
+            "MeshStandardMaterial" | "MeshPhysicalMaterial" => true,
+            // LineBasicMaterial shares `meshbasic_vert` (never skinned in glTF).
+            "MeshBasicMaterial" | "LineBasicMaterial" => p.skinning || p.env_map,
+            _ => false,
+        },
         "TANGENT" => !shadow && p.vertex_tangents && !p.flat_shading,
         // The depth and distance shaders include no color chunks, including
         // when alpha testing their copied map/alphaMap.
@@ -759,5 +761,63 @@ pub fn shadow_uniforms(
     }
     if src.alpha_test > 0.0 {
         u.push(("alphaTest".into(), vec![src.alpha_test]));
+    }
+}
+
+#[cfg(test)]
+mod short_normal_tests {
+    use super::*;
+
+    fn params(shader_type: &str) -> Parameters {
+        Parameters {
+            shader_type: shader_type.into(),
+            ..Parameters::default()
+        }
+    }
+
+    /// Chromium (Electron 44, three r180) linked-attribute captures; see
+    /// `e2e/helpers/gltf-short-attributes.ts`.
+    #[test]
+    fn normal_follows_the_r180_vertex_programs() {
+        let mut basic = params("MeshBasicMaterial");
+        assert!(!consumes_short_attribute(&basic, "NORMAL"), "unskinned Basic");
+        basic.skinning = true;
+        assert!(consumes_short_attribute(&basic, "NORMAL"), "skinned Basic");
+        basic.skinning = false;
+        basic.env_map = true;
+        assert!(consumes_short_attribute(&basic, "NORMAL"), "env-mapped Basic");
+        basic.env_map = false;
+        basic.morph_normals = true;
+        basic.morph_targets = true;
+        assert!(
+            !consumes_short_attribute(&basic, "NORMAL"),
+            "Basic morph normals sit inside the skinning/env guard"
+        );
+
+        for kind in ["MeshStandardMaterial", "MeshPhysicalMaterial"] {
+            let mut lit = params(kind);
+            assert!(consumes_short_attribute(&lit, "NORMAL"), "{kind}");
+            lit.flat_shading = true;
+            assert!(consumes_short_attribute(&lit, "NORMAL"), "flat {kind}");
+            lit.skinning = true;
+            assert!(consumes_short_attribute(&lit, "NORMAL"), "skinned flat {kind}");
+            // USE_TANGENT requires `flatShading === false`.
+            lit.vertex_tangents = true;
+            assert!(!consumes_short_attribute(&lit, "TANGENT"), "flat {kind} tangent");
+            lit.flat_shading = false;
+            assert!(consumes_short_attribute(&lit, "TANGENT"), "{kind} tangent");
+        }
+
+        for kind in ["MeshDepthMaterial", "MeshDistanceMaterial"] {
+            let mut shadow = params(kind);
+            shadow.skinning = true;
+            assert!(!consumes_short_attribute(&shadow, "NORMAL"), "skinned {kind}");
+            shadow.displacement_map = true;
+            assert!(consumes_short_attribute(&shadow, "NORMAL"), "displaced {kind}");
+        }
+
+        let mut points = params("PointsMaterial");
+        points.skinning = true;
+        assert!(!consumes_short_attribute(&points, "NORMAL"));
     }
 }
