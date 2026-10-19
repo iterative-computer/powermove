@@ -69,4 +69,45 @@ describe('native paused preview control', () => {
     await expect(r.preview.render()).rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
     expect(r.sent).toHaveLength(0);
   });
+
+  it('prepares the headless cache without waiting for a presented frame', async () => {
+    const r = rig();
+    r.session.route = 'pending';
+    r.session.headless = true;
+    const rendering = r.preview.render({ cacheOnly: true, size: { width: 640, height: 360 } });
+    await Promise.resolve();
+    expect(r.sent.at(-1)).toMatchObject({ action: 'render', cacheOnly: true, size: { width: 640, height: 360 } });
+    r.preview.receiveStatus(r.session, { ...r.status('ready', 1), cacheOnly: true });
+    await rendering;
+    expect(r.preview.state()).toEqual({ busy: false, error: null });
+  });
+
+  it('ignores an old cache completion after cancellation', async () => {
+    const r = rig();
+    r.session.route = 'pending';
+    r.session.headless = true;
+    const rendering = r.preview.render({ cacheOnly: true, size: { width: 1, height: 1 } });
+    await Promise.resolve();
+    const cancelling = r.preview.cancel();
+    await expect(rendering).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+    r.preview.receiveStatus(r.session, { ...r.status('ready', 1), cacheOnly: true });
+    r.preview.receiveStatus(r.session, r.status('cancelled', 2));
+    await cancelling;
+    expect(r.preview.state().busy).toBe(false);
+  });
+
+  it('cannot start a cache job after cancel wins the session wake', async () => {
+    let awake!: () => void;
+    const sent: Array<Record<string, unknown>> = [];
+    const session: PreviewSession = { id: 3, generation: 1, closed: false, route: 'pending', headless: true, post(event) { sent.push(event); return true; } };
+    const preview = new EnginePreview(() => session, () => 'comp', () => 0, () => 1, undefined, () => new Promise<void>(resolve => { awake = resolve; }));
+    const rendering = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
+    const cancelling = preview.cancel();
+    preview.receiveStatus(session, { generation: 1, automatic: false, revision: 1, composition: 'comp', time: 0, phase: 'cancelled', frameSeq: null, error: null });
+    await cancelling;
+    awake();
+    await expect(rendering).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: 'cancel' });
+  });
 });

@@ -23,7 +23,7 @@ test('native scene3d preview API renders, reports, and cancels the engine viewer
     });
     await page.evaluate(() => {
       const PM = (window as any).PM, api = PM.Kernel.api('native-preview-api');
-      PM.replaceProject(PM.mkProject({ name: 'Native preview API', w: 192, h: 108, fps: 24, dur: 1 }));
+      PM.replaceProject(PM.mkProject({ name: 'Native preview API', w: 192, h: 108, fps: 24, dur: 8 }));
       const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0.6, z: 5 } } });
       const object = api.scene3d.edit({ operation: 'add_object', object: { id: 'preview_box', source: { primitive: 'box' }, material: { p: { color: '#FF7733' } } } });
       if (!camera.ok || !object.ok) throw Error(camera.message || object.message);
@@ -61,6 +61,30 @@ test('native scene3d preview API renders, reports, and cancels the engine viewer
     });
     expect(cancelled.result).toBe('EnginePreviewCancelled');
     expect(cancelled.state).toMatchObject({ mode: 'draft', busy: false, error: null });
+
+    const solid = await page.evaluate(async () => {
+      const PM = (window as any).PM, api = PM.Kernel.api('native-preview-api');
+      PM.setTime(0.25);
+      const before = { time: PM.time, playing: PM.playing, shading: api.scene3d.previewState().shading };
+      await api.scene3d.renderFrame();
+      return { before, after: { time: PM.time, playing: PM.playing, shading: api.scene3d.previewState().shading }, state: api.scene3d.previewState() };
+    });
+    expect(solid.before).toMatchObject({ time: 0.25, playing: false, shading: 'solid' });
+    expect(solid.after).toEqual(solid.before);
+    expect(solid.state).toMatchObject({ mode: 'draft', busy: false, error: null });
+
+    const playing = await page.evaluate(async () => {
+      const PM = (window as any).PM, api = PM.Kernel.api('native-preview-api');
+      PM.loop = true; PM.setTime(1.25); PM.play();
+      try {
+        const before = PM.time;
+        await api.scene3d.renderFrame();
+        return { before, after: PM.time, playing: PM.playing, shading: api.scene3d.previewState().shading };
+      } finally { PM.pause(); }
+    });
+    expect(playing.playing).toBe(true);
+    expect(playing.after).toBeGreaterThan(playing.before);
+    expect(playing.shading).toBe('solid');
 
     const beforeOrbit = await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -119,4 +143,50 @@ test('native scene3d preview API renders, reports, and cancels the engine viewer
   } finally {
     await session.close();
   }
+});
+
+test('renderFrame prepares Blender through a headless engine session with no viewer mounted', async () => {
+  test.setTimeout(180_000);
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  try {
+    await session.openEditor();
+    await session.page.evaluate(async () => {
+      const PM = (window as any).PM;
+      await PM.Kernel.api('native-preview-headless').extensions.setEnabled('viewer', false);
+    });
+    await session.relaunch();
+    const { page, app } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM?.ProjectsScreen));
+    await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      await PM.Kernel.loader.builtinsReady;
+      window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Headless preview', w: 192, h: 108, fps: 24, dur: 4 }) }));
+      PM.ProjectsScreen.hide();
+    });
+    await page.waitForFunction(() => Boolean((window as any).PM.EngineConnection) && !(window as any).PM.Kernel.services.get('viewer'));
+    const blender = await page.evaluate(() => (window as any).PM.Kernel.api('native-preview-headless').scene3d.blenderStatus());
+    test.skip(!blender.available, 'Install Blender 4.5 or newer for the native preview API check');
+    await page.evaluate(() => {
+      const PM = (window as any).PM, api = PM.Kernel.api('native-preview-headless');
+      const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0.6, z: 5 } } });
+      const object = api.scene3d.edit({ operation: 'add_object', object: { id: 'headless_box', source: { primitive: 'box' } } });
+      if (!camera.ok || !object.ok) throw Error(camera.message || object.message);
+      const settings = api.scene3d.setRendering({ enabled: true, engine: 'eevee', samples: 2, previewSamples: 2, previewScale: 1, device: 'cpu' });
+      if (!settings.ok) throw Error(settings.message);
+      PM.setTime(0.5);
+    });
+    const jobsBefore = await app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.blender.completedRenders().length);
+    const result = await page.evaluate(async () => {
+      const PM = (window as any).PM, api = PM.Kernel.api('native-preview-headless');
+      const before = { time: PM.time, playing: PM.playing };
+      await api.scene3d.renderFrame();
+      return { before, after: { time: PM.time, playing: PM.playing }, headless: PM.EngineConnection.session()?.headless, state: api.scene3d.previewState(), viewer: Boolean(PM.Kernel.services.get('viewer')) };
+    });
+    expect(result.headless).toBe(true);
+    expect(result.after).toEqual(result.before);
+    expect(result.viewer).toBe(false);
+    expect(result.state).toMatchObject({ mode: 'draft', busy: false, error: null });
+    expect(await app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.blender.completedRenders().length)).toBeGreaterThan(jobsBefore);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally { await session.close(); }
 });

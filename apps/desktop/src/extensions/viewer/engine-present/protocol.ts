@@ -49,6 +49,7 @@ export type FrameQuality = {
   standIn?: boolean;
 };
 
+export type Scene3dMeta = { composition: string; layers: string[]; warnings: string[]; error: string | null };
 export type ChromeSelection = { selected: string[]; active: string[] };
 export type ChromeGlyph = { id:string; kind:'point'|'sun'|'spot'|'area'|'camera'; position:[number,number,number]; target:[number,number,number]|null; up:[number,number,number]; fov:number; aspect:number; angle:number; size:[number,number] };
 export type DepthIdSurface = { poolIndex:number; seq:number; poolGeneration:number; encoding?:string; coveragePoolIndex?:number; legend?:string[]; glyphs?:ChromeGlyph[]; selection?:ChromeSelection };
@@ -66,6 +67,7 @@ export type FrameDescriptor = {
   /** The frame-aligned lossless depth and ID/selection pair in the depth
    *  pool (`chromePlanesV1`), when the viewer asked for it. */
   depthId: DepthIdSurface | null;
+  scene3dMeta?: Scene3dMeta[];
   viewSeq: number;
   /** Ticks; `null` for frames shown at the next refresh. */
   duration: number | null;

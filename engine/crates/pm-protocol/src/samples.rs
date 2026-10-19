@@ -184,6 +184,12 @@ pub fn viewer_frame_request() -> FrameRequest {
 
 pub fn frame_descriptor() -> FrameDescriptor {
     FrameDescriptor {
+        scene3d_meta: vec![crate::frame::Scene3dMeta {
+            composition: "main".into(),
+            layers: vec!["model".into()],
+            warnings: vec!["Missing texture: offline".into()],
+            error: None,
+        }],
         pool_index: 3,
         pool_generation: seq(2),
         seq: seq(MAX_SAFE_INTEGER as u64),
@@ -1424,12 +1430,14 @@ pub fn events() -> Vec<Envelope> {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
             time: ticks(705_600_000), shading: crate::frame::Shading3d::Rendered,
             action: crate::preview::PreviewAction::Render,
+            cache_only: false, size: None, camera: None,
         })),
         event(Event::PreviewStatus(crate::preview::PreviewStatus {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
             time: ticks(705_600_000), phase: crate::preview::PreviewPhase::Ready,
             frame_seq: Some(seq(99)), error: None,
             automatic: false,
+            cache_only: false,
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),

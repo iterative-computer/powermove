@@ -453,6 +453,18 @@ pub struct DepthIdSurface {
     pub selection: Option<ChromeSelection>,
 }
 
+/// The scene metadata of layers that share one evaluated scene. Grouping
+/// avoids repeating a composition's warning array for every object layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Scene3dMeta {
+    pub composition: CompositionId,
+    pub layers: Vec<LayerId>,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+}
+
 /// One presented frame. Sent after the command buffer completes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
@@ -472,6 +484,8 @@ pub struct FrameDescriptor {
     pub quality: FrameQuality,
     pub overlay: Option<OverlayGeometry>,
     pub depth_id: Option<Box<DepthIdSurface>>,
+    #[serde(default)]
+    pub scene3d_meta: Vec<Scene3dMeta>,
     /// The viewer state the frame shows ([`ViewerState::view_seq`]): with
     /// `revision`, it tags the frame so overlays drawn from its geometry match
     /// its pixels during view gestures (zoom, pan, orbit, walk).
@@ -486,6 +500,15 @@ pub struct FrameDescriptor {
 impl Validate for FrameDescriptor {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
+        ensure(
+            self.scene3d_meta.iter().all(|meta| {
+                meta.composition.is_valid()
+                    && !meta.layers.is_empty()
+                    && meta.layers.iter().all(LayerId::is_valid)
+            }),
+            C,
+            || "invalid 3D scene metadata layer identity".into(),
+        )?;
         ensure(self.duration.is_none_or(|d| d.get() > 0), C, || {
             "a timed frame lasts a positive time".into()
         })?;

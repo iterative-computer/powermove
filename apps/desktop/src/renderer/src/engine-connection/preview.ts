@@ -4,11 +4,11 @@ export type PreviewAction = 'render' | 'cancel';
 export type PreviewPhase = 'queued' | 'running' | 'ready' | 'cancelled' | 'failed';
 export type PreviewStatus = {
   generation: number; automatic: boolean; revision: number; composition: string; time: number;
-  phase: PreviewPhase; frameSeq: number | null; error: string | null;
+  phase: PreviewPhase; frameSeq: number | null; error: string | null; cacheOnly?: boolean;
 };
 export type PreviewFrame = { seq: number; revision: number; pts: number };
 export type PreviewSession = {
-  id: number | null; generation: number; closed: boolean; route: string;
+  id: number | null; generation: number; closed: boolean; route: string; headless?: boolean;
   post(event: Record<string, unknown> & { type: string }): boolean;
 };
 export type PreviewState = { busy: boolean; error: string | null };
@@ -17,12 +17,19 @@ type Pending = {
   session: PreviewSession; status: PreviewStatus | null;
   resolve(): void; reject(error: Error): void;
 };
+export type CachePreviewOptions = {
+  cacheOnly: true;
+  size: { width: number; height: number };
+  camera?: { view: number[]; projection: { kind: 'perspective'; fovYDegrees: number; near: number; far: number } | { kind: 'orthographic'; halfHeight: number; near: number; far: number } } | null;
+};
 
 /** One explicit renderFrame/cancelRender operation in the interactive engine.
  * A Ready status alone is insufficient: the matching frame must reach the
  * viewer as well, including when GPU completion sends it after the status. */
 export class EnginePreview {
   private generation = 0;
+  private requestTicket = 0;
+  private wakingCache: number | null = null;
   private pending: Pending | null = null;
   private cancelPending: Pending | null = null;
   private frames = new Map<number, PreviewFrame>();
@@ -37,6 +44,7 @@ export class EnginePreview {
     private readonly time: () => number,
     private readonly revision: () => number,
     private readonly shading: () => 'material' | 'rendered' = () => 'rendered',
+    private readonly wake: () => Promise<void> = async () => {},
   ) {}
 
   state(): PreviewState { return { ...this.value }; }
@@ -50,9 +58,9 @@ export class EnginePreview {
     for (const listener of this.listeners) listener(this.state());
   }
 
-  private validSession(): PreviewSession {
+  private validSession(cacheOnly = false): PreviewSession {
     const session = this.session();
-    if (!session || session.closed || session.id === null || session.route !== 'engine') {
+    if (!session || session.closed || session.id === null || (!cacheOnly && session.route !== 'engine')) {
       const error = new Error('The native viewer is not ready to render this composition');
       error.name = 'EnginePreviewUnavailable';
       throw error;
@@ -76,14 +84,33 @@ export class EnginePreview {
     this.emit(false, null);
   }
 
-  render(): Promise<void> {
+  render(options?: CachePreviewOptions): Promise<void> {
+    const ticket = ++this.requestTicket;
+    if (!options?.cacheOnly) return this.postRender();
+    this.wakingCache = ticket;
+    return this.wake().then(() => {
+      if (this.wakingCache === ticket) this.wakingCache = null;
+      if (ticket !== this.requestTicket) {
+        const error = new Error('The preview was replaced before the engine session opened');
+        error.name = 'EnginePreviewCancelled';
+        throw error;
+      }
+      return this.postRender(options);
+    }, error => {
+      if (this.wakingCache === ticket) this.wakingCache = null;
+      throw error;
+    });
+  }
+
+  private postRender(options?: CachePreviewOptions): Promise<void> {
     let session: PreviewSession;
-    try { session = this.validSession(); } catch (error) { return Promise.reject(error); }
+    try { session = this.validSession(options?.cacheOnly); } catch (error) { return Promise.reject(error); }
     this.abort('The preview was replaced by a newer render');
     const control = {
       type: 'previewControl', generation: ++this.generation,
       revision: Math.max(0, Math.trunc(this.revision())),
       composition: this.composition(), time: ticks(this.time()), shading: this.shading(), action: 'render' as const,
+      ...(options?.cacheOnly ? { cacheOnly: true, size: options.size, camera: options.camera ?? null } : {}),
     };
     if (!control.composition || !session.post(control)) {
       const error = new Error('The native viewer could not accept the preview request');
@@ -97,8 +124,9 @@ export class EnginePreview {
   }
 
   cancel(): Promise<void> {
+    ++this.requestTicket;
     let session: PreviewSession;
-    try { session = this.validSession(); } catch (error) { return Promise.reject(error); }
+    try { session = this.validSession(!!this.pending?.status?.cacheOnly || this.wakingCache !== null); } catch (error) { return Promise.reject(error); }
     this.abort('The preview was cancelled');
     const control = {
       type: 'previewControl', generation: ++this.generation,
@@ -133,7 +161,7 @@ export class EnginePreview {
     const pending = status.phase === 'cancelled' && this.cancelPending?.status?.generation === status.generation
       ? this.cancelPending : this.pending;
     if (!pending || pending.session !== session || status.generation !== pending.status?.generation) return;
-    if (status.revision !== pending.status.revision || status.composition !== pending.status.composition || status.time !== pending.status.time) return;
+    if (status.revision !== pending.status.revision || status.composition !== pending.status.composition || status.time !== pending.status.time || !!status.cacheOnly !== !!pending.status.cacheOnly) return;
     if (status.phase === 'failed') {
       this.pending = null;
       const error = new Error(status.error || 'The native preview failed');
@@ -153,7 +181,11 @@ export class EnginePreview {
       }
     } else if (status.phase === 'ready') {
       pending.status = status;
-      this.finishIfPresented();
+      if (status.cacheOnly && status.frameSeq === null) {
+        this.pending = null;
+        this.emit(false, null);
+        pending.resolve();
+      } else this.finishIfPresented();
     } else if (status.phase === 'queued' || status.phase === 'running') {
       pending.status = status;
       this.emit(true, null);

@@ -39,6 +39,8 @@ pub enum ProgramRef {
 /// A shader layer's or extension fragment layer's content at one frame.
 #[derive(Debug, Clone)]
 pub struct ShaderSource {
+    /// A legacy scene sync failure that draws this checkerboard.
+    pub scene_error: Option<String>,
     pub layer: String,
     pub program: ProgramRef,
     /// The target (`grab(targetW, targetH)`), in output pixels.
@@ -82,7 +84,9 @@ impl ShaderSource {
 
 impl PartialEq for ShaderSource {
     fn eq(&self, other: &Self) -> bool {
-        self.layer == other.layer && self.content_key() == other.content_key()
+        self.layer == other.layer
+            && self.scene_error == other.scene_error
+            && self.content_key() == other.content_key()
     }
 }
 
@@ -277,6 +281,7 @@ fn program_plan(
     };
     Planned::Draw {
         source: Box::new(ShaderSource {
+            scene_error: None,
             layer: js::layer_id(layer),
             program,
             width: tw,
@@ -469,6 +474,7 @@ pub(crate) fn extension_layer<'d>(
     };
     Ok(Some(Planned::Draw {
         source: Box::new(ShaderSource {
+            scene_error: None,
             layer: js::layer_id(layer),
             program,
             width: sized.2,

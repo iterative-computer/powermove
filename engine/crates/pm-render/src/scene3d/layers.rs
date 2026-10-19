@@ -44,6 +44,12 @@ pub(crate) struct Pass3d {
     root_comp: bool,
 }
 
+impl Pass3d {
+    pub(crate) fn metadata_scene(&self) -> Option<Arc<Scene3d>> {
+        self.scene.as_ref().and_then(|s| s.as_ref().ok()).cloned()
+    }
+}
+
 /// The view override as the 3D pass applies it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct View3d {

@@ -239,6 +239,7 @@ pub struct Scene3dRenderer {
     /// The last scene whose maps were loaded, and that scene with the maps
     /// that failed to load dropped (shared by the layers of one pass).
     resolved: Option<(Arc<Scene3d>, Arc<Scene3d>)>,
+    warning_scenes: HashMap<usize, (std::sync::Weak<Scene3d>, Vec<String>)>,
     attachments: Option<Attachments>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
@@ -265,6 +266,7 @@ impl Default for Scene3dRenderer {
             generation: 0,
             frame_started: false,
             resolved: None,
+            warning_scenes: HashMap::new(),
             attachments: None,
             shadows: HashMap::new(),
             prepass: None,
@@ -368,6 +370,8 @@ impl Scene3dRenderer {
     /// resident set follows the scenes being drawn.
     pub fn begin_frame(&mut self) {
         self.frame_started = true;
+        self.warning_scenes
+            .retain(|_, (scene, _)| scene.strong_count() > 0);
     }
 
     fn start_generation(&mut self) {
@@ -455,8 +459,21 @@ impl Scene3dRenderer {
             s.warnings.extend(warnings);
             Arc::new(s)
         };
+        self.warning_scenes.insert(
+            Arc::as_ptr(scene) as usize,
+            (Arc::downgrade(scene), out.warnings.clone()),
+        );
         self.resolved = Some((scene.clone(), out.clone()));
         Ok(out)
+    }
+
+    /// Diagnostics of the actual decoded maps, retained with weak scene
+    /// identities while draw/prefix reuse still holds the source scene.
+    pub(crate) fn scene_warnings<'a>(&'a self, scene: &'a Arc<Scene3d>) -> &'a [String] {
+        self.warning_scenes
+            .get(&(Arc::as_ptr(scene) as usize))
+            .filter(|(key, _)| key.upgrade().is_some_and(|key| Arc::ptr_eq(&key, scene)))
+            .map_or(&scene.warnings, |(_, warnings)| warnings)
     }
 
     /// Keeps translated programs in `dir` across processes (the engine

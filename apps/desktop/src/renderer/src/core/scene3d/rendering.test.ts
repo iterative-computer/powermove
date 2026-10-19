@@ -94,6 +94,8 @@ describe('cancelRender with the engine on', () => {
         await expect(cancelBlender(PM)).resolves.toBeUndefined();
       }
       expect(calls.cancel).toBe(2);
+      await expect(cancelBlender({ EngineDoc: { enabled: true }, bus: { emit() {} } })).resolves.toBeUndefined();
+      expect(calls.cancel).toBe(3);
       const broken = enginePM({ cancel: async () => { throw new Error('protocol fault'); } });
       await expect(cancelBlender(broken)).rejects.toThrow('protocol fault');
     } finally {

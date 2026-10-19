@@ -5,4 +5,8 @@ import type { Revision } from "./Revision";
 import type { Seq } from "./Seq";
 import type { Ticks } from "./Ticks";
 
-export type PreviewStatus = { generation: Seq, automatic: boolean, revision: Revision, composition: CompositionId, time: Ticks, phase: PreviewPhase, frameSeq: Seq | null, error: string | null, };
+export type PreviewStatus = { generation: Seq, automatic: boolean, revision: Revision, composition: CompositionId, time: Ticks, phase: PreviewPhase, frameSeq: Seq | null, error: string | null, 
+/**
+ * A cache-only Ready has no presented frame sequence.
+ */
+cacheOnly: boolean, };

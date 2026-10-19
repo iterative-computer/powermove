@@ -286,3 +286,20 @@ sequence of automatic Material/Rendered previews. Controls include revision,
 composition, time and shading. A ready status includes the exact frame sequence; the API completes after that
 frame reaches the viewer. Addons and generated TypeScript rebuild together
 because these draft contracts require equal protocol build IDs.
+
+### Scene diagnostics and cache-only preview (THREED-6/7, round 7)
+
+`FrameDescriptor.scene3dMeta` contains `{composition, layers, warnings, error}`
+groups from the render plan that supplied this frame. The viewer applies them
+on presentation, alongside the descriptor's sequence and revision. Empty
+warnings clear the previous warning array; construction errors set the existing
+scene-error/missing metadata. Shared scenes use one group for all their object
+layers. No scene redraw or renderer geometry evaluation supplies these records.
+
+`PreviewControl.cacheOnly` requests native Blender cache preparation without
+changing transport or viewer shading. It carries the full composition `size`
+and optional editor `camera`. Solid/Wireframe, playback, and viewerless
+`renderFrame` use this path. Its explicit `PreviewStatus` has `cacheOnly: true`
+and may be Ready with no `frameSeq`, after the native cache contains all
+requested surfaces. A regular paused Material/Rendered request still completes
+only on the matching presented frame. Render requests never pause or seek.

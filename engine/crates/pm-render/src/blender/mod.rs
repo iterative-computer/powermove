@@ -103,6 +103,7 @@ impl PartialEq for BlenderRender {
 /// One Blender surface drawn as a source.
 #[derive(Clone)]
 pub struct BlenderSource {
+    pub scene_metadata: Option<Arc<crate::scene3d::Scene3d>>,
     pub layer: String,
     pub compatibility: bool,
     pub surface: Arc<DecodedSurface>,
@@ -121,6 +122,7 @@ impl std::fmt::Debug for BlenderSource {
 impl PartialEq for BlenderSource {
     fn eq(&self, other: &Self) -> bool {
         self.layer == other.layer
+            && self.scene_metadata == other.scene_metadata
             && self.compatibility == other.compatibility
             && Arc::ptr_eq(&self.surface, &other.surface)
     }
@@ -236,6 +238,7 @@ fn draw(
     let (w, h) = (f64::from(width), f64::from(height));
     Planned::Draw(
         BlenderSource {
+            scene_metadata: None,
             layer: layer.to_owned(),
             compatibility,
             surface,

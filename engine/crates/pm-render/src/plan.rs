@@ -1489,7 +1489,9 @@ fn native_content_quad<'d>(
                         height,
                         b.video_center.is_some(),
                     )? {
-                        Some(crate::blender::Planned::Draw(source, rect)) => {
+                        Some(crate::blender::Planned::Draw(mut source, rect)) => {
+                            source.scene_metadata =
+                                b.pass3d.last().and_then(|p| p.metadata_scene());
                             return Ok(Some(Quad::Device {
                                 source: Source::Blender(Box::new(source)),
                                 rect,
@@ -1546,8 +1548,8 @@ fn native_content_quad<'d>(
                     // A legacy scene that does not sync, or a mesh layer
                     // that does not build: the compositor's catch falls
                     // through to the missing-definition checkerboard.
-                    Some(Err(_)) => {
-                        let planned = crate::shader_layers::plan::missing_placeholder(
+                    Some(Err(error)) => {
+                        let mut planned = crate::shader_layers::plan::missing_placeholder(
                             scope,
                             layer,
                             &d,
@@ -1556,6 +1558,11 @@ fn native_content_quad<'d>(
                             scale,
                             b.shader_fallback,
                         )?;
+                        if let crate::shader_layers::plan::Planned::Draw { source, .. } =
+                            &mut planned
+                        {
+                            source.scene_error = Some(error);
+                        }
                         Ok(shader_quad(b, &comp_id, layer, planned))
                     }
                     None => {

@@ -43,6 +43,7 @@ import { SvgRasters } from './svg-rasters';
 import { BlenderPngs } from './blender-png';
 import { EngineTransport, TICKS_PER_SECOND } from './transport';
 import { EnginePreview } from './preview';
+import { EngineSceneMetadata } from './scene-metadata';
 import { previewEngine } from '../core/scene3d/rendering';
 import { followOpenComposition } from './composition-follow';
 
@@ -160,10 +161,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       connection?.sendPatches();
       return barrier?.revision ?? current?.applied ?? 0;
     },
-    () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered'
+    () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered',
+    () => wakeStandby()
   );
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
+  const sceneMetadata = new EngineSceneMetadata(PM);
   const noteVersion = (): void => {
     const barrier = PM.EngineDoc?.barrier;
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
@@ -435,6 +438,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
     presented: (frame, quality) => {
+      sceneMetadata.apply(frame, current);
       if (current) preview.receiveFrame(current, frame);
       presentedEvents.push(frame, quality);
     },

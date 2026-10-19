@@ -76,7 +76,8 @@ impl PreviewControls {
     /// composition with no 3D objects without waiting for a worker notice.
     pub fn presented(&mut self, key: Key, frame: PresentedFrame<'_>) -> Option<PreviewStatus> {
         let p = self.pending.get(&key)?;
-        if !frame.all_surfaces
+        if p.control.cache_only
+            || !frame.all_surfaces
             || frame.generation != p.control.generation
             || frame.revision < p.control.revision
             || frame.composition != p.control.composition.as_str()
@@ -91,6 +92,24 @@ impl PreviewControls {
             Some(frame.seq),
             None,
         ))
+    }
+
+    /// The native Blender cache finished without presenting a viewer frame.
+    pub fn ready_cache(
+        &mut self,
+        key: Key,
+        revision: Revision,
+        generation: Seq,
+    ) -> Option<PreviewStatus> {
+        let p = self.pending.get(&key)?;
+        if !p.control.cache_only
+            || p.control.generation != generation
+            || revision < p.control.revision
+        {
+            return None;
+        }
+        let p = self.pending.remove(&key)?;
+        Some(status(&p.control, PreviewPhase::Ready, None, None))
     }
 
     pub fn failed(
@@ -138,6 +157,7 @@ fn status(
         phase,
         frame_seq,
         error,
+        cache_only: control.cache_only,
     }
 }
 
@@ -158,6 +178,9 @@ mod tests {
             time: Ticks::new(42).unwrap(),
             shading: pm_protocol::frame::Shading3d::Rendered,
             action,
+            cache_only: false,
+            size: None,
+            camera: None,
         }
     }
     fn frame(
@@ -199,6 +222,30 @@ mod tests {
             .unwrap();
         assert!(tracker.presented(key(), frame(1, 3, 5, false)).is_none());
         assert!(tracker.current(key()).is_some());
+    }
+
+    #[test]
+    fn cache_ready_needs_current_generation_and_never_claims_a_frame() {
+        let mut tracker = PreviewControls::default();
+        let mut first = control(1, 3, PreviewAction::Render);
+        first.cache_only = true;
+        tracker.control(key(), first).unwrap();
+        assert!(tracker.presented(key(), frame(1, 3, 5, true)).is_none());
+        let mut second = control(2, 4, PreviewAction::Render);
+        second.cache_only = true;
+        tracker.control(key(), second).unwrap();
+        assert!(
+            tracker
+                .ready_cache(key(), Revision::new(3).unwrap(), Seq::new(1).unwrap())
+                .is_none()
+        );
+        let ready = tracker
+            .ready_cache(key(), Revision::new(4).unwrap(), Seq::new(2).unwrap())
+            .unwrap();
+        assert_eq!(ready.phase, PreviewPhase::Ready);
+        assert!(ready.cache_only);
+        assert!(ready.frame_seq.is_none());
+        assert!(tracker.current(key()).is_none());
     }
 
     #[test]

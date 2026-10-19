@@ -86,6 +86,13 @@ struct AutoPreview {
     phase: PreviewPhase,
 }
 
+#[derive(Clone, Copy)]
+struct CachePreview {
+    key: Key,
+    revision: Revision,
+    generation: Seq,
+}
+
 impl AutoPreview {
     fn matches(&self, candidate: &PreviewCandidate) -> bool {
         self.revision == candidate.revision
@@ -684,6 +691,8 @@ struct Thread {
     /// The last capture token handed to the Blender worker.
     blender_token: u64,
     preview_controls: super::preview_control::PreviewControls,
+    cache_requested: BTreeMap<Key, PreviewControl>,
+    cache_previews: BTreeMap<u64, CachePreview>,
     preview_candidates: BTreeMap<(Key, u64), PreviewCandidate>,
     auto_preview: BTreeMap<Key, AutoPreview>,
     auto_generation: BTreeMap<Key, Seq>,
@@ -787,6 +796,8 @@ pub fn run(
         blender: None,
         blender_token: 0,
         preview_controls: Default::default(),
+        cache_requested: BTreeMap::new(),
+        cache_previews: BTreeMap::new(),
         preview_candidates: BTreeMap::new(),
         auto_preview: BTreeMap::new(),
         auto_generation: BTreeMap::new(),
@@ -1219,6 +1230,7 @@ impl Thread {
             phase,
             frame_seq,
             error,
+            cache_only: false,
         }
     }
 
@@ -1293,9 +1305,18 @@ impl Thread {
     }
 
     fn cancel_preview(&mut self, key: Key) {
+        self.cancel_cache_preview(key);
         if let Some(status) = self.preview_controls.cancelled(key) {
             self.preview_status(key, status);
         }
+        self.cancel_auto_preview(key);
+        if let Some(blender) = &self.blender {
+            let revision = self.views.get(&key).map_or(Revision::ZERO, |v| v.revision);
+            blender.submit(key, None, revision, None, None);
+        }
+    }
+
+    fn cancel_auto_preview(&mut self, key: Key) {
         if let Some(auto) = self.auto_preview.remove(&key) {
             self.preview_status(
                 key,
@@ -1303,9 +1324,20 @@ impl Thread {
             );
         }
         self.preview_candidates.retain(|(k, _), _| *k != key);
-        if let Some(blender) = &self.blender {
-            let revision = self.views.get(&key).map_or(Revision::ZERO, |v| v.revision);
-            blender.submit(key, None, revision, None, None);
+    }
+
+    fn cancel_cache_preview(&mut self, key: Key) {
+        self.cache_requested.remove(&key);
+        let tokens: Vec<u64> = self
+            .cache_previews
+            .iter()
+            .filter_map(|(token, job)| (job.key == key).then_some(*token))
+            .collect();
+        for token in tokens {
+            self.cache_previews.remove(&token);
+            if let Some(blender) = &self.blender {
+                blender.cancel_capture(token);
+            }
         }
     }
 
@@ -1329,7 +1361,11 @@ impl Thread {
                     .preview_controls
                     .current(key)
                     .is_some_and(|pending| pending.composition != state.composition)
-                    || state.headless == Some(true)
+                    || (state.headless == Some(true)
+                        && self
+                            .preview_controls
+                            .current(key)
+                            .is_some_and(|pending| !pending.cache_only))
                 {
                     self.cancel_preview(key);
                 }
@@ -1381,7 +1417,15 @@ impl Thread {
                     _ => false,
                 };
                 if interrupts {
-                    self.cancel_preview(key);
+                    if self
+                        .preview_controls
+                        .current(key)
+                        .is_some_and(|c| c.cache_only)
+                    {
+                        self.cancel_auto_preview(key);
+                    } else {
+                        self.cancel_preview(key);
+                    }
                 }
                 self.transport(key, command, at);
             }
@@ -1389,6 +1433,7 @@ impl Thread {
                 let Some(status) = self.preview_controls.control(key, control.clone()) else {
                     return true;
                 };
+                self.cancel_cache_preview(key);
                 if control.action == PreviewAction::Cancel {
                     if let Some(blender) = &self.blender {
                         blender.submit(key, None, control.revision, None, None);
@@ -1398,6 +1443,10 @@ impl Thread {
                     self.preview_status(key, status);
                 } else {
                     self.preview_status(key, status);
+                    if control.cache_only {
+                        self.cache_requested.insert(key, control);
+                        return true;
+                    }
                     let valid = self.config.document
                         && self.blender.is_some()
                         && self.views.get(&key).is_some_and(|v| {
@@ -1415,17 +1464,6 @@ impl Thread {
                             self.preview_status(key, failed);
                         }
                     } else {
-                        if self.views.get(&key).is_some_and(|v| v.clock.is_playing()) {
-                            self.transport(key, TransportCommand::Pause, now());
-                        }
-                        self.transport(
-                            key,
-                            TransportCommand::Seek {
-                                time: control.time,
-                                mode: SeekMode::Exact,
-                            },
-                            now(),
-                        );
                         if let Some(view) = self.views.get_mut(&key) {
                             view.dirty = true;
                         }
@@ -1923,6 +1961,7 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
+        self.cancel_cache_preview(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
         self.auto_preview.remove(&key);
@@ -2010,6 +2049,15 @@ impl Thread {
             if view.clock.is_playing() {
                 view.schedule.invalidate();
             }
+        }
+        if self.preview_controls.current(key).is_some_and(|control| {
+            control.cache_only
+                && self
+                    .docs
+                    .get(&key)
+                    .is_some_and(|doc| doc.revision() > control.revision.get())
+        }) {
+            self.cancel_preview(key);
         }
     }
 
@@ -3105,6 +3153,7 @@ impl Thread {
         {
             self.recover_gpu();
         }
+        self.work_cache_previews();
         // The GPU watchdog sees completions promptly and frames that run
         // away while they run (a turn is at most 50 ms apart); a frame it
         // held is drawn again once the suspect frame is judged.
@@ -3472,7 +3521,11 @@ impl Thread {
                     "The native viewer cannot render this composition: {}.",
                     reasons.join("; ")
                 );
-                if let Some(control) = self.preview_controls.current(key).cloned()
+                if let Some(control) = self
+                    .preview_controls
+                    .current(key)
+                    .filter(|c| !c.cache_only)
+                    .cloned()
                     && let Some(status) = self.preview_controls.failed(
                         key,
                         control.revision,
@@ -3578,7 +3631,11 @@ impl Thread {
             .get(&key)
             .is_some_and(|v| v.dirty && v.pool.is_some() && !v.clock.is_playing());
         if paused_dirty {
-            let media = self.views[&key].clock.media_at(now());
+            let media = self
+                .preview_controls
+                .current(key)
+                .filter(|c| !c.cache_only)
+                .map_or_else(|| self.views[&key].clock.media_at(now()), |c| c.time.get());
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
@@ -3767,7 +3824,11 @@ impl Thread {
         viewer_frame: bool,
     ) -> Option<FrameDescriptor> {
         let document = self.config.document;
-        let explicit_control = self.preview_controls.current(key).cloned();
+        let explicit_control = self
+            .preview_controls
+            .current(key)
+            .filter(|c| !c.cache_only)
+            .cloned();
         let explicit_generation = explicit_control.as_ref().map(|c| c.generation);
         let gpu = self.gpu.as_mut()?;
         let view = self.views.get_mut(&key)?;
@@ -3777,6 +3838,7 @@ impl Thread {
         let start = now();
         let overlay;
         let mut depth_surface: Option<(u32, u32)> = None;
+        let mut scene3d_meta = Vec::new();
         let mut chrome_legend = Vec::new();
         let mut chrome_glyphs = Vec::new();
         let mut chrome_selection = None;
@@ -3808,16 +3870,7 @@ impl Thread {
             // Paused in Material Preview or Rendered: Blender surfaces
             // (`super::blender`); playback and draft shadings draw natively.
             let paused = timing.is_none() && !view.clock.is_playing();
-            let mut render_state = view.state.clone();
-            if let Some(control) = &explicit_control {
-                let override3d = render_state.view.get_or_insert(ViewOverride {
-                    camera: None,
-                    shading: Shading3d::Rendered,
-                    xray: false,
-                    local_view: Vec::new(),
-                });
-                override3d.shading = control.shading;
-            }
+            let render_state = view.state.clone();
             let shading = super::blender::blender_shading(render_state.view.as_ref());
             let preview = match (&self.blender, paused, shading, render_state.view.as_ref()) {
                 (Some(blender), true, Some(_), Some(v)) => Some(blender.host(v)),
@@ -3929,6 +3982,7 @@ impl Thread {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    scene3d_meta = composed.scene3d_meta;
                     chrome_legend = composed.chrome_legend;
                     chrome_glyphs = composed.chrome_glyphs;
                     chrome_selection = composed.chrome_selection;
@@ -4273,6 +4327,7 @@ impl Thread {
             held: 0,
         };
         let descriptor = FrameDescriptor {
+            scene3d_meta,
             pool_index: index,
             pool_generation: Seq::new(u64::from(live.spec.generation)).unwrap_or(Seq::MAX),
             seq: seq_value,
@@ -4489,6 +4544,37 @@ impl Thread {
         token: u64,
         result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
     ) {
+        if let Some(job) = self.cache_previews.remove(&token) {
+            let current = self.preview_controls.current(job.key);
+            if !current.is_some_and(|c| {
+                c.cache_only && c.revision == job.revision && c.generation == job.generation
+            }) {
+                return;
+            }
+            let revision = Revision::new(self.docs.get(&job.key).map_or(0, ViewDocument::revision))
+                .unwrap_or(Revision::ZERO);
+            if revision != job.revision {
+                if let Some(status) = self.preview_controls.cancelled(job.key) {
+                    self.preview_status(job.key, status);
+                }
+                return;
+            }
+            let status = match result {
+                Ok(_) => self
+                    .preview_controls
+                    .ready_cache(job.key, revision, job.generation),
+                Err(error) => self.preview_controls.failed(
+                    job.key,
+                    revision,
+                    Some(job.generation),
+                    format!("The Blender preview could not be prepared: {error}"),
+                ),
+            };
+            if let Some(status) = status {
+                self.preview_status(job.key, status);
+            }
+            return;
+        }
         match result {
             Ok(frames) => {
                 if let Some(job) = self.snapshots.preparing_mut(token) {
@@ -4511,6 +4597,166 @@ impl Thread {
                 self.snapshot_error(&job, code, &message);
             }
         }
+    }
+
+    /// Prepare Blender's interactive cache from the document mirror even if
+    /// no viewer surface exists. The transport clock and viewport are untouched.
+    fn work_cache_previews(&mut self) {
+        let ready: Vec<(Key, PreviewControl)> = self
+            .cache_requested
+            .iter()
+            .filter(|(key, control)| {
+                self.docs.get(key).is_some_and(|doc| {
+                    doc.has_document() && doc.revision() >= control.revision.get()
+                })
+            })
+            .map(|(key, control)| (*key, control.clone()))
+            .collect();
+        for (key, control) in ready {
+            self.cache_requested.remove(&key);
+            if self
+                .preview_controls
+                .current(key)
+                .is_none_or(|c| c.generation != control.generation)
+            {
+                continue;
+            }
+            let Some(blender) = self.blender.clone() else {
+                if let Some(status) = self.preview_controls.failed(
+                    key,
+                    control.revision,
+                    Some(control.generation),
+                    "The Blender capture worker is unavailable.".into(),
+                ) {
+                    self.preview_status(key, status);
+                }
+                continue;
+            };
+            if let Some(status) =
+                self.preview_controls
+                    .running(key, control.revision, Some(control.generation))
+            {
+                self.preview_status(key, status);
+            }
+            let result = self.cache_preview_snapshots(key, &control, &blender);
+            match result {
+                Ok(snapshots) if snapshots.is_empty() || blender.prepared(&snapshots).is_some() => {
+                    if let Some(status) =
+                        self.preview_controls
+                            .ready_cache(key, control.revision, control.generation)
+                    {
+                        self.preview_status(key, status);
+                    }
+                }
+                Ok(snapshots) => {
+                    self.blender_token += 1;
+                    let token = self.blender_token;
+                    self.cache_previews.insert(
+                        token,
+                        CachePreview {
+                            key,
+                            revision: control.revision,
+                            generation: control.generation,
+                        },
+                    );
+                    blender.capture(token, key, snapshots);
+                }
+                Err(error) => {
+                    if let Some(status) = self.preview_controls.failed(
+                        key,
+                        control.revision,
+                        Some(control.generation),
+                        error,
+                    ) {
+                        self.preview_status(key, status);
+                    }
+                }
+            }
+        }
+    }
+
+    fn cache_preview_snapshots(
+        &mut self,
+        key: Key,
+        control: &PreviewControl,
+        blender: &super::blender::PreviewBlender,
+    ) -> Result<Vec<pm_blender::snapshot::Snapshot>, String> {
+        // Headless sessions have no pool to initialize the device for us.
+        if self.gpu().is_none() {
+            return Err("The engine has no GPU device.".into());
+        }
+        let gpu = self.gpu.as_mut().ok_or("The engine has no GPU device.")?;
+        let doc = self
+            .docs
+            .get(&key)
+            .ok_or("The engine session has no document.")?;
+        if doc.revision() != control.revision.get() {
+            return Err("The preview document changed before Blender could start.".into());
+        }
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let _ = composer.use_definitions(key, doc.definitions(), &[]);
+        let renderer = composer.renderer();
+        renderer.set_scrub(false);
+        renderer.set_captions_hidden(false);
+        renderer.set_text_seed_scope(pm_render::text::served::SeedScope {
+            port: Some(key.0.0),
+            session: Some(key.1.get()),
+        });
+        let request = pm_render::RenderRequest {
+            output_size: control.size.ok_or("The preview has no composition size.")?,
+            scale: None,
+            region: None,
+            precision: pm_protocol::color::Precision::Float16,
+            depth_id: false,
+            background: true,
+            export: false,
+            view: None,
+            blender: pm_render::blender::BlenderRender::Native,
+            motion_blur: pm_render::motion::MotionBlur::Off,
+            sampling: pm_render::sampling::Sampling::Final,
+            video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Viewer),
+        };
+        let png = crate::jobs::blender_png::HostBlenderPng::new(
+            Arc::new(doc.media().clone()),
+            blender.host_link(),
+            key.1,
+            control.revision,
+            doc.document(),
+        );
+        let camera = control
+            .camera
+            .map(|camera| {
+                pm_render::scene3d::View3d::from_override(&ViewOverride {
+                    camera: Some(camera),
+                    shading: control.shading,
+                    xray: false,
+                    local_view: Vec::new(),
+                })
+            })
+            .and_then(|view| view.camera);
+        let snapshots = renderer
+            .blender_snapshots(
+                doc.document(),
+                control.composition.as_str(),
+                control.time,
+                &request,
+                &png,
+                true,
+                pm_render::blender::SnapshotOptions {
+                    force_eevee: control.shading == Shading3d::Material,
+                    camera,
+                    settings: None,
+                },
+            )
+            .map_err(|error| format!("The Blender preview could not be planned: {error}"))?;
+        if let Some((frame, why)) = snapshots.errors.first() {
+            return Err(format!(
+                "The Blender frame of {} at {} s could not be prepared: {why}",
+                frame.composition(),
+                frame.time
+            ));
+        }
+        Ok(snapshots.snapshots)
     }
 
     /// What the views are doing, for the snapshot queue's scheduling.
@@ -5423,6 +5669,8 @@ mod tests {
                 host_clock: true,
                 shader_cache: None,
                 fonts: None,
+                external_wait_cap_us: None,
+                send_delay: None,
             },
             sink,
             stats: Arc::new(Mutex::new(Stats::default())),
@@ -5438,6 +5686,8 @@ mod tests {
             blender: None,
             blender_token: 0,
             preview_controls: Default::default(),
+            cache_requested: BTreeMap::new(),
+            cache_previews: BTreeMap::new(),
             preview_candidates: BTreeMap::new(),
             auto_preview: BTreeMap::new(),
             auto_generation: BTreeMap::new(),
@@ -5459,6 +5709,46 @@ mod tests {
 
     fn preview_key() -> Key {
         (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    #[test]
+    fn cache_only_control_queues_without_viewer_or_transport_change() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let control = PreviewControl {
+            generation: Seq::new(7).unwrap(),
+            revision: Revision::new(3).unwrap(),
+            composition: CompositionId::new("comp"),
+            time: Ticks::new(705_600_000).unwrap(),
+            shading: Shading3d::Rendered,
+            action: PreviewAction::Render,
+            cache_only: true,
+            size: Some(Size::new(640, 360)),
+            camera: None,
+        };
+        thread.apply(Command::PreviewControl {
+            key,
+            control: control.clone(),
+        });
+        assert!(thread.views.is_empty());
+        assert_eq!(thread.cache_requested.get(&key), Some(&control));
+        assert_eq!(statuses.lock().unwrap()[0].phase, PreviewPhase::Queued);
+        thread.apply(Command::PreviewControl {
+            key,
+            control: PreviewControl {
+                generation: Seq::new(8).unwrap(),
+                action: PreviewAction::Cancel,
+                cache_only: false,
+                size: None,
+                ..control
+            },
+        });
+        assert!(!thread.cache_requested.contains_key(&key));
+        assert_eq!(
+            statuses.lock().unwrap().last().unwrap().phase,
+            PreviewPhase::Cancelled
+        );
     }
 
     fn candidate(shading: Shading3d, time: i64, complete: bool) -> PreviewCandidate {
@@ -5540,6 +5830,9 @@ mod tests {
                     time: Ticks::ZERO,
                     shading: Shading3d::Rendered,
                     action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
                 },
             )
             .unwrap();
@@ -5585,6 +5878,9 @@ mod tests {
                     time: Ticks::ZERO,
                     shading: Shading3d::Rendered,
                     action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
                 },
             )
             .unwrap();
@@ -5662,6 +5958,9 @@ mod tests {
                     time: Ticks::ZERO,
                     shading: Shading3d::Rendered,
                     action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
                 },
             )
             .unwrap();
@@ -5715,6 +6014,9 @@ mod tests {
                     time: Ticks::ZERO,
                     shading: Shading3d::Rendered,
                     action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
                 },
             )
             .unwrap();

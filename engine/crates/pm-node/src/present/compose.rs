@@ -124,6 +124,7 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
 /// What a composed frame reports.
 #[derive(Debug, Clone)]
 pub struct Composed {
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub overlay: OverlayGeometry,
     pub chrome_legend: Vec<String>,
     pub chrome_glyphs: Vec<pm_protocol::frame::ChromeGlyph>,
@@ -499,6 +500,7 @@ impl Composer {
         let mut failures = Vec::new();
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
+        let mut scene3d_meta = Vec::new();
         let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
@@ -557,6 +559,7 @@ impl Composer {
                 renderer.render_into(doc, composition, time, &request, media, scratch, None);
             renderer.set_draw_reuse(false);
             let rendered = rendered?;
+            scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
@@ -604,6 +607,7 @@ impl Composer {
                 (vec![], vec![], None)
             };
         Ok(Composed {
+            scene3d_meta,
             chrome_legend,
             chrome_glyphs,
             chrome_selection,

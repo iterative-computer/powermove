@@ -14,7 +14,7 @@ import {
 } from "./service";
 import { compositionScene, layer3DRole } from "./layers";
 import { evaluatedRecipe } from "./modeling";
-import { viewportCamera, getViewportMode } from "./viewport";
+import { viewportCamera, getViewportMode, editorCamera } from "./viewport";
 
 /** Blender's viewport shading: Wireframe and Solid draw natively; Material Preview (EEVEE) and Rendered (the composition's engine) use Blender. */
 export type ViewportShading = "wireframe" | "solid" | "material" | "rendered";
@@ -680,7 +680,24 @@ export async function renderBlenderPreview(PM: any) {
   if (nativePreviewEnabled(PM)) {
     if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
     state(PM).error = null;
-    return PM.EngineConnection.preview.render();
+    const session = PM.EngineConnection.session?.();
+    const cacheOnly = !!PM.playing || state(PM).mode === "draft" ||
+      !session || session.headless || session.route !== "engine";
+    if (!cacheOnly) return PM.EngineConnection.preview.render();
+    const comp = PM.curComp?.() || PM.proj;
+    const camera = getViewportMode(PM) === "editor" ? editorCamera(PM) : null;
+    camera?.updateMatrixWorld?.(true);
+    const engineCamera = camera ? {
+      view: Array.from(camera.matrixWorldInverse.elements as ArrayLike<number>),
+      projection: camera instanceof THREE.OrthographicCamera
+        ? { kind: "orthographic" as const, halfHeight: 3 / camera.zoom, near: camera.near, far: camera.far }
+        : { kind: "perspective" as const, fovYDegrees: camera.fov, near: camera.near, far: camera.far },
+    } : null;
+    return PM.EngineConnection.preview.render({
+      cacheOnly: true,
+      size: { width: Math.max(1, Math.round(Number(comp?.w) || 1)), height: Math.max(1, Math.round(Number(comp?.h) || 1)) },
+      camera: engineCamera,
+    });
   }
   const visited = new Set<string>(),
     project = PM.proj;
@@ -852,8 +869,7 @@ export async function cancelBlender(PM: any) {
   // import) with the engine on too, so cancelling always stops it, as today.
   const worker = bridge()?.blender?.cancel();
   if (nativePreviewEnabled(PM)) {
-    if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
-    await Promise.all([worker, cancelNativePreview(PM.EngineConnection.preview)]);
+    await Promise.all([worker, PM.EngineConnection?.preview ? cancelNativePreview(PM.EngineConnection.preview) : Promise.resolve()]);
   } else {
     await worker;
   }

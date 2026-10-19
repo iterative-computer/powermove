@@ -79,6 +79,8 @@ fn host_progress(
 
 /// A rendered frame.
 pub struct Frame {
+    /// Scene diagnostics of these pixels, grouped by composition and layer.
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     /// Premultiplied working values (Standard: E-encoded, Rec.709
     /// primaries), the request's precision, the region's size.
     pub color: Target,
@@ -118,6 +120,7 @@ pub struct PassThrough {
 
 /// What a render into a caller's target reports.
 pub struct Rendered {
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub legend: Vec<String>,
     pub failures: Vec<LayerFailure>,
     pub seconds: f64,
@@ -1191,6 +1194,7 @@ impl Renderer {
             depth_id.as_ref(),
         )?;
         Ok(Frame {
+            scene3d_meta: r.scene3d_meta,
             color: target,
             depth_id,
             legend: r.legend,
@@ -1577,6 +1581,7 @@ impl Renderer {
         for t in taken {
             self.pool.give(t);
         }
+        let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty() && pending.is_empty() {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
@@ -1587,6 +1592,7 @@ impl Renderer {
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
+        crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         if !unsupported.is_empty() {
             self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
@@ -1627,6 +1633,7 @@ impl Renderer {
             return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
+            scene3d_meta,
             quads,
             legend,
             failures,

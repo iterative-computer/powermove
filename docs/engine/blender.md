@@ -313,9 +313,14 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   returned today's prepare-frame error immediately, before any PNG ask.
 - **The viewport's busy and error state** now follows the interactive
   engine's per-session, generation-tagged preview status. `renderFrame`
-  requests the engine's Blender preview and completes after the matching
-  fully backed frame is shown by the engine viewer's presentation;
-  `cancelRender` cancels the engine job, while `previewState()` and `onPreviewChange`
+  requests the engine's Blender preview. With a paused Material or Rendered
+  viewer, it completes after the matching fully backed frame is shown by
+  the engine viewer's presentation. During playback, in Solid or Wireframe,
+  or with no mounted viewer, it prepares the same Blender cache through the
+  engine document session and completes without a viewer frame. Neither path
+  pauses, seeks, or changes the viewport shading. `cancelRender` cancels the
+  engine job (and resolves after the window worker cancel even if the engine
+  connection is unavailable), while `previewState()` and `onPreviewChange`
   receive automatic and explicit job changes. The round-5 native API pilot
   passed 1/1 in Electron, including render, status, cancellation, and zero
   calls to today's `blender:run` preview path. All three Blender motion app

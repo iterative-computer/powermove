@@ -125,6 +125,21 @@ describe('EnginePresenter', () => {
     ]);
   });
 
+  it('publishes only metadata of the frame it actually paints', () => {
+    const { source, presenter } = setup();
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented(frame => shown.push(frame));
+    const old = [{ composition: 'main', layers: ['model'], warnings: ['Missing model: old'], error: null }];
+    const current = [{ composition: 'main', layers: ['model'], warnings: ['Missing texture: current'], error: null }];
+    source.arrive(1, 1); source.arrive(1, 2);
+    presenter.receive({ type: 'frame', frame: desc(1, { scene3dMeta: old }) });
+    presenter.receive({ type: 'frame', frame: desc(2, { scene3dMeta: current }) });
+    expect(shown).toHaveLength(0);
+    presenter.refresh(16.7);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]?.scene3dMeta).toEqual(current);
+  });
+
   it('parks a frame until its import arrives and releases it if the import never comes', () => {
     const { source, painter, link, presenter } = setup();
     presenter.receive({ type: 'frame', frame: desc(1) }, 0);

@@ -68,6 +68,7 @@ export type PresentedFrame = {
   /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
    *  when the viewer asked for it and its pool arrived. */
   depthId?: import('./protocol').DepthIdSurface | null;
+  scene3dMeta?: import('./protocol').Scene3dMeta[];
   /** The frame's size in pixels (the canvas takes it when the frame lands). */
   width?: number;
   height?: number;
@@ -562,6 +563,7 @@ export class EnginePresenter implements Presenter {
       viewSeq: desc.viewSeq,
       pts: desc.pts,
       overlay: desc.overlay,
+      scene3dMeta: desc.scene3dMeta,
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
