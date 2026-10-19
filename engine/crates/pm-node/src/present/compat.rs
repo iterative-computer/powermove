@@ -83,6 +83,9 @@ pub enum Applied {
     Producers,
     /// A pass-through or a reused raster answered a need.
     Answered,
+    /// A reuse named a raster the store evicted meanwhile: the need is
+    /// asked again at once (not after [`ASK_AGAIN`]), for new pixels.
+    Evicted,
     /// Nothing changed.
     Ignored,
 }
@@ -92,7 +95,11 @@ impl Applied {
     pub fn unblocks(self) -> bool {
         matches!(
             self,
-            Applied::Complete | Applied::Answered | Applied::Producers | Applied::Forgot(_)
+            Applied::Complete
+                | Applied::Answered
+                | Applied::Evicted
+                | Applied::Producers
+                | Applied::Forgot(_)
         )
     }
 }
@@ -254,11 +261,14 @@ impl CompatStore {
                 scale,
                 revision,
             } => {
-                if !self.complete.contains_key(&(key, id.clone())) {
-                    // Evicted meanwhile: the next ask gets new pixels.
-                    return Applied::Ignored;
-                }
                 let answer = answer_id(key, &id.composition, &id.layer, id.time, id.source, scale);
+                if !self.complete.contains_key(&(key, id.clone())) {
+                    // Evicted meanwhile: the frame asks again at once, and
+                    // the producer, having answered `reuse` for this need
+                    // and revision, sends new pixels.
+                    self.asked.remove(&answer);
+                    return Applied::Evicted;
+                }
                 self.asked.remove(&answer);
                 self.answers.insert(
                     answer,
@@ -687,6 +697,46 @@ mod tests {
         assert_eq!(store.usage().0.values().sum::<usize>(), 1);
         store.forget_session(session(1));
         assert_eq!(store.usage(), (BTreeMap::new(), 0));
+    }
+
+    #[test]
+    fn a_reuse_of_an_evicted_raster_is_asked_again_at_once() {
+        // 1 KiB rasters in a 1 KiB store: the second evicts the first.
+        let mut store = CompatStore::with_limit(1024);
+        let need = CompatNeed {
+            composition: "c".into(),
+            layer: "L0".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+        };
+        let now = Instant::now();
+        let r3 = Revision::new(3).unwrap();
+        assert_eq!(
+            store.to_ask(session(1), r3, vec![need.clone()], now).len(),
+            1
+        );
+        store.apply(session(1), band(id("L0", "k"), 16, 16, 0, 16, 0));
+        store.apply(session(1), band(id("L1", "k"), 16, 16, 0, 16, 0));
+        assert!(store.get(session(1), &id("L0", "k")).is_none(), "evicted");
+        // The frame at revision 4 asks; the producer says its key is unchanged.
+        let r4 = Revision::new(4).unwrap();
+        assert_eq!(
+            store.to_ask(session(1), r4, vec![need.clone()], now).len(),
+            1
+        );
+        let applied = store.apply(
+            session(1),
+            CompatMessage::Reuse {
+                id: id("L0", "k"),
+                scale: 1.0,
+                revision: r4,
+            },
+        );
+        assert_eq!(applied, Applied::Evicted);
+        assert!(applied.unblocks(), "the frame tries again");
+        // Asked again now, not after ASK_AGAIN.
+        assert_eq!(store.to_ask(session(1), r4, vec![need], now).len(), 1);
     }
 
     #[test]
