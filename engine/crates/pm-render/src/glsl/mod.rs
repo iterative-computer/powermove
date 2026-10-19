@@ -204,7 +204,8 @@ mod tests {
                 binding: 1,
             },
         ]);
-        let got: Vec<(u32, Option<u8>, Option<u8>, Option<u8>)> = s
+        type Row = (u32, Option<u8>, Option<u8>, Option<u8>);
+        let got: Vec<Row> = s
             .iter()
             .map(|s| (s.binding, s.buffer, s.texture, s.sampler))
             .collect();

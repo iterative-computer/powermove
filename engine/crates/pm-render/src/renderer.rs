@@ -23,6 +23,7 @@ use crate::media::MediaCache;
 use crate::pipelines::Pipelines;
 use crate::plan::{self, Background, CompPlan};
 use crate::request::RenderRequest;
+use crate::scene3d::Scene3dRenderer;
 
 /// Rounds of a frame through a fallback host. A frame takes one round per
 /// runner step it draws: a waiting step's pixels may feed every later step
@@ -62,7 +63,6 @@ fn host_progress(
     }
     Ok(())
 }
-use crate::scene3d::Scene3dRenderer;
 
 /// A rendered frame.
 pub struct Frame {
