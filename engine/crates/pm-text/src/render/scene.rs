@@ -227,8 +227,9 @@ pub trait MaskSource {
         face: FaceRef<'_>,
         coords: &[(u32, f32)],
         glyph: u16,
+        skew: f32,
     ) -> Option<Arc<pm_skia_path::Path>> {
-        let _ = (face, coords, glyph);
+        let _ = (face, coords, glyph, skew);
         None
     }
     /// The distance field of `glyph` as the GPU canvas's distance-field
@@ -496,25 +497,17 @@ impl Painter<'_> {
         coords: &[(u32, f32)],
         glyph: u16,
     ) -> Option<Arc<pm_skia_path::Path>> {
+        let skew = skew_of(run) as f32;
         let path = self
             .masks
             .as_deref_mut()?
-            .canonical_path(run.face, coords, glyph)?;
-        let skew = skew_of(run) as f32;
-        if !run.synthetic_bold && skew == 0.0 {
+            .canonical_path(run.face, coords, glyph, skew)?;
+        if !run.synthetic_bold {
             return Some(path);
         }
-        let path = path
-            .as_ref()
-            .clone()
-            .transform(pm_skia_path::Transform::from_row(
-                1.0, 0.0, skew, 1.0, 0.0, 0.0,
-            ))?;
-        let path = if run.synthetic_bold {
-            super::skpath::framed(&path, super::skpath::Frame::fake_bold(64.0))?
-        } else {
-            path
-        };
+        // The Mac scaler applies the font transform in CoreGraphics
+        // before converting the path to f32. A later shear loses bits.
+        let path = super::skpath::framed(path.as_ref(), super::skpath::Frame::fake_bold(64.0))?;
         Some(Arc::new(path))
     }
 
@@ -1009,7 +1002,8 @@ impl Painter<'_> {
                 }
                 #[cfg(feature = "cg-masks")]
                 if self.masks.is_some()
-                    && self.path_rasterizer.is_some() && self.viewport.is_some()
+                    && self.path_rasterizer.is_some()
+                    && self.viewport.is_some()
                     && let Coords::User(coords) = run.coords
                     && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
                 {

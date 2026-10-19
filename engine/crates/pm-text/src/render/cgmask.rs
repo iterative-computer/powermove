@@ -287,6 +287,7 @@ impl super::scene::MaskSource for CgMasks {
         face: FaceRef<'_>,
         coords: &[(u32, f32)],
         glyph: u16,
+        skew: f32,
     ) -> Option<Arc<pm_skia_path::Path>> {
         let key = PathKey {
             face: face.id,
@@ -295,7 +296,7 @@ impl super::scene::MaskSource for CgMasks {
             size: 64f32.to_bits(),
             coords: coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
             quarter: u8::MAX,
-            skew: 0,
+            skew: skew.to_bits(),
             scale: 0,
             frame: (0, false, 0, 0),
         };
@@ -316,7 +317,7 @@ impl super::scene::MaskSource for CgMasks {
             // setupForAsPaths re-enables subpixel positioning after
             // MakePath clears it. The Mac scaler therefore removes x
             // hinting with its 4x path query even for the 64px strike.
-            .and_then(|font| glyph_path_with(&font, glyph, 4.0, 0.0, 0.0))
+            .and_then(|font| glyph_path_with(&font, glyph, 4.0, skew, 0.0))
             .map(Arc::new);
         self.bytes += path.as_ref().map_or(0, |p| p.points().len() * 8 + 64);
         self.canonical.insert(key, path.clone());
@@ -1047,6 +1048,38 @@ mod tests {
         assert!(Arc::ptr_eq(
             &masks.mask(face, &[], gid, 16.0, style(0), bounds).unwrap(),
             &m
+        ));
+    }
+
+    #[test]
+    fn canonical_outline_cache_keeps_the_font_transform() {
+        use crate::render::scene::MaskSource;
+        use read_fonts::TableProvider;
+        let data = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial");
+        let face = FaceRef {
+            data: &data,
+            index: 0,
+            id: 1,
+        };
+        let gid = read_fonts::FontRef::new(&data)
+            .unwrap()
+            .cmap()
+            .unwrap()
+            .map_codepoint('H' as u32)
+            .unwrap()
+            .to_u32() as u16;
+        let mut masks = CgMasks::new();
+        let upright = masks.canonical_path(face, &[], gid, 0.0).unwrap();
+        let oblique = masks.canonical_path(face, &[], gid, -0.25).unwrap();
+        assert_ne!(upright.points(), oblique.points());
+        assert!(oblique.bounds().width() > upright.bounds().width());
+        assert!(Arc::ptr_eq(
+            &upright,
+            &masks.canonical_path(face, &[], gid, 0.0).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &oblique,
+            &masks.canonical_path(face, &[], gid, -0.25).unwrap()
         ));
     }
 
