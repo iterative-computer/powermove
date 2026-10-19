@@ -484,9 +484,10 @@ in-realm API after the person installing the extension accepts the trust dialog.
 
 ### Deprecated compatibility APIs
 
-Everything below keeps working fully at `apiVersion` 1 to 3, with the same
+Everything below keeps working at `apiVersion` 1 to 3, with the same
 signatures, synchronous return types and live objects as before, with "Use New
-Engine" on or off. Nothing refuses, disables or rewrites code that uses them,
+Engine" on or off (the compatibility context's exact behavior and its few
+limits are in [The compatibility WebGL context](#the-compatibility-webgl-context)). Nothing refuses, disables or rewrites code that uses them,
 and no `apiVersion` change is needed to keep using them or to move off them:
 every replacement is available to every `apiVersion` (apiVersion 4 makes them
 part of its documented contract). New code must not use them.
