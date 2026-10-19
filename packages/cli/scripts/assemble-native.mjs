@@ -39,6 +39,17 @@ function dependencies(source, target) {
     const dependency = line.trim().split(' (')[0];
     if (!dependency || dependency.startsWith('/System/') || dependency.startsWith('/usr/lib/') || dependency === source || dependency === run('otool', ['-D', source]).split('\n')[1]?.trim()) continue;
     const name = path.basename(dependency);
+    // Swift overlays are supplied by macOS's dyld shared cache. Cross-linked
+    // FFmpeg can name them through @rpath; resolve the SDK's system install name
+    // instead of bundling Apple's runtime or relying on the build machine rpath.
+    if (dependency.startsWith('@rpath/libswift')) {
+      const sdk = run('xcrun', ['--sdk', 'macosx', '--show-sdk-path']).trim();
+      const stub = path.join(sdk, 'usr/lib/swift', name.replace(/\.dylib$/, '.tbd'));
+      const installName = existsSync(stub) && /install-name:\s*['"]?([^'"\s]+)/.exec(readFileSync(stub, 'utf8'))?.[1];
+      if (installName !== `/usr/lib/swift/${name}`) throw new Error(`native-system-runtime-unknown: ${dependency}`);
+      run('install_name_tool', ['-change', dependency, installName, target]);
+      continue;
+    }
     const from = dependency.startsWith('@rpath/') ? path.join(ffmpeg, 'lib', name) : dependency.startsWith('@loader_path/') ? path.resolve(path.dirname(source), dependency.slice(13)) : dependency;
     const resolved = realpathSync(from);
     if (copied.has(name) && copied.get(name) !== resolved) throw new Error(`native-library-collision: ${name}`);
