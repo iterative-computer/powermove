@@ -1346,10 +1346,12 @@ it to a viewer that replaces another (`missedRoute`). The exclusive
 presentation shows it as the stage's status line (wrapping to three lines so
 the named reasons fit), never hands the stage back, and clears it at the
 next engine frame. The renderer's `EngineTransport` takes commands for every
-decided route. `native-engine-tracer.spec.ts` now asserts this contract: the
-legacy canvas stays hidden, the line names the path mask, Play runs on the
-engine clock (state `playing`, `PM.time` advancing), the line clears when the
-mask goes and returns when it comes back, and no console errors.
+decided route. `native-engine-tracer.spec.ts` now asserts this contract
+with a project color setting this engine does not know (path masks are drawn
+since the compclose merge; a separate case checks that): the legacy canvas
+stays hidden, the line names the setting, Play runs on the engine clock
+(state `playing`, `PM.time` advancing), the line clears when the setting
+goes and returns when it comes back, and no console errors.
 
 **A viewerless session follows the open composition.** Switching
 compositions inside a project is a document batch, not a load, so nothing
@@ -1415,8 +1417,10 @@ base, other lanes).
   recipe parts: the snapshot builder's refusals that exports route) fail
   an async capture with `unsupported`, where today's capture has Blender
   convert and render them (3D lane).
-- **What the engine still refuses** (path masks and the other
-  `pm_render::unsupported` reasons) fails a snapshot with the engine's
+- **What the engine still refuses** (the remaining
+  `pm_render::unsupported` reasons: SVG images with text, animated images
+  without a rendition, unknown project color settings, missing
+  definitions, and the rest) fails a snapshot with the engine's
   reasons, and the viewer shows `The new engine cannot draw this
   composition yet: <reasons>.` on an empty stage while the transport and
   audio run on the engine. That is a visible difference from today, so these
