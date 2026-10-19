@@ -312,6 +312,13 @@ export class EngineRenderTransport {
     }
   }
 
+  /** Playback started: answer ahead from where the layers were asked for while paused. */
+  playbackStarted(): void {
+    if (!this.options.playing?.()) return;
+    const until = performance.now() + LOOKAHEAD_BUDGET_MS;
+    for (const entry of this.ahead.values()) this.answerAhead(entry, until);
+  }
+
   private lookahead(need: CompatNeed, session: TransportSession, answer: boolean): void {
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.source}`;
     const frame = this.options.frameTicks?.() ?? 0;

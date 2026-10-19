@@ -363,7 +363,7 @@ describe('compatibility answers during playback', () => {
     t.presentedWhilePlaying();
     expect(asked).toEqual([0]);
     state.playing = true;
-    t.presentedWhilePlaying();
+    t.playbackStarted();
     expect(asked[1]).toBe(23_520_000);
     expect(asked.length).toBeGreaterThan(1);
   });

@@ -327,7 +327,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
   // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
   const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
-  const offTransport = PM.bus?.on?.('transport', () => renderTransport.presentedWhilePlaying());
+  let wasPlaying = !!PM.playing;
+  const offTransport = PM.bus?.on?.('transport', () => {
+    const playing = !!PM.playing;
+    if (playing && !wasPlaying) renderTransport.playbackStarted();
+    wasPlaying = playing;
+  });
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
