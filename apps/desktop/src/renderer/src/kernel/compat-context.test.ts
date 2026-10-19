@@ -208,3 +208,20 @@ describe('render.gl.context, the compatibility context', () => {
     expect(sourceRect(source, bound)).toEqual({ sx: 100, sy: 40, sw: 200, sh: 100 });
   });
 });
+
+describe('render.gl.init before the engine connection is up', () => {
+  it('binds the canvas the viewer passed once the engine\'s binding exists', async () => {
+    const { bindLate } = await import('./install');
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const binding = { bound: null as HTMLCanvasElement | null, bind: vi.fn((c: HTMLCanvasElement) => { binding.bound = c; return true; }) };
+    expect(bindLate({}, canvas)).toBe(false);
+    expect(bindLate({ EngineCanvas: binding }, null)).toBe(false);
+    expect(bindLate({ EngineCanvas: binding }, canvas)).toBe(true);
+    expect(binding.bound).toBe(canvas);
+    // Bound already, or a canvas that left the document: nothing to do.
+    expect(bindLate({ EngineCanvas: binding }, canvas)).toBe(false);
+    canvas.remove();
+    expect(bindLate({ EngineCanvas: { bound: null, bind: binding.bind } }, canvas)).toBe(false);
+  });
+});

@@ -414,6 +414,16 @@ function engineRasterBase(PM: LegacyPM, engine: NonNullable<ReturnType<typeof en
   }
 }
 
+/** The canvas the last `render.gl.init` got (one per window, as `GL.init`). */
+const initCanvas: { current: HTMLCanvasElement | null } = { current: null };
+
+/** Binds the engine's presentation to the canvas `init` got before the engine connection installed. */
+export function bindLate(PM: LegacyPM, canvas: HTMLCanvasElement | null): boolean {
+  const binding = PM?.EngineCanvas;
+  if (!binding || !canvas || binding.bound || !canvas.isConnected) return false;
+  return binding.bind?.(canvas) === true;
+}
+
 function makeRender(PM: LegacyPM): RenderAPI {
   /* With the native evaluator a text layer's placement metrics come from
      pm-wasm at scale 1 (compared in dual mode), as they do with the flag
@@ -442,10 +452,14 @@ function makeRender(PM: LegacyPM): RenderAPI {
          until it is removed. */
       init: (canvas, options) => {
         const legacy = !!PM?.GL?.init?.(canvas, options);
+        initCanvas.current = canvas;
         return PM?.EngineCanvas?.bind?.(canvas) === true || legacy;
       },
       resize: (width, height, viewport) => {
         const legacy = !!PM?.GL?.resize?.(width, height, viewport);
+        // A viewer that called `init` before the engine connection was up
+        // (frozen viewers call it once, at mount) is bound now.
+        bindLate(PM, initCanvas.current);
         PM?.EngineCanvas?.resize?.();
         return legacy || !!PM?.EngineCanvas?.bound;
       },
@@ -941,6 +955,16 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
      before any extension hears `frame:rendered` (this subscription is made
      before the bus is forwarded below), so drawing in a `frame:rendered`
      handler lands on the new frame, as today. */
+  /* The engine connection installs after the kernel: a viewer that already
+     called `render.gl.init` gets its presentation as soon as it does. */
+  {
+    // After the task: the connection sets `PM.EngineCanvas` right after it announces the service.
+    const late = () => queueMicrotask(() => { if (bindLate(PM, initCanvas.current)) PM?.EngineCanvas?.resize?.(); });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('powermove:engine-viewer-changed', late);
+      subscriptions.push(() => window.removeEventListener('powermove:engine-viewer-changed', late));
+    }
+  }
   const compatContextHost = createCompatContextHost(PM);
   PM.CompatContext = compatContextHost;
   {
