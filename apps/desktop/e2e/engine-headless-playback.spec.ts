@@ -89,7 +89,10 @@ test('plays, shuttles, seeks and loops without a viewer; follows the open compos
     proof.off = PM.EngineConnection.audio.onLevels((l: any) => {
       proof.levels++; proof.peak = Math.max(proof.peak, ...l.master.peak);
     });
-    if (PM.Kernel.services.get('viewer') || !PM.EngineConnection.session()?.headless) throw new Error('a viewer is attached: the premise of this test does not hold');
+    // No session yet is fine (Play opens one, viewerless); a session with
+    // presentation, or a viewer service, voids the test.
+    const s = PM.EngineConnection.session();
+    if (PM.Kernel.services.get('viewer') || (s && !s.headless)) throw new Error(`a viewer is attached: the premise of this test does not hold (viewer service ${Boolean(PM.Kernel.services.get('viewer'))}, session ${s ? `headless ${s.headless}` : 'none'})`);
     PM.loop = false; PM.setTime(0.1); PM.play();
   });
   try {
