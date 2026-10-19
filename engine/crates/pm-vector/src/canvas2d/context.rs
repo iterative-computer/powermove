@@ -851,4 +851,41 @@ mod window_tests {
             }
         }
     }
+
+    #[test]
+    fn windowed_pixel_aligned_rects_equal_full_canvas_at_every_pixel() {
+        // The non-AA bounds renderer (`Op::Polygons { msaa: false }`, the 1X
+        // pattern): device-aligned rectangles, also within the pixel
+        // tolerance, mirrored, quarter-turned, and partly or wholly offscreen.
+        for (w, h) in [(317, 233), (1920, 1080), (3840, 2160)] {
+            let cases: [(f64, f64, f64, f64, f64, f64, u8); 7] = [
+                (0.0, 0.0, 10.0, 12.0, 40.0, 30.0, 0),
+                (0.002, -0.003, 10.0, 12.0, 40.0, 30.0, 0),
+                (0.0, 0.0, -25.0, -9.0, 60.0, 50.0, 0),
+                (w as f64, 0.0, 7.0, 3.0, 90.0, 41.0, 1),
+                (w as f64 - 20.0, h as f64 - 10.0, 0.0, 0.0, 64.0, 32.0, 0),
+                (100.0, 50.0, 0.0, 0.0, 33.0, 17.0, 2),
+                (w as f64 + 5.0, 0.0, 0.0, 0.0, 10.0, 10.0, 0),
+            ];
+            for (i, &(tx, ty, x, y, rw, rh, kind)) in cases.iter().enumerate() {
+                let mut c = Context::new(w, h);
+                c.set_fill_style("white");
+                c.translate(tx, ty);
+                match kind {
+                    1 => c.scale(-1.0, 1.0),
+                    2 => c.rotate(core::f64::consts::FRAC_PI_2),
+                    _ => {}
+                }
+                c.begin_path();
+                c.path.rect(x, y, rw, rh);
+                c.fill().unwrap();
+                assert!(
+                    matches!(c.ops.last(), Some(Op::Polygons { msaa: false, .. })),
+                    "{w}x{h}, case {i}: the non-AA bounds renderer"
+                );
+                let full: Vec<u8> = c.finish().chunks_exact(4).map(|p| p[3]).collect();
+                assert_eq!(c.finish_fill_alpha().unwrap(), full, "{w}x{h}, case {i}");
+            }
+        }
+    }
 }
