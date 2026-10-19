@@ -813,6 +813,14 @@ export class NativeApi {
       barrier.flush();
       return entry.revision === barrier.revision;
     }
+    // The ordinary open-project scope has no wrapper to validate. Avoid
+    // constructing a scope stamp for every resident channel of the frame.
+    if (!this.PM.scope?.length) {
+      const barrier = this.barrier();
+      if (!barrier) return false;
+      barrier.flush();
+      return entry.revision === barrier.revision && entry.cur === null;
+    }
     const stamp = this.stamp();
     return !!stamp && entry.revision === stamp.revision && entry.cur === stamp.cur
       && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));

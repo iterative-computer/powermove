@@ -20,7 +20,12 @@ it('batches resident expression channels exactly, across time, edits, errors and
   PM.touch();
   expect(await doc.whenReady).toBe(true);
   const api = doc.api!;
-  const batch = vi.spyOn(doc.wasm!, 'evBatch');
+  const batch = vi.fn();
+  const prepare = doc.wasm!.prepareBatch.bind(doc.wasm!);
+  vi.spyOn(doc.wasm!, 'prepareBatch').mockImplementation(ids => {
+    const evaluate = prepare(ids);
+    return time => { batch(ids.length, time); return evaluate(time); };
+  });
   const error = vi.spyOn(doc.wasm!, 'expressionError');
   const compare = (time: number) => {
     for (const L of PM.proj.layers) expect(Object.is(api.evP(L, L.p.opacity, time, 'opacity'), PM.evP(L, L.p.opacity, time, 'opacity'))).toBe(true);
@@ -30,7 +35,7 @@ it('batches resident expression channels exactly, across time, edits, errors and
     batch.mockClear(); error.mockClear();
     compare(time);
     expect(batch).toHaveBeenCalledTimes(1);
-    expect(batch.mock.calls[0]![0].length).toBe(120);
+    expect(batch.mock.calls[0]![0]).toBe(120);
     expect(error.mock.calls.length).toBe(time === 0 ? 60 : 0);
     for (let i = 0; i < 120; i++) expect(api.errors.has(PM.proj.layers[i].p.opacity)).toBe(time === 0 && i % 2 === 0);
     compare(time);
@@ -45,7 +50,7 @@ it('batches resident expression channels exactly, across time, edits, errors and
   delete PM.proj.layers[0].p.opacity.expr;
   PM.touch();
   compare(2.6); compare(3.6); // Removing one id updates all live frame-slot indexes.
-  expect(batch.mock.calls.at(-1)![0].length).toBe(119);
+  expect(batch.mock.calls.at(-1)![0]).toBe(119);
   api.reset();
   compare(2.5); compare(3.5);
   doc.wasm!.x.memory.grow(1);
@@ -68,5 +73,28 @@ it('preserves independent frame buffers when callers alternate composition scope
       PM.scope = [scope]; PM.curComp = () => scope;
       expect(doc.api!.evP(L, L.p.opacity, t, 'opacity')).toBe(PM.evP(L, L.p.opacity, t, 'opacity'));
     }
+  }
+});
+
+it('restores prepared batch ids after a larger batch and after ABI memory growth', async () => {
+  const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim');
+  PM.proj = PM.mkProject({ dur: 10 });
+  const layer = PM.mkLayer('solid');
+  layer.p.opacity.expr = 'time + value';
+  layer.p.skew.expr = 'time * 2 + value';
+  PM.proj.layers = [layer];
+  const doc = installEngineDoc(PM, { mode: parseMode('on'), strict: true, loadModule, sink: () => {} });
+  expect(await doc.whenReady).toBe(true);
+  const wasm = doc.wasm!;
+  const id = (key: string) => wasm.intern({ comp: `@root:${PM.proj.compId}`, layer: layer.id, key, via: 'channel' });
+  const opacity = id('opacity'), skew = id('skew');
+  const a = wasm.prepareBatch([opacity]), b = wasm.prepareBatch([skew, opacity]);
+  const expected = (key: string, t: number) => PM.evP(layer, layer.p[key], t, key);
+  for (const t of [0, 1, -0, 3]) {
+    expect([...a(t).values]).toEqual([expected('opacity', t)]);
+    expect([...b(t).values]).toEqual([expected('skew', t), expected('opacity', t)]);
+    wasm.evBatch([skew], t); // The generic ABI user overwrites its shared ids.
+    wasm.x.memory.grow(1);
+    expect([...a(t).values]).toEqual([expected('opacity', t)]);
   }
 });

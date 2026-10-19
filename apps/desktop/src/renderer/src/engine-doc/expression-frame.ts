@@ -10,7 +10,7 @@ export interface ExpressionFrameSlot {
  * nonnumeric results retain the scalar path and its existing throw decoding.
  * Weak owners do not keep deleted layers/channels alive. */
 export class ExpressionFrames {
-  private groups = new Map<string, { ids: Map<number, WeakRef<object>>; order: number[]; index: Map<number, number>; slots: Map<number, ExpressionFrameSlot>; time?: number; revision: number; values?: Float64Array; kinds?: Uint8Array }>();
+  private groups = new Map<string, { ids: Map<number, WeakRef<object>>; order: number[]; index: Map<number, number>; slots: Map<number, ExpressionFrameSlot>; batch?: ReturnType<PmWasm['prepareBatch']>; time?: number; revision: number; values?: Float64Array; kinds?: Uint8Array }>();
 
   register(comp: string, id: number, owner: object): ExpressionFrameSlot {
     let group = this.groups.get(comp);
@@ -20,6 +20,7 @@ export class ExpressionFrames {
     group.order.push(id);
     group.index.set(id, group.order.length - 1);
     group.time = undefined;
+    group.batch = undefined;
     const slot = { group, index: group.order.length - 1 };
     group.slots.set(id, slot);
     return slot;
@@ -33,6 +34,7 @@ export class ExpressionFrames {
       group.slots.delete(id);
       group.order.forEach((id, i) => { group.slots.get(id)!.index = i; });
       group.time = undefined;
+      group.batch = undefined;
     }
   }
 
@@ -40,7 +42,8 @@ export class ExpressionFrames {
     const group = this.groups.get(comp);
     if (!group || group.order.length < 2 || !group.index.has(id)) return null;
     if (group.time === undefined || !Object.is(group.time, time) || group.revision !== revision) {
-      const result = wasm.evBatch(group.order, time);
+      group.batch ??= wasm.prepareBatch(group.order);
+      const result = group.batch(time);
       // Another scope may use the ABI buffers before this scope is read again.
       group.values = result.values.slice();
       group.kinds = result.kinds.slice();

@@ -94,6 +94,9 @@ export class PmWasm {
   private inCap = 0;
   private statusPtr = 0;
   private statusWord: Uint32Array | null = null;
+  private batchCapacity = 0;
+  private batchGeneration = 0;
+  private activeBatch: object | null = null;
 
   constructor(instance: WebAssembly.Instance) {
     this.x = instance.exports as unknown as PmWasmExports;
@@ -216,6 +219,8 @@ export class PmWasm {
   /** Evaluates ids at `t`; returns views valid until the next call. */
   evBatch(ids: ArrayLike<number>, t: number): { values: Float64Array; kinds: Uint8Array } {
     return this.call(() => {
+      this.activeBatch = null;
+      this.batchGeneration += 1;
       const n = ids.length;
       const idsPtr = this.x.pm_batch_ids(n);
       const outPtr = this.x.pm_batch_out(n);
@@ -223,6 +228,43 @@ export class PmWasm {
       this.u32(idsPtr, n).set(ids);
       if (this.x.pm_ev_batch(n, t) !== 0) throw new Error('pm-wasm: batch buffers too small');
       return { values: this.f64(outPtr, n), kinds: this.bytes(kindsPtr, n) };
+    });
+  }
+
+  /** Freeze resident ids once. A warm frame has one numeric wasm call;
+   * switching scopes restores their ids, and memory growth only renews views. */
+  prepareBatch(ids: ArrayLike<number>): (time: number) => { values: Float64Array; kinds: Uint8Array } {
+    const resident = Uint32Array.from(ids), n = resident.length, token = {};
+    let generation = -1, buffer: ArrayBuffer | null = null;
+    let idsPtr = 0, outPtr = 0, kindsPtr = 0;
+    let input: Uint32Array, values: Float64Array, kinds: Uint8Array;
+    return time => this.call(() => {
+      if (generation !== this.batchGeneration || n > this.batchCapacity) {
+        const capacity = Math.max(n, this.batchCapacity);
+        idsPtr = this.x.pm_batch_ids(capacity);
+        outPtr = this.x.pm_batch_out(capacity);
+        kindsPtr = this.x.pm_batch_kinds(capacity);
+        this.batchCapacity = capacity;
+        generation = ++this.batchGeneration;
+        this.activeBatch = null;
+        buffer = null;
+      }
+      if (buffer !== this.x.memory.buffer) {
+        buffer = this.x.memory.buffer;
+        input = new Uint32Array(buffer, idsPtr, n);
+        values = new Float64Array(buffer, outPtr, n);
+        kinds = new Uint8Array(buffer, kindsPtr, n);
+      }
+      if (this.activeBatch !== token) { input.set(resident); this.activeBatch = token; }
+      if (this.x.pm_ev_batch(n, time) !== 0) throw new Error('pm-wasm: batch buffers too small');
+      // Evaluation itself can grow memory (cold plans, errors, keyed values).
+      if (buffer !== this.x.memory.buffer) {
+        buffer = this.x.memory.buffer;
+        values = new Float64Array(buffer, outPtr, n);
+        kinds = new Uint8Array(buffer, kindsPtr, n);
+        input = new Uint32Array(buffer, idsPtr, n);
+      }
+      return { values, kinds };
     });
   }
 
