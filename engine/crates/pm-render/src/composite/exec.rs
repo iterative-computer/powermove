@@ -19,8 +19,8 @@ use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
-    FLAG_BLEND_IN_E, FLAG_HALF, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED,
-    FLAG_MATTE_LUMA, Op, OpUniform,
+    FLAG_BLEND_IN_E, FLAG_HALF, FLAG_HALF_NEAREST, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE,
+    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -55,6 +55,9 @@ impl Exec<'_> {
         }
         if self.precision == Precision::Float16 {
             flags |= FLAG_HALF;
+            if self.pipelines.ops.half_nearest(self.device, self.queue) {
+                flags |= FLAG_HALF_NEAREST;
+            }
         }
         OpUniform {
             m: full_quad(full),
@@ -285,7 +288,7 @@ impl Exec<'_> {
 
     /// Masks and the matte on `input` (one fused pass; each step's result
     /// rounded to the storage precision as today's separate passes store
-    /// it).
+    /// it). `Err` when a path mask cannot be filled (the layer fails).
     fn mask_and_matte(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -294,17 +297,29 @@ impl Exec<'_> {
         matte: Option<(&Matte, &Target)>,
         rect: Region,
         full: (u32, u32),
-    ) -> Target {
+    ) -> Result<Target, String> {
         let mut u = self.op_uniform(full);
+        let mut coverage = None;
         if let Some(m) = masks {
-            u.i[1] |= FLAG_MASKS;
-            let (g, q) = m.masks.uniforms();
-            for i in 0..8 {
-                u.g[i] = [g[i * 4], g[i * 4 + 1], g[i * 4 + 2], g[i * 4 + 3]];
-                u.q[i] = [q[i * 4], q[i * 4 + 1], q[i * 4 + 2], q[i * 4 + 3]];
+            if let Some(path) = &m.path {
+                u.i[1] |= FLAG_PATH_MASKS;
+                let texture = self.pipelines.ops.path_masks.coverage(
+                    self.device,
+                    self.queue,
+                    encoder,
+                    path,
+                )?;
+                coverage = Some(texture.create_view(&Default::default()));
+            } else {
+                u.i[1] |= FLAG_MASKS;
+                let (g, q) = m.masks.uniforms();
+                for i in 0..8 {
+                    u.g[i] = [g[i * 4], g[i * 4 + 1], g[i * 4 + 2], g[i * 4 + 3]];
+                    u.q[i] = [q[i * 4], q[i * 4 + 1], q[i * 4 + 2], q[i * 4 + 3]];
+                }
+                u.i[2] = m.masks.masks.len() as i32;
+                u.i[3] = i32::from(m.masks.has_add);
             }
-            u.i[2] = m.masks.masks.len() as i32;
-            u.i[3] = i32::from(m.masks.has_add);
             for c in 0..3 {
                 u.inv[c] = [
                     m.inverse[c * 3] as f32,
@@ -324,17 +339,20 @@ impl Exec<'_> {
             }
         }
         let out = self.take_rect(rect);
-        self.run_op(
+        self.pipelines.ops.run_with_coverage(
+            self.device,
+            self.queue,
             encoder,
             Op::Layer,
             &u,
-            input,
-            matte.map(|(_, t)| t),
-            &out,
-            rect,
-            full,
+            &input.view,
+            matte.map(|(_, t)| &t.view),
+            coverage.as_ref(),
+            &out.view,
+            out.format(),
+            Self::viewport(rect, full),
         );
-        out
+        Ok(out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -464,19 +482,31 @@ impl Exec<'_> {
         match &n.effects {
             None => {
                 if n.masks.is_some() || matte.is_some() {
-                    res = self.mask_and_matte(
+                    match self.mask_and_matte(
                         encoder,
                         &res,
                         n.masks.as_ref(),
                         matte.as_ref().map(|(m, t)| (*m, t)),
                         rect,
                         full,
-                    );
+                    ) {
+                        Ok(t) => res = t,
+                        Err(message) => {
+                            self.fail_layer(plan, &n.layer, message);
+                            return None;
+                        }
+                    }
                 }
             }
             Some(effects) => {
                 if n.masks.is_some() {
-                    res = self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full);
+                    match self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full) {
+                        Ok(t) => res = t,
+                        Err(message) => {
+                            self.fail_layer(plan, &n.layer, message);
+                            return None;
+                        }
+                    }
                 }
                 match self.run_effects(encoder, effects, &res, Some(acc), rect, full) {
                     Ok(Some(t)) => res = t,
@@ -487,7 +517,9 @@ impl Exec<'_> {
                     }
                 }
                 if let Some((m, t)) = &matte {
-                    res = self.mask_and_matte(encoder, &res, None, Some((m, t)), rect, full);
+                    res = self
+                        .mask_and_matte(encoder, &res, None, Some((m, t)), rect, full)
+                        .expect("a matte alone always runs");
                 }
             }
         }
@@ -516,7 +548,13 @@ impl Exec<'_> {
             }
         };
         let contribution = match &n.masks {
-            Some(m) => self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full),
+            Some(m) => match self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full) {
+                Ok(t) => t,
+                Err(message) => {
+                    self.fail_layer(plan, &n.layer, message);
+                    return None;
+                }
+            },
             None => adjusted,
         };
         let out = self.take_rect(rect);
