@@ -56,7 +56,7 @@ describe('the raster override producer', () => {
       return { ...full, cv: { width: 100, height: 50 }, key: `typed:${layer.id}:${time}`, w: 50, h: 25, anchorX: 6, anchorY: 20 };
     });
     const answer = compat.answer(need('title', 1 / 30, 2), 9);
-    expect(seen).toEqual([['title', 2, 23_520_000 / TICKS_PER_SECOND, undefined, undefined]]);
+    expect(seen).toEqual([['title', 2, 23_520_000 / TICKS_PER_SECOND, expect.any(Function), undefined]]);
     expect(engineRaster).toHaveBeenCalledTimes(1);
     expect(answer).toMatchObject({ kind: 'raster', key: 'typed:title:0.03333333333333333', width: 100, height: 50, format: 'rgba8Premultiplied', anchor: [6, 20], size: [50, 25] });
     expect(readPixels).toHaveBeenCalledTimes(1);
@@ -95,6 +95,16 @@ describe('the raster override producer', () => {
     expect(engineRaster).toHaveBeenCalledTimes(1);
     PM.captionsHidden = true;
     expect(compat.answer(need('subs'), 2)).toEqual({ kind: 'native' });
+  });
+
+  it('passes wrappers today\'s uploaded lookup (a miss) and no crop', () => {
+    const { services, compat, need } = setup();
+    let args: any[] = [];
+    services.register('raster', (...a: any[]) => { args = a; return { cv: { width: 2, height: 2 }, w: 2, h: 2, anchorX: 0, anchorY: 0 }; });
+    compat.answer(need('title'), 1);
+    expect(typeof args[3]).toBe('function');
+    expect(args[3]('any-key')).toBeUndefined();
+    expect(args[4]).toBeUndefined();
   });
 
   it('an export frame draws the snapshot\'s layer: the live one when equal, else the snapshot\'s copy', () => {

@@ -207,6 +207,9 @@ function canvasOf(surface: any): (CanvasImageSource & { width: number; height: n
   return source && Number(source.width) > 0 && Number(source.height) > 0 ? source : null;
 }
 
+/** Today's `uploaded(key)` lookup, answering a miss. */
+const NOT_UPLOADED = (_key: string): undefined => undefined;
+
 const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
 
 export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): RasterCompatHandle {
@@ -250,7 +253,11 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       let result: any;
       producing++;
       try {
-        result = chain(layer, scale, time, undefined, undefined);
+        // `uploaded`: today the compositor's lookup of a raster it holds by
+        // key; here none is held (the engine keeps the pixels), so it answers
+        // undefined, a lookup miss. `crop`: today's preview-only viewport
+        // window; the engine draws whole rasters, as today's exports do.
+        result = chain(layer, scale, time, NOT_UPLOADED, undefined);
       } catch (error) {
         // Today the exception leaves the compositor's draw and fails the
         // frame; here it fails the answer (render-transport.ts reports it,
