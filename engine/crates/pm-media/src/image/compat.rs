@@ -43,6 +43,21 @@ pub fn bitmap(still: &StillImage, pool: &FramePool) -> Result<StillImage> {
     bitmap_impl(still, pool, None)
 }
 
+/// Whether today's RGBA8 WebGL upload of this still fails (`INVALID_VALUE`):
+/// JPEGs deeper than 8 bits or arithmetic-coded, which Chromium cannot keep
+/// as an 8-bit `ImageBitmap` (the importer falls back to an image element
+/// whose upload fails). [`bitmap_at`] gives image layers' incomplete
+/// texture (opaque black); a `texStorage2D` texture keeps its zeroed
+/// storage instead (3D material maps).
+pub fn upload_fails(path: &std::path::Path, still: &StillImage) -> Result<bool> {
+    Ok(if still.format == ImageFormat::Jpeg {
+        let info = super::jpeg::info(&std::fs::read(path)?)?;
+        info.precision > 8 || info.arithmetic
+    } else {
+        false
+    })
+}
+
 /// As [`bitmap`], including color information PNG decoders do not expose
 /// through the generic image trait. This changes only the level-1 bitmap.
 pub fn bitmap_at(
@@ -50,13 +65,7 @@ pub fn bitmap_at(
     still: &StillImage,
     pool: &FramePool,
 ) -> Result<StillImage> {
-    let failed_jpeg_upload = if still.format == ImageFormat::Jpeg {
-        let info = super::jpeg::info(&std::fs::read(path)?)?;
-        info.precision > 8 || info.arithmetic
-    } else {
-        false
-    };
-    if failed_jpeg_upload {
+    if upload_fails(path, still)? {
         // Chromium imports these as float ImageBitmaps, but today's RGBA8
         // texImage2D fails INVALID_VALUE. Its incomplete sampler is opaque
         // black, including in completed exports. Preserve that picture at

@@ -359,6 +359,43 @@ pub fn probe_still(path: &Path, reader: StillReader) -> Result<(), ProbeIssue> {
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
 
+/// Today's 8-bit Chromium bitmap of a still: the `ImageBitmap` the
+/// importer keeps (`createImageBitmap(blob)`), which level 1 image layers
+/// draw and today's 3D runtime hands three.js as a material map
+/// (`core/scene3d/runtime.ts` `texture()`). Its rows are oriented, top row
+/// first, in the bitmap's sRGB encoding, premultiplied as Chromium stores
+/// them. The second value is true when today's RGBA8 upload of it fails
+/// ([`pm_media::image::compat::upload_fails`]; the rows are then image
+/// layers' incomplete texture).
+pub fn level1_bitmap(
+    path: &Path,
+    pool: &FramePool,
+) -> Result<(pm_media::image::StillImage, bool), ProbeIssue> {
+    probe_still(path, StillReader::Chromium)?;
+    let unreadable = |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
+    let still = image_source(path, pool, true).map_err(unreadable)?;
+    let fails = pm_media::image::compat::upload_fails(path, &still).map_err(unreadable)?;
+    level1_bitmap_of(path, still, pool).map(|b| (b, fails))
+}
+
+fn level1_bitmap_of(
+    path: &Path,
+    still: pm_media::image::StillImage,
+    pool: &FramePool,
+) -> Result<pm_media::image::StillImage, ProbeIssue> {
+    let unreadable = |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
+    if pm_media::image::avif_compat::applies(&still) {
+        pm_media::image::avif_compat::read(path, &still, pool).map_err(unreadable)
+    } else if pm_media::image::compat::applies(&still) {
+        pm_media::image::compat::bitmap_at(path, &still, pool).map_err(unreadable)
+    } else {
+        Err(ProbeIssue::Unsupported(Feature::Media(format!(
+            "{} stills without Chromium's 8-bit bitmap",
+            still.frame.format.label
+        ))))
+    }
+}
+
 /// The shipped `sequencePlaybackTime`: select an available CFR slot,
 /// clamp to its ends, then seek one millisecond inside it. In particular,
 /// sequences do not use ordinary video's 40 ms end padding.

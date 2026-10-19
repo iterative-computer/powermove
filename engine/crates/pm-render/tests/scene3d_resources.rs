@@ -120,14 +120,8 @@ fn object_plans(r: &mut Renderer, doc: &Value, assets: &MapResolver) -> Vec<Obje
     out
 }
 
-fn transparency_routes(features: &[String]) -> bool {
-    features
-        .iter()
-        .any(|f| f.contains("3D texture maps with transparency"))
-}
-
 #[test]
-fn maps_with_transparency_route_and_missing_maps_draw_without_them() {
+fn maps_with_transparency_draw_and_missing_maps_draw_without_them() {
     let dir = Dir::new("3d-maps");
     let opaque = dir.0.join("opaque.png");
     let clear = dir.0.join("clear.png");
@@ -143,24 +137,14 @@ fn maps_with_transparency_route_and_missing_maps_draw_without_them() {
     let mapped = render(&mut r, &textured(true), &with).unwrap();
     assert_ne!(mapped, plain, "the map colors the model");
 
-    // A map with one translucent pixel is refused by the static check, so
-    // the frame is routed before it renders, and a render refuses it too.
+    // A map with translucent pixels draws too: three.js samples Chromium's
+    // premultiplied bitmap (tests/threed_maps.rs), so the model darkens
+    // where the map is translucent; nothing is listed.
     let with_clear = resolver("tex", &clear);
-    let features: Vec<String> = pm_render::unsupported_with_media(&doc, "Ptest-root", &with_clear)
-        .iter()
-        .map(|u| u.feature.to_string())
-        .collect();
-    assert!(transparency_routes(&features), "{features:?}");
-    match render(&mut r, &textured(true), &with_clear) {
-        Err(RenderError::Unsupported(list)) => {
-            let f: Vec<String> = list.iter().map(|u| u.feature.to_string()).collect();
-            assert!(transparency_routes(&f), "{f:?}");
-        }
-        other => panic!(
-            "expected the frame to be routed, got {:?}",
-            other.map(|_| ())
-        ),
-    }
+    assert!(pm_render::unsupported_with_media(&doc, "Ptest-root", &with_clear).is_empty());
+    let translucent = render(&mut r, &textured(true), &with_clear).unwrap();
+    assert_ne!(translucent, mapped, "premultiplied texels differ from the opaque map's");
+    assert_ne!(translucent, plain);
 
     // Offline (the resolver still names a path) and unreadable maps: the
     // model draws without the map, the check does not route, and the scene
@@ -224,16 +208,12 @@ fn maps_that_change_after_planning_route_or_drop() {
     let plain = render_plan(&gpu, &mut scene3d, &bare).unwrap();
     assert_ne!(mapped, plain);
 
-    // The file gains transparency after the check: the render is
-    // unsupported (the frame routes), not a failed layer.
+    // The file gains transparency after the check: the render draws its
+    // new texels (premultiplied, as today's bitmap), not a failure.
     write_map(&path, [255, 40, 40], [40, 40, 255], 0);
     let mut fresh = Scene3dRenderer::default();
-    match render_plan(&gpu, &mut fresh, &plan) {
-        Err(Error3d::Unsupported(why)) => {
-            assert!(why.contains("transparency"), "{why}")
-        }
-        other => panic!("expected unsupported, got {:?}", other.map(|_| ())),
-    }
+    let cleared = render_plan(&gpu, &mut fresh, &plan).expect("a translucent map draws");
+    assert_ne!(cleared, mapped);
 
     // The file vanishes after the plan: the model draws without the map.
     std::fs::remove_file(&path).unwrap();
