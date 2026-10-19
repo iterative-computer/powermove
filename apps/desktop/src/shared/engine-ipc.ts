@@ -291,6 +291,11 @@ export type EngineSnapshotReply =
  *  frame (contract 14 `compatFrame`). */
 export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
 
+/** A window's `unavailable` answer when another document is open there:
+ *  main keeps the more useful reason (the named S1 message, or another
+ *  window's) when every window says no. */
+export const OTHER_DOCUMENT_OPEN = 'This window has another document open.';
+
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =
   | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }

@@ -33,7 +33,7 @@
  *   the job engine's export frames are drawn by (main asks the window).
  */
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
-import type { EngineBridge, EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
+import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
 /** Rounds of `needsRenderer` a snapshot goes through before it fails. */
@@ -608,7 +608,7 @@ export class EngineRenderTransport {
     const answer = this.options.native.answerCompat;
     if (!answer) return;
     const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });
-    if (ask.request.document !== this.options.document()) return no('This window has another document open.');
+    if (ask.request.document !== this.options.document()) return no(OTHER_DOCUMENT_OPEN);
     const producer = this.producers.get(ask.request.source);
     if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : ask.request.source === 'svgImage' ? 'SVG rasterizer' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
     try {
