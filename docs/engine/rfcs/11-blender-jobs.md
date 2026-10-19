@@ -20,8 +20,9 @@ in 8-bit PNG, and any edit during an export invalidates prepared frames
 - **host services** run them in a supervised Blender worker with a scrubbed
   environment, and return one **surface** per layer, frame, shutter sample,
   and nested composition;
-- surfaces are **16-bit RGBA PNG through AgX with straight alpha**
-  (decision 15), cached by content key, never re-rendered within a job, and
+- level 2 surfaces are **16-bit RGBA PNG through AgX with straight alpha**
+  (decision 15); level 1 retains today's PNG8/dither 1 under owner amendment
+  22. Both are cached by content key, never re-rendered within a job, and
   composited by the engine as a source node with its crop rectangle;
 - model operations (recipe generation, `.blend` import) run through the same
   host services and come back as an engine fact the renderer commits as one
@@ -190,3 +191,23 @@ types are used. Design notes: `docs/engine/blender.md`.
 9. **Devices.** The surface key uses the device Blender resolved; before a
    job has run on a machine, Cycles on the CPU is known and everything else
    is learned from the first job's manifest and recorded with the cache.
+
+## Existing-project output (bridge continuation, 2026-10-18)
+
+Owner amendments 21–24 override invariant 1 for compat level 1. An optional
+`compatibilityLayers: string[]` root field in the canonical snapshot lists
+rendered object ids with compat below 2 (missing compat means 1). Those layers
+use PNG8/dither 1, matching today's worker. Other output settings stay pinned;
+level 2 retains PNG16/dither 0. This is an additive JSON-v1 field; the build and
+worker-script hash handshake require the matching worker, and both snapshot
+and script hashes change surface keys. The snapshot corpus comparison checks
+all original fields and independently derives this additional list.
+
+Decoded surfaces retain straight as well as premultiplied codes, with both
+allocations charged to the cache. Level 1 uploads normalized RGBA8 straight
+codes, including RGB under zero alpha, and blends as premultiplied, matching
+today's ImageBitmap/WebGL behavior and Canvas2D alpha-derived crop with 2 px
+padding. Level 2 keeps the exact premultiplied floating-point path. Both paths
+are tested independently; existing app captures and still exports match
+today's own captures exactly (100% within 2 CV, max 0 CV), rather than being
+compared only with an ideal composite of the raw Blender surfaces.
