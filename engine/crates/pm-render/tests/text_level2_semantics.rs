@@ -398,12 +398,79 @@ fn main() {
     assert_eq!(routes.routed.len(), cases.len());
     assert!(routes.failures().is_empty(), "{:?}", routes.failures());
     level2_routing_contract(&make_doc);
+    level2_caption_bitmaps_snap(&mut renderer, &request, &assets);
     stats.report();
     assert!(
         ssim_failures.is_empty(),
         "below the 0.98 CoreText ink SSIM floor: {ssim_failures:#?}"
     );
     println!("level 2 semantics: {frames} native frames passed");
+}
+
+/// Level 2 captions draw with the CoreText profile, so they share its
+/// `bitmap_snap: Round`: an axis-aligned color bitmap glyph sits at whole
+/// device pixels. Two sub-pixel positions that round alike draw the same
+/// pixels; one that rounds to the next pixel draws them one pixel over.
+#[cfg(target_os = "macos")]
+fn level2_caption_bitmaps_snap(
+    renderer: &mut pm_render::Renderer,
+    request: &pm_render::RenderRequest,
+    assets: &pm_render::MapResolver,
+) {
+    use serde_json::json;
+    use support::doc::{layer, no_fill, project};
+    let caption = json!({
+        "cues": [{"id": "c1", "text": "\u{1F44B}", "start": 0, "end": 3}],
+        "style": {"preset": "classic", "font": "SF Pro Display", "weight": 600, "italic": false,
+            "size": 48, "tracking": 0, "leading": 1.1, "fill": "#FFFFFF", "stroke": 0,
+            "strokeColor": "#000000", "box": false, "boxColor": "#000000", "boxOpacity": 0,
+            "boxPadding": 0, "boxRadius": 0, "placement": "middle", "align": "center",
+            "offsetX": 0, "offsetY": 0, "safeMargin": 8, "maxWidth": 76, "maxLines": 2,
+            "textCase": "original", "highlight": false, "highlightColor": "#FFFFFF",
+            "highlightScale": 100, "wordAnimation": "none"}
+    });
+    let draw = |renderer: &mut pm_render::Renderer, x: f64| {
+        let mut l = layer("caps", "captions", caption.clone(), x, 180.0, 3.0);
+        l["compat"] = json!(2);
+        let doc = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(&project(640, 360, 3.0, no_fill(), vec![l]).to_string())
+                    .unwrap(),
+            ),
+            1,
+        );
+        let issues = renderer.unsupported_with_media(&doc, "Ptest-root", assets);
+        assert!(
+            issues.is_empty(),
+            "level 2 captions draw natively: {issues:?}"
+        );
+        let frame = renderer
+            .render(&doc, "Ptest-root", support::ticks(1.0), request, assets)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        support::rgba8(&renderer.read_rgba(&frame).unwrap())
+    };
+    let a = draw(renderer, 320.3);
+    let b = draw(renderer, 320.4);
+    let c = draw(renderer, 320.7);
+    assert!(a.chunks_exact(4).any(|p| p[3] > 0), "the emoji draws");
+    assert!(
+        a == b,
+        "positions that round alike draw the same bitmap pixels"
+    );
+    let (w, h) = (640usize, 360usize);
+    let mut shifted = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 1..w {
+            let (to, from) = ((y * w + x) * 4, (y * w + x - 1) * 4);
+            shifted[to..to + 4].copy_from_slice(&a[from..from + 4]);
+        }
+    }
+    assert!(
+        c == shifted,
+        "the next whole pixel moves the bitmap by one pixel"
+    );
+    println!("level 2 captions: color bitmaps snap to whole device pixels");
 }
 
 /// The parity gates' level 2 routing: level 1 text is compared with the
