@@ -222,20 +222,21 @@ export default function activate(api: PowermoveAPI) {
   assert.equal(publishedFrames.content.filter(item => item.type === 'image').length, 1);
   const saved = text(await tool('save_project'));
   const packed = await readFile(saved.path);
-  assert.equal(packed.subarray(0, 5).toString(), 'PMV4\n');
-  const footer = packed.subarray(-64), offset = footer.readDoubleLE(8), length = footer.readUInt32LE(16);
-  const index = JSON.parse(packed.subarray(offset, offset + length));
-  assert(index.media.some(record => record.id === imported.assetId && record.length > 0), 'self-contained save embeds original audio');
-  const document = JSON.parse(packed.subarray(index.document.offset, index.document.offset + index.document.length));
+  // Today's agent save: a PMV3 container (shared/project-container.ts).
+  assert.equal(packed.subarray(0, 5).toString(), 'PMV3\n');
+  const headerLength = packed.readUInt32LE(5);
+  const header = JSON.parse(packed.subarray(9, 9 + headerLength));
+  assert(header.media.some(record => record.id === imported.assetId && record.length > 0), 'self-contained save embeds original audio');
+  const document = header.document;
   assert(document.proj && document.history && document.proj.layers.some(layer => layer.name === 'Title'), 'save keeps project and Undo history');
   assert.equal((await stat(saved.path)).mode & 0o777, 0o600);
   await tool('finish_session', { commit: true });
   // No temporary or empty files are left behind.
   const left = await readdir(exportsDir);
-  assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
+  assert.deepEqual(left.filter(name => name.startsWith('.')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP ${native ? 'native hidden' : 'desktop'} smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV4 with Undo history; ${left.length} verified exports.`);
+  console.log(`MCP ${native ? 'native hidden' : 'desktop'} smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV3 (today's agent save) with Undo history; ${left.length} verified exports.`);
 }
 
 try {

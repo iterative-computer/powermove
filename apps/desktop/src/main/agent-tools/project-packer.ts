@@ -1,68 +1,92 @@
-/** Agent delivery uses the host's PMV4 writer and original media, including
- * linked originals. No dialog, renderer upload or live exporter is involved. */
-import { open, realpath, stat } from 'node:fs/promises';
+/** Agent `save_project` with the new engine: the host packs the project the
+ * agent sees, from original media and linked originals, without a dialog or
+ * renderer upload. The file is today's agent save, byte for byte: the same
+ * PMV3 container (shared/project-container.ts) Export › Project writes
+ * through renderer/src/legacy/core/project-file.ts `packProjectFileBlob`,
+ * with the same document, media order and skip rules. */
+import { randomUUID } from 'node:crypto';
+import { openAsBlob, type Stats } from 'node:fs';
+import { open, rename, stat, unlink } from 'node:fs/promises';
+import path from 'node:path';
 import { agentExportDestination, withAgentExport } from '../agent-export';
-import { fileVersion, publishFile } from '../durable-file';
-import { FILE_CHUNK_BYTES } from '../file-upload';
+import { syncDirectory, syncFile } from '../durable-file';
 import { embedLinkedAssets, fileAssets } from '../../shared/project-assets';
-import { ProjectSave } from '../project-save';
+import { encodeProjectContainerBlob } from '../../shared/project-container';
 import { suggestedName } from '../engine/agent-jobs';
-import type { SaveMedia } from '../../shared/project-incremental';
 
 export type PackProjectOptions = {
   directory: string;
   resolveAsset(asset: string): Promise<{ path: string } | null>;
 };
 
+type Source = { id: string; type: string; path: string; info: Stats; data: Blob };
+
 export async function packAgentProject(project: Record<string, any>, options: PackProjectOptions, documentValue: unknown = project): Promise<string> {
   // Capture before file operations: the caller may continue editing immediately.
   const saved = JSON.parse(JSON.stringify(documentValue)) as Record<string, any>;
-  const media: SaveMedia[] = [];
-  const sources = new Map<string, { path: string; size: number; mtimeMs: number; ino: number; dev: number }>();
+  const sources: Source[] = [];
   for (const [id, asset] of Object.entries<any>(fileAssets(saved))) {
-    const source = await options.resolveAsset(id);
-    if (!source) throw new Error(`mediaOffline: Cannot save a self-contained project without original media ${asset?.name ?? id} (${id}).`);
-    const info = await stat(source.path);
-    if (!info.isFile()) throw new Error(`mediaOffline: The original media ${id} is not a regular file.`);
-    sources.set(id, { path: source.path, size: info.size, mtimeMs: info.mtimeMs, ino: info.ino, dev: info.dev });
-    media.push({ id, revision: String(asset?.revision ?? asset?.fingerprint ?? '1'), type: String(asset?.type ?? asset?.mimeType ?? 'application/octet-stream'), length: info.size });
+    const source = await readable(options, id);
+    // Missing sources (including deleted assets retained by undo/redo, and
+    // offline linked originals) must not prevent saving edits. Their metadata
+    // stays in the document and history, as today.
+    if (!source) continue;
+    sources.push({ id, type: String(asset?.type || ''), ...source });
   }
-  embedLinkedAssets(saved, new Set(media.map(item => item.id)));
-  return reserveAndPack(project, Buffer.from(JSON.stringify(saved)), media, sources, options.directory);
-}
-
-async function reserveAndPack(project: Record<string, any>, document: Buffer, media: SaveMedia[], sources: Map<string, { path: string; size: number; mtimeMs: number; ino: number; dev: number }>, directory: string): Promise<string> {
+  // Linked originals that were embedded become ordinary assets; the others stay linked.
+  embedLinkedAssets(saved, new Set(sources.map(item => item.id)));
+  const container = encodeProjectContainerBlob([new TextEncoder().encode(JSON.stringify(saved))], sources.map(({ id, type, data }) => ({ id, type, data })));
   const owner = {};
-  return withAgentExport(owner, directory, async () => {
+  return withAgentExport(owner, options.directory, async () => {
     const destination = await agentExportDestination(owner, `${suggestedName(project, undefined)}.pmv`);
     if (!destination) throw new Error('project-save-unavailable: The host could not reserve an output.');
-    const reserved = await fileVersion(destination);
-    const save = await ProjectSave.create(destination, reserved, media, document.length, async (temporary, hash) => {
-      await publishFile(temporary, destination, reserved, hash);
-      return realpath(destination);
-    }, () => {}, false);
-    try {
-      for (let offset = 0; offset < document.length; offset += FILE_CHUNK_BYTES) await save.write(null, document.subarray(offset, offset + FILE_CHUNK_BYTES));
-      for (const id of save.required) {
-        const expected = sources.get(id)!;
-        const source = await open(expected.path, 'r');
-        try {
-          const unchanged = async () => {
-            const now = await source.stat();
-            if (now.size !== expected.size || now.mtimeMs !== expected.mtimeMs || now.ino !== expected.ino || now.dev !== expected.dev) throw new Error(`mediaChanged: Original media ${id} changed during the project save.`);
-          };
-          await unchanged();
-          const chunk = Buffer.allocUnsafe(FILE_CHUNK_BYTES);
-          for (let offset = 0; offset < expected.size;) {
-            const { bytesRead } = await source.read(chunk, 0, Math.min(chunk.length, expected.size - offset), offset);
-            if (!bytesRead) throw new Error(`mediaChanged: Original media ${id} was truncated during the project save.`);
-            await save.write(id, chunk.subarray(0, bytesRead));
-            offset += bytesRead;
-          }
-          await unchanged();
-        } finally { await source.close(); }
-      }
-      return await save.finish();
-    } finally { await save.dispose(); }
+    await writeAtomically(destination, container, sources);
+    return destination;
   });
+}
+
+/** The asset's original, or null when today's packer would find no bytes for it. */
+async function readable(options: PackProjectOptions, id: string): Promise<{ path: string; info: Stats; data: Blob } | null> {
+  const resolved = await options.resolveAsset(id).catch(() => null);
+  if (!resolved) return null;
+  const info = await stat(resolved.path).catch(() => null);
+  if (!info?.isFile()) return null;
+  // A file-backed Blob refuses to read once its file changes (NotReadableError).
+  const data = await openAsBlob(resolved.path).catch(() => null);
+  return data && data.size === info.size ? { path: resolved.path, info, data } : null;
+}
+
+/** Writes beside the reserved output and replaces it only once every byte is
+ * on disk (main/project-files.ts `atomicWrite`). An original that changes
+ * while it is copied fails the save with a named error and leaves no file. */
+async function writeAtomically(destination: string, container: Blob, sources: Source[]): Promise<void> {
+  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.${randomUUID()}.tmp`);
+  try {
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      try {
+        for await (const chunk of container.stream()) await handle.write(chunk);
+      } catch (error) {
+        if ((error as Error)?.name !== 'NotReadableError') throw error;
+        await assertUnchanged(sources);
+        throw new Error('mediaChanged: Original media changed during the project save.');
+      }
+      await assertUnchanged(sources);
+      await syncFile(handle);
+    } finally { await handle.close(); }
+    await rename(temporary, destination);
+    await syncDirectory(path.dirname(destination));
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function assertUnchanged(sources: Source[]): Promise<void> {
+  for (const source of sources) {
+    const now = await stat(source.path).catch(() => null);
+    if (!now || now.size !== source.info.size || now.mtimeMs !== source.info.mtimeMs || now.ino !== source.info.ino || now.dev !== source.info.dev) {
+      throw new Error(`mediaChanged: Original media ${source.id} changed during the project save.`);
+    }
+  }
 }

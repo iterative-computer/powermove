@@ -750,6 +750,37 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests.filter((request) => request.tool === '__finish_run')).toHaveLength(1);
   });
 
+  it('saves through the host packer and records the saved project afterwards, as today\'s agent save does', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1, layers: [] };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__engine_save_plan' && request.arguments.saved !== true
+        ? { home: false, projectJSON: JSON.stringify(project), documentJSON: JSON.stringify({ proj: project, history: { entries: [] } }) }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 1 }));
+    } as never;
+    let fail = false;
+    const engineJobs = {
+      available: true, exportVideo: vi.fn(), renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0),
+      saveProject: vi.fn(async () => { if (fail) throw new Error('mediaChanged: Original media a changed during the project save.'); return '/exports/P.pmv'; })
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'engine-save', owner: owner as never, baseRevision: 0 });
+    const saved = await bridge.callTool(session, 'save_project', {});
+    expect(JSON.parse((saved.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.pmv', projectId: 'P' });
+    expect(engineJobs.saveProject).toHaveBeenCalledWith(project, { proj: project, history: { entries: [] } });
+    const plans = () => owner.requests.filter((request) => request.tool === '__engine_save_plan').map((request) => request.arguments);
+    expect(plans()).toEqual([{}, { saved: true }]);
+    fail = true;
+    await expect(bridge.callTool(session, 'save_project', {})).rejects.toThrow('mediaChanged');
+    // A failed save never records the project as saved.
+    expect(plans()).toEqual([{}, { saved: true }, {}]);
+    owner.destroyed = true;
+  });
+
   it('rejects oversized owning-renderer responses immediately instead of timing out', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

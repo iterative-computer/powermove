@@ -592,6 +592,7 @@ export class PowermoveAgentToolBridge {
         if (!this.options.engineJobs.saveProject) throw new Error('project-save-unavailable: The host project packer is unavailable.');
         const project = JSON.parse(String(plan.projectJSON));
         const path = await this.options.engineJobs.saveProject(project, JSON.parse(String(plan.documentJSON)));
+        await this.rendererValue(session, '__engine_save_plan', { saved: true });
         return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify({ path, projectId: project.id }) }] };
       }
       return withAgentExport(session.owner, this.options.exportDirectory, () =>

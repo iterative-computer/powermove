@@ -736,6 +736,15 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
   }
   if (request.tool === '__engine_save_plan') {
+    // Today's agent save (mcp-project-tools.ts, exporter.ts 'json'): the
+    // saved project is recorded once the file is written...
+    if (request.arguments.saved === true) {
+      PM.Projects?.put?.(PM.proj);
+      return { ok: true, content: [toolText({ projectId: PM.proj.id })], revision: currentRevision() };
+    }
+    // ...refused while an export runs, and packed after pending imports land.
+    if (PM.Export?.busy) throw new Error('An export is already running.');
+    await PM.app?.importQueue;
     await PM.EngineDoc?.whenReady;
     await PM.HostMedia?.flushBindings?.();
     return { ok: true, content: [toolText({ home: PM.isHomeProject?.() === true, projectJSON: JSON.stringify(PM.proj),
