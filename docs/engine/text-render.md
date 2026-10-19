@@ -920,7 +920,7 @@ Native typing p95 is 12.7/13.1/13.5 ms over 60 keys each, zero missed keys.
 This is an absolute measurement; the round 5 paired regression remains
 assigned to the performance lane.
 
-The release raster gates retain the original bounds and no accepted pins:
+The debug and release gates retain the original bounds and no accepted pins:
 
 | Gate | Within bound | Remaining failures |
 | --- | ---: | ---: |
@@ -929,6 +929,12 @@ The release raster gates retain the original bounds and no accepted pins:
 | Composed corpus, 2 CV | 473/477 | 4 |
 | Source textures, 1 CV | 0/3 | 3 |
 | Independent path cases, 1 CV | 2/4 | 2 |
+
+The debug main/closure/source runs produce the same 614 engine RGBA hashes
+as release. All 477 composed corpus score rows also agree across profiles.
+pm-text's 78 unit tests pass in both profiles, including the
+canonical-path skew cache check, alongside the full 5,200-case layout corpus
+and registry checks.
 
 The original 12 visible checks are reduced to 10; the independent path
 capture adds two more. Across all captures there are 12 visible and 11
@@ -1020,6 +1026,8 @@ historical; the round 6 report records the current strict failures.
   Graphite blur plan and independently verified UNORM8 sampling arithmetic.
 - `pm-render/src/composite/path_masks.{rs,wgsl}`: parameterize the existing
   GPU executor for R8 or premultiplied RGBA8; retain the path-mask behavior.
+- `pm-render/src/shaders/text.wgsl`: remove the text-only float Gaussian
+  entry point after switching text image filters to the shared executor.
 - `pm-render/examples/text_review.rs` and `pm-render/tests/text_level2.rs`:
   initialize the painter's optional path adapter; no level 2 semantics.
 - `apps/desktop/src/renderer/src/engine-doc/{install.ts,strict.test.ts}`:
