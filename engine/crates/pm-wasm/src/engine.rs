@@ -174,6 +174,9 @@ pub(crate) enum Unanswered {
     /// 3D geometry met model assets the mirror does not have yet: the
     /// renderer adds them ([`Engine::set_model`]) and asks again.
     Models(Vec<String>),
+    /// The question met content this engine cannot answer for (a model it
+    /// cannot load): a named failure, `{"unsupported": why}`.
+    Unsupported(String),
 }
 
 /// Measures through [`CompatMeasure`] and notes whether anything asked for
@@ -675,6 +678,12 @@ impl Engine {
                 }
                 out.raw("]}");
             }
+            Err(Unanswered::Unsupported(why)) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"unsupported\":");
+                out.str(&why);
+                out.raw("}");
+            }
         }
         out
     }
@@ -812,6 +821,9 @@ impl Engine {
                 match $e {
                     Ok(v) => v,
                     Err(e) if host_only(&e) => return Err(Unanswered::Host),
+                    Err(e) if e.kind == pm_eval::query3d::MODEL_UNLOADABLE => {
+                        return Err(Unanswered::Unsupported(e.message));
+                    }
                     Err(e) => return Ok(Err(e)),
                 }
             };

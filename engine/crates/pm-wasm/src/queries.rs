@@ -122,6 +122,9 @@ pub(crate) fn dispatch<'d>(
             match $e {
                 Ok(v) => v,
                 Err(e) if host_only(&e) => return Some(Err(Unanswered::Host)),
+                Err(e) if e.kind == pm_eval::query3d::MODEL_UNLOADABLE => {
+                    return Some(Err(Unanswered::Unsupported(e.message)));
+                }
                 Err(e) => return Some(Ok(Err(e))),
             }
         };

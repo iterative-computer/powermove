@@ -24,6 +24,7 @@ import { editScene } from '../core/scene3d/operations';
 import { setViewportMode, orbitViewStep, enterLocalView, exitLocalView, toggleViewProjection } from '../core/scene3d/viewport';
 import { loadGltf } from '../core/scene3d/import-model';
 import { compositionRuntime } from '../core/scene3d/service';
+import { runtimeBoxes } from '../core/scene3d/navigation';
 import * as THREE from 'three';
 import { parseObj } from '../kernel/obj';
 
@@ -49,7 +50,10 @@ async function editor(mode = 'audit') {
     ? { id, label: '3D', version: 1, params: [], defaults: {}, renderer: { kind: 'layer3d' } }
     : id === SCENE3D_DEFINITION ? { id, label: '3D Scene', version: 1, params: [], defaults: { scene: createScene() }, renderer: { kind: 'scene3d' } }
       : id === 'powermove.3d.obj-model' ? { id, label: 'Model', version: 1, params: [], defaults: {}, renderer: { kind: 'mesh', assetField: 'assetId' } }
-        : null;
+        // A user's own mesh definition (amendment 24): its asset field is
+        // the registry's, not the built-in's.
+        : id === 'acme.turntable' ? { id, label: 'Turntable', version: 1, params: [], defaults: {}, renderer: { kind: 'mesh', assetField: 'model' } }
+          : null;
   // The asset store's shape (`legacy/gl/raster.ts`): records by id.
   const store = new Map<string, any>();
   PM.assets = { map: store, get: (id: string) => store.get(id) ?? null, set: (id: string, a: any) => store.set(id, a), delete: (id: string) => store.delete(id) };
@@ -205,14 +209,18 @@ function addExtensionScenes(PM: any, invalidBackground = false) {
   // An empty background is invalid for parseScene: today every question throws.
   const invalid = PM.mkLayer('extension', { name: 'Invalid background' });
   invalid.d = { definition: 'powermove.3d.obj-model', data: { assetId: 'wedge' }, params: { background: PM.P(''), autoRotate: PM.P(true) }, w: 160, h: 120 };
+  // A third-party mesh definition layer; its asset sits in its own field.
+  const turntable = PM.mkLayer('extension', { name: 'Turntable' });
+  turntable.d = { definition: 'acme.turntable', data: { model: 'cube', assetId: 'missing-field' }, params: { background: PM.P(null), size: PM.P(2.4), yaw: PM.P(10, { kf: [PM.KF(0, 10), PM.KF(3, 200)] }) } };
   PM.addLayer(legacy, 0);
+  PM.addLayer(turntable, 0);
   PM.addLayer(model, 0);
   if (invalidBackground) PM.addLayer(invalid, PM.proj.layers.length);
   PM.touch();
 }
 
 /** What the picks hit, by kind (the suite must not pass on misses alone). */
-const hits = { object: 0, scene: 0, other: 0, none: 0, threw: 0 };
+const hits = { object: 0, scene: 0, thirdParty: 0, other: 0, none: 0, threw: 0 };
 const thrown: Record<string, number> = {};
 
 function exercise(PM: any, doc: EngineDoc, random: () => number, picks = 120) {
@@ -230,7 +238,7 @@ function exercise(PM: any, doc: EngineDoc, random: () => number, picks = 120) {
         const hit = api.pick(x, y, t);
         if (!hit) hits.none++;
         else if (hit.d?.data?.object) hits.object++;
-        else if (hit.type === 'extension') hits.scene++;
+        else if (hit.type === 'extension') { hits.scene++; if (hit.d?.definition === 'acme.turntable') hits.thirdParty++; }
         else hits.other++;
       } catch (error) { hits.threw++; const m = String((error as Error)?.message).slice(0, 60); thrown[m] = (thrown[m] ?? 0) + 1; /* both throw; compared */ }
     }
@@ -294,7 +302,7 @@ function sceneDiff(a: any, b: any, path = ''): string | null {
 }
 
 const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
-const fellBack = (doc: EngineDoc) => Object.entries(doc.api!.stats.fallbacks).filter(([k]) => /^(gl\.pick|gl\.bounds|groups\.bounds):/.test(k));
+const fellBack = (doc: EngineDoc) => Object.entries(doc.api!.stats.fallbacks).filter(([k]) => /^(gl\.pick|gl\.bounds|groups\.bounds|objectBoxes3d):/.test(k));
 
 describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
   it('answer like the three.js runtime on random compositions, in the camera and editor views', async () => {
@@ -325,6 +333,7 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     if (process.env.PM_GEOMETRY_REPORT) writeFileSync(process.env.PM_GEOMETRY_REPORT, JSON.stringify({ compared, hits, thrown, khronos: lastKhronos }));
     expect(hits.object).toBeGreaterThan(200);
     expect(hits.scene).toBeGreaterThan(20);
+    expect(hits.thirdParty).toBeGreaterThan(5);
     expect(hits.threw).toBeGreaterThan(0);
   }, 600_000);
 
@@ -339,8 +348,12 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
       PM.touch();
       const all = PM.proj.layers.filter((l: any) => l.d?.data?.object).map((l: any) => l.id);
       for (const t of [0, 0.8, 2.6]) {
-        const native = doc.api!.objectBoxes3d(all, t)!;
+        let legacyAsked = 0;
+        const native = doc.api!.objectBoxes3d(all, t, () => { legacyAsked++; return runtimeBoxes(PM, all, t); });
         const runtime = compositionRuntime(PM, t);
+        // Audit mode asks today's answer once as the reference; no fallback.
+        expect(legacyAsked).toBeLessThanOrEqual(1);
+        expect(Object.keys(doc.api!.stats.fallbacks).filter(k => k.startsWith('objectBoxes3d:'))).toEqual([]);
         for (const id of all) {
           const object = runtime.objects.get(id);
           const box = object ? new THREE.Box3().expandByObject(object) : null;
@@ -433,5 +446,26 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     exercise(PM, doc, rng(9), 40);
     expect(mismatches(doc)).toEqual([]);
     expect(fellBack(doc)).toEqual([]);
+  });
+
+  it('names a model three.js holds that the engine cannot load instead of answering with the missing box', async () => {
+    const { PM, doc } = await editor();
+    await addModels(PM);
+    // An object3d without the bytes it was loaded from (and a glTF the
+    // engine would reject is the same reply): never the orange box.
+    const record = PM.assets.get('cube');
+    PM.assets.set('cube', { ...record, object3d: record.object3d.clone() });
+    editScene(PM, { operation: 'add_object', object: { id: 'm', source: { assetId: 'cube' } } });
+    PM.touch();
+    const warn = console.warn;
+    const warned: string[] = [];
+    console.warn = (...args: unknown[]) => { warned.push(args.join(' ')); };
+    try {
+      doc.api!.pick(PM.proj.w / 2, PM.proj.h / 2, 0);
+      const layer = PM.L('m');
+      try { doc.api!.bounds(layer, 0); } catch { /* today's answer, compared */ }
+    } finally { console.warn = warn; }
+    expect(fellBack(doc).map(([k]) => k).sort()).toEqual(['gl.bounds:unsupported', 'gl.pick:unsupported']);
+    expect(warned.some(w => w.includes('cannot load the 3D model cube'))).toBe(true);
   });
 });

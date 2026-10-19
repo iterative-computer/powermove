@@ -314,6 +314,12 @@ export class NativeApi {
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
       return { threw: error };
     }
+    if (typeof reply.unsupported === 'string') {
+      // Content the engine cannot answer for (a 3D model it cannot load):
+      // named, counted, and refused by strict hosts; never the missing box.
+      console.warn(`[engine-doc] ${op}: ${reply.unsupported}`);
+      return { fallback: 'unsupported' };
+    }
     if (reply.host) return { fallback: 'host' };
     if (reply.fonts) return { fallback: 'fonts' };
     if (reply.ink) return { fallback: 'ink' };
@@ -867,15 +873,17 @@ export class NativeApi {
   /**
    * `Box3.expandByObject` of each 3D object layer in the composition's
    * runtime at `T` (`viewportBounds`), from pm-wasm's geometry: `[minX,
-   * minY, minZ, maxX, maxY, maxZ]` per id, null for an id without one, or
-   * null altogether when the mirror cannot answer.
+   * minY, minZ, maxX, maxY, maxZ]` per id, null for an id without one.
+   * `legacy` is today's three.js answer: it runs only where every other
+   * query's legacy fallback runs (counted in `stats.fallbacks`, refused by
+   * strict hosts), and in dual mode as the reference.
    */
-  objectBoxes3d(ids: readonly string[], T: number): Record<string, number[] | null> | null {
-    const c = this.comps();
-    if (!c) return null;
-    const got = this.query<Record<string, number[] | null>>('objectBoxes3d', { comp: c.open, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
-    if ('threw' in got) throw got.threw;
-    return 'value' in got ? got.value : null;
+  objectBoxes3d(ids: readonly string[], T: number, legacy: () => Record<string, number[] | null>): Record<string, number[] | null> {
+    return this.answer('objectBoxes3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<Record<string, number[] | null>>('objectBoxes3d', { comp: c.comp, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ ids: [...ids], t: T }));
   }
 
   textLayout(L: any, T: number): any {

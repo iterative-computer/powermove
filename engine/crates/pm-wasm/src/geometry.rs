@@ -7,7 +7,10 @@
 //! meets an asset the mirror lacks answers `{"models": [ids]}`, the
 //! renderer adds each one ([`Models::set`]: an OBJ model's text, a glTF or
 //! GLB model's bytes, or "missing" for an asset without geometry, which
-//! draws the orange box as today) and asks again.
+//! draws the orange box as today) and asks again. A model today's runtime
+//! holds geometry for that this engine cannot load (a glTF `pm-geom3d`
+//! rejects, an `object3d` without its source bytes) is kept as
+//! [`ModelAsset::Unloadable`]: questions about it fail by name.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +31,9 @@ pub enum ModelKind {
     Obj = 1,
     /// glTF or GLB bytes.
     Gltf = 2,
+    /// Geometry today's runtime holds that the host cannot give the mirror
+    /// (the bytes are the reason, UTF-8).
+    Unloadable = 3,
 }
 
 impl ModelKind {
@@ -36,6 +42,7 @@ impl ModelKind {
             0 => ModelKind::Missing,
             1 => ModelKind::Obj,
             2 => ModelKind::Gltf,
+            3 => ModelKind::Unloadable,
             _ => return None,
         })
     }
@@ -58,9 +65,10 @@ pub struct Models {
 }
 
 impl Models {
-    /// Adds or replaces model `id`. An OBJ model that does not parse, or a
-    /// glTF model this engine does not load, is kept as missing and the
-    /// reason returned.
+    /// Adds or replaces model `id`. An OBJ model that does not parse is kept
+    /// as missing (today's importer keeps no mesh for it either); a glTF
+    /// model this engine does not load is kept as unloadable. Either way the
+    /// reason is returned.
     pub fn set(&mut self, id: &str, kind: ModelKind, bytes: &[u8]) -> Result<(), String> {
         let (asset, error) = match kind {
             ModelKind::Missing => (ModelAsset::Missing, None),
@@ -89,11 +97,18 @@ impl Models {
                     ModelAsset::Gltf(Arc::new(Picker::new(Arc::new(model)))),
                     None,
                 ),
-                Err(e) => (
-                    ModelAsset::Missing,
-                    Some(format!("glTF model {id}: {}", e.0)),
-                ),
+                Err(e) => {
+                    let why = format!("the engine cannot load the glTF model {id}: {}", e.0);
+                    (ModelAsset::Unloadable(why.as_str().into()), Some(why))
+                }
             },
+            ModelKind::Unloadable => {
+                let why = format!(
+                    "the engine cannot load the 3D model {id}: {}",
+                    String::from_utf8_lossy(bytes)
+                );
+                (ModelAsset::Unloadable(why.as_str().into()), Some(why))
+            }
         };
         self.forget(id);
         self.assets.insert(id.to_owned(), asset);
@@ -126,6 +141,12 @@ pub struct GeomHost<'m> {
     pub models: &'m mut Models,
     pub camera: Option<Camera>,
     pub wanted: Vec<String>,
+    /// The registry's mesh renderer definitions (`meshFields`: definition
+    /// id to `renderer.assetField`, as `PM.layerDefinition` answers in the
+    /// host, overrides by id and third-party definitions included); `None`
+    /// when the request carries no registry (then only the built-in OBJ
+    /// model layer is a mesh layer).
+    pub mesh_fields: Option<HashMap<String, String>>,
     scenes: SceneCache,
 }
 
@@ -135,6 +156,7 @@ impl<'m> GeomHost<'m> {
             models,
             camera: request_camera(request),
             wanted: Vec::new(),
+            mesh_fields: request_mesh_fields(request),
             scenes: SceneCache::default(),
         }
     }
@@ -144,6 +166,28 @@ impl LayerHost for GeomHost<'_> {
     fn geometry(&mut self) -> Option<&mut dyn Geometry3d> {
         Some(self)
     }
+
+    fn mesh_asset_field(&self, definition: &pm_model::JsString) -> Option<String> {
+        match &self.mesh_fields {
+            Some(fields) => definition
+                .as_str()
+                .and_then(|id| fields.get(id))
+                .cloned(),
+            None => (definition.as_str() == Some("powermove.3d.obj-model"))
+                .then(|| "assetId".to_owned()),
+        }
+    }
+}
+
+/// The request's `meshFields` (`{definitionId: assetField}`), when present.
+pub fn request_mesh_fields(request: &Value) -> Option<HashMap<String, String>> {
+    let fields = request.as_object()?.get("meshFields")?.as_object()?;
+    Some(
+        fields
+            .iter()
+            .filter_map(|(k, v)| Some((k.to_string(), v.as_str()?.to_owned())))
+            .collect(),
+    )
 }
 
 impl Geometry3d for GeomHost<'_> {

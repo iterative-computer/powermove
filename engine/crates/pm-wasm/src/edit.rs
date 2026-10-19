@@ -294,6 +294,11 @@ pub(crate) fn dispatch(
     {
         return Err(Unanswered::Legacy);
     }
+    if let Err(e) = &result
+        && e.kind == pm_eval::query3d::MODEL_UNLOADABLE
+    {
+        return Err(Unanswered::Unsupported(e.message.clone()));
+    }
     // A kernel that measured text without every font, or ink without
     // outlines, did not answer, whatever it went on to do: a throw raised
     // after such a measurement is not the legacy edit's throw, and the

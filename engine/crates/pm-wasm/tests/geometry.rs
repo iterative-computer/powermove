@@ -106,6 +106,40 @@ fn model_assets_are_asked_for_once_then_picked() {
     );
 }
 
+/// A model three.js holds that this engine cannot load (a glTF `pm-geom3d`
+/// rejects, an `object3d` without its source bytes) is a named failure for
+/// every question about the scene: never the missing-model box.
+#[test]
+fn models_the_engine_cannot_load_fail_by_name() {
+    let mut e = Engine::new();
+    e.resync(project().as_bytes(), 1).unwrap();
+    let pick = r#"{"op":"pick","comp":"C","open":"C","x":320,"y":180,"t":0,"includeLocked":false,"localView":null}"#;
+    let bounds = r#"{"op":"bounds","comp":"C","open":"C","layer":0,"t":0}"#;
+    let boxes = r#"{"op":"objectBoxes3d","comp":"C","open":"C","ids":["model"],"t":0}"#;
+    let err = e
+        .set_model("m", ModelKind::Gltf, b"not a glTF file")
+        .unwrap_err();
+    assert!(err.contains("cannot load the glTF model m"), "{err}");
+    for request in [pick, bounds, boxes] {
+        let reply = q(&mut e, request);
+        let why = get(&reply, "unsupported").and_then(Value::as_str);
+        assert!(
+            why.is_some_and(|w| w.contains("cannot load the glTF model m")),
+            "{request}: {reply:?}"
+        );
+    }
+    e.set_model("m", ModelKind::Unloadable, b"no source bytes")
+        .unwrap_err();
+    let reply = q(&mut e, pick);
+    assert_eq!(
+        get(&reply, "unsupported").and_then(Value::as_str),
+        Some("the engine cannot load the 3D model m: no source bytes")
+    );
+    // A loadable model answers again.
+    e.set_model("m", ModelKind::Obj, OBJ.as_bytes()).unwrap();
+    assert!(get(&q(&mut e, pick), "ok").is_some());
+}
+
 #[test]
 fn the_editor_camera_decides_what_a_pick_sees() {
     let mut e = Engine::new();

@@ -262,17 +262,21 @@ export class PmWasm {
 
   /**
    * Adds 3D model asset `id` for picks and bounds: `missing` (no geometry,
-   * the orange box), OBJ text, or glTF/GLB bytes. Returns the reason when the
-   * engine did not load the model (it is kept as missing).
+   * the orange box), OBJ text, glTF/GLB bytes, or `unloadable` (geometry
+   * today's runtime holds that the engine cannot have; `data` is the reason,
+   * UTF-8). Returns the reason when the engine did not load the model: an
+   * OBJ that does not parse is kept as missing, as today; a glTF it cannot
+   * load, and an unloadable model, make every question about the scene a
+   * named `unsupported` failure.
    */
-  setModel(id: string, kind: 'missing' | 'obj' | 'gltf', data: Uint8Array = new Uint8Array()): string | null {
+  setModel(id: string, kind: 'missing' | 'obj' | 'gltf' | 'unloadable', data: Uint8Array = new Uint8Array()): string | null {
     return this.call(() => {
       if (!this.x.pm_model_set) throw new Error('pm-wasm: this module has no 3D models');
       const key = encoder.encode(id);
       const bytes = new Uint8Array(5 + key.length + data.length);
       new DataView(bytes.buffer).setUint32(0, key.length, true);
       bytes.set(key, 4);
-      bytes[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : 0;
+      bytes[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : kind === 'unloadable' ? 3 : 0;
       bytes.set(data, 5 + key.length);
       const status = this.x.pm_model_set(this.writeBytes(bytes));
       if (status === 1) throw new Error('pm-wasm: malformed model');

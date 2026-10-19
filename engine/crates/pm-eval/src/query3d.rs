@@ -50,6 +50,22 @@ pub enum ModelAsset {
     Mesh(Arc<TriangleMesh>, usize),
     /// An imported glTF model (`asset.object3d`).
     Gltf(Arc<Picker>),
+    /// A model today's runtime holds geometry for (`asset.object3d`) that
+    /// this engine does not load: every question about a scene with it
+    /// fails with [`MODEL_UNLOADABLE`] and the reason, never answering with
+    /// the missing-model box (amendment 21).
+    Unloadable(Arc<str>),
+}
+
+/// The [`JsThrow`] kind of a question that met an [`ModelAsset::Unloadable`]
+/// model: not today's answer, so hosts report it as a named failure.
+pub const MODEL_UNLOADABLE: &str = "ModelUnloadable";
+
+fn unloadable(why: &str) -> JsThrow {
+    JsThrow {
+        kind: MODEL_UNLOADABLE,
+        message: why.to_owned(),
+    }
 }
 
 impl ModelAsset {
@@ -59,6 +75,7 @@ impl ModelAsset {
             ModelAsset::Missing => 0,
             ModelAsset::Mesh(_, v) => *v,
             ModelAsset::Gltf(p) => p.model.vertices,
+            ModelAsset::Unloadable(_) => 0,
         }
     }
 }
@@ -466,6 +483,9 @@ fn objects<'d>(
         let shape = match text(&source, "assetId") {
             Some(asset) => {
                 let a = g.model(&asset);
+                if let ModelAsset::Unloadable(why) = &a {
+                    return Err(unloadable(why));
+                }
                 imported += a.vertices();
                 let rule = match &materials {
                     None => ModelMaterials::Source,
@@ -584,7 +604,8 @@ fn place(
                 }
             }
             ShapeSpec::Model(asset, rule, materials) => match asset {
-                ModelAsset::Missing => Shape::Mesh {
+                // Refused when the spec was built.
+                ModelAsset::Missing | ModelAsset::Unloadable(_) => Shape::Mesh {
                     mesh: query::missing_box(),
                     materials: Materials::Single(Facing::DEFAULT),
                 },
@@ -987,6 +1008,9 @@ impl<'d> Scope<'_, 'd> {
             [n(size.clone()), n(size.clone()), n(size)],
         );
         let a = g.model(&asset_id);
+        if let ModelAsset::Unloadable(why) = &a {
+            return Err(unloadable(why));
+        }
         let shape = ShapeSpec::Model(
             a,
             ModelMaterials::Single(Facing::DEFAULT),

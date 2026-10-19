@@ -5,12 +5,15 @@
  *
  * - `geometryRequest(PM)`: what a question carries besides the document,
  *   the editor camera exactly as the renderer holds it (`viewportCamera` in
- *   the editor view) and the Local View set.
+ *   the editor view), the Local View set, and the registry's mesh renderer
+ *   definitions (`meshFields`), so third-party mesh layers and overrides by
+ *   id are scenes as `sceneForLayer` makes them.
  * - `resolveModels(PM, wasm, run, reply)`: a reply of `{models: [ids]}`
  *   means the mirror met model assets it does not have. They are added from
  *   the renderer's asset store as `SceneRuntime.makeObject` reads it (a glTF
  *   model's source bytes, an OBJ model's text, else the missing-model box)
- *   and the question is asked again.
+ *   and the question is asked again. A model three.js holds that the engine
+ *   cannot load makes the question a named `unsupported` failure.
  */
 import { editorCamera, localViewIds } from './viewport';
 import { modelSourceBytes } from './import-model';
@@ -24,14 +27,47 @@ const fed = new WeakMap<object, Map<string, unknown>>();
 
 const asArray = (m: { elements: ArrayLike<number> }) => Array.from(m.elements);
 
-/** The editor camera and Local View of the open composition, when it has 3D layers. */
-export function geometryRequest(PM: any): { camera?: object; localView?: string[] | null } {
+/**
+ * The registry's mesh renderer definitions the project's layers use:
+ * definition id to `renderer.assetField`, as `sceneForLayer` reads
+ * `PM.layerDefinition(id)?.renderer` (third-party definitions and overrides
+ * by id included). Undefined when the host has no registry.
+ */
+export function meshFields(PM: any): Record<string, string> | undefined {
+  if (typeof PM?.layerDefinition !== 'function') return undefined;
+  const out: Record<string, string> = {};
+  const seen = new Set<string>();
+  const visit = (layers: unknown) => {
+    if (!Array.isArray(layers)) return;
+    for (const layer of layers) {
+      const id = layer?.type === 'extension' ? layer?.d?.definition : undefined;
+      if (typeof id !== 'string' || seen.has(id)) continue;
+      seen.add(id);
+      let renderer: any;
+      try { renderer = PM.layerDefinition(id)?.renderer; } catch { renderer = undefined; }
+      // `layer.d.data?.[definition.renderer.assetField]`: the key as JavaScript converts it.
+      if (renderer?.kind === 'mesh') out[id] = String(renderer.assetField);
+    }
+  };
+  visit(PM.proj?.layers);
+  for (const comp of Object.values<any>(PM.proj?.comps ?? {})) visit(comp?.layers);
+  return out;
+}
+
+/**
+ * The editor camera and Local View of the open composition, when it has 3D
+ * layers, and the registry's mesh definitions.
+ */
+export function geometryRequest(PM: any): { camera?: object; localView?: string[] | null; meshFields?: Record<string, string> } {
+  const fields = meshFields(PM);
+  const registry = fields ? { meshFields: fields } : {};
   const layers: any[] = PM?.proj?.layers || [];
-  if (!layers.some(layer => layer3DRole(layer))) return {};
+  if (!layers.some(layer => layer3DRole(layer))) return registry;
   const local = localViewIds(PM);
   const camera: any = editorCamera(PM);
-  if (!camera) return { localView: local ? [...local] : null };
+  if (!camera) return { ...registry, localView: local ? [...local] : null };
   return {
+    ...registry,
     localView: local ? [...local] : null,
     camera: {
       world: asArray(camera.matrixWorld),
@@ -53,12 +89,15 @@ export function feedModels(PM: any, wasm: PmWasm, ids: readonly string[]): void 
   if (!map) { map = new Map(); fed.set(wasm, map); }
   for (const id of ids) {
     const asset = PM?.assets?.get?.(id);
-    let kind: 'missing' | 'obj' | 'gltf' = 'missing';
+    let kind: 'missing' | 'obj' | 'gltf' | 'unloadable' = 'missing';
     let data: Uint8Array | undefined;
     if (asset?.object3d) {
+      // Today's runtime draws this object3d: without the bytes it was parsed
+      // from, the engine cannot answer for it, and says so by name rather
+      // than answering with the missing-model box.
       const bytes = modelSourceBytes(asset.object3d);
       if (bytes) { kind = 'gltf'; data = new Uint8Array(bytes); }
-      else console.warn(`[engine-doc] 3D model ${id} has no source bytes; the engine draws it as missing`);
+      else { kind = 'unloadable'; data = encoder.encode('its asset holds a three.js object without the file it was loaded from'); }
     } else if (asset?.mesh && typeof asset.sourceText === 'string') {
       kind = 'obj';
       data = encoder.encode(asset.sourceText);
