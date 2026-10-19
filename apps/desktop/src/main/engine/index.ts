@@ -151,8 +151,12 @@ function statusMessage(enabled: boolean, status: NativeEngineStatus | null): Eng
   return { enabled, processes: { interactive: one('interactive'), job: one('job') } };
 }
 
-/** Largest staged resync document (the largest corpus history is 60 MB). */
-const MAX_STAGED_BYTES = 256 * 1024 ** 2;
+/** Largest staged resync document: the same bound as a document sent with
+ *  a synchronous snapshot (snapshots.ts MAX_DOCUMENT_BYTES). The renderer
+ *  now hands over pm-wasm's bytes, not a JavaScript string, so V8's string
+ *  ceiling (about 512 MiB, which bounds today's own save) no longer stops
+ *  it first; a real project's document is 180 MB (C1). */
+const MAX_STAGED_BYTES = 512 * 1024 ** 2;
 
 function validStageRequest(value: unknown): value is StageDocumentRequest {
   if (typeof value !== 'object' || value === null) return false;
