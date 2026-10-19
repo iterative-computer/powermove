@@ -39,8 +39,10 @@ keep an export independent of another project or tab.
 
 `LazyNativeBrowser` starts Chromium only for DOM tools, a compatibility raster
 request, or an ANGLE shader request. A DOM page waits for document and complete
-extension boot, opens the session's project, joins its remote project session
-and flushes edits before answering. The setting-off host uses the same extension
+extension boot, opens the session's project, then rejoins the authoritative
+remote project session before accepting tools. This discards an empty or stale
+local document restored by asynchronous tab boot, even when the project ID
+already matches. Later calls flush edits before answering. The setting-off host uses the same extension
 readiness gate, so neither host exposes a partially registered panel list. Workspace
 tools invoke the production dispatcher, retaining persisted layout, workspace,
 viewport and the complete built-in/user panel registry. They do not return the
@@ -89,7 +91,10 @@ set to one:
 
 The parity harness captures a real desktop runner pin, compares every decoded
 PNG frame with the hidden export, and compares complete workspace JSON bytes
-with today's hidden host, including a user panel. The contract gate compares
+with today's hidden host, including a user panel. Before restart it saves a
+named workspace with custom dock sizes and the user panel visible; both hidden
+hosts must restore that complete layout and report equal viewport bytes. The
+contract gate compares
 answers and document bytes after every call, using only the existing deterministic
 id normalization. Service tests create temporary user-domain launchd jobs and a
 loopback-only SSH service with temporary keys outside the repository; they do
