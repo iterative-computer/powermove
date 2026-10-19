@@ -72,6 +72,17 @@ describe('EngineRenderTransport', () => {
     expect(snap.data).toBeInstanceOf(Uint8ClampedArray);
   });
 
+  it('prepares playback base pixels over async IPC at dependency priority, without changing ordinary async snapshots', async () => {
+    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2)]);
+    const sync = vi.spyOn(transport, 'snapshotSync');
+    await transport.rasterForCompat('shape', 2, .5);
+    expect(sync).not.toHaveBeenCalled();
+    expect(asked[0]!.snapshot.class).toBe('sync');
+    await transport.raster('shape', 2, .6);
+    expect(asked[1]!.snapshot.class).toBe('async');
+    expect(transport.stats.async).toBe(2);
+  });
+
   it('draws what the engine needs on this thread and asks again, never waiting on a task', () => {
     const { transport, asked, session: s, runner } = setup([
       { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('a'.repeat(64))], compat: [] },
@@ -524,6 +535,30 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(true);
+    const pending: Array<{ time: number; done: () => void }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, n => new Promise(resolve => pending.push({ time: n.time, done: resolve })));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.map(p => p.time)).toEqual([0, frame]);
+      expect(asked).toEqual([]);
+      // The second result lands while the first remains slow.
+      pending[1]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([frame]);
+      expect(t.lookaheadStats.maxInFlight).toBe(2);
+      state.time = 30 * frame;
+      pending[0]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([frame]);
+      expect(t.lookaheadStats.obsolete).toBe(1);
+      expect(pending.at(-1)!.time).toBe(30 * frame);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
   it('keeps a nested composition time offset while following the open clock', () => {
     const { t, session, asked, state } = rig(true);
     try {
@@ -562,6 +597,8 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: Array.from({ length: 40 }, (_, i) => need(0, `layer-${i}`)) }, session);
       asked.length = 0;
       t.answerCompat('rasterOverride', n => { asked.push(n.time); spent += 20; return { kind: 'native' }; });
+      t.receiveCompat({ compat: 'needs', needs: Array.from({ length: 40 }, (_, i) => need(0, `layer-${i}`)) }, session);
+      asked.length = 0;
       state.playing = true;
       t.playbackStarted();
       expect(asked).toHaveLength(1);

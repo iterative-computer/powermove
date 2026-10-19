@@ -61,6 +61,8 @@ export interface RasterCompatOptions {
   /** The engine's raster of a layer object (today's surface shape, with
    *  today's crop window applied: `sourceWindow` for text, `uv` for shapes), or null. */
   engineRaster: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => any;
+  /** Prepare the same base surface without blocking the renderer's event loop. */
+  engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<any>;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
   log?: (message: string) => void;
@@ -82,6 +84,8 @@ export interface RasterCompatHandle {
   reset(): void;
   /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
   answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
+  /** Optional interactive-playback preparation before a synchronous answer. */
+  prepare(need: CompatNeed, revision: number): Promise<void>;
   dispose(): void;
 }
 
@@ -259,9 +263,23 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let unanswer: (() => void) | null = null;
   /** The key last posted per layer, time and density (for `reuse`). */
   const posted = new Map<string, string>();
+  const ready = new Map<string, { layer: unknown; surface: any }>();
+  const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
+  let pending = 0, generation = 0, readyRevision: number | null = null;
+  let active: { layer: unknown; key: string; scale: number; time: number; crop: string } | null = null;
   let serial = 0;
   const log = options.log ?? ((message: string) => console.warn(`[raster-compat] ${message}`));
   const readPixels = options.readPixels ?? compositorPixels;
+
+  const cropKey = (crop: RasterWindowLike | undefined) => crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : '';
+  const sampleKey = (need: CompatNeed, revision: number) => `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.scale}\u0000${cropKey(need.crop ?? undefined)}\u0000${revision}`;
+  const sampleRevision = (revision: number) => {
+    if (readyRevision === revision) return;
+    readyRevision = revision;
+    ready.clear();
+    generation++;
+  };
+  const clearReady = () => { ready.clear(); preparing.clear(); readyRevision = null; generation++; };
 
   const wrapped = (): boolean => {
     const chain = options.chain();
@@ -276,13 +294,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     base([layer, scale = 1, time, , crop]: Parameters<Raster>): any {
       const s = Number(scale) || 1;
       const t = Number(time ?? PM?.time ?? 0);
-      const load = () => options.engineRaster(layer, s, t, crop ?? undefined);
+      const prepared = active && active.layer === layer ? ready.get(active.key) : undefined;
+      const matches = prepared?.layer === layer && active?.scale === s && active.time === t && active.crop === cropKey(crop ?? undefined);
+      const load = () => matches ? prepared!.surface : options.engineRaster(layer, s, t, crop ?? undefined);
       // A captions layer between cues is null today: decide it now.
       if (layer?.type === 'captions') return load();
       return lazySurface({ layer, scale: s, time: t, crop }, load);
     },
 
     answer(need: CompatNeed, revision: number, answerOptions?: CompatAnswerOptions): CompatAnswerResult {
+      sampleRevision(revision);
       const layer = answerOptions?.layer !== undefined
         ? snapshotLayer(PM, String(need.composition), String(need.layer), answerOptions.layer)
         : findLayer(PM, String(need.composition), String(need.layer));
@@ -298,6 +319,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const crop: RasterWindowLike | undefined = need.crop ? { x: need.crop.x, y: need.crop.y, width: need.crop.width, height: need.crop.height } : undefined;
       let result: any;
       producing++;
+      active = answerOptions?.prepared === true && answerOptions.layer === undefined
+        ? { layer, key: sampleKey(need, revision), scale, time, crop: cropKey(crop) } : null;
       try {
         // `uploaded`: today the compositor's lookup of a raster it holds by
         // key; here none is held (the engine keeps the pixels), so it answers
@@ -312,6 +335,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         throw error;
       } finally {
         producing--;
+        if (active) ready.delete(active.key);
+        active = null;
       }
       const mark: LazyMark | undefined = result?.[LAZY];
       // The base itself, for this layer, density and window, untouched: the
@@ -337,11 +362,41 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
     },
 
+    async prepare(need: CompatNeed, revision: number): Promise<void> {
+      if (!options.engineRasterAsync || !wrapped()) return;
+      sampleRevision(revision);
+      const layer = findLayer(PM, String(need.composition), String(need.layer));
+      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
+      const key = sampleKey(need, revision);
+      if (ready.get(key)?.layer === layer) return;
+      const existing = preparing.get(key);
+      if (existing) { if (existing.layer === layer) await existing.promise; return; }
+      if (pending >= 2) return;
+      const epoch = generation;
+      const crop = need.crop ? { ...need.crop } : undefined;
+      pending++;
+      const promise = Promise.resolve().then(async () => {
+        try {
+          const surface = await options.engineRasterAsync!(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, crop);
+          if (generation !== epoch || findLayer(PM, String(need.composition), String(need.layer)) !== layer || !wrapped()) return;
+          ready.set(key, { layer, surface });
+          while (ready.size > 2) ready.delete(ready.keys().next().value!);
+        } catch (error) {
+          log(`asynchronous base raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+          throw error;
+        }
+        finally { pending--; if (preparing.get(key)?.promise === promise) preparing.delete(key); }
+      });
+      preparing.set(key, { layer, promise });
+      await promise;
+    },
+
     attach(next: EngineRenderTransport): () => void {
       transport = next;
       sync();
       return () => {
         if (transport !== next) return;
+        clearReady();
         unanswer?.();
         unanswer = null;
         transport = null;
@@ -350,14 +405,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
 
     reset(): void {
       posted.clear();
+      clearReady();
       if (!transport || !unanswer) return;
       // A producer list without the source drops its answers, then the
       // source comes back: the next frame asks afresh.
       unanswer();
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options));
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
     },
 
     dispose(): void {
+      clearReady();
       chainChange.dispose();
       offFonts?.();
       unanswer?.();
@@ -367,13 +424,15 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   };
 
   function sync(): void {
+    clearReady();
     if (!transport) return;
     if (wrapped() && !unanswer) {
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options));
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
     } else if (!wrapped() && unanswer) {
       unanswer();
       unanswer = null;
       posted.clear();
+      clearReady();
     } else if (unanswer) {
       // Another wrapper on top, or one of several disposed: what the chain
       // answers may have changed for every layer.

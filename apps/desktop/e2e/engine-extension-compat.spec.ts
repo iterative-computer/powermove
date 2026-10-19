@@ -384,7 +384,7 @@ test.describe('Use New Engine: existing extensions', () => {
       if (typeof off === 'function') off(); else off?.dispose?.();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
-      return { frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
+      return { frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
     });
     const { page } = session;
     await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
