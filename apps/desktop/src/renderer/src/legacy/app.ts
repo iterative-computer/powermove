@@ -77,13 +77,15 @@ function fileUI() {
 }
 async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   const state = fileState(project.id);
-  const json = await stringifyAsync(project);
+  // Fingerprints, not the JSON, are held across the awaits: a large
+  // project's JSON is hundreds of megabytes of string (C1), and holding one
+  // while building another pushed the window past V8's heap limit.
+  const hash = await projectFingerprint(await stringifyAsync(project));
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
-  const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  if (await stringifyAsync(project) !== json) return true;
+  if (await projectFingerprint(await stringifyAsync(project)) !== hash) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -734,6 +736,11 @@ function closeProjectTransients() {
   PM.closeMenus?.();
   if (PM.WS.editing) PM.WS.cancelEdit();
 }
+/** How long the last autosave's write took: the next one waits at least
+ *  that long for quiet (up to a minute), so a project whose write takes
+ *  tens of seconds (C1: about 50 s for a 180 MB project) is not written
+ *  again after every half-second pause. Small projects keep 550 ms. */
+let lastAutosaveMs = 0;
 PM.autosave = () => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
   APP.dirty = true;
@@ -748,9 +755,11 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
+        const began = performance.now();
         PM.EngineDoc?.beforeSave?.('autosave');
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
+        lastAutosaveMs = performance.now() - began;
         await PM.store.flush?.();
       }
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
@@ -763,7 +772,7 @@ PM.autosave = () => {
       console.warn('Project save failed', error);
     }
     PM.invalidate('status'); PM.bus.emit('projects:open');
-  }, 550);
+  }, Math.max(550, Math.min(60_000, lastAutosaveMs)));
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
