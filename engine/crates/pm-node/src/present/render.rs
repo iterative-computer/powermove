@@ -2504,10 +2504,15 @@ impl Thread {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
+                // A headless clock carries the document revision only while
+                // the engine draws the composition: the renderer has no
+                // frame to learn the route from, so a tagged clock after an
+                // `unsupported` report is how it hears the composition is
+                // drawable again (an edit, a composition switch).
                 let revision = view
                     .state
                     .headless
-                    .filter(|h| *h)
+                    .filter(|h| *h && draws)
                     .and_then(|_| self.docs.get(&key))
                     .and_then(|doc| Revision::new(doc.revision()).ok());
                 self.event(key, Event::Clock(sample), revision);
