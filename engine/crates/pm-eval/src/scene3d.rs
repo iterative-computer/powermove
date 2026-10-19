@@ -473,6 +473,10 @@ impl<'d> Scope<'_, 'd> {
             out.insert("p", Value::Object(p));
             let material = node::member(object, "material");
             let mut m = object_of(material);
+            // `materialSchema`'s `doubleSided` default (`parseScene` fills it).
+            if m.get_key(&JsString::from("doubleSided")).is_none() {
+                m.insert("doubleSided", Value::Bool(true));
+            }
             m.insert(
                 "p",
                 with_defaults(
@@ -495,6 +499,9 @@ impl<'d> Scope<'_, 'd> {
                 let id = node::to_js_string(node::member(Some(slot), "id")).to_string_lossy();
                 let material = node::member(Some(slot), "material");
                 let mut sm = object_of(material);
+                if sm.get_key(&JsString::from("doubleSided")).is_none() {
+                    sm.insert("doubleSided", Value::Bool(true));
+                }
                 sm.insert(
                     "p",
                     with_defaults(

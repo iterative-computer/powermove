@@ -331,6 +331,8 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     await addModels(PM);
     addModelGroups(PM);
     editScene(PM, { operation: 'add_light', light: { id: 'sun', type: 'sun', p: { x: 1, y: 4, z: 3 } } });
+    // A material saved before `doubleSided` existed: parseScene's default (double).
+    delete PM.L('rbody').d.data.object.material.doubleSided;
     PM.touch();
     doc.barrier!.flush();
     const c = (doc.api as any).comps();

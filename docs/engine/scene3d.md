@@ -117,8 +117,10 @@ pass") into the full pass. The plan stays the authority.
   Built geometry (OBJ triangles included) is shared across scenes and
   frames. `Geometry3d`'s debug form names the key, not the vertices, so
   content keys stay cheap.
-- **`doubleSided`** is read as `compositionScene` passes it (absent means
-  front side), not with the schema default.
+- **`doubleSided`**: `compositionScene` returns `parseScene`'s output, so a
+  3D object layer's material without `doubleSided` is double-sided (the
+  schema default; `pm-eval` fills it since Phase 3c). A legacy scene layer's
+  raw objects are read as stored (absent means front side).
 - **Depth and id surface.** Coverage is the layer's own alpha (≥ 0.5/255);
   depth comes from a single-sampled pass, so MSAA-only edge pixels report
   +inf. Inside a precomposition the depth is the nested camera's; a legacy
