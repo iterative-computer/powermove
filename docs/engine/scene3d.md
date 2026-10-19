@@ -547,10 +547,14 @@ orchestrator with the evidence above.
   retry is 250 ms later, so the layer that arrives after the bind draws
   with offline media. Main's media store now holds the viewer engine's
   read of an asset no window binds yet until a binding names it (up to
-  2 s; `MediaStoreService.resolveAsset` with the interactive process); the
+  1 s; `MediaStoreService.resolveAsset` with the interactive process); the
   engine shows nothing missing while a read is outstanding (its route stays
   pending). Jobs and other callers never wait, and a bound but missing file
-  is offline at once. The e2e helper that waited for frames to settle is
+  is offline at once. While a read waits the composition's frames wait
+  too (the route is pending), so an asset no window ever binds (IndexedDB
+  media not migrated yet) holds the viewer for up to 1 s at open where it
+  drew that layer's offline failure at once before. The e2e helper that
+  waited for frames to settle is
   replaced by one that requires the engine's frame to be stable at once.
 - **Document host 3D geometry (issue D1).** A worker test adds 3D
   objects, groups them into a model group and a mixed group (group

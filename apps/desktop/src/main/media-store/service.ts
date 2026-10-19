@@ -42,7 +42,7 @@ export type MediaStoreServiceOptions = {
   relink?: Partial<Omit<RelinkOptions, 'hash'>>;
   now?: () => number;
   /** How long an interactive engine's read of an asset no window binds yet
-   *  waits for a binding (default 2000 ms; see `resolveAsset`). */
+   *  waits for a binding (default 1000 ms; see `resolveAsset`). */
   bindWaitMs?: number;
 };
 
@@ -374,7 +374,7 @@ export class MediaStoreService {
     // viewer's read waits for the binding; the engine shows nothing missing
     // while a read is outstanding. A truly unbound asset is offline after
     // the wait.
-    if (context?.process === 'interactive' && !this.bound(asset)) await this.bindingOf(asset, this.options.bindWaitMs ?? 2000);
+    if (context?.process === 'interactive' && !this.bound(asset)) await this.bindingOf(asset, this.options.bindWaitMs ?? 1000);
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
 
