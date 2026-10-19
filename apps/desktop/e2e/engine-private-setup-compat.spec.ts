@@ -185,6 +185,12 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           // the original document is now available rather than losing evidence.
           if (await app.page.evaluate(() => (window as any).PM.proj.layers.length) === 0) throw error;
         }
+        // Layer installation precedes the file fingerprint and workspace
+        // restore. Wait for the real open operation before exercising the
+        // loaded document; a layer count alone is not an open-completion gate.
+        try {
+          await expect.poll(() => app.page.evaluate(() => (window as any).__c1OpenDone), { timeout: 180_000, message: 'C1: original project open must finish' }).toBe(true);
+        } catch (error) { results[mode].openCompletionError = String(error); }
         if (engine) expect(await app.page.evaluate(() => !!(window as any).PM.EngineRender), 'C1: engine facade remains installed').toBe(true);
         const setup = await app.page.evaluate(() => { const PM = (window as any).PM; return { dur: PM.proj.dur, fps: PM.proj.fps, w: PM.proj.w, h: PM.proj.h, typewriters: PM.proj.layers.filter((l: any) => l.fx?.some((f: any) => f.type === 'typewriter')).map((l: any) => ({ from: l.from, dur: l.dur })) }; });
         console.log(`C1 ${mode}: project layers loaded`);
@@ -248,6 +254,7 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
     // preserve/report its same compile failure, never mask any other one.
     for (const mode of ['today', 'engine']) {
       expect(results[mode].openWaitError, `${mode}: project-open deadline`).toBeUndefined();
+      expect(results[mode].openCompletionError, `${mode}: project-open completion deadline`).toBeUndefined();
       expect(results[mode].openDone, `${mode}: original project open completed`).toBe(true);
       for (const records of [results[mode].extensions, results[mode].after]) expect(records.filter((r: any) => r.id !== 'private-extension-32' && (!r.active || !r.enabled || r.health !== 'ok'))).toEqual([]);
       for (const ui of [results[mode].ui, results[mode].uiAfter]) {
