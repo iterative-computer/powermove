@@ -52,7 +52,12 @@ export interface NativeEditStats {
   /** Operations applied to the live document. */
   ops: number;
   fallbacks: Record<string, number>;
+  /** Answers given by the caller's own extension code where a kernel does not cover the case (never the legacy evaluator). */
+  callers: Record<string, number>;
 }
+
+/** Reasons `align` leaves to the caller's own code (it evaluates natively, or fails by name). */
+const CALLER_REASONS: ReadonlySet<string> = new Set(['context', 'host', 'fonts', 'ink', 'legacy']);
 
 /** Section 25's evaluation tolerance, with the `atan2` branch cut allowed. */
 const close = (a: number, b: number) => Math.abs(a - b) <= 1e-9 + 1e-9 * Math.abs(b) || atan2BranchCut(a, b);
@@ -200,7 +205,7 @@ export function realizeOps(ops: readonly PatchOp[], open: string): PatchOp[] {
 }
 
 export class NativeEdits {
-  readonly stats: NativeEditStats = { calls: {}, applied: {}, ops: 0, fallbacks: {} };
+  readonly stats: NativeEditStats = { calls: {}, applied: {}, ops: 0, fallbacks: {}, callers: {} };
   /**
    * Kernels with no legacy answer to compare with: the headless document
    * host has no raster, so the legacy font-anchor capture and anchor
@@ -356,10 +361,18 @@ export class NativeEdits {
    * goes on with, as for `edit`). `ops` (if any) are applied by the caller
    * through `apply` where the legacy code writes.
    */
-  answer<T>(name: string, request: Record<string, unknown>, native: (reply: KernelReply) => T, legacy: () => T, compare: (native: T, legacy: T) => string | null = (a, b) => differs(a, b, close), options: { wide?: boolean } = {}): T {
+  answer<T>(name: string, request: Record<string, unknown>, native: (reply: KernelReply) => T, legacy: () => T, compare: (native: T, legacy: T) => string | null = (a, b) => differs(a, b, close), options: {
+    wide?: boolean;
+    /** Reasons the caller's own (non-legacy) code answers instead, through `onCaller`. */
+    caller?: ReadonlySet<string>;
+    onCaller?: (reason: string) => T;
+  } = {}): T {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
-    if ('fallback' in got) return this.fallback(name, got.fallback, legacy);
+    if ('fallback' in got) {
+      if (options.onCaller && options.caller?.has(got.fallback)) return options.onCaller(got.fallback);
+      return this.fallback(name, got.fallback, legacy);
+    }
     const value = 'threw' in got ? undefined : native(got.reply);
     if (this.dual && !this.noReference.has(name)) {
       let expected: { value?: T; threw?: unknown };
@@ -385,14 +398,20 @@ export class NativeEdits {
    * composition, `legacy` otherwise (and compared with it in dual modes).
    */
   align<T>(layers: any[], mode: string, time: number, legacy: () => T): T {
+    // What the kernel does not cover is answered by the caller's own code
+    // (the alignment strip's `alignCommands`, or a fork's): it is extension
+    // code that evaluates through `api.anim` and `api.render`, which answer
+    // natively with the setting on (or fail by name), never the legacy
+    // evaluator. Engine faults (unavailable, flush, trap, error) stay named failures.
+    const caller = (why: string): T => { this.count(this.stats.callers, `align:${why}`); return legacy(); };
     const indexes = layers.map(layer => this.index(layer));
-    if (!indexes.length) return [] as unknown as T;
-    if (indexes.some(i => i < 0)) return this.fallback('align', 'context', legacy);
+    if (!indexes.length) return caller('empty');
+    if (indexes.some(i => i < 0)) return caller('context');
     const live = this.scope()?.layers ?? [];
     const commands = (reply: KernelReply) => (reply.moves as Array<{ layer: number; channel: string; value: number }>).map(move => ({
       type: 'set_property', target: live[move.layer]?.id, path: move.channel, value: move.value, time, mode: 'auto', preserveHandEdits: false,
     })) as unknown as T;
-    return this.answer('align', { layers: indexes, mode, t: time }, commands, legacy);
+    return this.answer('align', { layers: indexes, mode, t: time }, commands, legacy, undefined, { caller: CALLER_REASONS, onCaller: caller });
   }
 
   /**

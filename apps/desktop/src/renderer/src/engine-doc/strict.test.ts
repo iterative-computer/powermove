@@ -281,7 +281,14 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(fallbacks(doc)).toEqual({});
     expect(doc.dual!.total().mismatched).toBe(0);
     const legacy = vi.fn();
-    expect(() => doc.edits!.align([layer], 'left', 0, legacy)).toThrow(/edit.align.*context/);
+    // align's closure is the caller's own extension code (it evaluates through
+    // api.anim/api.render, natively): it answers what the kernel does not cover.
+    const caller = vi.fn(() => ['caller']);
+    expect(doc.edits!.align([layer], 'left', 0, caller)).toEqual(['caller']);
+    expect(doc.edits!.align([], 'left', 0, caller)).toEqual(['caller']);
+    expect(caller).toHaveBeenCalledTimes(2);
+    expect(doc.edits!.stats.callers).toEqual({ 'align:context': 1, 'align:empty': 1 });
+    expect(doc.edits!.stats.fallbacks).toEqual({});
     expect(() => doc.edits!.leaveAttributes(layer, 0, legacy)).toThrow(/edit.leaveAttributes.*context/);
     expect(() => doc.edits!.anchorReference(layer, 'font', 0, legacy)).toThrow(/edit.anchorReference.*context/);
     expect(legacy).not.toHaveBeenCalled();
