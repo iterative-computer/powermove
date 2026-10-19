@@ -106,9 +106,12 @@ impl Models {
                     ModelAsset::Gltf(Arc::new(Picker::new(Arc::new(model)))),
                     None,
                 ),
+                // A file the engine's reader refuses is one today's
+                // importer refuses too (`gltf-acceptance.test.ts`): today
+                // the asset has no scene and draws the missing-model box.
                 Err(e) => {
                     let why = format!("the engine cannot load the glTF model {id}: {}", e.0);
-                    (ModelAsset::Unloadable(why.as_str().into()), Some(why))
+                    (ModelAsset::Missing, Some(why))
                 }
             },
             ModelKind::Unloadable => {

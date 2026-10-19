@@ -337,6 +337,35 @@ pub(crate) fn shader_layer<'d>(
     ))
 }
 
+/// The missing-definition checkerboard for `layer` at its extension size:
+/// what the compositor draws for an extension layer with no fragment
+/// renderer, which includes a legacy 3D scene layer whose scene does not
+/// sync (`sceneRuntime` throws or has no scene; the compositor falls
+/// through to this program).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn missing_placeholder<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    d: &Content,
+    time: f64,
+    output: (u32, u32),
+    scale: (f64, f64),
+    fallback_runner: bool,
+) -> JsResult<Planned> {
+    let sized = size(scope, layer, d, output, scale, time)?;
+    let (source, line_offset) = super::missing_layer_program();
+    let calls = base_calls(scope, layer, time, sized.2, sized.3);
+    Ok(program_plan(
+        layer,
+        "missing-layer placeholder",
+        source,
+        line_offset,
+        calls,
+        sized,
+        fallback_runner,
+    ))
+}
+
 /// An extension layer whose definition is a fragment renderer, or whose
 /// definition is marked missing (the checkerboard). `None` for other
 /// renderer kinds (mesh, legacy scene, 3D roles) and when the renderer has

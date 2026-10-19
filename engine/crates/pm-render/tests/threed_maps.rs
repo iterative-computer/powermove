@@ -189,3 +189,61 @@ fn map_mip_levels_against_todays_generate_mipmap() {
     assert_eq!(equal, compared, "every level 1 mip equals Chromium's");
     assert!(compared >= 200);
 }
+
+/// A map is level 1 content, read from the same Chromium bitmap as an
+/// image layer: for every still fixture, the map's verdict is the image
+/// layer's (`probe_image`), feature for feature, so a map is never the
+/// reason a project an image layer of the same file draws in is refused;
+/// and every still an image layer draws decodes to the one RGBA8 plane a
+/// map uploads (`decode`'s layout check is an internal assertion).
+#[test]
+fn map_verdicts_are_the_image_layer_verdicts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stills2");
+    let pool = pm_media::pool::FramePool::new(0);
+    let mut names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                matches!(
+                    x,
+                    "png"
+                        | "jpg"
+                        | "jpeg"
+                        | "tiff"
+                        | "tif"
+                        | "avif"
+                        | "webp"
+                        | "gif"
+                        | "bmp"
+                        | "heic"
+                )
+            })
+        })
+        .collect();
+    names.sort();
+    let (mut drawn, mut unsupported, mut unreadable) = (0, 0, 0);
+    for path in &names {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let layer = pm_render::media::probe_image(path);
+        let map = Textures::probe(path);
+        match (&layer, &map) {
+            (Ok(()), Ok(())) => {
+                let (w, h, rgba) = decode(path, &pool).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert_eq!(rgba.len(), w as usize * h as usize * 4, "{name}");
+                drawn += 1;
+            }
+            (Err(pm_render::media::ProbeIssue::Unsupported(a)), Err(MapError::Unsupported(b))) => {
+                assert_eq!(a, b, "{name}");
+                unsupported += 1;
+            }
+            (Err(pm_render::media::ProbeIssue::Unreadable(_)), Err(MapError::Failed(_))) => {
+                unreadable += 1;
+            }
+            _ => panic!("{name}: image layer {layer:?}, map {map:?}"),
+        }
+    }
+    eprintln!("map verdicts: {drawn} drawn, {unsupported} unsupported, {unreadable} unreadable");
+    assert!(drawn >= 100, "{drawn}");
+}

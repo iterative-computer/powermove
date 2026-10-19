@@ -106,28 +106,32 @@ fn model_assets_are_asked_for_once_then_picked() {
     );
 }
 
-/// A model three.js holds that this engine cannot load (a glTF `pm-geom3d`
-/// rejects, an `object3d` without its source bytes) is a named failure for
-/// every question about the scene: never the missing-model box.
+/// A glTF file `pm-geom3d` refuses is the missing-model box, as today's
+/// asset without a scene; an `object3d` without its source bytes (which
+/// three.js holds and the engine cannot read) is a named failure for every
+/// question about the scene.
 #[test]
-fn models_the_engine_cannot_load_fail_by_name() {
+fn refused_gltf_models_are_the_missing_box_and_unloadable_ones_fail_by_name() {
     let mut e = Engine::new();
     e.resync(project().as_bytes(), 1).unwrap();
     let pick = r#"{"op":"pick","comp":"C","open":"C","x":320,"y":180,"t":0,"includeLocked":false,"localView":null}"#;
     let bounds = r#"{"op":"bounds","comp":"C","open":"C","layer":0,"t":0}"#;
     let boxes = r#"{"op":"objectBoxes3d","comp":"C","open":"C","ids":["model"],"t":0}"#;
+    // A glTF file the reader refuses is one today's importer refuses
+    // (`gltf-acceptance.test.ts`): its asset has no scene, and every
+    // question answers for the missing-model box, as for a missing model.
     let err = e
         .set_model("m", ModelKind::Gltf, b"not a glTF file")
         .unwrap_err();
     assert!(err.contains("cannot load the glTF model m"), "{err}");
-    for request in [pick, bounds, boxes] {
-        let reply = q(&mut e, request);
-        let why = get(&reply, "unsupported").and_then(Value::as_str);
-        assert!(
-            why.is_some_and(|w| w.contains("cannot load the glTF model m")),
-            "{request}: {reply:?}"
-        );
-    }
+    let refused: Vec<_> = [pick, bounds, boxes].iter().map(|r| q(&mut e, r)).collect();
+    e.set_model("m", ModelKind::Missing, b"").unwrap();
+    let missing: Vec<_> = [pick, bounds, boxes].iter().map(|r| q(&mut e, r)).collect();
+    assert_eq!(refused, missing);
+    assert!(
+        refused.iter().all(|r| get(r, "ok").is_some()),
+        "{refused:?}"
+    );
     e.set_model("m", ModelKind::Unloadable, b"no source bytes")
         .unwrap_err();
     let reply = q(&mut e, pick);

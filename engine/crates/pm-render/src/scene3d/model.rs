@@ -524,9 +524,6 @@ pub enum ModelLookup {
     },
     /// A glTF or GLB scene (`asset.object3d`).
     Gltf(Arc<super::gltf::GltfAsset>),
-    /// A glTF or GLB file this engine does not load although the importer
-    /// accepted it (routed to the legacy engine).
-    Unloadable(String),
 }
 
 /// How a scene finds model assets.
@@ -1008,7 +1005,6 @@ impl SceneBuilder {
                             depth: 1.0,
                         })))
                     }
-                    ModelLookup::Unloadable(why) => return Err(why),
                     ModelLookup::Missing => {
                         warnings.push(format!("Missing model: {asset}"));
                         missing = true;
@@ -1016,27 +1012,10 @@ impl SceneBuilder {
                     }
                     ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
                 }
-            } else if let Some(name) = text(source, "primitive")
-                && !pm_geom3d::Primitive::known(&name)
-                && matches!(placement, Placement::Composition { .. })
-            {
-                // `compositionRuntime` syncs its scene unvalidated:
-                // `primitiveGeometry` returns nothing for a primitive it does
-                // not know, and `new THREE.Mesh(undefined)` has an empty
-                // `BufferGeometry`, so the object draws nothing, as today. (A
-                // legacy scene layer's `parseScene` refuses it and the layer
-                // fails, here as today.)
-                Some(
-                    self.cached(sha_key(&[b"empty geometry 1"]), || pm_geom3d::Geometry {
-                        positions: Vec::new(),
-                        normals: Vec::new(),
-                        uvs: Vec::new(),
-                        indices: Vec::new(),
-                        indexed: false,
-                        groups: Vec::new(),
-                    }),
-                )
             } else {
+                // A primitive the schema does not know fails the scene:
+                // `compositionScene` and a legacy layer's `sync` both run
+                // `parseScene`, which refuses it (`corrupt-scenes.test.ts`).
                 Some(self.geometry(&source_of(source)?))
             };
             let slots = arr(node, "slots");

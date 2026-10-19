@@ -64,9 +64,10 @@ impl GpuMesh {
 /// Why a 3D render drew nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error3d {
-    /// Something this pass does not draw, met at render time (the frame is
-    /// routed to the legacy engine, `MediaFailure::Unsupported`).
-    Unsupported(String),
+    /// A material map still outside the level 1 classes, met at render
+    /// time: the image feature an image layer of the file reports
+    /// (`MediaFailure::Unsupported`).
+    Unsupported(crate::capability::Feature),
     /// The layer failed and drew nothing.
     Failed(String),
 }
@@ -1162,10 +1163,7 @@ impl Scene3dRenderer {
                     ),
                 },
                 Some(TextureRef::Ltc1) | Some(TextureRef::Ltc2) => {
-                    let (a, b) = self
-                        .textures
-                        .ltc(device, queue)
-                        .map_err(Error3d::Unsupported)?;
+                    let (a, b) = self.textures.ltc(device, queue).map_err(Error3d::Failed)?;
                     let v = if matches!(bound, Some(TextureRef::Ltc1)) {
                         a
                     } else {

@@ -51,8 +51,10 @@ struct MapKey {
 /// Why a map cannot be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MapError {
-    /// Outside the classes this pass draws (routed to the legacy engine).
-    Unsupported(String),
+    /// A still outside the level 1 classes: the same feature an image
+    /// layer of the file reports (`crate::media::probe_image`), as both
+    /// read Chromium's bitmap.
+    Unsupported(crate::capability::Feature),
     Failed(String),
 }
 
@@ -534,9 +536,7 @@ pub fn decode(
 ) -> Result<(u32, u32, Vec<u8>), MapError> {
     let (bitmap, upload_fails) = match crate::media::level1_bitmap(path, pool) {
         Ok(b) => b,
-        Err(crate::media::ProbeIssue::Unsupported(f)) => {
-            return Err(MapError::Unsupported(format!("3D texture map image ({f})")));
-        }
+        Err(crate::media::ProbeIssue::Unsupported(f)) => return Err(MapError::Unsupported(f)),
         Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
     };
     let f = &bitmap.frame.format;
@@ -545,9 +545,14 @@ pub fn decode(
         // `texSubImage2D` failed: the storage stays zeroed.
         return Ok((w as u32, h as u32, vec![0u8; w * h * 4]));
     }
+    // Chromium's bitmap is one RGBA8 plane for every still class
+    // (`level1_bitmaps_are_rgba8` in `tests/threed_maps.rs` checks each
+    // fixture): another layout is an internal error, not a class.
     if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
-        return Err(MapError::Unsupported(format!(
-            "3D texture map image layout {}",
+        debug_assert!(false, "a level 1 bitmap of layout {}", f.label);
+        return Err(MapError::Failed(format!(
+            "{}: the level 1 bitmap has layout {}",
+            path.display(),
             f.label
         )));
     }

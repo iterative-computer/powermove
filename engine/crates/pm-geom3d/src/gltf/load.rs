@@ -901,10 +901,10 @@ impl Loader<'_> {
         }
         let count = position.count();
         let check = |a: &Option<Raw>, name: &str, sizes: &[usize]| -> Result<()> {
-            if let Some(a) = a {
-                if !sizes.contains(&a.size) {
-                    return err(format!("{name} has {} components", a.size));
-                }
+            if let Some(a) = a
+                && !sizes.contains(&a.size)
+            {
+                return err(format!("{name} has {} components", a.size));
             }
             Ok(())
         };

@@ -340,11 +340,12 @@ fn shared_scene_maps_load_once_per_frame() {
     assert_eq!(r.scene3d_resident().maps, 1, "one texture for both layers");
 }
 
-/// A primitive `primitiveGeometry` does not know (`new THREE.Mesh(undefined)`:
-/// an empty `BufferGeometry`) draws nothing, with no failure and nothing
-/// listed: the frame equals the frame without the object.
+/// A primitive the scene schema does not know fails the composition's
+/// scene, as today's `compositionScene` throws in `parseScene`
+/// (`corrupt-scenes.test.ts`): nothing is listed, every object layer fails
+/// and draws nothing, and the rest of the frame draws.
 #[test]
-fn unknown_primitives_draw_nothing_as_today() {
+fn unknown_primitives_fail_the_composition_scene_as_today() {
     let mut r = Renderer::headless().unwrap();
     let mut knot = textured(false);
     let i = knot["layers"]
@@ -358,9 +359,20 @@ fn unknown_primitives_draw_nothing_as_today() {
     assert!(
         pm_render::unsupported_with_media(&doc, "Ptest-root", &MapResolver::default()).is_empty()
     );
-    let drawn = render(&mut r, &knot, &MapResolver::default()).expect("draws");
+    let frame = r
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request(),
+            &MapResolver::default(),
+        )
+        .unwrap();
+    let failed: Vec<&str> = frame.failures.iter().map(|f| f.layer.as_str()).collect();
+    assert_eq!(failed, vec!["o"]);
+    let drawn = r.read_rgba(&frame).unwrap();
     let mut without = textured(false);
     without["layers"][i]["on"] = json!(false);
     let empty = render(&mut r, &without, &MapResolver::default()).unwrap();
-    assert_eq!(drawn, empty, "the unknown primitive draws nothing");
+    assert_eq!(drawn, empty, "the object layer draws nothing");
 }

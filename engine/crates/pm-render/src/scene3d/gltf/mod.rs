@@ -31,9 +31,11 @@ use crate::three::math::{self, Mat4};
 
 pub use asset::{DecodedImage, GltfAsset};
 
-/// How a model asset's file resolves: loaded, missing (offline or
-/// unreadable: today's asset has no scene), or a file the importer
-/// accepted that this engine does not load (routed).
+/// How a model asset's file resolves: loaded, or missing (offline,
+/// unreadable, or a file the reader refuses). The reader accepts exactly
+/// the files today's importer loads (`gltf-acceptance.test.ts`), so a
+/// refused file is one whose asset has no scene today either: the
+/// missing-model box.
 pub fn lookup(path: &std::path::Path) -> super::model::ModelLookup {
     use super::model::ModelLookup;
     if std::fs::metadata(path).is_err() {
@@ -41,9 +43,7 @@ pub fn lookup(path: &std::path::Path) -> super::model::ModelLookup {
     }
     match asset::load(path) {
         Ok(a) => ModelLookup::Gltf(a),
-        Err(why) => {
-            ModelLookup::Unloadable(format!("imported model the engine does not load ({why})"))
-        }
+        Err(_) => ModelLookup::Missing,
     }
 }
 

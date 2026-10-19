@@ -5,6 +5,7 @@
 //! draws the background (the bottom of its set), the view override, and
 //! the static capability check.
 
+use crate::capability::Feature;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -557,16 +558,21 @@ pub(crate) fn plan_layer(pass: Option<&Pass3d>, layer: &Node) -> Result<Object3d
     }
 }
 
-/// A static capability issue: the layer (when one is at fault) and why.
-pub(crate) type Issue = (Option<String>, String);
+/// A static capability issue: the layer (when one is at fault) and the
+/// feature it uses that this renderer does not draw.
+pub(crate) type Issue = (Option<String>, Feature);
 
 fn str_member(n: Option<&Node>, key: &str) -> Option<String> {
     node::string(node::member(n, key)).map(|s| s.to_string_lossy())
 }
 
-/// Static checks of a composition's 3D layers against what this pass
-/// draws (conservative: anything that could need more at some time is
-/// listed). Texture images are checked when `assets` can open them.
+/// Static checks of a composition's 3D layers. Everything a 3D layer
+/// holds is drawn as today, including what today fails (a scene the
+/// schema refuses fails every object layer, `plan::layer_quad`; a model
+/// file neither importer loads is the missing-model box). What remains is
+/// the material maps' stills: a map is level 1 content, read from the same
+/// Chromium bitmap as an image layer, so a still outside the level 1
+/// classes reports the image layer's feature.
 pub(crate) fn check(
     root: &Node,
     _comp: &Node,
@@ -575,117 +581,52 @@ pub(crate) fn check(
 ) -> Vec<Issue> {
     let mut out = Vec::new();
     for l in layers {
+        if Role3d::of(l) != Some(Role3d::Object) {
+            continue;
+        }
         let data = node::member(node::member(Some(l), "d"), "data");
         let mut issues = Vec::new();
-        match Role3d::of(l) {
-            Some(Role3d::Object) => {
-                check_object(root, node::member(data, "object"), assets, &mut issues);
-            }
-            Some(Role3d::Light) => check_light(node::member(data, "light"), &mut issues),
-            _ => {}
-        }
-        out.extend(issues.into_iter().map(|why| (Some(js::layer_id(l)), why)));
+        check_maps(root, node::member(data, "object"), assets, &mut issues);
+        out.extend(issues.into_iter().map(|f| (Some(js::layer_id(l)), f)));
     }
     out
 }
 
 /// Static checks of a legacy `scene3d` layer's embedded scene
-/// (`d.data.scene`): its objects and lights meet the same checks as 3D
-/// object and light layers, so a routing decision holds at every frame.
+/// (`d.data.scene`): its objects' material maps, as for object layers. A
+/// scene the schema refuses (an unknown primitive or light type, or none
+/// at all) draws today's missing-definition checkerboard
+/// (`plan::layer_quad`).
 pub(crate) fn check_legacy_scene(
     root: &Node,
     layer: &Node,
     assets: Option<&dyn AssetResolver>,
-) -> Vec<String> {
+) -> Vec<Feature> {
     let scene = node::member(
         node::member(node::member(Some(layer), "d"), "data"),
         "scene",
     );
-    let Some(scene) = scene.filter(|s| matches!(s.kind(), NodeKind::Object(_))) else {
-        return vec!["a legacy 3D scene without a scene object".to_owned()];
-    };
     let mut out = Vec::new();
-    for o in node::array(node::member(Some(scene), "objects")).unwrap_or(&[]) {
-        let mut issues = Vec::new();
-        check_object(root, Some(o), assets, &mut issues);
-        // A stored scene `parseScene` refuses (an unknown primitive) fails
-        // the layer today (`sceneRuntime` validates it); a 3D object layer's
-        // unknown primitive draws nothing instead (`compositionRuntime`
-        // syncs its scene unvalidated).
-        if let Some(p) = str_member(node::member(Some(o), "source"), "primitive")
-            && !pm_geom3d::Primitive::known(&p)
-        {
-            issues.push(format!("{p} primitives"));
-        }
-        let id = str_member(Some(o), "id").unwrap_or_default();
-        out.extend(
-            issues
-                .into_iter()
-                .map(|why| format!("{why} (legacy scene object {id})")),
-        );
-    }
-    for l in node::array(node::member(Some(scene), "lights")).unwrap_or(&[]) {
-        let mut issues = Vec::new();
-        check_light(Some(l), &mut issues);
-        let id = str_member(Some(l), "id").unwrap_or_default();
-        out.extend(
-            issues
-                .into_iter()
-                .map(|why| format!("{why} (legacy scene light {id})")),
-        );
+    for o in node::array(node::member(scene, "objects")).unwrap_or(&[]) {
+        check_maps(root, Some(o), assets, &mut out);
     }
     out
 }
 
-/// The light kinds [`SceneBuilder`] draws (an absent type is a sun).
-fn check_light(light: Option<&Node>, out: &mut Vec<String>) {
-    if let Some(t) = node::member(light, "type") {
-        match node::string(Some(t)).map(|s| s.to_string_lossy()) {
-            Some(t) if matches!(t.as_str(), "sun" | "point" | "spot" | "area") => {}
-            Some(t) => out.push(format!("{t} lights")),
-            None => out.push("a 3D light type that is not a string".to_owned()),
-        }
-    }
-}
-
-/// One scene object (`d.data.object` of a 3D object layer, or an entry of
-/// a legacy scene's `objects`): its source and its materials' maps.
-fn check_object(
+/// One scene object's material maps (`d.data.object` of a 3D object
+/// layer, or an entry of a legacy scene's `objects`): each image map's
+/// still meets the level 1 image check ([`crate::media::probe_image`]),
+/// and without media, the recorded container
+/// ([`crate::stills::static_format`]), as for image layers. SVG maps are
+/// Chromium's raster (decision S1); offline and unreadable maps are
+/// today's missing textures at draw time.
+fn check_maps(
     root: &Node,
     object: Option<&Node>,
     assets: Option<&dyn AssetResolver>,
-    out: &mut Vec<String>,
+    out: &mut Vec<Feature>,
 ) {
     let asset = |a: &str| node::member(node::member(Some(root), "assets"), a);
-    let source = node::member(object, "source");
-    if let Some(a) = str_member(source, "assetId")
-        && let Some(record) = asset(&a)
-    {
-        // Imported glTF scenes draw here when this engine loads the file
-        // (an offline file is a missing model, as today); OBJ models draw
-        // here, other assets as the missing-model box.
-        let format = str_member(Some(record), "format").unwrap_or_default();
-        let name = str_member(Some(record), "name")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if matches!(format.as_str(), "gltf" | "glb")
-            || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
-        {
-            match assets.and_then(|r| r.path(&a, Some(record))) {
-                Some(path) => {
-                    if let super::model::ModelLookup::Unloadable(why) = super::gltf::lookup(&path) {
-                        out.push(why);
-                    }
-                }
-                // Without media the file cannot be checked: routed.
-                None if assets.is_none() => out.push("imported models".to_owned()),
-                None => {}
-            }
-        }
-    }
-    // A primitive `primitiveGeometry` does not know draws nothing, here as
-    // today (`scene3d::model`).
-    // Map images outside the drawn still classes.
     let mut materials: Vec<Option<&Node>> = vec![node::member(object, "material")];
     for slot in node::array(node::member(object, "slots")).unwrap_or(&[]) {
         materials.push(node::member(Some(slot), "material"));
@@ -709,25 +650,24 @@ fn check_object(
             }
             let format = str_member(Some(record), "format").unwrap_or_default();
             if format.eq_ignore_ascii_case("svg") {
-                // Chromium draws SVG maps through the same upload channel as
-                // level 1 SVG images, with the map's own unpack flags.
                 continue;
             }
             match assets {
                 Some(r) => {
                     if let Some(path) = r.path(&a, Some(record))
-                        && let Err(super::textures::MapError::Unsupported(why)) =
+                        && let Err(super::textures::MapError::Unsupported(f)) =
                             super::textures::Textures::probe(&path)
+                        && !out.contains(&f)
                     {
-                        out.push(why);
+                        out.push(f);
                     }
                 }
-                // Without media, the recorded container decides, as for
-                // image layers (`capability::check_media`).
                 None => {
                     let name = str_member(Some(record), "name").unwrap_or_default();
-                    if let Err(f) = crate::stills::static_format(&format, &name) {
-                        out.push(format!("3D texture map image ({f})"));
+                    if let Err(f) = crate::stills::static_format(&format, &name)
+                        && !out.contains(&f)
+                    {
+                        out.push(f);
                     }
                 }
             }
