@@ -651,7 +651,7 @@ describe('ViewerPresentation', () => {
   it('shows a named compatibility failure on the stage and clears it on a rendered frame', async () => {
     const service = new Service();
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);
-    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => null, createPainter: async () => new Painter() });
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
     await settle();
     presentation.update(PARAMS);
     const channel = service.channels[0]!;

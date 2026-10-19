@@ -194,7 +194,9 @@ export class CompatContextHost {
     // when the descriptor says the engine encoded Display P3. The presenter
     // writes those values to its P3 canvas. Our legacy GL context is sRGB:
     // reinterpret the imported values before converting to that space.
-    if (tag.colorSpace === 'displayP3' && source.colorSpace?.primaries !== 'smpte432') {
+    // (TypeScript's DOM library predates the 'smpte432' primaries value.)
+    const primaries: string | null | undefined = source.colorSpace?.primaries;
+    if (tag.colorSpace === 'displayP3' && primaries !== 'smpte432') {
       const pixels = c2.getImageData(0, 0, canvas.width, canvas.height);
       c2.putImageData(new ImageData(pixels.data, canvas.width, canvas.height, { colorSpace: 'display-p3' }), 0, 0);
     }
