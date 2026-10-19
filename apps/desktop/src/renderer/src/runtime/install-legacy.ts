@@ -107,6 +107,13 @@ export function installLegacyRuntime(PM: LegacyPM): () => void {
     transport.tool = PM.tool ?? 'select';
   });
   on('draw:status', () => {
+    // With the new engine on, its stats replace GL.stats (presentation-events.ts).
+    const engine = PM.EngineStats?.perf?.();
+    if (engine) {
+      Object.assign(perf, engine);
+      frameBus.emit('status');
+      return;
+    }
     const stats = PM.GL?.stats ?? {};
     perf.ms = PM.perf?.ms ?? stats.ms ?? 0;
     perf.fps = PM.perf?.fps ?? 0;

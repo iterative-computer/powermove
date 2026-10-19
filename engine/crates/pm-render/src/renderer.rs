@@ -5,6 +5,9 @@
 
 use std::sync::Arc;
 
+mod layer_raster;
+pub use layer_raster::{LayerPixels, LayerRaster};
+
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;

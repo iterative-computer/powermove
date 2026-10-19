@@ -197,6 +197,7 @@ fn state(view_seq: u64) -> ViewerState {
         edr: false,
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 

@@ -63,19 +63,47 @@ export class EngineTransport implements TransportDriver {
   private scrub = false;
   private scrubSentOn: DocumentSession | null = null;
 
+  /** The playhead state asked for while no session could take it (an
+   *  exclusive transport during a cold start or a restart): replayed on
+   *  the next session that draws. */
+  private pending: { playing: boolean; time: number; rate: number } | null = null;
+  private live = false;
+  /** The playhead as last asked or reported (seconds). */
+  private lastTime = 0;
+
   constructor(
     private readonly session: () => DocumentSession | null,
-    private readonly clock: HostClock
+    private readonly clock: HostClock,
+    private readonly options: { exclusive?: boolean } = {}
   ) {}
 
-  active(): boolean {
+  /** Whether a session draws and takes transport commands now. */
+  private drawing(): boolean {
     const s = this.session();
     return !!s && !s.closed && s.route === 'engine' && s.frames > 0 && s.id !== null;
   }
 
+  active(): boolean {
+    if (this.drawing()) return true;
+    // "Use New Engine" on: the engine keeps the transport while it starts
+    // or restarts; only capability routing (development scaffolding until
+    // it is removed) hands it to the current engine.
+    return this.options.exclusive === true && this.session()?.route !== 'legacy';
+  }
+
   /** Re-evaluates activity and tells the legacy transport when it changed. */
   refresh(): void {
+    const live = this.drawing();
+    const came = live && !this.live;
+    this.live = live;
     const active = this.active();
+    if (came && this.pending) {
+      // A session draws again: the playhead goes on from where it was asked.
+      const { playing, time, rate } = this.pending;
+      this.pending = null;
+      if (playing) this.shuttle(time, rate);
+      else this.seek(time, false);
+    }
     if (active === this.wasActive) return;
     this.wasActive = active;
     if (!active) this.run = null;
@@ -96,7 +124,18 @@ export class EngineTransport implements TransportDriver {
     this.shuttle(time, 1);
   }
 
+  /** An exclusive transport asked to move while no session draws: kept
+   *  for the next one (`refresh`). Returns whether it was kept. */
+  private hold(next: { playing?: boolean; time?: number; rate?: number }): boolean {
+    if (this.options.exclusive !== true || this.drawing()) return false;
+    const was = this.pending ?? { playing: false, time: this.lastTime, rate: 1 };
+    this.pending = { playing: next.playing ?? was.playing, time: next.time ?? was.time, rate: next.rate ?? was.rate };
+    return true;
+  }
+
   shuttle(time: number, rate: number): void {
+    this.lastTime = time;
+    if (this.hold({ playing: true, time, rate })) return;
     const s = this.session();
     const clock = s?.clock;
     const moving = !!clock && clock.state !== 'stopped' && clock.rate.num !== 0;
@@ -107,6 +146,8 @@ export class EngineTransport implements TransportDriver {
   }
 
   playAround(time: number, preRoll: number, postRoll: number): void {
+    this.lastTime = time;
+    if (this.hold({ playing: false, time })) return;
     const s = this.session();
     this.run = { before: s?.clock?.epoch ?? null, played: false };
     this.send({ command: 'seek', time: ticks(time), mode: 'exact' });
@@ -129,10 +170,13 @@ export class EngineTransport implements TransportDriver {
 
   pause(): void {
     this.run = null;
+    if (this.hold({ playing: false })) return;
     this.send({ command: 'pause' });
   }
 
   seek(time: number, scrub: boolean): void {
+    this.lastTime = time;
+    if (this.hold({ time })) return;
     if (scrub) this.syncScrub();
     if (this.run) this.run = { before: this.session()?.clock?.epoch ?? null, played: false };
     this.send({ command: 'seek', time: ticks(time), mode: scrub ? 'scrub' : 'exact' });
@@ -171,6 +215,7 @@ export class EngineTransport implements TransportDriver {
     // then the playhead stays where Play put it rather than following the
     // line backwards (contract 6 invariant 3).
     const media = mediaTicksAt(sample, Math.max(host ?? sample.hostTime, sample.hostTime));
-    return { time: media / TICKS_PER_SECOND, playing: moving, ended: !!run?.played && !moving };
+    this.lastTime = media / TICKS_PER_SECOND;
+    return { time: this.lastTime, playing: moving, ended: !!run?.played && !moving };
   }
 }

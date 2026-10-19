@@ -59,6 +59,8 @@ export type FromWorker =
   | { type: 'release'; session: number; release: FrameRelease }
   /** A frame drawn, with the session's stats after it. */
   | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
+  /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
+  | { type: 'done'; session: number; seq: number }
   | { type: 'vsync'; session: number; hint: VsyncHint }
   | { type: 'stats'; session: number; stats: PresenterStats }
   | { type: 'trace'; session: number; id: number; trace: TraceRecord | null }
@@ -182,6 +184,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       s.statsSentMs = now();
       post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } } });
     });
+    s.presenter.onDone((seq) => post({ type: 'done', session: id, seq }));
     s.presenter.start(requestFrame, cancelFrame);
     session = s;
   };

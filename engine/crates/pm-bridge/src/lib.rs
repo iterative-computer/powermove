@@ -32,6 +32,8 @@ pub mod ffi;
 pub mod host;
 #[cfg(target_os = "macos")]
 pub mod rendezvous;
+#[cfg(unix)]
+pub mod shm;
 #[cfg(target_os = "macos")]
 pub mod wire;
 

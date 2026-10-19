@@ -318,6 +318,15 @@ pub struct SurfaceDescriptor {
     pub platform: PlatformSurface,
 }
 
+/// What a surface pool carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum PoolRole {
+    Color,
+    DepthId,
+}
+
 /// The pool announced to the host when it is created or resized. Every
 /// surface is imported once with `importSharedTexture`; frames then name a
 /// `pool_index` only.
@@ -328,6 +337,14 @@ pub struct SurfacePool {
     /// Increases when the pool is replaced; frames from older generations are stale.
     pub generation: Seq,
     pub surfaces: Vec<SurfaceDescriptor>,
+    /// What the pool's surfaces carry. Absent (older peers) or `color`:
+    /// viewer frames. `depthId`: the depth and object-id surfaces of frames
+    /// whose viewer asked for them (`ViewerState::depth_id`; plan section 8,
+    /// the Phase 3c render transport). A depth pool never replaces the
+    /// color pool.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub role: Option<PoolRole>,
 }
 
 /// Fewest surfaces in a pool: ring + jitter buffer + 2 (section 18), with a
@@ -716,6 +733,7 @@ mod tests {
         let pool = SurfacePool {
             generation: Seq::ZERO,
             surfaces: (0..6).map(surface).collect(),
+            role: None,
         };
         assert!(pool.validate().is_ok());
         let mut bad = pool.clone();
@@ -727,6 +745,7 @@ mod tests {
         let small = SurfacePool {
             generation: Seq::ZERO,
             surfaces: (0..2).map(surface).collect(),
+            role: None,
         };
         assert!(small.validate().is_err());
     }

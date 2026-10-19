@@ -10,6 +10,8 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  Layer,
+  RasterWindow,
   PreviewViewport,
   AnimAPI,
   AssetRecord,
@@ -50,6 +52,7 @@ import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBac
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
+import { engineRaster, engineRasterSync, locateLayer, type RasterCrop, type RasterHost } from '../engine-connection/raster-surface';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -186,7 +189,19 @@ function makeProject(PM: LegacyPM): ProjectAPI {
     playing: () => !!PM?.playing,
     undo: () => PM?.hist?.undo?.(),
     redo: () => PM?.hist?.redo?.(),
-    snapshot: async (t, maxWidth) => (await PM?.Export?.snapshot?.(t ?? PM?.time ?? 0, maxWidth ?? 480)) ?? ''
+    snapshot: async (t, maxWidth) => {
+      // With the new engine on, the engine draws it (never the current engine).
+      // Today's path is the synchronous capture: a Blender composition with
+      // no prepared frame rejects with today's error; other failures are ''.
+      const engine = engineRender(PM);
+      if (engine) {
+        return engine.snapshotDataUrl(t ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj).catch((error: { code?: string; message?: string }) => {
+          if (error?.code === 'blenderFailed') throw new Error(String(error.message));
+          return '';
+        });
+      }
+      return (await PM?.Export?.snapshot?.(t ?? PM?.time ?? 0, maxWidth ?? 480)) ?? '';
+    }
   };
 }
 
@@ -196,6 +211,12 @@ const EMPTY_MAT4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 
 /** The native evaluator (engine-doc), when the flag is on; it answers through
  *  pm-wasm and falls back to the legacy code itself. */
+/** The engine's render transport while "Use New Engine" is on
+ *  (engine-connection/render-transport.ts). */
+function engineRender(PM: LegacyPM): import('../engine-connection/render-transport').EngineRenderTransport | null {
+  return PM?.EngineRender ?? null;
+}
+
 function native(PM: LegacyPM): import('../engine-doc/native').NativeApi | null {
   const doc = PM?.EngineDoc;
   return doc?.enabled && doc.api ? doc.api : null;
@@ -362,29 +383,118 @@ function makeMedia(PM: LegacyPM): MediaAPI {
   } as MediaAPI;
 }
 
+/* `render.raster()` with "Use New Engine" on: while a public call runs,
+   the raster service's base (beneath any extension wrapper) is the engine's
+   raster (engine-connection/raster-surface.ts). The compositor's and the
+   editing helpers' own `PM.raster` calls keep today's rasterizer. */
+let publicRaster = 0;
+
+function rasterHost(PM: LegacyPM): RasterHost {
+  const unwrap = (v: any) => PM?.EngineDoc?.tracker?.unwrap?.(v) ?? v;
+  return {
+    locate: (layer) => locateLayer(PM, layer, unwrap),
+    captionBounds: (layer, time) => PM?.captionBounds?.(layer, time) ?? null
+  };
+}
+
+/** The engine's raster in today's shape, or null (logged) when it fails. */
+function engineRasterBase(PM: LegacyPM, engine: NonNullable<ReturnType<typeof engineRender>>, args: Parameters<RenderAPI['raster']>): ReturnType<RenderAPI['raster']> {
+  const [layer, scale = 1, time, , crop] = args;
+  try {
+    return engineRasterSync(engine, rasterHost(PM), layer, Number(scale) || 1, time ?? PM?.time ?? 0, crop as RasterCrop) as ReturnType<RenderAPI['raster']>;
+  } catch (error) {
+    console.warn(`[engine] render.raster(${String((layer as any)?.id ?? '')}) failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 function makeRender(PM: LegacyPM): RenderAPI {
-  /* Raster pixels stay the renderer's; with the native evaluator a text
-     layer's placement metrics come from pm-wasm (compared in dual mode). */
-  const raster = (...args: Parameters<RenderAPI['raster']>) => {
-    const surface = PM?.raster?.(...args) ?? null;
+  /* With the native evaluator a text layer's placement metrics come from
+     pm-wasm at scale 1 (compared in dual mode), as they do with the flag
+     off; the pixels are the engine's with "Use New Engine" on. */
+  const placed = (surface: ReturnType<RenderAPI['raster']>, args: Parameters<RenderAPI['raster']>) => {
     const n = native(PM);
     if (!n || !surface || (args[1] ?? 1) !== 1) return surface;
     return n.rasterSurface(surface, args[0], args[2] ?? PM?.time ?? 0);
+  };
+  const raster = (...args: Parameters<RenderAPI['raster']>) => {
+    if (!engineRender(PM)) return placed(PM?.raster?.(...args) ?? null, args);
+    publicRaster++;
+    try {
+      return placed(PM?.raster?.(...args) ?? null, args);
+    } finally {
+      publicRaster--;
+    }
   };
   return {
     gl: {
       bounds: (layer, time) => { const n = native(PM); return (n ? n.bounds(layer, time) : PM?.GL?.bounds?.(layer, time)) ?? null; },
       pick: (x, y, time, options) => { const n = native(PM); return (n ? n.pick(x, y, time, options) : PM?.GL?.pick?.(x, y, time, options)) ?? null; },
-      init: (...args) => !!PM?.GL?.init?.(...args),
-      resize: (...args) => !!PM?.GL?.resize?.(...args),
+      /* With the new engine on, engine presentation is bound to the canvas
+         the caller passes (engine-connection/canvas-binding.ts); the
+         compositor keeps its context for capability routing, scaffolding
+         until it is removed. */
+      init: (canvas, options) => {
+        const legacy = !!PM?.GL?.init?.(canvas, options);
+        return PM?.EngineCanvas?.bind?.(canvas) === true || legacy;
+      },
+      resize: (width, height, viewport) => {
+        const legacy = !!PM?.GL?.resize?.(width, height, viewport);
+        PM?.EngineCanvas?.resize?.();
+        return legacy || !!PM?.EngineCanvas?.bound;
+      },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       get context() { return PM?.GL?.gl ?? null; }
     },
     raster,
     textLayout: (layer, time) => { const n = native(PM); const t = time ?? PM?.time ?? 0; return (n ? n.textLayout(layer, t) : PM?.textCaretLayout?.(layer, t)) ?? null; },
-    renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
-    snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
+    /* The synchronous compatibility path (apiVersion 1 to 3): with the new
+       engine on, pixels come from the engine through a synchronous request
+       (render-transport.ts), never from the current engine. */
+    renderFrameTo: (time, width, height, options) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.renderFrameTo?.(time, width, height, options);
+      try {
+        return engine.renderFrameToCanvasSync(time, width, height, options);
+      } catch (error) {
+        // A Blender composition without its prepared frame fails with
+        // today's words; anything else names the engine's reason.
+        const e = error as { code?: string; message?: string };
+        throw new Error(e?.code === 'blenderFailed' ? String(e.message) : `The engine could not render the frame: ${e?.message ?? String(error)}`);
+      }
+    },
+    snapshot: (time, maxWidth) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.Export?.snapshot?.(time, maxWidth) ?? '';
+      return engine.snapshotDataUrlSync(time ?? PM?.time ?? 0, maxWidth ?? 480, PM.proj);
+    },
+    /* apiVersion 4's async siblings (additive): the UI never blocks. */
+    /* Today's `PM.Export.snapshotAsync` with the flag on or off: with the
+       engine it reaches `PM.EngineCaptures` through the exporter (and any
+       wrapper of it), which prepares a Blender frame first as today. */
+    snapshotAsync: async (time: number, maxWidth = 480) => {
+      const engine = engineRender(PM);
+      if (!engine || PM?.Export?.snapshotAsync) return (await PM?.Export?.snapshotAsync?.(time, maxWidth)) ?? '';
+      return engine.snapshotDataUrl(time ?? PM?.time ?? 0, maxWidth, PM.proj, { prepareBlender: true });
+    },
+    renderFrameToAsync: async (time: number, width: number, height: number, options?: Record<string, unknown>) => {
+      const engine = engineRender(PM);
+      if (!engine) return PM?.renderFrameTo?.(time, width, height, options);
+      return engine.renderFrameTo(time, width, height, options);
+    },
+    /* The same surface shape with the flag on or off; the crop is today's
+       fifth `raster` argument. With the engine, wrappers beneath the
+       service run around the engine's raster as for `raster`. */
+    rasterAsync: async (layer: Layer, scale = 1, time?: number, crop?: RasterWindow | null) => {
+      const engine = engineRender(PM);
+      const args = [layer, scale, time, undefined, crop ?? undefined] as Parameters<RenderAPI['raster']>;
+      if (!engine) return raster(...args);
+      const wrapped = !!PM?.Kernel?.services?.get?.('raster') && PM.Kernel.services.get('raster') !== PM?.__rasterBase;
+      if (wrapped) return raster(...args);
+      const t = time ?? PM?.time ?? 0;
+      return placed((await engineRaster(engine, rasterHost(PM), layer, Number(scale) || 1, t, crop as RasterCrop)) as ReturnType<RenderAPI['raster']>, args);
+    }
   } as RenderAPI;
 }
 
@@ -787,7 +897,11 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   // can capture/delegate to it without changing the base beneath themselves.
   const rasterDescriptor = Object.getOwnPropertyDescriptor(PM, 'raster');
   let nativeRaster = PM.raster;
-  const rasterBase: RenderAPI['raster'] = (...args) => nativeRaster?.(...args) ?? null;
+  const rasterBase: RenderAPI['raster'] = (...args) => {
+    const engine = publicRaster > 0 ? engineRender(PM) : null;
+    return engine ? engineRasterBase(PM, engine, args) : (nativeRaster?.(...args) ?? null);
+  };
+  PM.__rasterBase = rasterBase;
   const rasterRegistration = kernel.services.register('raster', rasterBase);
   const rasterDispatch: RenderAPI['raster'] = (...args) =>
     (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);

@@ -224,6 +224,13 @@ pub enum Request {
     ToolCall(ToolCall),
     /// Host → job engine. Answer: `mediaFacts`.
     ProbeMedia(crate::media::ProbeMedia),
+    /// Host → interactive engine, on the host port only: a renderer
+    /// session's snapshot (the Phase 3c render transport). Answer:
+    /// `snapshot`.
+    Snapshot(crate::snapshot::HostSnapshot),
+    /// Job engine → host: a layer's compatibility pixels for an export
+    /// frame, drawn by the document's renderer. Answer: `compatFrame`.
+    CompatFrame(crate::snapshot::CompatFrameRequest),
 }
 
 /// Responses, one per request kind.
@@ -259,6 +266,8 @@ pub enum Response {
     ExtensionRegistered(ExtensionRegistered),
     ToolResult(ToolResult),
     MediaFacts(Box<crate::media::MediaFacts>),
+    Snapshot(Box<crate::snapshot::SnapshotOutcome>),
+    CompatFrame(Box<crate::snapshot::CompatFrame>),
 }
 
 /// One-way messages. Each names its direction.
@@ -319,6 +328,13 @@ pub enum Event {
     /// shader fallback runner's requests and pixels (contract 10,
     /// [`ShaderFallbackMessage`]).
     ShaderFallback(ShaderFallbackMessage),
+    /// Renderer → interactive engine (session-bound): compatibility pixels
+    /// of one layer at one frame (a `raster` override's result, an
+    /// extension's compatibility WebGL2 context), and their disposal.
+    Compat(crate::snapshot::CompatMessage),
+    /// Interactive engine → renderer (session-bound): presentation stats
+    /// for the status bar and the performance panel.
+    RenderStats(crate::snapshot::RenderStats),
 }
 
 /// Response kinds, for correlating answers with requests.
@@ -347,6 +363,8 @@ pub enum ResponseKind {
     ExtensionRegistered,
     ToolResult,
     MediaFacts,
+    Snapshot,
+    CompatFrame,
 }
 
 impl Request {
@@ -379,6 +397,8 @@ impl Request {
             Request::RegisterExtension(_) => ResponseKind::ExtensionRegistered,
             Request::ToolCall(_) => ResponseKind::ToolResult,
             Request::ProbeMedia(_) => ResponseKind::MediaFacts,
+            Request::Snapshot(_) => ResponseKind::Snapshot,
+            Request::CompatFrame(_) => ResponseKind::CompatFrame,
         }
     }
 
@@ -399,7 +419,9 @@ impl Request {
             | Request::OutputDestination(_)
             | Request::CommitOutput(_)
             | Request::HardwareSessions(_)
-            | Request::ProbeMedia(_) => ContractId::HostServices,
+            | Request::ProbeMedia(_)
+            | Request::CompatFrame(_) => ContractId::HostServices,
+            Request::Snapshot(_) => ContractId::Frame,
             Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
                 ContractId::Blender
             }
@@ -452,6 +474,8 @@ impl Response {
             Response::ExtensionRegistered(_) => ResponseKind::ExtensionRegistered,
             Response::ToolResult(_) => ResponseKind::ToolResult,
             Response::MediaFacts(_) => ResponseKind::MediaFacts,
+            Response::Snapshot(_) => ResponseKind::Snapshot,
+            Response::CompatFrame(_) => ResponseKind::CompatFrame,
         }
     }
 }
@@ -469,6 +493,7 @@ impl Event {
             Event::JobStatus(_) => ContractId::Priority,
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
             Event::ShaderFallback(_) => ContractId::Definitions,
+            Event::Compat(_) | Event::RenderStats(_) => ContractId::Frame,
         }
     }
 
@@ -483,6 +508,8 @@ impl Event {
                 | Event::Transport(_)
                 | Event::Audio(_)
                 | Event::ShaderFallback(_)
+                | Event::Compat(_)
+                | Event::RenderStats(_)
         )
     }
 }
@@ -526,6 +553,8 @@ impl Validate for Request {
             Request::SubmitJob(job) => job.validate(),
             Request::ToolCall(call) => call.validate(),
             Request::ProbeMedia(probe) => probe.validate(),
+            Request::Snapshot(snapshot) => snapshot.validate(),
+            Request::CompatFrame(request) => request.validate(),
             Request::CloseSession
             | Request::Resync(_)
             | Request::CheckConsistency(_)
@@ -552,6 +581,8 @@ impl Validate for Response {
             Response::Lease(lease) => lease.validate(),
             Response::HandleResolved(resolved) => resolved.validate(),
             Response::MediaFacts(facts) => facts.validate(),
+            Response::Snapshot(result) => result.validate(),
+            Response::CompatFrame(frame) => frame.validate(),
             _ => Ok(()),
         }
     }
@@ -575,6 +606,7 @@ impl Validate for Event {
             Event::Failure(report) => report.error.validate(),
             Event::InFlight(in_flight) => in_flight.validate(),
             Event::ShaderFallback(message) => message.validate(),
+            Event::Compat(message) => message.validate(),
             _ => Ok(()),
         }
     }

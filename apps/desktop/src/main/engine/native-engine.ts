@@ -80,6 +80,10 @@ export type NativeEngineOptions = {
    *  it Blender requests answer `unsupported` and the current engine runs
    *  Blender. */
   blender?: { locate: BlenderLocator; tempRoot: string };
+  /** The job engine's `compatFrame` requests: a layer's compatibility
+   *  pixels drawn by the document's window (compat-frames.ts). Without it
+   *  they answer `notHeadlessRenderable`. */
+  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -122,6 +126,10 @@ export const PROBE_SUPERSEDED = 'A newer probe of the same asset replaced this o
 interface ProbeSlot {
   waiting: { interpret: string | null; resolve: (facts: MediaFacts) => void; reject: (cause: unknown) => void } | null;
 }
+
+/** Events the engine sends for a session, which main ignores for the
+ *  sessions it opened itself. */
+const SESSION_EVENTS: ReadonlySet<string> = new Set(['patchesApplied', 'renderStats', 'failure', 'shaderFallback', 'compat', 'audio', 'clock', 'surfacePool', 'frame']);
 
 export class NativeEngine {
   readonly services: HostServicesCore;
@@ -313,6 +321,17 @@ export class NativeEngine {
   }
 
   /** The port a client holds to an engine (for handle binding by clients). */
+  /** Main's own host port on the current launch of `process`. */
+  hostPort(process: EngineProcess): { port: number; generation: number } | null {
+    const launch = this.supervisors[process].current;
+    return launch && !launch.exiting ? { port: launch.hostPort, generation: launch.generation } : null;
+  }
+
+  /** Posts an event to `process` for a session main opened. */
+  event(process: EngineProcess, body: Event, session: number | null): void {
+    this.supervisors[process].event(body, session);
+  }
+
   clientPort(id: number, process: EngineProcess): { port: number; generation: number } | null {
     return this.clients.get(id)?.ports.get(process) ?? null;
   }
@@ -555,13 +574,22 @@ export class NativeEngine {
             return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
           }
         }
+        if (body.type === 'compatFrame') {
+          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for compatibility frames.'));
+          if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
+          const { type: _type, ...request } = body;
+          return this.options.compatFrame(request);
+        }
         return this.services.serve(process, current.hostPort, body, session);
       },
       event: (body, session) => this.onEvent(process, body, session)
     };
   }
 
-  private onEvent(process: EngineProcess, body: Event, _session: number | null): void {
+  private onEvent(process: EngineProcess, body: Event, session: number | null): void {
+    // What a session main opened itself reports (window snapshot sessions,
+    // window-sessions.ts): main only snapshots them.
+    if (session !== null && SESSION_EVENTS.has(body.type)) return;
     switch (body.type) {
       case 'inFlight':
         if (!validInFlight(body)) throw new Error('a breadcrumb lists at most 256 attributable items');
