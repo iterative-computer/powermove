@@ -992,6 +992,24 @@ Six capture-independent contract tests cover new residuals, both regression
 axes, improvements with stale budgets, lowering/removal, missing selected
 measurements, corpus identity collisions and fixture/path validation.
 
+Round 7 image gates pass in debug and release (integration snapshot
+`a80796f9`, including dochost `f89a239e` and compclose `e9a80939`):
+
+| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Failed/refused |
+|---|---:|---:|---:|---:|---:|
+| Main raster | 495 | 1 CV | 484 | 11 | 0 |
+| Closure raster | 116 | 1 CV | 113 | 3 | 0 |
+| Actual source textures | 3 | 1 CV | 0 | 3 | 0 |
+| Independent large paths | 4 | 1 CV | 2 | 2 | 0 |
+| Composed text, original and isolation | 477 | 2 CV | 473 | 4 | 0 |
+| Total per profile | 1095 | unchanged | 1072 | 23 | 0 |
+
+The fresh app matrix passes 22/22, including caption burn-in, live window
+seeds and document-host boot. The affected TypeScript suite passes 264 tests
+in 14 files with no skips; the six ratchet contract tests pass in both Rust
+profiles. Release validation uses `CARGO_PROFILE_RELEASE_LTO=false` for the
+previously disclosed cache/bitcode limitation; it does not verify shipping LTO.
+
 The follow-up **textexact** lane owns reducing these measurements to zero
 before beta: line-for-line ports of Skia's CPU AAA scan converter and
 SkStroke for glyph masks, Graphite's stroke tessellation for large-path

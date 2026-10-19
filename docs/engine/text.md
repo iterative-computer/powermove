@@ -498,8 +498,17 @@ addition to the earlier static-startup parity run.
 
 Orchestrator decision **FONTS-R** (2026-10-19) places the 23 measured Round 6
 pixel residuals in an explicit downward-only ratchet; see `text-render.md`,
-“Round 7”. Font selection, layout and the existing 1-CV raster / 2-CV
-composition bounds are unchanged. Unlisted failures and stale budgets after
+“Round 7”. The ratchet leaves font selection, layout and the existing
+1-CV raster / 2-CV composition bounds unchanged. Unlisted failures and stale budgets after
 an improvement fail. The textexact follow-up owns the CPU AAA/SkStroke,
-Graphite stroke tessellation and Fontations COLR ports; this closing round
-changes test policy only.
+Graphite stroke tessellation and Fontations COLR ports. The ratchet changes
+gate policy only; no glyph-rasterization port is started in this round.
+
+The bridge integration retains the scoped served-font provider for views
+and snapshots. Main-owned fallback snapshot sessions bind to their window's
+font seeds before resync, fail on a rejected binding and clear stale bindings
+before session ids are reused after a restart. Per-capture caption visibility
+is carried through the typed protocol and restored for later captures and
+viewer frames. See `text-render.md` and RFC 16. The fresh Round 7 app matrix
+passes 22/22; all 23 measured residuals match their FONTS-R budgets in debug
+and release, with every other case on its original strict bound.
