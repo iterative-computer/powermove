@@ -48,6 +48,26 @@ async function typewriterProject(page: Page): Promise<void> {
   });
 }
 
+/** A 320×180 composition with a rotating ellipse the shape-tint fixture
+ *  tints, and a plain rectangle, over #203040. */
+async function shapeTintProject(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Shape tint export', w: 320, h: 180, fps: 30, dur: 3, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 3, d: { shape: 'ellipse', w: 120, h: 80, color: '#33CC66', stroke: 0 } }, project);
+    tinted.id = 'tinted';
+    tinted.p['position.x'].v = 100; tinted.p['position.y'].v = 90;
+    tinted.p['rotation'] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, 90)] });
+    const plain = PM.mkLayer('shape', { name: 'Plain', from: 0, dur: 3, d: { shape: 'rect', w: 80, h: 60, color: '#3366CC', stroke: 0 } }, project);
+    plain.id = 'plain';
+    plain.p['position.x'].v = 230; plain.p['position.y'].v = 90;
+    project.layers = [tinted, plain];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+  });
+}
+
 /** The next save panel answers `file`. */
 async function stubSavePanel(app: ElectronApplication, file: string): Promise<void> {
   await app.evaluate(({ dialog }, target) => {
@@ -98,17 +118,22 @@ test.describe('Use New Engine: existing extensions', () => {
         }
         return { typed, plain };
       };
+      /** Section 25's render measure over rows [from, to): the largest
+       *  channel difference, and how many channel values differ by more
+       *  than 1 (and by more than 8) of how many. */
       const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray, from: number, to: number) => {
-        let max = 0, over = 0;
+        let max = 0, over = 0, over1 = 0, values = 0;
         for (let y = from; y < to; y++) for (let x = 0; x < W; x++) {
           for (let c = 0; c < 3; c++) {
             const i = (y * W + x) * 4 + c;
             const d = Math.abs(a[i]! - b[i]!);
+            values++;
             if (d > max) max = d;
+            if (d > 1) over1++;
             if (d > 8) over++;
           }
         }
-        return { max, over };
+        return { max, over, over1, values };
       };
       const frames: Record<string, { engine: Uint8ClampedArray; today: Uint8ClampedArray }> = {};
       const contact = document.createElement('canvas'); contact.width = W * 2; contact.height = H * 4;
@@ -161,7 +186,7 @@ test.describe('Use New Engine: existing extensions', () => {
       expect(result.ink[name].engine.plain).toBeGreaterThan(100);
       // The wrapper's raster is today's: the typed band matches the
       // compositor's within one code value.
-      expect(result.diffs[name].typed.max).toBeLessThanOrEqual(1);
+      expect(result.diffs[name].typed.max, `${name}: typed band`).toBeLessThanOrEqual(1);
     }
     // Viewer frames asked the producer for the frames they drew.
     expect(result.viewerAsked).toBeGreaterThan(0);
@@ -169,6 +194,127 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(result.restoredInk.plain).toBe(result.fullInk.plain);
     expect(result.restoredInk.typed).toBeGreaterThan(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
+    // The plain layer the engine draws itself (no override) is today's too:
+    // an existing project must not change (amendment 22; section 25: <= 1 CV
+    // for 99.9% of values, <= 4 for any).
+    for (const name of ['empty', 'partial', 'full']) {
+      const plain = result.diffs[name].plain;
+      expect(plain.over1, `${name}: unaffected text vs today`).toBeLessThanOrEqual(plain.values * 0.001);
+      expect(plain.max, `${name}: unaffected text vs today`).toBeLessThanOrEqual(4);
+      expect(result.ink[name].engine.plain, `${name}: unaffected text ink`).toBe(result.ink[name].today.plain);
+    }
+  });
+
+  test('the typewriter project exports through the engine, the window drawing the override frame by frame', async ({ session }, testInfo) => {
+    test.setTimeout(240_000);
+    await cp(path.join(__dirname, 'fixtures/typewriter-effect'), path.join(session.userData, 'extensions/typewriter-effect'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    const { app, page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('typewriter-effect') && Boolean((window as any).PM?.EngineRender));
+    await typewriterProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-typewriter-export-'));
+    try {
+      const folder = path.join(root, 'Frames');
+      await stubSavePanel(app, folder);
+      const run = await page.evaluate(async () => {
+        const PM = (window as any).PM;
+        const before = PM.EngineRender.compatStats.exportAsks;
+        const result = await PM.Export.run({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false });
+        return { result, exportAsks: PM.EngineRender.compatStats.exportAsks - before };
+      });
+      console.log(JSON.stringify(run));
+      expect(run.result).toEqual({ cancelled: false });
+      // The job engine drew it (amendment 21: never the current exporter),
+      // asking this window for the typed layer at each frame.
+      expect(run.exportAsks, 'export asks (0: the export went to the current exporter)').toBeGreaterThanOrEqual(90);
+      const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
+      expect(files.length).toBe(90);
+      const frames = [0, 24, 75];
+      const today = await page.evaluate((frames) => {
+        const PM = (window as any).PM;
+        return frames.map((f) => Array.from(PM.renderFrameTo(f / 30, 480, 270, { mblur: false }).getContext('2d').getImageData(0, 0, 480, 270).data as Uint8ClampedArray));
+      }, frames);
+      const diffs = frames.map((frame, i) => {
+        const exported = pngRgba(path.join(folder, files[frame]!));
+        let max = 0, over1 = 0, values = 0;
+        for (let p = 0; p < 480 * 270 * 4; p += 4) for (let c = 0; c < 3; c++) {
+          const d = Math.abs(exported[p + c]! - today[i]![p + c]!);
+          values++;
+          if (d > max) max = d;
+          if (d > 1) over1++;
+        }
+        return { frame, max, over1, values };
+      });
+      console.log(JSON.stringify(diffs));
+      for (const d of diffs) {
+        expect(d.over1, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(d.values * 0.001);
+        expect(d.max, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(4);
+      }
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a render queue job with a raster override draws the project as queued, not as edited since', async ({ session }) => {
+    test.setTimeout(240_000);
+    await cp(path.join(__dirname, 'fixtures/compat-corpus/shape-tint'), path.join(session.userData, 'extensions/shape-tint'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    const { app, page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
+    await shapeTintProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineRender.producing), { timeout: 10_000 }).toEqual(['rasterOverride']);
+    const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-compat-queue-'));
+    try {
+      const folder = path.join(root, 'Queued');
+      await stubSavePanel(app, folder);
+      const frames = [0, 45, 89];
+      // Today's compositor at the queued state, then an edit the job must not see.
+      const today = await page.evaluate(async (frames) => {
+        const PM = (window as any).PM;
+        const reference = frames.map((f) => Array.from(PM.renderFrameTo(f / 30, 320, 180, { mblur: false }).getContext('2d').getImageData(0, 0, 320, 180).data as Uint8ClampedArray));
+        const added = await PM.Export.addToQueue({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false });
+        const tinted = PM.proj.layers.find((l: any) => l.id === 'tinted');
+        // Its raster changes too (a narrower ellipse), not only where it sits.
+        tinted.p['position.x'].v = 200;
+        tinted.d.w = 60;
+        PM.touch();
+        return { reference, added };
+      }, frames);
+      expect(today.added).toMatchObject({ status: 'added' });
+      const asksBefore = await page.evaluate(() => (window as any).PM.EngineRender.compatStats.exportAsks);
+      await page.evaluate(() => (window as any).PM.Export.queueDialog());
+      const panel = page.getByRole('dialog', { name: 'Render Queue', exact: true });
+      await panel.getByRole('button', { name: 'Start Queue', exact: true }).click();
+      await expect(panel.locator('.render-queue-job').nth(0)).toContainText('Done', { timeout: 180_000 });
+      const asks = await page.evaluate(() => (window as any).PM.EngineRender.compatStats.exportAsks) - asksBefore;
+      expect(asks).toBeGreaterThanOrEqual(90);
+      const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
+      expect(files.length).toBe(90);
+      const diffs = frames.map((frame, i) => {
+        const exported = pngRgba(path.join(folder, files[frame]!));
+        let max = 0, over1 = 0, values = 0;
+        for (let p = 0; p < 320 * 180 * 4; p += 4) for (let c = 0; c < 3; c++) {
+          const d = Math.abs(exported[p + c]! - today.reference[i]![p + c]!);
+          values++;
+          if (d > max) max = d;
+          if (d > 1) over1++;
+        }
+        return { frame, max, over1, values };
+      });
+      console.log(JSON.stringify({ asks, diffs }));
+      for (const d of diffs) {
+        expect(d.over1, `frame ${d.frame}: vs today at the queued state`).toBeLessThanOrEqual(d.values * 0.001);
+        expect(d.max, `frame ${d.frame}: vs today at the queued state`).toBeLessThanOrEqual(4);
+      }
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {
@@ -180,21 +326,7 @@ test.describe('Use New Engine: existing extensions', () => {
     await session.openEditor();
     const { app, page } = session;
     await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
-    await page.evaluate(() => {
-      const PM = (window as any).PM;
-      const project = PM.mkProject({ name: 'Shape tint export', w: 320, h: 180, fps: 30, dur: 3, bg: '#203040' });
-      project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
-      const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 3, d: { shape: 'ellipse', w: 120, h: 80, color: '#33CC66', stroke: 0 } }, project);
-      tinted.id = 'tinted';
-      tinted.p['position.x'].v = 100; tinted.p['position.y'].v = 90;
-      tinted.p['rotation'] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, 90)] });
-      const plain = PM.mkLayer('shape', { name: 'Plain', from: 0, dur: 3, d: { shape: 'rect', w: 80, h: 60, color: '#3366CC', stroke: 0 } }, project);
-      plain.id = 'plain';
-      plain.p['position.x'].v = 230; plain.p['position.y'].v = 90;
-      project.layers = [tinted, plain];
-      PM.replaceProject(project);
-      PM.Projects?.put?.(PM.proj);
-    });
+    await shapeTintProject(page);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineRender.producing), { timeout: 10_000 }).toEqual(['rasterOverride']);
     const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-compat-export-'));
@@ -221,25 +353,33 @@ test.describe('Use New Engine: existing extensions', () => {
       }, frames);
       const diffs = frames.map((frame, i) => {
         const exported = pngRgba(path.join(folder, files[frame]!));
-        let max = 0, over = 0, red = 0, todayRed = 0;
+        let max = 0, over1 = 0, values = 0, red = 0, todayRed = 0;
+        const worst: Array<{ x: number; y: number; exported: number[]; today: number[] }> = [];
         for (let p = 0; p < 320 * 180 * 4; p += 4) {
+          let pixel = 0;
           for (let c = 0; c < 3; c++) {
             const d = Math.abs(exported[p + c]! - today[i]![p + c]!);
+            values++;
             if (d > max) max = d;
-            if (d > 2) over++;
+            if (d > 1) over1++;
+            pixel = Math.max(pixel, d);
           }
+          if (pixel > 4 && worst.length < 6) worst.push({ x: (p / 4) % 320, y: Math.floor(p / 4 / 320), exported: [...exported.subarray(p, p + 4)], today: today[i]!.slice(p, p + 4) });
           if (exported[p]! > 200 && exported[p + 1]! < 80) red++;
           if (today[i]![p]! > 200 && today[i]![p + 1]! < 80) todayRed++;
         }
-        return { frame, max, over, red, todayRed };
+        return { frame, max, over1, values, red, todayRed, worst };
       });
       console.log(JSON.stringify(diffs));
       await testInfo.attach('export-frame-45', { path: path.join(folder, files[45]!), contentType: 'image/png' });
-      for (const d of diffs) {
-        expect(d.red).toBeGreaterThan(1000);
-        expect(Math.abs(d.red - d.todayRed)).toBeLessThanOrEqual(Math.max(8, d.todayRed * 0.01));
-      }
       expect(session.diagnostics.pageErrors).toEqual([]);
+      for (const d of diffs) {
+        // The override drew (the tint is red), and the frame is today's
+        // (section 25: <= 1 CV for 99.9% of values, <= 4 for any).
+        expect(d.red, `frame ${d.frame}: tinted`).toBeGreaterThan(1000);
+        expect(d.over1, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(d.values * 0.001);
+        expect(d.max, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(4);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
