@@ -828,16 +828,134 @@ counts, maximum deltas and image paths are in the round 5 JSON report;
 visible (`max >3 CV` or `>10` pixels) and sub-visible entries are listed
 separately. Both classes still fail their original gates.
 
+## Round 6: shared Canvas2D paths and image filters
+
+Level 1 canonical glyph paths now go through
+`pm_vector::canvas2d::Context`, including its rectangle/convex/path dispatch,
+Graphite tessellation, original backing-canvas viewport, 1/256-pixel vertex
+snapping, sample decisions, stroker and per-sample N32 blend/resolve. The
+text-specific copy of the Graphite tessellator and analytic rectangle
+rasterizer is removed. `PathRasterizer` is a small host interface in
+pm-text, implemented by pm-vector, which already depends on pm-text for
+SVG text. It avoids a circular dependency and keeps a single path renderer.
+
+Canonical glyphs of a draw share one recorded pass. Resolving each glyph
+separately was wrong for analytic rectangular glyphs next to curved paths:
+the curved draw requests MSAA for the pass, including the rectangle's
+triangle coverage at its corners. Device-space region rendering keeps the
+full canvas's viewport round trip before cropping; its regression test
+compares a crop byte for byte with the full canvas for curved fills,
+rectangles and round strokes. Canonical fake-bold outlines are framed at
+64 px and filled through the same renderer. Strokes above the strike limit
+follow the `needsExactCTM` branch in `PathOpSubmitter`: the canonical
+outline is first transformed into source space, then stroked with the
+unchanged canvas CTM.
+`SkFont::setupForAsPaths` re-enables subpixel positioning; the Mac scaler's
+4× horizontal path query is therefore retained for the canonical strike too.
+
+The small caption-stroke hypothesis has a different result. Chromium's
+[SubRunContainer](https://github.com/google/skia/blob/chrome/m152/src/text/gpu/SubRunContainer.cpp)
+tries the SDF/direct-mask routes before the ordinary path route when the
+device text size is below the maximum strike size. A nonzero-width stroke
+does not bypass these routes. At 54 and 82 px, the requested colored-stroke
+and pop cases therefore use
+[SkScalerContext::GenerateImageFromPath](https://github.com/google/skia/blob/chrome/m152/src/core/SkScalerContext.cpp),
+with CPU analytic coverage, horizontal LCD filtering and mask gamma. They
+retain that route; moving them to Graphite would change today's rendering.
+Their remaining CPU outline/coverage differences are still blockers.
+A counterfactual run forcing the six pop cases through Graphite produced
+1,009–11,151 pixels beyond 1 CV (max 156–214), compared with 0–74 pixels
+(max 0–13) on the production mask route. The counterfactual is not shipped
+and is not counted among the production residuals.
+
+Text animator blur now uses `pm_vector::canvas2d::filter::BlurPlan` and the
+existing path-mask GPU executor/shader, parameterized for premultiplied
+RGBA8. It shares the scale selection, quantized rescale steps, paired taps,
+2D/1D selection, transparent borders and final sampling with path masks.
+The initial N32 save layer includes ink outside the output canvas that can
+reach it through the filter. Canvas bounds select the filter plan; clipping
+to the raster crop happens after filtering. Filter results are retained by
+the encoder, rather than returned as unaccounted targets to the target pool.
+The old text-only float Gaussian shader is removed.
+
+The CPU reference uses the same plan and a measured Metal UNORM8 sampler:
+weights round to 1/256, interpolation operates on integer channel values,
+and the result rounds to 1/16 of a code value before normalization. An
+independent GPU test sweeps every horizontal weight bucket, with nontrivial
+interpolation on both axes and four input channels. Normalizing bytes
+before interpolation changes halfway cases.
+The CPU model also preserves source origins, border coordinates and N32
+storage after each pass. The existing float paint bound remains unchanged.
+All 54 path-mask capture canvases remain bit-exact after the RGBA extension.
+
+Typing performance remains owned by the performance lane. The committed
+paired harness (`fad1e567`) and the round 5 measurements above are retained.
+To rerun the same legacy/native comparison after building the current addons:
+
+```sh
+cd apps/desktop
+PM_TEXT_TYPING_PAIRED=1 PM_TEXT_TYPING_MEASURE=1 \
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+  bunx playwright test e2e/native-engine-text-typing.spec.ts --workers=1
+```
+
+The independent `capture/render.ts --set paths` set adds two 320 px caption
+strokes (plain and oblique/highlighted at density 1.25) and two 300 px
+synthetic faces. Both synthetic captures are byte-identical, including the
+pre-quantization skew correction. The large strokes expose two further
+strict failures: `path-stroke-0000`, 154 pixels beyond 1 CV, max 4;
+`path-stroke-0001`, one pixel, max 64. The first is a straight analytic
+stroke edge (153 alpha deltas of −3 and one of −4); the second is a single
+sample change. Sharing the renderer does not establish closure of those
+previously uncaptured coordinates. Both remain unpinned.
+
+Fresh app verification after merging document-host integration `f89a239e`:
+22/22 Playwright tests pass with the native engine enabled, one worker and
+the machine-wide Electron lock, including caption burn-in export, editor
+boot/revival, split/resize/anchor/animation, the live seed comparison and
+large-timeline census. The seed test compares 23 rows with a maximum width
+error of 0.00001525879 px, within its unchanged 0.001 px bound. Targeted
+Vitest: 102/102; svelte-check: no errors and one existing cropper warning.
+Native typing p95 is 12.7/13.1/13.5 ms over 60 keys each, zero missed keys.
+This is an absolute measurement; the round 5 paired regression remains
+assigned to the performance lane.
+
+The release raster gates retain the original bounds and no accepted pins:
+
+| Gate | Within bound | Remaining failures |
+| --- | ---: | ---: |
+| Main raster, 1 CV | 484/495 | 11 |
+| Closure raster, 1 CV | 113/116 | 3 |
+| Composed corpus, 2 CV | 473/477 | 4 |
+| Source textures, 1 CV | 0/3 | 3 |
+| Independent path cases, 1 CV | 2/4 | 2 |
+
+The original 12 visible checks are reduced to 10; the independent path
+capture adds two more. Across all captures there are 12 visible and 11
+sub-visible strict failures. Here “visible” means max >3 CV or more than
+10 pixels beyond the comparison's bound. It does not permit the remaining
+smaller errors. All 12 COLR cases draw; two retain 1/5 pixels at max 2 CV.
+All 27 variable-font cases remain byte-identical; all 74 color cases meet
+1 CV. The three requested SDF stroke/bold cases remain within 1 CV.
+
+Fresh `pm-cli parity eval --wasm`: 1,891,448 compared, zero mismatches or
+questions; native/wasm identity: 1,815,420 replies, zero differences. The
+named variable-font ink class remains unchanged (405 bounds and 405 raster
+selections, max 1.191e-4 px).
+
+Round 6 measurements and every remaining side-by-side are recorded in the
+lane report. The round 5 counts above remain historical.
+
 ## Gaps
 
-The round 5 gates accept no pinned level 1 differences. Any remaining
+The round 6 gates accept no pinned level 1 differences. Any remaining
 difference or refusal fails the same unchanged bound (1 CV for raster
 captures, 2 CV for composed text pixels). A failing comparison is a blocker,
-not an accepted difference. Earlier round 4 measurements are historical;
-the round 5 results above supersede them.
+not an accepted difference. Earlier round 4 and round 5 measurements are
+historical; the round 6 report records the current strict failures.
 
 - Caption-pop, colored caption stroke, whisper and paper retain failures.
-  The remaining counts and side-by-side paths are in the round 5 report.
+  The remaining counts and side-by-side paths are in the round 6 report.
   Round joins, miter limits, fake-bold interpolation, descriptor relaxation,
   inverse/forward scale order, normalization precision and tangent storage
   were checked against Chromium's configured Skia. No tolerance or profile
@@ -856,20 +974,19 @@ the round 5 results above supersede them.
   rotations and clipping have implementation coverage but no captured
   pixel-parity evidence beyond the linear-gradient and v0 captures; do not
   treat them as a closed parity class.
-- The real project is compared in full and in isolation. After the analytic
-  rectangle fix, original t16/18/24 retain 2/7/5 pixels beyond 2 CV, max
-  38/33/15; isolation retains 3/8/5 pixels, max 44/43/15. These sparse
-  curved-edge/MSAA disagreements still fail. The original non-text pixels
-  meet their Standard bound; isolation is a gate on its reduced project.
-- Animator blur retains differences. The renderer currently uses a
-  separable discrete Gaussian in float, whereas the Chromium/Skia filter
-  pipeline can quantize and choose different Gaussian implementations.
-  This is an open root-cause boundary, not a claim that changing sigma
-  closes it.
+- The real project is compared in full and in isolation. Shared Canvas2D
+  pass decisions reduce its actual t16/18/24 source-texture residuals to
+  6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
+  disagreements remain, including with the shared path renderer. These
+  are failing comparisons, not a reason to change the 2-CV composition
+  bound. The round 6 report lists each composed frame separately.
+- Animator blur now meets the unchanged 2-CV corpus bound through the
+  shared quantized Graphite plan/executor, including isolation and the
+  original project. It no longer uses the text-only float Gaussian.
 - Paired typing is slower than today's renderer by 5.3–10.4 ms at p95,
-  although every native scenario remains under 33 ms. The full engine's
-  no-regression typing requirement remains open; the measurement now
-  exposes the gap instead of comparing only against an absolute budget.
+  although every native scenario remains under 33 ms. The performance lane
+  owns the full engine's no-regression typing requirement. The paired
+  measurement exposes the gap alongside the absolute budget.
 - Level 2 anchoring, animated/ranged semantics, bounds and picks are
   explicitly assigned to **textl2** by decision C. This lane adds no level 2
   semantics or routing removal. The final compclose integration merge
@@ -893,6 +1010,23 @@ the round 5 results above supersede them.
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts, round 6):
+
+- `pm-vector/src/canvas2d/{context,analytic,text,mod}.rs`: shared path
+  adapter and region rendering with the full backing-canvas viewport.
+  `svg_text.rs` initializes the optional adapter for its existing consumer.
+- `pm-vector/src/canvas2d/filter.rs`: RGBA CPU reference for the existing
+  Graphite blur plan and independently verified UNORM8 sampling arithmetic.
+- `pm-render/src/composite/path_masks.{rs,wgsl}`: parameterize the existing
+  GPU executor for R8 or premultiplied RGBA8; retain the path-mask behavior.
+- `pm-render/examples/text_review.rs` and `pm-render/tests/text_level2.rs`:
+  initialize the painter's optional path adapter; no level 2 semantics.
+- `apps/desktop/src/renderer/src/engine-doc/{install.ts,strict.test.ts}`:
+  preserve seed application during the document-host attach/revive merge,
+  and retain initial seeds and change callbacks for synchronous whole-face
+  providers. The first post-merge live census caught this integration
+  regression; the new unit test exercises both seed deliveries.
 
 2026-10-18 (lane ne-fonts, round 5):
 

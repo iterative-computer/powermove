@@ -467,3 +467,29 @@ process; wrap it in `pm-electron-lock`).
 Recapture the fixture (`capture/run.ts`, then `pm-text-corpus fixture`) after
 a macOS update changes the fonts; `tests/corpus.rs` detects font drift and
 says so.
+
+## Round 6 integration
+
+Canonical glyph paths and animator image filters now reuse pm-vector's
+Canvas2D renderer and Graphite filter executor; the source trace and raster
+results are in `text-render.md`, “Round 6”. Font selection and the full
+platform-cache identity retain the round 5 behavior. With the document-host
+integration, attaching or reviving a pm-wasm instance reapplies the latest
+received window seeds after synchronizing the document and before declaring
+it ready. An initial reply or notification arriving later still applies
+the seeds and invalidates cached answers through `FontLoader.applySeeds`.
+The paired typing harness remains committed and documented for the
+performance lane; round 6 does not attempt an edit-to-present optimization.
+
+The synchronous whole-face font provider carries the same initial seed
+callback and seeds-changed subscription as the asynchronous provider.
+The document-host integration introduced the synchronous branch; dropping
+these callbacks left the first 26 px/400 layout at opsz 26 instead of the
+window's seeded opsz 13. The provider regression test checks the initial
+application and a later notification against the actual pm-wasm wrapper.
+
+The fresh round 6 app matrix passes 22/22. Its live seed comparison includes
+23 rows and the first 26 px/400 query, with maximum native/Canvas2D width
+error 0.00001525879 px (unchanged bound 0.001 px). This validates the
+census-derived table as applied through the synchronous provider, in
+addition to the earlier static-startup parity run.
