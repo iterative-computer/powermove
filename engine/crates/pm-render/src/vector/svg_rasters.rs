@@ -72,6 +72,105 @@ pub trait SvgRasterSource: Send + Sync {
     fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String>;
 }
 
+/// Chromium's rasters captured to a directory, one file per key
+/// (`<content>-<width>x<height>.rgba`, premultiplied RGBA8, top-down):
+/// what headless comparisons against the legacy captures draw with
+/// (`pm-cli parity render --svg-rasters`, the corpus test's
+/// `PM_SVG_RASTERS`). A missing file is recorded ([`RasterDir::missing`],
+/// written as `needs.json` for the capture tool,
+/// `engine/crates/pm-render/tools/svg-rasters`) and fails the frame.
+pub struct RasterDir {
+    dir: std::path::PathBuf,
+    missing: std::sync::Mutex<std::collections::BTreeMap<SvgRasterKey, std::path::PathBuf>>,
+}
+
+impl RasterDir {
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> RasterDir {
+        RasterDir {
+            dir: dir.into(),
+            missing: Default::default(),
+        }
+    }
+
+    /// The file of `key`.
+    pub fn file(&self, key: &SvgRasterKey) -> std::path::PathBuf {
+        self.dir
+            .join(format!("{}-{}x{}.rgba", key.content, key.width, key.height))
+    }
+
+    /// Rasters asked for that were not captured, and their SVG files.
+    pub fn missing(&self) -> Vec<(SvgRasterKey, std::path::PathBuf)> {
+        let m = self.missing.lock().unwrap_or_else(|e| e.into_inner());
+        m.iter().map(|(k, p)| (k.clone(), p.clone())).collect()
+    }
+
+    /// Merges the missing rasters into `<dir>/needs.json` (`[{ content,
+    /// width, height, svg }]`) and returns how many it lists.
+    pub fn write_needs(&self) -> std::io::Result<usize> {
+        let path = self.dir.join("needs.json");
+        let mut all: std::collections::BTreeMap<(String, u32, u32), String> = Default::default();
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(serde_json::Value::Array(list)) = serde_json::from_str(&text)
+        {
+            for v in list {
+                if let (Some(c), Some(w), Some(h), Some(svg)) = (
+                    v["content"].as_str(),
+                    v["width"].as_u64(),
+                    v["height"].as_u64(),
+                    v["svg"].as_str(),
+                ) {
+                    all.insert((c.into(), w as u32, h as u32), svg.into());
+                }
+            }
+        }
+        for (k, svg) in self.missing() {
+            all.insert(
+                (k.content, k.width, k.height),
+                svg.to_string_lossy().into_owned(),
+            );
+        }
+        let list: Vec<serde_json::Value> = all
+            .into_iter()
+            .map(|((content, width, height), svg)| {
+                serde_json::json!({ "content": content, "width": width, "height": height, "svg": svg })
+            })
+            .collect();
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(&path, serde_json::to_string_pretty(&list)?)?;
+        Ok(list.len())
+    }
+}
+
+impl SvgRasterSource for RasterDir {
+    fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String> {
+        let key = &need.request.key;
+        let file = self.file(key);
+        match std::fs::read(&file) {
+            Ok(data) if data.len() as u64 == key.bytes() => Ok(data),
+            Ok(data) => Err(format!(
+                "{}: {} bytes for a {}x{} SVG raster",
+                file.display(),
+                data.len(),
+                key.width,
+                key.height
+            )),
+            Err(_) => {
+                self.missing
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key.clone(), need.path.clone());
+                Err(format!(
+                    "the Chromium SVG raster {}x{} of {} was not captured ({}; capture it with engine/crates/pm-render/tools/svg-rasters)",
+                    key.width,
+                    key.height,
+                    need.path.display(),
+                    file.display()
+                ))
+            }
+        }
+    }
+}
+
 struct Stored {
     data: Arc<Vec<u8>>,
     used: u64,
@@ -283,6 +382,41 @@ mod tests {
         assert!(s.latest(&key('b', 2, 2)).is_none(), "never another content");
         s.forget(Some(&"a".repeat(64)));
         assert!(s.latest(&key('a', 4, 4)).is_none());
+    }
+
+    #[test]
+    fn raster_directories_read_captures_and_list_what_is_missing() {
+        let dir = std::env::temp_dir().join(format!("pm-svg-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rasters = RasterDir::new(&dir);
+        let need = |k: SvgRasterKey| SvgRasterNeed {
+            request: SvgRasterRequest {
+                key: k,
+                asset: "a".into(),
+            },
+            path: "/art.svg".into(),
+            composition: "c".into(),
+            layer: "l".into(),
+        };
+        std::fs::write(rasters.file(&key('a', 2, 1)), [7u8; 8]).unwrap();
+        assert_eq!(rasters.fetch(&need(key('a', 2, 1))).unwrap(), vec![7; 8]);
+        std::fs::write(rasters.file(&key('a', 3, 1)), [7u8; 8]).unwrap();
+        assert!(
+            rasters
+                .fetch(&need(key('a', 3, 1)))
+                .unwrap_err()
+                .contains("8 bytes")
+        );
+        let e = rasters.fetch(&need(key('b', 4, 4))).unwrap_err();
+        assert!(e.contains("was not captured"), "{e}");
+        assert_eq!(rasters.write_needs().unwrap(), 1);
+        // Merged with what an earlier run listed.
+        let again = RasterDir::new(&dir);
+        let _ = again.fetch(&need(key('c', 1, 1)));
+        assert_eq!(again.write_needs().unwrap(), 2);
+        let text = std::fs::read_to_string(dir.join("needs.json")).unwrap();
+        assert!(text.contains("/art.svg") && text.contains(&"b".repeat(64)));
     }
 
     #[test]
