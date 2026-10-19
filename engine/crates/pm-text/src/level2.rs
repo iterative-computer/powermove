@@ -267,24 +267,9 @@ impl Level2 {
     pub fn layout_styled(&mut self, d: &TextContent, spans: &[StyleSpan]) -> Level2Layout {
         let text = d.text.clone();
         let size = d.size() as f32;
-        let leading = d
-            .leading
-            .filter(|l| *l != 0.0 && !l.is_nan())
-            .unwrap_or(1.15) as f32;
-        let weight = d
-            .weight
-            .filter(|w| *w != 0.0 && !w.is_nan())
-            .unwrap_or(DEFAULT_WEIGHT as f64)
-            .clamp(1.0, 1000.0) as f32;
-        let tracking = d.tracking.filter(|t| t.is_finite()).unwrap_or(0.0) as f32;
-        let mut families: Vec<FontFamilyName<'static>> = Vec::new();
-        if let Some(f) = d.font.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
-            families.push(FontFamilyName::Named(Cow::Owned(f.to_string())));
-        }
-        if let Some(base) = &self.base_family {
-            families.push(FontFamilyName::Named(Cow::Owned(base.clone())));
-        }
-        families.push(FontFamilyName::Generic(GenericFamily::SansSerif));
+        let (leading, weight, tracking) = (leading_of(d), weight_of(d), tracking_of(d));
+        let base_family = self.base_family.clone();
+        let families = Self::families_of(base_family.as_deref(), d);
         // CoreText optical sizing: `opsz` follows the size unless the layer
         // sets it.
         let axis = |t: u32, v: f32| FontVariation::new(Tag::from_bytes(t.to_be_bytes()), v);
@@ -326,23 +311,20 @@ impl Level2 {
                 continue;
             }
             let s = &span.content;
-            if let Some(family) = &s.font {
+            // A span normalizes exactly as the base does, so a range that
+            // restates the base style lays out identically to none.
+            if s.font.as_deref().is_some_and(|f| !f.trim().is_empty()) {
                 builder.push(
-                    StyleProperty::FontFamily(FontFamily::List(Cow::Owned(vec![
-                        FontFamilyName::Named(Cow::Owned(family.clone())),
-                        FontFamilyName::Generic(GenericFamily::SansSerif),
-                    ]))),
+                    StyleProperty::FontFamily(FontFamily::List(Cow::Owned(Self::families_of(
+                        base_family.as_deref(),
+                        s,
+                    )))),
                     range.clone(),
                 );
             }
             builder.push(StyleProperty::FontSize(s.size() as f32), range.clone());
             builder.push(
-                StyleProperty::FontWeight(FontWeight::new(
-                    s.weight
-                        .filter(|w| *w != 0.0 && !w.is_nan())
-                        .unwrap_or(500.0)
-                        .clamp(1.0, 1000.0) as f32,
-                )),
+                StyleProperty::FontWeight(FontWeight::new(weight_of(s))),
                 range.clone(),
             );
             builder.push(
@@ -353,18 +335,9 @@ impl Level2 {
                 }),
                 range.clone(),
             );
+            builder.push(StyleProperty::LetterSpacing(tracking_of(s)), range.clone());
             builder.push(
-                StyleProperty::LetterSpacing(
-                    s.tracking.filter(|t| t.is_finite()).unwrap_or(0.0) as f32
-                ),
-                range.clone(),
-            );
-            builder.push(
-                StyleProperty::LineHeight(LineHeight::FontSizeRelative(
-                    s.leading
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                        .unwrap_or(1.15) as f32,
-                )),
+                StyleProperty::LineHeight(LineHeight::FontSizeRelative(leading_of(s))),
                 range.clone(),
             );
             let mut axes: Vec<_> = s
@@ -386,6 +359,20 @@ impl Level2 {
             .filter(|w| w.is_finite() && *w > 0.0 && d.paragraph.unwrap_or(false));
         layout.break_all_lines(box_width.map(|w| w as f32));
         self.collect(d, &text, &layout)
+    }
+
+    /// The layer's family, then the registry's base family, then
+    /// `sans-serif` (the base family through the manifest).
+    fn families_of(base: Option<&str>, d: &TextContent) -> Vec<FontFamilyName<'static>> {
+        let mut families: Vec<FontFamilyName<'static>> = Vec::new();
+        if let Some(f) = d.font.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            families.push(FontFamilyName::Named(Cow::Owned(f.to_string())));
+        }
+        if let Some(base) = base {
+            families.push(FontFamilyName::Named(Cow::Owned(base.to_string())));
+        }
+        families.push(FontFamilyName::Generic(GenericFamily::SansSerif));
+        families
     }
 
     fn collect(&self, d: &TextContent, text: &str, layout: &Layout<u32>) -> Level2Layout {
@@ -443,6 +430,12 @@ impl Level2 {
                 descent,
             });
 
+            // Parley cuts one shaped run into several glyph runs where the
+            // style changes without splitting shaping (a range that differs
+            // only in line height, say). The run's visual clusters are walked
+            // once per line, and each glyph run takes the next clusters until
+            // its glyph count is covered, so sources stay glyph-aligned.
+            let mut cluster_cursor: HashMap<usize, (Vec<ClusterSource>, usize)> = HashMap::new();
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(gr) = item else {
                     continue;
@@ -459,26 +452,17 @@ impl Level2 {
                         y: g.y as f64,
                     });
                 }
-                let sources = run
-                    .visual_clusters()
-                    .flat_map(|c| {
-                        let source = utf16_at.of(c.text_range().start);
-                        c.glyphs().map(move |_| source)
-                    })
-                    .collect();
-                // `.notdef` for a visible character (controls, spaces, and
-                // default-ignorables draw nothing by design).
-                for cluster in run.clusters() {
-                    let t = &text[cluster.text_range()];
-                    let visible = t.chars().any(|c| {
-                        !c.is_whitespace()
-                            && !c.is_control()
-                            && !crate::blink::chars::is_default_ignorable(c as u32)
-                    });
-                    if visible && cluster.glyphs().any(|g| g.id == 0) {
-                        out.missing_glyphs += 1;
-                    }
+                let (clusters, cursor) = cluster_cursor
+                    .entry(run.index())
+                    .or_insert_with(|| (cluster_sources(run, text, &utf16_at), 0));
+                let mut sources = Vec::with_capacity(glyphs.len());
+                while sources.len() < glyphs.len() && *cursor < clusters.len() {
+                    let c = &clusters[*cursor];
+                    *cursor += 1;
+                    sources.extend(std::iter::repeat_n(c.source, c.glyphs));
+                    out.missing_glyphs += usize::from(c.missing);
                 }
+                debug_assert_eq!(sources.len(), glyphs.len(), "glyph run sources");
                 out.runs.push(Run {
                     line: row,
                     font: key,
@@ -600,6 +584,63 @@ impl Level2 {
         out.height = top;
         out
     }
+}
+
+/// Line height relative to size, as level 1 (`d.leading || 1.15`).
+fn leading_of(d: &TextContent) -> f32 {
+    d.leading
+        .filter(|l| *l != 0.0 && !l.is_nan())
+        .unwrap_or(1.15) as f32
+}
+
+/// Weight, as level 1 (`d.weight || 500`), clamped to the CSS range.
+fn weight_of(d: &TextContent) -> f32 {
+    d.weight
+        .filter(|w| *w != 0.0 && !w.is_nan())
+        .unwrap_or(DEFAULT_WEIGHT as f64)
+        .clamp(1.0, 1000.0) as f32
+}
+
+fn tracking_of(d: &TextContent) -> f32 {
+    d.tracking.filter(|t| t.is_finite()).unwrap_or(0.0) as f32
+}
+
+/// One visual cluster of a run's line slice: its UTF-16 source, how many
+/// glyphs it yields (a ligature's continuations yield none), and whether it
+/// draws `.notdef` for a visible character.
+struct ClusterSource {
+    source: usize,
+    glyphs: usize,
+    missing: bool,
+}
+
+fn cluster_sources(
+    run: &parley::Run<'_, u32>,
+    text: &str,
+    utf16_at: &Utf16Index,
+) -> Vec<ClusterSource> {
+    run.visual_clusters()
+        .map(|c| {
+            let range = c.text_range();
+            // Controls, spaces and default-ignorables draw nothing by design.
+            let visible = text[range.clone()].chars().any(|ch| {
+                !ch.is_whitespace()
+                    && !ch.is_control()
+                    && !crate::blink::chars::is_default_ignorable(ch as u32)
+            });
+            let mut glyphs = 0;
+            let mut notdef = false;
+            for g in c.glyphs() {
+                glyphs += 1;
+                notdef |= g.id == 0;
+            }
+            ClusterSource {
+                source: utf16_at.of(range.start),
+                glyphs,
+                missing: visible && notdef,
+            }
+        })
+        .collect()
 }
 
 /// The caret x at a UTF-16 index, or the nearest boundary before it (an
