@@ -78,7 +78,7 @@ export function installHiddenCpu(PM: PMRegistry): void {
         const canvasWidth = canvas.width, canvasHeight = canvas.height, version = PM.animVersion?.(), quality = PM.quality;
         const scaleX = canvasWidth / view.width, scaleY = canvasHeight / view.height;
         const width = Math.max(1, Math.round(project.w * scaleX)), height = Math.max(1, Math.round(project.h * scaleY));
-        const image = await render.snapshot({ time: frame.time, width, height, pixels: 'opaque', background: frame.options.bg !== false });
+        const image = await render.snapshot({ time: frame.time, width, height, pixels: 'opaque', background: frame.options.bg !== false, prepareBlender: true });
         if (PM.proj !== project || output !== target || PM.GL.previewViewport !== viewport || canvas.width !== canvasWidth || canvas.height !== canvasHeight) continue;
         const offscreen = document.createElement('canvas'); offscreen.width = image.width; offscreen.height = image.height;
         offscreen.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(image.data), image.width, image.height), 0, 0);
