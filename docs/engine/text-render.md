@@ -19,10 +19,10 @@ anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
 | Apple Color Emoji (`sbix`), drawn by CoreGraphics and placed as Canvas2D places it | Drawn, pixel-identical | `emoji` group (6 to 160 px) |
 | Caption boxes, 4× multisampled as the GPU canvas fills paths | Drawn (3 to 9 pixels per case still differ at the corners) | `caption-boxed`, `caption-paper` |
 | RTL and complex scripts the level 1 layout shapes (Arabic, Hebrew, Devanagari, Thai, CJK) | Drawn | `scripts` group |
-| `compat` level 2 text and captions, at output resolution | Drawn when the host gives level 2 fonts; still routed by the static check (below) | `tests/text_level2.rs` |
+| `compat` level 2 text and captions, at output resolution | Simple content draws with level 2 fonts; animated/ranged/typography semantics remain assigned to textl2 (below) | `tests/text_level2.rs` |
 | Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
-| Valid CSS colors the engine does not reproduce (`lab()`, `lch()`, `oklab()`, `oklch()`, `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`, system colors, any functional notation that does not parse) | Refused (`Feature::Text`), not drawn with a fallback | `tests/text_colors.rs` |
-| Color vector glyphs (`COLR`) | Refused (`Feature::Text`), not drawn wrong | `scene::tests::color_vector_glyphs_are_refused_not_drawn` |
+| CSS Color 4/5 (`lab`, `lch`, `oklab`, `oklch`, `color`, `color-mix`, relative colors, `calc`, `currentcolor`) and detached-canvas system colors | Drawn; invalid `light-dark()` retains the restored paint, as today | `tests/text_colors.rs`, closure capture (74 colors) |
+| Color vector glyphs (`COLR` v0 and v1) | Fontations paint graph rasterized natively; 12 captured glyph runs draw, two still fail exactness | `render/colr.rs`, `tests/text_raster.rs` |
 | Text and captions without configured fonts | Refused (`Feature::Text`). The interactive engine, the job engine, and `pm-cli` give their renderers fonts (`docs/engine/text.md`, "Fonts on render threads") | `tests/text_gpu.rs`, `pm-node/tests/fonts.rs` |
 | A registry question the host's font service left unanswered | Refused (`Feature::Text`, "the font registry did not answer"), never drawn in another font | `pm_text::served` tests |
 
@@ -341,13 +341,16 @@ normalization), relative colors (`rgb(from …)` with channel keywords and
 raster canvas is never in the document) and the system colors measured on
 the closure capture (`CanvasText`, `Canvas`, `LinkText`, `GrayText`;
 `AccentColor` is not a color to the canvas and keeps the previous style).
+Round 4 also captures the remaining detached-canvas system colors.
 Conversions follow `ui/gfx/color_conversions.cc` and skcms (its own `powf`
 approximation where `Color::ToSRGB` uses it for linear sRGB); gamut mapping
 is not baked in (`kBakedGamutMapping` off, as the capture's out-of-gamut
 `oklch()` shows). Colors outside sRGB stay unclamped through the glyph
-blend; the 8-bit target clamps them. All 36 colors of the closure capture
-match within 1 code value. `light-dark()` and system colors not measured
-still refuse their layer.
+blend; the 8-bit target clamps them. The round 4 capture has 74 color
+cases, including all the previously unmeasured system names. The detached
+canvas rejects `light-dark()` in both native light and dark themes, so it
+keeps the restored paint. Highlight is `rgba(128, 188, 254, 0.6)` in both
+themes; it is not opaque.
 
 ## Routing
 
@@ -359,12 +362,81 @@ viewer presenter (`ViewDocument::set_fonts`), the job engine
 (`StillRouting::with_fonts`, `plan_export_with_fonts`), and `pm-cli` use the
 check with fonts when their renderers have them, so text and captions no
 longer route there.
-`compat` level 2 content stays routed (`Feature::CompatLevel2`) until level 2
-layer semantics (bounds, picks, anchors) exist in `pm-eval`; the renderer
-draws it when asked. `Renderer::set_captions_hidden` is `PM.captionsHidden`
+After the compclose integration merge, simple level 2 text can draw, but
+animated/range-styled and typography-anchored level 2 content remains
+refused (a `Feature::Text` compat-level-2 reason). Semantic closure belongs
+to textl2. This lane does not implement level 2 bounds, picks or anchors.
+`Renderer::set_captions_hidden` is `PM.captionsHidden`
 (exports with `captionsBurn: false`).
 
-## Measurements
+## Round 4 verification
+
+2026-10-18/19, Apple M4 Max, macOS 27, Electron 44 / Chromium 152.
+The gates no longer load any of the three pin files. Raster failures mean
+pixels outside 1 CV; composed text failures mean pixels outside 2 CV.
+All refusal pins were removed too.
+
+After merging integration at `e9a80939` (merge `d42913bf`), the rebuilt
+addons speak unchanged protocol `protocol-c137021c07039329`. Debug and
+release raster runs agree:
+main 495 cases, 468 within the bound and 27 failing; closure 116 cases,
+110 within the bound and 6 failing; zero refused. The 27 variable-font
+cases are now pixel-identical (maximum channel difference 0). CoreText
+instancing now follows `SkTypeface_mac_ct`: non-hidden variable fonts are
+created from a descriptor at size 0 with every axis's default or clamped
+value, then copied at the device size with `NSCTFontOpticalSizeAttribute`
+and `NSCTFontUnscaledTrackingAttribute`. Creating the varied CGFont first
+was a different CoreText path. Hidden system faces retain their direct
+CGFont path, avoiding descriptor fallback to Times.
+
+The closure set includes all 74 captured color cases (all within 1 CV),
+12 COLR runs (10 within 1 CV, 2 failing), and the independent distance-field
+cases (4 failing). COLR uses Fontations' paint graph, font-unit paths,
+CPAL colors, layer bounds, transforms/clips and premultiplied compositing.
+No CoreGraphics color-font approximation is used.
+
+The real project's 45 text-in-isolation samples are now included. Before
+the merge, the full release corpus compared 412 frames, 405 within 2 CV,
+7 failing, with zero projects left unpaired with a comparison. The full
+merged release run compares 477 frames: 467 within 2 CV, 10 failing, zero
+not compared. It now draws the original real project too (45 samples,
+42 within 2 CV). Its failures at 16/18/24 seconds are 2/727/1,550 pixels
+beyond 2 CV, maximum Δ 38/33/49; the corresponding isolated failures are
+3/924/1,550 pixels, maximum Δ 44/43/49. The extra three failures are the
+original real frames, not new isolation failures. The pre-merge full debug
+run completes all 412 frames with the same seven failures; merged debug
+verification also reruns the animator-blur project. The failures
+were the two animator-blur times, each also present in the isolation set,
+and real-project times 16, 18 and 24 seconds. This corrects the previous
+claim, which omitted the entire `real/` tree. Isolation validates the
+reduced text project, not all effects or non-text content of the original.
+
+The full app run with the rebuilt addons after the merge passed 20 of 21
+tests: the 19 existing text/export/typing cases and the new census playback benchmark passed;
+the new census-derived seed comparison failed and remains a blocker.
+Typing p95 was 18.4 ms (96 px title), 21.1 ms (48 px paragraph), and
+20.1 ms (24 px system-ui), 60 keys each, zero missed. These meet 33 ms;
+a legacy typing baseline was not measured in this round.
+
+The playback benchmark uses a 1,000-layer timeline for ten seconds in
+each engine. Legacy: 1,186 animation-frame intervals, p50 8.3 ms, p95
+9.5 ms, one interval above 1.5× median. New engine: 1,201 intervals,
+p50 8.3 ms, p95 9.3 ms, zero above 1.5× median. The census added 299
+scans visiting 301 nodes in 15.4 ms total (about 0.0515 ms per scan),
+with no new reports during playback; maximum scan 1.3 ms includes startup.
+The scan timer excludes mutation-handler overhead; the frame timings
+include it. This run shows no added long frames, not a universal guarantee
+under every extension or density.
+
+The font-service, pm-text, pm-cli ink and pm-wasm seed tests pass in debug
+and release. Static startup-seed eval parity still reports zero mismatches
+across 6,162 text layouts / 74,032 units and 1,815,420 native/wasm replies;
+it does not establish that the live census is correct. The variable-font
+bounds class remains 405 bounds plus 405 selections, maximum 1.191e-4 px.
+Touched TypeScript tests: 101 passed; svelte-check: zero errors and one
+pre-existing warning. Release tests and addons use LTO disabled (Gaps).
+
+## Earlier measurements (rounds 1–3)
 
 **2026-10-18 (third pass: distance-field text, CSS Color 4, the closure
 capture)**, Apple M4 Max, macOS 27, Electron 44 / Chromium 152, addon built
@@ -436,7 +508,8 @@ value and the largest difference; pins only shrink):
 | **All** | **495** | **459** | 36 pinned (first pass: 414 exact) |
 
 `tests/text_corpus.rs` now gates on exactness too (every text pixel within
-2 code values; `tests/fixtures/text-corpus-pins.json`) and has no escapes:
+2 code values; the now-deleted `tests/fixtures/text-corpus-pins.json`).
+This historical run omitted `real/`; it did not establish zero escapes:
 the 35 projects refused for features outside text are compared through
 their text in isolation (`text-iso-20261018-175328-e9f22842`). 237 frames,
 235 exact, 0 failed, 0 not compared. All 111 isolated frames are exact
@@ -588,6 +661,27 @@ end (Phase 3a gate).
 
 ## Review sheets
 
+Round 4: `~/Library/Application Support/Powermove Engine Corpus/review/text-round4-20261018/index.html`
+contains 147 sheets: all 27 variable cases, all 12 COLR cases, all 74 colors,
+every remaining raster failure, and the three earlier distance-field fixes.
+Seven contact sheets, the real-project sheets and the three live-seed
+sheets were visually inspected by the implementation worker; this is not Jude's acceptance. The three
+real-project failures are in
+`.../review/text-round4-real-20261018/index.html` (16, 18 and 24 seconds).
+Live-seed diagnostic sheets are in
+`.../review/text-round4-seeds-20261018/index.html`: 30 px / weight 600
+(4,917 pixels beyond 1 CV; width 462 vs 422), 30 px / weight 500 (4,751;
+453 vs 413), and 20 px / weight 400 (2,136; 295 vs 289), all maximum Δ 255.
+These use the actual window's reported seeds and a captured page canvas;
+they are visible layout failures, not AA residuals. The final merged corpus
+has eight additional sheets in
+`.../review/text-round4-final-corpus-20261018/index.html`: all three
+original real frames, their three isolated counterparts, and both blur
+frames. Their contact sheet was visually inspected. Full and isolated
+outputs now have distinct names so one cannot overwrite the other's
+review evidence. References, engine images and difference images stay
+outside Git.
+
 2026-10-18 (third pass), regenerated at the pass's head:
 `~/Library/Application Support/Powermove Engine Corpus/review/text-sidebyside-20261018c-main/index.html`
 (the three distance-field cases this pass changed and every pinned case,
@@ -622,7 +716,7 @@ source engine/env.sh
 python3 engine/crates/pm-text/capture/colr-fonts.py "$HOME/Library/Application Support/Powermove Engine Corpus/fonts"   # needs fontTools
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set closure   # text-closure-*
 cd engine
-cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_DIFFS (+ PM_TEXT_DIFFS_PINNED), PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
+cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
 cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_gpu
@@ -639,67 +733,97 @@ is read back through a WebGL texture uploaded as `texFor` uploads it.
 
 ## Gaps
 
-Each of these is a visible or measurable difference on level 1 content
-today (amendment 22), pinned in the exactness gates so it cannot grow, or a
-refusal; none is accepted, each is open work for an orchestrator decision.
-Updated 2026-10-18 (third pass).
+The round 4 gates accept no pinned level 1 differences. Any remaining
+difference or refusal fails the same unchanged bound (1 CV for raster
+captures, 2 CV for composed text pixels). A failing comparison is a blocker,
+not an accepted difference. The earlier measurements above are historical.
 
-- **`COLR` color fonts** (project fonts only; no installed macOS font has a
-  `COLR` table) refuse their layer. The closure capture shows Chromium does
-  not draw them as CoreGraphics color images: drawn that way (in an em box
-  or in CoreText's glyph bounds, at quarter-pixel or whole-pixel
-  positions) they differ by ink SSIM 0.85 to 0.99, max Δ up to 232 (a layer
-  outside the base glyph is kept, whole-pixel placement fits best). The
-  likely path is Skia's Fontations typeface for `COLR` web fonts (its own
-  layer bounds, paths filled by Skia's rasterizer, gradients by its
-  shaders). References: `text-closure-20261018-205749`, cases `colr-0030`
-  to `colr-0041` (`v0` layered and `v1` gradient fonts at 14 to 200 px;
-  `review/text-colr-references-20261018/index.html` shows them).
-- **Distance-field residuals** (closure capture): synthesized bold at 200
-  px 16 pixels by up to 6; a 6 px stroke at 180 px 12 pixels by up to 21;
-  210 px 4 pixels by 2; `pop` at 160 px 3 pixels by up to 5. (Arabic at
-  200 px, 41 pixels by 2 where joined glyphs overlap, became exact once
-  the glyphs blend with their unquantized coverage, as the GPU does.)
-- **Caption pop at density 1** (`caption-pop-0455`, `-0456`, `-0458`,
-  `-0459`): 2 to 75 pixels by 2 to 13 in `text_raster`, all in the black
-  stroke of the scaled word (the corpus's pop frames are exact).
-- **Blurred animator glyphs** (`animator-blur`): 1 to 5 pixels by 3.
-- **Small residuals**: synthesized bold 1 and 7 pixels by 2; variable fonts
-  6 to 448 pixels by 2 to 6 (Chromium's CTFont carries variations
-  differently); caption strokes 2 and 7 pixels by 2 and 4; classic,
-  whisper, paper, spotlight and fade captions 1 to 2 pixels by 2 or 3
-  (8-bit rounding between the box, stroke and fill items).
-- **Colors**: `light-dark()` and the system colors not measured
-  (`ButtonFace`, `Highlight`, ...) refuse their layer.
-- **Level 2**: animated and range-styled text and typography anchoring are
-  still refused, and `compat` level 2 content still routes
-  (`Feature::CompatLevel2`); level 2 layer semantics (bounds, picks,
-  anchors in `pm-eval`) are not built. No existing project holds level 2
-  content (it is created only with the new engine), but the brief lists it.
-- **`Feature::Text`** stays in `pm_render::unsupported`: it is the reason a
-  renderer without fonts, an unsupported color, a `COLR` glyph, or an
-  unanswered registry question refuses a layer. Hosts with fonts no longer
-  emit it for ordinary text; the derouter lane retires the routing.
-- An app web font loaded by the page is available to Canvas2D but not to
-  the engine's registry: `Geist` (`onboarding/welcome.css`) is loaded only
-  once the onboarding window's styles are in the document, so a text layer
-  naming `Geist` draws in Geist after onboarding in that window and in the
-  fallback otherwise; the engine always draws the fallback. Not seen in the
-  corpus.
-- The tables, the emoji shift, and the GPU model of distance-field text are
-  data measured from one Electron (Chromium 152) on macOS 27 with default
-  font smoothing on Apple silicon; an update that changes Skia's tables,
-  CoreText's emoji placement or the GPU's rasterization (or a user-level
-  `AppleFontSmoothing` default) needs them measured again;
-  `tests/text_raster.rs` fails only when the references are captured
-  again.
-- Unattended render queue jobs (possibly after a relaunch, no window) and
-  `pm-cli` measure with every open window's seeds (or the startup model).
-- Release builds with LTO fail on this machine ("failed to get bitcode",
-  probably kache-cached rlibs without embedded bitcode); every test and the
-  addon were built with `CARGO_PROFILE_RELEASE_LTO=false`.
+- Caption pop, synthesized bold, caption strokes and some caption presets
+  still differ. The exact case counts and per-case pixel counts are in the
+  round 4 report and review sheets. The stroker's round joins, miter limit,
+  fake-bold interpolation, descriptor relaxation and inverse/forward scale
+  order were checked against Skia m149 (`SkScalerContext::internalGetPath`,
+  `SkStroke`, `SkStrokerPriv`). A change to an RGBA8 intermediate target
+  left the caption failure counts unchanged and increased the animator blur
+  residual; it was discarded. The remaining cause is unresolved; no
+  parameter fitting or tolerance change was used.
+- The four closure distance-field residuals remain: `sdf-sizes-0004`,
+  `sdf-synthetic-0016`, `sdf-caption-0027` and `sdf-caption-0028`.
+  The backward distance walk now recomputes each row's starting index and
+  never decrements beyond the first row. It works with overflow checks on,
+  fixing the debug panic; it does not close the shader/stroker residuals.
+- COLR v0 at 96 and 200 px still differs at a few pixels by 2 CV. The
+  CoreGraphics approximation is gone. Fontations supplies unhinted paths,
+  all layer bounds, transforms, clips, palettes and gradient geometry; the
+  existing Skia analytic filler supplies coverage, with N32 integer solid
+  alpha blending. Whole-pixel placement uses the text blob's 1/8-pixel x
+  bias, not a 1/2-pixel bias. A direct-span-blitter experiment did not fix
+  the residual and was discarded. Radial/sweep paints, composite modes,
+  rotations and clipping have implementation coverage but no captured
+  pixel-parity evidence beyond the linear-gradient and v0 captures; do not
+  treat them as a closed parity class.
+- The real project is now compared both in its original form and through
+  text in isolation.
+  Its very large, scaled text reveals additional failures at 16, 18 and
+  24 seconds. They sit on the large path glyph edges, including a layer
+  at roughly 105 px scaled to 340%. Investigation checked the canonical
+  64 px path transform, quarter-step raster density, tessellation and
+  pixel sampling; the exact remaining cause is unresolved. The original
+  full project now draws after the compclose integration merge and has the
+  same three failing times; its non-text pixels meet their Standard bound.
+  Isolation itself remains a gate on the reduced project only.
+- Animator blur retains differences. The renderer currently uses a
+  separable discrete Gaussian in float, whereas the Chromium/Skia filter
+  pipeline can quantize and choose different Gaussian implementations.
+  This is an open root-cause boundary, not a claim that changing sigma
+  closes it.
+- Level 2 anchoring, animated/ranged semantics, bounds and picks are
+  explicitly assigned to **textl2** by decision C. This lane adds no level 2
+  semantics or routing removal. The final compclose integration merge
+  classifies its remaining animated/ranged/typography-anchor refusals as
+  `Feature::Text` with a compat-level-2 reason; those remain failing routes.
+- `Feature::Text` remains for a renderer without fonts, unparsed styles or
+  an unanswered registry query; the derouter owns retiring that machinery.
+- Font-cache entries from pseudo-element text and cache purges under
+  memory pressure are not modelled. The census now records main-thread
+  Canvas2D and OffscreenCanvas2D font assignments too, including on-grid
+  canvas-first entries; it does not observe canvas operations in workers.
+  The live-seed validation still fails; `text.md` records the 6.45–40.26 px
+  advance errors and the reduced-key/culling limitations. The final test
+  checks 16 rows; six fail, representing three unique descriptions. The
+  passing static-seed parity runner is not evidence that this census is correct.
+- A page-only web font (for example a font loaded by onboarding) need not
+  be present in the engine's registry. Project fonts remain fully served.
+- The measured mask tables, emoji placement and SDF GPU arithmetic are
+  specific to this Apple-silicon/macOS/Electron reference. Other machines
+  and Chromium updates need their own captured comparisons.
+- The shipping LTO profile remains unverified. Test/addon builds use
+  `CARGO_PROFILE_RELEASE_LTO=false` because the cached build otherwise
+  reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts, round 4):
+
+- `apps/desktop/src/main/engine/{index,agent-jobs,render-queue}.ts`: carry
+  the queue's starting window to its font session while that window is
+  open; renderer ids are runtime-only and never persisted across relaunch.
+- `apps/desktop/src/renderer/src/engine-doc/{install,fonts}.ts`: a changed
+  seed set invalidates editor answers and redraws the overlays; an old
+  startup reply cannot replace a later seeds-changed notification.
+- `apps/desktop/src/renderer/src/legacy/bootstrap.ts`: start observing
+  canvas font assignments before engines and extensions install.
+- `apps/desktop/e2e/helpers/engine-drew.ts`: a missing main-process report
+  fails the gate. New seed-order and large-timeline census measurements
+  accompany the existing text typing benchmark.
+- `engine/corpus/src/capture.ts`: `--text-only` reduces the real project
+  too. The CLI exits after closing its capture session.
+- `engine/crates/pm-render/tests/support/mod.rs`: discover `real/` as well
+  as `projects/`, preserving the `real/` prefix in comparison names.
+- `engine/crates/pm-cli/tests/render.rs`: verify actual white text ink in a
+  decoded PNG over a black background, rather than only file existence.
+- `engine/crates/pm-vector/src/canvas2d/svg_text.rs`: the earlier lane's
+  one-line `masks: None` initializer (omitted from earlier lists).
 
 2026-10-18 (lane ne-fonts, third pass):
 

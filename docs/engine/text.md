@@ -104,10 +104,10 @@ was found on the corpus's real project and checked against Chromium itself
    text therefore depends on the display and on what the UI drew before;
    the decision below picks the app's own state.
 
-   Not modelled: when a canvas itself first creates an entry at a specified
-   size off the 1/100 px grid between 17 and 28 px, later canvas text in the
-   same 1/100 px bucket inherits that `opsz` (a difference below 0.01 px of
-   optical size).
+   Canvas-created entries matter on the 1/100 px grid too: a 30 px
+   canvas created before 15 px UI text at 2x must keep `opsz` 30 for the
+   shared 30 px key. Recording only the menu would instead use `opsz` 15
+   and change the width visibly (roughly 3.7%).
 
    **Decided (Phase 1 T1, by the orchestrator under amendment 22): measure
    as the running app's renderer does.** The seeds are the font cache
@@ -152,16 +152,60 @@ was found on the corpus's real project and checked against Chromium itself
 
    Main answers `engine-fonts:seeds` with the window's seeds and sends
    `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
-   takes them through `pm_fonts_seeds`; both engines' font services get
+   takes them through `pm_fonts_seeds`. The client caches an accepted table
+   only after the engine acknowledges it; an error reply rejects the update
+   and session-owner assignment. Startup replies cannot overwrite a newer
+   seeds-changed notification. Both engines' font services get
    every window's seeds (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds
    }] }`, replayed last on every port). The typing measurement in the app
    (2026-10-18) shows the census at work: 11 and 12 seeds in a fresh editor
    window, where the static model had 2.
 
-   Not modelled: entries a canvas creates first (a canvas measuring off the
-   1/100 px grid between 17 and 28 px; below 0.01 px of optical size), the
-   font cache's purge under memory pressure, pseudo-element text
-   (`::before`, `::placeholder`), and system colors' and SVG text's fonts.
+   **Canvas creators (round 4).** The census wraps the browser's native
+   Canvas2D and OffscreenCanvas2D `font` setters, retaining native parsing
+   and rejection behavior, and reports the accepted description at DPR 1.
+   Pending UI descriptions are drained first (Blink's font setter itself
+   flushes style/layout-tree updates). Main's existing first-creator rule
+   then preserves a canvas entry when a later menu reports the same key.
+   The wrapper is removed when the census stops. Pure transform/opacity
+   style changes do not schedule a tree walk; font/layout-affecting styles
+   still do. Aggregate scan time, maximum scan time, visited nodes and
+   reports are available in `EngineDoc.stats().fontCensus` for measurement.
+
+   Parked panels at -9999 px have layout boxes but do not paint a
+   DPR-scaled strike. The census now requires a visible client rect
+   intersecting the viewport. The first in-app comparison exposed four
+   false seeds; this removed the offscreen 24 px / weight 560 entry, but
+   the final merged run still fails for 20 px / weight 400 and 30 px /
+   weights 500 and 600. The native fresh resolver agrees with Canvas2D
+   where those proposed UI seeds do not. This is a blocker: measured
+   advance errors for the 24-character probe were 6.45, 40.26 and 39.64 px,
+   respectively. The cache-creation order/culling boundary remains open;
+   viewport intersection alone is insufficient. The final diagnostics show
+   `text-rendering: optimizeLegibility` on the DOM origins, while
+   `CanvasRenderingContext2DState::SetFont` sets the context's own text
+   rendering mode (default auto). `FontDescription::CacheKey` includes
+   that mode, which the reduced census key loses. This is a demonstrated
+   identity boundary; the complete origin of the still-shared 24/26 px
+   entries remains unresolved, so simply dropping all DOM seeds is not a
+   valid fix. Primary sources: [Blink cache key](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/platform/fonts/font_description.cc)
+   and [Canvas font state](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_state.cc).
+
+   Remaining unmodelled entries also include pseudo-element text,
+   font-cache purges under memory pressure and worker-owned canvases.
+   Offscreen text scrolling into view without a DOM mutation is not yet
+   observed. Blink's cache key also carries optical sizing, synthesis,
+   text rendering, variation and palette state; the census's reduced key
+   has not been validated for arbitrary custom CSS. The new in-app
+   `native-engine-font-seeds.spec.ts` checks the census-derived seeds
+   against this renderer's actual Canvas2D and pm-wasm advances, including
+   the 30 px canvas before a visible 15 px menu at 2x (that first-creator
+   check passes), UI-first weights 500/600, and the formerly poisoned
+   descriptions even if the census leaves them out. It records fresh
+   resolver diagnostics and can capture failures outside Git with
+   `PM_FONT_SEEDS_CAPTURE`. Its failing rows must not be described as T1
+   closure. Playback cost and the separate typing measurement are in
+   `text-render.md`, round 4 verification.
 
    **Seeds per window (2026-10-18).** Each BrowserWindow is its own
    renderer with its own Chromium font cache, so the engines measure a
@@ -174,20 +218,25 @@ was found on the corpus's real project and checked against Chromium itself
      (`EngineFontClient::setSessionOwner`, the `sessions` list of
      `Op::Seeds`, job engine only) and waits for the engine to take it
      before submitting the job, so an export measures with the seeds of
-     the window it was started from. If the engine does not take them
+     the window it was started from. A queued job keeps its starting
+     window while it remains open (runtime-only ownership, never a
+     persisted renderer id). If the engine does not take them
      within 5 s, once more; then the export does not start (an error to
      the window) rather than lay text out with every window's seeds;
    - a render thread's `ServedFonts` takes the scope of each layer
      (`Renderer::set_text_seed_scope`: the view's port in the presenter,
      the work's port and session in the job lanes) and resolves it port
      first, then session, then the fallback (every window's seeds, for
-     work of no known window: unattended render queue jobs, `pm-cli`); it
+     work of no known window: queue jobs after their window closes or the app
+     relaunches, `pm-cli`); it
      parks one measurer per seed set, so windows on different displays
      never rebuild each other's layouts.
 
    Measured (`pm-cli parity eval --wasm`, corpus v1, 2026-10-18): pm-wasm
    in Node with the seeds main sends gives 1,891,448 compared, 0
-   mismatched, exactly as natively; before, 1,260 `system-ui` layouts of the
+   mismatched with the static startup seeds, exactly as natively; this
+   measurement did not validate the later census-derived seeds. Before,
+   1,260 `system-ui` layouts of the
    real project differed (up to 18.2 px). Native and wasm32 replies: 0 of
    1,815,420 differ.
 
