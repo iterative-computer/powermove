@@ -195,6 +195,14 @@ export class ViewerPresentation {
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
   private host: Window | null = null;
+  /** Keep the configured surface colors when a host's capability queries change. */
+  private displayColor: {
+    host: Window;
+    colorSpace: ViewerState['colorSpace'];
+    edr: boolean;
+    observedColorSpace: ViewerState['colorSpace'];
+    observedEdr: boolean;
+  } | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
   /** The revision the engine routed the composition away at (`routed`). */
@@ -211,6 +219,7 @@ export class ViewerPresentation {
   /** The CSS size the engine last got, and the pending settle. */
   private appliedSize: { width: number; height: number } | null = null;
   private settleTimer = 0;
+  private pendingSize: { width: number; height: number } | null = null;
   private settleDue = false;
   /** The display's refresh grid, sent with every state (amendment 18). */
   private vsync: VsyncHint | null = null;
@@ -412,19 +421,36 @@ export class ViewerPresentation {
     if (rect.width < 1 || rect.height < 1) return;
     const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);
+    const display = this.configuredDisplay(view);
     const { state, changed } = this.sequencer.next({
       ...params,
       composition: this.options.service.composition(),
       cssWidth: size.width,
       cssHeight: size.height,
       devicePixelRatio: dpr,
-      edr: this.options.edr !== 'off' && displayIsEdr(view),
-      colorSpace: canvasColorSpace(view)
+      edr: display.edr,
+      colorSpace: display.colorSpace
     });
     if (!changed) return;
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
     this.presenter?.setViewerState(this.withHint(state));
+  }
+
+  private configuredDisplay(host: Window): NonNullable<ViewerPresentation['displayColor']> {
+    const colorSpace = canvasColorSpace(host);
+    const edr = displayIsEdr(host);
+    if (!this.displayColor || this.displayColor.host !== host) {
+      this.displayColor = { host, colorSpace, edr: this.options.edr !== 'off' && edr, observedColorSpace: colorSpace, observedEdr: edr };
+    } else if (colorSpace !== this.displayColor.observedColorSpace || edr !== this.displayColor.observedEdr) {
+      // Legacy GL never reconfigures its drawing buffer for media-query
+      // changes. Match that lifetime, including later geometry updates:
+      // a first-show capability change must not rebuild a playing pool.
+      this.options.log?.('info', `engine presentation display capabilities changed to ${colorSpace}, edr=${edr}; keeping configured ${this.displayColor.colorSpace}, edr=${this.displayColor.edr}`);
+      this.displayColor.observedColorSpace = colorSpace;
+      this.displayColor.observedEdr = edr;
+    }
+    return this.displayColor;
   }
 
   /** A state as sent: with the newest vsync hint, which is not part of the view. */
@@ -447,10 +473,16 @@ export class ViewerPresentation {
       this.settleDue = false;
       if (this.settleTimer) this.clearTimer(view, this.settleTimer);
       this.settleTimer = 0;
+      this.pendingSize = null;
       this.appliedSize = { width, height };
       return this.appliedSize;
     }
+    // Param/overlay updates repeat during playback. They do not mean the
+    // stage resized again: extending this deadline on every repeat can leave
+    // the old pool alive for seconds, then reallocate it in steady playback.
+    if (this.settleTimer && this.pendingSize?.width === width && this.pendingSize.height === height) return applied;
     if (this.settleTimer) this.clearTimer(view, this.settleTimer);
+    this.pendingSize = { width, height };
     const fire = (): void => {
       this.settleTimer = 0;
       this.settleDue = true;
@@ -488,6 +520,14 @@ export class ViewerPresentation {
     const view = this.options.stage.ownerDocument.defaultView;
     if (!view || view === this.host) return view;
     const moved = this.host !== null;
+    if (this.host) {
+      // A popout owns a different timer queue; closing the old host cancels
+      // its timer, so a pending size must start a fresh deadline here.
+      if (this.settleTimer) this.clearTimer(this.host, this.settleTimer);
+      this.settleTimer = 0;
+      this.pendingSize = null;
+      this.settleDue = false;
+    }
     this.host = view;
     for (const off of this.mediaOffs.splice(0)) off();
     const refresh = (): void => {

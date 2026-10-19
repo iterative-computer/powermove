@@ -386,7 +386,8 @@ describe.skipIf(!built)('the identity registry across a replaced instance', () =
     const expected = (L: any) => keys.flatMap(key => [PM.ev(L, key, 1.25), PM.evP(L, L.p[key], 1.25, key)]);
     // Interned in the first instance: A's channels get the low ids.
     expect(ask(A)).toEqual(expected(A));
-    const registry = registries.at(-1)!;
+    // Detached scopes also own a finalizer; select the property-id registry.
+    const registry = registries.find(r => r.held.some(h => h && typeof h === 'object' && 'generation' in h))!;
     const before = registry.held.splice(0);
     expect(before.length).toBeGreaterThan(0);
     // A trap; the loader replaces the instance.

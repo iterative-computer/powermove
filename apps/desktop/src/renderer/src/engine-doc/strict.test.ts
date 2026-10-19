@@ -11,6 +11,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { groupMatrix, makeVectorPath, makeVertex, pathValues } from '../legacy/core/vector-paths';
 import { installEngineDoc, type EngineDoc } from './install';
+import { COMP_FIELDS, rootComp } from '../legacy/core/compositions';
+import { ROOT_WRAPPER_FIELDS } from './native';
 import { parseMode, profileOverride, workerMode } from './flags';
 import type { FontProvider } from './fonts';
 import { PmWasm } from './wasm';
@@ -159,9 +161,162 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     PM.proj = PM.mkProject({ dur: 10 });
     expect(await doc.whenReady).toBe(false);
     expect(doc.failures().map((f) => [f.code, f.retry])).toEqual([['pm-wasm-unavailable', true]]);
+    const readied: boolean[] = [];
+    const stop = doc.onReady(() => readied.push(doc.ready));
     available = true;
     expect(await doc.retry()).toBe(true);
     expect(doc.ready).toBe(true);
+    // The extension loader activates what waited (kernel/loader.ts).
+    expect(readied).toEqual([true]);
+    stop();
+  });
+
+  it('addresses fresh Comps.get root wrappers through the wrapper view, keeping interned values', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    PM.scope = [{}];
+    // PM.Comps.get(openId): a new rootComp(PM.proj) on every call.
+    PM.curComp = () => rootComp(PM.proj);
+    const query = vi.spyOn(doc.wasm!, 'query');
+    const prop = child.p['position.y'];
+    for (const t of [0, 0.5, 1, 2]) {
+      expect(doc.api!.evP(child, prop, t, 'position.y')).toBe(PM.evP(child, prop, t, 'position.y'));
+      doc.api!.worldMatrix(child, t);
+    }
+    expect(query.mock.calls.every(([r]) => !(r as any).compJson && !(r as any).compJsonText && (r as any).comp === '@root:' + PM.proj.compId)).toBe(true);
+    expect((doc.stats() as any).native.fastPath).toBeGreaterThanOrEqual(4);
+    expect((doc.stats() as any).native.interned).toBe(1);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
+  it("gives expressions under a root wrapper the wrapper's members, not the project's (param, comp.name, comp.id)", async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    PM.proj.params = { amp: { value: 7 } };
+    PM.proj.compName = 'Main';
+    const exprs = [
+      'param("amp") + (comp.params ? 1000 : 0)',
+      'comp.name === "Untitled" ? 5 : comp.name === "Main" ? 6 : 9',
+      'comp.id === "' + PM.proj.compId + '" ? 3 : comp.id === "' + PM.proj.id + '" ? 4 : 8',
+      '(comp.compId === undefined ? 10 : 20) + (comp.comps ? 100 : 0) + (comp.compName === undefined ? 1 : 2)',
+      'comp.fps * 2 + comp.layers.length + fps',
+    ];
+    const props = exprs.map((expr, i) => { const p = PM.P(i); p.expr = expr; child.p[`x.e${i}`] = p; return p; });
+    child.p['position.x'].expr = 'param("amp") * 10 + (comp.name === "Main" ? 1 : 0)';
+    PM.touch();
+    const native = () => [...props.map((p, i) => doc.api!.evP(child, p, 1, `x.e${i}`)), doc.api!.ev(child, 'position.x', 1)];
+    const legacy = () => [...props.map((p, i) => PM.evP(child, p, 1, `x.e${i}`)), PM.ev(child, 'position.x', 1)];
+    // Today's answers (legacy/core/anim.ts paramGet and evalProp's `comp`).
+    const fpsTerm = 3 * PM.proj.fps + PM.proj.layers.length;
+    const open = [1007, 5, 4, 122, fpsTerm, 70];
+    const wrapped = [0, 6, 3, 11, fpsTerm, 1];
+    const fresh = () => { PM.scope = [{}]; PM.curComp = () => rootComp(PM.proj); };
+    const none = () => { PM.scope = []; PM.curComp = () => PM.scope.at(-1) ?? PM.proj; };
+    // Scopes alternate at one revision: no interned id, memo, or answer may cross views.
+    for (const [scope, want] of [[none, open], [fresh, wrapped], [none, open], [fresh, wrapped]] as const) {
+      scope();
+      for (let round = 0; round < 2; round++) {
+        expect(legacy()).toEqual(want);
+        expect(native()).toEqual(legacy());
+      }
+    }
+    // A wrapper held in the scope and then changed without the barrier seeing
+    // it (its own members, not the document): the next answer reads it.
+    const held = rootComp(PM.proj);
+    PM.scope = [held];
+    PM.curComp = () => PM.scope.at(-1) ?? PM.proj;
+    expect(native()).toEqual(legacy());
+    held.params = { amp: { value: 3 } };
+    expect(legacy()[0]).toBe(1003);
+    expect(native()).toEqual(legacy());
+    delete held.params;
+    held.name = 'Untitled';
+    expect(native()).toEqual(legacy());
+    // A member rootComp never has, and one it has, removed.
+    (held as any).extra = 1;
+    expect(native()).toEqual(legacy());
+    delete (held as any).extra;
+    delete held.fps;
+    expect(native()).toEqual(legacy());
+    held.fps = PM.proj.fps;
+    expect(native()).toEqual(legacy());
+    expect([...ROOT_WRAPPER_FIELDS]).toEqual([...COMP_FIELDS]);
+    // A stale wrapper after the project's own field changed.
+    held.name = PM.proj.compName;
+    PM.proj.fps = 50;
+    PM.touch();
+    expect(legacy()[4]).not.toBe(2 * 50 + 2 + 50);
+    expect(native()).toEqual(legacy());
+    // The stored form: a project without compId is its own open composition.
+    none();
+    delete PM.proj.compId;
+    PM.touch();
+    fresh();
+    expect(native()).toEqual(legacy());
+    expect(doc.api!.evP(child, props[0], 1, 'x.e0')).toBe(0);
+    expect(fallbacks(doc)).toEqual({});
+    expect(doc.failures()).toEqual([]);
+  });
+
+  it('keeps one validated detached scope for a scope object made anew on every call, exactly', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    const base: any = clone({ id: 'outside', fps: 24, w: 640, h: 360, dur: 10, layers: PM.proj.layers });
+    const L = base.layers[1];
+    L.p['x.k'] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 50)] });
+    L.p['x.e'] = PM.P(0); L.p['x.e'].expr = 'param("amp") + comp.fps + comp.layers.length + time';
+    PM.scope = [{}];
+    PM.curComp = () => ({ ...base });
+    const query = vi.spyOn(doc.wasm!, 'query');
+    const check = () => {
+      for (const t of [0, 0.5, 1.25]) {
+        expect(doc.api!.evP(L, L.p['x.k'], t, 'x.k')).toBe(PM.evP(L, L.p['x.k'], t, 'x.k'));
+        expect(doc.api!.evP(L, L.p['x.e'], t, 'x.e')).toBe(PM.evP(L, L.p['x.e'], t, 'x.e'));
+        expect(doc.api!.ev(L, 'position.y', t)).toBe(PM.ev(L, 'position.y', t));
+        expect(doc.api!.worldMatrix(L, t)).toEqual(PM.worldMatrix(L, t));
+      }
+    };
+    check();
+    const serialized = () => query.mock.calls.filter(([r]) => (r as any).compJson || (r as any).compJsonText).length;
+    const first = serialized();
+    for (let i = 0; i < 20; i++) check();
+    // Repeated queries reuse the resident scope: no full serialization per call.
+    expect(serialized()).toBe(first);
+    // Changes reach the next copy. A scope member change is seen at an
+    // unchanged document revision; channel edits are announced (PM.touch()
+    // clears today's keyframe caches too).
+    base.fps = 50;
+    check();
+    base.params = { amp: { value: 9 } };
+    check();
+    L.p['x.k'].kf[1].v = 80;
+    PM.touch();
+    check();
+    L.p['x.e'] = PM.P(0); L.p['x.e'].expr = 'comp.w + time';
+    PM.touch();
+    check();
+    base.layers = base.layers.slice(0, 2);
+    PM.touch();
+    check();
+    expect(child).toBeTruthy();
+    expect(fallbacks(doc)).toEqual({});
+    expect(doc.failures()).toEqual([]);
+  });
+
+  it('invalidates numeric scope answers on writes and revives a dead module before reusing them', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    const prop = child.p['position.y'];
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(40);
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(40);
+    prop.v = 12;
+    PM.touch();
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(52);
+    const old = doc.wasm!;
+    old.dead = true;
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(52);
+    expect(doc.wasm).not.toBe(old);
+    expect(doc.failures()).toEqual([]);
   });
 
   it('answers nested composition paths and a root without compId natively', async () => {

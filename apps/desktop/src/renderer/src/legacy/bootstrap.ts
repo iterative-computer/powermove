@@ -26,6 +26,7 @@ import { install as installSelection } from './core/selection';
 import { install as installAnim } from './core/anim';
 import { install as installHistory } from './core/history';
 import { installEngineDoc } from '../engine-doc/install';
+import { compileEditorModule, preloadedEngineEnabled } from '../engine-doc/wasm';
 import { rendererMode, withNewEngine } from '../engine-doc/flags';
 import { installEngineConnection } from '../engine-connection/install';
 import { installUiFontCensus } from '../engine-doc/ui-font-census';
@@ -72,6 +73,8 @@ const PM: PMRegistry = (window.PM = window.PM || {});
 
 /** Whether this launch runs the new engine (main decides at launch). */
 function newEngineOn(): boolean {
+  const preloaded = preloadedEngineEnabled();
+  if (preloaded !== undefined) return preloaded;
   try {
     return (hostBridge() as { nativeEngine?: { enabledSync?(): boolean } } | undefined)?.nativeEngine?.enabledSync?.() === true;
   } catch {
@@ -166,16 +169,42 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
 ];
 
 const NEW_ENGINE = newEngineOn();
+performance.mark('powermove:bootstrap-start');
+// Fetch concurrently with installation; the activation gate reuses this load.
+if (NEW_ENGINE) void compileEditorModule().catch(() => {});
 for (const [name, install] of INSTALLS) {
+  const started = performance.now();
   try {
     install(PM);
   } catch (error) {
     // Keep independent engine failures isolated while the registry boots.
     console.error(`[legacy] install failed: ${name}`, error);
+  } finally {
+    performance.measure(`powermove:install:${name}`, { start: started, end: performance.now() });
   }
 }
+performance.mark('powermove:bootstrap-end');
 if (NEW_ENGINE) {
-  // Warm in the background after installation: UI availability never waits on fonts or wasm.
-  void PM.EngineDoc?.whenReady?.then(() => PM.EngineDoc?.warmFonts?.());
-  PM.bus?.on?.('projects:open', () => { void PM.EngineDoc?.warmFonts?.(); });
+  // Prewarming is speculative: visible queries load their exact faces on demand.
+  // Leave the first frame free to finish before scanning all keyed font times.
+  let scheduled = false;
+  const warm = () => {
+    if (scheduled) return;
+    scheduled = true;
+    const run = () => {
+      scheduled = false;
+      void PM.EngineDoc?.whenReady?.then(async () => {
+        const start = performance.now();
+        await PM.EngineDoc?.warmFonts?.();
+        performance.measure('powermove:font-prewarm', { start, end: performance.now() });
+      });
+    };
+    // First leave a paint opportunity, then use otherwise idle time.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2000 });
+      else setTimeout(run, 0);
+    }));
+  };
+  warm();
+  PM.bus?.on?.('projects:open', warm);
 }
