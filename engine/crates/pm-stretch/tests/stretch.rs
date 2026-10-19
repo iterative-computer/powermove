@@ -3,6 +3,7 @@
 //! same bytes for the same calls.
 
 use pm_stretch::Stretcher;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SR: u32 = 48_000;
 
@@ -73,6 +74,82 @@ fn stretch(s: &mut Stretcher, input: &[f32], rate: f64, out_len: usize) -> Vec<f
     }
     out.truncate(out_len);
     out
+}
+
+#[test]
+fn cooperative_checkpoints_keep_interval_calls_bit_exact() {
+    static CHECKPOINTS: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn checkpoint() {
+        CHECKPOINTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let input = sine(440.0, SR as usize * 2, 0.4);
+    for rate in [0.5, 0.75, 1.5, 2.0] {
+        let mut ordinary = Stretcher::new(1, SR).unwrap();
+        let mut cooperative = Stretcher::new(1, SR).unwrap();
+        let lead = ordinary.output_seek_length(rate);
+        let before_seek = CHECKPOINTS.load(Ordering::Relaxed);
+        ordinary.output_seek(&[&input[..lead]]).unwrap();
+        assert_eq!(CHECKPOINTS.load(Ordering::Relaxed), before_seek);
+        cooperative
+            .output_seek_with_checkpoint(&[&input[..lead]], checkpoint)
+            .unwrap();
+        assert!(CHECKPOINTS.load(Ordering::Relaxed) > before_seek);
+        let interval = ordinary.interval_samples();
+        let mut fed = lead;
+        for call in 1..=8 {
+            let want = (lead as f64 + (call * interval) as f64 * rate).round() as usize;
+            let mut expected = vec![0.0; interval];
+            let mut actual = vec![0.0; interval];
+            ordinary
+                .process(&[&input[fed..want]], &mut [&mut expected])
+                .unwrap();
+            let before_process = CHECKPOINTS.load(Ordering::Relaxed);
+            cooperative
+                .process_with_checkpoint(&[&input[fed..want]], &mut [&mut actual], checkpoint)
+                .unwrap();
+            assert!(CHECKPOINTS.load(Ordering::Relaxed) > before_process);
+            assert_eq!(
+                expected.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                actual.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                "rate {rate}, interval {call}"
+            );
+            fed = want;
+        }
+
+        let mut expected = vec![0.0; 2 * interval];
+        let mut actual = vec![0.0; 2 * interval];
+        ordinary.flush(&mut [&mut expected], rate).unwrap();
+        let before_flush = CHECKPOINTS.load(Ordering::Relaxed);
+        cooperative
+            .flush_with_checkpoint(&mut [&mut actual], rate, checkpoint)
+            .unwrap();
+        assert!(CHECKPOINTS.load(Ordering::Relaxed) > before_flush);
+        assert_eq!(
+            expected.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+            actual.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+            "rate {rate}, flush"
+        );
+
+        // A prior cooperative call must not leave the thread-local hook set
+        // for ordinary calls, including zero-input and sustained silence.
+        let zeroes = vec![0.0; interval];
+        let silent_channels = [&zeroes[..]];
+        for call in 0..=10 {
+            let mut expected = vec![0.0; interval];
+            let mut actual = vec![0.0; interval];
+            let before_plain = CHECKPOINTS.load(Ordering::Relaxed);
+            let input: &[&[f32]] = if call == 0 { &[] } else { &silent_channels };
+            ordinary.process(input, &mut [&mut expected]).unwrap();
+            cooperative.process(input, &mut [&mut actual]).unwrap();
+            assert_eq!(CHECKPOINTS.load(Ordering::Relaxed), before_plain);
+            assert_eq!(
+                expected.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                actual.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                "rate {rate}, plain zero call {call}"
+            );
+        }
+    }
 }
 
 /// Within about one sample per analysis interval of unity (|rate − 1| below

@@ -40,6 +40,7 @@ unsafe extern "C" {
         handle: *mut c_void,
         inputs: *const *const f32,
         samples: c_int,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
     fn pm_stretch_process(
         handle: *mut c_void,
@@ -47,6 +48,7 @@ unsafe extern "C" {
         input_samples: c_int,
         outputs: *const *mut f32,
         output_samples: c_int,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
     fn pm_stretch_exact(
         handle: *mut c_void,
@@ -60,6 +62,7 @@ unsafe extern "C" {
         outputs: *const *mut f32,
         output_samples: c_int,
         rate: f32,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
 }
 
@@ -266,16 +269,59 @@ impl Stretcher {
     /// [`Self::output_seek_length`] samples for the rate to come): the next
     /// output of [`Self::process`] is aligned with that sample.
     pub fn output_seek(&mut self, input: &[&[f32]]) -> Result<()> {
+        self.output_seek_inner(input, None)
+    }
+
+    /// The same output seek, with checkpoints inside its pre-roll processing.
+    /// The callback must not panic or unwind over C++.
+    pub fn output_seek_with_checkpoint(
+        &mut self,
+        input: &[&[f32]],
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.output_seek_inner(input, Some(checkpoint))
+    }
+
+    fn output_seek_inner(
+        &mut self,
+        input: &[&[f32]],
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n = self.input_pointers(input)?;
         // SAFETY: as in `seek`.
         status(unsafe {
-            pm_stretch_output_seek(self.handle.as_ptr(), self.inputs.as_ptr(), n as c_int)
+            pm_stretch_output_seek(
+                self.handle.as_ptr(),
+                self.inputs.as_ptr(),
+                n as c_int,
+                checkpoint,
+            )
         })
     }
 
     /// Consumes every sample of `input` and fills every sample of `output`.
     /// `input` may be empty (a frozen spectrum, or silence).
     pub fn process(&mut self, input: &[&[f32]], output: &mut [&mut [f32]]) -> Result<()> {
+        self.process_inner(input, output, None)
+    }
+
+    /// The same processing call, with a cooperative callback before each
+    /// indivisible DSP step. The callback must not panic or unwind over C++.
+    pub fn process_with_checkpoint(
+        &mut self,
+        input: &[&[f32]],
+        output: &mut [&mut [f32]],
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.process_inner(input, output, Some(checkpoint))
+    }
+
+    fn process_inner(
+        &mut self,
+        input: &[&[f32]],
+        output: &mut [&mut [f32]],
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n_in = if input.is_empty() {
             for p in &mut self.inputs {
                 *p = std::ptr::null();
@@ -295,12 +341,33 @@ impl Stretcher {
                 n_in as c_int,
                 self.outputs.as_ptr(),
                 n_out as c_int,
+                checkpoint,
             )
         })
     }
 
     /// Reads the remaining output with no further input.
     pub fn flush(&mut self, output: &mut [&mut [f32]], rate: f64) -> Result<()> {
+        self.flush_inner(output, rate, None)
+    }
+
+    /// The same flush, with checkpoints inside any tail processing.
+    /// The callback must not panic or unwind over C++.
+    pub fn flush_with_checkpoint(
+        &mut self,
+        output: &mut [&mut [f32]],
+        rate: f64,
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.flush_inner(output, rate, Some(checkpoint))
+    }
+
+    fn flush_inner(
+        &mut self,
+        output: &mut [&mut [f32]],
+        rate: f64,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n = self.output_pointers(output)?;
         // SAFETY: as in `process`.
         status(unsafe {
@@ -309,6 +376,7 @@ impl Stretcher {
                 self.outputs.as_ptr(),
                 n as c_int,
                 rate as f32,
+                checkpoint,
             )
         })
     }

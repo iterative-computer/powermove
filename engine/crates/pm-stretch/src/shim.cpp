@@ -9,7 +9,19 @@
 #include <cstdint>
 #include <new>
 
+extern "C" {
+typedef void pm_stretch_checkpoint_fn();
+}
+
+// The library invokes this before each indivisible analysis, spectrum, or
+// synthesis step. A null callback leaves ordinary/offline processing alone.
+static thread_local pm_stretch_checkpoint_fn *pm_stretch_active_checkpoint = nullptr;
+#define SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP(step, steps) \
+	do { \
+		if (pm_stretch_active_checkpoint) pm_stretch_active_checkpoint(); \
+	} while (false)
 #include "signalsmith-stretch/signalsmith-stretch.h"
+#undef SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP
 
 namespace {
 
@@ -20,6 +32,15 @@ struct Handle {
 	long seed;
 	int channels;
 	explicit Handle(long s) : stretch(s), seed(s), channels(0) {}
+};
+
+struct CheckpointScope {
+	pm_stretch_checkpoint_fn *previous;
+	explicit CheckpointScope(pm_stretch_checkpoint_fn *callback)
+		: previous(pm_stretch_active_checkpoint) {
+		pm_stretch_active_checkpoint = callback;
+	}
+	~CheckpointScope() { pm_stretch_active_checkpoint = previous; }
 };
 
 // Zero-valued input of any length, for flushes and silent pre-rolls.
@@ -110,7 +131,9 @@ int pm_stretch_seek(void *handle, const float *const *inputs, int samples, doubl
 	}
 }
 
-int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples) {
+int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples,
+		pm_stretch_checkpoint_fn *checkpoint) {
+	CheckpointScope scope(checkpoint);
 	try {
 		static_cast<Handle *>(handle)->stretch.outputSeek(inputs, samples);
 		return 0;
@@ -120,7 +143,8 @@ int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples
 }
 
 int pm_stretch_process(void *handle, const float *const *inputs, int input_samples,
-		float *const *outputs, int output_samples) {
+		float *const *outputs, int output_samples, pm_stretch_checkpoint_fn *checkpoint) {
+	CheckpointScope scope(checkpoint);
 	try {
 		auto &s = static_cast<Handle *>(handle)->stretch;
 		if (input_samples == 0) {
@@ -134,7 +158,9 @@ int pm_stretch_process(void *handle, const float *const *inputs, int input_sampl
 	}
 }
 
-int pm_stretch_flush(void *handle, float *const *outputs, int output_samples, float rate) {
+int pm_stretch_flush(void *handle, float *const *outputs, int output_samples, float rate,
+		pm_stretch_checkpoint_fn *checkpoint) {
+	CheckpointScope scope(checkpoint);
 	try {
 		static_cast<Handle *>(handle)->stretch.flush(outputs, output_samples, rate);
 		return 0;
