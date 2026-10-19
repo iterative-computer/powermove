@@ -62,6 +62,7 @@ fn main() {
     let assets = MapResolver::default();
     selection_contract(&mut measure, &mut renderer);
     let mut frames = 0;
+    let mut routes = support::text::Level2Routes::new();
     let mut stats = Stats::default();
     let mut ssim_failures = Vec::new();
     let make_doc = |l: Value| {
@@ -97,6 +98,9 @@ fn main() {
         let mut l = layer("text", "text", d, 100.0, 80.0, 3.0);
         l["compat"] = json!(2);
         let document = make_doc(l.clone());
+        // A capture of this document would be a level 1 picture: the
+        // parity gates route it here (text_corpus, the evaluation corpus).
+        assert!(routes.route(id, id, &document), "{id} routes to this gate");
         let resting_doc = {
             let mut r = l.clone();
             r["d"]["animators"] = json!([]);
@@ -366,12 +370,55 @@ fn main() {
         println!("{id}: four native frames, bounds, picks, plane, raster, no forbidden routing");
     }
     assert_eq!(frames, 52);
+    assert_eq!(routes.routed.len(), cases.len());
+    assert!(routes.failures().is_empty(), "{:?}", routes.failures());
+    level2_routing_contract(&make_doc);
     stats.report();
     assert!(
         ssim_failures.is_empty(),
         "below the 0.98 CoreText ink SSIM floor: {ssim_failures:#?}"
     );
     println!("level 2 semantics: {frames} native frames passed");
+}
+
+/// The parity gates' level 2 routing: level 1 text is compared with the
+/// capture, level 2 text the semantic gate judges is routed, and level 2
+/// text it does not judge fails rather than being skipped.
+#[cfg(target_os = "macos")]
+fn level2_routing_contract(make_doc: &dyn Fn(serde_json::Value) -> pm_model::Document) {
+    use serde_json::json;
+    use support::doc::layer;
+    let text = |compat: Option<u32>| {
+        let mut l = layer(
+            "text",
+            "text",
+            json!({"text":"a","font":"Georgia","size":20}),
+            0.0,
+            0.0,
+            3.0,
+        );
+        if let Some(c) = compat {
+            l["compat"] = json!(c);
+        }
+        make_doc(l)
+    };
+    let mut routes = support::text::Level2Routes::new();
+    assert!(!routes.route("text/plain", "text/plain", &text(None)));
+    assert!(!routes.route("text/level-1", "text/level-1", &text(Some(1))));
+    assert!(routes.failures().is_empty());
+    assert!(routes.route(
+        "text-level2/word-transform (text in isolation)",
+        "text-level2/word-transform",
+        &text(Some(2))
+    ));
+    assert!(routes.failures().is_empty());
+    assert!(routes.route("text/unjudged", "text/unjudged", &text(Some(2))));
+    assert_eq!(routes.failures().len(), 1);
+    assert!(routes.failures()[0].starts_with("text/unjudged: "));
+    assert_eq!(routes.routed.len(), 2);
+    println!(
+        "level 2 routing contract: level 1 compared, judged level 2 routed, unjudged level 2 fails"
+    );
 }
 
 /// Independent interaction contract: authored paragraph boxes and the

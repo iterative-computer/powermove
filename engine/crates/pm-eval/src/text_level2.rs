@@ -23,6 +23,30 @@ pub fn is_level2(layer: &Node) -> bool {
     node::member(Some(layer), "compat").is_some_and(|v| node::to_number(Some(v)) >= 2.0)
 }
 
+/// The ids of the document's text layers at compatibility level 2, in the
+/// root composition and every `comps` entry. Today's engine ignores
+/// `compat` and draws these at level 1, so a legacy capture of such a
+/// document is no level 2 reference: the parity gates send it to the native
+/// semantic gate instead of comparing it.
+pub fn level2_text_layers(doc: &pm_model::Document) -> Vec<String> {
+    let root = doc.root();
+    let mut lists = vec![node::member(root, "layers")];
+    if let Some(comps) = node::member(root, "comps") {
+        lists.extend(
+            node::entries(comps)
+                .into_iter()
+                .map(|(_, comp)| node::member(comp.node(), "layers")),
+        );
+    }
+    lists
+        .into_iter()
+        .filter_map(node::array)
+        .flatten()
+        .filter(|l| node::is_str(node::member(Some(l), "type"), "text") && is_level2(l))
+        .map(|l| node::to_js_string(node::member(Some(l), "id")).to_string_lossy())
+        .collect()
+}
+
 pub struct Shaped {
     pub layout: Level2Layout,
     pub faces: HashMap<String, FontBytes>,
@@ -492,6 +516,20 @@ mod tests {
             };
             assert_eq!(resting_selection(&auto, &layout, None).y1, 33.0);
         }
+    }
+
+    #[test]
+    fn level2_text_layers_are_found_in_every_composition() {
+        let doc =
+            |json: &str| pm_model::Document::new(Some(pm_model::json::parse(json).unwrap()), 1);
+        let found = level2_text_layers(&doc(
+            r#"{"layers":[{"id":"a","type":"text","compat":2},{"id":"b","type":"text"},
+                {"id":"c","type":"text","compat":1},{"id":"d","type":"image","compat":2}],
+               "comps":{"C1":{"layers":[{"id":"e","type":"text","compat":3}]},"C2":{}}}"#,
+        ));
+        assert_eq!(found, ["a", "e"]);
+        assert!(level2_text_layers(&doc(r#"{"layers":[{"id":"b","type":"text"}]}"#)).is_empty());
+        assert!(level2_text_layers(&pm_model::Document::new(None, 1)).is_empty());
     }
 
     #[test]
