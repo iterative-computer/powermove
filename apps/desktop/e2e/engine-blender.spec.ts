@@ -8,20 +8,14 @@ import { expect, test } from '@playwright/test';
 import { launchApp, type LaunchedApp } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
-/* Exports with Blender layers in the job engine (plan section 17's Blender
-   stage, contract 11): with Use New Engine on, the export sheet's job runs
-   in the job engine, which builds each frame's snapshot, has host services
-   run the pinned worker in the installed Blender (16-bit RGBA through AgX),
-   and composites the surfaces; the file is the job engine's (not Lavf), the
-   surfaces are in Engine Cache/Blender Surfaces, and the frame looks like
-   today's Blender export of the same project (the current exporter, Use
-   New Engine off): the job engine's still equals today's Blender surfaces
-   of the same frame (today's 8-bit worker, recorded at main's IPC)
-   composited per layer, within 2 CV (today's 8-bit dithered PNGs against
-   the pinned 16-bit ones). Today's own still is measured against the same
-   composite and reported (the current exporter's still path draws its
-   surfaces up to a pixel off; docs/engine/blender.md). Skipped without
-   Blender 4.5 or newer. */
+/* Exports with Blender layers in the job engine (plan section 17,
+   contract 11). Existing projects retain today's PNG8/dither and straight
+   ImageBitmap compositing; level 2 keeps pinned PNG16. The job engine's
+   still is compared directly with today's still at the Blender corpus
+   bounds. A composite of today's raw surfaces is diagnostic only: it
+   does not reproduce today's ImageBitmap upload at the fringes. The
+   viewer test checks paused Blender previews and native playback without
+   renderer-side Blender work. Skipped without Blender 4.5 or newer. */
 
 const ffprobe = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
 const probe = (file: string) => JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format_tags=encoder:stream=codec_name,pix_fmt,nb_frames,width,height', '-of', 'json', file], { encoding: 'utf8' }));
@@ -129,8 +123,8 @@ test('exports with Blender layers render in the job engine and look like today\'
         for (const f of [today, engine]) await copyFile(f, path.join(keep, path.basename(f)));
         await cp(path.join(userData, 'Engine Cache', 'Blender Surfaces'), path.join(keep, 'area'), { recursive: true });
       }
-      // Today's surfaces composited per layer over the (black) background,
-      // straight alpha, as today's compositor premultiplies them.
+      // Ideal premultiplied raw-surface composite, diagnostic only. The
+      // actual ImageBitmap upload is covered by the direct still comparison.
       const layers = ['box', 'ball'].map((id) => rgba(path.join(root, `today-${id}.png`)));
       const pixels = W * H;
       const composite = new Float64Array(pixels * 3);
@@ -155,8 +149,17 @@ test('exports with Blender layers render in the job engine and look like today\'
       const ours = compare(engine), theirs = compare(today);
       console.log(`Blender look: job engine still ${(100 * ours.within2).toFixed(3)}% within 2 CV of today's surfaces composited (max ${ours.max} CV); today's own still ${(100 * theirs.within2).toFixed(3)}% (max ${theirs.max} CV); ${covered} covered surface pixels`);
       expect(covered).toBeGreaterThan(pixels * 0.05);
-      expect(ours.within2).toBeGreaterThanOrEqual(0.999);
-      expect(ours.max).toBeLessThanOrEqual(4);
+      const actual = rgba(engine), reference = rgba(today);
+      let matching = 0, maximum = 0;
+      for (let i = 0; i < pixels; i++) {
+        let difference = 0;
+        for (let c = 0; c < 3; c++) difference = Math.max(difference, Math.abs(actual[i * 4 + c]! - reference[i * 4 + c]!));
+        if (difference <= 2) matching++;
+        maximum = Math.max(maximum, difference);
+      }
+      console.log(`Blender still vs today's still: ${(100 * matching / pixels).toFixed(3)}% within 2 CV, max ${maximum} CV`);
+      expect(matching / pixels).toBeGreaterThanOrEqual(0.999);
+      expect(maximum).toBeLessThanOrEqual(4);
       expect(session.diagnostics.pageErrors).toEqual([]);
     } finally {
       await session.close();

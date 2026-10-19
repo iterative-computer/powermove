@@ -739,6 +739,21 @@ pub fn build<'d>(
     snapshot.insert("width", num(size(frame.width)));
     snapshot.insert("height", num(size(frame.height)));
     snapshot.insert("settings", s);
+    // Output compatibility is per layer. It is hashed with the snapshot,
+    // so an 8-bit legacy surface can never be reused for a level 2 render.
+    let compatibility_layers: Vec<Value> = ids
+        .iter()
+        .filter(|id| {
+            layers.get(*id).is_some_and(|layer| {
+                let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
+                !level2
+            })
+        })
+        .map(|id| Value::String(JsString::from(id.as_str())))
+        .collect();
+    if !compatibility_layers.is_empty() {
+        snapshot.insert("compatibilityLayers", Value::Array(compatibility_layers));
+    }
     snapshot.insert("objects", Value::Array(objects));
     snapshot.insert("lights", Value::Array(lights));
     snapshot.insert("blocks", Value::Object(blocks));

@@ -300,9 +300,11 @@ describe('the engine connection', () => {
     const doc = stream();
     let id = 'P1';
     const loaded: number[] = [];
+    const loading = vi.fn();
     const session = new DocumentSession({
       connection, stream: doc, documentId: () => id, log: () => {},
       handlers: { message: () => {}, closed: () => {} },
+      onLoading: loading,
       onLoaded: () => loaded.push(port.requests('resync').length)
     });
     await session.start();
@@ -312,10 +314,12 @@ describe('the engine connection', () => {
     doc.emit({ revision: 6, baseRevision: 5 });
     await flush();
     expect(loaded).toEqual([]);
+    expect(loading).not.toHaveBeenCalled();
     // `PM.proj = PM.mkProject(…)`: the mirror loads another document. The
     // viewer is asked again only after the engine has it.
     id = 'P2';
     doc.emit({ revision: 7, origin: 'load' });
+    expect(loading).toHaveBeenCalledOnce(); // preserve UI time before asynchronous resync
     expect(loaded).toEqual([]);
     await flush();
     const last = port.requests('resync').at(-1)!.message as { body: { document: string } };
@@ -399,10 +403,17 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 3, state: 'stopped', hostTime: 9_000_000, mediaTime: ticks(2), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(9000)).toEqual({ time: 2, playing: false, ended: true });
 
-    // Routed to the legacy viewer: the driver hands back.
+    // A composition the engine cannot draw (amendment 21): nothing hands
+    // the transport back; Play still runs on the engine's clock.
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 4, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'masks', retry: { kind: 'never' }, detail: null } } } as never, 5));
     driver.refresh();
-    expect(changes).toEqual([true, false]);
+    expect(session.route).toBe('legacy');
+    expect(changes).toEqual([true]);
+    expect(driver.active()).toBe(true);
+    const before = port.events('transport').length;
+    driver.play(0.5);
+    const after = port.events('transport').slice(before).map((e) => (e.message as { body: { command: string } }).body.command);
+    expect(after).toEqual(['seek', 'play']);
   });
 
   it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {
@@ -442,6 +453,86 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 4, state: 'stopped', hostTime: 5_000_000, mediaTime: ticks(2.5), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(5100)).toEqual({ time: 2.5, playing: false, ended: true });
     expect(driver.rate()).toBe(0);
+  });
+
+  it('wakes a headless session and replays Play without requiring a frame', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C');
+    const wake = vi.fn();
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake });
+    driver.setLoop([0.2, 1.2]);
+    driver.play(0.5);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(port.events('transport')).toHaveLength(0);
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    driver.refresh();
+    expect(session.route).toBe('pending'); // an untagged in-flight clock is not readiness
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    driver.refresh();
+    expect(session.route).toBe('engine');
+    expect(session.frames).toBe(0);
+    expect(port.events('transport').map(e => (e.message as any).body.command)).toEqual(['audioScrub', 'setLoop', 'seek', 'play']);
+    expect(port.events('viewer').at(-1)?.message).toMatchObject({ body: { headless: true, composition: 'C' } });
+    // Attaching presentation to the same session does not send another Play.
+    session.sendViewerState({ composition: 'C', viewSeq: 2, headless: false } as never);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', revision: 3 } } as never, 5));
+    driver.refresh();
+    expect(port.events('transport').filter(e => (e.message as any).body.command === 'play')).toHaveLength(1);
+    session.close(); connection.close('test complete');
+  });
+
+  it('a viewerless session follows the open composition before each command', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C1');
+    let open = 'C1';
+    // install.ts's followComposition.
+    const follow = () => { if (session.headless && session.composition !== open) session.sendHeadless(open); };
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {}, prepare: follow });
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    driver.refresh();
+    expect(session.route).toBe('engine');
+    // Another timeline tab: the same project, another composition (a
+    // document batch, not a load). Play plays the composition just opened.
+    open = 'C2';
+    const start = port.sent.length;
+    driver.play(0.25);
+    const after = port.sent.slice(start).filter((e) => e.message.kind === 'event').map((e) => {
+      const body = (e.message as { body: { type: string; command?: string; composition?: string } }).body;
+      return body.type === 'viewer' ? `viewer:${body.composition}` : `${body.type}:${body.command}`;
+    });
+    expect(after[0]).toBe('viewer:C2');
+    expect(after.slice(-2)).toEqual(['transport:seek', 'transport:play']);
+    expect(session.composition).toBe('C2');
+    // Nothing new to send for the same composition.
+    const again = port.events('viewer').length;
+    driver.pause();
+    expect(port.events('viewer')).toHaveLength(again);
+    session.close(); connection.close('test complete');
+  });
+
+  it('a viewerless session keeps the transport for a composition the engine cannot draw', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C');
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {} });
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 0, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'The new engine cannot draw this composition yet: path masks.', retry: { kind: 'never' }, detail: null } } } as never, 5, 0));
+    // Its tagged clock (the engine runs the transport) keeps the reason.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    driver.refresh();
+    expect(session.route).toBe('legacy');
+    expect(session.routeReason).toMatch(/path masks/);
+    expect(driver.active()).toBe(true);
+    driver.play(0.5);
+    expect(port.events('transport').map(e => (e.message as any).body.command)).toEqual(['audioScrub', 'seek', 'play']);
+    session.close(); connection.close('test complete');
   });
 
   it('wraps a looping line as contract 6 does', () => {

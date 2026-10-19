@@ -655,7 +655,12 @@ enum Job {
 /// surfaces join the preview map (a later synchronous capture draws them);
 /// a failure answers the capture only (previews go on).
 fn run_capture(inner: &Inner, worker: &mut Worker, c: Capture, cancel: &AtomicBool) {
-    let id = JobId::new(format!("capture-{}-{}-{}", c.key.0.0, c.key.1.get(), c.token));
+    let id = JobId::new(format!(
+        "capture-{}-{}-{}",
+        c.key.0.0,
+        c.key.1.get(),
+        c.token
+    ));
     let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel);
     let mut st = inner.lock();
     st.running = None;
@@ -1264,8 +1269,9 @@ mod tests {
 
     #[test]
     fn surfaces_stay_within_the_budget_least_recently_drawn_first_out() {
-        // One 12 × 8 f32 surface is 1,536 bytes: room for two frames.
-        let r = rig(Mode::Render, None, 3_500);
+        // One 12 × 8 surface keeps straight and premultiplied f32 RGBA
+        // (3,072 bytes): room for two frames, accounting for both.
+        let r = rig(Mode::Render, None, 7_000);
         let frames: Vec<Snapshot> = (0..3).map(|i| snapshot(&["box"], f64::from(i))).collect();
         for (i, f) in frames.iter().enumerate() {
             paint(&r, &material(), std::slice::from_ref(f));
@@ -1277,7 +1283,7 @@ mod tests {
         }
         let stats = r.stats.lock().unwrap().blender_preview.clone();
         assert_eq!(stats.surfaces, 2);
-        assert!(stats.bytes <= 3_500);
+        assert!(stats.bytes <= 7_000);
         let host = r.blender.host(&material());
         assert!(host.lookup(&frames[0], "box").is_some());
         assert!(host.lookup(&frames[1], "box").is_none());
@@ -1330,7 +1336,11 @@ mod tests {
                 .is_none()
         );
         // Nor one layer short of what was asked.
-        assert!(r.blender.prepared(&[final_frame(&["box", "cone"], 0.0)]).is_none());
+        assert!(
+            r.blender
+                .prepared(&[final_frame(&["box", "cone"], 0.0)])
+                .is_none()
+        );
         assert!(!r.blender.busy());
     }
 
@@ -1345,8 +1355,13 @@ mod tests {
         // A paused frame of the same view wants something else: the capture
         // keeps running (a preview only cancels previews).
         paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
+        // A headless transition removes preview demand, not the session's
+        // capture. Only ending the session (`forget`) cancels both.
+        r.blender.submit(KEY, None, Revision::ZERO, None);
         std::thread::sleep(Duration::from_millis(80));
         assert!(r.host.seen.lock().unwrap().cancels.is_empty());
+        // A viewer joins again while the capture still runs.
+        paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
         // The snapshot gave up: Blender stops, the answer is `Cancelled`.
         r.blender.cancel_capture(5);
         wait("cancelled", || !r.captured.lock().unwrap().is_empty());

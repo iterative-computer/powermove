@@ -12,14 +12,10 @@
  * - gives each viewer session the window's canonical document and pm-wasm's
  *   patch stream (`DocumentSession`), so edits from the inspector, canvas
  *   gestures, Undo, and agents reach the engine as they reach pm-wasm;
- * - runs the transport through the engine while it draws the composition
- *   (`EngineTransport`, `PM.setTransportDriver`), the audio device clock as
- *   the master; when the engine routes the composition to the legacy viewer
- *   (capability routing) the legacy transport, compositor, and audio take
- *   over at the same time, and back;
- * - survives engine restarts: a crashed engine's sessions end, the legacy
- *   viewer shows, and the next launch's port opens new sessions that resync
- *   the whole document (section 19, "Crash handling").
+ * - keeps one window session for engine transport and pm-audio, independently
+ *   of presentation; a closed viewer keeps the device clock and sound;
+ * - survives engine restarts by resyncing the document and definitions on
+ *   the next native launch, keeping transport exclusive to the native engine.
  *
  * With the flag off nothing here runs.
  */
@@ -119,12 +115,30 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
   let fallbackRunner: ShaderFallbackRunner | null = null;
-  /** A session with no viewer, so snapshots work while no viewer is open
-   *  (the Library, a closed viewer): open while no viewer session is. */
-  let standby: DocumentSession | null = null;
-  // With the new engine on, the engine holds the transport even while it
-  // starts or restarts: the current engine never plays (exclusive).
-  const transport = new EngineTransport(() => current, hostClock, { exclusive: true });
+  // One session owns this window's clock. A viewer attaches to it; closing
+  // that channel retires presentation only, leaving pm-audio and time alive.
+  let viewerHandlers: EngineViewerHandlers | null = null;
+  let viewerLease = 0;
+  let sessionReady: Promise<void> | null = null;
+  /** The open composition (what Play plays and the viewer shows). */
+  const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
+  /**
+   * A viewerless session follows the open composition: switching
+   * compositions inside a project is a document batch, not a load, so
+   * nothing else would tell the session (a viewer's presentation sends its
+   * own state). Before every transport command too, so a Play right after
+   * a switch plays the composition just opened.
+   */
+  const followComposition = (): void => {
+    const s = current;
+    if (!s || s.closed || !s.headless) return;
+    const composition = openComposition();
+    if (composition && s.composition !== composition) s.sendHeadless(composition);
+  };
+  const transport = new EngineTransport(() => current, hostClock, {
+    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
+    prepare: followComposition
+  });
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
   const noteVersion = (): void => {
@@ -154,6 +168,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
   const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
+  // A composition switch (compositions.open) and its undo announce `comps`.
+  const offComps = PM.bus?.on?.('comps', followComposition) ?? (() => {});
+  const offProject = PM.bus?.on?.('project', followComposition) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -191,52 +208,77 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     return doc as DocumentStream;
   };
 
-  /** The session snapshots are taken of: the newest viewer session once it
-   *  has the document, else the standby. */
-  const snapshotSession = (): DocumentSession | null => {
-    if (current && current.id !== null && !current.closed && current.applied > 0) return current;
-    if (standby && standby.id !== null && !standby.closed) return standby;
-    return current;
-  };
-  const closeStandby = (): void => {
-    const s = standby;
-    standby = null;
-    s?.close();
-  };
-  /** Closes the standby once a viewer session has the document. */
-  const syncStandby = (): void => {
-    if (sessions.size && current && current.applied > 0) closeStandby();
-  };
-  /**
-   * Opens the standby session, on demand only: when a snapshot is asked
-   * for while no viewer session is open (the Library, a closed viewer).
-   * Never at boot: a second session there competes with the viewer's own
-   * resync and definitions (measured: it made the tracer's effects frame
-   * and the J/K/L A/V sync flaky). Resolves once it has the document.
-   */
-  let standbyReady: Promise<void> | null = null;
-  const wakeStandby = (): Promise<void> => {
+  const snapshotSession = (): DocumentSession | null => current;
+  /** Lazily opens a transport session for a snapshot, Play, or a viewer. */
+  const openSession = (): DocumentSession | null => {
+    if (current && !current.closed) return current;
     const c = connection;
-    if (sessions.size || !c?.ready || c.closed || !PM.EngineDoc?.enabled) return Promise.resolve();
-    if (standby && !standby.closed && standbyReady) return standbyReady;
-    const s: DocumentSession = new DocumentSession({
-      connection: c,
-      stream: stream(),
-      documentId: () => String(PM.proj?.id ?? ''),
+    if (!c?.ready || c.closed || !PM.EngineDoc?.enabled) return null;
+    const session = new DocumentSession({
+      connection: c, stream: stream(), documentId: () => String(PM.proj?.id ?? ''),
       stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
       definitions: () => ((PM as any).EngineDefinitions ?? null),
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
       handlers: {
-        message: () => {},
-        closed: () => {
-          if (standby === s) standby = null;
+        message: (message, arrivedMs) => {
+          if (message.type === 'frame' && !firstFrame) {
+            firstFrame = true;
+            performance.mark?.('powermove:engine-first-frame');
+          }
+          if (viewerHandlers) viewerHandlers.message(message as never, arrivedMs);
+          else if (message.type === 'frame') session.release(message.frame);
+        },
+        closed: (reason) => {
+          sessions.delete(session);
+          if (current === session) {
+            current = null;
+            sessionReady = null;
+            const handlers = viewerHandlers;
+            viewerHandlers = null;
+            handlers?.closed(reason);
+          }
+          transport.refresh();
         }
       },
-      log
+      log,
+      onClock: (sample) => {
+        transport.refresh();
+        for (const listener of clockListeners) listener(sample);
+      },
+      onAudio: (message) => audio.receive(message, session),
+      onStats: (message) => {
+        stats.receive(message, performance.now());
+        PM.invalidate?.('status');
+      },
+      // Replace a seek queued on the home screen before any old clock can
+      // overwrite the replacement document's requested UI position.
+      onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onLoaded: () => {
+        if (session.headless) session.sendHeadless(openComposition());
+        PM.bus?.emit?.('layout');
+      },
+      onRoute: (route, reason) => {
+        if (route === 'legacy') log('warn', `engine composition unavailable: ${reason ?? ''}`);
+        transport.refresh();
+        if (route === 'engine') audio.sync();
+        PM.bus?.emit?.('draw');
+      }
     });
-    standby = s;
-    standbyReady = s.start().catch((error: unknown) => log('warn', `engine standby session: ${error instanceof Error ? error.message : String(error)}`));
-    return standbyReady;
+    sessions.add(session);
+    current = session;
+    transport.resetLoop();
+    session.sendHeadless(openComposition());
+    sessionReady = session.start().catch((error: unknown) => {
+      log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
+      session.close();
+      sessions.delete(session);
+      if (current === session) { current = null; sessionReady = null; }
+    });
+    return session;
+  };
+  const wakeStandby = (): Promise<void> => {
+    openSession();
+    return sessionReady ?? Promise.resolve();
   };
   const documentEncoder = new TextEncoder();
   const renderTransport = new EngineRenderTransport({
@@ -304,6 +346,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
     for (const listener of [...ready]) listener();
+    transport.refresh();
 
   }
 
@@ -314,7 +357,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (data.process !== 'interactive' || !event.ports[0]) return;
       void connect(Number(data.generation) || 0, event.ports[0] as unknown as PortLike);
     } else if (data?.type === ENGINE_WINDOW_MESSAGE.crash) {
-      log('warn', 'an engine crashed and is restarting; the current engine draws meanwhile');
+      log('warn', 'an engine crashed and is restarting; the native session will reconnect');
     }
   };
   target.addEventListener('message', onMessage);
@@ -350,71 +393,36 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     open(handlers: EngineViewerHandlers): EngineViewerChannel | null {
       const c = connection;
       if (!c?.ready || c.closed || !PM.EngineDoc?.enabled) return null;
-      let session: DocumentSession | null = null;
-      const forget = (s: DocumentSession): void => {
-        sessions.delete(s);
-        if (current === s) current = [...sessions].at(-1) ?? null;
-        transport.refresh();
-      };
-      session = new DocumentSession({
-        connection: c,
-        stream: stream(),
-        documentId: () => String(PM.proj?.id ?? ''),
-        stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
-        definitions: () => ((PM as any).EngineDefinitions ?? null),
-        // One WebGL2 context for the window's sessions (decision 19).
-        fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
-        handlers: {
-          message: (message, arrivedMs) => {
-            if (message.type === 'frame' && !firstFrame) {
-              firstFrame = true;
-              performance.mark?.('powermove:engine-first-frame');
-            }
-            handlers.message(message as never, arrivedMs);
-          },
-          closed: (reason) => {
-            if (session) forget(session);
-            handlers.closed(reason);
-          }
-        },
-        log,
-        onClock: (sample) => {
-          for (const listener of clockListeners) listener(sample);
-        },
-        onAudio: (message) => {
-          if (session) audio.receive(message, session);
-        },
-        onStats: (message) => {
-          if (session !== current) return;
-          stats.receive(message, performance.now());
-          PM.invalidate?.('status');
-        },
-        // The viewer lays out for the new document, as opening a project
-        // makes it do: its state names the new composition, so the engine
-        // draws and plays it (a `PM.proj` assignment emits nothing).
-        onLoaded: () => PM.bus?.emit?.('layout'),
-        onRoute: (route, reason) => {
-          if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
-          transport.refresh();
-          if (route === 'engine') audio.sync();
-          PM.bus?.emit?.('draw');
-        }
-      });
-      sessions.add(session);
-      current = session;
-      transport.resetLoop();
-      const opened = session;
-      void opened.start().then(syncStandby, (error: unknown) => {
-        log('warn', `engine viewer session: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      const opened = openSession();
+      if (!opened) return null;
+      const lease = ++viewerLease;
+      const previous = viewerHandlers;
+      viewerHandlers = handlers;
+      previous?.closed('another viewer attached to the engine session');
       return {
-        sendViewerState: (state) => opened.sendViewerState(state as never),
+        sendViewerState: (state) => {
+          if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
+        },
         release: (release) => opened.release(release),
         close: () => {
-          opened.close();
-          forget(opened);
+          if (lease !== viewerLease || opened.closed) return;
+          viewerHandlers = null;
+          opened.sendHeadless(openComposition());
+          transport.refresh();
         }
       };
+      // A viewer that replaces another on a session already presenting
+      // (no viewerless state in between, which would make the engine say
+      // it again) learns why a composition the engine cannot draw shows
+      // nothing. Its channel is in place by the next microtask.
+      if (!opened.headless && opened.route === 'legacy') {
+        const reason = opened.routeReason ?? '';
+        queueMicrotask(() => {
+          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
+            handlers.message({ type: 'routed', route: 'legacy', reason }, performance.now());
+          }
+        });
+      }
     }
   });
   let service = makeService();
@@ -469,6 +477,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offPending();
       offEager();
       offAssets();
+      offComps();
+      offProject();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
@@ -477,7 +487,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       for (const s of [...sessions]) s.close();
       sessions.clear();
       current = null;
-      closeStandby();
+      viewerHandlers = null;
+      sessionReady = null;
       unrouteCaptures();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;

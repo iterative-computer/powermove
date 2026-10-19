@@ -57,6 +57,8 @@ export class EngineTransport implements TransportDriver {
   private readonly listeners = new Set<(active: boolean) => void>();
   private wasActive = false;
   private loop: string | null = null;
+  private loopValue: { start: number; end: number } | null = null;
+  private loopSentOn: DocumentSession | null = null;
   /** A run this driver started: the epoch before it, and whether it played. */
   private run: { before: number | null; played: boolean } | null = null;
   /** Audio scrub as asked, and the session it was sent on. */
@@ -67,6 +69,7 @@ export class EngineTransport implements TransportDriver {
    *  exclusive transport during a cold start or a restart): replayed on
    *  the next session that draws. */
   private pending: { playing: boolean; time: number; rate: number } | null = null;
+  private pendingAround: { time: number; preRoll: number; postRoll: number } | null = null;
   private live = false;
   /** The playhead as last asked or reported (seconds). */
   private lastTime = 0;
@@ -74,34 +77,55 @@ export class EngineTransport implements TransportDriver {
   constructor(
     private readonly session: () => DocumentSession | null,
     private readonly clock: HostClock,
-    private readonly options: { exclusive?: boolean } = {}
+    private readonly options: {
+      exclusive?: boolean;
+      wake?: () => void;
+      /** Before each command reaches the session (a viewerless session
+       *  follows the open composition first). */
+      prepare?: () => void;
+    } = {}
   ) {}
 
-  /** Whether a session draws and takes transport commands now. */
+  /**
+   * Whether a session takes transport commands now: its route is decided
+   * (the engine draws the composition, or cannot and shows why; either
+   * way its clock and audio run, amendment 21) and its clock is heard.
+   */
   private drawing(): boolean {
     const s = this.session();
-    return !!s && !s.closed && s.route === 'engine' && s.frames > 0 && s.id !== null;
+    return !!s && !s.closed && s.route !== 'pending' && (s.frames > 0 || s.clock !== null) && s.id !== null;
   }
 
   active(): boolean {
     if (this.drawing()) return true;
     // "Use New Engine" on: the engine keeps the transport while it starts
-    // or restarts; only capability routing (development scaffolding until
-    // it is removed) hands it to the current engine.
-    return this.options.exclusive === true && this.session()?.route !== 'legacy';
+    // or restarts, including while there is no mounted viewer.
+    return this.options.exclusive === true;
   }
 
   /** Re-evaluates activity and tells the legacy transport when it changed. */
   refresh(): void {
     const live = this.drawing();
     const came = live && !this.live;
+    if (!live && this.live && this.options.exclusive === true && !this.pending) {
+      // An engine restart retains the last heard position/rate. The next
+      // native session resumes it; no legacy clock or audio takes over.
+      const sample = this.session()?.clock;
+      const position = this.now(performance.now());
+      if (sample && position) this.pending = { playing: position.playing, time: position.time, rate: sample.rate.num / sample.rate.den || 1 };
+    }
     this.live = live;
     const active = this.active();
+    if (!live && this.pending) this.options.wake?.();
+    if (came) { this.syncScrub(); this.syncLoop(); }
     if (came && this.pending) {
       // A session draws again: the playhead goes on from where it was asked.
       const { playing, time, rate } = this.pending;
       this.pending = null;
-      if (playing) this.shuttle(time, rate);
+      const around = this.pendingAround;
+      this.pendingAround = null;
+      if (playing && around) this.playAround(around.time, around.preRoll, around.postRoll);
+      else if (playing) this.shuttle(time, rate);
       else this.seek(time, false);
     }
     if (active === this.wasActive) return;
@@ -117,6 +141,7 @@ export class EngineTransport implements TransportDriver {
   }
 
   private send(command: TransportCommand): void {
+    this.options.prepare?.();
     this.session()?.transport(command);
   }
 
@@ -130,10 +155,12 @@ export class EngineTransport implements TransportDriver {
     if (this.options.exclusive !== true || this.drawing()) return false;
     const was = this.pending ?? { playing: false, time: this.lastTime, rate: 1 };
     this.pending = { playing: next.playing ?? was.playing, time: next.time ?? was.time, rate: next.rate ?? was.rate };
+    this.options.wake?.();
     return true;
   }
 
   shuttle(time: number, rate: number): void {
+    this.pendingAround = null;
     this.lastTime = time;
     if (this.hold({ playing: true, time, rate })) return;
     const s = this.session();
@@ -147,7 +174,10 @@ export class EngineTransport implements TransportDriver {
 
   playAround(time: number, preRoll: number, postRoll: number): void {
     this.lastTime = time;
-    if (this.hold({ playing: false, time })) return;
+    if (this.hold({ playing: true, time, rate: 1 })) {
+      this.pendingAround = { time, preRoll, postRoll };
+      return;
+    }
     const s = this.session();
     this.run = { before: s?.clock?.epoch ?? null, played: false };
     this.send({ command: 'seek', time: ticks(time), mode: 'exact' });
@@ -169,6 +199,7 @@ export class EngineTransport implements TransportDriver {
   }
 
   pause(): void {
+    this.pendingAround = null;
     this.run = null;
     if (this.hold({ playing: false })) return;
     this.send({ command: 'pause' });
@@ -184,15 +215,24 @@ export class EngineTransport implements TransportDriver {
 
   setLoop(range: readonly [number, number] | null): void {
     const key = range ? `${range[0]}:${range[1]}` : 'none';
-    if (key === this.loop) return;
+    if (key === this.loop) { this.syncLoop(); return; }
     this.loop = key;
     const loop = range && range[1] > range[0] ? { start: ticks(range[0]), end: ticks(range[1]) } : null;
-    this.send({ command: 'setLoop', range: loop && loop.end > loop.start ? loop : null });
+    this.loopValue = loop && loop.end > loop.start ? loop : null;
+    this.loopSentOn = null;
+    this.syncLoop();
+  }
+
+  private syncLoop(): void {
+    const s = this.session();
+    if (this.loop === null || !s || !this.drawing() || s.closed || s.id === null || this.loopSentOn === s) return;
+    this.loopSentOn = s;
+    this.send({ command: 'setLoop', range: this.loopValue });
   }
 
   /** Forgets the loop sent (a new session starts without one). */
   resetLoop(): void {
-    this.loop = null;
+    this.loopSentOn = null;
   }
 
   /** The line's rate: 1, 2, −1, −2 while it moves, 0 when stopped. */

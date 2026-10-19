@@ -107,8 +107,12 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
     const L = current();
     if (!L?.d?.fontAnchorBounds) return undefined;
     const key = `${api.project.revision()}|${time()}`;
-    if (anchored?.key !== key) anchored = { key, offset: api.render.raster(L, 1, time())?.fontOffset as { x?: number; y?: number } | undefined };
-    return anchored.offset;
+    if (anchored?.key === key) return anchored.offset;
+    const offset = api.render.raster(L, 1, time())?.fontOffset as { x?: number; y?: number } | undefined;
+    // A font still loading returns a blank raster. Retry it on the next
+    // draw/hit test, even when neither the time nor the document changed.
+    if (offset) anchored = { key, offset };
+    return offset;
   };
   const matrix = (): AffineMatrix => {
     const m = [...api.anim.worldMatrix(current(), time())] as AffineMatrix;
