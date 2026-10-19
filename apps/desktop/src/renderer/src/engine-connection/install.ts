@@ -162,7 +162,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       return barrier?.revision ?? current?.applied ?? 0;
     },
     () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered',
-    documentWake(wakeStandby, () => current)
+    // `wakeStandby` is declared below; read it when the preview wakes.
+    documentWake(() => wakeStandby(), () => current)
   );
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
