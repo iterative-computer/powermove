@@ -144,7 +144,16 @@ async function viewerShows(page: Page, id: string, engine: boolean, capture = fa
     const importColorSpace = imported?.colorSpace?.toJSON?.() ?? null; imported?.close();
     const presenting = engine ? !!PM.EngineCanvas?.presenting : true;
     const connected = !!canvas?.isConnected;
-    return { ...image, works: !!gl && connected && presenting && white > 50, detail: { importColorSpace, context: !!gl, connected, presenting, white, sourceWhite, error: gl?.getError(), buffers: [gl?.drawingBufferWidth, gl?.drawingBufferHeight], bound: !!PM.EngineCanvas?.bound, stats: PM.CompatContext?.stats, boxes: [...document.querySelectorAll('#stage canvas')].map((c: any) => ({ id: c.id, width: c.width, height: c.height, visible: c.style.visibility, box: c.getBoundingClientRect().toJSON() })), canvases: [...document.querySelectorAll('#stage canvas')].map((c) => c.id) } };
+    // What the user sees: on the engine the presentation canvas, today the
+    // viewer's GL canvas, shown with a box on the stage. A context's
+    // preserved copies can read back while the stage is blank.
+    const onStage = (c: HTMLCanvasElement | null | undefined) => {
+      if (!c?.isConnected || !(c.width > 0)) return false;
+      const box = c.getBoundingClientRect();
+      return getComputedStyle(c).visibility !== 'hidden' && getComputedStyle(c).display !== 'none' && box.width > 0 && box.height > 0;
+    };
+    const shown = engine ? (Array.from(document.querySelectorAll('canvas#engine-present')) as HTMLCanvasElement[]).some(onStage) : onStage(canvas);
+    return { ...image, works: !!gl && connected && presenting && shown && white > 50, detail: { importColorSpace, context: !!gl, connected, presenting, shown, white, sourceWhite, error: gl?.getError(), buffers: [gl?.drawingBufferWidth, gl?.drawingBufferHeight], bound: !!PM.EngineCanvas?.bound, stats: PM.CompatContext?.stats, boxes: [...document.querySelectorAll('#stage canvas')].map((c: any) => ({ id: c.id, width: c.width, height: c.height, visible: c.style.visibility, box: c.getBoundingClientRect().toJSON() })), canvases: [...document.querySelectorAll('#stage canvas')].map((c) => c.id) } };
   }, { engine, capture });
 }
 

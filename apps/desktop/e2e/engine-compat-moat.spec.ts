@@ -379,40 +379,56 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('render.raster above scale 16 returns today\'s surface and pixels synchronously', async ({ session }) => {
+  test('render.raster at any scale returns today\'s surface and pixels synchronously and never blanks the viewer', async ({ session }) => {
+    test.setTimeout(180_000);
     await session.openEditor();
     await assignProject(session.page);
     await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const stage = () => session.page.evaluate(() => ({
+      status: document.querySelector('[data-engine-status]')?.textContent ?? '',
+      shown: (Array.from(document.querySelectorAll('canvas#engine-present')) as HTMLCanvasElement[]).some((c) => c.width > 0 && getComputedStyle(c).visibility !== 'hidden'),
+      failures: (window as any).PM.EngineConnection.status().failures as string[]
+    }));
+    await expect.poll(async () => (await stage()).shown, { timeout: 30_000 }).toBe(true);
+    const before = await stage();
     const results = await session.page.evaluate(() => {
       const PM = (window as any).PM, api = PM.Kernel.api('corpus');
-      const layer = PM.mkLayer('shape', { d: { shape: 'rect', w: 16, h: 12, color: '#33CC66', stroke: 0 } }, PM.proj);
+      // Today's `PM.raster` has no upper bound on scale: the density is
+      // min(scale, 8192 / w, 8192 / h). A small box reaches scale 50
+      // without the cap; a thin bar meets the 8192-pixel edge at any scale
+      // past 8192 / 208 without a 200 MB canvas.
+      const box = PM.mkLayer('shape', { d: { shape: 'rect', w: 16, h: 12, color: '#33CC66', stroke: 0 } }, PM.proj);
+      const bar = PM.mkLayer('shape', { d: { shape: 'rect', w: 200, h: 2, color: '#3366CC', stroke: 0 } }, PM.proj);
+      const fields = (r: any) => r && [r.w, r.h, r.anchorX, r.anchorY, r.cv.width, r.cv.height, r.selection];
+      const bytes = (r: any) => r.cv.width && r.cv.height ? r.cv.getContext('2d').getImageData(0, 0, r.cv.width, r.cv.height).data : new Uint8ClampedArray(0);
       const result = [];
-      for (const scale of [16.25, 24, 32]) {
+      for (const [layer, scale] of [[box, 16.25], [box, 24], [box, 32], [box, 33], [box, 40], [box, 50], [bar, 1000], [bar, Infinity], [box, 0.005], [box, 0], [box, -1]] as Array<[any, number]>) {
         const today = PM.__rasterBase(layer, scale, 0);
+        const started = performance.now();
         const engine = api.render.raster(layer, scale, 0);
-        const fields = (r: any) => r && [r.w, r.h, r.anchorX, r.anchorY, r.cv.width, r.cv.height, r.selection];
-        const bytes = (r: any) => r.cv.getContext('2d').getImageData(0, 0, r.cv.width, r.cv.height).data;
-        let max = 0;
+        const ms = performance.now() - started;
+        let max = 0, todayInk = 0, engineInk = 0;
         if (today?.cv && engine?.cv && today.cv.width === engine.cv.width && today.cv.height === engine.cv.height) {
           const a = bytes(today), b = bytes(engine);
           for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - b[i]));
+          for (let i = 3; i < a.length; i += 4) { todayInk += Number(a[i] > 0); engineInk += Number(b[i] > 0); }
         } else max = Infinity;
-        result.push({ scale, sync: !!engine && !(engine instanceof Promise), today: fields(today), engine: fields(engine), max });
+        result.push({ layer: layer === box ? 'box' : 'bar', scale: String(scale), sync: !!engine && !(engine instanceof Promise), today: fields(today), engine: fields(engine), max, todayInk, engineInk, ms: Math.round(ms) });
       }
-      const invalid = api.render.raster(layer, 33, 0);
-      result.push({ invalid: invalid === null, failures: PM.EngineConnection.status().failures });
       return result;
     });
-    const invalid = results.pop() as any;
-    expect(invalid.invalid).toBe(true);
-    expect(invalid.failures.some((s: string) => s.includes('Raster scale 33') && s.includes('0.01..32'))).toBe(true);
-    expect(await session.page.locator('[data-engine-status]').textContent()).toContain('Raster scale 33');
-    console.log(JSON.stringify({ highDensityRasters: results }));
+    console.log(JSON.stringify({ anyScaleRasters: results }));
     for (const result of results) {
-      expect(result.sync).toBe(true);
-      expect(result.engine).toEqual(result.today);
-      expect(result.max).toBe(0);
+      expect(result.sync, `${result.layer} at ${result.scale}`).toBe(true);
+      expect(result.engine, `${result.layer} at ${result.scale}`).toEqual(result.today);
+      expect(result.max, `${result.layer} at ${result.scale}: pixels`).toBe(0);
     }
+    // No request failed, and the viewer kept its frame on the stage.
+    const after = await stage();
+    expect(after.failures).toEqual(before.failures);
+    expect(after.status).toBe('');
+    expect(after.shown).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
   test('a drawing into render.gl.context is in a WebM export as today, not in an MP4 one, and context.canvas reads it', async ({ session }) => {
