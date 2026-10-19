@@ -185,6 +185,12 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(ops.some((op: any) => op.path.includes('rotation'))).toBe(true);
     expect(decodePatchOps(batches[0].body).filter((op: any) => 'op' in op).map((op: any) => op.op)).toEqual(['order']);
     expect(batches[1].revision).toBe(batches[0].revision + 1);
+    // Neither touches the assets; an asset edit does.
+    expect(batches.map(b => b.assets)).toEqual([false, false]);
+    PM.hist.do('Rename asset', () => { PM.proj.assets = { ...(PM.proj.assets || {}), x: { id: 'x', name: 'x.svg', kind: 'image' } }; });
+    PM.doc.touched([['assets']]);
+    doc.barrier!.flush();
+    expect(batches[2]?.assets).toBe(true);
   });
 
   it('tells its pending listeners once when a write leaves something to flush', async () => {

@@ -42,11 +42,26 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
     viewer.setZoom(8);
     PM.invalidate('render');
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    // Today's compositor draws a high zoom as a cropped viewport with the
+    // paths at its resolution. With "Use New Engine" on the engine draws
+    // the view itself: the viewer's state (zoom and pan) at the canvas's
+    // device size, vectors at output resolution (docs/engine/vector.md).
+    const presentation = viewer.enginePresentation;
+    let engineView: any = null;
+    if (presentation?.presenting) {
+      const until = performance.now() + 10_000;
+      while (!engineView && performance.now() < until) {
+        const frame = presentation.latest, state = frame ? presentation.stateFor(frame.viewSeq) : null;
+        if (state && state.zoom === 8) engineView = { zoom: state.zoom, size: { ...state.size }, devicePixelRatio: state.devicePixelRatio, stage: { width: viewer.el.clientWidth, height: viewer.el.clientHeight } };
+        else await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    }
     const highZoom = {
       viewport: { ...PM.GL.previewViewport },
       viewportVectors: PM.GL.stats.viewportVectors,
       canvas: { width: PM.GL.canvas.width, height: PM.GL.canvas.height },
       viewportTextureBytes: PM.GL.texes.get('viewport-path:' + layer.id)?.bytes || 0,
+      engineView,
     };
     layer.p['scale.x'].v = 200; layer.p['scale.y'].v = 200;
     viewer.fit = true;
@@ -95,14 +110,27 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
   expect(proof.vertexEdit.restoredVertexX).toBe(proof.vertexEdit.originalVertexX);
   expect(proof.exported).toEqual({ type: 'shape', paths: 2, sourceAsset: proof.layer.sourceAsset });
   expect(proof.stored).toContain('<svg');
-  expect(proof.highZoom.viewport.width).toBeLessThan(640);
-  expect(proof.highZoom.viewport.height).toBeLessThan(360);
-  expect(proof.highZoom.viewportVectors).toBeGreaterThan(0);
-  expect(proof.highZoom.canvas.width).toBeGreaterThan(0);
-  expect(proof.highZoom.canvas.height).toBeGreaterThan(0);
-  expect(proof.highZoom.viewportTextureBytes).toBe(
-    proof.highZoom.canvas.width * proof.highZoom.canvas.height * 4,
-  );
+  if (process.env.POWERMOVE_NEW_ENGINE === '1') {
+    // The engine presented the 8× view at the canvas's device size: the
+    // visible part of the composition, never the whole one enlarged.
+    const view = proof.highZoom.engineView;
+    expect(view).not.toBeNull();
+    expect(view.zoom).toBe(8);
+    expect(view.size.width).toBeGreaterThan(0);
+    expect(view.size.height).toBeGreaterThan(0);
+    expect(view.size.width).toBeLessThanOrEqual(Math.ceil(view.stage.width * view.devicePixelRatio) + 1);
+    expect(view.size.height).toBeLessThanOrEqual(Math.ceil(view.stage.height * view.devicePixelRatio) + 1);
+    expect(view.size.width).toBeLessThan(640 * 8 * view.devicePixelRatio);
+  } else {
+    expect(proof.highZoom.viewport.width).toBeLessThan(640);
+    expect(proof.highZoom.viewport.height).toBeLessThan(360);
+    expect(proof.highZoom.viewportVectors).toBeGreaterThan(0);
+    expect(proof.highZoom.canvas.width).toBeGreaterThan(0);
+    expect(proof.highZoom.canvas.height).toBeGreaterThan(0);
+    expect(proof.highZoom.viewportTextureBytes).toBe(
+      proof.highZoom.canvas.width * proof.highZoom.canvas.height * 4,
+    );
+  }
   expect({ before: proof.undoBefore, ...undo }).toEqual({ before: 1, after: 0, assetPreserved: true });
   expect(session.diagnostics.pageErrors).toEqual([]);
 

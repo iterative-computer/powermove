@@ -66,6 +66,9 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   if (Array.isArray(request?.fallbackPixels)) {
     plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
   }
+  if (Array.isArray(request?.svgPixels)) {
+    plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
+  }
   return plain;
 }
 

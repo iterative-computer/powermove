@@ -6,8 +6,10 @@
 //!   their atlas layout.
 //! - [`cpu`]: the `vello_cpu` coverage backend (the CPU fallback).
 //! - [`svg`]: SVG images through usvg and resvg.
+//! - [`svg_depth`]: nesting safety for SVG documents.
 
 pub mod color;
 pub mod cpu;
 pub mod scene;
 pub mod svg;
+pub mod svg_depth;
