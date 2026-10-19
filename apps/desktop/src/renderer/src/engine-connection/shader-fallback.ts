@@ -25,8 +25,10 @@
  * positional alias: applied to the alias when the named uniform is not
  * active.
  *
- * Compiles are asynchronous (`KHR_parallel_shader_compile`) and bounded by a
- * deadline. Every pass's draw is fenced and bounded by the draw deadline
+ * Compiles are asynchronous (`KHR_parallel_shader_compile`): a request
+ * waits up to a deadline, and a compile past it goes on and is waited for
+ * again by the program's next request (the engine asks again), so a large
+ * program draws once WebGL has compiled it, as today. Every pass's draw is fenced and bounded by the draw deadline
  * (the runner's watchdog): a draw that has not finished by then loses the
  * context on purpose, fails with `watchdog`, and its program is never run
  * again, so a runaway program never blocks the renderer in `readPixels`.
@@ -105,6 +107,9 @@ type GL = WebGL2RenderingContext;
 interface Program { program: WebGLProgram; position: number; locations: Map<string, WebGLUniformLocation | null> }
 
 const MAX_PROGRAMS = 32;
+const MAX_COMPILING = 4;
+/** How long one request waits for its program to compile (ms). */
+export const COMPILE_DEADLINE_MS = 10_000;
 const POLL_MS = 16;
 
 const scratchF32 = new Float32Array(1);
@@ -174,6 +179,8 @@ export class ShaderFallbackRunner {
   private quad: WebGLBuffer | null = null;
   private programs = new Map<string, Program>();
   private failed = new Map<string, ShaderFallbackError>();
+  /** Compiles past a request's deadline, still going in the driver. */
+  private compiling = new Map<string, { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader }>();
   private lost = false;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -230,10 +237,12 @@ export class ShaderFallbackRunner {
     const gl = this.gl;
     if (gl && !gl.isContextLost()) {
       for (const p of this.programs.values()) gl.deleteProgram(p.program);
+      for (const c of this.compiling.values()) { gl.deleteProgram(c.program); gl.deleteShader(c.vs); gl.deleteShader(c.fs); }
       if (this.quad) gl.deleteBuffer(this.quad);
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     }
     this.programs.clear();
+    this.compiling.clear();
     this.gl = null;
     this.canvas = null;
   }
@@ -241,6 +250,7 @@ export class ShaderFallbackRunner {
   private context(): GL {
     if (this.gl && !this.lost && !this.gl.isContextLost()) return this.gl;
     this.programs.clear();
+    this.compiling.clear();
     this.lost = false;
     const canvas = this.options.createCanvas?.() ?? new OffscreenCanvas(4, 4);
     canvas.addEventListener('webglcontextlost', (event) => { event.preventDefault(); this.lost = true; }, false);
@@ -267,19 +277,35 @@ export class ShaderFallbackRunner {
     }
     const failure = this.failed.get(id);
     if (failure) throw new ShaderFallbackError(request.key, failure.reason, failure.message);
-    const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
-    gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
-    gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
-    gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
+    // A compile that passed an earlier request's deadline goes on in the
+    // driver: this request waits for the same compile, not a new one, so a
+    // program WebGL takes long to compile (today's compositor waits for it)
+    // draws once it is done.
+    let started = this.compiling.get(id);
+    if (!started) {
+      const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
+      gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
+      gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
+      gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
+      started = { program, vs, fs };
+    }
+    const { program, vs, fs } = started;
+    this.compiling.delete(id);
     if (this.parallel) {
-      const deadline = performance.now() + (this.options.compileDeadlineMs ?? 10_000);
+      const deadline = this.now() + (this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS);
       while (!gl.getProgramParameter(program, this.parallel.COMPLETION_STATUS_KHR)) {
         if (this.lost || gl.isContextLost()) throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while compiling');
-        if (performance.now() > deadline) {
-          gl.deleteProgram(program); gl.deleteShader(vs); gl.deleteShader(fs);
-          throw this.fail(id, request, 'deadline', 'the program did not compile within the deadline');
+        if (this.now() > deadline) {
+          // Kept compiling for the next request (at most a few programs).
+          this.compiling.set(id, started);
+          while (this.compiling.size > MAX_COMPILING) {
+            const [oldest, c] = this.compiling.entries().next().value!;
+            gl.deleteProgram(c.program); gl.deleteShader(c.vs); gl.deleteShader(c.fs);
+            this.compiling.delete(oldest);
+          }
+          throw this.fail(id, request, 'deadline', `the program has not finished compiling after ${Math.round((this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS) / 1000)} s; it is still compiling and is drawn once it has`);
         }
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        await this.sleep(POLL_MS);
       }
     }
     const linked = gl.getProgramParameter(program, gl.LINK_STATUS);

@@ -440,3 +440,26 @@ describe('the runner reads its target', () => {
     }
   });
 });
+
+describe('a program WebGL takes long to compile', () => {
+  it('is not compiled again: the next request waits for the same compile and draws it', async () => {
+    let clock = 0;
+    const { canvas } = fakeGl([], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let programs = 0;
+    let polls = 0;
+    const COMPLETION_STATUS_KHR = 40;
+    const getExtension = gl['getExtension'] as (name: string) => unknown;
+    gl['getExtension'] = (name: string) => (name === 'KHR_parallel_shader_compile' ? { COMPLETION_STATUS_KHR } : getExtension(name));
+    gl['createProgram'] = () => { programs++; return {}; };
+    // The compile finishes after 30 polls (about 15 s on the fake clock).
+    gl['getProgramParameter'] = (_p: unknown, what: number) => (what === COMPLETION_STATUS_KHR ? ++polls > 30 : true);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, compileDeadlineMs: 10_000, now: () => clock, sleep: async () => { clock += 500; } });
+    const first = request(2, 1, '71'.repeat(32));
+    await expect(runner.render(first)).rejects.toMatchObject({ reason: 'deadline', message: expect.stringContaining('still compiling') });
+    // Asked again (the engine retries a transient failure): the same
+    // compile, which is done within this request's deadline.
+    await expect(runner.render({ ...first, key: '72'.repeat(32) })).resolves.toMatchObject({ width: 2 });
+    expect(programs).toBe(1);
+  });
+});
