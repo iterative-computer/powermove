@@ -112,6 +112,9 @@ type CompatState = {
   lost: boolean;
   /** An export frame the default framebuffer holds instead of the frame on screen ([`exportFrame`]). */
   exporting: ImageData | null;
+  /** Draw calls into the default framebuffer, and how many of them are shown. */
+  drawn: number;
+  shown: number;
   /** The bound canvas's 2D context mirroring today's canvas pixels (`context.canvas` reads). */
   mirror: CanvasRenderingContext2D | null | undefined;
 };
@@ -388,7 +391,7 @@ export class CompatContextHost {
     if (!gl) return null;
     const state: CompatState = {
       bound, canvas, gl, raw: {}, drawFb: null, readFb: null,
-      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false, exporting: null, mirror: undefined
+      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false, exporting: null, mirror: undefined, drawn: 0, shown: 0
     };
     this.instrument(state);
     (canvas as any).addEventListener?.('webglcontextlost', (event: Event) => {
@@ -421,7 +424,9 @@ export class CompatContextHost {
       const fn = gl[name];
       if (typeof fn === 'function') raw[name] = fn.bind(gl);
     }
-    Object.defineProperty(gl, 'canvas', { configurable: true, get: () => state.bound });
+    // Reading `context.canvas` right after drawing (`drawImage(gl.canvas)`)
+    // sees the drawing, as today's canvas held it at once.
+    Object.defineProperty(gl, 'canvas', { configurable: true, get: () => { this.flush(); return state.bound; } });
     Object.defineProperty(gl, 'compatCanvas', { configurable: true, get: () => state.canvas });
     own('bindFramebuffer', (target: number, fb: WebGLFramebuffer | null) => {
       raw.bindFramebuffer!(target, fb);
@@ -576,14 +581,23 @@ export class CompatContextHost {
   /** The extension drew into the default framebuffer: show it after this task. */
   private drew(state: CompatState): void {
     state.dirty = true;
+    state.drawn++;
     // An export frame's drawing goes to the export, not the viewer.
     if (state.exporting) return;
     if (state.flushQueued) return;
     state.flushQueued = true;
     (this.env.defer ?? queueMicrotask)(() => {
       state.flushQueued = false;
-      if (this.state === state && state.dirty) this.showLayer(state);
+      if (this.state === state) this.flush();
     });
+  }
+
+  /** Shows (and mirrors into the bound canvas) a drawing not shown yet. */
+  flush(): void {
+    const state = this.state;
+    if (!state || !state.dirty || state.exporting || state.shown === state.drawn) return;
+    state.shown = state.drawn;
+    this.showLayer(state);
   }
 
   /** Composites the context's drawing over the engine's canvas, under the viewer's overlay. */

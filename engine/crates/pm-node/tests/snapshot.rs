@@ -2231,14 +2231,27 @@ fn child_compat() {
     c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
         id: id.clone(),
         revision: Revision::new(2).unwrap(),
-        width: 4,
-        height: 2,
+        // 40 × 20 pixels (160 bytes a row, not a multiple of 256): red
+        // everywhere but a transparent column at x = 30, so the rows must
+        // keep their stride for the column to stay straight.
+        width: 40,
+        height: 20,
         format: CompatFormat::Rgba8Premultiplied,
         origin: [20.0, 10.0],
         scale: need.scale,
         row: 0,
-        rows: 2,
-        data: Bytes([255u8, 0, 0, 255].repeat(8)),
+        rows: 20,
+        data: Bytes(
+            (0..20 * 40)
+                .flat_map(|i| {
+                    if i % 40 == 30 {
+                        [0u8, 0, 0, 0]
+                    } else {
+                        [255u8, 0, 0, 255]
+                    }
+                })
+                .collect(),
+        ),
         size: Some([40.0, 20.0]),
         uv: None,
         crop: None,
@@ -2249,6 +2262,12 @@ fn child_compat() {
     // The quad is the raster's own: 40 × 20 around (200, 60).
     assert_eq!(at(&red, 320, 181, 60), [255, 0, 0, 255]);
     assert_eq!(at(&red, 320, 178, 60), BACKGROUND);
+    // The column at raster x = 30 is at x = 210 on every row.
+    for y in [51, 55, 60, 64, 68] {
+        assert_eq!(at(&red, 320, 210, y), BACKGROUND, "row {y}");
+        assert_eq!(at(&red, 320, 209, y), [255, 0, 0, 255], "row {y}");
+        assert_eq!(at(&red, 320, 211, y), [255, 0, 0, 255], "row {y}");
+    }
     // Another edit, the same raster (the producer's key did not change).
     c.resync(4, 3, &{
         let mut doc = shape_project(200.0);

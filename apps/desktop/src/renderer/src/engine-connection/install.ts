@@ -371,6 +371,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const unrouteCaptures = installAppCaptures(PM, renderTransport);
   // The kernel's raster override producer answers through it (kernel/raster-compat.ts).
   const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
+  // And the compatibility context draws over WebM export frames (kernel/compat-context.ts).
+  const detachContextExports = (PM as any).CompatContextExports?.attach?.(renderTransport) ?? (() => {});
   // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
   const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
   let wasPlaying = !!PM.playing;
@@ -549,6 +551,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       sessionReady = null;
       unrouteCaptures();
       detachRasterCompat();
+      detachContextExports();
       if (typeof offPresented === 'function') offPresented();
       if (typeof offTransport === 'function') offTransport();
       renderTransport.dispose();

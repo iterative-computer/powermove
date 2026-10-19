@@ -467,7 +467,11 @@ function makeRender(PM: LegacyPM): RenderAPI {
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       /* The canvas `init` bound (the engine's binding with the new engine on,
          the compositor's otherwise). */
-      get canvas() { return (PM?.EngineCanvas?.bound ?? PM?.GL?.gl?.canvas ?? null) as HTMLCanvasElement | null; },
+      get canvas() {
+        // Its pixels hold any drawing into the compatibility context (compat-context.ts).
+        PM?.CompatContext?.flush?.();
+        return (PM?.EngineCanvas?.bound ?? PM?.GL?.gl?.canvas ?? null) as HTMLCanvasElement | null;
+      },
       /* The compatibility context: null until a viewer called `init`; with
          the engine on, a WebGL2 context on an offscreen canvas that reads the
          presented frame back and composites its drawing (compat-context.ts). */
@@ -996,25 +1000,31 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   }
   /* WebM exports with the engine: each frame comes here before it is
      encoded, and `frame:rendered` runs over it in the compatibility
-     context, as today's `renderInto` frames did (compat-context.ts). */
-  if (PM.EngineRender?.provideCompat) {
-    const transport = PM.EngineRender as import('../engine-connection/render-transport').EngineRenderTransport;
-    transport.contextActive = () => compatContextHost.active;
-    const unprovide = transport.provideCompat('compatContext', (request) => {
-      const frame = request.frame;
-      if (!frame) return null;
-      if (frame.payload.kind !== 'inline') throw new Error('The export frame did not reach this window.');
-      const width = Number(frame.width), height = Number(frame.height);
-      const time = Number(request.time) / TICKS_PER_SECOND;
-      const drawn = compatContextHost.exportFrame({ width, height, data: frame.payload.bytes }, () =>
-        kernel.events.emit('frame:rendered', { time, viewport: (presentedViewport ?? null) as any, version: PM.animVersion?.(), quality: 1 }));
-      return drawn ? { key: `compat-context:${String(request.time)}`, width, height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: drawn } : 'native';
-    });
-    subscriptions.push(() => {
-      unprovide();
-      if (transport.contextActive) transport.contextActive = null;
-    });
-  }
+     context, as today's `renderInto` frames did (compat-context.ts). The
+     engine connection installs after the kernel and attaches its
+     transport (engine-connection/install.ts). */
+  const contextExports = {
+    attach(transport: import('../engine-connection/render-transport').EngineRenderTransport): () => void {
+      transport.contextActive = () => compatContextHost.active;
+      const unprovide = transport.provideCompat('compatContext', (request) => {
+        const frame = request.frame;
+        if (!frame) return null;
+        if (frame.payload.kind !== 'inline') throw new Error('The export frame did not reach this window.');
+        const width = Number(frame.width), height = Number(frame.height);
+        const time = Number(request.time) / TICKS_PER_SECOND;
+        const drawn = compatContextHost.exportFrame({ width, height, data: frame.payload.bytes }, () =>
+          kernel.events.emit('frame:rendered', { time, viewport: (presentedViewport ?? null) as any, version: PM.animVersion?.(), quality: 1 }));
+        return drawn ? { key: `compat-context:${String(request.time)}`, width, height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: drawn } : 'native';
+      });
+      return () => {
+        unprovide();
+        if (transport.contextActive) transport.contextActive = null;
+      };
+    }
+  };
+  PM.CompatContextExports = contextExports;
+  if (PM.EngineRender?.provideCompat) subscriptions.push(contextExports.attach(PM.EngineRender));
+  subscriptions.push(() => { if (PM.CompatContextExports === contextExports) PM.CompatContextExports = null; });
   subscriptions.push(() => {
     compatContextHost.dispose();
     if (PM.CompatContext === compatContextHost) PM.CompatContext = null;

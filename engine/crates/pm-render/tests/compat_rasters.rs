@@ -314,3 +314,104 @@ fn a_viewport_that_misses_the_shape_or_sits_in_its_plain_fill_does_not_ask() {
     .unwrap();
     assert!(producer.asked.lock().unwrap().is_empty());
 }
+
+#[test]
+fn rasters_of_any_width_keep_their_rows() {
+    // 200 × 132 (800 bytes a row: not a multiple of 256), one opaque red
+    // column at x = 50 on transparent rows; drawn at one pixel per layer
+    // pixel, centered on (128, 128) at scale 1: the column at x = 78 in
+    // every row, nothing beside it.
+    let (w, h) = (200u32, 132u32);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        let i = ((y * w + 50) * 4) as usize;
+        data[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+    }
+    let column = Arc::new(CompatRaster {
+        width: w,
+        height: h,
+        format: CompatFormat::Rgba8Premultiplied,
+        anchor: [100.0, 66.0],
+        size: [200.0, 132.0],
+        uv: [0.0, 0.0, 1.0, 1.0],
+        data: Arc::new(data),
+    });
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(column))));
+    let doc = load(&doc(100.0));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    let frame = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    let out = renderer.read_rgba(&frame).unwrap();
+    for y in [63u32, 64, 100, 128, 160, 193] {
+        let on = px(&out, 78, y);
+        assert!(on[0] > 0.99 && on[3] > 0.99, "row {y}: column {on:?}");
+        for x in [70u32, 77, 79, 90, 150] {
+            assert_eq!(px(&out, x, y)[3], 0.0, "row {y}, x {x}");
+        }
+    }
+}
+
+#[test]
+fn a_text_layer_s_raster_keeps_its_rows() {
+    for precision in [Precision::Float32, Precision::Float16] {
+        text_rows(precision);
+    }
+}
+
+fn text_rows(precision: Precision) {
+    let (w, h) = (200u32, 132u32);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        let i = ((y * w + 50) * 4) as usize;
+        data[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+    }
+    let column = Arc::new(CompatRaster {
+        width: w,
+        height: h,
+        format: CompatFormat::Rgba8Premultiplied,
+        anchor: [100.0, 66.0],
+        size: [200.0, 132.0],
+        uv: [0.0, 0.0, 1.0, 1.0],
+        data: Arc::new(data),
+    });
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(column))));
+    let text = layer(
+        "title",
+        "text",
+        json!({ "text": "Shifted", "font": "Helvetica", "size": 36, "weight": 700, "color": "#FFFFFF" }),
+        128.0,
+        128.0,
+        2.0,
+    );
+    let doc = load(&project(W, H, 2.0, no_fill(), vec![text]));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, precision);
+    let frame = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    let out = renderer.read_rgba(&frame).unwrap();
+    for y in [63u32, 64, 100, 128, 160, 193] {
+        let on = px(&out, 78, y);
+        assert!(
+            on[0] > 0.99 && on[3] > 0.99,
+            "{precision:?} row {y}: column {on:?}"
+        );
+        for x in [70u32, 77, 79, 90, 150] {
+            assert_eq!(px(&out, x, y)[3], 0.0, "{precision:?} row {y}, x {x}");
+        }
+    }
+}
