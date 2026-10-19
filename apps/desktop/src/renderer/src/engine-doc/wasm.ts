@@ -28,6 +28,7 @@ export interface PmWasmExports {
   pm_release(id: number): void;
   pm_ev(id: number, t: number): number;
   pm_kind(): number;
+  pm_status_ptr(): number;
   pm_last(): number;
   pm_batch_ids(n: number): number;
   pm_batch_out(n: number): number;
@@ -91,6 +92,8 @@ export class PmWasm {
   private u8: Uint8Array | null = null;
   private inPtr = 0;
   private inCap = 0;
+  private statusPtr = 0;
+  private statusWord: Uint32Array | null = null;
 
   constructor(instance: WebAssembly.Instance) {
     this.x = instance.exports as unknown as PmWasmExports;
@@ -221,6 +224,13 @@ export class PmWasm {
       if (this.x.pm_ev_batch(n, t) !== 0) throw new Error('pm-wasm: batch buffers too small');
       return { values: this.f64(outPtr, n), kinds: this.bytes(kindsPtr, n) };
     });
+  }
+
+  /** Reacquire after growth; no per-expression wasm/error-string crossing. */
+  evaluationStatus(): number {
+    this.statusPtr ||= this.x.pm_status_ptr();
+    if (!this.statusWord || this.statusWord.buffer !== this.x.memory.buffer) this.statusWord = this.u32(this.statusPtr, 1);
+    return this.statusWord[0]!;
   }
 
   expressionError(id: number): string | null {

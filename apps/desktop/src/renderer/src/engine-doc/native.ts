@@ -25,6 +25,7 @@ import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
 import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
+import { ExpressionFrames } from './expression-frame';
 
 type Legacy = Record<string, any>;
 
@@ -287,6 +288,8 @@ export class NativeApi {
   /** Live layer → interned transform channels, valid at the current revision and scope. */
   private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
+  private expressionFrames = new ExpressionFrames();
+  private expressionComps = new Map<number, string>();
   /**
    * The module instance the interned ids belong to. `reset()` (a replaced
    * instance) moves it on; a registration from an earlier instance names an
@@ -727,6 +730,8 @@ export class NativeApi {
     const n = this.refs.get(id)! - 1;
     if (n > 0) { this.refs.set(id, n); return; }
     this.refs.delete(id);
+    this.expressionFrames.release(id);
+    this.expressionComps.delete(id);
     const wasm = this.wasm();
     if (wasm && !wasm.dead) try { wasm.release(id); } catch { /* the instance is gone */ }
   }
@@ -739,16 +744,24 @@ export class NativeApi {
     this.detachedProps = new WeakMap();
     this.channels = new WeakMap();
     this.refs.clear();
+    this.expressionFrames = new ExpressionFrames();
+    this.expressionComps.clear();
     this.indexed = new WeakMap();
     this.shapes = new WeakMap();
     this.rootsAnswer = null;
   }
 
-  private noteError(prop: any, wasm: PmWasm, id: number) {
+  private noteError(prop: any, wasm: PmWasm, id: number, comp?: string) {
     if (!prop || typeof prop !== 'object') return;
     const raw = this.unwrap(prop);
-    if (!raw.expr) { this.errors.delete(raw); return; }
-    const message = wasm.expressionError(id);
+    if (!raw.expr) {
+      this.errors.delete(raw);
+      this.expressionFrames.release(id);
+      this.expressionComps.delete(id);
+      return;
+    }
+    if (comp && !this.dual) { this.expressionFrames.register(comp, id, raw); this.expressionComps.set(id, comp); }
+    const message = (wasm.evaluationStatus() & 0x80) ? wasm.expressionError(id) : null;
     if (message == null) this.errors.delete(raw);
     else this.errors.set(raw, message);
   }
@@ -809,13 +822,23 @@ export class NativeApi {
   private fastValue(id: number, T: number, prop: any): unknown {
     const wasm = this.wasm();
     if (!wasm || wasm.dead) return MISS;
-    let n: number;
-    try { n = wasm.x.pm_ev(id, T); } catch { wasm.dead = true; return MISS; }
-    if (n !== n && wasm.x.pm_kind() !== 0) return MISS; // not a number, or a throw: ask the slow path
-    this.stats.fastPath += 1;
     const raw = prop && typeof prop === 'object' ? this.unwrap(prop) : null;
+    let n: number, status: number;
+    try {
+      if (raw?.expr) {
+        const comp = this.expressionComps.get(id);
+        const batch = comp ? this.expressionFrames.read(wasm, comp, id, T, this.barrier()!.revision) : null;
+        if (batch) { n = batch.value; status = batch.status; }
+        else { n = wasm.x.pm_ev(id, T); status = wasm.evaluationStatus(); }
+      } else {
+        n = wasm.x.pm_ev(id, T);
+        status = n === n ? 0 : wasm.x.pm_kind();
+      }
+    } catch { wasm.dead = true; return MISS; }
+    if ((status & 0x7f) !== 0) return MISS; // not a number, or a throw: ask the slow path
+    this.stats.fastPath += 1;
     if (raw) {
-      if (raw.expr) { const m = wasm.expressionError(id); if (m == null) this.errors.delete(raw); else this.errors.set(raw, m); }
+      if (raw.expr) { const m = (status & 0x80) ? wasm.expressionError(id) : null; if (m == null) this.errors.delete(raw); else this.errors.set(raw, m); }
       else this.errors.delete(raw);
     }
     return n;
@@ -852,7 +875,7 @@ export class NativeApi {
         entry.ids.set(key, id);
       }
       const got = this.evById(wasm, id, T);
-      this.noteError(ctx.raw.p?.[key], wasm, id);
+      this.noteError(ctx.raw.p?.[key], wasm, id, ctx.comp);
       return got;
     }, () => this.legacy.ev(L, key, T), () => ({ layer: L?.id, key, t: T }));
   }
@@ -925,7 +948,7 @@ export class NativeApi {
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
       if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
-      this.noteError(rawProp, wasm, entry!.id);
+      this.noteError(rawProp, wasm, entry!.id, ctx.comp);
       return got;
     }, () => this.legacy.evP(L, prop, T, key), () => ({ layer: L?.id, key, t: T }));
   }

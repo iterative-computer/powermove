@@ -440,3 +440,21 @@ for tests, remaining 3D/cyclic-pose failures and cross-lane edits.
   mirror's top level (no repair per query); explicit layer lists go by their
   composition's address, or as their structural members only. Measurements are in
   document-host.md, round 5.
+
+## P6 expression batch ABI (2026-10-19)
+
+Warm renderer frames evaluate the resident expression ids of a composition in
+one `pm_ev_batch` call. `ExpressionFrames` keeps separate copies per composition
+because the ABI's typed-array buffers are shared. A first read interns its live
+address; subsequent frame reads use the batch. Nonnumeric values/throws retain
+the scalar decoder. Revision, scope, module reset and `Object.is(time)` validate
+the renderer cache; native memo time keys remain raw f64 bits.
+
+The low seven bits of a batch kind remain `ValueKind`; bit 7 flags an expression
+error. Scalar calls also write a stable status word exported by `pm_status_ptr`.
+The renderer reads that word from linear memory and fetches an error message only
+when flagged. Views are reacquired after memory growth. The resident id registry
+uses weak owners and removes released ids; a module reset drops all batches.
+The 120-channel integration unit test covers errors/recovery, signed zero,
+repeat times, revisions, nonnumeric results, reset and memory growth; a second
+case alternates stored composition scopes.
