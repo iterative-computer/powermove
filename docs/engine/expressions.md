@@ -248,3 +248,13 @@ runtime type changes. Parity now compares unbound and bound numeric results,
 including changed time/frame/keyed-value inputs, against the same exact V8
 vectors. The same-revision slot also reuses its validated layer position; it
 resolves the composition once per batch and revalidates after any revision.
+
+The third pass exposes a guarded scalar-input entry on a bound numeric plan.
+It accepts local time, composition time and a numeric base only; any remaining
+document read or unavailable input declines to the complete evaluator. pm-eval
+uses finite answers only, at the exact validated revision, with no outstanding
+expression errors. That removes layer/scope resolution, address cloning and
+context construction for these warm channels. Non-finite answers, nonnumeric
+bases and error recovery retain the ordinary evaluator. The existing V8 vectors
+also compare this entry, including changed dynamic inputs; production engine
+regressions cover revision changes, numeric-to-string bases and error recovery.

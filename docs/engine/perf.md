@@ -1416,3 +1416,84 @@ and `fixups3-resource-block.json` plus the load retry records. No final
 performance pass is inferred from correctness. Cold address interning remains
 separate from the warm resident-frame measurement; arbitrary direct synchronous
 compatibility calls outside the readiness boundaries still require a ready host.
+
+### Round 2: Node inner loop and bound scalar plans
+
+`apps/desktop/scripts/expression-benchmark.mjs` bundles the real renderer
+`legacy/core/anim.ts` (and its `expression.ts` dependency), model/easing modules,
+and production EngineDoc facade into a temporary Node ESM bundle. No evaluator
+or expression helper is replaced. Only host services unrelated to evaluation
+(invalidation, notifications, asset lookup and bus transport) are inert; the bus
+still delivers listeners. Both evaluators run in the same Node process against
+independent, identical projects, with the production release pm-wasm. Electron
+and the shared Electron lock are absent from this inner loop.
+
+Run from the repository root after building the release module:
+
+```sh
+node engine/crates/pm-wasm/scripts/build.mjs
+PM_BENCH_OUT=/tmp/expression-benchmark.json node apps/desktop/scripts/expression-benchmark.mjs
+```
+
+The runner requires nice 0, at least 40 GiB free, and one-minute load <=8 before
+and after measurement. It waits up to 30 seconds for quiet and otherwise fails
+for a later retry. `PM_BENCH_FRAMES` overrides the default 4,000 frames per side
+of each of nine alternating pairs. Each side first warms for 1,000 frames. The
+400-channel fixture is the same four sources on 100 layers as the Electron
+fixture above. Every frame changes time; signed zero and other reference times
+are checked with `Object.is`, and every pair must have identical accumulated
+answers. Results include median/p95 of the nine block averages and a separate
+2,000-frame-per-side latency distribution, sampled in eight alternating pairs.
+
+The scalar case uses one layer/channel and nine alternating 100,000-call pairs.
+Cold means the first evaluated frame of a fresh project and native instance,
+with module compilation, document loading and fixture construction outside the
+timing. Edit/rebind means changing a parameter and one expression source,
+calling the real `touch()` and evaluating the same frame time; diff/apply and
+re-binding are included. Cold/edit each have nine alternating pairs. All units
+are microseconds per frame (per call for the one-channel scalar case).
+
+Resident frame groups now prepare their numeric id buffer once. A warm frame
+calls only `pm_ev_batch(n, time)` and reads shared numeric result/status views;
+there is no per-channel JS/wasm marshalling or hot-path string/JSON encoding.
+Scope switches and generic batch users restore the correct ids; buffer growth
+renews views. Scope-owned copies keep independent frame memos exact. Bound
+numeric plans additionally accept only time/local-time/base on the warm path,
+avoiding document-context construction; full bytecode remains the fallback.
+The ordinary empty scope no longer constructs a scope-stamp object per channel.
+
+Measured on Node 24.18.0 / V8 13.6, nice 0, load 7.897 before / 7.825 after:
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 38.323 | 77.704 | 38.795 | 78.026 |
+| 400 channels, individual frame µs | 37.709 | 75.541 | 39.792 | 80.208 |
+| One-channel scalar µs/call | 0.127128 | 0.108808 | 0.147446 | 0.110591 |
+| Cold 400-channel frame µs | 4196.625 | 180.083 | 4808.916 | 267.917 |
+| Edit/rebind + frame µs | 1275.958 | 133.500 | 3081.625 | 207.750 |
+
+The requested warm 400-channel Node gate passes: 95.808 versus 194.261 ns per
+channel, about 51% less frame cost. Scalar, cold and edit/rebind still regress
+and are separate remaining costs; this does not claim every expression workload
+is at parity. Absolute Node timings are not substitutes for Electron 44 / V8
+15.2 timings. The release module SHA-256 is
+`77dd7a122c6bc8e3db8b437b2d0f8d8e305b2b9fb1b3f459e836a4e0a9e139e9`.
+Raw samples and runtime versions are outside Git in
+`/tmp/ne-w5/fixups3-r2-node-numeric.json`.
+
+Current integration was merged first. Both release addons were rebuilt here
+and load with `protocol-25292d6fdfffb933`; no fixups2 addon is used in round 2.
+Native Rust and production `js-pow` wasm replay the unchanged saved Electron V8
+reference: 42,498 exact cases and all 13 × 400,000 math samples pass, including
+the new scalar-input comparisons. The wasm replay runs in Node against those
+saved V8 answers; it does not regenerate references with Node. pm-eval's 14
+vector/cache/identity tests and pm-wasm's engine/query tests pass, including the
+new revision/type/error guard regression. EngineDoc's 101 unit/dual/audit tests
+pass (two opt-in benchmark skips); the earlier kernel/agent selection remains
+passing. Renderer typecheck has zero errors and the existing IconCropper
+warning, and the three changed libraries pass clippy with warnings denied.
+
+One combined Electron expression/startup confirmation attempt is queued under
+the shared lock, bounded to 20 minutes of acquisition wait. Its result is
+recorded below after the attempt completes; Node's pass does not infer an
+Electron or startup pass.
