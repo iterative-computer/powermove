@@ -178,7 +178,7 @@ async function desktopSmoke() {
   await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ id: 'mcp-render-smoke', name: 'MCP render smoke', version: '1.0.0', apiVersion: 3, permissions: [], contributes: ['effects'] }));
   await writeFile(path.join(stage, 'index.ts'), `import type { PowermoveAPI } from 'powermove';
 export default function activate(api: PowermoveAPI) {
-  api.effects.register({ id: 'mcp-render-smoke.effect', label: 'MCP render smoke', params: [], frag: 'o = texture(u_tex, v_st);' });
+  api.effects.register({ id: 'mcp-render-smoke.effect', label: 'MCP render smoke', group: 'Color', params: [], frag: 'o = texture(u_tex, v_st);' });
 }
 `);
   await tool('publish_extensions', { extensions: [{ id: 'mcp-render-smoke', action: 'created', summary: 'MCP render contract fixture' }] });
