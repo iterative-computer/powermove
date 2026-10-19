@@ -91,6 +91,64 @@ describe('the UI font census', () => {
     stop();
   });
 
+  it('reads a connected canvas once per description until a style mutation, and flushes DOM text only before a new one', async () => {
+    const win = window as any;
+    const before = Object.getOwnPropertyDescriptor(win, 'CanvasRenderingContext2D');
+    class FakeContext {
+      font = '400 13px system-ui'; textRendering = 'auto'; fontStretch = 'normal';
+      constructor(public canvas: HTMLCanvasElement) {}
+      measureText(text: string) { return { width: text.length }; }
+    }
+    Object.defineProperty(win, 'CanvasRenderingContext2D', { value: FakeContext, configurable: true, writable: true });
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const ctx = new FakeContext(canvas);
+    const reports: UiFontCensus[] = [];
+    const queue: Array<() => void> = [];
+    const styles = { n: 0 };
+    const getComputedStyle = win.getComputedStyle;
+    win.getComputedStyle = function (el: Element, ...rest: unknown[]) { if (el === canvas) styles.n++; return getComputedStyle.call(this, el, ...rest); };
+    try {
+      const stop = startUiFontCensus(document, { report: async json => { reports.push(JSON.parse(json)); } }, cb => queue.push(cb));
+      queue.splice(0).forEach(cb => cb());
+      ctx.measureText('a');
+      expect(styles.n).toBe(1);
+      expect(reports.map(r => r.uses[0]!.size)).toEqual([13]);
+      // The same description: no style read, no report.
+      for (let i = 0; i < 5; i++) ctx.measureText('b');
+      expect(styles.n).toBe(1);
+      // A style mutation makes the canvas read its inherited style again,
+      // but a description it already recorded leaves pending DOM text to
+      // the idle scan.
+      const label = document.createElement('div');
+      label.style.font = '400 11px system-ui';
+      label.textContent = 'Label';
+      document.body.append(label);
+      ctx.measureText('c');
+      expect(styles.n).toBe(2);
+      expect(reports.map(r => r.uses[0]!.size)).toEqual([13]);
+      expect(queue).toHaveLength(1);
+      queue.splice(0).forEach(cb => cb());
+      expect(reports.map(r => r.uses[0]!.size)).toEqual([13, 11]);
+      const n = styles.n;
+      ctx.measureText('d');
+      expect(styles.n).toBe(n);
+      // A new description records the DOM text laid out before it first.
+      const menu = document.createElement('div');
+      menu.style.font = '400 15px system-ui';
+      menu.textContent = 'Menu';
+      document.body.append(menu);
+      ctx.font = '400 17px system-ui';
+      ctx.measureText('e');
+      expect(reports.map(r => r.uses[0]!.size)).toEqual([13, 11, 15, 17]);
+      stop();
+    } finally {
+      win.getComputedStyle = getComputedStyle;
+      if (before) Object.defineProperty(win, 'CanvasRenderingContext2D', before);
+      else delete win.CanvasRenderingContext2D;
+    }
+  });
+
   it('runs only with the new engine on and a channel to report to', () => {
     expect(installUiFontCensus({ nativeEngine: { enabledSync: () => false }, engineFonts: { reportUiFonts: async () => true } })).toBeNull();
     expect(installUiFontCensus({ nativeEngine: { enabledSync: () => true }, engineFonts: {} })).toBeNull();

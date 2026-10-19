@@ -76,6 +76,9 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   const pending = new Set<Node>();
   let full = true;
   let scheduled = false;
+  // Bumped by every mutation that can change computed fonts: a connected
+  // canvas's inherited style is read again only after one.
+  let styleGeneration = 0;
   let stopped = false;
 
   const visit = (el: Element, dpr: number, out: UiFontUse[]): void => {
@@ -151,28 +154,34 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
       else if (!fontStyleChanged(r)) continue;
       else if (r.target === doc.documentElement || r.target === doc.body) full = true;
       else pending.add(r.target);
+      styleGeneration++;
     }
     if (full || pending.size) request();
   };
   const observer = new view.MutationObserver(takeRecords);
   observer.observe(doc, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'data-density'] });
 
-  // Platform data is lazy: font assignments can be followed by changes
-  // to textRendering/stretch before the first measure or draw. Record the
-  // description actually used by text preparation, after native parsing.
   const restoreCanvas: Array<() => void> = [];
   for (const proto of [(view as any).CanvasRenderingContext2D?.prototype, (view as any).OffscreenCanvasRenderingContext2D?.prototype]) {
     if (!proto) continue;
     const declaration = doc.createElement('span').style;
-    const contextStates = new WeakMap<object, string>();
-    const record = (ctx: CanvasRenderingContext2D): void => {
-      const detached = !(ctx.canvas instanceof view.HTMLCanvasElement) || !ctx.canvas.isConnected;
-      const state = `${ctx.font}|${ctx.textRendering}|${ctx.fontStretch}`;
-      if (detached && contextStates.get(ctx) === state) return;
+    // The description each context last used, by its state. A connected
+    // canvas's state includes the style generation (its inherited style can
+    // change); a detached or offscreen canvas has no inherited style. Only a
+    // changed state parses the font and reads the computed style again.
+    type Description = { key: string; use: UiFontUse } | null;
+    const described = new WeakMap<object, { state: string; description: Description }>();
+    const stateOf = (ctx: CanvasRenderingContext2D): string => {
+      const connected = ctx.canvas instanceof view.HTMLCanvasElement && ctx.canvas.isConnected;
+      return `${ctx.font}|${ctx.textRendering}|${ctx.fontStretch}${connected ? `|${styleGeneration}` : ''}`;
+    };
+    const describe = (ctx: CanvasRenderingContext2D): Description => {
+      const state = stateOf(ctx);
+      const last = described.get(ctx);
+      if (last?.state === state) return last.description;
       declaration.font = ctx.font;
       const use = useOf(declaration);
-      if (!use) return;
-      if (detached) contextStates.set(ctx, state);
+      if (!use) { described.set(ctx, { state, description: null }); return null; }
       const canvas = ctx.canvas;
       const inherited = canvas instanceof view.HTMLCanvasElement && canvas.isConnected ? view.getComputedStyle(canvas) : null;
       use.cacheKey = fontCacheKey({
@@ -187,20 +196,30 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
         fontPalette: inherited?.fontPalette,
         fontVariantAlternates: inherited?.fontVariantAlternates,
       });
-      const key = `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}|${use.cacheKey}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      stats.reports++;
-      host.report(JSON.stringify({ dpr: 1, uses: [use] } satisfies UiFontCensus)).catch(() => undefined);
+      const description = { key: `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}|${use.cacheKey}`, use };
+      described.set(ctx, { state, description });
+      return description;
     };
     for (const name of ['measureText', 'fillText', 'strokeText']) {
       const descriptor = Object.getOwnPropertyDescriptor(proto, name);
       if (typeof descriptor?.value !== 'function' || !descriptor.configurable) continue;
       const method = function(this: CanvasRenderingContext2D, ...args: unknown[]) {
         takeRecords(observer.takeRecords());
-        if (full || pending.size) flush();
+        // Platform data is lazy: font assignments can be followed by
+        // changes to textRendering/stretch before the first measure or
+        // draw, so the description is read at the call, after native
+        // parsing. Only a description not yet seen creates a font-cache
+        // entry: the DOM text laid out before it is recorded first (the
+        // first creator of a key fixes it). A seen one leaves pending DOM
+        // text to its idle scan.
+        const entry = describe(this);
+        if (entry && !seen.has(entry.key) && (full || pending.size)) flush();
         const result = descriptor.value.apply(this, args);
-        record(this);
+        if (entry && !seen.has(entry.key)) {
+          seen.add(entry.key);
+          stats.reports++;
+          host.report(JSON.stringify({ dpr: 1, uses: [{ ...entry.use }] } satisfies UiFontCensus)).catch(() => undefined);
+        }
         return result;
       };
       Object.defineProperty(proto, name, { ...descriptor, value: method });
@@ -219,6 +238,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   };
   function onRatio(): void {
     full = true;
+    styleGeneration++;
     watchRatio();
     request();
   }
