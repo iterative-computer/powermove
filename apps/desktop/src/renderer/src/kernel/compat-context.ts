@@ -1,36 +1,449 @@
 /*
- * `render.gl.context` (a deprecated compatibility member, amendment 23;
- * docs/engine/extensions-compat.md).
+ * `render.gl.context`, the compatibility WebGL2 context (a deprecated
+ * compatibility member, owner amendment 23; plan section 20 "render.gl.context";
+ * docs/engine/extensions-compat.md "The compatibility context").
  *
- * Today it is the compositor's WebGL2 context: null until a viewer hands a
- * canvas to `render.gl.init`, then that canvas's context. Old custom viewers
- * (forks frozen before the engine) read it to find their canvas
- * (`context.canvas`, to recover their stage after a reload) and test it to
- * decide whether to call `init` (`if (!context) init(canvas)`).
+ * Today it is the compositor's WebGL2 context on the canvas a viewer handed
+ * to `render.gl.init` (legacy/gl/compositor.ts `GL.init`: alpha false,
+ * premultiplied, preserveDrawingBuffer, no antialiasing). Extensions see:
+ *
+ * 1. null until `init`, then the context (`if (!context) init(canvas)` in
+ *    viewers frozen before the engine);
+ * 2. `context.canvas`, the bound canvas (frozen viewers find their stage
+ *    from it after a reload);
+ * 3. the default framebuffer holding the frame the viewer shows: each frame
+ *    the compositor clears it to opaque black and draws the composite at the
+ *    canvas's size (`GL.render` "present"), so `readPixels` there reads the
+ *    finished composite;
+ * 4. drawing into the default framebuffer shows in the viewer on top of the
+ *    composite until the next frame replaces it; exports and captures render
+ *    in their own passes and never include it (exporter.ts `renderInto`,
+ *    `GL.renderToPixels`);
+ * 5. its own textures, framebuffers and programs, as in any WebGL2 context.
  *
  * With "Use New Engine" on there is no compositor context. The engine
- * presents over the canvas `init` bound (engine-connection/canvas-binding.ts),
- * which stays in the document, hidden under the presentation. The
- * compatibility context is that canvas's own WebGL2 context, made when first
- * asked for: the same lifecycle (null before `init`), the same `canvas`, and
- * a live WebGL2 context an extension may use. Drawing into it does not show:
- * the canvas is under the engine's presentation (docs/engine/extensions-compat.md,
- * "What the compatibility context does not do").
+ * presents its frames over the bound canvas (engine-connection/
+ * canvas-binding.ts, or the built-in viewer's own presentation), and an
+ * extension that asks for `render.gl.context` gets a WebGL2 context on an
+ * offscreen canvas with today's attributes, at the bound canvas's size:
+ *
+ * - (1) and (2) hold: null before `init`; `canvas` is the bound canvas (an
+ *   own property of the context; the offscreen canvas is `compatCanvas`).
+ * - (3) Reading back: before the first operation that reads or draws the
+ *   default framebuffer after an engine frame was presented, the frame on
+ *   screen (the presentation canvas, the region under the bound canvas) is
+ *   uploaded into the default framebuffer over opaque black, so
+ *   `readPixels`, `copyTex*Image2D` and `blitFramebuffer` from it read the
+ *   composite, and drawing lands on top of it, as today.
+ * - (4) Drawing: after the extension draws into the default framebuffer
+ *   (clear, draw calls, blits), the offscreen canvas is composited as a
+ *   layer of the viewer's presentation stack, right above the engine's
+ *   canvas and under the viewer's overlay, at the bound canvas's place,
+ *   until the next engine frame is presented (the frame that replaces the
+ *   drawing today). Exports and captures do not include it, as today.
+ * - (5) holds: it is an ordinary WebGL2 context.
+ *
+ * The context stays the same object while the same canvas is bound; a new
+ * `init` with another canvas makes a new one, as `GL.init` did.
  */
 type LegacyPM = Record<string, any>;
 
-const ATTRIBUTES: WebGLContextAttributes = { alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: true };
+/** Today's compositor attributes (`GL.init`). */
+export const COMPAT_ATTRIBUTES: WebGLContextAttributes = {
+  alpha: false, antialias: false, premultipliedAlpha: true,
+  preserveDrawingBuffer: true, powerPreference: 'high-performance', desynchronized: true
+};
 
-export function compatContext(PM: LegacyPM): WebGL2RenderingContext | null {
-  // Without the engine (or before it binds): the compositor's own context.
-  const binding = PM?.EngineCanvas;
-  const bound: HTMLCanvasElement | null = binding?.bound ?? null;
-  if (!PM?.EngineRender || !bound) return (PM?.GL?.gl ?? null) as WebGL2RenderingContext | null;
-  // A context of the bound canvas: the compositor's when it made one there
-  // (getContext returns it), otherwise a new one.
-  try {
-    return bound.getContext('webgl2', ATTRIBUTES);
-  } catch {
-    return null;
+/** Methods that draw into the bound draw framebuffer. */
+const DRAWS = [
+  'clear', 'clearBufferfv', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfi',
+  'drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'drawRangeElements'
+] as const;
+/** Methods that read the bound read framebuffer. */
+const READS = ['readPixels', 'copyTexImage2D', 'copyTexSubImage2D', 'copyTexSubImage3D'] as const;
+
+/** What the host needs of its surroundings (the app; fakes in tests). */
+export type CompatContextEnv = {
+  /** The canvas `render.gl.init` bound with the engine on, or null. */
+  bound(): HTMLCanvasElement | null;
+  /** Whether the engine draws this window's frames (else the compositor's context is the answer). */
+  engine(): boolean;
+  /** The compositor's own context (the flag off). */
+  legacy(): WebGL2RenderingContext | null;
+  /** Makes the offscreen canvas. */
+  makeCanvas?(width: number, height: number): OffscreenCanvas | HTMLCanvasElement;
+  /** The engine's canvas presenting over `bound`, when it shows a frame. */
+  presentation?(bound: HTMLCanvasElement): HTMLCanvasElement | null;
+  /** Runs `fn` after the current task's drawing (a microtask). */
+  defer?(fn: () => void): void;
+};
+
+type CompatState = {
+  bound: HTMLCanvasElement;
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+  gl: WebGL2RenderingContext;
+  /** Unwrapped methods. */
+  raw: Record<string, (...args: any[]) => any>;
+  drawFb: WebGLFramebuffer | null;
+  readFb: WebGLFramebuffer | null;
+  /** An engine frame was presented after the last upload. */
+  stale: boolean;
+  /** The extension drew into the default framebuffer since the last frame. */
+  dirty: boolean;
+  flushQueued: boolean;
+  layer: HTMLCanvasElement | null;
+  upload: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null;
+  lost: boolean;
+};
+
+/** Counters for tests and diagnostics. */
+export type CompatContextStats = { made: number; uploads: number; shown: number; hidden: number };
+
+function defaultCanvas(width: number, height: number): OffscreenCanvas | HTMLCanvasElement {
+  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  return canvas;
+}
+
+/** The engine's canvas over `bound`: the presentation in the bound canvas's stage, when it shows a frame. */
+export function presentationCanvas(bound: HTMLCanvasElement): HTMLCanvasElement | null {
+  const scopes = [bound.closest('[data-engine-stage]'), bound.parentElement].filter(Boolean) as Element[];
+  for (const scope of scopes) {
+    for (const canvas of Array.from(scope.querySelectorAll('canvas#engine-present')) as HTMLCanvasElement[]) {
+      if (canvas.style.visibility === 'visible' && canvas.width > 0 && canvas.height > 0) return canvas;
+    }
   }
+  return null;
+}
+
+export class CompatContextHost {
+  private state: CompatState | null = null;
+  readonly stats: CompatContextStats = { made: 0, uploads: 0, shown: 0, hidden: 0 };
+
+  constructor(private readonly env: CompatContextEnv) {}
+
+  /** `render.gl.context`. */
+  context(): WebGL2RenderingContext | null {
+    if (!this.env.engine()) return this.env.legacy();
+    const bound = this.env.bound();
+    if (!bound) return null;
+    let state = this.state;
+    if (!state || state.bound !== bound || state.lost) {
+      this.drop();
+      state = this.make(bound);
+      if (!state) return null;
+      this.state = state;
+    }
+    this.fit(state);
+    return state.gl;
+  }
+
+  /** The offscreen canvas behind the compatibility context (null before one was made). */
+  get compatCanvas(): OffscreenCanvas | HTMLCanvasElement | null {
+    return this.state?.canvas ?? null;
+  }
+
+  /** The layer showing the context's drawing, while it shows. */
+  get shownLayer(): HTMLCanvasElement | null {
+    const layer = this.state?.layer;
+    return layer && layer.style.visibility === 'visible' ? layer : null;
+  }
+
+  /**
+   * An engine frame was presented (today's `preview:presented`, emitted
+   * before `frame:rendered`): the default framebuffer is to hold it again,
+   * and the drawing it replaces stops showing.
+   */
+  presented(): void {
+    const state = this.state;
+    if (!state) return;
+    state.stale = true;
+    state.dirty = false;
+    this.hideLayer(state);
+  }
+
+  dispose(): void {
+    this.drop();
+  }
+
+  private make(bound: HTMLCanvasElement): CompatState | null {
+    const width = Math.max(1, bound.width | 0), height = Math.max(1, bound.height | 0);
+    let canvas: OffscreenCanvas | HTMLCanvasElement;
+    let gl: WebGL2RenderingContext | null = null;
+    try {
+      canvas = (this.env.makeCanvas ?? defaultCanvas)(width, height);
+      gl = canvas.getContext('webgl2', COMPAT_ATTRIBUTES) as WebGL2RenderingContext | null;
+    } catch {
+      return null;
+    }
+    if (!gl) return null;
+    const state: CompatState = {
+      bound, canvas, gl, raw: {}, drawFb: null, readFb: null,
+      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false
+    };
+    this.instrument(state);
+    (canvas as any).addEventListener?.('webglcontextlost', (event: Event) => {
+      event.preventDefault();
+      state.lost = true;
+      state.upload = null;
+    });
+    this.stats.made++;
+    return state;
+  }
+
+  /** Follows the bound canvas's size (today `GL.resize` sized the compositor's canvas). */
+  private fit(state: CompatState): void {
+    const width = Math.max(1, state.bound.width | 0), height = Math.max(1, state.bound.height | 0);
+    if (state.canvas.width !== width || state.canvas.height !== height) {
+      state.canvas.width = width;
+      state.canvas.height = height;
+      state.stale = true;
+    }
+  }
+
+  /** Wraps the context's framebuffer-touching methods (own properties: the context stays the real object). */
+  private instrument(state: CompatState): void {
+    const gl = state.gl as any;
+    const raw = state.raw;
+    const own = (name: string, value: unknown) => Object.defineProperty(gl, name, { configurable: true, writable: true, value });
+    for (const name of ['bindFramebuffer', 'deleteFramebuffer', 'blitFramebuffer', ...DRAWS, ...READS]) {
+      const fn = gl[name];
+      if (typeof fn === 'function') raw[name] = fn.bind(gl);
+    }
+    Object.defineProperty(gl, 'canvas', { configurable: true, get: () => state.bound });
+    Object.defineProperty(gl, 'compatCanvas', { configurable: true, get: () => state.canvas });
+    own('bindFramebuffer', (target: number, fb: WebGLFramebuffer | null) => {
+      raw.bindFramebuffer!(target, fb);
+      if (target === gl.FRAMEBUFFER) { state.drawFb = fb; state.readFb = fb; }
+      else if (target === gl.DRAW_FRAMEBUFFER) state.drawFb = fb;
+      else if (target === gl.READ_FRAMEBUFFER) state.readFb = fb;
+    });
+    own('deleteFramebuffer', (fb: WebGLFramebuffer | null) => {
+      raw.deleteFramebuffer!(fb);
+      if (fb && state.drawFb === fb) state.drawFb = null;
+      if (fb && state.readFb === fb) state.readFb = null;
+    });
+    for (const name of DRAWS) {
+      if (!raw[name]) continue;
+      own(name, (...args: any[]) => {
+        const target = state.drawFb === null;
+        if (target) this.refresh(state);
+        const result = raw[name]!(...args);
+        if (target) this.drew(state);
+        return result;
+      });
+    }
+    for (const name of READS) {
+      if (!raw[name]) continue;
+      own(name, (...args: any[]) => {
+        if (state.readFb === null) this.refresh(state);
+        return raw[name]!(...args);
+      });
+    }
+    if (raw.blitFramebuffer) {
+      own('blitFramebuffer', (...args: any[]) => {
+        const touches = state.drawFb === null || state.readFb === null;
+        if (touches) this.refresh(state);
+        const result = raw.blitFramebuffer!(...args);
+        if (state.drawFb === null) this.drew(state);
+        return result;
+      });
+    }
+  }
+
+  /**
+   * Puts the frame on screen into the default framebuffer, if an engine
+   * frame was presented since the last time: opaque black (today's clear),
+   * then the presentation's pixels under the bound canvas at its size.
+   * The extension's GL state is left as it was.
+   */
+  private refresh(state: CompatState): void {
+    this.fit(state);
+    if (!state.stale) return;
+    state.stale = false;
+    const gl = state.gl;
+    const raw = state.raw;
+    const width = state.canvas.width, height = state.canvas.height;
+    const source = (this.env.presentation ?? presentationCanvas)(state.bound);
+    // The frame under the bound canvas, scaled to its backing store, over black.
+    const scratch = this.scratch(width, height);
+    const c2 = scratch?.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (!scratch || !c2) return;
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+    c2.globalCompositeOperation = 'copy';
+    c2.fillStyle = '#000';
+    c2.fillRect(0, 0, width, height);
+    c2.globalCompositeOperation = 'source-over';
+    if (source) {
+      const from = sourceRect(source, state.bound);
+      if (from) {
+        // At the same density (the usual case) the region is copied pixel
+        // for pixel from the nearest whole-pixel origin; otherwise scaled.
+        // (A CSS box of fractional size rounds its backing store: within a pixel is the same density.)
+        const same = Math.abs(from.sw - width) <= 1 && Math.abs(from.sh - height) <= 1;
+        if (same) Object.assign(from, { sx: Math.round(from.sx), sy: Math.round(from.sy), sw: width, sh: height });
+        c2.imageSmoothingEnabled = !same;
+        try {
+          c2.drawImage(source, from.sx, from.sy, from.sw, from.sh, 0, 0, width, height);
+        } catch {
+          // A canvas that cannot be read (lost device): black, as a cleared frame.
+        }
+      }
+    }
+    const saved = {
+      tex: gl.getParameter(gl.TEXTURE_BINDING_2D),
+      unpackBuffer: gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING),
+      flip: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+      premultiply: gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL),
+      conversion: gl.getParameter(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL),
+      alignment: gl.getParameter(gl.UNPACK_ALIGNMENT),
+      rowLength: gl.getParameter(gl.UNPACK_ROW_LENGTH),
+      skipPixels: gl.getParameter(gl.UNPACK_SKIP_PIXELS),
+      skipRows: gl.getParameter(gl.UNPACK_SKIP_ROWS),
+      scissor: gl.isEnabled(gl.SCISSOR_TEST),
+      discard: gl.isEnabled(gl.RASTERIZER_DISCARD)
+    };
+    try {
+      if (!state.upload) {
+        const tex = gl.createTexture(), fbo = gl.createFramebuffer();
+        if (!tex || !fbo) return;
+        state.upload = { tex, fbo };
+      }
+      const { tex, fbo } = state.upload;
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      // Bottom row first, as the default framebuffer reads back.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, scratch as TexImageSource);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.disable(gl.RASTERIZER_DISCARD);
+      raw.bindFramebuffer!(gl.READ_FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      raw.bindFramebuffer!(gl.DRAW_FRAMEBUFFER, null);
+      raw.blitFramebuffer!(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      this.stats.uploads++;
+    } finally {
+      raw.bindFramebuffer!(gl.READ_FRAMEBUFFER, state.readFb);
+      raw.bindFramebuffer!(gl.DRAW_FRAMEBUFFER, state.drawFb);
+      gl.bindTexture(gl.TEXTURE_2D, saved.tex);
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, saved.unpackBuffer);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, saved.flip);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, saved.premultiply);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, saved.conversion);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, saved.alignment);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, saved.rowLength);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, saved.skipPixels);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, saved.skipRows);
+      if (saved.scissor) gl.enable(gl.SCISSOR_TEST);
+      if (saved.discard) gl.enable(gl.RASTERIZER_DISCARD);
+    }
+  }
+
+  private scratchCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+
+  private scratch(width: number, height: number): OffscreenCanvas | HTMLCanvasElement | null {
+    try {
+      let scratch = this.scratchCanvas;
+      if (!scratch) scratch = this.scratchCanvas = (this.env.makeCanvas ?? defaultCanvas)(width, height);
+      if (scratch.width !== width) scratch.width = width;
+      if (scratch.height !== height) scratch.height = height;
+      return scratch;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The extension drew into the default framebuffer: show it after this task. */
+  private drew(state: CompatState): void {
+    state.dirty = true;
+    if (state.flushQueued) return;
+    state.flushQueued = true;
+    (this.env.defer ?? queueMicrotask)(() => {
+      state.flushQueued = false;
+      if (this.state === state && state.dirty) this.showLayer(state);
+    });
+  }
+
+  /** Composites the context's drawing over the engine's canvas, under the viewer's overlay. */
+  private showLayer(state: CompatState): void {
+    const bound = state.bound;
+    const doc = bound.ownerDocument;
+    if (!doc || !bound.isConnected) return;
+    let layer = state.layer;
+    if (!layer || layer.ownerDocument !== doc) {
+      layer?.remove();
+      layer = doc.createElement('canvas');
+      layer.id = 'engine-compat-context';
+      layer.setAttribute('aria-hidden', 'true');
+      layer.style.cssText = 'position:absolute;pointer-events:none;visibility:hidden';
+      state.layer = layer;
+    }
+    const above = (this.env.presentation ?? presentationCanvas)(bound) ?? bound;
+    if (above.nextSibling !== layer) above.after(layer);
+    const parent = (layer.offsetParent ?? layer.parentElement) as HTMLElement | null;
+    const box = bound.getBoundingClientRect();
+    const origin = parent?.getBoundingClientRect() ?? { left: 0, top: 0 };
+    layer.style.left = `${box.left - origin.left + (parent?.scrollLeft ?? 0) - (parent?.clientLeft ?? 0)}px`;
+    layer.style.top = `${box.top - origin.top + (parent?.scrollTop ?? 0) - (parent?.clientTop ?? 0)}px`;
+    layer.style.width = `${box.width}px`;
+    layer.style.height = `${box.height}px`;
+    if (layer.width !== state.canvas.width) layer.width = state.canvas.width;
+    if (layer.height !== state.canvas.height) layer.height = state.canvas.height;
+    const c2 = layer.getContext('2d');
+    if (!c2) return;
+    c2.globalCompositeOperation = 'copy';
+    c2.imageSmoothingEnabled = false;
+    c2.drawImage(state.canvas as CanvasImageSource, 0, 0);
+    layer.style.visibility = 'visible';
+    this.stats.shown++;
+  }
+
+  private hideLayer(state: CompatState): void {
+    const layer = state.layer;
+    if (layer && layer.style.visibility === 'visible') {
+      layer.style.visibility = 'hidden';
+      this.stats.hidden++;
+    }
+  }
+
+  private drop(): void {
+    const state = this.state;
+    if (!state) return;
+    state.layer?.remove();
+    state.layer = null;
+    this.state = null;
+  }
+}
+
+/** The region of `source` (the engine's canvas) on screen under `bound`, in `source`'s pixels. */
+export function sourceRect(source: HTMLCanvasElement, bound: HTMLCanvasElement): { sx: number; sy: number; sw: number; sh: number } | null {
+  const s = source.getBoundingClientRect();
+  const b = bound.getBoundingClientRect();
+  if (!(s.width > 0 && s.height > 0 && b.width > 0 && b.height > 0)) return null;
+  const kx = source.width / s.width, ky = source.height / s.height;
+  return { sx: (b.left - s.left) * kx, sy: (b.top - s.top) * ky, sw: b.width * kx, sh: b.height * ky };
+}
+
+/** `render.gl.context` for `PM` (the kernel's host, or today's compositor context). */
+export function compatContext(PM: LegacyPM): WebGL2RenderingContext | null {
+  const host = PM?.CompatContext as CompatContextHost | undefined;
+  if (host) return host.context();
+  if (PM?.EngineRender && PM?.EngineCanvas) return null;
+  return (PM?.GL?.gl ?? null) as WebGL2RenderingContext | null;
+}
+
+/** The host for `PM`: the engine's binding, with today's compositor context when the engine is off. */
+export function createCompatContextHost(PM: LegacyPM): CompatContextHost {
+  return new CompatContextHost({
+    bound: () => (PM?.EngineCanvas?.bound ?? null) as HTMLCanvasElement | null,
+    engine: () => !!PM?.EngineRender && !!PM?.EngineCanvas,
+    legacy: () => (PM?.GL?.gl ?? null) as WebGL2RenderingContext | null
+  });
 }

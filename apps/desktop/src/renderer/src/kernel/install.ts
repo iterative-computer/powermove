@@ -116,7 +116,7 @@ import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-m
 import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { assetAudio, assetSource } from './live-media';
 import { createRasterCompat } from './raster-compat';
-import { compatContext } from './compat-context';
+import { compatContext, createCompatContextHost } from './compat-context';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -454,8 +454,9 @@ function makeRender(PM: LegacyPM): RenderAPI {
       /* The canvas `init` bound (the engine's binding with the new engine on,
          the compositor's otherwise). */
       get canvas() { return (PM?.EngineCanvas?.bound ?? PM?.GL?.gl?.canvas ?? null) as HTMLCanvasElement | null; },
-      /* The compatibility context: null until a viewer called `init`, then a
-         WebGL2 context of the bound canvas (compat-context.ts). */
+      /* The compatibility context: null until a viewer called `init`; with
+         the engine on, a WebGL2 context on an offscreen canvas that reads the
+         presented frame back and composites its drawing (compat-context.ts). */
       get context() { return compatContext(PM); }
     },
     raster,
@@ -934,6 +935,21 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   subscriptions.push(() => {
     rasterCompat.dispose();
     if (PM.RasterCompat === rasterCompat) PM.RasterCompat = null;
+  });
+  /* `render.gl.context` with the engine on: a WebGL2 context on an
+     offscreen canvas (compat-context.ts). It hears each presented frame
+     before any extension hears `frame:rendered` (this subscription is made
+     before the bus is forwarded below), so drawing in a `frame:rendered`
+     handler lands on the new frame, as today. */
+  const compatContextHost = createCompatContextHost(PM);
+  PM.CompatContext = compatContextHost;
+  {
+    const off = PM?.bus?.on?.('preview:presented', () => compatContextHost.presented());
+    if (typeof off === 'function') subscriptions.push(off);
+  }
+  subscriptions.push(() => {
+    compatContextHost.dispose();
+    if (PM.CompatContext === compatContextHost) PM.CompatContext = null;
   });
   const rasterDispatch: RenderAPI['raster'] = (...args) =>
     (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);
