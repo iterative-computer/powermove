@@ -373,3 +373,131 @@ PM_TRACER_MEASURE=1 $L bunx playwright test e2e/native-engine-tracer-measure.spe
 cd ../../engine && cargo build --release -p pm-node --example compose_bench
 PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 240
 ```
+
+
+## P3/B2/COMPCLOSE-2 follow-up measurements
+
+Measured on the same M4 Max, with native release addons and the release wasm
+module built in this worktree. Electron runs use the shared lock, hidden windows,
+isolated profiles and one Playwright worker. Raw results remain outside Git under
+`/tmp/ne-fixups2-evidence/`. These are targeted follow-up results, not a full gate.
+
+### Composition scopes
+
+`scope-bench.test.ts` builds 100 layers with 40 keyed properties each (five keys
+per property), alternates native/legacy order over five samples, and warms both
+paths. Each root sample and each legacy sample times one million calls; detached
+native samples time 24 calls because each serializes the large scope. Assertions
+consume every answer, and the resident cache reports one miss and 134 hits.
+
+| Scope, repeated evP at one time | Native median | Today median | Strict no-slower gate |
+|---|---:|---:|---|
+| Fresh root wrapper sharing proj.layers | 34.92 ns | 34.39 ns | Not cleanly met across repeated runs; the final run is slightly slower |
+| Genuinely detached composition | 19.57 ms | 34.53 ns | Fails |
+
+The root wrapper no longer serializes a document or resets the evaluator (the
+reported regression was 62 ms/call). Repeated numeric answers retain pm-wasm's
+last value after validating revision, scope, property, key and module health.
+Other runs put the root path at 40–43 ns versus 41–47 ns; a run at 36.5 versus
+33.2 ns and the final run above prevent claiming the strict performance line.
+No timing tolerance was widened. The remaining root difference is nanoseconds,
+not the original frame-scale serialization, but it is still disclosed.
+
+Resident detached scopes avoid repeated Node construction and document-cache
+resets, but their exact contents still must cross the boundary and be hashed.
+This remains milliseconds versus nanoseconds: a cache hit alone does not clear
+P3 for arbitrary detached objects. An explicit detached-scope write/version
+contract or dependency-aware query transport is needed to remove that cost while
+still seeing arbitrary outside-document mutations; silently caching by identity
+and mirror revision would miss those mutations. A version contract can only be an
+additive opt-in for new callers; existing apiVersion 1–3 calls must retain their
+unannounced-mutation semantics.
+
+### Boot and activation
+
+`engine-doc-boot.spec.ts`: the activation regression and five alternating
+setting-off/on pairs pass (11 fresh launches including the separate regression).
+Every activation probe returns 10 from its keyed property; with the setting on
+it is a native evP answer, zero fallbacks and zero named failures.
+
+| Measurement | Setting off | Setting on |
+|---|---:|---:|
+| Time to installed UI, p50 / max | 590.38 / 603.65 ms | 583.53 / 597.45 ms |
+| Time to opened editor, p50 / max | 866.34 / 878.57 ms | 883.45 / 910.55 ms |
+
+On: streaming compile 11.1–14.4 ms (includes body delivery), module load
+76.3–81.5 ms (source headers 65.2–67.1 ms), instantiation 0.1–0.2 ms,
+mirror-ready 78.2–83.3 ms from engine-doc installation. The UI install chain never
+awaits any of these. UI availability is faster on this five-pair sample; opening
+the editor is 17.11 ms slower at p50. The latter is an additional observed
+performance gap, not a timing allowance or a claim that all boot behavior matches.
+Five observations per mode do not estimate tail latency.
+
+### Mask correctness and fill work
+
+The window keeps the original viewport math and global sample coordinates, and
+returns full-sized transparent alpha outside the filled mesh; the existing blur
+therefore keeps all feather margins and downsample phases. Exact rational
+scanline spans replace per-pixel edge walks. The mask's white alpha is resolved
+directly, without full-output multisampled RGBA storage.
+
+- GPU path-mask reference gate: 54/54 canvases bit-exact (zero differing pixels),
+  including HD/UHD and every blur pass structure.
+- Composite path-mask corpus: seven non-text frames, zero failures; the two
+  path-mask text/caption frames pass their existing text class, all other pixels
+  exact. No unsupported reason, corpus case, threshold or reference was changed.
+- Direct full-canvas/window comparison: exact at 317×233, HD and UHD with fractional,
+  clipped and reflected geometry; winding spans also match independent per-sample
+  point tests for both fill rules and sample patterns.
+- Canvas2D gate: unchanged 529-case result (503 exact, 22 within one, four existing
+  pinned exceptions). Those exceptions remain baseline parity gaps.
+- CPU-model test HD fill: 6.1 ms for hd-f24 and 17.6 ms for the subtract combination;
+  GPU reference test first-fill, including pipeline construction, HD 10.1 ms,
+  UHD 19.5 ms. These are test-harness timings, not viewer playback results.
+
+Reproduce with the opt-in `scope-bench.test.ts`, `engine-doc-boot.spec.ts` and
+`path-mask-playback-measure.spec.ts` (`PM_FIXUPS2_MEASURE=1`,
+`PM_FIXUPS2_EVIDENCE=<outside-repo-dir>`); Electron specs under pm-electron-lock.
+Rust selections: pm-wasm tests; pm-vector canvas2d/mask_coverage and unit tests;
+pm-render path_masks plus corpus with `PM_RENDER_ONLY=composite/path-masks`,
+and text_corpus with `PM_TEXT_ONLY=composite/path-masks`.
+
+
+### Actual viewer playback (strict performance gate still fails)
+
+The corrected measurement spec finishes successfully and records four rows; that
+means the measurement ran, not that the performance gate passed. Each composition
+is 30 fps, 120 seconds long, with a feathered curved path whose rotation and one
+vertex animate continuously. It does not loop, so each item raster in the measured
+span is new. Both hidden viewers have the same full-sized device canvas (asserted
+1920×1080 or 3840×2160), Full preview resolution and adaptive quality off. Each row
+has two seconds of playback warmup followed by twelve measured seconds.
+
+| Canvas | Today shown / skipped | Engine shown / skipped | Today interval p50 / p95 / p99 / max | Engine interval p50 / p95 / p99 / max |
+|---|---|---|---|---|
+| 1920×1080 | 360 / 0 | 357 / 3 | 33.30 / 34.20 / 34.50 / 40.50 ms | 33.20 / 41.50 / 41.50 / 126.70 ms |
+| 3840×2160 | 360 / 0 | 360 / 0 | 33.30 / 33.80 / 34.40 / 34.50 ms | 33.20 / 35.10 / 35.30 / 35.70 ms |
+
+Both rows fail the no-slower line at the tail; HD also loses three composition
+frames. UHD's zero skips alone does not clear the row. There are no repeated
+frames, render errors, layer failures, named evaluator failures or legacy routes
+in either engine row. Engine compose mean is 1.36 ms (HD) and 2.50 ms (UHD),
+including the warmup; maxima are 66.19 and 5.24 ms. HD's measured viewer changes
+from viewSeq 4 to 5 and presenter generation 2 to 3 during the span, with three
+generation drops; the result retains that event rather than dropping the sample.
+The cause of the view change was not isolated in this lane.
+
+Legacy timestamps come from the compositor's `preview:presented` submission event;
+engine timestamps come from the presentation worker's onPresented/displayUs
+reports. These are the real viewer paths, but different points in the compositor
+pipeline. A common viz/presentation trace (the bridge/S1 harness) is still needed
+for a physical-display timing comparison. The recorded skips and tail costs are
+not waived pending that measurement. The remaining playback gate belongs with
+the bridge/presentation follow-up; CPU fill windowing alone does not clear it.
+
+All app runs shut down their isolated Electron instance. The initial harness
+attempts used the wrong legacy event and then treated a Disposable as a function;
+both failed before yielding valid paired data. The corrected run is the table
+above, preserved in the evidence file together with the failed first zero-frame
+observation. No production behavior or test threshold was changed to correct
+those instrumentation errors.

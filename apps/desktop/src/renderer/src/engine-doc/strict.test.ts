@@ -146,7 +146,7 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
       expect(doc.api!.evP(child, prop, t, 'position.y')).toBe(PM.evP(child, prop, t, 'position.y'));
       doc.api!.worldMatrix(child, t);
     }
-    expect(query.mock.calls.every(([r]) => !(r as any).compJson)).toBe(true);
+    expect(query.mock.calls.every(([r]) => !(r as any).compJson && !(r as any).compJsonText && (r as any).comp === PM.proj.compId)).toBe(true);
     expect((doc.stats() as any).native.fastPath).toBeGreaterThanOrEqual(4);
     expect((doc.stats() as any).native.interned).toBe(1);
     expect(fallbacks(doc)).toEqual({});

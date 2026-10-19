@@ -53,7 +53,7 @@ test('measure animated path masks at 1080p and UHD against today', async () => {
         const frames: { t:number; at:number }[] = [];
         const off = enabled ? presentation.onPresented((f:any) => {
           if (f.timed) frames.push({t:f.pts/705600000,at:f.displayUs/1000});
-        }) : PM.Kernel.events.on('frame:rendered', (f:any) => { if (PM.playing) frames.push({t:f.time,at:performance.now()}); });
+        }) : PM.bus.on('preview:presented', (f:any) => { if (PM.playing) frames.push({t:f.time,at:performance.now()}); });
         PM.setTime(0); PM.play();
         await new Promise(r=>setTimeout(r,2000));
         frames.length = 0;
