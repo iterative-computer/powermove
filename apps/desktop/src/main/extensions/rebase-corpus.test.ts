@@ -10,7 +10,8 @@
  * the update can be undone exactly; and a fork that is never rebased keeps
  * working (the e2e corpus loads it unchanged).
  */
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,8 +28,25 @@ const BUILTINS = path.join(DESKTOP, 'src/extensions');
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
+/** `main` before the native engine: today's shipped built-ins. */
+const SHIPPED_COMMIT = '470eeaf3';
+
+/** A shipped built-in's folder: the checked-in fixture, or (timeline, see
+ *  shipped/README.md) the source at `SHIPPED_COMMIT` from git history. */
+async function shippedSource(id: string): Promise<string> {
+  if (id !== 'timeline') return path.join(SHIPPED, id);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-shipped-'));
+  roots.push(root);
+  const repo = path.resolve(DESKTOP, '../..');
+  const archive = execFileSync('git', ['-C', repo, 'archive', '--format=tar', SHIPPED_COMMIT, `apps/desktop/src/extensions/${id}`], { maxBuffer: 64 * 1024 * 1024 });
+  execFileSync('tar', ['-x', '-C', root], { input: archive });
+  const folder = path.join(root, 'apps/desktop/src/extensions', id);
+  for (const file of await readdir(folder, { recursive: true })) if (/\.test\.ts$/.test(String(file))) await rm(path.join(folder, String(file)));
+  return folder;
+}
+
 /** A user data folder with `<id>-fork` written as `api.extensions.fork` writes it (fork.ts), from the shipped source. */
-async function forkOf(id: string): Promise<{ userData: string; userExtensionsDir: string; builtinExtensionsDir: string; forkId: string; live: string }> {
+async function forkOf(id: string): Promise<{ userData: string; userExtensionsDir: string; builtinExtensionsDir: string; forkId: string; live: string; shipped: string }> {
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-rebase-corpus-'));
   roots.push(userData);
   const userExtensionsDir = path.join(userData, 'extensions');
@@ -36,15 +54,16 @@ async function forkOf(id: string): Promise<{ userData: string; userExtensionsDir
   const forkId = `${id}-fork`;
   const live = path.join(userExtensionsDir, forkId);
   const skipTests = (source: string) => !/\.test\.ts$/.test(source);
-  await cp(path.join(SHIPPED, id), live, { recursive: true });
-  await cp(path.join(SHIPPED, id), path.join(live, '.forked-from'), { recursive: true });
+  const shipped = await shippedSource(id);
+  await cp(shipped, live, { recursive: true });
+  await cp(shipped, path.join(live, '.forked-from'), { recursive: true });
   // The built-in as this app ships it now (tests are not shipped).
   await cp(path.join(BUILTINS, id), path.join(builtinExtensionsDir, id), { recursive: true, filter: skipTests });
-  const manifest = JSON.parse(await readFile(path.join(SHIPPED, id, 'manifest.json'), 'utf8'));
+  const manifest = JSON.parse(await readFile(path.join(shipped, 'manifest.json'), 'utf8'));
   await writeFile(path.join(live, 'manifest.json'), `${JSON.stringify({
     ...manifest, id: forkId, name: `${manifest.name} (mine)`, replaces: [id], forkedFrom: `${id}@${manifest.version}`, author: 'user'
   }, null, 2)}\n`);
-  return { userData, userExtensionsDir, builtinExtensionsDir, forkId, live };
+  return { userData, userExtensionsDir, builtinExtensionsDir, forkId, live, shipped };
 }
 
 async function edit(file: string, from: string, to: string): Promise<void> {
@@ -124,4 +143,39 @@ describe('rebasing a modified fork onto the engine-rewritten built-in', () => {
     const builtin = await readFile(path.join(BUILTINS, 'keymap-default/keymap.ts'), 'utf8');
     for (const line of builtin.split('\n').filter((l) => l.includes('command:'))) expect(merged).toContain(line);
   }, 120_000);
+
+  /** Files of a folder (relative, sorted), without the fork's base copy. */
+  const files = async (dir: string) => (await readdir(dir, { recursive: true, withFileTypes: true }))
+    .filter((e) => e.isFile()).map((e) => path.relative(dir, path.join(e.parentPath, e.name)))
+    .filter((f) => !f.startsWith('.forked-from') && !/\.test\.ts$/.test(f)).sort();
+
+  for (const id of ['inspector', 'timeline'] as const) {
+    it(`${id}, no conflict: the built-in\'s changes since the shipped version merge, the user\'s change is kept, and undo restores the fork`, async () => {
+      const setup = await forkOf(id);
+      const shipped = JSON.parse(await readFile(path.join(setup.shipped, 'manifest.json'), 'utf8'));
+      const current = JSON.parse(await readFile(path.join(BUILTINS, id, 'manifest.json'), 'utf8'));
+      expect(await readForkRebaseInfo(setup)).toEqual({ forkId: `${id}-fork`, forkedFrom: id, base: shipped.version, current: current.version });
+      // The user's own change: a line appended to the entry module.
+      const entry = path.join(setup.live, 'index.ts');
+      const mine = `\n// mine: ${id} tweaks\nexport const MINE = ${JSON.stringify(id)};\n`;
+      const original = await readFile(entry, 'utf8');
+      await writeFile(entry, original + mine);
+      const before = await readFile(entry, 'utf8');
+      const result = await updateFork(setup);
+      expect(result, JSON.stringify(result)).toMatchObject({ kind: 'updated' });
+      if (result.kind !== 'updated') throw new Error('expected a local update');
+      expect(await readFile(entry, 'utf8')).toContain(mine.trim());
+      // Every other file is the built-in's as it is now.
+      const builtinFiles = await files(path.join(BUILTINS, id));
+      for (const file of builtinFiles) {
+        if (file === 'index.ts' || file === 'manifest.json') continue;
+        expect(await readFile(path.join(setup.live, file), 'utf8'), file).toBe(await readFile(path.join(BUILTINS, id, file), 'utf8'));
+      }
+      const manifest = JSON.parse(await readFile(path.join(setup.live, 'manifest.json'), 'utf8'));
+      expect(manifest).toMatchObject({ id: `${id}-fork`, forkedFrom: `${id}@${current.version}` });
+      // Undo restores the fork byte for byte.
+      await restoreExtensionChangeSet({ liveDirectory: setup.userExtensionsDir, historyRoot: path.join(setup.userData, 'Agent Change History', result.projectId), changeSetId: result.changeSetId });
+      expect(await readFile(entry, 'utf8')).toBe(before);
+    }, 120_000);
+  }
 });

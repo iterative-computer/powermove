@@ -514,4 +514,39 @@ test.describe('Use New Engine: the customization corpus', () => {
     for (const row of drawn.rows) expect(row.vsBuiltin.max, `${row.kind} ${row.id}: the override's program drew`).toBeGreaterThan(8);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
+
+  test('a modified fork of the shipped viewer rebased in the app loads, presents with the engine, keeps the user\'s change and drops the deprecated calls', async ({ session }) => {
+    test.setTimeout(180_000);
+    const extensions = path.join(session.userData, 'extensions');
+    await mkdir(extensions, { recursive: true });
+    await writeFork(extensions, 'viewer');
+    const viewerTs = path.join(extensions, 'viewer-fork', 'viewer.ts');
+    const shipped = await readFile(viewerTs, 'utf8');
+    const mine = 'const ZOOM_LAYOUT_VERSION = 3; // mine: keep the zoom model';
+    expect(shipped).toContain('const ZOOM_LAYOUT_VERSION = 3;');
+    await writeFile(viewerTs, shipped.replace('const ZOOM_LAYOUT_VERSION = 3;', mine));
+    await session.relaunch();
+    await session.openEditor();
+    const { page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('viewer-fork') && Boolean((window as any).PM?.EngineRender), undefined, { timeout: 60_000 });
+    await textProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    // The update the app offers (Settings › Extensions › Update), local merge path.
+    await page.evaluate(async () => { await (window as any).PM.requestExtensionRebase('viewer-fork'); });
+    const merged = await readFile(viewerTs, 'utf8');
+    expect(merged).toContain(mine);
+    // The engine-era viewer no longer reads the compatibility context.
+    expect(shipped).toMatch(/render\.gl\.context/);
+    expect(merged).not.toMatch(/render\.gl\.context/);
+    const manifest = JSON.parse(await readFile(path.join(extensions, 'viewer-fork', 'manifest.json'), 'utf8'));
+    const current = JSON.parse(await readFile(path.join(__dirname, '../src/extensions/viewer/manifest.json'), 'utf8'));
+    expect(manifest.forkedFrom).toBe(`viewer@${current.version}`);
+    // Reloaded, healthy, and presenting the engine's frames.
+    await expect.poll(() => page.evaluate(() => {
+      const PM = (window as any).PM;
+      const record = PM.Kernel.api('corpus').extensions.list().find((r: any) => r.id === 'viewer-fork');
+      return { active: PM.Kernel.loader.activeIds().includes('viewer-fork'), health: record?.health?.state, builtinActive: PM.Kernel.loader.activeIds().includes('viewer'), presenting: !!PM.Kernel.services.get('viewer')?.enginePresentation?.presenting || !!PM.EngineCanvas?.presenting };
+    }), { timeout: 45_000 }).toEqual({ active: true, health: 'ok', builtinActive: false, presenting: true });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
 });
