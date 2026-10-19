@@ -450,3 +450,44 @@ The following edits outside them are intentional and local:
 
 Idle/close policy belongs to the agents lane: workers remain alive until explicit
 close or shutdown; no competing eviction policy was added here.
+
+## P3/B2 follow-up: root scopes, detached scopes, activation readiness
+
+The round 5 root-scope and boot-window entries above are superseded here.
+`Comps.get(rootId)` returns a fresh `rootComp` object sharing the open project's
+layers. When `cur.layers === proj.layers && cur.id === proj.compId`, NativeApi
+addresses the open composition and normalizes the scope stamp. Its identity
+registry can therefore keep interned property plans across these wrappers, without
+serializing the project. A repeated numeric answer at exactly the same time,
+revision, layer, property, key and scope is retained from pm-wasm; writes, scope
+changes and module death invalidate it. This is an additional small hot-path edit
+in native.ts beyond scope addressing, needed for the paired query-time gate.
+
+Genuinely detached scopes still carry their exact contents. The renderer carries
+JSON as `compJsonText`, avoiding a second JavaScript object parse; pm-wasm hashes
+the text and keeps up to four resident compositions with independent evaluators,
+evicting the least recently used. Object-form `compJson` still works and uses its
+canonical content hash. A hit does not parse/build the composition again or reset
+the document's evaluator. Project revision changes reset the detached evaluator
+(expression dependencies can reach the project); resync discards every resident
+scope. Missing-address results are cached only for the same project and mirror
+revision. Content changes outside the write barrier therefore remain observable.
+The remaining serialization cost is measured in perf.md; this does **not** claim
+that arbitrary detached scopes now meet the legacy query-time gate.
+
+The loader waits for `EngineDoc.whenReady` **before importing or activating any
+extension**, including built-ins, direct loader activations, reloads and contained
+runtimes. The synchronous API signatures stay the same: activation starts with a
+ready evaluator. The wait is outside the extension's activation timeout. The
+bootstrap/UI install chain remains synchronous and does not await the module.
+A failed module load remains a named `pm-wasm-unavailable` failure and extension
+code is not run. `EngineDoc.stats().startup` records source/streaming compile,
+instantiation and mirror-ready durations; streaming compilation includes body
+delivery. No readiness check switches an answer to the legacy evaluator.
+
+Regression coverage: fresh root wrappers never send compJson and keep one interned
+channel; numeric answers invalidate on a write or dead module; detached scopes
+hit the resident cache, notice mutations, evict and resync; failed/held readiness
+prevents imports and activation. `e2e/engine-doc-boot.spec.ts` installs an apiVersion
+1 extension whose activate() synchronously evaluates a keyed property. Its opt-in
+measurement runs five alternating setting-off/on boot pairs in isolated profiles.

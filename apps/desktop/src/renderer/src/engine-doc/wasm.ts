@@ -270,21 +270,31 @@ export class PmWasm {
 
 /** Compiles the module once per page; instances are cheap. */
 let compiled: Promise<WebAssembly.Module> | null = null;
+/** Last successful load; streaming compilation includes delivery of the body. */
+let compileTiming: { sourceMs: number; compileMs: number } | null = null;
+export function moduleCompileTiming(): typeof compileTiming { return compileTiming; }
 
 /** Where the editor serves the module (`public/engine/`, see engine/crates/pm-wasm/scripts/build.mjs). */
 export const MODULE_PATH = 'engine/pm_wasm.wasm';
 
 export function compileFrom(source: () => Promise<Response | ArrayBuffer | Uint8Array>): Promise<WebAssembly.Module> {
   compiled ??= (async () => {
+    const started = performance.now();
     const got = await source();
-    if (got instanceof Response) {
-      if (!got.ok) throw new Error(`pm-wasm: ${got.status} fetching the module`);
-      if (typeof WebAssembly.compileStreaming === 'function' && got.headers.get('content-type')?.includes('wasm')) {
-        return WebAssembly.compileStreaming(got);
+    const fetched = performance.now();
+    const compile = async (): Promise<WebAssembly.Module> => {
+      if (got instanceof Response) {
+        if (!got.ok) throw new Error(`pm-wasm: ${got.status} fetching the module`);
+        if (typeof WebAssembly.compileStreaming === 'function' && got.headers.get('content-type')?.includes('wasm')) {
+          return WebAssembly.compileStreaming(got);
+        }
+        return WebAssembly.compile(await got.arrayBuffer());
       }
-      return WebAssembly.compile(await got.arrayBuffer());
-    }
-    return WebAssembly.compile(got as BufferSource);
+      return WebAssembly.compile(got as BufferSource);
+    };
+    const module = await compile();
+    compileTiming = { sourceMs: fetched - started, compileMs: performance.now() - fetched };
+    return module;
   })();
   compiled.catch(() => { compiled = null; });
   return compiled;
@@ -297,4 +307,4 @@ export async function instantiate(module: WebAssembly.Module): Promise<PmWasm> {
 }
 
 /** For tests: forget the compiled module. */
-export function resetCompiled(): void { compiled = null; }
+export function resetCompiled(): void { compiled = null; compileTiming = null; }

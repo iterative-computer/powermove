@@ -209,6 +209,36 @@ describe('planLoad', () => {
 /* ── boot / activate ─────────────────────────────────────── */
 
 describe('loader boot', () => {
+  it('waits for the mirror before importing or activating an extension, without blocking the caller', async () => {
+    const { deps } = fakeDeps();
+    let release!: (ok: boolean) => void;
+    const doc = { enabled: true, ready: false, whenReady: new Promise<boolean>(r => { release = r; }) };
+    (deps.pm as any).EngineDoc = doc;
+    const imported = vi.fn(async () => ({ default: vi.fn(() => { expect(doc.ready).toBe(true); }) }));
+    const loader = createLoader({ kernel, bridge: null, deps, builtins: { early: imported } });
+    const booting = loader.boot();
+    await new Promise(r => setTimeout(r, 0));
+    expect(imported).not.toHaveBeenCalled();
+    expect(loader.activeIds()).toEqual([]);
+    doc.ready = true;
+    release(true);
+    await booting;
+    expect(loader.activeIds()).toEqual(['early']);
+    expect(imported).toHaveBeenCalledOnce();
+    await loader.dispose();
+  });
+
+  it('keeps the named module failure out of extension code', async () => {
+    const { deps } = fakeDeps();
+    (deps.pm as any).EngineDoc = { enabled: true, ready: false, whenReady: Promise.resolve(false) };
+    const imported = vi.fn(async () => ({ default: () => {} }));
+    const loader = createLoader({ kernel, bridge: null, deps, builtins: { early: imported } });
+    await loader.boot();
+    expect(imported).not.toHaveBeenCalled();
+    expect(loader.records()[0]?.health).toMatchObject({ state: 'activation-error', error: expect.stringContaining('pm-wasm-unavailable') });
+    await loader.dispose();
+  });
+
   it('does not activate a second timeline when health notifications arrive during boot', async () => {
     const bridge = fakeBridge([builtinRec('theme'), builtinRec('timeline')]);
     const { deps } = fakeDeps();

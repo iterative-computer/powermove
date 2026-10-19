@@ -29,7 +29,7 @@ import { findPath, NativeApi } from './native';
 import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
-import { compileFrom, imports, instantiate, MODULE_PATH, PmWasm } from './wasm';
+import { compileFrom, imports, instantiate, moduleCompileTiming, MODULE_PATH, PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
@@ -423,6 +423,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
+  const startup = { moduleMs: 0, instantiateMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     check(reason) {
@@ -438,6 +439,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     stats() {
       return {
         mode: mode.name, ready: state.ready,
+        startup: { ...startup, ...moduleCompileTiming() },
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
         edits: edits.stats,
@@ -487,8 +489,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
   const start = async (): Promise<boolean> => {
     try {
+      const started = performance.now();
       compiledModule = await loadModule();
-      attach(await instantiate(compiledModule));
+      const loaded = performance.now();
+      startup.moduleMs = loaded - started;
+      const instance = await instantiate(compiledModule);
+      startup.instantiateMs = performance.now() - loaded;
+      attach(instance);
+      startup.readyMs = performance.now() - started;
       return true;
     } catch (error) {
       state.ready = false;

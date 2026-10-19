@@ -236,6 +236,17 @@ export function createLoader(options: LoaderOptions): Loader {
   async function activate(record: ExtensionRecord): Promise<boolean> {
     if (disposed || active.has(record.id)) return active.has(record.id);
     const id = record.id;
+    // Activation is asynchronous already; wait here, before importing user code
+    // or starting a sandbox. The UI install chain keeps running, and every
+    // synchronous evaluator/helper available to activate() has a ready mirror.
+    const doc = (hostDeps.pm as any)?.EngineDoc;
+    if (doc?.enabled && !doc.ready) {
+      if (!await doc.whenReady) {
+        failActivation(record, new Error("The new engine's document module did not load (pm-wasm-unavailable)."));
+        return false;
+      }
+      if (disposed || active.has(id)) return active.has(id);
+    }
 
     if (record.trust === 'store') {
       try {
