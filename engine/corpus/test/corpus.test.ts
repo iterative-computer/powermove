@@ -46,6 +46,7 @@ describe('synthetic documents', () => {
     expect(native).toHaveLength(13);
     expect(validateAll(native)).toEqual([]);
     for (const item of native) {
+      expect(projects.find(project => project.id === item.id)).toEqual(item);
       expect(item.doc.layers[0].compat).toBe(2);
       expect(item.samples).toEqual([0, .25, .75, 2.5]);
     }
