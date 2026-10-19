@@ -55,3 +55,12 @@ it('releases the rendezvous if the engine cannot be spawned', () => {
   expect(f.hosts[0].stop).toHaveBeenCalledOnce();
   expect(f.hosts[0].releaseAll).toHaveBeenCalledOnce();
 });
+
+it('cleans up a normal bridge goodbye without reporting or killing a failed engine', () => {
+  const f = fixture(); f.bridge.spawn(() => f.child); f.child.emit('spawn');
+  f.hosts[0].callback({ kind: 'goodbye' });
+  expect(f.kill).not.toHaveBeenCalled();
+  expect(f.log).not.toHaveBeenCalled();
+  f.child.emit('exit', 0); f.bridge.dispose();
+  expect(f.hosts[0].releaseAll).toHaveBeenCalledOnce();
+});

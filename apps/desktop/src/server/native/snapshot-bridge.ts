@@ -35,7 +35,8 @@ export class NativeSnapshotBridge {
         host.start((event: BridgeEvent) => {
           if (closed) return;
           if (event.kind === 'accepted') this.log(`[native] snapshot bridge authenticated pid ${expected.pid}`);
-          else if (event.kind === 'error' || event.kind === 'gone' || event.kind === 'goodbye') fail(event.reason ?? event.kind);
+          else if (event.kind === 'goodbye') close();
+          else if (event.kind === 'error' || event.kind === 'gone') fail(event.reason ?? event.kind);
           else if (event.kind === 'rejected') this.log(`[native] snapshot bridge rejected peer: ${event.reason}`);
           else if (event.kind === 'surface' || event.kind === 'remoteLayer') fail('A headless snapshot session attempted viewer presentation.');
         }, CHECK_IN_TIMEOUT_MS);
