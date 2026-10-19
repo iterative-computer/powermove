@@ -3,11 +3,14 @@
  * "Level 1 SVG images"), drawn by the app's own module in the app's
  * Electron (hidden window; the Chromium and GPU path the app uses).
  *
- *   --cases [--reference <canvas capture>]
+ *   --cases [--reference <canvas capture>] [--cases-file <json>]
  *       The 27 SVG cases of pm-vector's canvas-ref sweep, drawn by the
  *       module and compared byte for byte with the legacy capture (today's
  *       rasterSvgAsset and texFor upload, read back): the newest complete
- *       `canvas-*` capture unless named.
+ *       `canvas-*` capture unless named. `--cases-file` takes another case
+ *       list of the same shape (`{ cases: [{ id, kind: 'svg', svg, width,
+ *       height }] }`), such as feat/ne-svg's 383 gate documents with their
+ *       `svg-gate-*` capture as the reference.
  *   --needs <dir>
  *       Every raster `<dir>/needs.json` lists (written by `pm-cli parity
  *       render --svg-rasters <dir>` and the corpus test's PM_SVG_RASTERS),
@@ -38,7 +41,8 @@ if (args.includes('--cases')) {
   mode = 'cases';
   reference = flag('--reference') ?? readdirSync(corpusRoot).filter((d) => d.startsWith('canvas-') && existsSync(path.join(corpusRoot, d, 'manifest.json'))).sort().at(-1)!.replace(/^/, corpusRoot + '/');
   const manifest = JSON.parse(readFileSync(path.join(reference, 'manifest.json'), 'utf8'));
-  const cases = JSON.parse(readFileSync(path.join(repo, 'engine/crates/pm-vector/tests/fixtures/canvas-cases.json'), 'utf8')).cases;
+  const casesFile = flag('--cases-file') ?? path.join(repo, 'engine/crates/pm-vector/tests/fixtures/canvas-cases.json');
+  const cases = JSON.parse(readFileSync(casesFile, 'utf8')).cases;
   for (const c of cases) {
     if (c.kind !== 'svg') continue;
     jobs.push({ id: c.id, width: c.width, height: c.height, svg: new TextEncoder().encode(c.svg), expect: manifest.cases[c.id]?.sha256 });
