@@ -11,15 +11,16 @@
 //! objects (`compositions`, with `settings`); this test does the same to
 //! the loaded document.
 //!
-//! Allowed differences (appendix A), each counted and listed:
-//! - Projects with imported glTF models: the glTF lane's loader builds
-//!   their geometry; until it lands, their snapshots are not built (routed,
-//!   `imported models`) and are listed, not compared. Their source
-//!   materials follow amendment 14's fix (`sourceMaterialSnapshot`), which
-//!   corpus v1 already records; v0 recorded the throw instead.
+//! Nothing is allowed to differ or to be skipped (amendments 21 and 22): a
+//! snapshot the engine does not build (projects with imported glTF models,
+//! `imported models`, until their posed meshes and source materials are
+//! built) is a failure, as is any asset that differs. Source materials
+//! follow amendment 14's fix (`sourceMaterialSnapshot`), which corpus v1
+//! records; v0 recorded the throw instead.
 //!
-//! `PM_ENGINE_CORPUS` picks the capture (default: the newest `v1-*`);
-//! `PM_BLENDER_ONLY` limits to project names with a prefix.
+//! `PM_ENGINE_CORPUS` picks the captures (comma-separated; default: the
+//! newest `v1-*` and the newest `threed-2*` capture, which has the level 1 map
+//! classes); `PM_BLENDER_ONLY` limits to project names with a prefix.
 
 mod support;
 
@@ -82,7 +83,6 @@ struct Totals {
     geometry_max: f64,
     exact_values: usize,
     frame_lists: usize,
-    routed: BTreeMap<String, String>,
     failed: Vec<String>,
     /// Snapshots whose converted PNG textures equal today's by pixels.
     converted: usize,
@@ -104,17 +104,23 @@ fn png_pixels(bytes: &[u8]) -> Option<Option<Vec<u8>>> {
 
 #[test]
 fn snapshots_equal_todays_render_snapshot() {
-    let capture = match std::env::var("PM_ENGINE_CORPUS") {
-        Ok(p) => Some(std::path::PathBuf::from(p.split(',').next().unwrap())),
-        Err(_) => newest_capture("v1-"),
+    let captures: Vec<std::path::PathBuf> = match std::env::var("PM_ENGINE_CORPUS") {
+        Ok(p) => p.split(',').map(std::path::PathBuf::from).collect(),
+        Err(_) => [newest_capture("v1-"), newest_capture("threed-2")]
+            .into_iter()
+            .flatten()
+            .collect(),
     };
-    let Some(capture) = capture else {
+    if captures.is_empty() {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
-    };
+    }
     let only = std::env::var("PM_BLENDER_ONLY").ok();
     let mut t = Totals::default();
-    for dir in projects(&capture) {
+    for (capture, dir) in captures
+        .iter()
+        .flat_map(|c| projects(c).into_iter().map(move |d| (c.clone(), d)))
+    {
         let blender = dir.join("blender");
         if !blender.is_dir() {
             continue;
@@ -232,10 +238,6 @@ fn snapshots_equal_todays_render_snapshot() {
                         .unwrap();
                     let snapshot = match built {
                         Ok(s) => s,
-                        Err(why) if why == "imported models" => {
-                            t.routed.insert(p.name.clone(), why);
-                            continue;
-                        }
                         Err(why) => {
                             t.failed.push(format!("{label}: not built: {why}"));
                             continue;
@@ -388,9 +390,6 @@ fn snapshots_equal_todays_render_snapshot() {
         t.geometry_max,
         t.exact_values
     );
-    for (name, why) in &t.routed {
-        eprintln!("not built (allowed until the glTF lane lands): {name}: {why}");
-    }
     assert!(
         t.failed.is_empty(),
         "{} failures:\n{}",
