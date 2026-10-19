@@ -1010,6 +1010,24 @@ impl SceneBuilder {
                     }
                     ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
                 }
+            } else if let Some(name) = text(source, "primitive")
+                && !pm_geom3d::Primitive::known(&name)
+                && matches!(placement, Placement::Composition { .. })
+            {
+                // `compositionRuntime` syncs its scene unvalidated:
+                // `primitiveGeometry` returns nothing for a primitive it does
+                // not know, and `new THREE.Mesh(undefined)` has an empty
+                // `BufferGeometry`, so the object draws nothing, as today. (A
+                // legacy scene layer's `parseScene` refuses it and the layer
+                // fails, here as today.)
+                Some(self.cached(sha_key(&[b"empty geometry 1"]), || pm_geom3d::Geometry {
+                    positions: Vec::new(),
+                    normals: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                    indexed: false,
+                    groups: Vec::new(),
+                }))
             } else {
                 Some(self.geometry(&source_of(source)?))
             };

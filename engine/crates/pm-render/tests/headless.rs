@@ -562,7 +562,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
     });
-    assert!(scene(&f, "knot primitives"), "{f:?}");
+    // An unknown primitive draws nothing, as today (`primitiveGeometry`
+    // returns nothing and three.js's mesh has an empty geometry).
+    assert!(no_3d(&f), "{f:?}");
     // Nested compositions are checked too.
     let f = variant(|d| {
         d["comps"]["inner"]["layers"]

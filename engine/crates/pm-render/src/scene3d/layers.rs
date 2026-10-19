@@ -574,6 +574,15 @@ pub(crate) fn check_legacy_scene(
     for o in node::array(node::member(Some(scene), "objects")).unwrap_or(&[]) {
         let mut issues = Vec::new();
         check_object(root, Some(o), assets, &mut issues);
+        // A stored scene `parseScene` refuses (an unknown primitive) fails
+        // the layer today (`sceneRuntime` validates it); a 3D object layer's
+        // unknown primitive draws nothing instead (`compositionRuntime`
+        // syncs its scene unvalidated).
+        if let Some(p) = str_member(node::member(Some(o), "source"), "primitive")
+            && !pm_geom3d::Primitive::known(&p)
+        {
+            issues.push(format!("{p} primitives"));
+        }
         let id = str_member(Some(o), "id").unwrap_or_default();
         out.extend(
             issues
@@ -640,14 +649,8 @@ fn check_object(
             }
         }
     }
-    if let Some(p) = str_member(source, "primitive")
-        && !matches!(
-            p.as_str(),
-            "box" | "sphere" | "plane" | "cylinder" | "cone" | "torus" | "capsule" | "icosahedron"
-        )
-    {
-        out.push(format!("{p} primitives"));
-    }
+    // A primitive `primitiveGeometry` does not know draws nothing, here as
+    // today (`scene3d::model`).
     // Map images outside the drawn still classes.
     let mut materials: Vec<Option<&Node>> = vec![node::member(object, "material")];
     for slot in node::array(node::member(object, "slots")).unwrap_or(&[]) {

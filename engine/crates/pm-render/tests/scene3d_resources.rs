@@ -336,3 +336,26 @@ fn shared_scene_maps_load_once_per_frame() {
     assert!(Arc::ptr_eq(&plans[0].scene, &plans[1].scene));
     assert_eq!(r.scene3d_resident().maps, 1, "one texture for both layers");
 }
+
+/// A primitive `primitiveGeometry` does not know (`new THREE.Mesh(undefined)`:
+/// an empty `BufferGeometry`) draws nothing, with no failure and nothing
+/// listed: the frame equals the frame without the object.
+#[test]
+fn unknown_primitives_draw_nothing_as_today() {
+    let mut r = Renderer::headless().unwrap();
+    let mut knot = textured(false);
+    let i = knot["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|l| l["id"] == "o")
+        .unwrap();
+    knot["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
+    let doc = load(&knot);
+    assert!(pm_render::unsupported_with_media(&doc, "Ptest-root", &MapResolver::default()).is_empty());
+    let drawn = render(&mut r, &knot, &MapResolver::default()).expect("draws");
+    let mut without = textured(false);
+    without["layers"][i]["on"] = json!(false);
+    let empty = render(&mut r, &without, &MapResolver::default()).unwrap();
+    assert_eq!(drawn, empty, "the unknown primitive draws nothing");
+}
