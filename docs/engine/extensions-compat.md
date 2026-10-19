@@ -19,7 +19,7 @@ and the compatibility context, today's document values for apiVersion 1 to
 | Engine: drawing compatibility rasters | `engine/crates/pm-render/src/compat.rs`, the hook in `plan.rs` (`compat_quad`), upload in `exec.rs` |
 | Engine: answers per session | `engine/crates/pm-node/src/present/compat.rs` (`CompatStore` answers, `CompatView`), `present/render.rs` (viewer frames and snapshots) |
 | Engine: exports | `engine/crates/pm-node/src/jobs/compat.rs` (`JobCompat` over `Request::CompatFrame`), main's `engine/compat-frames.ts` |
-| Protocol | `pm_protocol::snapshot::CompatMessage` (`Producers`, `Native`, `Reuse`, `Needs`), `CompatPixels.size/uv`, `CompatFrame.native/size/uv`, `DeliveryOptions.compat`; this round `CompatNeed/CompatNative/CompatPixels/Reuse.crop` and `CompatFrameRequest.frame` (`CompatFrameInput`), PROTOCOL_BUILD `protocol-556adc1fa36ea9ee` |
+| Protocol | `pm_protocol::snapshot::CompatMessage` (`Producers`, `Native`, `Reuse`, `Needs`), `CompatPixels.size/uv`, `CompatFrame.native/size/uv`, `DeliveryOptions.compat`; this round `CompatNeed/CompatNative/CompatPixels/Reuse.crop` and `CompatFrameRequest.frame` (`CompatFrameInput`), PROTOCOL_BUILD `protocol-d1e0c26ccb949da7` |
 | Today's preview crop | `engine/crates/pm-render/src/compat_crop.rs`, `plan.rs` `preview_crop`, `renderer.rs` `preview_window` |
 | Export frames through the context | `pm-export` `render::FramePost` (`ExportPlan::frame_post`), `pm-node` `jobs/compat.rs` `ContextFrames`, `kernel/compat-context.ts` `exportFrame`, `kernel/install.ts` (the `compatContext` producer) |
 | `render.gl.canvas`, the compatibility context | `renderer/src/kernel/compat-context.ts` (`CompatContextHost`), wired in `kernel/install.ts` (hears `preview:presented` before extensions hear `frame:rendered`) |
@@ -101,7 +101,7 @@ viewer passed to `render.gl.init`. What extensions get from it:
 |---|---|
 | null until `init` | the same |
 | `context.canvas` is the bound canvas | the same (an own property of the context; the offscreen canvas is `context.compatCanvas`) |
-| the default framebuffer holds the presented frame (cleared to opaque black, the composite drawn at the canvas size), so `readPixels` reads the composite | before the first read (`readPixels`, `copyTex(Sub)Image2D/3D`, `blitFramebuffer` from it) or draw into the default framebuffer after a presented frame, the engine's canvas under the bound canvas is drawn over opaque black into a scratch canvas at the bound canvas's backing size (pixel for pixel at equal density, from the nearest whole-pixel origin) and blitted in, bottom row first. The extension's GL state (bindings, unpack flags, scissor, rasterizer discard) is restored |
+| the default framebuffer holds the presented frame (cleared to opaque black, the composite drawn at the canvas size), so `readPixels` reads the composite | while a compatibility context exists, completed engine surfaces are copied before the presenter releases their slots; the public presentation event selects the exact `(revision, viewSeq, seq)` copy (at most eight are retained). Before the first read (`readPixels`, `copyTex(Sub)Image2D/3D`, `blitFramebuffer` from it) or draw after a presented frame, its region under the bound canvas is drawn over opaque black into a scratch canvas at the bound canvas's backing size (pixel for pixel at equal density, from the nearest whole-pixel origin) and blitted in, bottom row first. The extension's GL state (bindings, unpack flags, scissor, rasterizer discard) is restored |
 | drawing into the default framebuffer shows in the viewer until the next frame clears it | after a draw call, clear or blit into the default framebuffer, the offscreen canvas is copied (after the task) to a layer canvas inserted right after the engine's canvas (under the viewer's overlay) at the bound canvas's box; the next presented frame hides it. A `frame:rendered` handler draws on the new frame: the host hears `preview:presented` first |
 | WebM exports include it: the shipped exporter's `exportWebCodecs` and `exportRecorder` render each frame with `GL.render` into that canvas (`renderInto`), which emits `preview:presented` → `frame:rendered`, then encode the canvas. MP4 and ProRes (`exportNative`), PNG sequences, stills and captures read their own pass (`GL.renderToPixels`) and never include it | the same, per frame: see "Exports" below |
 | `context.canvas` holds the composite and the drawing (`preserveDrawingBuffer`): `drawImage`, `toDataURL`, `toBlob`, texture uploads read them | the bound canvas gets the same pixels: each presented frame is copied into it (under the bound canvas, over opaque black), then any drawing over it. It rests hidden under the presentation. A bound canvas without a context gets a 2D one; one that has today's compositor context (kept while the legacy compositor runs beside the engine) is written through that context with its state restored |
@@ -199,7 +199,7 @@ call. A nested or retimed layer whose time runs at another rate gets its
 answers ahead at the open composition's frames, so its frames that miss are
 asked for as before.
 
-### Measured (2026-10-19, e2e under the Electron lock, flag on)
+### Earlier measurements (2026-10-19, before round-three integration)
 
 Playback (`engine-extension-compat.spec.ts`, a shape override, 3 s at 30
 fps, against today's app with the flag off on the same project): 90 frames
@@ -230,7 +230,7 @@ next frame; `render.renderFrameTo` never includes it.
   (51, 102, 204), 35 code values. Today's export of the same project with no
   extension has the same pixel, so it is today's drawing of a plain shape,
   not the override (vector/composite lanes; the gate fails on it).
-  Side by side: `/tmp/ne-extcompat-evidence/shape-export-engine-left-today-right-frame45.png`
+  Side by side: `$TMPDIR/ne-extcompat-evidence/shape-export-engine-left-today-right-frame45.png`
   and the 8× crop `shape-export-zoom-195-110-engine-left-today-right.png`.
 - Render queue: a job queued with a raster override, the project then edited
   (the tinted ellipse narrowed and moved), draws the project as queued:
@@ -258,7 +258,7 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
   shifted text is at today's place. Its glyph edges differ by up to 86 code
   values (1665 of 144,000 values over 1): text rasterization, the
   text-render lane's gap. Side by side:
-  `/tmp/ne-extcompat-evidence/legacy-raster-assign-engine-left-today-right.png`.
+  `$TMPDIR/ne-extcompat-evidence/legacy-raster-assign-engine-left-today-right.png`.
   Before this round's stride fix the same text was streaked.
 - The rebased shipped viewer fork reloads healthy, keeps the user's change,
   no longer reads `render.gl.context`, and presents the engine's frames.
@@ -278,16 +278,22 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
   (today's gap plus one frame). In the full suite run, under load average
   about 9, it measured 88 frames and 79 ms against today's 91 and 42, and
   failed the bound.
-- The zoomed typewriter gate does not reach a zoomed viewer in the hidden
-  test window in either app. After `setZoom`, `zoom` and `shown` are 8, but
-  today's compositor has no preview viewport and its `#gl` canvas stays
-  480 × 270. Neither app called the raster at a zoomed density, so the
-  crop windows are verified only by the Rust tests against the legacy
-  functions' own outputs (`compat_crop`, `compat_rasters`). In that state the
-  engine's viewer still showed the time-0 frame (the cursor alone) 1.3 s
-  after `setTime(1.2)`, where today's showed `Hello el`. The cause was not
-  found. Paths: `/tmp/ne-extcompat-evidence/typewriter-zoom16-engine.png`
-  and `typewriter-zoom16-today.png`.
+- The round-three diagnosis of the zoom gate was wrong. The engine did
+  zoom, but protocol validation rejected raster densities above 16, leaving
+  the previous frame on screen without a failure report. Raster density is
+  now bounded at today's 32 independently of output-frame scaling; the
+  layer-snapshot and export-answer validators agree. Bad densities produce
+  `invalidMessage` in `EngineConnection.status().failures` and the viewer's
+  report line. The old hidden legacy-window comparison was not a zoomed
+  reference. The replacement gate drives the engine view, checks advancing
+  frames and seeks, and compares stable-view crop windows with the shipped
+  TypeScript crop planner. It explicitly requests a 16x engine view in
+  addition to the built-in menu's 8x maximum.
+- The stronger crop gate found a second defect: `at_root()` excluded the
+  canonical open composition that real app sessions send. Both the preview
+  request and the raster planner now accept `is_open_canonical()`; nested
+  precompositions remain excluded. A renderer regression checks stored and
+  canonical documents against the same legacy-computed crop.
 
 ### The corpus
 
@@ -301,16 +307,17 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
   today's app (their shipped source imports `../../renderer/src/…`, which
   `main`'s compiler also refuses: a product bug of today's fork tool, not an
   engine regression).
-- The oldest fork shapes the loader accepts, from git history: the viewer at
-  155481d0 (viewer@1.0.0, the commit the fork tool first shipped in) as that
-  tool wrote it, and the same source as a `replaces`-only folder (the shape
-  before the fork tool). Each is compared with today's app (flag off, a
-  fresh profile) on whether the viewer shows the composition, through the
-  old viewer's own `render.gl.context`. Measured: neither works on today's
-  app (the old viewer's `#gl` canvas ends up out of the document; today's
-  compositor draws into it unseen), and neither on the engine; the engine
-  behaves as today. A frozen viewer that called `init` before the engine
-  connection installed is now bound when it does (`bindLate`).
+- Historical viewer source: bisection of main's shipped source trees between
+  155481d0 and 470eeaf3 found **c2139713 (viewer 1.0.6)** as the oldest that
+  still renders today. Every earlier first-parent shipped tree was checked,
+  including 155481d0 and the predecessor f5f993d3; none worked. The checked-in
+  `fixtures/compat-corpus/oldest-viewer` is byte-for-byte that tree (the gate
+  checks every file against git). Both a fork with a pristine `.forked-from`
+  and a `replaces`-only folder activate unchanged on the engine, bind their
+  canvas and read the composition through their original `render.gl.context`.
+  Both whole-canvas comparisons pass: max 2; 37 of 3,619,008 RGB channel
+  values over 1, within the unchanged section-25 bounds.
+
 - An override by id of every built-in contribution
   (`fixtures/compat-corpus/override-builtins`): 16 effects, 4 transitions,
   48 commands, 6 panels, 264 keybindings, 2 themes, 6 layer types, an
@@ -341,6 +348,16 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
   evaluation shims against the legacy implementations, and all 16 events
   (each caused the way the editor causes it; payloads, the time event before
   the frame drawn for it, `frame:rendered.viewport` identity).
+- `engine-viewport-compat.spec.ts` installs an independently compiled copy
+  of `fixtures/compat-corpus/viewport-probe` for each of the six viewport
+  members and twenty controller members, at apiVersion 1, 2 and 3 locally
+  and apiVersion 3 as a declared full-access Store install. All 104 probes
+  passed with the engine on. They assert selection, notifications and
+  disposal, input handling, tools, cursor and wire picking, modal transforms,
+  walk, extrusion/cancellation and non-applicable cases, not just names.
+  The member inventory is exhaustive against the public interfaces. The
+  3D lane is still unmerged here; this proves the current facade's behavior,
+  not that every internal 3D computation has been replaced.
 - The sandbox probe (`fixtures/compat-corpus/api-probe-sandbox`) as a Store
   install at apiVersion 1, 2 and 3: `project.get` resolves to a frozen
   snapshot, the reactive reads stay synchronous, `project.snapshot` resolves
@@ -382,29 +399,140 @@ new ids through a typed accessor; none is added in this lane.
 
 ## What remains (blockers under amendments 22 to 24)
 
-- **The zoomed crop path end to end** (above): the e2e harness does not put
-  either app's viewer into a zoomed preview viewport. The engine viewer's
-  stale frame in that state is unexplained.
+- External setup acceptance requires the original file to finish opening
+  and every corpus-frame and extension-health gate to pass. Its private
+  outcomes and crash evidence are reported outside Git.
 - **The occlusion-culling crop regions and 3D plane windows** are not ported
   (see "Crop"). A crop-sensitive wrapper could differ there.
 
-- **Text exports with a raster override** go to the current exporter: the
-  job engine has no render fonts on this branch, so `pm_render::unsupported`
-  routes every text export. The fonts lane has job fonts on `feat/ne-fonts`
-  (`unsupported_with_fonts` in pm-export and the job lanes, not merged);
-  with it, the typewriter export test is the gate (it asserts the engine
-  drew it, asking the window each frame, and compares with today's export).
-- **Native text against today's** on the unaffected 32 px regular layer of
-  the typewriter project: max 57 code values, 2652 of 144,000 channel values
-  over 1 (ink 1250 against 1294). Text-render lane; the typewriter test
-  fails on it. Side by side (left engine, right today):
-  `/tmp/ne-extcompat-evidence/typewriter-engine-left-today-right.png`.
+- The previous round's text/export failures were rerun after merging the
+  fonts lane in c6966e68. The synchronous PM.raster-assignment gate now has
+  max 1 and no channel values over 1. The whole API probe passes at v1–3
+  local and full-access Store v3. The typewriter preview/disposal gate
+  passes, and its export uses the job engine (`routed: null`, 180 window
+  requests), with max 1 and no values over 1 in the sampled frames. These
+  specific previously recorded differences are cleared by the final merge.
 - **The hidden host and `pm-cli`** have no window to draw a raster
   override's layers: such an export fails by name there (plan: the hidden
   host's on-demand Chromium, L6).
-- The oldest fork shapes do not work on today's app either (above); the
-  oldest shape that works on today's app lies between 155481d0 and
-  470eeaf3 and is not bisected.
 - The lookahead answers at the open composition's frame rate only.
-- `scene3d` controller methods and the `viewport.*` members are not probed
-  one by one (the probe calls the reads); the 3D lane owns their backing.
+
+## Round-four verification and the private setup gate
+
+After merging native integration `8ebaa950`, the shipping thin-LTO addons
+and rebuilt wasm module passed all twenty public gates in one run (2.2 min).
+The zoom test centres both viewports on the glyph bodies. It reads the
+exact presented surface before its pool slot is
+released, requires its current view sequence and requested time, checks
+visible ink and changed pixels after seeking, and compares every crop with
+the legacy TypeScript function. It keeps the same density and pixel checks.
+
+| Gate | Observed round-four result |
+|---|---|
+| 8× zoom, density 24 | Frames 1 → 8 → 9; crop `(2304,1024,1792,1024)` |
+| 16× custom-viewer request, density 32 | Frames 9 → 12 → 13; crop `(2816,1280,1024,768)` |
+| Both zooms | Presented 0.2 s then 1.7 s at the current view sequence; no failures; text pixels change |
+| Synchronous `render.raster` at 16.25, 24, 32 | Geometry equal to today; max 0; invalid 33 appears by name in status and the viewer report |
+| Substituted text, sync and async raster APIs | Geometry equal; full-frame max 0 at 0.2 s and max 1 at 1.2 s; no RGB values over 1 |
+| Trusted API v1–3, full-access Store v3, sandbox v1–3 | Behavior probes pass, including all sixteen public events in the trusted contexts |
+| Viewport/controller | All 104 compiled per-member probes pass |
+| Historical viewer fork and replaces-only | Both pass unchanged; max 2, 37 RGB values over 1 |
+| Typewriter preview, disposal, export | Pass; export uses the job engine, 180 producer asks, no routing, sampled frames max 1 |
+| Shape override and render-queue exports | Pass; 180 asks each, sampled frames max 1 and max 0 respectively |
+
+Playback under load remains the orchestrator's measurement window. The
+additional rebase, local fork update and built-in shader checks pass too
+(seventeen tests).
+
+The historical fork gate exposed a separate readback problem: WebGPU clears
+its canvas swapchain after Chromium composites it, before the coalesced
+`frame:rendered` event. Reading that canvas in a later task returned black.
+`CompatContextHost.captureFrame/selectFrame` now preserves completed engine
+surfaces before their pool slots are returned, and selects the copy by the
+presented frame's exact tags. Copies are made only while a compatibility
+context exists. Imports that arrive after descriptors are captured on the
+surface notification too. Unit tests cover delayed reads and selecting an
+older presented frame instead of the newest arrival. The historical fork
+and replaces-only form both passed the functional readback gate after this
+fix. The shared-texture import also needed its descriptor's Display P3
+encoding interpreted before conversion into the legacy sRGB canvas; the
+historical viewer gate exercises a colored background and full text pixels.
+The context gate independently checks legacy compositor pixels, drawing and
+canvas mirroring, with 59,037 green project pixels on each side and max 0.
+A later read of the cleared WebGPU swapchain is no longer its reference.
+
+C1 is `e2e/engine-private-setup-compat.spec.ts`. It reads the external corpus
+in place, installs the 39 original extension folders into disposable profiles,
+then opens the original project off and on. Its result ledger is
+`$TMPDIR/powermove-private-setup-compat/results.json`, outside Git. It records
+per-extension activation, health, contribution ids, winners, panels, safe
+open/read commands, the workspace theme and tools, wrapper presence and
+project frames. It uses the real-project corpus schedule (every two seconds
+plus the last frame), adding each typewriter interval's midpoint, at full
+project size with the corpus's motion-blur settings and unchanged section-25
+bounds. The omitted TensorFlow runtime's private-extension-32 build failure is reported
+on both paths; no other failure or runtime auto-disable is excused.
+
+The isolated profile acknowledges the workspace theme's explicit one-time
+appearance recovery before activation, so the requested theme can be exercised
+without modifying the private source. The activation barrier waits for actual loader activations,
+not main's successful compilation records. No live profile is read or written.
+A missing corpus yields a named notice. With the corpus present, run its
+external-artifact configuration so Playwright's traces and DOM snapshots
+cannot copy private data into the worktree:
+
+```sh
+pm-electron-lock bun run --cwd apps/desktop test:e2e -- --config playwright.private-corpus.config.ts --workers=1
+```
+
+The viewport probes and private harness terminate their own isolated Electron
+processes after assertions. Graceful quitting after these histories/viewports
+was observed to wait indefinitely; shutdown is not claimed as passing here.
+
+
+### Additional failures found by the real setup and the faster zoom gate
+
+The public raster facade used to apply pm-wasm placement *after* an extension
+wrapper returned. That overwrote a changed text surface's anchor with the
+original text's metrics. `makeRender` now preserves wrapper-owned geometry;
+it still applies native placement to an unwrapped base. The synthetic
+`label-substitution` fixture covers this independently of private extension
+source, including synchronous and asynchronous raster APIs and complete frames.
+
+The snapshot queue also retained the byte charge of every shared-memory
+result for sixty seconds after main had already taken and unlinked it.
+High-density text rasters and the real setup exhausted that stale accounting:
+the next base raster failed `budgetExceeded`, then the wrapper could not draw.
+Published-result accounting now tracks the actual segment names and reclaims
+only names main took or orphan cleanup unlinked. Other OS errors retain their
+charge. The 1 GiB pending-result cap and queue bounds are unchanged. Layer
+rasters additionally retain today's 8192×8192 bitmap limit instead of the
+old 6000×6000 request ceiling: their admission limit is independent of the
+unchanged 40-million-pixel full-frame limit. A queue test checks both classes. A real
+POSIX shared-memory test proves that a full budget refuses a request before
+main takes its result and admits it immediately afterwards, without another
+publication or a timeout. The four shared-memory tests and thirteen snapshot
+queue tests pass.
+
+The merged shader fallback path exposed another snapshot limit: answering
+raster needs can reveal successive dependent shader programs. A global
+three-round limit can stop before the final render even while every phase
+makes progress. Snapshot retries now track the actual unresolved
+dependency set: three repeats fail by name, distinct dependency phases can
+finish within a hard 68-phase bound, and the protocol's 64-upload limit is
+unchanged. Tests cover synchronous, asynchronous and main-owned snapshot
+sessions plus a repeatedly unanswered raster. The focused renderer/bridge/kernel tests
+pass: 272 tests across eighteen files.
+
+The private schedule uses full composition size, each typewriter midpoint,
+the corpus interval and the original project's final frame. Reused baseline
+PNGs must decode byte-for-byte to their original RGBA hashes. The external
+reference ledger records the source commit/tree hash, project hash and each
+frame's hash. The harness's thirty-minute overall budget accommodates large
+saved histories; project-open checks and section-25 pixel bounds remain
+explicit. Layer installation precedes file fingerprinting and workspace
+restoration, so the harness awaits the original open promise, with a
+ten-minute allowance for that prerequisite, and stops before captures if
+opening is unfinished. Renderer exit reasons are collected from main even
+when the renderer can no longer answer diagnostics. Private measurements,
+crash evidence and automatic Playwright artifacts remain outside the worktree.
