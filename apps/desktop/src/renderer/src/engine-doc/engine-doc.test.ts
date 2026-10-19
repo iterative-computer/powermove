@@ -225,6 +225,27 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
   });
 
+  it('hands the document to receivers as pm-wasm bytes, and encodes a load batch only when one is read', async () => {
+    // A 180 MB project (C1) must not become several JavaScript strings of
+    // the whole document: the renderer ran out of heap opening it.
+    const { PM, doc } = await editor('on');
+    populate(PM, rng(7), 4);
+    const snap = doc.snapshot()!;
+    expect(snap.bytes).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(snap.bytes)).toBe(canonicalStringify(canonicalProject(PM.proj)));
+    expect(snap.json).toBe(new TextDecoder().decode(snap.bytes));
+    const loads: any[] = [];
+    doc.subscribe(batch => { if (batch.origin === 'load') loads.push(batch); });
+    PM.replaceProject(PM.mkProject({ name: 'Another' }));
+    doc.barrier!.flush();
+    expect(loads).toHaveLength(1);
+    const described = Object.getOwnPropertyDescriptor(loads[0], 'body')!;
+    expect(typeof described.get).toBe('function');
+    const ops = decodePatchOps(loads[0].body);
+    expect(ops).toMatchObject([{ path: [], exists: true }]);
+    expect(loads[0].body).toBe(loads[0].body);
+  });
+
   it('carries load only on whole-document resyncs, so a receiver following the stream rules stays equal', async () => {
     const { PM, doc } = await editor('on');
     populate(PM, rng(21), 6);

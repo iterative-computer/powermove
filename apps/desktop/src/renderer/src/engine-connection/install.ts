@@ -363,7 +363,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         full: () => {
           const snapshot = doc.snapshot();
           if (!snapshot) throw new Error('the document mirror has no snapshot');
-          return { json: documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
+          return { json: snapshot.bytes ?? documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
         }
       };
     },

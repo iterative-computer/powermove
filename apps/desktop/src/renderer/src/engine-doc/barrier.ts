@@ -288,7 +288,14 @@ export class DocumentBarrier {
     this.resyncPending = false;
     this.origin = 'metadata';
     this.stats.resyncs += 1;
-    this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]), assets: true });
+    // A `load` batch's receivers resync from `snapshot()` rather than apply
+    // it, so its body (the whole document again) is encoded only if asked.
+    const shadow = this.shadow;
+    let body: Uint8Array | null = null;
+    this.emit({
+      baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, assets: true,
+      get body() { return (body ??= encodePatchOps([{ path: [], exists: json !== undefined, value: shadow }])); }
+    });
   }
 
   /** The paths a structural diff covers: the open composition, the entered one, compositions added or removed, and every project member but `comps`. */
@@ -444,9 +451,13 @@ export class DocumentBarrier {
    * keys, its revision, and pm-wasm's canonical hash at that revision.
    * Batches with `baseRevision === revision` follow.
    */
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } {
+  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
     this.flush();
-    return { revision: this.revision, encoding: 'canonicalJsonV1', json: canonicalStringify(this.shadow) ?? '', hash: this.wasm.hash() };
+    // pm-wasm holds this revision (the shadow equals it): its canonical JSON
+    // comes out as bytes, outside the JavaScript heap, for a large document
+    // the difference between opening and running out of memory.
+    const bytes = this.wasm.toJsonBytes();
+    return { revision: this.revision, encoding: 'canonicalJsonV1', bytes, get json() { return new TextDecoder().decode(bytes); }, hash: this.wasm.hash() };
   }
 
   /** Whether the shadow equals the live document (the auditor's comparison). */

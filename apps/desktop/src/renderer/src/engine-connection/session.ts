@@ -39,7 +39,9 @@ export interface DocumentStream {
   readonly ready: boolean;
   whenReady: Promise<boolean>;
   subscribe(fn: (batch: StreamBatch) => void): () => void;
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } | null;
+  /** `bytes`: the canonical JSON as UTF-8 (pm-wasm's, kept out of the
+   *  JavaScript heap); otherwise `json` is encoded. */
+  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
 }
 
 export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
@@ -309,7 +311,7 @@ export class DocumentSession {
     const snapshot = this.options.stream.snapshot();
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
-    const bytes = encoder.encode(snapshot.json);
+    const bytes = snapshot.bytes ?? encoder.encode(snapshot.json);
     const limit = this.options.inlineLimit ?? INLINE_RESYNC_LIMIT;
     let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
     if (bytes.length > limit && this.options.stage) {
