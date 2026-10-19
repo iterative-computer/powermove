@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { assetAudio, assetSource } from './live-media';
+import { assetAudio, assetSource, audioObjectUrl } from './live-media';
 
 function pm(assets: Record<string, any>, live: Record<string, any>) {
   const listeners: Array<() => void> = [];
@@ -44,6 +44,21 @@ describe('media.assets.source and audio', () => {
     await assetSource(PM, 'a');
     expect(created).toHaveBeenCalledTimes(1);
     created.mockRestore();
+  });
+
+  it('revokes an audio asset\'s object URL when its bytes are replaced', () => {
+    let n = 0;
+    const created = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:audio-${++n}`);
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const live = {};
+    const first = new Blob(['a']), second = new Blob(['b']);
+    expect(audioObjectUrl(live, first)).toBe('blob:audio-1');
+    expect(audioObjectUrl(live, first)).toBe('blob:audio-1');
+    expect(revoked).not.toHaveBeenCalled();
+    expect(audioObjectUrl(live, second)).toBe('blob:audio-2');
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:audio-1');
+    created.mockRestore();
+    revoked.mockRestore();
   });
 
   it('is null for missing assets, models, silent videos, failures and timeouts', async () => {

@@ -14,7 +14,28 @@ import * as helpers from 'powermove';
  * the test asserts behavior, not names.
  */
 type Result = { ok: boolean; detail?: unknown };
-type Fixture = { image?: string; video?: string; audio?: string; text?: string; shape?: string; group?: string; child?: string; three?: string; modelAsset?: string; helperNames?: string[] };
+type Fixture = { image?: string; video?: string; audio?: string; text?: string; shape?: string; group?: string; child?: string; three?: string; modelAsset?: string; shaderOk?: string; shaderBroken?: string; helperNames?: string[] };
+
+/** legacy/gl/compositor.ts `hashStr` (today's shader layer program key). */
+const hashStr = (s: string) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; };
+
+/** legacy/core/audio.ts `peakEnvelope` (today's waveform peaks, 100 per second). */
+function peakEnvelope(buffer: AudioBuffer, rate = 100): Float32Array {
+  const frames = Math.max(1, buffer.length || 1);
+  const duration = Math.max(.001, Number.isFinite(buffer.duration) ? buffer.duration : frames / Math.max(1, buffer.sampleRate || 1));
+  const length = Math.max(1, Math.min(frames, Math.ceil(duration * rate)));
+  const peaks = new Float32Array(length);
+  const data: Float32Array[] = [];
+  for (let c = 0; c < Math.max(1, buffer.numberOfChannels || 1); c++) data.push(buffer.getChannelData(c));
+  for (let bucket = 0; bucket < length; bucket++) {
+    const start = Math.floor(bucket * frames / length);
+    const end = bucket === length - 1 ? frames : Math.max(start + 1, Math.floor((bucket + 1) * frames / length));
+    let peak = 0;
+    for (const samples of data) for (let i = start; i < end; i++) peak = Math.max(peak, Math.abs(samples[i] || 0));
+    peaks[bucket] = peak;
+  }
+  return peaks;
+}
 
 const TOL = 1e-9;
 const near = (a: unknown, b: unknown): boolean => {
@@ -141,8 +162,24 @@ export default function activate(api: PowermoveAPI): void {
         return { ok: !!k && has === k && value === 50 && value2 === 75 && near(after, todayAfter) && opacity.kf.length === 0, detail: { value, value2, after, todayAfter, eased: json(eased), left: opacity.kf.length } };
       });
       check('anim.expressionErrors', () => {
+        // Today: a throwing expression evaluates to the property's value,
+        // and the error is kept for the property until it evaluates again.
         const errors = api.anim.expressionErrors;
-        return { ok: typeof errors.get === 'function' && typeof errors.has === 'function' && errors.has(opacity) === false };
+        const clean = errors.has(opacity) === false;
+        const property = text.p['position.y'];
+        const kept = property.expr;
+        property.expr = 'probeUndefinedName * 2';
+        api.anim.touch();
+        let value: unknown, message: unknown, has = false;
+        try {
+          value = api.anim.ev(text, 'position.y', t);
+          has = errors.has(property);
+          message = errors.get(property);
+        } finally { property.expr = kept; api.anim.touch(); }
+        const after = api.anim.ev(text, 'position.y', t);
+        const cleared = errors.has(property) === false;
+        const text_ = String((message as any)?.message ?? message ?? '');
+        return { ok: clean && has && /probeUndefinedName/.test(text_) && /not defined/.test(text_) && value === property.v && after === property.v && cleared, detail: { value, message: text_, cleared } };
       });
 
       /* ── model.* ── */
@@ -212,7 +249,29 @@ export default function activate(api: PowermoveAPI): void {
         return { ok: a === today && !!a && outside == todayOutside, detail: { a: a?.id, today: today?.id, text: text.id, outside: outside?.id ?? outside, todayOutside: todayOutside?.id ?? todayOutside } };
       });
       check('render.gl.previewViewport/canvas', () => ({ ok: api.render.gl.canvas instanceof HTMLCanvasElement && api.render.gl.previewViewport === pm.GL.previewViewport }));
-      check('render.gl.compileError', () => { const e = api.render.gl.compileError('powermove:no-such-program'); return { ok: e === null || typeof e === 'string', detail: e }; });
+      await checkAsync('render.gl.compileError and uiState.getShaderMeta of shader layers', async () => {
+        const ok = byId(fixture.shaderOk), broken = byId(fixture.shaderBroken);
+        if (!ok || !broken) return { ok: false, detail: 'no shader fixtures' };
+        // Today: after a frame drew them, each layer's meta names its program
+        // (`sh:<id>:<hashStr(code)>`) and compileError(that key) is the
+        // compiler's message, or null when it compiles.
+        const keyOf = (l: any) => `sh:${l.id}:${hashStr(String(l.d.code))}`;
+        const started = performance.now();
+        let metaOk: any = null, metaBroken: any = null, error: string | null = null;
+        while (performance.now() - started < 8000) {
+          api.transport.invalidate();
+          await new Promise((r) => setTimeout(r, 100));
+          metaOk = api.uiState.getShaderMeta(ok); metaBroken = api.uiState.getShaderMeta(broken);
+          error = metaBroken?.shaderKey ? api.render.gl.compileError(metaBroken.shaderKey) : null;
+          if (metaOk?.shaderKey && error) break;
+        }
+        const good = metaOk?.shaderKey ? api.render.gl.compileError(metaOk.shaderKey) : 'no key';
+        const unknown = api.render.gl.compileError('powermove:no-such-program');
+        return {
+          ok: metaOk?.shaderKey === keyOf(ok) && metaBroken?.shaderKey === keyOf(broken) && good === null && typeof error === 'string' && error.length > 0 && /probeUndeclared/.test(error) && unknown === null,
+          detail: { ok: metaOk?.shaderKey, broken: metaBroken?.shaderKey, expected: [keyOf(ok), keyOf(broken)], good, error: error?.slice(0, 200) }
+        };
+      });
       check('render.gl.context', () => {
         const gl = api.render.gl.context;
         if (!gl) return { ok: false, detail: 'null after a viewer called init' };
@@ -234,12 +293,11 @@ export default function activate(api: PowermoveAPI): void {
         engineFrame = c;
         const today = pm.renderFrameTo(t, 240, 135, { mblur: false });
         const a = pixels(c), b = pixels(today);
-        // The title's rows (y 20..60 at this size) are text-render parity,
-        // gated strictly by the typewriter test; reported here, the rest asserted.
+        // The whole frame, the title's text included (bands reported to locate a difference).
         const band = (from: number, to: number) => compare(a.subarray(from * 240 * 4, to * 240 * 4), b.subarray(from * 240 * 4, to * 240 * 4));
-        const rest = [band(0, 20), band(60, 135)];
-        const d = { above: rest[0], below: rest[1], title: band(20, 60), whole: compare(a, b) };
-        return { ok: c instanceof HTMLCanvasElement && !(c as any).then && c.width === 240 && c.height === 135 && rest.every(same), detail: d };
+        const whole = compare(a, b);
+        const d = { above: band(0, 20), title: band(20, 60), below: band(60, 135), whole };
+        return { ok: c instanceof HTMLCanvasElement && !(c as any).then && c.width === 240 && c.height === 135 && same(whole), detail: d };
       });
       await checkAsync('render.snapshot sync, the engine frame as today\'s JPEG', async () => {
         const url = api.render.snapshot(t, 240);
@@ -269,8 +327,20 @@ export default function activate(api: PowermoveAPI): void {
         registration.dispose();
         return { ok: wrapped && api.services.get('raster') === original && !!viaRender, detail: { calls } };
       });
-      check('services viewer/shaderHooks/compositions', () => ({ ok: !!api.services.get('viewer') && !!api.services.get('shaderHooks'), detail: ['viewer', 'shaderHooks', 'compositions', 'captions', 'tool', 'timeline'].map((n) => [n, typeof api.services.get(n)]) }));
-      check('uiState.getShaderMeta', () => { const m = api.uiState.getShaderMeta(text); return { ok: m === null || typeof m === 'object', detail: json(m) }; });
+      check('services viewer/shaderHooks/compositions', () => {
+        // The built-ins' services are the objects today's registrations put
+        // there, and they work: shaderHooks syncs a shader layer's uniforms
+        // as today's inspector does; the viewer answers its own size.
+        const viewer: any = api.services.get('viewer');
+        const hooks: any = api.services.get('shaderHooks');
+        const ok = byId(fixture.shaderOk);
+        let synced: unknown = 'no layer';
+        if (ok && typeof hooks?.syncShaderUniforms === 'function') {
+          try { synced = hooks.syncShaderUniforms(ok); } catch (e) { synced = `threw: ${String((e as Error).message)}`; }
+        }
+        const kinds = ['viewer', 'shaderHooks', 'compositions', 'captions', 'tool', 'timeline'].map((n) => [n, typeof api.services.get(n)]);
+        return { ok: !!viewer && typeof hooks?.syncShaderUniforms === 'function' && !(typeof synced === 'string' && synced.startsWith('threw')) && api.services.get('viewer') === viewer && pm.Kernel?.services?.get?.('viewer') === viewer, detail: { kinds, synced: json(synced) } };
+      });
 
       /* ── media.* and assets.* live fields ── */
       const assetOf = (layerId?: string) => { const l = byId(layerId); return l ? (api.media.assets.get(l.d?.asset ?? l.d?.src ?? l.asset) as any) : undefined; };
@@ -283,12 +353,41 @@ export default function activate(api: PowermoveAPI): void {
         return { ok: !!today && Object.values(parts).every(([a, b]) => near(a, b)) && parts.timed[0] === true, detail: parts };
       });
       check('media.commandForAsset', () => { const asset: any = assetOf(fixture.image); const c: any = asset ? api.media.commandForAsset(asset.id, 0) : null; return { ok: !!c && c.type === 'add_layer', detail: json(c) }; });
-      check('media.fonts', () => { const f: any = api.media.fonts; return { ok: !!f && typeof f === 'object', detail: Object.keys(f ?? {}).slice(0, 6) }; });
-      check('media.audio.drawWaveform', () => {
-        const a = byId(fixture.audio);
-        const c = document.createElement('canvas'); c.width = 200; c.height = 40;
-        const drew = a ? api.media.audio.drawWaveform(c.getContext('2d')!, a) : null;
-        return { ok: typeof drew === 'boolean', detail: drew };
+      check('media.fonts', () => {
+        // Today's font registry itself, with the families it lists.
+        const f: any = api.media.fonts;
+        const families = typeof f?.families === 'function' ? f.families() : f?.families ?? f?.list?.();
+        const names = Array.isArray(families) ? families.map((x: any) => (typeof x === 'string' ? x : x?.family ?? x?.name)) : [];
+        return { ok: !!f && f === pm.Fonts && names.length > 0 && names.includes('Helvetica'), detail: { same: f === pm.Fonts, count: names.length, first: names.slice(0, 4) } };
+      });
+      await checkAsync('media.audio.drawWaveform: today\'s peaks and pixels', async () => {
+        const layer = byId(fixture.audio);
+        const asset: any = layer ? api.media.assets.get(layer.d.asset) : undefined;
+        if (!asset?.audioBlob) return { ok: false, detail: 'no audio asset' };
+        // Today's peaks: Chromium's decode of the asset's bytes, peakEnvelope.
+        const context = new OfflineAudioContext(1, 1, 48000);
+        const buffer = await context.decodeAudioData(await asset.audioBlob.arrayBuffer());
+        const today = peakEnvelope(buffer);
+        const peaks: ArrayLike<number> = asset.peaks ?? [];
+        let peakDiff = Infinity;
+        if (peaks.length === today.length) { peakDiff = 0; for (let i = 0; i < today.length; i++) peakDiff = Math.max(peakDiff, Math.abs(peaks[i]! - today[i]!)); }
+        const draw = () => {
+          const c = document.createElement('canvas'); c.width = 300; c.height = 48;
+          const drew = api.media.audio.drawWaveform(c.getContext('2d')!, layer);
+          return { drew, data: pixels(c) };
+        };
+        const ours = draw();
+        // The same drawing over today's peaks.
+        const kept = asset.peaks;
+        asset.peaks = today;
+        let theirs: { drew: boolean; data: Uint8ClampedArray };
+        try { theirs = draw(); } finally { asset.peaks = kept; }
+        let ink = 0;
+        for (let i = 3; i < ours.data.length; i += 4) if (ours.data[i]! > 0) ink++;
+        const d = compare(ours.data, theirs.data);
+        let alpha = 0;
+        for (let i = 3; i < ours.data.length; i += 4) alpha = Math.max(alpha, Math.abs(ours.data[i]! - theirs.data[i]!));
+        return { ok: ours.drew === true && theirs.drew === true && ink > 0 && peakDiff <= 1 / 255 && d.max === 0 && alpha === 0, detail: { peaks: [peaks.length, today.length], peakDiff, ink, ...d, alpha } };
       });
       check('assets.get live fields: image', () => {
         const a = assetOf(fixture.image);
@@ -331,7 +430,18 @@ export default function activate(api: PowermoveAPI): void {
         const auto = s.getAutoKey();
         const three = byId(fixture.three);
         const described: any = three ? s.describe(three.id) : null;
-        return { ok: !!rendering && ['draft', 'rendered'].includes(state.mode) && ['camera', 'editor'].includes(view) && typeof auto === 'boolean' && (!three || !!described), detail: { view, mode: state.mode, described: !!described } };
+        // The reads follow what they read, as today: the auto-key and view
+        // setters round-trip, rendering is the open composition's settings.
+        s.setAutoKey(!auto);
+        const flipped = s.getAutoKey();
+        s.setAutoKey(auto);
+        const other = view === 'camera' ? 'editor' : 'camera';
+        s.setView(other as any);
+        const switched = s.getView();
+        s.setView(view as any);
+        const comp: any = api.model.curComp();
+        const renderingOk = rendering === s.getRendering() || near(json(rendering), json(s.getRendering()));
+        return { ok: !!rendering && renderingOk && ['draft', 'rendered'].includes(state.mode) && ['camera', 'editor'].includes(view) && typeof auto === 'boolean' && flipped === !auto && s.getAutoKey() === auto && !!pm.autokey === auto && switched === other && s.getView() === view && (!three || described?.id === three.id) && !!comp, detail: { view, switched, mode: state.mode, auto, flipped, described: described?.id ?? null } };
       });
 
       /* ── EDITOR_HELPER_EXPORTS from this compiled bundle ── */

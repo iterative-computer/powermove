@@ -412,7 +412,8 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.asked).toBeGreaterThanOrEqual(engine.frames);
     // No stall (an unanswered need waits a second before it is asked again),
     // and no fewer frames than today's compositor presents.
-    expect(engine.maxGap).toBeLessThanOrEqual(Math.max(today.maxGap, 100));
+    // Today's longest gap plus one frame at 30 fps, at most.
+    expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     // (A 3 s window can start or end one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
   });

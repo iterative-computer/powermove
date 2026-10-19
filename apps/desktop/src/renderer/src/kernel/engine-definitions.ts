@@ -36,6 +36,8 @@ export class EngineShaderMeta {
    * older than a frame shown is cleared (`frame`).
    */
   private layerReports = new Map<string, { revision: number; kind: 'compile' | 'missing' | 'scene' }>();
+  /** Layers whose report is under the engine's own key (`engine:<layer>`). */
+  private engineKeyed = new Set<string>();
 
   constructor(private readonly PM: any) {}
 
@@ -71,6 +73,18 @@ export class EngineShaderMeta {
    */
   frame(revision: number): void {
     for (const [id, report] of [...this.layerReports]) if (report.revision < revision) this.clearLayer(id);
+    // Today's compositor set every drawn shader layer's `shaderKey` as it
+    // compiled it (`sh:<layer>:<hash of the code>`, legacy/gl/compositor.ts),
+    // so `uiState.getShaderMeta(layer).shaderKey` names the program and
+    // `render.gl.compileError(shaderKey)` its error (null when it compiles).
+    for (const layer of this.layers()) {
+      if (layer?.type !== 'shader') continue;
+      // A layer the engine reports under its own key (drawn by the WebGL
+      // fallback: compiles today, not headless-renderable) keeps it.
+      if (this.engineKeyed.has(String(layer.id))) continue;
+      const key = shaderLayerKey(layer);
+      if (this.PM.UIState?.getShaderMeta?.(layer)?.shaderKey !== key) this.PM.UIState?.setShaderMeta?.(layer, { shaderKey: key });
+    }
   }
 
   private clearLayer(id: string): void {
@@ -80,6 +94,8 @@ export class EngineShaderMeta {
     const layer = this.layer(id);
     if (report.kind === 'compile') {
       this.errors.delete('engine:' + id);
+      this.engineKeyed.delete(id);
+      for (const key of [...this.errors.keys()]) if (key.startsWith(`sh:${id}:`)) this.errors.delete(key);
     } else if (layer) {
       this.PM.UIState?.setShaderMeta?.(layer, report.kind === 'missing' ? { missing: false, missingAsset: null } : { missing: false, sceneError: null });
     }
@@ -110,8 +126,13 @@ export class EngineShaderMeta {
     if (previous && previous.kind !== kind) this.clearLayer(scope.layer);
     this.layerReports.set(scope.layer, { revision, kind });
     if (error.code === 'shaderCompile' || error.code === 'notHeadlessRenderable') {
-      const shaderKey = 'engine:' + scope.layer;
+      // A shader layer's program has today's key; other layers keep the engine's.
+      const own = layer.type === 'shader' && error.code === 'shaderCompile';
+      const shaderKey = own ? shaderLayerKey(layer) : 'engine:' + scope.layer;
+      if (own) this.engineKeyed.delete(scope.layer);
+      else this.engineKeyed.add(scope.layer);
       this.errors.set(shaderKey, text);
+      if (shaderKey !== 'engine:' + scope.layer) this.errors.set('engine:' + scope.layer, text);
       this.PM.UIState?.setShaderMeta?.(layer, { shaderKey, definition, missing: false });
     } else if (error.code === 'definitionMissing') {
       this.PM.UIState?.setShaderMeta?.(layer, { definition, missing: true, missingAsset: null });
@@ -229,4 +250,16 @@ export async function installEngineDefinitions(PM: any, bridge: { nativeEngine?:
   }
   PM.EngineDefinitions = definitions;
   return definitions;
+}
+
+/** `hashStr` of legacy/gl/compositor.ts (djb2, 32-bit). */
+export function hashStr(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+/** Today's program key of a shader layer: `sh:<layer id>:<hashStr(d.code)>`. */
+export function shaderLayerKey(layer: { id?: unknown; d?: { code?: unknown } }): string {
+  return `sh:${String(layer.id)}:${hashStr(String(layer.d?.code ?? ''))}`;
 }

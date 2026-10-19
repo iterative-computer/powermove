@@ -162,12 +162,18 @@ async function probeProject(page: Page): Promise<Record<string, string>> {
     picture.p['position.x'].v = 30; picture.p['position.y'].v = 30;
     const clip = PM.mkLayer('video', { name: 'Clip', from: 2.5, dur: 0.5, d: { asset: video.id, w: 320, h: 180 } }, p);
     const sound = PM.mkLayer('audio', { name: 'Tone', from: 0, dur: 1, d: { asset: audio.id, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 } }, p);
-    p.layers = [title, shape, group, child, picture, clip, sound];
+    // Two small shader layers in a corner: one compiles, one does not
+    // (render.gl.compileError and uiState.getShaderMeta are probed on them).
+    const shaderOk = PM.mkLayer('shader', { name: 'Shader ok', from: 0, dur: 3, d: { code: 'void main(){ fragColor = vec4(uv, 0.5, 1.0); }', w: 12, h: 12 } }, p);
+    shaderOk.p['position.x'].v = 462; shaderOk.p['position.y'].v = 10;
+    const shaderBroken = PM.mkLayer('shader', { name: 'Shader broken', from: 0, dur: 3, d: { code: 'void main(){ fragColor = vec4(probeUndeclared, 1.0); }', w: 12, h: 12 } }, p);
+    shaderBroken.p['position.x'].v = 474; shaderBroken.p['position.y'].v = 10;
+    p.layers = [title, shape, group, child, picture, clip, sound, shaderOk, shaderBroken];
     PM.ProjectIndex?.invalidate?.();
     const three = null as any;
     PM.touch();
     PM.Projects?.put?.(PM.proj);
-    return { text: title.id, shape: shape.id, group: group.id, child: child.id, image: picture.id, video: clip.id, audio: sound.id, three: three?.id, modelAsset: model.id };
+    return { text: title.id, shape: shape.id, group: group.id, child: child.id, image: picture.id, video: clip.id, audio: sound.id, three: three?.id, modelAsset: model.id, shaderOk: shaderOk.id, shaderBroken: shaderBroken.id };
   }, media);
 }
 

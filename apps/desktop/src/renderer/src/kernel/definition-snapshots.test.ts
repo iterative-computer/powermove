@@ -12,7 +12,16 @@ import {
   DefinitionPublisher, SessionDefinitions, effectSnapshot, layerSnapshot, normalizedColor, originOf, paramSpec,
   transitionSnapshot, wrappedGlsl, type Preambles
 } from './definition-snapshots';
-import { EngineShaderMeta, describe as describeError } from './engine-definitions';
+import { EngineShaderMeta, describe as describeError, hashStr, shaderLayerKey } from './engine-definitions';
+
+/** UIState's shader meta store (legacy/core/ui-state.ts), recording each patch. */
+function uiState(meta: any[]) {
+  const store = new Map<string, any>();
+  return {
+    setShaderMeta: (layer: any, patch: any) => { meta.push([layer.id, patch]); store.set(layer.id, { ...store.get(layer.id), ...patch }); },
+    getShaderMeta: (layer: any) => store.get(layer.id) ?? null
+  };
+}
 import { createKernel } from './registries';
 
 /** The real preambles, installed as the app installs them. */
@@ -186,7 +195,7 @@ describe('engine shader meta', () => {
   it('fills compile errors and layer meta from engine reports', () => {
     const meta: any[] = [];
     const layers = [{ id: 'L1', type: 'extension', d: { definition: 'gen.glow' } }, { id: 'L2', type: 'shader', d: {} }];
-    const PM: any = { proj: { layers, comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
+    const PM: any = { proj: { layers, comps: {} }, UIState: uiState(meta) };
     const m = new EngineShaderMeta(PM);
     m.applied({ generation: 2, failures: [{ code: 'shaderCompile', scope: { kind: 'definition', definition: 'gen.glow' }, message: 'The shader of gen.glow does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics }] });
     expect(m.compileError('fx:gen.glow')).toBe("The shader of gen.glow does not compile.\nline 3: 'nope' : undeclared identifier\n(generated code): in the preamble");
@@ -195,8 +204,10 @@ describe('engine shader meta', () => {
     expect(m.compileError('fx:gen.glow')).toBeNull();
     // Layer reports apply at their revision; older ones are ignored.
     m.failure({ revision: 7, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'L2' }, message: 'Shader layer L2 does not compile.', retry: { kind: 'never' }, detail: diagnostics } });
+    // A shader layer's program has today's key (`sh:<id>:<hashStr(code)>`).
     expect(m.compileError('engine:L2')).toContain('line 3');
-    expect(meta.at(-1)).toEqual(['L2', { shaderKey: 'engine:L2', definition: null, missing: false }]);
+    expect(m.compileError('sh:L2:5381')).toContain('line 3');
+    expect(meta.at(-1)).toEqual(['L2', { shaderKey: 'sh:L2:5381', definition: null, missing: false }]);
     m.failure({ revision: 5, error: { code: 'definitionMissing', scope: { kind: 'layer', layer: 'L2' }, message: 'old', retry: { kind: 'never' }, detail: null } });
     expect(meta).toHaveLength(2);
     m.failure({ revision: 8, error: { code: 'watchdogTimeout', scope: { kind: 'effect', layer: 'L2', effect: 'f1', definition: 'blur' }, message: 'blur took 300 ms.', retry: { kind: 'afterUserAction' }, detail: null } });
@@ -204,10 +215,36 @@ describe('engine shader meta', () => {
     expect(describeError({ code: 'internal', scope: { kind: 'connection' }, message: 'x', retry: { kind: 'never' }, detail: null })).toBe('x');
   });
 
+  it('names every drawn shader layer\'s program as today\'s compositor did, and its error under that key', () => {
+    const meta: any[] = [];
+    const code = 'void main(){ fragColor = vec4(1.); }';
+    const layers = [{ id: 'S', type: 'shader', d: { code } }, { id: 'T', type: 'text', d: { text: 'x' } }];
+    const PM: any = { proj: { layers, comps: {} }, UIState: uiState(meta) };
+    const m = new EngineShaderMeta(PM);
+    const key = `sh:S:${hashStr(code)}`;
+    expect(shaderLayerKey(layers[0]!)).toBe(key);
+    // legacy/gl/compositor.ts hashStr (djb2, 32-bit signed).
+    expect(hashStr('void main(){}')).toBe(-760748891);
+    m.frame(1);
+    expect(PM.UIState.getShaderMeta(layers[0])).toEqual({ shaderKey: key });
+    expect(m.compileError(key)).toBeNull();
+    // Unchanged: not set again.
+    const count = meta.length;
+    m.frame(2);
+    expect(meta).toHaveLength(count);
+    m.failure({ revision: 3, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics } });
+    expect(m.compileError(key)).toContain('line 3');
+    // The code changed: a new key; the old error goes when the frame stops repeating it.
+    layers[0]!.d.code = code + ' ';
+    m.frame(4);
+    expect(PM.UIState.getShaderMeta(layers[0]).shaderKey).toBe(`sh:S:${hashStr(code + ' ')}`);
+    expect(m.compileError(key)).toBeNull();
+  });
+
   it('holds layer reports for their revision and clears the ones a later frame did not repeat', () => {
     const meta: any[] = [];
     const layers = [{ id: 'S', type: 'shader', d: {} }, { id: 'X', type: 'extension', d: { definition: 'gen.orb' } }, { id: 'Y', type: 'extension', d: { definition: 'gen.bars' } }];
-    const PM: any = { proj: { layers, comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
+    const PM: any = { proj: { layers, comps: {} }, UIState: uiState(meta) };
     const m = new EngineShaderMeta(PM);
     const compile = (revision: number) => m.failure({ revision, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics } });
     const missing = (revision: number, layer: string) => m.failure({ revision, error: { code: 'definitionMissing', scope: { kind: 'layer', layer }, message: `Extension layer ${layer} is missing.`, retry: { kind: 'never' }, detail: null } });
@@ -237,12 +274,12 @@ describe('engine shader meta', () => {
     missing(7, 'S');
     compile(8);
     expect(meta.at(-2)).toEqual(['S', { missing: false, missingAsset: null }]);
-    expect(meta.at(-1)).toEqual(['S', { shaderKey: 'engine:S', definition: null, missing: false }]);
+    expect(meta.at(-1)).toEqual(['S', { shaderKey: 'sh:S:5381', definition: null, missing: false }]);
   });
 
   it('shows a shader layer the fallback runner draws as not headless-renderable until a frame stops repeating it', () => {
     const meta: any[] = [];
-    const PM: any = { proj: { layers: [{ id: 'C', type: 'shader', d: {} }], comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
+    const PM: any = { proj: { layers: [{ id: 'C', type: 'shader', d: {} }], comps: {} }, UIState: uiState(meta) };
     const m = new EngineShaderMeta(PM);
     const message = 'Shader layer C is drawn by the WebGL fallback, so headless exports cannot render it (the native pipeline stops at bind: samplerCube uEnv is not a float sampler2D).';
     m.failure({ revision: 2, error: { code: 'notHeadlessRenderable', scope: { kind: 'layer', layer: 'C' }, message, retry: { kind: 'afterUserAction' }, detail: { kind: 'shaderCompile', diagnostics: [] } } });

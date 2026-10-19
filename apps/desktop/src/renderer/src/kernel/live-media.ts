@@ -11,8 +11,27 @@ type LegacyPM = Record<string, any>;
 
 export const DEFAULT_WAIT_MS = 30_000;
 const POLL_MS = 100;
-/** Object URLs made for audio assets, kept while their live asset is. */
-const audioUrls = new WeakMap<object, string>();
+/** Object URLs made for audio assets, kept while their live asset is and
+ *  its bytes are the same: a replaced blob's URL is revoked when the next
+ *  one is made, and a live asset that is collected revokes its own. */
+const audioUrls = new WeakMap<object, { blob: Blob; url: string }>();
+const revokeWhenCollected = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry<string>((url) => URL.revokeObjectURL(url))
+  : null;
+
+/** The object URL of `live`'s audio `blob` (one per live asset and blob). */
+export function audioObjectUrl(live: object, blob: Blob): string {
+  const made = audioUrls.get(live);
+  if (made?.blob === blob) return made.url;
+  if (made) {
+    URL.revokeObjectURL(made.url);
+    revokeWhenCollected?.unregister(made);
+  }
+  const entry = { blob, url: URL.createObjectURL(blob) };
+  audioUrls.set(live, entry);
+  revokeWhenCollected?.register(live, entry.url, entry);
+  return entry.url;
+}
 
 /** Resolves with `pick(live)` once it is not undefined, null when the asset is
  *  gone or `pick` says so, or null after `timeoutMs`. */
@@ -65,8 +84,7 @@ export function assetSource(PM: LegacyPM, id: string, options?: { timeoutMs?: nu
       // An audio asset has no element: it plays from its bytes, one URL per loaded asset.
       blob = live.audioBlob instanceof Blob ? live.audioBlob : blob;
       if (!blob) return undefined;
-      url = audioUrls.get(live) ?? URL.createObjectURL(blob);
-      audioUrls.set(live, url);
+      url = audioObjectUrl(live, blob);
     }
     if (!url) return undefined;
     return { url, kind, mime: blob?.type || null, rendition: !!live.playbackProxy };
