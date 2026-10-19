@@ -241,6 +241,11 @@ export class WorkerPresenter implements Presenter {
     this.options.link.sendViewerState(state);
   }
 
+  noteResize(): void {
+    if (this.disposed) return;
+    this.options.host.post({ type: 'resize', session: this.options.session });
+  }
+
   start(): void {}
 
   /** The worker's animation frames follow its canvas; only the display's rate changes here. */

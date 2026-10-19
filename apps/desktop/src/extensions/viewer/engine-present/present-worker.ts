@@ -46,6 +46,7 @@ export type ToWorker =
   | { type: 'frame'; session: number; desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number }
   | { type: 'hostOffset'; session: number; us: number | null }
   | { type: 'display'; session: number; displayHz: number | null }
+  | { type: 'resize'; session: number }
   | { type: 'takeTrace'; session: number; id: number }
   | { type: 'dispose' };
 
@@ -93,18 +94,22 @@ export type ServeOptions = {
  * worker cannot see: 0 to 40% of frames the first way, by run and load),
  * and the panel shows it a refresh after that draw (8% two refreshes),
  * 3.2 ms into that refresh (measured on the 120 Hz panel, viz's
- * presentation feedback).
- *
- * 1.75 rather than halfway (1.5): measured again on 2026-10-18
- * (docs/engine/perf.md, "A/V sync under load"), the draw and the
- * presentation together took two refreshes for nearly every frame idle and
- * more under load (a live resize holds presentation two to four
- * refreshes), so halfway left every rate's offsets 3 to 4 ms late (idle
- * 0 to +7.3 ms at 25 fps) and frames a refresh late outside ±10 ms. A
- * quarter of a refresh later centers the two-refresh case and keeps a run
- * where the race goes the early way (one refresh) within ±10 ms.
+ * presentation feedback). The prediction sits between the two draws, so
+ * with the nearest refresh either lands within a refresh of the frame's
+ * time on the audio clock.
  */
-export const WORKER_LATENCY_REFRESHES = 1.75;
+export const WORKER_LATENCY_REFRESHES = 1.5;
+/**
+ * Added while the window is being resized (docs/engine/perf.md, "A/V sync
+ * under load"): a live resize holds the panel's presentation of a worker
+ * canvas one to three refreshes longer, which left frames a refresh or two
+ * late outside ±10 ms (0.75: the best of 0.5, 0.75, and 1.0 on the
+ * measured offsets of six loaded runs). Idle prediction is unchanged: a
+ * later one there puts the runs where draw and presentation take one
+ * refresh outside ±10 ms (measured at 1.75: 208 of 1,433 frames at
+ * 23.976 fps).
+ */
+export const WORKER_RESIZE_LATENCY_REFRESHES = 0.75;
 export const WORKER_PRESENT_OFFSET_MS = 3.2;
 
 /** How often the worker sends a session's stats while frames flow. */
@@ -177,6 +182,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // reaches the panel (WORKER_LATENCY_REFRESHES), rounded to the
         // nearest refresh, so they stay on the audio clock's line.
         latencyRefreshes: WORKER_LATENCY_REFRESHES,
+        resizeLatencyRefreshes: WORKER_RESIZE_LATENCY_REFRESHES,
         presentOffsetMs: WORKER_PRESENT_OFFSET_MS,
         nearestRefresh: true,
         now,
@@ -249,6 +255,9 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         return;
       case 'display':
         s?.presenter.retarget(requestFrame, cancelFrame, message.displayHz);
+        return;
+      case 'resize':
+        s?.presenter.noteResize();
         return;
       case 'takeTrace': {
         const trace = s?.presenter.trace ?? null;

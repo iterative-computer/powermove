@@ -81,6 +81,13 @@ export type PresenterOptions = {
   displayHz?: number | null;
   /** Predicted rAF to display time, in refreshes (S1: one or two at 120 Hz). */
   latencyRefreshes?: number;
+  /**
+   * Added to `latencyRefreshes` while the window is being resized and for
+   * `RESIZE_HOLD_MS` after its last step (`noteResize`): a live resize
+   * holds the panel's presentation one to three refreshes longer
+   * (docs/engine/perf.md, "A/V sync under load").
+   */
+  resizeLatencyRefreshes?: number;
   /** Added to `latencyRefreshes`: where in its refresh a frame's
    *  presentation lands after the BeginFrame (ms; measured, see
    *  present-worker.ts). */
@@ -149,6 +156,8 @@ export type TraceRecord = {
 };
 
 const PARK_TIMEOUT_MS = 1000;
+/** How long after a live resize step its presentation delay is assumed. */
+export const RESIZE_HOLD_MS = 150;
 
 /**
  * What the viewer's presentation needs from a presenter: `EnginePresenter`
@@ -167,6 +176,8 @@ export interface Presenter {
   start(): void;
   /** The per-frame trace recorded since the last call (S1 harness), emptied. */
   takeTrace(): Promise<TraceRecord | null>;
+  /** The viewer's window is being resized now (a live resize step). */
+  noteResize?(): void;
   dispose(): void;
 }
 
@@ -185,6 +196,8 @@ export class EnginePresenter implements Presenter {
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
   private offsetKey = '';
+  /** performance.now() of the last live resize step (`noteResize`). */
+  private resizedAtMs: number | null = null;
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
@@ -422,6 +435,11 @@ export class EnginePresenter implements Presenter {
     if (show) this.draw(show, rafMs, this.hostUs(displayMs));
   }
 
+  /** A live resize step of the viewer's window (`resizeLatencyRefreshes`). */
+  noteResize(): void {
+    this.resizedAtMs = this.now();
+  }
+
   takeTrace(): Promise<TraceRecord | null> {
     const t = this.trace;
     return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
@@ -450,14 +468,15 @@ export class EnginePresenter implements Presenter {
    *  halfway between decisions. */
   private decision(rafMs: number, fit: VsyncFit | null): { decisionMs: number; displayMs: number } {
     const periodMs = fit?.periodMs ?? 1000 / 60;
-    const latency = (this.options.latencyRefreshes ?? 1) * periodMs + (this.options.presentOffsetMs ?? 0);
+    const resizing = this.resizedAtMs !== null && rafMs - this.resizedAtMs < RESIZE_HOLD_MS ? (this.options.resizeLatencyRefreshes ?? 0) : 0;
+    const latency = ((this.options.latencyRefreshes ?? 1) + resizing) * periodMs + (this.options.presentOffsetMs ?? 0);
     const vsync = fit ? nextVsync(fit, rafMs - periodMs / 2) : rafMs;
     const displayMs = vsync + latency;
     const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
     if (fit && clock && head) {
-      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}`;
+      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}:${resizing}`;
       const host = this.hostUs(decision);
       if (key !== this.offsetKey && host !== null) {
         this.offsetKey = key;
