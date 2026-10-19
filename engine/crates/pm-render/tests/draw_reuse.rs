@@ -19,9 +19,17 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
 use pm_render::{AssetResolver, RenderRequest, Renderer};
 
-/// Paths that can change between frames (a relinked asset).
-#[derive(Clone, Default)]
-struct Paths(Arc<Mutex<BTreeMap<String, PathBuf>>>);
+/// Paths that can change between frames (a relinked asset), and the
+/// files a relink picks from.
+#[derive(Clone)]
+struct Paths(Arc<Mutex<BTreeMap<String, PathBuf>>>, Arc<Vec<PathBuf>>);
+
+impl Paths {
+    fn new(files: Vec<PathBuf>) -> Paths {
+        let map = BTreeMap::from([("a1".to_owned(), files[0].clone())]);
+        Paths(Arc::new(Mutex::new(map)), Arc::new(files))
+    }
+}
 
 impl AssetResolver for Paths {
     fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
@@ -251,17 +259,10 @@ fn edit(doc: &mut Document, rng: &mut Rng, paths: &Paths, serial: &mut u32) -> S
             "asset a1.w".into()
         }
         11 => {
-            let path = if rng.below(2) == 0 {
-                "/media/a.png"
-            } else {
-                "/media/b.png"
-            };
-            paths
-                .0
-                .lock()
-                .unwrap()
-                .insert("a1".into(), PathBuf::from(path));
-            format!("a1 → {path}")
+            let path = paths.1[rng.below(paths.1.len())].clone();
+            let label = format!("a1 → {}", path.display());
+            paths.0.lock().unwrap().insert("a1".into(), path);
+            label
         }
         12 => {
             let mut order: Vec<String> = ids.clone();
@@ -408,12 +409,7 @@ fn plans_match(seed: u64, steps: usize) -> (u64, usize) {
     let mut with = Renderer::headless().expect("a Metal device");
     let mut without = Renderer::headless().expect("a Metal device");
     with.set_draw_reuse(true);
-    let paths = Paths::default();
-    paths
-        .0
-        .lock()
-        .unwrap()
-        .insert("a1".into(), PathBuf::from("/media/a.png"));
+    let paths = Paths::new(vec!["/media/a.png".into(), "/media/b.png".into()]);
     let mut doc = Document::new(Some(document()), 1);
     let request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
     let mut rng = Rng(seed);
@@ -476,12 +472,7 @@ fn reused_draws_plan_what_a_fresh_build_plans() {
 fn a_drag_reuses_every_layer_but_the_dragged_one() {
     let mut r = Renderer::headless().expect("a Metal device");
     r.set_draw_reuse(true);
-    let paths = Paths::default();
-    paths
-        .0
-        .lock()
-        .unwrap()
-        .insert("a1".into(), PathBuf::from("/media/a.png"));
+    let paths = Paths::new(vec!["/media/a.png".into(), "/media/b.png".into()]);
     let mut doc = Document::new(Some(document()), 1);
     let request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
     let time = Ticks::new(TICKS_PER_SECOND).unwrap();
@@ -579,6 +570,9 @@ fn corpus_plans_with_reused_draws_match() {
                 ..request
             };
             let time = support::ticks(sample.time);
+            // The first sample is also drawn and read back (the kept bottom
+            // of the frame, `pm_render::frame_prefix`).
+            let draw = std::ptr::eq(sample, &p.samples[0]);
             let mut check = |doc: &Document, label: &str| {
                 let a = with.plan(doc, &p.composition, time, &request, &p.resolver);
                 let b = without.plan(doc, &p.composition, time, &request, &p.resolver);
@@ -589,6 +583,30 @@ fn corpus_plans_with_reused_draws_match() {
                     p.name,
                     sample.time
                 );
+                if !draw {
+                    return;
+                }
+                let a = with.render(doc, &p.composition, time, &request, &p.resolver);
+                let b = without.render(doc, &p.composition, time, &request, &p.resolver);
+                match (a, b) {
+                    (Ok(a), Ok(b)) => {
+                        let pa = with.read_rgba(&a).unwrap();
+                        let pb = without.read_rgba(&b).unwrap();
+                        let differ = pa
+                            .iter()
+                            .zip(&pb)
+                            .filter(|(x, y)| x.to_bits() != y.to_bits())
+                            .count();
+                        assert_eq!(differ, 0, "{} at {}: {label}", p.name, sample.time);
+                    }
+                    (a, b) => assert_eq!(
+                        format!("{:?}", a.err()),
+                        format!("{:?}", b.err()),
+                        "{} at {}: {label}",
+                        p.name,
+                        sample.time
+                    ),
+                }
             };
             check(&p.document, "first");
             check(&p.document, "again");
@@ -616,4 +634,149 @@ fn corpus_plans_with_reused_draws_match() {
         with.draw_reuse_stats()
     );
     assert!(with.draw_reuse_stats().reused > 0);
+}
+
+/// Frames drawn with the reuse on (kept draws and the kept bottom of the
+/// last frame, `pm_render::frame_prefix`) are the pixels a renderer
+/// without it draws, bit for bit, through the same edits; whole frames and
+/// the viewer's regions of interest.
+#[test]
+fn frames_drawn_with_reuse_are_identical() {
+    let fixtures = support::repo_root().join("apps/desktop/e2e/fixtures");
+    let files = vec![
+        fixtures.join("still-alpha.png"),
+        fixtures.join("still-red.png"),
+    ];
+    let steps: usize = std::env::var("PM_REUSE_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(260);
+    let mut prefix_frames = 0;
+    for (seed, region) in [
+        (0x51f1_5eed_0000_0001_u64, None),
+        (
+            0x51f1_5eed_0000_0002,
+            Some(pm_protocol::common::PixelRect {
+                x: 90,
+                y: 40,
+                width: 400,
+                height: 260,
+            }),
+        ),
+    ] {
+        let mut with = Renderer::headless().expect("a Metal device");
+        let mut without = Renderer::headless().expect("a Metal device");
+        with.set_draw_reuse(true);
+        let paths = Paths::new(files.clone());
+        let mut doc = Document::new(Some(document()), 1);
+        let mut request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
+        request.region = region;
+        let mut rng = Rng(seed);
+        let mut serial = 0;
+        let mut last = String::from("start");
+        let time = Ticks::new(TICKS_PER_SECOND).unwrap();
+        // A drag of one layer at a time, with every other kind of edit
+        // between drags.
+        let mut dragged = 7;
+        for step in 0..steps {
+            if step > 0 {
+                if rng.below(6) == 0 {
+                    last = edit(&mut doc, &mut rng, &paths, &mut serial);
+                    // Mostly layers near the top of the stack (listed
+                    // first), which leave many unchanged draws below.
+                    let n = layer_count(&doc, "C");
+                    dragged = if rng.below(4) == 0 {
+                        rng.below(n)
+                    } else {
+                        rng.below(n.min(6))
+                    };
+                } else {
+                    let path = at("C", dragged, &["p", "position.x", "v"]);
+                    let _ = doc.apply(&[Patch::set(path, Value::Number(rng.unit() * 1200.0))]);
+                    last = format!("drag C[{dragged}]");
+                }
+            }
+            let a = with.render(&doc, "C", time, &request, &paths);
+            let b = without.render(&doc, "C", time, &request, &paths);
+            match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    let pa = with.read_rgba(&a).unwrap();
+                    let pb = without.read_rgba(&b).unwrap();
+                    let differ = pa
+                        .iter()
+                        .zip(&pb)
+                        .filter(|(x, y)| x.to_bits() != y.to_bits())
+                        .count();
+                    assert_eq!(differ, 0, "seed {seed:#x}, step {step}, after {last}");
+                    assert_eq!(
+                        a.legend, b.legend,
+                        "seed {seed:#x}, step {step}, after {last}"
+                    );
+                }
+                (a, b) => assert_eq!(
+                    format!("{:?}", a.err()),
+                    format!("{:?}", b.err()),
+                    "seed {seed:#x}, step {step}, after {last}"
+                ),
+            }
+        }
+        prefix_frames += with.draw_reuse_stats().prefix_frames;
+    }
+    assert!(
+        prefix_frames > 100,
+        "only {prefix_frames} frames from a kept bottom"
+    );
+}
+
+/// A still under the kept bottom of the frame that changes on disk is drawn
+/// again as it is now, as a fresh frame draws it.
+#[test]
+fn a_still_changed_on_disk_is_not_kept() {
+    let fixtures = support::repo_root().join("apps/desktop/e2e/fixtures");
+    let dir = std::env::temp_dir().join(format!("pm-draw-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let still = dir.join("a.png");
+    std::fs::copy(fixtures.join("still-alpha.png"), &still).unwrap();
+    let paths = Paths::new(vec![still.clone()]);
+    let mut with = Renderer::headless().expect("a Metal device");
+    let mut without = Renderer::headless().expect("a Metal device");
+    with.set_draw_reuse(true);
+    let mut doc = Document::new(Some(document()), 1);
+    let request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
+    let time = Ticks::new(TICKS_PER_SECOND).unwrap();
+    let same = |with: &mut Renderer, without: &mut Renderer, doc: &Document| {
+        let a = with.render(doc, "C", time, &request, &paths).unwrap();
+        let b = without.render(doc, "C", time, &request, &paths).unwrap();
+        let (pa, pb) = (with.read_rgba(&a).unwrap(), without.read_rgba(&b).unwrap());
+        pa.iter().zip(&pb).all(|(x, y)| x.to_bits() == y.to_bits())
+    };
+    // Drag a layer near the top: the images are below it, in the kept
+    // bottom.
+    let top = layer_ids(&doc, "C")
+        .iter()
+        .position(|id| id == "s4")
+        .unwrap();
+    for k in 0..6 {
+        doc.apply(&[Patch::set(
+            at("C", top, &["p", "position.x", "v"]),
+            Value::Number(200.0 + f64::from(k)),
+        )])
+        .unwrap();
+        assert!(same(&mut with, &mut without, &doc), "frame {k}");
+    }
+    let kept = with.draw_reuse_stats().prefix_frames;
+    assert!(kept >= 3, "{kept} frames from a kept bottom");
+    // The file changes (another size and modification time).
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::copy(fixtures.join("still-red.png"), &still).unwrap();
+    doc.apply(&[Patch::set(
+        at("C", top, &["p", "position.x", "v"]),
+        Value::Number(300.0),
+    )])
+    .unwrap();
+    assert!(
+        same(&mut with, &mut without, &doc),
+        "after the still changed"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

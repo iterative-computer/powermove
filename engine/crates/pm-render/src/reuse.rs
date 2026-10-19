@@ -74,6 +74,11 @@ pub struct ReuseStats {
     /// Builds that did not use the reuse (another time, another
     /// document, other options).
     pub cold_builds: u64,
+    /// Frames drawn from the kept bottom of an earlier frame
+    /// (`crate::frame_prefix`), and the top-level draws they did not draw
+    /// again.
+    pub prefix_frames: u64,
+    pub prefix_draws: u64,
 }
 
 /// The build options a layer's draws depend on.
