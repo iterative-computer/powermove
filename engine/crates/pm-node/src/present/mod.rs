@@ -21,6 +21,7 @@ pub mod audio;
 pub mod blender;
 pub mod clock;
 pub mod compat;
+pub mod complete;
 pub mod compose;
 pub mod document;
 mod layer_reports;
@@ -233,6 +234,7 @@ impl BridgePresenter {
         let generations = Generations::default();
         let thread_generations = generations.clone();
         let thread_sink = sink.clone();
+        let back = tx.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-present",
@@ -240,6 +242,7 @@ impl BridgePresenter {
                 render::run(
                     thread_config,
                     rx,
+                    back,
                     thread_sink,
                     thread_stats,
                     thread_generations,
