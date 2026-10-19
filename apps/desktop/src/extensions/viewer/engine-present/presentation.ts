@@ -191,6 +191,14 @@ export class ViewerPresentation {
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
   private host: Window | null = null;
+  /** Keep the configured surface colors when a host's capability queries change. */
+  private displayColor: {
+    host: Window;
+    colorSpace: ViewerState['colorSpace'];
+    edr: boolean;
+    observedColorSpace: ViewerState['colorSpace'];
+    observedEdr: boolean;
+  } | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
   /** The revision the engine routed the composition away at (`routed`). */
@@ -410,19 +418,36 @@ export class ViewerPresentation {
     if (rect.width < 1 || rect.height < 1) return;
     const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);
+    const display = this.configuredDisplay(view);
     const { state, changed } = this.sequencer.next({
       ...params,
       composition: this.options.service.composition(),
       cssWidth: size.width,
       cssHeight: size.height,
       devicePixelRatio: dpr,
-      edr: this.options.edr !== 'off' && displayIsEdr(view),
-      colorSpace: canvasColorSpace(view)
+      edr: display.edr,
+      colorSpace: display.colorSpace
     });
     if (!changed) return;
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
     this.presenter?.setViewerState(this.withHint(state));
+  }
+
+  private configuredDisplay(host: Window): NonNullable<ViewerPresentation['displayColor']> {
+    const colorSpace = canvasColorSpace(host);
+    const edr = displayIsEdr(host);
+    if (!this.displayColor || this.displayColor.host !== host) {
+      this.displayColor = { host, colorSpace, edr: this.options.edr !== 'off' && edr, observedColorSpace: colorSpace, observedEdr: edr };
+    } else if (colorSpace !== this.displayColor.observedColorSpace || edr !== this.displayColor.observedEdr) {
+      // Legacy GL never reconfigures its drawing buffer for media-query
+      // changes. Match that lifetime, including later geometry updates:
+      // a first-show capability change must not rebuild a playing pool.
+      this.options.log?.('info', `engine presentation display capabilities changed to ${colorSpace}, edr=${edr}; keeping configured ${this.displayColor.colorSpace}, edr=${this.displayColor.edr}`);
+      this.displayColor.observedColorSpace = colorSpace;
+      this.displayColor.observedEdr = edr;
+    }
+    return this.displayColor;
   }
 
   /** A state as sent: with the newest vsync hint, which is not part of the view. */

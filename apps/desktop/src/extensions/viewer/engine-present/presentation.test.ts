@@ -258,6 +258,79 @@ describe('ViewerPresentation', () => {
     expect(stage.contains(presentation.canvas)).toBe(false);
   });
 
+  it.each([true, false])('keeps configured surface colors through capability flips (initial high gamut/EDR: %s) and later geometry changes', async (initialHigh) => {
+    const service = new Service();
+    const painter = new Painter();
+    const win = window as unknown as Window;
+    const { stage, overlay, rafs } = stageIn(win);
+    const lists = new Map<string, { matches: boolean; listeners: Set<() => void> }>();
+    Object.assign(win, {
+      matchMedia: (query: string) => {
+        let list = lists.get(query);
+        if (!list) {
+          list = { matches: query === '(dynamic-range: high)' || query === '(color-gamut: p3)' ? initialHigh : true, listeners: new Set() };
+          lists.set(query, list);
+        }
+        return {
+          get matches() { return list.matches; },
+          addEventListener: (_type: string, listener: () => void) => list.listeners.add(listener),
+          removeEventListener: (_type: string, listener: () => void) => list.listeners.delete(listener)
+        };
+      }
+    });
+    const flip = (query: string, matches: boolean): void => {
+      const list = lists.get(query)!;
+      list.matches = matches;
+      for (const listener of list.listeners) listener();
+    };
+    const logs: [string, string][] = [];
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, sizeSettleMs: 0, createPainter: async () => painter, log: (level, message) => logs.push([level, message]) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const colors = { colorSpace: initialHigh ? 'displayP3' : 'srgb', edr: initialHigh };
+    expect(channel.states[0]).toMatchObject({ ...colors, viewSeq: 1 });
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 7, surfaces: [] } }, performance.now());
+    const frame = (seq: number, viewSeq: number): void => {
+      channel.handlers.message({ type: 'frame', frame: { ...desc(seq, viewSeq), poolGeneration: 7 } }, performance.now());
+      runFrames(rafs, performance.now());
+    };
+    frame(1, 1);
+
+    // Each capability changes independently, as on first show or a display
+    // transition. Neither asks the engine to reconfigure a playing pool.
+    flip('(color-gamut: p3)', !initialHigh);
+    frame(2, 1);
+    flip('(dynamic-range: high)', !initialHigh);
+    frame(3, 1);
+    expect(channel.states).toHaveLength(1);
+    expect(presentation.stats()).toMatchObject({ generation: 7, drawn: 3, dropped: {}, staleGeneration: 0 });
+    expect(presentation.latest).toMatchObject({ seq: 3, viewSeq: 1 });
+    expect(logs).toHaveLength(2);
+    expect(logs.every(([level, message]) => level === 'info' && message.includes(`keeping configured ${colors.colorSpace}, edr=${colors.edr}`))).toBe(true);
+    expect(logs[0]![1]).toContain(`changed to ${initialHigh ? 'srgb' : 'displayP3'}, edr=${initialHigh}`);
+    expect(logs[1]![1]).toContain(`edr=${!initialHigh}; keeping`);
+
+    // A later real DPR/size/zoom update must not pick up the observed
+    // capability tuple that was deliberately excluded above.
+    Object.assign(win, { devicePixelRatio: 1 });
+    flip('(resolution: 2dppx)', false);
+    expect(channel.states.at(-1)).toMatchObject({ ...colors, devicePixelRatio: 1, size: { width: 640, height: 360 }, viewSeq: 2 });
+    const rect = stage.getBoundingClientRect();
+    stage.getBoundingClientRect = () => ({ ...rect, width: 800, height: 450, right: 800, bottom: 450 });
+    presentation.update({ ...PARAMS, zoom: 0.75, pan: [4, 8] }, { width: 800, height: 450 });
+    expect(channel.states.at(-1)).toMatchObject({ ...colors, size: { width: 800, height: 450 }, zoom: 0.75, pan: [4, 8], viewSeq: 3 });
+    expect(logs).toHaveLength(2);
+
+    flip('(color-gamut: p3)', initialHigh);
+    flip('(dynamic-range: high)', initialHigh);
+    expect(channel.states).toHaveLength(3);
+    expect(presentation.stats()?.generation).toBe(7);
+    expect(logs).toHaveLength(4);
+    presentation.dispose();
+    expect([...lists.values()].every((list) => list.listeners.size === 0)).toBe(true);
+  });
+
   it('a canvas that was hidden counts its first frame as on screen only after the display shows it', async () => {
     const service = new Service();
     service.revealFrames = 2;
