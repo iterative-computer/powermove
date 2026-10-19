@@ -126,7 +126,7 @@ export class NativeHiddenHost {
       packProject: (project, session, document) => packAgentProject(project, { directory: options.exportsDir,
         resolveAsset: id => this.media.resolveAsset(id, { process: 'job', session }) }, document), log: (level, message) => log(`[jobs:${level}] ${message}`) });
     const services: DocumentHostServices = {
-      store: profileStore(store),
+      store: profileStore(store, keys => { for (const client of options.ipc.all()) client.send(IPC.storeChanged, { keys }); }),
       session: {
         join: async project => {
           let member = this.members.get(project);

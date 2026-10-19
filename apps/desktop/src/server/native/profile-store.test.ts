@@ -29,3 +29,9 @@ it('preserves ordinary store replacement and read-your-writes', async () => {
   expect(await service.read('preference')).toBe(2); await written;
   await service.remove('preference'); expect(await service.read('preference')).toBeNull();
 });
+
+it('seeds global preferences without copying every project and Undo history into each worker', async () => {
+  const { service } = fixture({ projects: [{ id: 'A' }], preference: 1, 'project.A': { id: 'A' }, 'documentHost.A': { history: ['private instance state'] } });
+  expect(await service.snapshot!()).toEqual({ projects: [{ id: 'A' }], preference: 1 });
+  expect(await service.read('project.A')).toEqual({ id: 'A' });
+});

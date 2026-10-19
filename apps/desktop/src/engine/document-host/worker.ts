@@ -69,6 +69,7 @@ export class DocumentWorker {
   private readonly ext: WorkerExtensions;
   private media: WorkerMedia | null = null;
   private storeWrites: Promise<unknown> = Promise.resolve();
+  private refreshPreferences: (() => Promise<void>) | null = null;
 
   private async editorStore() {
     const seed = await this.service<Record<string, unknown> | null>('store.snapshot');
@@ -77,6 +78,14 @@ export class DocumentWorker {
     // host that supplied a profile snapshot opts into preference write-through.
     if (seed === null) return memory;
     const set = memory.set, del = memory.del;
+    const known = new Set(Object.keys(seed));
+    this.refreshPreferences = async () => {
+      const current = await this.service<Record<string, unknown> | null>('store.snapshot');
+      if (!current) return;
+      for (const key of known) if (!Object.hasOwn(current, key)) del(key);
+      known.clear();
+      for (const [key, value] of Object.entries(current)) { set(key, value); known.add(key); }
+    };
     memory.set = (key, value) => {
       const base = key === 'projects' || key === 'projectTrash' ? memory.get(key, null) : undefined;
       set(key, value);
@@ -353,6 +362,7 @@ export class DocumentWorker {
   /* ── tools ───────────────────────────────────────────────────────────── */
 
   private async tool(request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> {
+    await this.storeWrites; await this.refreshPreferences?.();
     const PM = this.requireChain().PM;
     const text = (value: unknown): AgentToolResponseEvent => ({ runId: request.runId, callId: request.callId, ok: true,
       revision: Number(PM['proj']?.revision) || 0, content: [{ type: 'text', text: JSON.stringify(value) }] });
