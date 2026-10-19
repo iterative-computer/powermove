@@ -554,9 +554,18 @@ mod child {
             &painted.pixels,
             SnapshotPixels::Premultiplied,
         );
+        // The text plan's crop is `[x0, y0, x1, y1]`; `place_raster` takes
+        // `[x, y, w, h]`. The ink starts away from the canvas's corner here,
+        // so a stride mixed up between the two would streak the rows.
+        let [px0, py0, px1, py1] = painted.plan.crop;
+        assert!(
+            px0 > 0 || py0 > 0,
+            "an ink crop at the corner: {:?}",
+            painted.plan.crop
+        );
         let placed = pm_node::present::snapshot::place_raster(
             &rgba,
-            painted.plan.crop,
+            [px0, py0, px1 - px0, py1 - py0],
             painted.canvas,
             None,
         )

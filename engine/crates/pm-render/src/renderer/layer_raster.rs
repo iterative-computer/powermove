@@ -245,8 +245,16 @@ impl Renderer {
                     (quad.ax + x0 * sx, quad.ay + y0 * sy),
                 )
             });
+            // `LayerPixels::Float` places the painted crop by `[x, y, w, h]`;
+            // the text plan's crop is `[x0, y0, x1, y1]` (an ink crop away
+            // from the canvas's corner read with the wrong stride drew
+            // streaks in `render.raster()`).
+            let [cx0, cy0, cx1, cy1] = crop;
             return Ok(Some(LayerRaster {
-                pixels: LayerPixels::Float { pixels, crop },
+                pixels: LayerPixels::Float {
+                    pixels,
+                    crop: [cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0)],
+                },
                 canvas,
                 box_size,
                 anchor,
