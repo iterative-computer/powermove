@@ -14,7 +14,7 @@ import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBri
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import { MANIFEST_LIMITS, needsTrust } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
-import { createSandboxRuntime, type SandboxRuntime } from './sandbox-host';
+import { createSandboxRuntime, type SandboxRuntime, type SandboxRuntimeOptions } from './sandbox-host';
 import { extensionLoad, noticeSlowExtensions } from '../runtime/extension-load';
 
 /* The loader speaks about an extension rather than as one, so it stamps the
@@ -37,6 +37,8 @@ export interface LoaderOptions {
   /** Manifest overrides for synthesized built-in records (tests / bridge-less boot). */
   builtinManifests?: Record<string, Partial<ExtensionManifest>>;
   activateTimeoutMs?: number;
+  /** Where Store extensions run outside a browser document (the document host's contained process). */
+  sandboxProcess?: (record: ExtensionRecord) => SandboxRuntimeOptions['process'];
   runtimeErrorWindowMs?: number;
   runtimeErrorLimit?: number;
 }
@@ -240,7 +242,8 @@ export function createLoader(options: LoaderOptions): Loader {
         /* The sandbox keeps its own deadline: past it, it tears the runtime
            down and tells a spinning one from a slow one, within this budget.
            A second timer here would report the same failure twice. */
-        const sandbox = await createSandboxRuntime(kernel, record, hostDeps, await valuesFor(record), { timeoutMs });
+        const external = options.sandboxProcess?.(record);
+        const sandbox = await createSandboxRuntime(kernel, record, hostDeps, await valuesFor(record), { timeoutMs, ...(external ? { process: external } : {}) });
         active.set(id, { record, module: null, handle: sandbox.handle, sandbox });
         activationFailures.delete(id);
         syncActive();

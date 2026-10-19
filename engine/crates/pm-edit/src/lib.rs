@@ -43,29 +43,7 @@
 //! results equal the legacy edit bit for bit wherever the inputs are the same
 //! floats. Where the legacy code throws, the kernel throws the same message.
 //! The differences, all deliberate, are listed in docs/engine/pm-edit.md.
-//!
-//! # Edits left to the legacy code
-//!
-//! A kernel that meets a document whose legacy result depends on something
-//! other than the document (today: a camera or light reparented into a space
-//! that reads its own transform, where the legacy aim reads the evaluation
-//! cache the pose write left stale) throws [`LEGACY_ONLY`] before it writes
-//! anything; the renderer then runs the legacy edit, so the app behaves as
-//! today.
 #![forbid(unsafe_code)]
-
-use pm_eval::JsThrow;
-
-/// The thrown kind for an edit a kernel leaves to the legacy TypeScript edit
-/// (pm-wasm answers `{ legacy: true }`, and the renderer falls back).
-pub const LEGACY_ONLY: &str = "LegacyOnly";
-
-pub(crate) fn legacy_only(what: &str) -> JsThrow {
-    JsThrow {
-        kind: LEGACY_ONLY,
-        message: format!("{what} stays with the legacy edit"),
-    }
-}
 
 pub mod align;
 pub mod anchor;

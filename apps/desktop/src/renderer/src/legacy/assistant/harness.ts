@@ -688,7 +688,8 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       })),
       projectsScreenOpen: PM.ProjectsScreen?.isOpen || false,
       selection: clone(PM.sel), layout: panelLayoutDigest(),
-      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+      // A document host has no window: no viewport to report.
+      viewport: typeof innerWidth === 'number' ? { width: innerWidth, height: innerHeight, devicePixelRatio } : null,
       errors: PM.agentDiagnostics || [],
     };
     return { ok: true, content: [toolText(state)], revision: currentRevision() };
@@ -906,10 +907,11 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
 }
 
 const nativeAgentTools = typeof window === 'undefined' ? undefined : hostBridge()?.agentTools;
-nativeAgentTools?.onRequest((request) => {
-  void handleLiveAgentTool(request).then(
-    (result) => nativeAgentTools.respond({ runId: request.runId, callId: request.callId, ...result }),
-    (error) => nativeAgentTools.respond({
+/** A live tool call as the host receives its answer, errors included. */
+function answerLiveAgentTool(request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> {
+  return handleLiveAgentTool(request).then(
+    (result) => ({ runId: request.runId, callId: request.callId, ...result }),
+    (error) => ({
       runId: request.runId,
       callId: request.callId,
       ok: false,
@@ -919,11 +921,15 @@ nativeAgentTools?.onRequest((request) => {
       revision: currentRevision()
     })
   );
+}
+
+nativeAgentTools?.onRequest((request) => {
+  void answerLiveAgentTool(request).then((response) => nativeAgentTools.respond(response));
 });
 
 PM.AgentHarness = {
   MAX_REPAIRS, projectState, defaultTimes, observe, observeVisual, capture, sanitizeProposal,
   describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
-  test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool },
+  test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool, answerLiveAgentTool },
 };
 }

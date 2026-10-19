@@ -29,7 +29,7 @@ import { findPath, NativeApi } from './native';
 import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
-import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
+import { compileFrom, imports, instantiate, MODULE_PATH, PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
@@ -50,9 +50,28 @@ export interface EngineDocOptions {
   /** The headless document host: no renderer, so 2D bounds and picks
    *  (`PM.GL`) come from pm-wasm alone. */
   headless?: boolean;
+  /** Test builds: replayed Canvas raster measurements give ink kernels a legacy reference. */
+  textReference?: boolean;
   /** Registry answers and subsets for text layout (engine-doc/fonts.ts). The
    *  editor uses `window.powermove.engineFonts` when the preload exposes it. */
   fonts?: FontProvider | null;
+  /**
+   * "Use New Engine" on (docs/engine/write-path.md, "Named failures"): a
+   * module that fails to load, an instance that traps twice on one
+   * question, or a font service that stopped answering is a named failure
+   * (`engine:failure` on the bus, a report line, `failures()`), never a
+   * silent legacy answer. The flag off keeps today's behavior.
+   */
+  strict?: boolean;
+}
+
+/** A named engine failure ("Use New Engine" on). */
+export interface EngineFailure {
+  code: 'native-answer-unavailable' | 'pm-wasm-unavailable' | 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable';
+  message: string;
+  /** Whether `PM.EngineDoc.retry()` can recover. */
+  retry: boolean;
+  at: number;
 }
 
 export interface DocApi {
@@ -107,6 +126,12 @@ export interface EngineDoc {
   snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
   stats(): Record<string, unknown>;
   summary(): void;
+  /** Named failures so far (strict mode), newest last. */
+  failures(): EngineFailure[];
+  /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
+  retry(): Promise<boolean>;
+  /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
+  warmFonts(): Promise<void>;
 }
 
 const noopDoc: DocApi = {
@@ -125,6 +150,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
+      failures: () => [], retry: () => Promise.resolve(false), warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -337,6 +363,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
+  if (options.headless) for (const op of ['gl.bounds', 'gl.pick', 'glyphLayout']) api.noReference.add(op);
+  // The glyph layout get_project_state reports for selected text (gl/raster.ts on the desktop).
+  if (options.headless && !PM.textLayout) PM.textLayout = (L: any, T: number = PM.time) => api.glyphLayout(L, T);
+  /* A trap leaves the instance dead. The compiled module is kept, so a fresh
+     instance is made synchronously (the module is far below Chromium's
+     synchronous-instantiation limit) and resynced from the shadow, and the
+     question that trapped is asked once more on it: the answer stays native. */
+  api.revive = () => reviveNow();
+  api.onFailure = (code, message) => fail(code, message, code === 'font-service-unavailable');
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
   if (fontProvider) api.fonts = new FontLoader(fontProvider);
   api.onStale = (op, paths) => {
@@ -344,12 +379,43 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
   const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual, () => api.fonts);
+  if (options.headless && !options.textReference) for (const kernel of ['captureFontAnchor', 'anchorReference']) edits.noReference.add(kernel);
+  edits.revive = () => reviveNow();
+  edits.onFailure = (code, message) => fail(code, message, code === 'font-service-unavailable');
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
 
   const onMismatch = (result: ConsistencyResult) => {
     reporter.emit({ type: 'consistency', reason: result.reason, revision: result.revision, missed: result.missed.slice(0, 20), ms: Math.round(result.ms * 1000) / 1000 });
     PM.bus?.emit?.('engine:consistency-mismatch', { reason: result.reason, revision: result.revision, missed: result.missed.length });
   };
+
+  if (options.strict) {
+    api.onFallback = edits.onFallback = (op, reason) => {
+      const code = reason === 'fonts' || reason === 'ink' ? 'font-service-unavailable' : 'native-answer-unavailable';
+      const message = `The new engine could not answer ${op} (${reason}).`;
+      fail(code, message, code === 'font-service-unavailable' || reason === 'unavailable');
+      const error = new Error(message);
+      error.name = 'EngineFailure';
+      throw error;
+    };
+  }
+  const failures: EngineFailure[] = [];
+  const failed = new Set<string>();
+  /** Reports a named failure once per code and message (strict mode only). */
+  function fail(code: EngineFailure['code'], message: string, retry: boolean): void {
+    if (!options.strict) return;
+    const key = `${code}\u0000${message}`;
+    if (failed.has(key)) return;
+    failed.add(key);
+    const failure: EngineFailure = { code, message, retry, at: Date.now() };
+    failures.push(failure);
+    reporter.emit({ type: 'failure', code, message, retry });
+    PM.bus?.emit?.('engine:failure', failure);
+    // Visible, never silent (amendment 21): the editor's own toast, with
+    // Retry where reloading the module can help.
+    PM.toast?.(message, 8000, { error: true, key: `engine-failure-${code}`,
+      ...(retry ? { action: { label: 'Retry', run: () => { void state.retry(); } } } : {}) });
+  }
 
   const subscribers = new Set<(batch: PatchBatch) => void>();
   const pendingListeners = new Set<() => void>();
@@ -382,43 +448,73 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       };
     },
     summary() { reporter.emit({ type: 'summary', session, ...state.stats() }); },
+    failures: () => failures.slice(),
+    retry: () => {
+      if (!api.fonts && options.fonts === undefined) { const provider = editorFonts(); if (provider) api.fonts = new FontLoader(provider); }
+      api.fonts?.retry();
+      failed.clear();
+      if (state.ready) return Promise.resolve(true);
+      return start().then((ok) => { if (ok) afterReady(); return ok; });
+    },
+    warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
   };
   PM.EngineDoc = state;
 
   // ── loading ───────────────────────────────────────────────────────────
   const loadModule = options.loadModule ?? (() => compileFrom(() => fetch(new URL(MODULE_PATH, (globalThis as any).document?.baseURI ?? (globalThis as any).location?.href).href)));
+  let compiledModule: WebAssembly.Module | null = null;
+  /** Puts a fresh instance in place and resyncs it (the barrier keeps its revisions). */
+  const attach = (instance: PmWasm): void => {
+    wasm = instance;
+    barrier = new DocumentBarrier(wasm, () => current, {
+      onMismatch, revision: barrier?.revision ?? 0,
+      beforeFlush: transactionWrites,
+      scoped: () => {
+        const comp = PM.scope?.length ? unwrap(PM.curComp?.()) : null;
+        return comp && typeof comp.id === 'string' && comp !== current ? comp.id : null;
+      },
+    });
+    barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
+    barrier.onPending(() => pendingListeners.forEach(fn => { try { fn(); } catch (error) { console.error(error); } }));
+    api.reset();
+    state.wasm = wasm;
+    state.barrier = barrier;
+    replacing = true;
+    try { barrier.resync(); } finally { replacing = false; }
+    pendingReplace = null;
+    state.ready = true;
+    reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
+  };
   const start = async (): Promise<boolean> => {
     try {
-      wasm = await instantiate(await loadModule());
-      barrier = new DocumentBarrier(wasm, () => current, {
-        onMismatch, revision: barrier?.revision ?? 0,
-        beforeFlush: transactionWrites,
-        scoped: () => {
-          const comp = PM.scope?.length ? unwrap(PM.curComp?.()) : null;
-          return comp && typeof comp.id === 'string' && comp !== current ? comp.id : null;
-        },
-      });
-      barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
-      barrier.onPending(() => pendingListeners.forEach(fn => { try { fn(); } catch (error) { console.error(error); } }));
-      api.reset();
-      state.wasm = wasm;
-      state.barrier = barrier;
-      replacing = true;
-      try { barrier.resync(); } finally { replacing = false; }
-      pendingReplace = null;
-      state.ready = true;
-      reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
+      compiledModule = await loadModule();
+      attach(await instantiate(compiledModule));
       return true;
     } catch (error) {
       state.ready = false;
       reporter.emit({ type: 'error', message: String((error as Error)?.message ?? error) });
-      console.warn('[engine-doc] pm-wasm unavailable; the legacy evaluator answers', error);
+      if (options.strict) fail('pm-wasm-unavailable', `The new engine's document module did not load: ${String((error as Error)?.message ?? error)}`, true);
+      else console.warn('[engine-doc] pm-wasm unavailable; the legacy evaluator answers', error);
       return false;
     }
   };
-  void start().then(ok => {
-    readyResolve(ok);
-    if (!ok) return;
+  /** Synchronous revival after a trap; false when there is no module to instantiate. */
+  function reviveNow(): boolean {
+    if (!compiledModule || (wasm && !wasm.dead)) return !!wasm && !wasm.dead;
+    try {
+      reporter.emit({ type: 'dead' });
+      attach(new PmWasm(new WebAssembly.Instance(compiledModule, imports)));
+      return true;
+    } catch (error) {
+      state.ready = false;
+      console.warn('[engine-doc] pm-wasm could not be re-instantiated', error);
+      return false;
+    }
+  }
+  let afterReadyDone = false;
+  function afterReady(): void {
+    if (afterReadyDone) return;
+    afterReadyDone = true;
     if (auditor) auditor.start(options.auditMs ?? 100);
     if (mode.audit || mode.dual) {
       // A summary every 2 s while counts change, and one as the page goes,
@@ -435,13 +531,18 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       (globalThis as any).addEventListener?.('pagehide', flushSummary);
     }
     scheduleIdleCheck();
+  }
+  void start().then(ok => {
+    readyResolve(ok);
+    if (ok) afterReady();
   });
 
-  // A trap leaves the instance dead: re-instantiate and resync.
+  // A trap outside a query (a flush) leaves the instance dead: re-instantiate and resync.
   const revive = () => {
     if (!wasm?.dead || reviving) return;
     reviving = true;
     state.ready = false;
+    if (reviveNow()) { reviving = false; return; }
     reporter.emit({ type: 'dead' });
     void start().finally(() => { reviving = false; });
   };
@@ -475,6 +576,12 @@ function editorFonts(): FontProvider | null {
     if (!r || typeof r !== 'object') throw new Error('the font registry did not answer');
     if (r.ok === false) throw new Error(r.error);
     return r.value;
+  };
+  if (typeof bridge.answerSync === 'function' && typeof bridge.wholeSync === 'function') return {
+    sync: true,
+    answer: (queries) => unwrapResult(bridge.answerSync(queries)),
+    subset: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
+    whole: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
   };
   return {
     sync: false,
@@ -510,6 +617,8 @@ function legacyImplementations(PM: PMRegistry): Record<string, any> {
     bounds: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.bounds(...a)),
     pick: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.pick(...a)),
     textLayout: (...a: any[]) => (PM.textCaretLayout ? PM.textCaretLayout(...a) : null),
+    // Only a host without a raster asks (its PM.textLayout is the native one): nothing to fall back to.
+    glyphLayout: () => null,
     local3D: (L: any, T: number) => local3D(PM, L, T),
     parent3D: (L: any, T: number, ...rest: any[]) => (parent3D as any)(PM, L, T, ...rest),
     world3D: (L: any, T: number, positioning?: boolean) => world3D(PM, L, T, positioning),
