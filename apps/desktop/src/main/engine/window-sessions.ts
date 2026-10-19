@@ -117,12 +117,13 @@ export class WindowSnapshotSessions {
   private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[]): Promise<{ port: number; session: number } | 'needsDocument'> {
     const host = this.engine.hostPort('interactive');
     if (!host) throw new Error('the new engine is not running');
-    let record = this.windows.get(windowId);
-    if (record && (record.launch !== host.generation || record.port !== host.port)) {
-      // The engine restarted: that session went with it.
-      this.drop(windowId, false);
-      record = undefined;
+    // Session ids may be reused after a restart. Clear every old binding
+    // before opening any new session; a later stale close must not erase
+    // another window's new font owner at the same id.
+    for (const [id, record] of this.windows) {
+      if (record.launch !== host.generation || record.port !== host.port) this.drop(id, false);
     }
+    let record = this.windows.get(windowId);
     // A window's revisions only grow while its page lives (main forgets
     // the window's session when the page loads again), so the document id
     // and revision name the content.

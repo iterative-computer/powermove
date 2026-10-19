@@ -1003,8 +1003,10 @@ The Round 7 integration merge also retains the window-scoped served-font
 provider when installing the bridge lane's `RenderFonts`. Both viewer frames
 and frame/layer snapshots select their originating port/session's seeds.
 Main-owned fallback snapshot sessions wait for their window's seed-owner
-binding before sending the document and release that binding on close;
-a rejected binding refuses the capture. The scoped
+binding before sending the document and release that binding on close.
+An engine restart clears every old-launch binding before session ids can be
+reused, so one window's stale close cannot erase another window's new owner.
+A rejected binding refuses the capture. The scoped
 provider reports a failed registry query through the bridge's font-health
 boundary, so later fallback queries in that frame fail immediately and a later
 frame can retry. The incoming unscoped broker API remains available for its

@@ -26,7 +26,7 @@ function fakeEngine() {
     },
     event: (_p, body, session) => events.push({ body, session })
   };
-  return { engine, sent, events, staged, restart: () => { launch = { port: 9, generation: 2 }; } };
+  return { engine, sent, events, staged, restart: (session?: number) => { launch = { port: 9, generation: 2 }; if (session !== undefined) nextSession = session; } };
 }
 
 function defs(generation: number | null = 4) {
@@ -92,6 +92,26 @@ describe('main’s snapshot sessions for windows', () => {
     expect(sessions.has(9)).toBe(false);
     expect(f.sent.map(s => s.body.type)).toEqual(['openSession', 'closeSession']);
     expect(owner).toHaveBeenLastCalledWith(40, null);
+  });
+
+  it('forgets every old-launch font binding before session ids can be reused', async () => {
+    const f = fakeEngine();
+    const owners = new Map<number, number>();
+    const owner = async (session: number, window: number | null) => {
+      if (window === null) owners.delete(session);
+      else owners.set(session, window);
+    };
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    const doc = { id: 'doc', revision: 1, hash, json: json() };
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    f.restart(41); // New window 9 reuses the old session id of window 10.
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    expect(owners.get(41)).toBe(9);
+    expect(owners.get(42)).toBe(10);
+    expect(owners.has(40)).toBe(false);
+    sessions.dispose();
   });
 
   it('stages a large document instead of sending it inline', async () => {
