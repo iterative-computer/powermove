@@ -364,7 +364,12 @@ impl Exec<'_> {
                             .vector
                             .resolve(self.device, self.queue, v, self.precision)
                         {
-                            Ok(view) => r.view = Some(view),
+                            Ok(view) => {
+                                // Level 2 content on a plane is resampled
+                                // (`crate::space25d::local`).
+                                self.prepare_level2(encoder, r, view.texture(), false);
+                                r.view = Some(view);
+                            }
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
@@ -378,7 +383,10 @@ impl Exec<'_> {
                             text,
                             self.precision,
                         ) {
-                            Ok(view) => r.view = Some(view),
+                            Ok(view) => {
+                                self.prepare_level2(encoder, r, view.texture(), false);
+                                r.view = Some(view);
+                            }
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
@@ -396,6 +404,8 @@ impl Exec<'_> {
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
+                            // Level 2 shader output is resampled.
+                            self.prepare_level2(encoder, r, &target.texture, false);
                             // Legacy GLSL targets are in GL row order
                             // and hold E-encoded values.
                             r.view = Some(target.view.clone());

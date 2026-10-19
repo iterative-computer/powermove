@@ -97,11 +97,6 @@ fn compare_float(ours: &[f32], reference: &[f32], w: u32, video: bool) -> (f64, 
 ///   pixel differs by more than [`FRAME_IDENTITY_CV`] while the same render
 ///   one composition frame later differs by more than [`WRONG_FRAME_CV`]:
 ///   the selected frames are then the same.
-/// - **Blurred stills at 16 or more samples (float frames).** Each sample of
-///   a still differs from Chromium's by up to 2 f16 ulps (the still class),
-///   and the f16 accumulator (today's `RGBA16F`) rounds every partial sum,
-///   so the two paths diverge by up to [`F16_ACCUMULATION_CV`] after 20
-///   samples (Chromium's own sum is 0.87 CV from the exact mean in alpha).
 /// - **Blurred video in today's captures draws a stale, unseeked frame**
 ///   (`motion/blur-video`, frame 0 in the capture): `renderToPixels` sets
 ///   `useVideoPreviews = false`, so every sample reads the shared asset
@@ -111,7 +106,6 @@ fn compare_float(ours: &[f32], reference: &[f32], w: u32, video: bool) -> (f64, 
 ///   clip is compared with the engine's own sharp frame.
 const FRAME_IDENTITY_CV: u8 = 12;
 const WRONG_FRAME_CV: u8 = 40;
-const F16_ACCUMULATION_CV: f64 = 2.0;
 
 #[test]
 fn motion_corpus_parity() {
@@ -298,12 +292,11 @@ fn motion_corpus_parity() {
                 let reference = read_float(file);
                 let (max, class) = compare_float(&ours, &reference, w, video);
                 compared += 1;
-                // Blurred stills at 16 or more samples: f16 accumulation.
-                let still_blur = !video && p.name == "motion/blur-solids" && n >= 16;
+                // Blurred stills sample today's 8-bit texture and accumulate
+                // in the same half float target with the same rounding, so
+                // they are held to the alpha class like everything else.
                 let (limit, deviation_limit) = if video {
                     (2.0, f64::from(FRAME_IDENTITY_CV))
-                } else if still_blur {
-                    (1.0, F16_ACCUMULATION_CV)
                 } else {
                     (1.0, 1.0)
                 };
@@ -312,11 +305,7 @@ fn motion_corpus_parity() {
                     p.name, s.time
                 );
                 if max > limit && max <= deviation_limit {
-                    line.push_str(if video {
-                        "; DEVIATION video decode"
-                    } else {
-                        "; DEVIATION f16 accumulation of still samples"
-                    });
+                    line.push_str("; DEVIATION video decode");
                     deviations.push(line.clone());
                 }
                 eprintln!("{line}");

@@ -373,27 +373,78 @@ pub fn fill_polygons_local(path: &SkPath, m: &Mat) -> Vec<Vec<P>> {
     contours
 }
 
-/// Maps local points to window coordinates as the vertex shader does.
-pub fn to_device(contours: &[Vec<P>], m: &Mat, width: u32, height: u32) -> Vec<Vec<[f64; 2]>> {
-    contours
-        .iter()
-        .map(|c| c.iter().map(|p| window(*p, m, width, height)).collect())
-        .collect()
-}
-
-/// A device position (already transformed) through the NDC conversion and
-/// viewport transform.
-pub fn window_device(d: P, _width: u32, _height: u32) -> [f64; 2] {
-    [f64::from(d[0]), f64::from(d[1])]
+/// Maps local points to device coordinates as the vertex shader does
+/// (before the viewport transform, [`Viewport::map`]).
+pub fn to_device(contours: &[Vec<P>], m: &Mat) -> Vec<Vec<P>> {
+    contours.iter().map(|c| c.iter().map(|p| device(*p, m)).collect()).collect()
 }
 
 /// One vertex through the vertex shader: `localToDevice * float4(p, 0, 1)`
-/// as a fused multiply-add chain in `f32`. (The NDC round trip and viewport
-/// transform measured no effect on any reference.)
-pub fn window(p: P, m: &Mat, _width: u32, _height: u32) -> [f64; 2] {
+/// as a fused multiply-add chain in `f32`.
+pub fn device(p: P, m: &Mat) -> P {
     let x = m.sx.mul_add(p[0], m.kx.mul_add(p[1], m.tx));
     let y = m.ky.mul_add(p[0], m.sy.mul_add(p[1], m.ty));
-    [f64::from(x), f64::from(y)]
+    [x, y]
+}
+
+/// The render pass's viewport transform. A device position leaves the
+/// vertex shader in normalized device coordinates and the rasterizer maps it
+/// back to window coordinates before snapping it to the subpixel grid; the
+/// round trip moves vertices by a few `f32` ulps, which decides MSAA samples
+/// that lie that close to a tessellated edge.
+///
+/// The model is empirical (docs/engine/vector.md, "Viewport round trip"):
+/// `ndc = (x − w/2) / (w/2)` and `window = ndc · w/2 + w/2`, each step
+/// rounded to `f32`, over the target's own dimensions. Of the twenty
+/// evaluation orders tried, each over exact and approx-fit attachment sizes,
+/// it is the one that reproduces the single flipped MSAA samples at the
+/// corners of radius-24 rounded rectangles: it was chosen on two canvas
+/// sizes (108 × 108, 138 × 148), then predicted four sizes captured after it
+/// (98 × 178, 208 × 128, 264 × 264, 341 × 219) and kept 68 × 68 exact, and it
+/// changes no other captured case.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Viewport {
+    /// The viewport of a pass over a `width × height` target.
+    pub fn of(width: u32, height: u32) -> Self {
+        Self {
+            width: width as f32,
+            height: height as f32,
+        }
+    }
+
+    /// A device position to window coordinates.
+    #[inline]
+    pub fn map(&self, d: P) -> P {
+        let (hw, hh) = (self.width * 0.5, self.height * 0.5);
+        let nx = (d[0] - hw) / hw;
+        let ny = (d[1] - hh) / hh;
+        [nx * hw + hw, ny * hh + hh]
+    }
+
+    /// Device polygons to window coordinates.
+    pub fn map_polygons(&self, polys: &[Vec<P>]) -> Vec<Vec<[f64; 2]>> {
+        polys
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|p| {
+                        let w = self.map(*p);
+                        [f64::from(w[0]), f64::from(w[1])]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Device triangles to window coordinates.
+    pub fn map_triangles(&self, tris: &[[P; 3]]) -> Vec<[P; 3]> {
+        tris.iter().map(|t| [self.map(t[0]), self.map(t[1]), self.map(t[2])]).collect()
+    }
 }
 
 /// The points of a patch at its resolve level, `T = j / 2^level` for
@@ -443,13 +494,11 @@ fn contour_midpoint(path: &SkPath) -> P {
 /// The triangles of `PathWedgeTessellator` patches for a convex path, in
 /// window coordinates: per patch the fan triangle `(fan, p0, p3)` and the
 /// middle-out triangles `(T(i-1), T(i), T(i+1))` of every level up to the
-/// patch's resolve level (the demoted higher levels are degenerate).
-pub fn convex_wedge_triangles(path: &SkPath, m: &Mat, width: u32, height: u32) -> Vec<[P; 3]> {
+/// patch's resolve level (the demoted higher levels are degenerate), in
+/// device coordinates.
+pub fn convex_wedge_triangles(path: &SkPath, m: &Mat) -> Vec<[P; 3]> {
     let vx = Vx::of(m);
-    let dev = |p: P| {
-        let w = window(p, m, width, height);
-        [w[0] as f32, w[1] as f32]
-    };
+    let dev = |p: P| device(p, m);
     let fan = dev(contour_midpoint(path));
     let mut tris = Vec::new();
     let mut patches = Vec::new();
@@ -499,4 +548,36 @@ pub fn convex_wedge_triangles(path: &SkPath, m: &Mat, width: u32, height: u32) -
     }
     close(start, last, &mut tris);
     tris
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::Viewport;
+
+    #[test]
+    fn grid_positions_survive_the_round_trip() {
+        let v = Viewport::of(108, 68);
+        for x in [0.0f32, 0.5, 13.25, 54.0, 107.75] {
+            for y in [0.0f32, 0.125, 33.5, 67.0] {
+                assert_eq!(v.map([x, y]), [x, y]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_round_trip_moves_a_vertex_by_ulps_at_most() {
+        // The error is bounded by the viewport's scale: a few ulps of w/2.
+        let v = Viewport::of(138, 148);
+        let bound = [4.0 * f32::EPSILON * 69.0, 4.0 * f32::EPSILON * 74.0];
+        let mut moved = 0;
+        for i in 0..10_000u32 {
+            let p = [i as f32 * 0.013_717_3, i as f32 * 0.014_211_9];
+            let q = v.map(p);
+            for k in 0..2 {
+                assert!((q[k] - p[k]).abs() <= bound[k], "{p:?} -> {q:?}");
+                moved += usize::from(q[k] != p[k]);
+            }
+        }
+        assert!(moved > 0, "the round trip is not the identity");
+    }
 }
