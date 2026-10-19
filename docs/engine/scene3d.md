@@ -215,27 +215,38 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 
 ## Gaps
 
-- Imported glTF scenes draw (docs/engine/gltf.md); recipe parts (model
-  groups) draw since Phase 3c (last section). Blender surfaces and Studio
-  Cube belong to other lanes.
-- Third-party mesh layers render natively only with a definition
-  snapshot; the static check routes them until the definition snapshot lane
-  delivers them (the built-in OBJ model layer needs none).
-- (Done in Phase 3c, see the last section.) 3D picks and bounds came from
-  the host's three.js runtime; pm-eval answers them now.
-- Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` draw
-  since the compositing and motion closure merged (wave 5): 35 of 35 `3d/`
-  corpus frames compare, none skipped (2026-10-19).
-- (Done in Phase 3c round 2.) Texture maps with transparency and maps of
-  every level 1 still class draw; SVG maps stay listed until Chromium's
-  SVG raster reaches the engine (the svgcompat lane's decision S1).
+Current as of Phase 3c round 6 (2026-10-19); the round sections below are
+history.
+
+- Nothing about a 3D layer routes. `Feature::Scene3d` no longer exists:
+  imported models draw or are today's missing-model box (`gltf.md`,
+  "Acceptance"), a scene the schema refuses draws as today (below,
+  "Corrupted scenes"), and a material map's still has the level 1 image
+  layer's verdict, feature for feature (`threed_maps.rs`). What an image
+  layer of the same still reports is the stills lane's to close.
+- glTF files with a node two nodes list as a child load today and are the
+  missing-model box here (`gltf.md`, "Acceptance").
+- `parseScene` validates far more than unknown primitives and light types
+  (ranges, lengths, strict keys, mesh sources). A composition or legacy
+  scene that breaks one of those other rules throws today; the engine
+  checks positions and transforms (`pm-eval` `scene3d`) and draws the
+  rest. Projects saved by the app always pass the schema, so only
+  hand-edited or foreign documents can differ.
+- Blender snapshots of glTF primitives that WebGL refuses to draw (an
+  index past the last vertex is written as null as today; a vertex
+  attribute shorter than its positions is read as zeros where today reads
+  `undefined`) are not compared against a capture.
 - Scene warnings (`Missing texture`, `Missing model`) are kept in
-  `Scene3d::warnings` but have no channel to the host yet.
+  `Scene3d::warnings` but no channel carries them to
+  `uiState.getShaderMeta().sceneWarnings` with the engine on.
 - 3D output stays 8-bit as today's canvas, renders at the full output size
   for a region of interest, and has no render cache yet (the content key
   is ready for one).
 - Program text differences that three.js's cache makes history-dependent
   (above) are reproduced as fresh programs, not as history.
+- The paired post-D 3D orbit row (pointer to pixel) is unmeasured (round
+  5's attempt ran with the display asleep); it moves to the Phase 3c
+  measurement window.
 
 ## Changes outside the lane
 
@@ -785,3 +796,59 @@ produced, and no performance pass is claimed. Run this same pair with the
 display awake and session unlocked on a quiet machine; compare all three
 percentiles and profile any regression. The r1 values above remain
 historical pre-D results, not measurements of the new chrome.
+
+## Phase 3c round 6: no 3D routing, cancel, and Blender inputs
+
+### Corrupted scenes
+
+`corrupt-scenes.test.ts` pins today's behavior. `compositionScene` runs
+`parseScene` on the assembled scene, so an unknown primitive or light type
+on any 3D layer throws for the whole composition: the compositor's catch
+draws nothing for every object layer and an export fails. A legacy scene
+layer whose `sync` throws, or whose scene is absent, falls through to the
+missing-definition checkerboard. The engine now does the same:
+
+- `SceneBuilder` refuses unknown primitives in composition scenes too (the
+  old empty-geometry rule was wrong); a scene that does not build makes
+  `plan_layer` fail every object layer with a `LayerFailure` (nothing
+  drawn, exports fail), not a routing reason
+  (`scene3d_resources.rs` `unknown_primitives_fail_the_composition_scene_as_today`).
+- A legacy scene or mesh layer that does not build plans
+  `shader_layers::plan::missing_placeholder`, the checkerboard program,
+  at the extension size; `scene3d_document.rs`
+  `the_static_check_looks_inside_legacy_scenes` compares its pixels with
+  a missing-definition extension layer's for an unknown primitive, an
+  unknown light type and an absent scene.
+
+### Material maps
+
+`MapError::Unsupported` and `Error3d::Unsupported` carry the image
+feature (`crate::media::probe_image`'s), not a 3D reason; the static check
+lists it on the 3D layer as `check_media` would on an image layer.
+`map_verdicts_are_the_image_layer_verdicts` checks every still fixture
+(120 drawn, 2 unreadable, 0 unsupported): map and image layer verdicts are
+equal, and every drawn still decodes to the single RGBA8 plane a map
+uploads. The old "texture map image layout" reason is now an internal
+failure with a debug assertion; the 112-class texel test runs every
+compat output through it. Without media, a map's recorded container gets
+`stills::static_format`'s feature, as an image layer's does. The LTC
+table load failure is an internal `Failed`, not a routing reason.
+
+### glTF acceptance
+
+`gltf.md`, "Acceptance": both engine readers now accept exactly the files
+`loadGltf` loads over a 106-file boundary table, except two-parent nodes.
+A refused file is `ModelLookup::Missing` and pm-wasm's `ModelAsset::Missing`
+(the orange box), as today's asset without a scene.
+
+### cancelRender
+
+`cancelBlender` with the engine on cancels the window's Blender worker
+through `bridge().blender.cancel()` again: the worker still runs
+`scene3d.model`'s Regenerate and `.blend` import jobs, and the Model
+Inspector's Cancel relies on it. The native preview is cancelled alongside;
+`EnginePreviewUnavailable` (no native session, route not `engine`) and
+`EnginePreviewCancelled` resolve, as today's cancel always does. Tests:
+`rendering.test.ts` (a pending model job is rejected by the cancel; the
+unavailable cases resolve; other errors still reject) and the app test
+`engine-scene3d-cancel-model.spec.ts` (real Blender, engine on).

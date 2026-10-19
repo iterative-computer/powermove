@@ -159,10 +159,10 @@ repository.
   `pm-geom3d` with the glTF code builds for wasm32-unknown-unknown. Picks
   in wasm (V8) on 7 Khronos models plus a random composition, a new time
   per pick, editor view: p50 2.15 ms, p95 2.27 ms, max 3.73 ms
-  (docs/engine/scene3d.md, "Phase 3c"). A model `pm_geom3d::gltf::load`
-  rejects is a named failure for every 3D question, not the missing box;
-  with "Use New Engine" on it is a visible `EngineFailure` (the engine
-  document is strict), never three.js.
+  (docs/engine/scene3d.md, "Phase 3c"). Since round 6 a model
+  `pm_geom3d::gltf::load` rejects is the missing-model box for every 3D
+  question and draw, as today's asset without a scene (see
+  "Acceptance").
 - Round 3: the 3D cursor's surface point uses the same kernel
   (`Scene::cursor_hit`: `Picker::pick_as_runtime` over a model's meshes
   only, with its points and lines skipped, as `placeCursor`'s
@@ -185,8 +185,10 @@ repository.
 - Nodes outside the default scene, and multiple scenes sharing nodes, are
   not modeled (the default scene is loaded; names of other scenes' nodes do
   not take part in `createUniqueName`).
-- An imported scene over two million vertices routes (today's runtime
-  throws in `sync`).
+- A node two nodes list as a child loads today and is the missing-model
+  box here (see "Acceptance").
+- An imported scene over two million vertices: today's runtime throws in
+  `sync` (not re-checked in round 6).
 - Blender rendering of models is the Blender lane's.
 
 ## Changes outside the lane
@@ -265,3 +267,45 @@ The eight selected OBJ fixtures and six selected glTF models exercise
 the current parity suite; they do not exhaust every valid input. Embedded
 images currently cross the WASM boundary as base64 JSON, adding temporary
 memory use for large models.
+
+## Phase 3c round 6: acceptance
+
+Which files load decides whether a model draws or is the orange
+missing-model box, so the engine's readers must accept exactly the files
+today's importer (`loadGltf`: three.js r180's GLTFLoader plus the import
+budget) loads. `gltf-acceptance.test.ts` builds 53 boundary cases, each as
+`.gltf` (data-URI buffer) and `.glb`, and runs today's `loadGltf` in Node
+against both engine readers in wasm: the importer behind
+`assets.get().object3d` (`importModel`, `pm_geom3d::model_import`) and the
+renderer's and picks' reader (`setModel`, `pm_geom3d::gltf`). 106 files:
+52 load and 54 are refused, identically by all three, and no reader traps.
+
+Round 6 made the readers follow GLTFLoader where they did not:
+
+| Case | Today | Before | Now |
+|---|---|---|---|
+| unknown `buffers[].type` | refuses (`loadBuffer`) | importer loaded | refused |
+| buffer view past its buffer | loads (`ArrayBuffer.slice` clamps) | renderer refused | clamped; an accessor past the shorter view still refuses |
+| matrix of 12, 15 or 17 values | `fromArray`: missing entries NaN; a NaN position makes the bounds NaN (refused); `decompose` ignores the w column | both refused | `fromArray` and three's `decompose` |
+| scene node another node lists | `scene.add` moves it to the scene | renderer refused | moved, as listed (twice: to the end) |
+| node camera out of range | `loadCamera` throws | both loaded | refused |
+| too few inverse bind matrices | entries past the array are NaN | importer refused | NaN entries; bounds refuse if a weighted vertex uses one |
+| a joint index past the skin with a weight other than 0 | `setFromObject` throws (`bones[i]` undefined) | both loaded | refused; a zero weight loads |
+| a vertex attribute or morph target shorter than POSITION, an index past the last vertex | loads; WebGL draws nothing for the primitive | renderer refused | loaded, padded for safe reads, `Geometry::undrawable` (not drawn; counted, bounded and picked like three.js, triangles with an index past the end never hit) |
+| sparse index past the accessor | `setX` past the end writes nothing | both refused | skipped |
+| attribute of an unknown accessor type (`VEC5`) | an empty attribute | both refused | absent (POSITION still refuses) |
+| unknown required extension | warns and loads | importer refused | loads |
+| Draco or a missing material/light | throws | importer loaded | refused |
+| animation channel without a node | skipped | importer refused (typed schema) | skipped |
+
+The importer no longer parses with the `gltf` crate's typed schema; it
+reads the raw JSON through the renderer reader's container, and its
+acceptance is `pm_geom3d::gltf::load`'s (`scene::import` calls it first),
+so `object3d` exists exactly when the engine draws the model.
+
+**Known gap: two-parent nodes.** GLTFLoader attaches a node two parents
+list to whichever parent's `loadNode` promise settles last. That depends
+on promise depth and on asynchronous image decoding, so it is not a
+static function of the file, and both readers refuse such a file (the
+missing-model box). `gltf-acceptance.test.ts` pins the divergence in a
+separate test so it is noticed when it changes.
