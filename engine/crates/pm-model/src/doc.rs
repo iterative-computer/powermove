@@ -119,6 +119,13 @@ impl Node {
         Node { rev, kind }
     }
 
+    /// Parses JSON text straight into a tree at revision `rev`: the same
+    /// tree as `Node::from_value(parse_bytes(bytes)?, rev)` without building
+    /// the intermediate `Value` (for a large document, its memory again).
+    pub fn parse_bytes(bytes: &[u8], rev: u64) -> Result<Node, crate::json::ParseError> {
+        crate::json::parse_bytes_with(bytes, &mut NodeBuilder { rev })
+    }
+
     /// The revision at which this subtree last changed.
     pub fn rev(&self) -> u64 {
         self.rev
@@ -270,6 +277,176 @@ fn same_object(old: &ObjectMap<Node>, new: &Map) -> bool {
 
 fn same_array(old: &[Node], new: &[Value]) -> bool {
     old.len() == new.len() && old.iter().zip(new).all(|(n, v)| same(n, v))
+}
+
+/// Builds [`Node`]s while parsing (`Node::parse_bytes`).
+struct NodeBuilder {
+    rev: u64,
+}
+
+impl crate::json::TreeBuilder for NodeBuilder {
+    type Out = Node;
+    fn null(&mut self) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::Null,
+        }
+    }
+    fn bool(&mut self, b: bool) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::Bool(b),
+        }
+    }
+    fn number(&mut self, n: f64) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::Number(n),
+        }
+    }
+    fn string(&mut self, s: JsString) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::String(s),
+        }
+    }
+    fn array(&mut self, items: Vec<Node>) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::Array(Arc::new(items)),
+        }
+    }
+    fn object(&mut self, members: Vec<(JsString, Node)>) -> Node {
+        Node {
+            rev: self.rev,
+            kind: NodeKind::Object(Arc::new(members.into_iter().collect())),
+        }
+    }
+}
+
+impl Node {
+    /// [`Node::reconcile`] with a parsed tree (every node at `rev`) in place
+    /// of a `Value`: identical results, revisions included.
+    fn reconcile_node(&mut self, new: Node, rev: u64) -> bool {
+        let changed = match (&mut self.kind, new.kind) {
+            (NodeKind::Null, NodeKind::Null) => false,
+            (NodeKind::Bool(a), NodeKind::Bool(b)) => {
+                let changed = *a != b;
+                *a = b;
+                changed
+            }
+            (NodeKind::Number(a), NodeKind::Number(b)) => {
+                let changed = a.to_bits() != b.to_bits();
+                *a = b;
+                changed
+            }
+            (NodeKind::String(a), NodeKind::String(b)) => {
+                let changed = *a != b;
+                *a = b;
+                changed
+            }
+            (NodeKind::Object(old), NodeKind::Object(new)) => {
+                if Arc::get_mut(old).is_none() && same_nodes_object(old, &new) {
+                    false
+                } else {
+                    let new = Arc::try_unwrap(new).unwrap_or_else(|shared| (*shared).clone());
+                    reconcile_object_nodes(Arc::make_mut(old), new, rev)
+                }
+            }
+            (NodeKind::Array(old), NodeKind::Array(new)) => {
+                if Arc::get_mut(old).is_none() && same_nodes_array(old, &new) {
+                    false
+                } else {
+                    let new = Arc::try_unwrap(new).unwrap_or_else(|shared| (*shared).clone());
+                    reconcile_array_nodes(Arc::make_mut(old), new, rev)
+                }
+            }
+            (_, kind) => {
+                *self = Node { rev, kind };
+                return true;
+            }
+        };
+        if changed {
+            self.rev = rev;
+        }
+        changed
+    }
+}
+
+/// Whether two trees hold the same JSON (numbers by bit pattern).
+fn same_nodes(a: &Node, b: &Node) -> bool {
+    match (&a.kind, &b.kind) {
+        (NodeKind::Null, NodeKind::Null) => true,
+        (NodeKind::Bool(x), NodeKind::Bool(y)) => x == y,
+        (NodeKind::Number(x), NodeKind::Number(y)) => x.to_bits() == y.to_bits(),
+        (NodeKind::String(x), NodeKind::String(y)) => x == y,
+        (NodeKind::Object(x), NodeKind::Object(y)) => Arc::ptr_eq(x, y) || same_nodes_object(x, y),
+        (NodeKind::Array(x), NodeKind::Array(y)) => Arc::ptr_eq(x, y) || same_nodes_array(x, y),
+        _ => false,
+    }
+}
+
+fn same_nodes_object(old: &ObjectMap<Node>, new: &ObjectMap<Node>) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new.iter())
+            .all(|((k, n), (key, v))| k == key && same_nodes(n, v))
+}
+
+fn same_nodes_array(old: &[Node], new: &[Node]) -> bool {
+    old.len() == new.len() && old.iter().zip(new).all(|(n, v)| same_nodes(n, v))
+}
+
+fn reconcile_object_nodes(old: &mut ObjectMap<Node>, new: ObjectMap<Node>, rev: u64) -> bool {
+    let before = old.len();
+    old.retain(|key, _| new.contains_key(key.as_bytes()));
+    let mut changed = old.len() != before;
+    for (key, value) in new {
+        match old.get_mut(key.as_bytes()) {
+            Some(node) => changed |= node.reconcile_node(value, rev),
+            None => {
+                old.insert(key, value);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn reconcile_array_nodes(old: &mut Vec<Node>, new: Vec<Node>, rev: u64) -> bool {
+    let mut changed = old.len() != new.len();
+    let mut pool: Vec<Option<Node>> = std::mem::take(old).into_iter().map(Some).collect();
+    let mut by_id: BTreeMap<JsString, VecDeque<usize>> = BTreeMap::new();
+    for (index, node) in pool.iter().enumerate() {
+        if let Some(id) = node.as_ref().and_then(Node::record_id) {
+            by_id.entry(id.clone()).or_default().push_back(index);
+        }
+    }
+    let mut out = Vec::with_capacity(new.len());
+    for (position, value) in new.into_iter().enumerate() {
+        let source = match value.record_id() {
+            Some(id) => by_id.get_mut(id).and_then(VecDeque::pop_front),
+            None => pool
+                .get(position)
+                .and_then(Option::as_ref)
+                .filter(|node| node.record_id().is_none())
+                .map(|_| position),
+        };
+        match source.and_then(|index| pool[index].take().map(|node| (index, node))) {
+            Some((index, mut node)) => {
+                changed |= index != position;
+                changed |= node.reconcile_node(value, rev);
+                out.push(node);
+            }
+            None => {
+                out.push(value);
+                changed = true;
+            }
+        }
+    }
+    *old = out;
+    changed
 }
 
 fn reconcile_object(old: &mut ObjectMap<Node>, new: Map, rev: u64) -> bool {
@@ -502,6 +679,48 @@ impl Document {
             (_, value) => document.root = value.map(|v| Node::from_value(v, revision)),
         }
         document
+    }
+
+    /// [`Document::reconciled`] with a tree parsed at `revision`
+    /// ([`Node::parse_bytes`]): identical results, without a `Value`.
+    pub fn reconciled_node(base: &Document, root: Option<Node>, revision: u64) -> Document {
+        assert!(
+            revision >= base.revision,
+            "revision {revision} must not precede {}",
+            base.revision
+        );
+        let mut document = base.clone();
+        document.revision = revision;
+        match (document.root.as_mut(), root) {
+            (Some(node), Some(new)) => {
+                node.reconcile_node(new, revision);
+            }
+            (_, new) => document.root = new,
+        }
+        document
+    }
+
+    /// [`Document::resync`] with a tree parsed at `revision`.
+    pub fn resync_node(&mut self, root: Option<Node>, revision: u64) -> ApplyOutcome {
+        assert!(
+            revision > self.revision,
+            "revision {revision} must exceed {}",
+            self.revision
+        );
+        self.revision = revision;
+        let changed = match (self.root.as_mut(), root) {
+            (Some(node), Some(new)) => node.reconcile_node(new, revision),
+            (None, Some(new)) => {
+                self.root = Some(new);
+                true
+            }
+            (node, None) => {
+                let had = node.is_some();
+                self.root = None;
+                had
+            }
+        };
+        ApplyOutcome { revision, changed }
     }
 
     /// Replaces the whole document (a resync), reconciling against the current

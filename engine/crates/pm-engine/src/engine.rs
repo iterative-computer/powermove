@@ -1252,9 +1252,11 @@ impl Engine {
         resync: &Resync,
         body: &[u8],
     ) -> Result<(), (ErrorCode, String)> {
-        let value = match resync.encoding {
+        // Parsed straight into the revisioned tree: no intermediate `Value`
+        // (for a 180 MB document, about 1 GB more at the peak).
+        let root = match resync.encoding {
             DocumentEncoding::CanonicalJsonV1 => {
-                pm_model::json::parse_bytes(body).map_err(|e| {
+                pm_model::Node::parse_bytes(body, resync.revision.get()).map_err(|e| {
                     (
                         ErrorCode::InvalidMessage,
                         format!("The resync body is not JSON ({e})."),
@@ -1274,8 +1276,10 @@ impl Engine {
         // session's: main's snapshot session for the window), the new tree
         // shares every unchanged subtree with it instead of doubling.
         let mirror = match self.base_mirror(sid, resync) {
-            Some(base) => pm_model::Document::reconciled(base, Some(value), resync.revision.get()),
-            None => pm_model::Document::new(Some(value), resync.revision.get()),
+            Some(base) => {
+                pm_model::Document::reconciled_node(base, Some(root), resync.revision.get())
+            }
+            None => pm_model::Document::from_root(Some(root), resync.revision.get()),
         };
         let digest = mirror_digest(&mirror);
         if ContentHash(digest) != resync.hash {

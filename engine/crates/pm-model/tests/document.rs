@@ -400,3 +400,92 @@ fn a_resync_reconciled_against_another_mirror_shares_what_did_not_change() {
         hash::canonical_hash(&v(PROJECT))
     );
 }
+
+/// Seeded JSON documents shaped like projects: id-keyed arrays (reordered,
+/// inserted, removed), nested objects, every scalar kind, `-0`, duplicate
+/// keys, and keys whose byte order differs from their UTF-16 order.
+fn xorshift(seed: &mut u64) -> u64 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    *seed
+}
+
+fn random_json(seed: &mut u64, depth: u32) -> String {
+    let pick = xorshift(seed) % if depth == 0 { 6 } else { 9 };
+    match pick {
+        0 => "null".into(),
+        1 => {
+            if xorshift(seed).is_multiple_of(2) {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+        2 => ["0", "-0", "1.5", "1e21", "-3", "0.1"][(xorshift(seed) % 6) as usize].into(),
+        3 => format!("\"s{}\"", xorshift(seed) % 4),
+        4 => "\"\\ud800x\"".into(),
+        5 => "\"é😀\"".into(),
+        6 | 7 => {
+            let n = xorshift(seed) % 5;
+            let ids = xorshift(seed).is_multiple_of(2);
+            let mut items = Vec::new();
+            for i in 0..n {
+                let shift = xorshift(seed) % 3;
+                let inner = random_json(seed, depth - 1);
+                items.push(if ids {
+                    format!("{{\"id\":\"L{}\",\"v\":{inner}}}", (i + shift) % 4)
+                } else {
+                    inner
+                });
+            }
+            format!("[{}]", items.join(","))
+        }
+        _ => {
+            let n = xorshift(seed) % 4;
+            let mut members = Vec::new();
+            for _ in 0..n {
+                let key =
+                    ["a", "b", "id", "\u{ff61}", "\u{1f600}", "a"][(xorshift(seed) % 6) as usize];
+                members.push(format!("\"{key}\":{}", random_json(seed, depth - 1)));
+            }
+            format!("{{{}}}", members.join(","))
+        }
+    }
+}
+
+#[test]
+fn parsing_straight_into_a_tree_and_reconciling_trees_match_the_value_path() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..3000 {
+        let a = format!(
+            "{{\"layers\":{},\"x\":{}}}",
+            random_json(&mut seed, 4),
+            random_json(&mut seed, 3)
+        );
+        let b = format!(
+            "{{\"layers\":{},\"x\":{}}}",
+            random_json(&mut seed, 4),
+            random_json(&mut seed, 3)
+        );
+        // The same tree, revisions included.
+        assert_eq!(
+            Node::parse_bytes(a.as_bytes(), 3).unwrap(),
+            Node::from_value(v(&a), 3),
+            "{a}"
+        );
+        // Reconciling a parsed tree equals reconciling the parsed value.
+        let base = Document::new(Some(v(&a)), 1);
+        let mut by_value = base.clone();
+        by_value.resync(Some(v(&b)), 2);
+        let mut by_node = base.clone();
+        by_node.resync_node(Some(Node::parse_bytes(b.as_bytes(), 2).unwrap()), 2);
+        assert_eq!(by_value, by_node, "{a} -> {b}");
+        let shared_value = Document::reconciled(&base, Some(v(&b)), 2);
+        let shared_node =
+            Document::reconciled_node(&base, Some(Node::parse_bytes(b.as_bytes(), 2).unwrap()), 2);
+        assert_eq!(shared_value, shared_node, "{a} -> {b}");
+        assert_eq!(base, Document::new(Some(v(&a)), 1), "the base is untouched");
+    }
+    assert!(Node::parse_bytes(b"{\"a\":", 1).is_err());
+}

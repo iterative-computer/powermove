@@ -156,8 +156,11 @@ pub extern "C" fn pm_resync(len: usize, rev: f64) -> u32 {
             reply(s, "invalid revision", false);
             return 1;
         };
-        let bytes = input(s, len).to_vec();
-        match s.engine.resync(&bytes, rev) {
+        // Borrowed in place rather than copied: a large document's copy
+        // would stay in wasm memory (which never shrinks) as a peak.
+        let len = len.min(s.input.len());
+        let result = s.engine.resync(&s.input[..len], rev);
+        match result {
             Ok(()) => 0,
             Err(e) => {
                 reply(s, &e, false);

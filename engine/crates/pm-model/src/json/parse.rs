@@ -25,23 +25,78 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// What the parser builds: a [`Value`] tree, or another tree the same
+/// parse can produce directly (the revisioned document, without the
+/// intermediate `Value` a large document would need memory for twice).
+pub trait TreeBuilder {
+    type Out;
+    fn null(&mut self) -> Self::Out;
+    fn bool(&mut self, b: bool) -> Self::Out;
+    fn number(&mut self, n: f64) -> Self::Out;
+    fn string(&mut self, s: JsString) -> Self::Out;
+    fn array(&mut self, items: Vec<Self::Out>) -> Self::Out;
+    /// Members in source order; the last duplicate key wins.
+    fn object(&mut self, members: Vec<(JsString, Self::Out)>) -> Self::Out;
+}
+
+struct ValueBuilder;
+
+impl TreeBuilder for ValueBuilder {
+    type Out = Value;
+    fn null(&mut self) -> Value {
+        Value::Null
+    }
+    fn bool(&mut self, b: bool) -> Value {
+        Value::Bool(b)
+    }
+    fn number(&mut self, n: f64) -> Value {
+        Value::Number(n)
+    }
+    fn string(&mut self, s: JsString) -> Value {
+        Value::String(s)
+    }
+    fn array(&mut self, items: Vec<Value>) -> Value {
+        Value::Array(items)
+    }
+    fn object(&mut self, members: Vec<(JsString, Value)>) -> Value {
+        Value::Object(members.into_iter().collect::<Map>())
+    }
+}
+
 /// Parses JSON text exactly as `JSON.parse` does for a JavaScript string with
 /// the same code points: RFC 8259 grammar, the last duplicate key wins, numbers
 /// are correctly rounded `f64`s (overflow becomes ±Infinity), and `\uXXXX`
 /// escapes may produce lone surrogates.
 pub fn parse(text: &str) -> Result<Value, ParseError> {
+    parse_with(text, &mut ValueBuilder)
+}
+
+/// [`parse`] into the tree `builder` makes.
+pub fn parse_with<B: TreeBuilder>(text: &str, builder: &mut B) -> Result<B::Out, ParseError> {
     let mut parser = Parser {
         bytes: text.as_bytes(),
         pos: 0,
         depth: 0,
     };
     parser.skip_whitespace();
-    let value = parser.value()?;
+    let value = parser.value(builder)?;
     parser.skip_whitespace();
     if parser.pos != parser.bytes.len() {
         return Err(parser.error("unexpected data after JSON value"));
     }
     Ok(value)
+}
+
+/// [`parse_bytes`] into the tree `builder` makes.
+pub fn parse_bytes_with<B: TreeBuilder>(
+    bytes: &[u8],
+    builder: &mut B,
+) -> Result<B::Out, ParseError> {
+    let text = core::str::from_utf8(bytes).map_err(|e| ParseError {
+        offset: e.valid_up_to(),
+        message: "invalid UTF-8",
+    })?;
+    parse_with(text, builder)
 }
 
 /// Parses UTF-8 bytes; invalid sequences fail (use [`parse_file_text`] for
@@ -91,29 +146,31 @@ impl Parser<'_> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn expect_literal(
-        &mut self,
-        literal: &'static [u8],
-        value: Value,
-    ) -> Result<Value, ParseError> {
+    fn expect_literal(&mut self, literal: &'static [u8]) -> Result<(), ParseError> {
         if self.bytes[self.pos..].starts_with(literal) {
             self.pos += literal.len();
-            Ok(value)
+            Ok(())
         } else {
             Err(self.error("unexpected token"))
         }
     }
 
-    fn value(&mut self) -> Result<Value, ParseError> {
+    fn value<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
         match self.peek() {
             None => Err(self.error("unexpected end of JSON input")),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
-            Some(b'"') => Ok(Value::String(self.string()?)),
-            Some(b't') => self.expect_literal(b"true", Value::Bool(true)),
-            Some(b'f') => self.expect_literal(b"false", Value::Bool(false)),
-            Some(b'n') => self.expect_literal(b"null", Value::Null),
-            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(b'{') => self.object(b),
+            Some(b'[') => self.array(b),
+            Some(b'"') => {
+                let s = self.string()?;
+                Ok(b.string(s))
+            }
+            Some(b't') => self.expect_literal(b"true").map(|()| b.bool(true)),
+            Some(b'f') => self.expect_literal(b"false").map(|()| b.bool(false)),
+            Some(b'n') => self.expect_literal(b"null").map(|()| b.null()),
+            Some(b'-' | b'0'..=b'9') => {
+                let n = self.number()?;
+                Ok(b.number(n))
+            }
             Some(_) => Err(self.error("unexpected token")),
         }
     }
@@ -126,17 +183,17 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn object(&mut self) -> Result<Value, ParseError> {
+    fn object<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
         self.enter()?;
         self.pos += 1; // {
         // Members are collected, then sorted once (already sorted in
         // canonical JSON) into a map holding exactly them.
-        let mut members: Vec<(JsString, Value)> = Vec::new();
+        let mut members: Vec<(JsString, B::Out)> = Vec::new();
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(Value::Object(Map::new()));
+            return Ok(b.object(members));
         }
         loop {
             self.skip_whitespace();
@@ -150,7 +207,7 @@ impl Parser<'_> {
             }
             self.pos += 1;
             self.skip_whitespace();
-            let value = self.value()?;
+            let value = self.value(b)?;
             members.push((key, value));
             self.skip_whitespace();
             match self.peek() {
@@ -163,10 +220,10 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        Ok(Value::Object(members.into_iter().collect()))
+        Ok(b.object(members))
     }
 
-    fn array(&mut self) -> Result<Value, ParseError> {
+    fn array<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
         self.enter()?;
         self.pos += 1; // [
         let mut items = Vec::new();
@@ -174,11 +231,11 @@ impl Parser<'_> {
         if self.peek() == Some(b']') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(Value::Array(items));
+            return Ok(b.array(items));
         }
         loop {
             self.skip_whitespace();
-            items.push(self.value()?);
+            items.push(self.value(b)?);
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -190,7 +247,8 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        Ok(Value::Array(items))
+        items.shrink_to_fit();
+        Ok(b.array(items))
     }
 
     fn hex4(&mut self) -> Result<u16, ParseError> {
@@ -281,7 +339,7 @@ impl Parser<'_> {
         }
     }
 
-    fn number(&mut self) -> Result<Value, ParseError> {
+    fn number(&mut self) -> Result<f64, ParseError> {
         let start = self.pos;
         if self.peek() == Some(b'-') {
             self.pos += 1;
@@ -319,7 +377,7 @@ impl Parser<'_> {
         let text = core::str::from_utf8(&self.bytes[start..self.pos]).expect("ASCII");
         // Correctly rounded; out-of-range magnitudes become ±inf or ±0 as in JS.
         let n: f64 = text.parse().map_err(|_| self.error("bad number"))?;
-        Ok(Value::Number(n))
+        Ok(n)
     }
 }
 
