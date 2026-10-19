@@ -55,7 +55,11 @@ test('level 2 corpus draws natively with animated bounds, picks, styles and anch
       expect(result.status.failures).toEqual([]);
       expect(result.fallbacks, `${item.id} geometry stays native`).toEqual([]);
       expect(result.queries).toEqual(expect.arrayContaining(['gl.bounds', 'gl.pick', 'glyphLayout', 'textLayout']));
-      if (item.id !== 'text-level2/stagger' || time > 0) expect(result.picked, `${item.id} pick`).toBe(true);
+      // The selection is the resting text: it never collapses while
+      // animators hide every glyph, so the layer stays pickable.
+      expect(result.picked, `${item.id} pick at ${time}`).toBe(true);
+      expect(result.bounds.x1 - result.bounds.x0, `${item.id} width at ${time}`).toBeGreaterThan(1);
+      expect(result.bounds.y1 - result.bounds.y0, `${item.id} height at ${time}`).toBeGreaterThan(1);
       expect(Object.values(result.bounds).every(v => typeof v !== 'number' || Number.isFinite(v))).toBe(true);
       captures.push(result.shot);
     }
@@ -64,5 +68,45 @@ test('level 2 corpus draws natively with animated bounds, picks, styles and anch
     }
     await expectEngineDrewText(session);
   }
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('Pan Behind on font-anchored level 2 text keeps the resting text in place while animators move it', async ({ session }) => {
+  test.setTimeout(60_000);
+  await session.openEditor();
+  const result = await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Level 2 anchor', w: 640, h: 360, dur: 3 });
+    const layer = PM.mkLayer('text', { name: 'Anchored', d: { text: 'Motion type', font: 'Georgia', weight: 400, size: 40, color: '#FFFFFF',
+      animators: [{ id: 'anim', mode: 'range', unit: 'characters', shape: 'square',
+        p: { x: PM.P(72), y: PM.P(24), start: PM.P(0), end: PM.P(100) } }] },
+      p: { 'position.x': 100, 'position.y': 80 } }, project);
+    layer.compat = 2;
+    project.layers = [layer];
+    PM.replaceProject(project); PM.touch(); PM.setTime(.75, { force: true });
+    const apply = (command: any) => {
+      const edit = PM.Edit.apply({ target: layer.id, preserveHandEdits: false, ...command });
+      if (!edit.ok) throw new Error(JSON.stringify(edit));
+    };
+    // A typography edit records the font anchor bounds.
+    apply({ type: 'set_property', path: 'c.size', value: 48 });
+    const api = PM.EngineDoc.api;
+    const before = { ...api.bounds(layer, .75) };
+    const fallbacks = { ...PM.EngineDoc.stats().native.fallbacks };
+    apply({ type: 'set_property', path: 'anchor.x', value: 30, time: .75 });
+    apply({ type: 'set_property', path: 'anchor.y', value: 10, time: .75 });
+    const after = { ...api.bounds(layer, .75) };
+    const native = PM.EngineDoc.stats().native;
+    return { recorded: !!layer.d.fontAnchorBounds, before, after,
+      fallbacks: Object.entries(native.fallbacks).filter(([key, count]) => Number(count) > Number(fallbacks[key] || 0)),
+      route: PM.EngineConnection.status().route };
+  });
+  expect(result.recorded).toBe(true);
+  expect(result.route).toBe('engine');
+  expect(result.fallbacks, 'anchor edits stay native').toEqual([]);
+  for (const key of ['x0', 'y0', 'x1', 'y1'] as const) {
+    expect(Math.abs(result.after[key] - result.before[key]), `${key}: ${JSON.stringify(result)}`).toBeLessThan(0.01);
+  }
+  await expectEngineDrewText(session);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
