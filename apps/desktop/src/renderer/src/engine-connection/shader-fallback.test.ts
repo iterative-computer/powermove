@@ -491,6 +491,16 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     expect(state.draws).toHaveLength(0);
   });
 
+  it('uses a blocking GPU barrier for a sync snapshot, whose fence cannot signal in the same JavaScript task', () => {
+    const { canvas } = fakeGl([], () => { throw new Error('same-task fence polling would spin'); });
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let barriers = 0;
+    gl['finish'] = () => { barriers++; };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    expect(runner.renderSync(request(2, 1, '8a'.repeat(32)))).toMatchObject({ width: 2 });
+    expect(barriers).toBe(1);
+  });
+
   it('keeps the watchdog: a draw past its deadline loses the context and the program is never run again', () => {
     let clock = 0;
     // The fence never signals; the clock moves each poll.

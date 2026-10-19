@@ -41,10 +41,34 @@ test('fallback PBO frames are bit exact across concurrent draws and synchronous 
           }
         }
       }
+      // The integrated defs runner: sampled inputs, chain feedback, three
+      // passes, uniform changes, and a snapshot while pass fences yield.
+      const sampled = '#version 300 es\nprecision highp float; uniform sampler2D a; uniform sampler2D b; uniform vec2 size; uniform float t; out vec4 color; void main(){vec2 uv=gl_FragCoord.xy/size; color=mix(texture(a,uv),texture(b,uv),t);}';
+      for (const [width,height] of [[64,36],[1920,1080]]) {
+        const input = new Uint16Array(width*height*4), backdrop = new Uint16Array(input.length);
+        for(let j=0;j<input.length;j++){input[j]=j%11 ? 0x3c00 : 0x3800;backdrop[j]=j%7 ? 0x3400 : 0;}
+        const requests = Array.from({length:4},(_,i)=>({...request(i,width,height),fragment:sampled,textures:2,
+          units:[{unit:0,texture:0,chain:true},{unit:2,texture:1,chain:false}],
+          calls:[{fn:'1i',name:'a',v:[0]},{fn:'1i',name:'b',v:[2]},{fn:'2f',name:'size',v:[width,height]},{fn:'1f',name:'t',v:[i/7]}],
+          morePasses:[[{fn:'1f',name:'t',v:[.25]}],[{fn:'1f',name:'t',v:[.75]}]]}));
+        const references = requests.map(r=>runner.renderSync(r,[input,backdrop]));
+        const running = requests.map(r=>runner.render(r,[new Uint16Array(input),new Uint16Array(backdrop)]));
+        await new Promise(r=>setTimeout(r,1));
+        runner.renderSync(request(88,117,63));
+        const actual = await Promise.all(running);
+        for(let i=0;i<actual.length;i++) for(let j=0;j<actual[i].rgba16f.length;j++) {
+          compared++; if(actual[i].rgba16f[j]!==references[i].rgba16f[j]) differing++;
+        }
+        // Reusing a caller buffer after completion must upload changed pixels.
+        input.fill(0x3000);
+        const changed = runner.renderSync(requests[0],[input,backdrop]);
+        const changedAsync = await runner.render(requests[0],[input,backdrop]);
+        for(let j=0;j<changed.rgba16f.length;j++){compared++;if(changed.rgba16f[j]!==changedAsync.rgba16f[j]) differing++;}
+      }
       runner.dispose();
       return { differing, compared };
     });
-    expect(result.compared).toBeGreaterThan(60_000_000);
+    expect(result.compared).toBeGreaterThan(100_000_000);
     expect(result.differing).toBe(0);
     expect(app.diagnostics.pageErrors).toEqual([]);
   } finally { await app.close(); }

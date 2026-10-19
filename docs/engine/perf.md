@@ -851,7 +851,7 @@ new probes. These are measurement entry points, not completed gate results.
 
 The perf3 attempt produced no valid final paired rows: the cadence run locked
 mid-pair, drag/pan/orbit were skipped by the display guard, and typing remains
-unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only;
-export throughput and animated fallback playback still need the integrated defs
-runner's paired measurements. A 135 ms SVG scale edit was observed in an
-unpaired locked-session correctness run and is not a speed pass.
+unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only.
+The defs runner is now integrated, but export throughput and animated fallback
+playback still need its paired measurements. A 135 ms SVG scale edit was
+observed in an unpaired locked-session correctness run and is not a speed pass.

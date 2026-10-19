@@ -456,7 +456,11 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 ## Perf3: bounded asynchronous runner readback (2026-10-19)
 
 `ShaderFallbackRunner` retains its RGBA16F framebuffer at an unchanged size.
-Its asynchronous path serializes GL submission and allows at most three
+Unchanged input pixels reuse their uploaded textures after an exact byte
+comparison against an owned snapshot; an in-place change always uploads again.
+The combined texture/CPU snapshot cache is bounded to 128 MiB and 12 entries
+when idle; suspended draws lease their resources so snapshots cannot overwrite
+them. Its asynchronous path serializes GL submission and allows at most three
 pixel-pack buffers to wait for GPU fences, yielding to the browser between
 polls. A synchronous compatibility snapshot may draw between those submissions:
 each PBO already owns its read command and is copied from its own buffer after
@@ -468,7 +472,7 @@ RGBA16F is read as binary16 when the implementation exposes that read pair;
 the float path converts the input view's bits without per-component allocation.
 The conversion test covers every finite binary16 value, signed zero, subnormals
 and a nonzero source byte offset. The real Electron/WebGL regression compares
-more than 60 million components from concurrent requests against the blocking
+more than 100 million components from concurrent requests against the blocking
 path, with size changes and an interleaved synchronous snapshot: zero differing
 components (`e2e/shader-fallback-readback.spec.ts`, 2026-10-19, under the Electron
 lock). This is a correctness pass, not a paired export-throughput pass.
@@ -480,3 +484,12 @@ GL submission is serialized; up to three PBO reads can finish independently.
 Per-pass fence polling yields for 1 ms rather than a whole 16 ms interval.
 The 60-frame HD export and animated-effect viewer rows remain unmeasured;
 no faster-than-today claim follows from the PBO regression.
+
+The integrated real-WebGL test also exposed a synchronous snapshot defect:
+spinning on `clientWaitSync` in the same JavaScript task never observes its
+new fence in Chromium and incorrectly disables an ordinary shader after ten
+seconds. The calling-thread path now uses `gl.finish()` as its blocking GPU
+barrier and checks elapsed time and context loss afterward. Chromium's GPU
+watchdog bounds a hung synchronous draw at the same ten-second default; async
+passes keep their yielding per-pass fences and the runner's deadline. A scripted
+regression verifies that synchronous snapshots do not poll a same-task fence.

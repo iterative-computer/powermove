@@ -118,6 +118,7 @@ const POLL_MS = 16;
 export { toHalf, toHalfArray } from './half-float';
 import { toHalfArray } from './half-float';
 import { FallbackReadback } from './fallback-readback';
+import { FallbackSurfaces, type SurfaceLease } from './fallback-surfaces';
 
 /** Replays the compositor's uniform calls. A call of the wrong type raises a GL error and changes nothing, as in the compositor. A parameter goes to its positional alias when the named uniform is not active (`setParam`). */
 export function applyCalls(gl: GL, locate: (name: string) => WebGLUniformLocation | null, calls: FallbackCall[]): void {
@@ -152,6 +153,7 @@ export class ShaderFallbackRunner {
   private disposed = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readback: FallbackReadback | null = null;
+  private surfaces: FallbackSurfaces | null = null;
 
   constructor(private readonly options: RunnerOptions = {}) {}
 
@@ -232,8 +234,11 @@ export class ShaderFallbackRunner {
     }
   }
 
-  /** `finished` on the calling thread: the fence is polled without
-   *  yielding, within the same draw deadline. */
+  /** Calling-thread snapshots cannot yield. WebGL fence status is not
+   * observable until the event loop advances, so busy polling it always
+   * times out in Chromium. finish() is the blocking GPU barrier here;
+   * Chromium's 10 s GPU watchdog bounds a hung draw, and the same elapsed
+   * deadline and context-loss policy apply after the barrier returns. */
   private finishedSync(gl: GL, id: string, request: ShaderFallbackRequest): void {
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (!sync) return;
@@ -241,6 +246,21 @@ export class ShaderFallbackRunner {
     const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
     const deadline = this.now() + ms;
     try {
+      if (typeof gl.finish === 'function') {
+        gl.finish();
+        if (this.now() > deadline) {
+          const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
+          gl.getExtension('WEBGL_lose_context')?.loseContext();
+          this.lost = true;
+          throw error;
+        }
+        if (this.lost || gl.isContextLost()) {
+          this.lost = true;
+          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+        }
+        return;
+      }
+      // Minimal scripted GL doubles expose only fence polling.
       for (;;) {
         const status = gl.clientWaitSync(sync, 0, 0);
         if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
@@ -264,6 +284,8 @@ export class ShaderFallbackRunner {
     this.disposed = true;
     this.readback?.dispose();
     this.readback = null;
+    this.surfaces?.dispose();
+    this.surfaces = null;
     const gl = this.gl;
     if (gl && !gl.isContextLost()) {
       for (const p of this.programs.values()) gl.deleteProgram(p.program);
@@ -282,6 +304,8 @@ export class ShaderFallbackRunner {
     if (this.gl && !this.lost && !this.gl.isContextLost()) return this.gl;
     this.readback?.dispose();
     this.readback = null;
+    this.surfaces?.dispose();
+    this.surfaces = null;
     this.programs.clear();
     this.compiling.clear();
     this.lost = false;
@@ -297,6 +321,7 @@ export class ShaderFallbackRunner {
     gl.disable(gl.DEPTH_TEST);
     this.canvas = canvas;
     this.gl = gl;
+    this.surfaces = new FallbackSurfaces(gl);
     return gl;
   }
 
@@ -467,32 +492,23 @@ export class ShaderFallbackRunner {
    */
   private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: Uint16Array[], readback: FallbackReadback | null = null): Generator<void, ShaderFallbackPixels | Promise<ShaderFallbackPixels>, void> {
     const { width, height } = request;
-    const created: WebGLTexture[] = [];
+    const surfaces = this.surfaces!;
+    const leases: SurfaceLease[] = [];
     const framebuffers: WebGLFramebuffer[] = [];
-    const texture = (data: Uint16Array | null): WebGLTexture => {
-      const t = gl.createTexture()!;
-      created.push(t);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, data);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.bindTexture(gl.TEXTURE_2D, null);
-      return t;
-    };
     try {
-      const inputs = textures.map((t) => texture(t));
+      const inputs = textures.map(pixels => {
+        const input = surfaces.input(width, height, pixels);
+        leases.push(input);
+        return input.texture;
+      });
       const passes = [request.calls, ...(request.morePasses ?? [])];
       let previous: WebGLTexture | null = null;
       for (let pass = 0; pass < passes.length; pass++) {
-        const target = texture(null);
-        const framebuffer = gl.createFramebuffer()!;
+        const output = surfaces.target(width, height);
+        leases.push(output);
+        const target = output.texture, framebuffer = output.framebuffer!;
         framebuffers.push(framebuffer);
         gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
         gl.viewport(0, 0, width, height);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
@@ -548,9 +564,8 @@ export class ShaderFallbackRunner {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         for (let unit = 0; unit < 16; unit++) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, null); }
         gl.activeTexture(gl.TEXTURE0);
-        for (const f of framebuffers) gl.deleteFramebuffer(f);
-        for (const t of created) gl.deleteTexture(t);
       }
+      for (const lease of leases) lease.release();
     }
   }
 }
