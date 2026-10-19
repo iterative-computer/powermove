@@ -1273,6 +1273,11 @@ fn sk_qsort<T: Copy>(v: &mut [T], less: impl Fn(&T, &T) -> bool) {
 // ---------------------------------------------------------------------------
 // Blitters.
 
+/// `SK_ColorBLACK` premultiplied: the paint for which `SkBlitter::Choose`
+/// selects `SkARGB32_Black_Blitter` (`paint.getColor() == SK_ColorBLACK`;
+/// only unpremultiplied (0, 0, 0, 255) premultiplies to this).
+const SK_PM_BLACK: [u32; 4] = [0, 0, 0, 255];
+
 /// The A8 destination with Skia's source-over A8 blitter (paint alpha 255).
 struct Device {
     w: i32,
@@ -1330,14 +1335,28 @@ impl Device {
     fn rgba_index(&self, x: i32, y: i32) -> Option<usize> {
         (x >= 0 && y >= 0 && x < self.w && y < self.h).then_some(((y * self.w + x) * 4) as usize)
     }
-    // SkARGB32_Blitter::blitAntiH2 has a single combined multiply/add,
-    // rather than quantizing the source before SkPMSrcOver.
+    // `blitAntiH2` of the N32 blitter `SkBlitter::Choose` picks for a solid
+    // paint (SkBlitter.cpp:750-756): black, opaque or translucent. The
+    // opaque and translucent forms combine multiply and add before
+    // quantizing (SkFastFourByteInterp, SkBlendARGB32) rather than
+    // quantizing the source before SkPMSrcOver; black adds the raw alpha.
     fn aa_two(&mut self, x: i32, y: i32, aa: u8) {
         let Some(color) = self.color else {
             self.aa(x, y, aa);
             return;
         };
         if let Some(i) = self.rgba_index(x, y) {
+            if color == SK_PM_BLACK {
+                // SkARGB32_Black_Blitter::blitAntiH2
+                // (SkBlitter_ARGB32.cpp:1724-1730):
+                // (a << SK_A32_SHIFT) + SkAlphaMulQ(dst, 256 - a).
+                let scale = 256 - u32::from(aa);
+                for c in 0..4 {
+                    self.data[i + c] = ((u32::from(self.data[i + c]) * scale) >> 8) as u8;
+                }
+                self.data[i + 3] += aa;
+                return;
+            }
             let scale = if color[3] == 255 {
                 u32::from(aa) + (u32::from(aa) >> 7)
             } else {

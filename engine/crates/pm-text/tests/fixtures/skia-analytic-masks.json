@@ -3,7 +3,7 @@
   "configuration": [
     "SK_SUPPORT_LEGACY_CONIC_CHOP",
     "ffp-contract=off",
-    "A8, white antialiased fill"
+    "A8, white antialiased fill; N32 premul layer sets"
   ],
   "cases": [
     {
@@ -36,7 +36,11 @@
         ]
       ],
       "hash": 14468616525135477452,
-      "rgbaHash": 16867512474946633216
+      "rgbaHashes": {
+        "red-blue": 16867512474946633216,
+        "black": 6003647095512705768,
+        "translucent-then-black": 2863110827742514340
+      }
     },
     {
       "id": "convex-quad",
@@ -60,7 +64,11 @@
         ]
       ],
       "hash": 2209242000473708307,
-      "rgbaHash": 8395814781576180564
+      "rgbaHashes": {
+        "red-blue": 8395814781576180564,
+        "black": 7844990026828358733,
+        "translucent-then-black": 18113673003068007274
+      }
     },
     {
       "id": "convex-conic",
@@ -85,7 +93,11 @@
         ]
       ],
       "hash": 18267618157432531679,
-      "rgbaHash": 12478376786235119132
+      "rgbaHashes": {
+        "red-blue": 12478376786235119132,
+        "black": 13778395957590519315,
+        "translucent-then-black": 16657320488491593276
+      }
     },
     {
       "id": "convex-cubic",
@@ -111,7 +123,11 @@
         ]
       ],
       "hash": 412445337874083643,
-      "rgbaHash": 11052858485911622970
+      "rgbaHashes": {
+        "red-blue": 11052858485911622970,
+        "black": 17554286639231815415,
+        "translucent-then-black": 14853201074740006190
+      }
     },
     {
       "id": "concave-curves",
@@ -144,7 +160,11 @@
         ]
       ],
       "hash": 16873498261326071300,
-      "rgbaHash": 4315762936984740043
+      "rgbaHashes": {
+        "red-blue": 4315762936984740043,
+        "black": 1946530621780470526,
+        "translucent-then-black": 3386798078517187453
+      }
     },
     {
       "id": "convex-large-rle",
@@ -170,7 +190,11 @@
         ]
       ],
       "hash": 4144125683215173399,
-      "rgbaHash": 16366410352939734438
+      "rgbaHashes": {
+        "red-blue": 16366410352939734438,
+        "black": 1307358837457404167,
+        "translucent-then-black": 11217791877683351108
+      }
     },
     {
       "id": "winding-hole",
@@ -214,7 +238,11 @@
         ]
       ],
       "hash": 8597459423598233424,
-      "rgbaHash": 12550286143463500866
+      "rgbaHashes": {
+        "red-blue": 12550286143463500866,
+        "black": 12654939633922782972,
+        "translucent-then-black": 15738302166814027305
+      }
     },
     {
       "id": "tiny-conic",
@@ -239,21 +267,49 @@
         ]
       ],
       "hash": 17355005638571687269,
-      "rgbaHash": 6729905900229024541
+      "rgbaHashes": {
+        "red-blue": 6729905900229024541,
+        "black": 1097864492688856509,
+        "translucent-then-black": 13262529684841119538
+      }
     }
   ],
-  "solidColors": [
-    [
-      230,
-      26,
-      38,
-      255
+  "solidLayers": {
+    "red-blue": [
+      [
+        230,
+        26,
+        38,
+        255
+      ],
+      [
+        26,
+        77,
+        242,
+        128
+      ]
     ],
-    [
-      26,
-      77,
-      242,
-      128
+    "black": [
+      [
+        0,
+        0,
+        0,
+        255
+      ]
+    ],
+    "translucent-then-black": [
+      [
+        26,
+        77,
+        242,
+        128
+      ],
+      [
+        0,
+        0,
+        0,
+        255
+      ]
     ]
-  ]
+  }
 }

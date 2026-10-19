@@ -42,26 +42,41 @@ fn path(case: &Value) -> pm_skia_path::Path {
     p.finish().unwrap()
 }
 
+/// Each layer set draws its colors in order into a cleared N32 premul
+/// bitmap. `SkBlitter::Choose` gives each paint its own blitter (black,
+/// opaque or translucent, SkBlitter.cpp:750-756), so every kind is drawn
+/// over a cleared pixel and over a translucent first layer.
 #[test]
 fn n32_spans_match_skia_152_byte_for_byte() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/skia-analytic-masks.json")).unwrap();
+    let sets = fixture["solidLayers"].as_object().unwrap();
+    assert!(sets.len() >= 3);
     for case in fixture["cases"].as_array().unwrap() {
         let p = path(case);
         let (w, h) = (
             case["width"].as_u64().unwrap() as u32,
             case["height"].as_u64().unwrap() as u32,
         );
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        for color in fixture["solidColors"].as_array().unwrap() {
-            let rgba = std::array::from_fn(|i| color[i].as_u64().unwrap() as f32 / 255.);
-            pm_text::render::skaaa::fill_path_solid(&p, w, h, rgba, &mut pixels);
+        let hashes = case["rgbaHashes"].as_object().unwrap();
+        assert_eq!(hashes.len(), sets.len(), "{}", case["id"]);
+        for (name, colors) in sets {
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            for color in colors.as_array().unwrap() {
+                let rgba = std::array::from_fn(|i| color[i].as_u64().unwrap() as f32 / 255.);
+                pm_text::render::skaaa::fill_path_solid(&p, w, h, rgba, &mut pixels);
+            }
+            let hash = pixels
+                .into_iter()
+                .fold(14_695_981_039_346_656_037u64, |h, v| {
+                    (h ^ u64::from(v)).wrapping_mul(1_099_511_628_211)
+                });
+            assert_eq!(
+                hash,
+                hashes[name].as_u64().unwrap(),
+                "{} {name}",
+                case["id"]
+            );
         }
-        let hash = pixels
-            .into_iter()
-            .fold(14_695_981_039_346_656_037u64, |h, v| {
-                (h ^ u64::from(v)).wrapping_mul(1_099_511_628_211)
-            });
-        assert_eq!(hash, case["rgbaHash"].as_u64().unwrap(), "{}", case["id"]);
     }
 }

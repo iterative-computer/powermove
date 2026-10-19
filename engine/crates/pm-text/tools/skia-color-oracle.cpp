@@ -1,7 +1,9 @@
 // N32 solid-span reference generator for tests/analytic_masks.rs.
 // Pinned Skia/configuration are in fixtures/skia-analytic-masks.json.
 // Input: width height left top, then M/L/Q/K/C/Z paths, each followed
-// by D red green blue alpha. Output: premultiplied RGBA8.
+// by D red green blue alpha (D consumes the path, so each layer repeats
+// it). Output: premultiplied RGBA8. skia-color-oracle-hashes.py writes
+// the fixture's solidLayers/rgbaHashes from it.
 #include "include/core/SkBitmap.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPathBuilder.h"
