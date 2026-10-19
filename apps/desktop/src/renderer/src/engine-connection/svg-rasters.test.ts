@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SvgRasterRequest } from '../../../shared/engine-protocol';
-import { MAX_SVG_BAND_BYTES, SvgRasterCanvas, SvgRasters, sha256Hex, type SvgAsset } from './svg-rasters';
+import { MAX_SVG_BAND_BYTES, SvgRasterCanvas, SvgRasters, sha256Hex, sha256HexSync, type SvgAsset } from './svg-rasters';
 
 const text = new TextEncoder();
 const svgA = text.encode('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"/>');
@@ -30,6 +30,10 @@ async function setup() {
     assets: () => assets.values(),
     bytes: async (asset) => {
       reads.push(asset.url!);
+      return (asset as { bytes: Uint8Array }).bytes;
+    },
+    bytesSync: (asset) => {
+      reads.push(`sync ${asset.url!}`);
       return (asset as { bytes: Uint8Array }).bytes;
     },
     canvas: { draw } as unknown as SvgRasterCanvas
@@ -88,12 +92,31 @@ describe('SvgRasters', () => {
     expect(posted.at(-1)).toMatchObject({ compat: 'svgFailed', reason: 'size' });
   });
 
-  it('draws on the calling thread only with a hash it already has', async () => {
-    const { rasters, assets, contentA } = await setup();
-    expect(() => rasters.drawSync(request(contentA))).toThrow(/not hashed yet/);
+  it('draws on the calling thread with the hash taken ahead, or taken there', async () => {
+    const { rasters, assets, reads, contentA, contentB } = await setup();
     rasters.prime();
     await rasters.content(assets.get('a1')!);
     expect(rasters.drawSync(request(contentA)).byteLength).toBe(32);
+    expect(reads).toEqual(['blob:a1']);
+    // Replaced in the same task as the snapshot: hashed on this thread,
+    // once, and still never drawn under another content.
+    assets.set('a1', { el: {} as CanvasImageSource, url: 'blob:a1-2', format: 'svg', kind: 'image', bytes: svgB });
+    expect(() => rasters.drawSync(request(contentA))).toThrow(/is not the engine's/);
+    expect(rasters.drawSync(request(contentB)).byteLength).toBe(32);
+    expect(reads).toEqual(['blob:a1', 'sync blob:a1-2']);
+    expect(rasters.stats.hashedSync).toBe(1);
+    expect(await rasters.content(assets.get('a1')!)).toBe(contentB);
+    expect(reads).toHaveLength(2);
+  });
+
+  it('hashes on the calling thread exactly as crypto.subtle does', async () => {
+    const lengths = [0, 1, 3, 55, 56, 63, 64, 65, 119, 120, 128, 1000, 70_001];
+    let seed = 7;
+    for (const length of lengths) {
+      const bytes = new Uint8Array(length).map(() => (seed = (seed * 1103515245 + 12345) >>> 0) >>> 24);
+      expect(sha256HexSync(bytes)).toBe(await sha256Hex(bytes));
+    }
+    expect(sha256HexSync(new TextEncoder().encode('abc'))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   });
 
   it('answers the job engine’s export asks with the bucket’s premultiplied pixels', async () => {
