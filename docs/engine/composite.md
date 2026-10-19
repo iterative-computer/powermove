@@ -333,3 +333,34 @@ Recapture the corpus cases with
 - App: `legacy/ui/project-settings.ts` (Color section), `settings/install.ts`,
   `settings/project-color.ts` (new), `shared/project-color.ts` (new),
   `shared/engine-stamp.ts` (project color is native-only), `e2e/project-color.spec.ts`.
+
+## COMPCLOSE-2 follow-up: windowed mask fills
+
+The animated-mask CPU-fill gap above is superseded by a windowed white-fill
+path in `pm_vector::canvas2d::Context`. Tessellation and the viewport transform
+still use the original output canvas, including its f32 round trip. The raster
+window is the resulting device mesh bounds, clipped to the canvas with a one-pixel
+AA/snapping margin. MSAA and analytic samples keep **global** pixel coordinates;
+vertices and fragment interpolation are never translated to the window. White
+fill alpha resolves directly from the sample mask/analytic coverage, avoiding a
+full-canvas multisampled RGBA allocation and resolve.
+
+Polygon fills use exact rational scanline crossing thresholds and fill winding
+spans, rather than comparing every pixel with every edge. Both nonzero and even-odd
+rules retain the original top-left/sample tests. Alpha outside the window is still
+present and transparent in the full-sized item returned to pm-render. The blur's
+save-layer bounds, feather margin, downsample phase, GPU passes and composite
+therefore stay unchanged; cropping the blur source would change pixels.
+
+Verification on the existing captures: every one of the 54 GPU mask canvases is
+bit-exact, including HD, UHD, all feather pass structures, off-canvas paths and
+subtract-only combinations. The composite path-mask corpus and a direct full-canvas
+versus windowed-fill test cover placement, clipping, reflections, analytic and
+polygon/triangle paths at 317×233, 1920×1080 and 3840×2160. The 529-case Canvas2D
+gate retains exactly its previous result: 503 exact, 22 within one, four pre-existing
+pinned cases; no reference, tolerance or exception was changed. Those existing
+pins remain the vector lane's gaps, not accepted differences from this change.
+
+The GPU/item cache and full-sized alpha/blur upload are unchanged. Windowing saves
+CPU fill work; it does not establish that every animated-mask project beats today's
+GPU Canvas2D path. Paired viewer results and remaining limits are recorded in perf.md.

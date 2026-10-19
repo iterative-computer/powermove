@@ -11,7 +11,7 @@
 //! 3-Clause license.
 
 use super::msaa::{SUBPIXEL_BITS, snap};
-use super::skpath::Mat;
+use super::skpath::{Mat, P};
 
 const K_MITER: f32 = 1.0;
 const K_BEVEL: f32 = 0.0;
@@ -709,6 +709,16 @@ pub struct Samples {
 
 /// Rasterizes an instance's mesh.
 pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]]) -> Samples {
+    rasterize_window(inst, width, height, pattern, [0, 0])
+}
+
+/// Device bounds include the analytic mesh's antialiasing outset.
+pub(super) fn device_bounds(inst: &Instance) -> Vec<P> {
+    (0..36).map(|i| vertex(inst, i).pos).collect()
+}
+
+/// Rasterizes a window without moving vertices or fragment interpolation.
+pub(super) fn rasterize_window(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]], origin: [u32; 2]) -> Samples {
     let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
     let n = pattern.len();
     let mut out = Samples {
@@ -728,10 +738,10 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
         if area == 0 {
             continue;
         }
-        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(0);
-        let maxx = p.iter().map(|q| q.0).max().unwrap().div_euclid(one).min(i64::from(width) - 1);
-        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(0);
-        let maxy = p.iter().map(|q| q.1).max().unwrap().div_euclid(one).min(i64::from(height) - 1);
+        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(i64::from(origin[0]));
+        let maxx = p.iter().map(|q| q.0).max().unwrap().div_euclid(one).min(i64::from(origin[0] + width) - 1);
+        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(i64::from(origin[1]));
+        let maxy = p.iter().map(|q| q.1).max().unwrap().div_euclid(one).min(i64::from(origin[1] + height) - 1);
         if maxx < minx || maxy < miny {
             continue;
         }
@@ -746,7 +756,7 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
                 let mut covered = [false; 4];
                 let mut any = false;
                 for (si, s) in pattern.iter().enumerate() {
-                    let idx = (py as u32 * width + px as u32) as usize * n + si;
+                    let idx = ((py as u32 - origin[1]) * width + px as u32 - origin[0]) as usize * n + si;
                     if out.coverage[idx].is_some() {
                         continue;
                     }
@@ -778,7 +788,7 @@ pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]])
                 let c = coverage(&v);
                 for (si, &cov) in covered.iter().enumerate().take(n) {
                     if cov {
-                        out.coverage[(py as u32 * width + px as u32) as usize * n + si] = Some(c);
+                        out.coverage[((py as u32 - origin[1]) * width + px as u32 - origin[0]) as usize * n + si] = Some(c);
                     }
                 }
             }
