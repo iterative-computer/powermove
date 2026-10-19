@@ -345,8 +345,10 @@ pub fn distance_field(image: &[u8], width: usize, height: usize) -> Vec<u8> {
     }
     // Backwards in y (the walk starts one texel before row dh - 2, as
     // Skia's does).
-    let mut curr = dw * (dh - 2) - 1;
-    for _ in 1..dh - 1 {
+    for row in (1..dh - 1).rev() {
+        // Derive each row independently. Skia's pointer walk advances past
+        // the allocation after its final row; a usize must never do that.
+        let mut curr = dw * row - 1;
         for _ in 1..dw - 1 {
             if edges[curr] == 0 {
                 b1(&mut data, curr);
@@ -360,7 +362,6 @@ pub fn distance_field(image: &[u8], width: usize, height: usize) -> Vec<u8> {
             }
             curr -= 1;
         }
-        curr -= dw - 1;
     }
 
     let mut out = Vec::with_capacity((dw - 2) * (dh - 2));
