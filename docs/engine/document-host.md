@@ -706,10 +706,50 @@ failed load, the repeated named notice with Retry, and a command queued
 during a real `retry()` that runs once it is ready. `readiness.test.ts`
 covers the classification and the queue.
 
+### Round 5 review fix: field editing and save after a failed load
+
+Round 4 left the field-editing commands classed as document commands. After
+a failed strict load `documentPending()` stays true, so they were queued, the
+queue rejected, and they never ran, for as long as the load stayed failed
+(not only during the load window, as round 4 stated). The default keymap
+binds Cmd/Ctrl+V to `contextPaste` and Escape to `blurField`, both with
+`inFields: true`. The key listener took the queued `undefined` as handled and
+called `preventDefault`, so Cmd+V in every text field (Settings, the agent
+composer, rename, extension panels through trusted keys) and Escape-to-blur
+stopped working, each press showing the failure notice. The Edit menu's
+Copy/Cut/Paste/Undo/Redo/Select All were blocked the same way, and Cmd+S and
+File > Save could no longer save.
+
+Now `blurField`, the six `context*` Edit commands, `save` and `saveAs` are
+app commands as well. `blurField` only blurs. Each `context*` command runs
+its native field edit (`nativeEdit`) at once when a text field or text
+selection owns it, exactly as before, and wraps only its document fallback
+(`undo`, `redo`, `cutLayers`, `copyLayers`, `selectAll`, `pasteLayers`, and
+the media paste, which imports into the project) in `runWhenDocumentReady`,
+so that fallback waits for a load in flight and shows the named failure
+after a failed one. Save writes the JavaScript project, which needs no
+module (`EngineDoc.check` returns null until it is ready), so the shortcut
+and menu now save like the toolbar does. An app command id counts only while
+its built-in (`legacy`-owned) definition is active: an extension that
+overrides one of these ids gets the document-command default, since a
+command carries no metadata saying whether it reads the document. A deferred
+command that returns a rejecting promise is now logged rather than left
+unhandled.
+
+Tests: `legacy/__tests__/failed-load-field-keys.test.ts` drives the real key
+listener, built-in commands and default keymap after a failed strict load:
+Cmd+V in a focused input reaches the native paste and Escape blurs it with no
+failure notice; the six Edit-menu items edit the field natively; without a
+field, Cmd+V and Undo do not paste media or layers and show the failure;
+Cmd+S and Save As save; an extension override of `contextPaste` waits. It
+fails on the round 4 code (3 of 4 cases). `electron-shim.test.ts` and
+`readiness.test.ts` cover the menu path and the classification.
+
 Still open: while a document command is queued, the kernel's key listener
-treats the key as handled. So `inFields` and contextual bindings cannot
-decline during the load window (about 80 ms at boot, or the length of a
-Retry).
+treats the key as handled, so an `inFields` or contextual document binding
+cannot decline while a load is in flight or after it failed. The built-in
+field bindings no longer reach that path; an extension's own `inFields`
+binding to a document command still does.
 
 What remains:
 
