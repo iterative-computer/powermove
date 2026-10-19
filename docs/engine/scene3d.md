@@ -613,4 +613,10 @@ orchestrator with the evidence above.
   Chromium through the compatibility upload channel (decision S1), which
   the 2D `SVG images` reason waits on as well. The no-media static check
   still lists `imported models` and map containers conservatively.
-- The 3D orbit row (measured below).
+- The 3D orbit row misses p95 ≤ 33 ms on both paths in r1 (2026-10-19,
+  load average 25 to 68: engine idle p50/p95/p99 28.2/44.9/53.3 ms against
+  today's 25.7/38.5/42.6 ms; under the gate load the engine is
+  26.6/84.9/101.6 ms against today's 26.0/88.2/113.3 ms;
+  `docs/engine/phase3c-measurements/p3c-orbit-*-r1.json`). The r2 rerun was
+  queued behind other lanes' jobs on the Electron lock for over an hour in
+  round 3 and cancelled unrun; it needs a quiet machine before the gate.
