@@ -47,7 +47,11 @@ try {
   for (const until = Date.now() + 120000; !existsSync(path.join(profile, 'mcp/connection.json')) || !appLog.includes('the job engine is ready');) { if (app.exitCode !== null || Date.now() > until) throw new Error(appLog); await delay(100); }
   const current = mcp(start(electron, ['.', '--powermove-mcp'], { cwd: desktop, env: appEnv, stdio: ['pipe', 'pipe', 'pipe'] }));
   await current.initialize();
-  const project = await current.tool('create_project', { name: 'Pinned host parity', width: 239, height: 137, fps: 24, duration: 0.25 });
+  let project;
+  for (const until = Date.now() + 60_000; !project;) {
+    try { project = await current.tool('create_project', { name: 'Pinned host parity', width: 239, height: 137, fps: 24, duration: 0.25 }); }
+    catch (error) { if (!String(error).includes('No Powermove editor is available') || Date.now() >= until) throw error; await delay(200); }
+  }
   const session = await current.tool('start_session', { prompt: 'Probe and export a pinned user program' });
   const stage = path.join(session.stagingDirectory, 'host-parity'); await mkdir(stage, { recursive: true });
   await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ id: 'host-parity', name: 'Host parity', version: '1.0.0', apiVersion: 3, permissions: [], contributes: ['effects', 'panels'] }));

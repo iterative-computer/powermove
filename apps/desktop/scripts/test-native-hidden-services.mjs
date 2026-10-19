@@ -28,7 +28,7 @@ try {
       <key>ProgramArguments</key><array>${[process.execPath, script, '--native'].map(a => `<string>${xml(a)}</string>`).join('')}</array>
       <key>EnvironmentVariables</key><dict>${Object.entries(env).map(([k,v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`).join('')}</dict>
       <key>StandardOutPath</key><string>${xml(output)}</string><key>StandardErrorPath</key><string>${xml(error)}</string>
-      <key>ProcessType</key><string>Background</string></dict></plist>`, { mode: 0o600 });
+      <key>LimitLoadToSessionType</key><string>Background</string><key>ProcessType</key><string>Background</string></dict></plist>`, { mode: 0o600 });
     run('/bin/launchctl', ['bootstrap', domain, plist]); loaded = true;
     const until = Date.now() + 240_000;
     for (;;) {
@@ -50,7 +50,7 @@ try {
     const config = path.join(root, 'sshd_config');
     await writeFile(config, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${root}/host\nPidFile ${root}/pid\nAuthorizedKeysFile ${root}/authorized_keys\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAuthenticationMethods publickey\nAllowUsers ${os.userInfo().username}\nAllowTcpForwarding no\nX11Forwarding no\nPermitTTY no\nPermitTunnel no\nLogLevel ERROR\n`, { mode: 0o600 });
     const sshLog = path.join(root, 'sshd.log');
-    await writeFile(plist, `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>RunAtLoad</key><true/><key>ProgramArguments</key><array><string>/usr/sbin/sshd</string><string>-D</string><string>-e</string><string>-f</string><string>${xml(config)}</string></array><key>StandardErrorPath</key><string>${xml(sshLog)}</string><key>ProcessType</key><string>Background</string></dict></plist>`, { mode: 0o600 });
+    await writeFile(plist, `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>RunAtLoad</key><true/><key>ProgramArguments</key><array><string>/usr/sbin/sshd</string><string>-D</string><string>-e</string><string>-f</string><string>${xml(config)}</string></array><key>StandardErrorPath</key><string>${xml(sshLog)}</string><key>LimitLoadToSessionType</key><string>Background</string><key>ProcessType</key><string>Background</string></dict></plist>`, { mode: 0o600 });
     run('/bin/launchctl', ['bootstrap', domain, plist]); loaded = true;
     await new Promise(resolve => setTimeout(resolve, 500));
     const known = path.join(root, 'known_hosts'); await writeFile(known, `[localhost]:${port} ${hostKey}\n`, { mode: 0o600 });
