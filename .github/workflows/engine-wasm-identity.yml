@@ -15,6 +15,7 @@ on:
       - 'engine/crates/pm-text/**'
       - 'engine/crates/pm-time/**'
       - 'engine/crates/pm-wasm/**'
+      - 'engine/crates/pm-wasm-module/**'
       - '.github/workflows/engine-wasm-identity.yml'
 permissions:
   contents: read

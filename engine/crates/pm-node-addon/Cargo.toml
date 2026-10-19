@@ -1,0 +1,39 @@
+[package]
+name = "pm-node-addon"
+description = "The engine processes' Node-API addon (pm_node.node): a cdylib over pm-node (section 19)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The addon the engine utility processes load, installed as
+# native/pm_node.node by apps/desktop/scripts/build-engine-addon.mjs. It is
+# its own crate because Cargo never passes `-C lto` to a crate whose types
+# are ["cdylib", "rlib"]: a cdylib-only crate gets the release profile's thin
+# LTO, and pm-node stays a plain rlib for its tests, examples and benches
+# (docs/engine/release-build.md).
+[lib]
+crate-type = ["cdylib"]
+# The cdylib links Node's symbols only when Node loads it.
+test = false
+doctest = false
+
+[dependencies]
+pm-node = { path = "../pm-node" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
+pm-media = { path = "../pm-media" }
+
+[features]
+# pm-node's napi glue. Off by default, like pm-node's own feature, so
+# workspace-wide `cargo test` and `clippy` never unify it into pm-node's test
+# binaries (they would need Node's symbols). Without it this dylib has no
+# Node-API exports; the build script warns.
+node = ["pm-node/node"]
+# The C′ prototype (pm-gpu `remote-layer`), measurement builds only.
+remote-layer = ["pm-node/remote-layer"]
+
+[build-dependencies]
+napi-build = "2.6"

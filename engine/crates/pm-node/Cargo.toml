@@ -7,11 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The addon is a cdylib loaded by the engine utility processes. The napi
-# glue is behind the `node` feature so the workspace builds and tests
-# without Node's symbols (they resolve when Node loads the addon).
-[lib]
-crate-type = ["cdylib", "rlib"]
+# The napi glue is behind the `node` feature so the workspace builds and
+# tests without Node's symbols (they resolve when Node loads the addon). The
+# addon itself is the cdylib-only pm-node-addon crate over this rlib, so the
+# release profile's LTO applies to it (docs/engine/release-build.md).
 
 [dependencies]
 pm-engine = { path = "../pm-engine" }
@@ -71,6 +70,3 @@ harness = false
 # The engine's render fonts: the child's host runs on its main thread.
 name = "render_fonts"
 harness = false
-
-[build-dependencies]
-napi-build = "2.6"

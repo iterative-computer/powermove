@@ -66,7 +66,7 @@ pw() { # <name> <env...> -- <playwright args...>
 wait_display() {
   [ -n "${GATE_NO_DISPLAY_WAIT:-}" ] && return 0
   local addon="$OUT/pm_bridge_harness.node"
-  cp "$repo/engine/target/release/libpm_bridge.dylib" "$addon" || return 1
+  cp "$repo/engine/target/release/libpm_bridge_addon.dylib" "$addon" || return 1
   local state
   while :; do
     state="$(node -e "const s=require(process.argv[1]).displayState();process.stdout.write(!s.asleep&&!s.locked?'usable':'asleep '+s.asleep+' locked '+s.locked)" "$addon")"
