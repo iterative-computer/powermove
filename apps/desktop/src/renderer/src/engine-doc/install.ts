@@ -588,18 +588,23 @@ function editorFonts(): FontProvider | null {
     if (r.ok === false) throw new Error(r.error);
     return r.value;
   };
+  // Seeds describe this renderer regardless of how face bytes are served.
+  const seedSource = {
+    ...(typeof bridge.seeds === 'function' ? { seeds: async () => String(unwrapResult(await bridge.seeds())) } : {}),
+    ...(typeof bridge.onSeedsChanged === 'function' ? { onSeedsChanged: (listener: (json: string) => void) => { bridge.onSeedsChanged(listener); } } : {}),
+  };
   if (typeof bridge.answerSync === 'function' && typeof bridge.wholeSync === 'function') return {
     sync: true,
     answer: (queries) => unwrapResult(bridge.answerSync(queries)),
     subset: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
     whole: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
+    ...seedSource,
   };
   return {
     sync: false,
     answer: async (queries: string) => unwrapResult(await bridge.answer(queries)),
     subset: async (blob: string, index: number) => new Uint8Array(unwrapResult(await bridge.subset(blob, index))),
-    ...(typeof bridge.seeds === 'function' ? { seeds: async () => String(unwrapResult(await bridge.seeds())) } : {}),
-    ...(typeof bridge.onSeedsChanged === 'function' ? { onSeedsChanged: (listener: (json: string) => void) => { bridge.onSeedsChanged(listener); } } : {}),
+    ...seedSource,
   };
 }
 
