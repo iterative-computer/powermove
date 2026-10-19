@@ -3762,8 +3762,6 @@ enum BlenderFrames {
     Fail(ErrorCode, String),
 }
 
-/// Snapshot build failures the static check routes for exports
-/// (`pm_export::blender`): the engine cannot build these frames.
 /// Whether a view's route takes transport: the engine runs the clock and
 /// audio for every decided route, drawn or not (amendment 21: nothing hands
 /// playback to the legacy engine). Only an undecided route defers it.
@@ -3771,6 +3769,8 @@ fn takes_transport(route: Option<&Route>) -> bool {
     matches!(route, Some(Route::Engine | Route::Legacy(_)))
 }
 
+/// Snapshot build failures the static check routes for exports
+/// (`pm_export::blender`): the engine cannot build these frames.
 fn blender_routed(why: &str) -> bool {
     matches!(why, "imported models" | "model-group recipe parts")
 }
