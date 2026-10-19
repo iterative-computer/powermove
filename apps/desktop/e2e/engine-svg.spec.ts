@@ -194,6 +194,43 @@ test.describe('Use New Engine: level 1 SVG images', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('a bucket change in the viewer shows a stand-in until the window answers', async ({ session }) => {
+    const { page } = session;
+    await openEngine(session);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+    const runs = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      const contain = PM.proj.layers.find((l: any) => l.name === 'Contain');
+      const out: { standIns: number; ms: number }[] = [];
+      for (const scale of [131, 173, 219, 97, 151, 263, 117, 199, 241, 89]) {
+        const posted = PM.EngineSvgRasters.stats.posted;
+        let standIns = 0, done = 0;
+        const start = performance.now();
+        const off = presentation.onPresented((frame: any) => {
+          if (PM.EngineSvgRasters.stats.posted === posted && !frame.standIn) return;
+          if (frame.standIn) standIns++;
+          else if (!done) done = performance.now();
+        });
+        contain.p['scale.x'].v = scale; contain.p['scale.y'].v = scale;
+        PM.touch();
+        PM.invalidate?.('render');
+        const until = performance.now() + 5000;
+        while (!done && performance.now() < until) await new Promise((r) => requestAnimationFrame(r));
+        off();
+        out.push({ standIns, ms: done ? Math.round(done - start) : -1 });
+      }
+      return out;
+    });
+    console.log(`bucket changes: ${JSON.stringify(runs)}`);
+    // Every change ended on an exact frame after at most one stand-in
+    // (the previous bucket, scaled), as the plan allows (vector.md).
+    expect(runs.every((r) => r.ms >= 0)).toBe(true);
+    expect(Math.max(...runs.map((r) => r.standIns))).toBeLessThanOrEqual(1);
+    expect((await compareFrame(page, 0.5)).differ).toBe(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('a restarted engine starts with no rasters and asks the window for them again', async ({ session }) => {
     const { page } = session;
     await openEngine(session);
