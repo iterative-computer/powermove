@@ -15,8 +15,10 @@
 //! Descriptors go out in submission order (one thread, FIFO). The render
 //! thread drains the completions before anything whose order against them
 //! matters: a timed (playback) frame, a frame request's answer, a pool
-//! change, GPU recovery, and shutdown. At most [`MAX_IN_FLIGHT`] frames
-//! wait on the GPU, so the queue never runs ahead of the display.
+//! change, an `unsupported` report (a frame drawn before the decision must
+//! not reach the viewer after it), GPU recovery, and shutdown. At most
+//! [`MAX_IN_FLIGHT`] frames wait on the GPU, so the queue never runs ahead
+//! of the display.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -75,15 +77,20 @@ pub struct Completer {
 
 impl Completer {
     /// Starts the completion thread. `sink` sends the descriptors; `back`
-    /// reaches the render thread.
-    pub fn start(sink: Sink, back: Sender<Command>) -> Result<Self, String> {
+    /// reaches the render thread. `delay` (tests only) holds each finished
+    /// frame that long before it is sent.
+    pub fn start(
+        sink: Sink,
+        back: Sender<Command>,
+        delay: Option<Duration>,
+    ) -> Result<Self, String> {
         let (tx, rx) = channel::<Pending>();
         let in_flight = Arc::new((Mutex::new(0usize), Condvar::new()));
         let count = in_flight.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-complete",
-            move || run(rx, sink, back, count),
+            move || run(rx, sink, back, count, delay),
         )
         .map_err(|e| format!("could not start the frame completion thread: {e}"))?;
         Ok(Self {
@@ -147,6 +154,7 @@ fn run(
     sink: Sink,
     back: Sender<Command>,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
+    delay: Option<Duration>,
 ) {
     pm_bridge::set_thread_user_interactive();
     for pending in rx {
@@ -164,6 +172,9 @@ fn run(
         let gpu_done = now_us();
         let command = match done {
             Ok(_) => {
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
                 sink(vec![Action::Send { port: key.0, bytes }]);
                 Command::FrameSent {
                     key,

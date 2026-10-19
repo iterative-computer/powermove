@@ -36,7 +36,7 @@ use pm_protocol::codec;
 use pm_protocol::color::WorkingEncoding;
 use pm_protocol::common::{RequestId, Revision, Seq, SessionId, Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::envelope::{Envelope, Event, Message, Response};
-use pm_protocol::error::{EngineError, ErrorCode, ErrorScope, FailureReport, Retry};
+use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, PoolLedger, PreviewResolution,
     Representation, ViewerState,
@@ -282,6 +282,9 @@ pub struct ThreadConfig {
     /// captions layers are drawn natively. `None`: no fonts, those layers
     /// are refused.
     pub fonts: Option<crate::fonts::render::RenderFonts>,
+    /// Tests only ([`super::SEND_DELAY_ENV`]): how long the completion
+    /// thread holds a finished paused frame before sending it.
+    pub send_delay: Option<Duration>,
 }
 
 /// Today's capture error for a Blender composition whose frame was not
@@ -674,7 +677,7 @@ pub fn run(
     let fps = i64::from(config.fps.max(1));
     let peaks = super::peaks::PeakWorker::new(sink.clone());
     // Without the completion thread every frame waits for the GPU here.
-    let completer = match super::complete::Completer::start(sink.clone(), back) {
+    let completer = match super::complete::Completer::start(sink.clone(), back, config.send_delay) {
         Ok(c) => Some(c),
         Err(error) => {
             sink(vec![Action::Log {
@@ -2754,7 +2757,22 @@ impl Thread {
     /// Tells the viewer its composition is drawn by the legacy engine
     /// (capability routing, section 21): a session-scope `unsupported`
     /// failure at the revision decided.
-    fn report_legacy(&self, key: Key, reasons: &[String]) {
+    ///
+    /// Every route to `legacy` reports here: a static reason, a draw that
+    /// failed (`force_legacy` from `RenderError::Unsupported`), and the
+    /// shader fallback runner's failure (also `force_legacy`). Paused
+    /// frames leave from the completion thread once the GPU finishes them,
+    /// so the frames still on the GPU are sent first: no frame the engine
+    /// drew before the decision reaches the viewer after its report. The
+    /// report names the newest frame seq the view was given
+    /// (`ErrorDetail::Unsupported`), so the viewer drops any frame at or
+    /// below it as well.
+    fn report_legacy(&mut self, key: Key, reasons: &[String]) {
+        self.drain_frames();
+        let last_frame = self
+            .views
+            .get(&key)
+            .map_or(0, |view| view.next_seq.saturating_sub(1));
         let revision = self
             .docs
             .get(&key)
@@ -2772,7 +2790,10 @@ impl Thread {
             ErrorCode::Unsupported,
             ErrorScope::Session { session: key.1 },
             message,
-        );
+        )
+        .with_detail(ErrorDetail::Unsupported {
+            last_frame: Seq::new(last_frame).unwrap_or(Seq::ZERO),
+        });
         self.event(
             key,
             Event::Failure(FailureReport { revision, error }),

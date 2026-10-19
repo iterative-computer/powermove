@@ -115,6 +115,16 @@ export const MAX_REVEAL_FRAMES = 30;
 /** Dispatched (bubbling) by a viewer's own presentation on its stage. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
 
+/**
+ * The stage attribute (dataset key `engineSelfPresents`) of a viewer that
+ * presents engine frames by itself, set for as long as it is mounted, so a
+ * `render.gl.init` binding never presents over its canvas, before its own
+ * presentation exists (the engine connection comes up after the viewer
+ * mounts) and after it is gone (the built-in viewer's WebGL canvas outlives
+ * it in the panel skeleton).
+ */
+export const ENGINE_SELF_PRESENTS_ATTRIBUTE = 'data-engine-self-presents';
+
 /** The visible states of an exclusive presentation without a frame to show. */
 export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
@@ -201,11 +211,16 @@ export class ViewerPresentation {
   private host: Window | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
-  /** The newest frame `seq` the channel had delivered when the engine said
-   *  it cannot draw the composition (`routed`): frames up to it, still in
-   *  the presenter, are stale. A frame delivered after the report is a
-   *  later decision even at the same revision (a composition switch: the
-   *  document batch reaches the engine before the viewer state). */
+  /** The frame `seq` at or below which frames are stale since the engine
+   *  said it cannot draw the composition (`routed`): the newest seq the
+   *  engine had given the view when it decided (`message.seq`), and at
+   *  least the newest the channel had delivered (frames still in the
+   *  presenter). A frame above it is a later decision even at the same
+   *  revision (a composition switch: the document batch reaches the engine
+   *  before the viewer state). Arrival order alone does not decide it:
+   *  paused frames leave from the engine's completion thread, so a frame
+   *  drawn before the report can arrive after it with a higher seq than
+   *  any delivered so far. */
   private routedSeq: number | null = null;
   /** The newest frame `seq` the current channel delivered. */
   private deliveredSeq = 0;
@@ -718,7 +733,7 @@ export class ViewerPresentation {
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.
-          this.routedSeq = this.deliveredSeq;
+          this.routedSeq = Math.max(this.deliveredSeq, Number(message.seq) || 0);
           this.latestFrame = null;
           if (this.exclusive) {
             // "Use New Engine" on (amendment 21): nothing else draws it, so

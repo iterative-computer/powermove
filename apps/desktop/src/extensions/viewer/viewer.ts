@@ -21,7 +21,7 @@ export function selectionOutlineColor(project: any): string {
 
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
-import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
+import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
 import { viewParamsFor } from './engine-present/view-params';
 import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 import { GeometryAtRevision } from './engine-present/revision-geometry';
@@ -771,7 +771,7 @@ const commitPendingResize = () => {
      wasted main-thread work, all of it inside live resizes (3.3 s of a
      60 s profiled run with the corpus project). The size waits here and is
      committed once the engine stops presenting. */
-  if (enginePresentation?.presenting) return;
+  if (disposed || enginePresentation?.presenting) return;
   const pending = pendingResize; pendingResize = null;
   if (pending) api.render.gl.resize(pending.width, pending.height, pending.viewport);
 };
@@ -858,6 +858,7 @@ const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
   enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null;
+  ((V._boundStage ?? V.stage) as HTMLElement | null | undefined)?.removeAttribute?.(ENGINE_SELF_PRESENTS_ATTRIBUTE);
   viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
   if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
   activeDrag?.cancel(); activeDrag = null;
@@ -976,6 +977,9 @@ V.attach = (stage: HTMLElement) => {
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
 
+    // This viewer presents engine frames by itself: a render.gl.init
+    // binding must not present over its canvas (canvas-binding.ts).
+    stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
     if (!api.render.gl.canvas) api.render.gl.init(gl);
     unbindStage?.();
     resizeObserver?.disconnect();
@@ -991,7 +995,11 @@ V.attach = (stage: HTMLElement) => {
 V.layout = (panOnly = false, gesture = panOnly === true) => {
   const now = window.performance.now();
   if (gesture) { navigationUntil = now + 250; zoomGestureUntil = now + 100; }
-  if (!V.el || !V.stage) return;
+  // A layout queued before this runtime was disposed (the animation frame
+  // attach schedules) must not size the compositor's canvas afterwards: with
+  // the engine on, that resize would bind engine presentation to a canvas
+  // whose viewer is gone (canvas-binding.ts).
+  if (disposed || !V.el || !V.stage) return;
   const gl = V.el as HTMLCanvasElement;
   const p = api.project.get();
   const r = gesture && stageGeometry ? stageGeometry : V.stage.getBoundingClientRect();

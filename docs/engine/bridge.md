@@ -1493,24 +1493,42 @@ headless e2e prints them (every run this round: `stalls` 0, `slowTurns` at
 most one turn of 50 to 100 ms, the longest 85 ms). The headless spec's
 premise check threw `a viewer is attached` when no engine session existed
 yet before Play (Play opens one, viewerless); it now fails only on a viewer
-service or a session with presentation, and says which. A first-test run of
-a full suite later failed it the other way: no viewer service, but a
-session with presentation (`headless false`). That did not reproduce in 6
-isolated runs; the error now names who presents (the session's last state,
-the `render.gl.init` binding, the engine stages and their canvases). One
-way to get there was a real defect, now fixed: the `render.gl.init`
-binding unbound a detached canvas only at the caller's next
-`render.gl.resize`, so a viewer torn down before its own presentation took
-the stage over (disabled or unmounted early) left the binding's
-presentation holding a presenting session for a stage nobody sees. The
-binding now watches its canvas with a ResizeObserver and unbinds when it
-leaves the document (unit test in `canvas-binding.test.ts`). Whether that
-was the cause of this run is not proven.
+service or a session with presentation, and says which. Three first-test
+runs of a full suite later failed it the other way: no viewer service, but
+a session with presentation. With the error naming who
+presents, the next one showed the `render.gl.init` binding presenting over
+the built-in viewer's `#gl` canvas (connected, the session's first state
+552x311). The path, inferred from that state rather than traced: the
+viewer was mounted and disposed at startup (its extension off), and the
+animation frame its `attach` schedules ran `V.layout` after the dispose
+(only the viewer calls `render.gl.resize`, and layout had no disposed guard), so it committed the
+compositor's pending size through `render.gl.resize`, and the binding, no
+longer seeing the viewer's presentation on the stage, presented over the
+canvas the viewer leaves in the panel skeleton. That is a production defect
+(disabling the viewer, or a viewer runtime replaced at startup, leaves a
+ghost presenter holding the window's session attached), and three fixes
+close it:
 
-**Merged feat/native-engine again (perf2, wave 5)** after this round's
-first measurements, with pm-wasm and the addon rebuilt (protocol
-unchanged, `protocol-2f8d7cab61015d02`); the viewer's version lock entry is
-updated for the merged tree.
+- `V.layout` and `commitPendingResize` return once the runtime is disposed
+  (`viewer-engine.test.ts`: a layout after dispose makes no
+  `render.gl.resize` call; it fails without the guard).
+- The built-in viewer marks its stage `data-engine-self-presents` from
+  `attach` (before `render.gl.init`) until it is disposed, and the binding
+  yields to that as well as to the viewer's presentation, so it never
+  presents over the built-in viewer before its presentation exists either.
+  Old forks that draw through the compositor still get the binding.
+- The binding watches its canvas with a ResizeObserver and unbinds as soon
+  as it leaves the document, instead of at the caller's next resize.
+
+After the three fixes, two full-suite runs passed 28 of 28 each (the
+headless spec first in both).
+
+**Merged feat/native-engine twice more** during the round: perf2 (protocol
+unchanged) and then svgcompat (the protocol build is now
+`protocol-05819931f26a31b9`; the only conflict was install.ts's dispose,
+which keeps both teardowns). pm-wasm and the addon were rebuilt each time,
+and the viewer's version lock entry follows the merged tree (1.2.2,
+unreleased).
 
 **Final run (one lock, after every change).** pm-node: 88 library tests,
 document 4 of 4, snapshot 7 of 7. Vitest (main/engine, preload,
@@ -1521,12 +1539,13 @@ skipped. E2E `native-engine-transport`, `native-engine-tracer`,
 sample over 10 ms, worst 10.1 ms). Then `engine-headless-playback` three
 times: 6 of 6.
 
-After the perf2 merge and the binding fix, the same set again under one
-lock: 28 of 28 (J/K/L 2x reverse worst 7.2 ms, no sample over 10 ms), then
-`engine-headless-playback` three times, 6 of 6. A post-merge run before the
-binding fix had failed two: the headless premise (above) and the J/K/L 2x
-reverse sawtooth (20 samples over 10 ms, 8.6 to 12.6 ms, the documented
-pattern; audio and performance owners).
+After the merges and the viewer fixes, at HEAD: pm-node 94 library tests,
+document 4 of 4, snapshot 9 of 9; vitest 842 passed, 1 skipped;
+svelte-check 0 errors; boundaries ok. The five e2e specs twice: 28 of 28
+and 28 of 28 (J/K/L 2x reverse worst 7.4 and 7.0 ms, no sample over
+10 ms). Earlier in the round, runs failed only on the headless premise
+(above) and once on the J/K/L 2x reverse sawtooth (20 samples over 10 ms,
+8.6 to 12.6 ms, the documented pattern; audio and performance owners).
 
 **The join, for the orchestrator's decision.** Playhead (`PM.time`) error
 while the viewer mounts mid-play, engine against today (flag off), same
@@ -1534,11 +1553,128 @@ invocation: 39.3 against 26.9 ms (the suite), then 36.9 against 25.2, 32.2
 against 24.1, and 32.1 against 34.7 ms (the repeats). After the merge: 36.7
 against 27.0, 32.0 against 23.5, 29.6 against 32.1 (repeats); final lock:
 43.1 against 37.3 ms (the suite), then 28.9 against 24.0, 34.9 against
-29.2, and 36.6 against 33.5 ms. Over the 11 pairs the engine is 5.9 ms
-slower on average (from 2.6 ms faster to 12.4 ms slower). The engine's line
+29.2, and 36.6 against 33.5 ms; after the svgcompat merge (repeats): 33.7
+against 22.2, 32.2 against 31.1, 39.8 against 30.9, then 34.2 against
+24.5, 32.4 against 24.0, 33.6 against 24.7; the last two suites: 27.8
+against 25.4 and 22.1 against 23.2 ms. Over the 19 pairs the engine is
+6.0 ms slower on average (from 2.6 ms faster to 12.4 ms slower; worst
+43.1 ms against today's worst 37.3 ms). The engine's line
 stays within 0.1 ms and the playhead is back on it within two animation
 frames. The stall is the page's main thread mounting the engine viewer
 (its presentation worker and painter); it is still recorded, not bounded.
+
+### Round 7: a frame in flight at an `unsupported` report (2026-10-19)
+
+Round 6's seq gate assumed a session's events arrive in the engine's
+order. Paused frames do not: they leave from the completion thread
+(`present/complete.rs`) once the GPU finishes them, and the render thread
+sent the report from `document_step` without waiting for them. A paused
+frame of revision R, still on the GPU, could arrive after a report caused
+by the batch at R+1, with a higher seq than any frame the viewer had. The
+session took it as a later decision, the route went back to `engine`, the
+status line cleared, and a stale picture stayed up with the reason hidden.
+
+- **The engine drains first.** `report_legacy` waits for the completion
+  thread before it sends the report. Every route to `legacy` goes through
+  it: a static reason, a draw that fails with `RenderError::Unsupported`
+  (`force_legacy`), and a shader fallback runner failure (`M::Failed`, also
+  `force_legacy`). The other `Unsupported` codes the engine sends are
+  request-scope errors (frame requests, snapshots, Blender jobs) and do not
+  change the route. The wait is bounded by the GPU work of at most
+  `MAX_IN_FLIGHT` (2) frames, and happens only when the route changes.
+- **The report names the newest seq.** `ErrorDetail::Unsupported {
+  lastFrame }` is `view.next_seq - 1` at the decision. The session drops
+  frames at or below it (falling back to the newest frame it received when
+  the detail is absent) and passes it on in `routed`. The presentation
+  drops presented frames at or below the larger of it and the newest its
+  channel delivered. Protocol build: `protocol-a8f64376eb9e1e12` (the
+  addon is rebuilt; pm-wasm does not depend on pm-protocol).
+- **Tests.** `tests/document.rs`
+  `an_unsupported_report_follows_the_frames_drawn_before_it` holds a paused
+  frame in the completion thread for 600 ms
+  (`POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS`, tests only), sends a batch that
+  adds an effect without definitions 150 ms later, and checks that the
+  frame arrives before the report, that the report covers its seq, and
+  that no frame follows within 1.2 s. Without the drain it fails exactly as
+  reviewed: the report (`lastFrame` 2), then the seq 2 frame of revision 2.
+  `engine-connection.test.ts` covers the in-flight frame again (seq 2 of
+  revision 5 after a report naming seq 2: stale), replacing round 6's
+  re-delivery of seq 1, which cannot happen. `presentation.test.ts` does
+  the same with a report naming seq 7. Both TS cases fail with round 6's
+  gating.
+- **Runs.** pm-node: 94 library tests, document 5 of 5 (the new test three
+  times on its own), present 2 of 2, shader_fallback 1 of 1; pm-protocol
+  wire 11 of 11 (regeneration is a no-op); clippy `-D warnings` clean;
+  vitest (engine-connection, engine-present) 152 of 152; svelte-check 0
+  errors. Under the lock, `engine-render-transport`,
+  `engine-headless-playback` and `native-engine-tracer` (the A, B, A, B
+  switch with the viewer attached): 22 of 22. Join in that run: engine
+  25.1 ms against today's 20.1 ms.
+
+The viewer-mount playhead stall and the J/K/L 2x reverse sawtooth (issue
+P5) now belong to the perf3 lane.
+
+### Round 8: the viewer's version lock, the held-frame knob, 0x0 canvases (2026-10-19)
+
+- **The viewer's version lock.** Round 7 changed `engine-present`
+  (presentation.ts, protocol.ts, presentation.test.ts) after the lock was
+  last refreshed, so `check:builtins` reported `viewer: tree changed
+  without a version bump`. 1.2.2 is unreleased (main has 1.0.8, the
+  integration branch 1.2.1), so only the viewer's entry is refreshed to the
+  merged tree; the version stays 1.2.2. The check now fails only for
+  inspector, keymap-default and timeline (other lanes).
+- **The held-frame knob is test-only in the build.**
+  `POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS` is read only with pm-node's new
+  `test-hooks` feature, which the crate's own tests turn on through a
+  dev-dependency on itself (pm-audio's pattern). The addon
+  (`build:engine`: `--features node`) compiles the other `send_delay`, which
+  answers `None`, so a stray variable can no longer hold a paused frame in
+  a shipped build. `the_send_delay_knob_is_read_only_with_test_hooks` covers
+  the parse and the 5 s cap; `tests/document.rs` still holds its frame.
+- **A 0x0 canvas that leaves the document.** The binding's default watch
+  (`watchRemoval`, canvas-binding.ts) keeps the ResizeObserver and adds a
+  MutationObserver on the document's child lists that reports once the
+  canvas is disconnected: a ResizeObserver never fires for a canvas whose
+  box was already 0x0, so such a canvas stayed bound until the caller's
+  next `render.gl.resize`. Two happy-dom tests (the watch on its own, and a
+  bound 0x0 canvas whose stage is removed) fail without the
+  MutationObserver.
+- **Sync snapshots that need the fallback runner (a regression from the
+  merge).** After merging feat/native-engine, `engine-render-transport`'s
+  real-WebGL case failed: `failed` 1, `internal: its draw did not finish
+  within 10 s`. The defs lane's runner (shader-fallback.ts, not this lane's
+  file; the edit is minimal) made `renderSync` poll each pass's fence on
+  the calling thread, but WebGL lets a fence signal only once the event
+  loop runs again, so every synchronous snapshot needing a fallback program
+  spun to the 10 s draw deadline and failed with `watchdog`. `finishedSync`
+  now waits with `finish` (it blocks until the GPU ran the pass) and judges
+  the deadline when it returns: a pass over it still fails with `watchdog`,
+  loses the context, and its program is never run again; a hang the GPU
+  process cuts surfaces as `contextLost`. The calling thread cannot stop a
+  draw part way, which the asynchronous path still can. A unit test models
+  WebGL's rule (every poll answers `TIMEOUT_EXPIRED`) and fails without the
+  fix; the e2e now names `lastFailure` when it fails. The async path
+  (viewer, job exports) is unchanged.
+- **Wording.** Commit 73b2b2a2's message states the ghost-presenter path
+  as fact; it is inferred from the session's state, as round 6 above says.
+  The fixes stand either way; history is not rewritten.
+- **Merged feat/native-engine** (69 commits: defs, svgcompat and others).
+  The only conflict was the generated `PROTOCOL_BUILD`; regenerating
+  (`pm-protocol-gen`) gives `protocol-6fa9b179042f4a70`, and both addons
+  were rebuilt with `bun run build:engine` (development runs load
+  `engine/target/pm-bridge/pm_bridge.node`; without it, flag-on routes stay
+  `pending`). `cargo fmt --check` over the whole workspace now reports
+  drift in pm-eval, pm-export, pm-geom3d, pm-render and pm-vector files
+  from merged lanes; this lane's crates are clean.
+- **Runs.** pm-node: 96 library tests, document 5 of 5; pm-protocol: 93
+  library, wire 11 (1 ignored); clippy `-D warnings` clean for pm-node and
+  pm-protocol with tests and for pm-node `--features node`; vitest
+  (engine-connection, extensions/viewer, main/engine, preload) 42 files,
+  466 passed; svelte-check 0 errors. E2E under the lock with the rebuilt
+  addon (`engine-render-transport`, `engine-headless-playback`,
+  `native-engine-tracer`): 22 of 22 after the fallback fix (before it, 21
+  of 22). Join in that run: engine 35.6 ms against today's 22.1 ms (issue
+  P5, perf3).
 
 ### What remains
 
