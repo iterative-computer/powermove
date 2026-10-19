@@ -189,9 +189,10 @@ the messages above:
 | `CompatSource::SvgImage`, `CompatFrameRequest.svg` | job engine → host | An export or agent frame's bucket (`svg` is set exactly when the source is `svgImage`). The answer is a `CompatFrame` keyed `<content>:<w>x<h>`, `rgba8Premultiplied`, the bucket's size, origin 0, scale 1. With no window that has the document open: `notHeadlessRenderable`, "SVG images are drawn by the editor window that has this project open; open the project in a window to export it." |
 
 The renderer draws a request only from its own asset whose decoded bytes
-hash to `content`. A viewer frame never waits: it draws the content's latest
-bucket or nothing and is drawn again when the bands arrive; snapshots and job
-frames never draw a stand-in. TypeScript: `EngineSnapshotReply.needsRenderer`
+hash to `content`. The app viewer, snapshots and job frames all wait for
+that exact bucket. The viewer retains the frame in its render-ahead schedule
+while its renderer answers; it never publishes the old bucket under a new
+frame's revision. Other sessions and the audio clock continue running. TypeScript: `EngineSnapshotReply.needsRenderer`
 gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
 (`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
 `PM.EngineSvgRasters` (`SvgRasters`, with `stats`).

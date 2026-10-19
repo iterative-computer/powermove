@@ -511,6 +511,11 @@ struct View {
     sample_due: bool,
     next_seq: u64,
     dirty: bool,
+    /// A frame waiting for Chromium's exact SVG bucket or shader pixels:
+    /// (retry host time,
+    /// document revision, view sequence, clock epoch). Other views and the
+    /// audio clock keep running while its renderer answers on the port.
+    external_wait: Option<(i64, u64, u64, u32)>,
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
@@ -1123,6 +1128,7 @@ impl Thread {
                         }]);
                     }
                     for view in self.views.values_mut() {
+                        view.external_wait = None;
                         view.dirty = true;
                     }
                 }
@@ -1201,6 +1207,7 @@ impl Thread {
                     composer.renderer().put_fallback_pixels(request, pixels);
                 }
                 if let Some(view) = self.views.get_mut(&key) {
+                    view.external_wait = None;
                     view.dirty = true;
                 }
             }
@@ -1776,6 +1783,7 @@ impl Thread {
             sample_due: true,
             next_seq: 1,
             dirty: true,
+            external_wait: None,
             requests: VecDeque::new(),
             retry: None,
             reported: None,
@@ -1804,6 +1812,7 @@ impl Thread {
             view.revision = view.revision.max(revision);
         }
         if !hint_only {
+            view.external_wait = None;
             view.dirty = true;
         }
         let refresh = composition_changed || !view.clock.is_playing();
@@ -1870,6 +1879,7 @@ impl Thread {
                 let descriptor = live.pool.descriptor();
                 if let Some(view) = self.views.get_mut(&key) {
                     view.pool = Some(live);
+                    view.external_wait = None;
                     view.retry = None;
                     view.dirty = true;
                 }
@@ -2287,7 +2297,13 @@ impl Thread {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
             }
-            if (view.dirty && view.state.headless != Some(true))
+            let external_waiting = view
+                .external_wait
+                .is_some_and(|(until, _, _, _)| until > now);
+            if let Some((until, _, _, _)) = view.external_wait {
+                wake = wake.min(until);
+            }
+            if (view.dirty && !external_waiting && view.state.headless != Some(true))
                 || !view.requests.is_empty()
                 || (view.sample_due
                     && (view.state.headless != Some(true) || view.reported == Some(Route::Engine)))
@@ -2312,6 +2328,9 @@ impl Thread {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
                 if view.state.headless == Some(true) {
+                    continue;
+                }
+                if external_waiting {
                     continue;
                 }
                 let mut schedule = view.schedule.clone();
@@ -2660,6 +2679,22 @@ impl Thread {
         {
             self.answer(key, id, &request, revision);
         }
+        // A newer edit, view, or transport discontinuity must never wait
+        // for an obsolete bucket. Otherwise the raster's completion wakes
+        // this view; no polling render, and no blocked audio/other views.
+        if let Some(view) = self.views.get_mut(&key)
+            && let Some((until, revision, seq, epoch)) = view.external_wait
+        {
+            let current = self.docs.get(&key).map_or(0, |d| d.revision());
+            if until > now()
+                && revision == current
+                && seq == view.state.view_seq.get()
+                && epoch == view.clock.epoch()
+            {
+                return;
+            }
+            view.external_wait = None;
+        }
         // A frame drawn with stand-ins is drawn again once video it asked
         // for has decoded.
         let landed = self
@@ -2736,6 +2771,13 @@ impl Thread {
                     let Some(view) = self.views.get_mut(&key) else {
                         return;
                     };
+                    // Pending external pixels have not rendered this k yet.
+                    // Keep its slot in the render-ahead schedule so the exact
+                    // frame follows when the raster arrives (never skip it
+                    // merely because its asynchronous request was sent).
+                    if rendered.is_none() && view.external_wait.is_some() {
+                        return;
+                    }
                     view.schedule.rendered(&view.clock, k);
                     if rendered.is_some() {
                         // What the next frames will cost (deadline-aware skips).
@@ -3021,6 +3063,23 @@ impl Thread {
                         }
                     }
                 }
+                Err(pm_render::RenderError::SvgRastersPending(needs)) => {
+                    Self::ask_svg(
+                        &mut self.svg,
+                        &self.sink,
+                        composer.renderer(),
+                        key,
+                        Revision::new(doc.revision()).ok(),
+                        &needs,
+                    );
+                    view.external_wait = Some((
+                        now() + super::svg::RETRY_US,
+                        doc.revision(),
+                        view.state.view_seq.get(),
+                        view.clock.epoch(),
+                    ));
+                    return None;
+                }
                 Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
                     // Layers only the fallback runner draws (decision 19):
                     // ask the view's renderer, and render the frame again
@@ -3063,6 +3122,12 @@ impl Thread {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }
                     }
+                    view.external_wait = Some((
+                        now() + super::svg::ASK_AGAIN_US,
+                        doc.revision(),
+                        view.state.view_seq.get(),
+                        view.clock.epoch(),
+                    ));
                     return None;
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {

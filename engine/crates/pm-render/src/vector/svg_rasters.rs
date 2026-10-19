@@ -13,11 +13,11 @@
 //! A bucket the store does not have is a miss, recorded for the frame
 //! ([`SvgRasterNeed`]); the host asks for it:
 //!
-//! - **Preview** draws the content's most recent bucket in its place (the
-//!   quad and UVs do not depend on the bucket), or nothing when it has
-//!   none, and draws the frame again when the raster arrives: one frame at
-//!   most, as today's asynchronous `<img>` decode shows nothing until it
-//!   resolves.
+//! - **Viewer preview**, exports and snapshots use [`SvgMissPolicy::Wait`]:
+//!   the caller asks for the exact bucket and renders the frame when it
+//!   arrives. The viewer retains its render-ahead slot in the meantime.
+//!   [`SvgMissPolicy::Substitute`] is available to diagnostic callers only;
+//!   the app viewer never publishes a previous bucket as a new frame.
 //! - **Exports and snapshots** ([`SvgMissPolicy::Wait`]) never draw a
 //!   substitute: the frame fails with `RenderError::SvgRastersPending` and
 //!   the caller fetches the rasters and renders it again.
