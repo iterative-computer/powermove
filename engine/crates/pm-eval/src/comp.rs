@@ -56,7 +56,21 @@ pub struct Comp<'d> {
     rate: std::cell::OnceCell<Option<IngestRate>>,
     /// The open composition of a canonical document (see above).
     open_canonical: bool,
+    /// The open composition seen through `rootComp(PM.proj)` (see
+    /// [`ROOT_VIEW`]) in a document still in the stored form.
+    stored_root_view: bool,
 }
+
+/// The address prefix of the legacy `rootComp(PM.proj)` wrapper
+/// (`legacy/core/compositions.ts`), which `PM.Comps.get(openId)` returns:
+/// `{ id: compId, name: compName }` plus each composition field the project
+/// has, and nothing else (no `params`, `comps`, `compId`, project `id` or
+/// `name`). Expressions see that object as `comp`, and `param()` reads its
+/// (absent) `params`, so a scope holding the wrapper answers differently
+/// from the open composition itself. `@root:<openId>` resolves to the open
+/// composition with exactly the wrapper's members; its own address keeps
+/// every cache keyed by composition id apart from the open composition's.
+pub const ROOT_VIEW: &str = "@root:";
 
 impl<'d> Comp<'d> {
     /// Resolves `comp_id` in a document in canonical form
@@ -71,6 +85,17 @@ impl<'d> Comp<'d> {
 
     /// [`Comp::resolve`] on a bare root node at a given revision.
     pub fn in_root(root: &'d Node, comp_id: &str, revision: u64) -> Result<Comp<'d>, CompError> {
+        if let Some(open) = comp_id.strip_prefix(ROOT_VIEW) {
+            let mut comp = Comp::in_root(root, open, revision)?;
+            // The canonical open composition is already exactly the wrapper:
+            // `{ id: compId, name: compName, ...composition fields }`
+            // (`pm_model::canonical`), so it reads as a plain object. The
+            // stored form keeps it at the top level, among project members.
+            comp.stored_root_view = comp.at_root();
+            comp.open_canonical = false;
+            comp.id = JsString::from(comp_id);
+            return Ok(comp);
+        }
         // The stored form keeps the open composition at the top level (and may
         // keep a stale copy in `comps`, which the legacy code never reads).
         let open = node::string(node::member(Some(root), "compId"))
@@ -103,6 +128,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             open_canonical,
+            stored_root_view: false,
         })
     }
 
@@ -116,6 +142,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             open_canonical: false,
+            stored_root_view: false,
         }
     }
 
@@ -168,6 +195,16 @@ impl<'d> Comp<'d> {
     /// A member of the legacy composition object (see the type
     /// documentation).
     pub fn member(&self, key: &str) -> Option<&'d Node> {
+        if self.stored_root_view {
+            return match key {
+                "id" => node::member(Some(self.root), "compId"),
+                "name" => node::member(Some(self.root), "compName"),
+                _ if pm_model::canonical::COMP_FIELDS.contains(&key) => {
+                    node::member(Some(self.node), key)
+                }
+                _ => None,
+            };
+        }
         if !self.open_canonical {
             return node::member(Some(self.node), key);
         }
@@ -182,6 +219,12 @@ impl<'d> Comp<'d> {
 
     /// `comp[key]` on the legacy composition object for any key.
     pub fn get(&self, key: &[u8]) -> Got<'d> {
+        if self.stored_root_view {
+            return match std::str::from_utf8(key) {
+                Ok(k) => self.member(k).map_or(Got::Undefined, Got::Node),
+                Err(_) => Got::Undefined,
+            };
+        }
         if !self.open_canonical {
             return node::get(self.node, key);
         }
@@ -445,6 +488,55 @@ mod tests {
         );
         assert_eq!(open.duration(), 5.0);
         assert_eq!(open.project_fps(), JsValue::Number(30.0));
+    }
+
+    /// `@root:<open>` reads exactly `rootComp(PM.proj)`'s members in both
+    /// forms: the open composition's fields, `id: compId`, `name: compName`,
+    /// and no project members.
+    #[test]
+    fn root_wrapper_view() {
+        let canonical = root(
+            r#"{"id":"P","name":"Project","compId":"C","params":{"amp":{"value":7}},
+                "comps":{"C":{"id":"C","name":"Main","fps":30,"dur":5,"layers":[]}}}"#,
+        );
+        let open = Comp::in_root(&canonical, "C", 1).unwrap();
+        let view = Comp::in_root(&canonical, "@root:C", 1).unwrap();
+        assert!(std::ptr::eq(open.node(), view.node()));
+        assert_eq!(view.id().to_string_lossy(), "@root:C");
+        assert!(open.get(b"params").truthy());
+        for (key, want) in [
+            ("params", JsValue::Undefined),
+            ("compId", JsValue::Undefined),
+            ("compName", JsValue::Undefined),
+            ("comps", JsValue::Undefined),
+            ("id", JsValue::from("C")),
+            ("name", JsValue::from("Main")),
+            ("fps", JsValue::Number(30.0)),
+        ] {
+            assert_eq!(node::js_value_opt(view.member(key)), want, "{key}");
+        }
+        assert_eq!(view.expression_fps(), JsValue::Number(30.0));
+
+        // The stored form (no `compId`: the project is its own open
+        // composition, addressed by its `id`).
+        let stored = root(
+            r#"{"id":"P","name":"Project","compName":"Main","fps":24,"dur":3,"layers":[],
+                "params":{"amp":{"value":7}}}"#,
+        );
+        let view = Comp::in_root(&stored, "@root:P", 1).unwrap();
+        assert!(view.at_root());
+        for (key, want) in [
+            ("params", JsValue::Undefined),
+            ("compName", JsValue::Undefined),
+            ("id", JsValue::Undefined),
+            ("name", JsValue::from("Main")),
+            ("fps", JsValue::Number(24.0)),
+            ("dur", JsValue::Number(3.0)),
+        ] {
+            assert_eq!(node::js_value_opt(view.member(key)), want, "{key}");
+            assert_eq!(view.get(key.as_bytes()).truthy(), want.truthy(), "{key}");
+        }
+        assert!(Comp::in_root(&stored, "@root:X", 1).is_err());
     }
 
     #[test]
