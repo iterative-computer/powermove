@@ -644,6 +644,54 @@ fn child_snapshots() {
     let px = pixels_of(&shape);
     assert_eq!(at(&px, 48, 24, 14), BOX, "the box's color inside");
     assert_eq!(at(&px, 48, 1, 1)[3], 0, "the pad is transparent");
+    // Any scale, as today's `PM.raster`: the density is
+    // `min(scale, 8192 / w, 8192 / h)` of the 48 × 28 raster box, so scale 40
+    // is 1920 × 1120, scales past 8192 / 48 stop at the 8192-pixel edge, and
+    // a tiny scale is one pixel (with the box's coverage in it; none at a
+    // vanishing scale). Geometry is unchanged.
+    for (id, scale) in [
+        (40u64, 40.0),
+        (41, 50.0),
+        (42, 1_000.0),
+        (43, f64::MAX),
+        (44, 0.005),
+        (45, 1e-9),
+    ] {
+        let mut request = raster_request(None, None);
+        request.target = SnapshotTarget::Layer {
+            layer: "box".into(),
+            scale,
+            crop: None,
+            content: None,
+        };
+        request.output_size = Size::new(8192, 8192);
+        c.snapshot(id, request, None, WINDOW, session);
+        let at_scale = rendered(c.inbox.wait(Duration::from_secs(30), answer(id)));
+        let density = scale.min(8192.0 / 48.0).min(8192.0 / 28.0);
+        let canvas = (
+            ((48.0 * density).ceil().max(1.0)) as u32,
+            ((28.0 * density).ceil().max(1.0)) as u32,
+        );
+        assert_eq!(
+            (at_scale.width, at_scale.height),
+            canvas,
+            "scale {scale}: today's canvas"
+        );
+        assert_eq!(at_scale.origin, [4.0, 4.0], "scale {scale}");
+        assert_eq!(at_scale.layer_box, Some([48.0, 28.0]), "scale {scale}");
+        let g = at_scale.raster.clone().expect("raster geometry");
+        assert_eq!(g.selection, Some([-20.0, -10.0, 20.0, 10.0]), "scale {scale}");
+        let px = pixels_of(&at_scale);
+        if canvas.0 > 2 {
+            let (cx, cy) = (canvas.0 / 2, canvas.1 / 2);
+            assert_eq!(at(&px, canvas.0, cx, cy), BOX, "scale {scale}: the box inside");
+        } else if scale < 1e-6 {
+            assert!(
+                px.chunks_exact(4).all(|p| p[3] == 0),
+                "scale {scale}: no ink at a vanishing density"
+            );
+        }
+    }
     // A crop window of a shape is cut from the same raster.
     let window = pm_protocol::common::PixelRect {
         x: 4,
@@ -758,9 +806,10 @@ fn child_snapshots() {
 
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     let presenter = &status["presenter"];
-    // Four frames and three layer rasters.
-    assert_eq!(presenter["snapshots"], 7, "{presenter}");
-    assert_eq!(presenter["snapshotShared"], 1, "{presenter}");
+    // Four frames, three layer rasters, and six at other scales (four of
+    // them over the inline limit, in shared memory).
+    assert_eq!(presenter["snapshots"], 13, "{presenter}");
+    assert_eq!(presenter["snapshotShared"], 5, "{presenter}");
     println!("CHILD-OK");
 }
 

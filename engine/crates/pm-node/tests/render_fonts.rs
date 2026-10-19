@@ -582,6 +582,44 @@ mod child {
             "the raster is the registry's raster"
         );
         println!("layer raster: {}x{}", raster.width, raster.height);
+        // Any scale, as today's `PM.raster` (`textRasterGeometry`): the
+        // density is `min(scale, 8192 / w, 8192 / h)` of the same box, so
+        // past the cap the canvas stops at the 8192-pixel edge, and a
+        // vanishing scale is one pixel with no ink. Geometry is unchanged.
+        let [bw, bh] = raster.layer_box.expect("a raster box");
+        for (id, scale) in [(30u64, 40.0), (31, 1_000.0), (32, f64::MAX), (33, 1e-9)] {
+            let at_scale = rendered(c.snapshot(
+                id,
+                SnapshotTarget::Layer {
+                    layer: "title".into(),
+                    scale,
+                    crop: None,
+                    content: None,
+                },
+                Size::new(8192, 8192),
+                SnapshotPixels::Premultiplied,
+            ));
+            let density = scale.min(8192.0 / bw).min(8192.0 / bh);
+            let canvas = (
+                (bw * density).ceil().max(1.0) as u32,
+                (bh * density).ceil().max(1.0) as u32,
+            );
+            assert_eq!(
+                (at_scale.width, at_scale.height),
+                canvas,
+                "scale {scale}: today's canvas"
+            );
+            assert_eq!(at_scale.layer_box, raster.layer_box, "scale {scale}");
+            assert_eq!(at_scale.origin, raster.origin, "scale {scale}");
+            // At a vanishing density the text rasterizer can leave a faint
+            // pixel (alpha 82 measured): the renderer's raster surface clears
+            // it for today's non-positive scales (`withoutInk`).
+            if scale >= 1.0 {
+                let inked = pixels(&at_scale).chunks_exact(4).any(|p| p[3] > 0);
+                assert!(inked, "scale {scale}: ink");
+            }
+            println!("layer raster at scale {scale}: {}x{}", at_scale.width, at_scale.height);
+        }
         // Today's placement: the selection of the text geometry; with
         // typography anchoring, the shift as `fontOffset` and in the anchor.
         let geometry = raster.raster.clone().expect("raster geometry");

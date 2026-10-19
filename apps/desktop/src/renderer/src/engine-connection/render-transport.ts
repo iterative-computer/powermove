@@ -231,7 +231,7 @@ export type RenderTransportOptions = {
   session: () => TransportSession | null;
   /** A producer threw while answering a frame's need (today's failed frame). */
   onProducerError?: (error: unknown, need: CompatNeed) => void;
-  /** Named snapshot failures also reach the connection status and viewer. */
+  /** Named snapshot failures also reach the connection status (never the viewer's stage: the snapshot is its caller's). */
   onFailure?: (code: string, message: string) => void;
   /** Whether the editor plays (compatibility answers then run ahead of the clock). */
   playing?: () => boolean;
@@ -287,6 +287,25 @@ export type TransportStats = { sync: number; async: number; idle: number; failed
 function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): EngineSnapshotError {
   return new EngineSnapshotError(reply.code, reply.message);
 }
+
+/** The scale a layer raster asks the engine for (`render.raster(layer,
+ *  scale)` at apiVersion 1 to 3). Today's `PM.raster` takes any scale and
+ *  caps only its density, at `min(scale, 8192 / w, 8192 / h)` (legacy
+ *  gl/raster.ts `textRasterGeometry`, `shapeRasterGeometry`, `rasterPaths`,
+ *  the captions rasterizer), and the engine's rasterizers apply the same
+ *  cap. So a positive scale goes as it is; Infinity (the cap) as the largest
+ *  finite number, which the cap reduces to the same density; zero, a
+ *  negative scale, or NaN, whose raster today is a canvas of at most one
+ *  pixel with nothing on it (captions: density 0.05), as a vanishing density
+ *  that gives a one-pixel transparent canvas with the same geometry. */
+export function layerRasterScale(scale: number): number {
+  if (scale === Infinity) return Number.MAX_VALUE;
+  return scale > 0 ? scale : VANISHING_RASTER_SCALE;
+}
+
+/** A density at which even a layer 100,000 pixels wide covers a
+ *  ten-thousandth of a pixel: a one-pixel canvas with no visible ink. */
+export const VANISHING_RASTER_SCALE = 1e-9;
 
 export class EngineRenderTransport {
   private readonly producers = new Map<CompatSource, CompatProducer>();
@@ -847,7 +866,7 @@ export class EngineRenderTransport {
   }
 
   private rasterOptions(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null, options: RasterOptions): EngineSnapshotOptions {
-    if (!(Number.isFinite(scale) && scale >= .01 && scale <= 32)) throw this.fail(new EngineSnapshotError('invalidMessage', `Raster scale ${scale} for layer ${layer} is outside 0.01..32.`), 'raster');
+    scale = layerRasterScale(scale);
     const edge = options.maxEdge ?? MAX_RASTER_EDGE;
     return { time, width: edge, height: edge, pixels: 'premultiplied', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
   }

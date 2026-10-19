@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, type TransportSvgRasters, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -329,6 +329,17 @@ describe('EngineRenderTransport', () => {
     expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
     // An empty raster is not a failure.
     expect(transport.stats.failed).toBe(1);
+  });
+
+  it('layer rasters take any scale, as today\'s PM.raster: the engine caps the density at the 8192-pixel edge', () => {
+    expect([33, 40, 50, 1000, 0.005, 1e-7].map(layerRasterScale)).toEqual([33, 40, 50, 1000, 0.005, 1e-7]);
+    expect(layerRasterScale(Infinity)).toBe(Number.MAX_VALUE);
+    for (const s of [0, -1, -Infinity, NaN]) expect(layerRasterScale(s)).toBe(VANISHING_RASTER_SCALE);
+    const raster = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
+    const { transport, asked } = setup([raster, raster, raster, raster, raster]);
+    for (const scale of [40, 1000, Infinity, -2, NaN]) expect(transport.rasterSync('T1', scale, 0)).toMatchObject({ width: 3, height: 2 });
+    expect(asked.map((a) => (a.snapshot.target as { scale: number }).scale)).toEqual([40, 1000, Number.MAX_VALUE, VANISHING_RASTER_SCALE, VANISHING_RASTER_SCALE]);
+    expect(transport.stats.failed).toBe(0);
   });
 
   it('a Blender composition without its prepared frame throws today’s error, never an empty snapshot', () => {

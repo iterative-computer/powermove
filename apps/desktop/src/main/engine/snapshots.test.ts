@@ -54,9 +54,9 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
-  it('accepts today’s layer raster densities through 32, independently of output scale', () => {
-    for (const scale of [16.25, 24, 32, 32.01, 0, NaN, Infinity]) {
-      expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0 && scale <= 32);
+  it('accepts any positive layer raster scale, as today’s PM.raster, independently of output scale', () => {
+    for (const scale of [1e-9, 0.005, 16.25, 24, 32, 33, 50, 1000, Number.MAX_VALUE, 0, -1, NaN, Infinity, -Infinity]) {
+      expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0);
     }
   });
 
