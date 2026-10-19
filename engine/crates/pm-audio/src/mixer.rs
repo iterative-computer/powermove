@@ -440,6 +440,7 @@ impl PrepareTask {
 
     fn initialize(&mut self, cancelled: &dyn Fn() -> bool) -> Result<()> {
         let work = &self.work;
+        crate::realtime::checkpoint_phase("prepare-resolve");
         let comps = work.graph.resolve(&work.doc)?;
         let plan = &work.graph.voices[work.vi];
         let p = work.rate as f64;
@@ -454,6 +455,7 @@ impl PrepareTask {
             self.initialized = true;
             return Ok(());
         }
+        crate::realtime::checkpoint_phase("prepare-map");
         let fixed = self
             .static_content
             .then(|| crate::graph::StaticMap::new(plan, &comps, &mut self.ev, a as f64 / p))
@@ -467,6 +469,7 @@ impl PrepareTask {
         let lo =
             (a.div_euclid(stretch::GRID) * stretch::GRID - stretch::preroll(work.rate)).max(first);
         let hi = (b + 2 * block as i64).min(last);
+        crate::realtime::checkpoint_phase("prepare-prefetch");
         if let Some(fixed) = &fixed {
             // A constant map is monotone. Two exact endpoint evaluations
             // bound it without resolving thousands of control points or
@@ -526,6 +529,7 @@ impl PrepareTask {
             }
         }
 
+        crate::realtime::checkpoint_phase("prepare-scratch");
         self.fixed = fixed;
         self.out = vec![Vec::new(); plan.source.channels()];
         self.initialized = true;
@@ -2418,7 +2422,11 @@ fn read_linear(
             }
             let mut views: Vec<&mut [f32]> = src.iter_mut().map(|c| &mut c[..span]).collect();
             let complete = cache.read(source, first, span, &mut views, wait)?;
+            crate::realtime::checkpoint_phase("read-linear-grid");
             for i in 0..n {
+                if i.is_multiple_of(64) {
+                    crate::realtime::checkpoint_dsp_step();
+                }
                 let u = unit(lo + i as i64);
                 let (si, ph) = (u.div_euclid(*phases) as i64, u.rem_euclid(*phases) as usize);
                 for c in 0..sc {
@@ -2443,7 +2451,11 @@ fn read_linear(
             let mut views: Vec<&mut [f32]> = src.iter_mut().map(|c| &mut c[..span]).collect();
             let complete = cache.read(source, first, span, &mut views, wait)?;
             let mut kern = vec![0f32; bank.taps];
+            crate::realtime::checkpoint_phase("read-linear-free");
             for i in 0..n {
+                if i.is_multiple_of(64) {
+                    crate::realtime::checkpoint_dsp_step();
+                }
                 let x = pos(i);
                 let fl = x.floor();
                 bank.free_kernel(x - fl, &mut kern);

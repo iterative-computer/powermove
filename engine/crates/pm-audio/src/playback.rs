@@ -324,6 +324,7 @@ pub struct StartTiming {
     pub scheduling_max_unit_ns: u64,
     pub scheduling_max_period_cpu_ns: u64,
     pub scheduling_computation_overruns: u64,
+    pub scheduling_first_computation_overrun: Option<crate::realtime::ComputationOverrun>,
     pub scheduling_constraint_overruns: u64,
     /// Throttling since this epoch's Play; preparation before Play remains
     /// included in the lifetime maxima and entry/failure counters above.
@@ -561,6 +562,7 @@ impl StartTrace {
             scheduling_max_unit_ns: 0,
             scheduling_max_period_cpu_ns: 0,
             scheduling_computation_overruns: 0,
+            scheduling_first_computation_overrun: None,
             scheduling_constraint_overruns: 0,
             scheduling_throttle_sleeps: 0,
             scheduling_total_sleep_ns: 0,
@@ -1152,6 +1154,7 @@ impl Playback {
             timing.scheduling_max_unit_ns = metrics.max_unit_ns;
             timing.scheduling_max_period_cpu_ns = metrics.max_period_cpu_ns;
             timing.scheduling_computation_overruns = metrics.computation_overruns;
+            timing.scheduling_first_computation_overrun = metrics.first_computation_overrun;
             timing.scheduling_constraint_overruns = metrics.constraint_overruns;
             let baseline = *self
                 .shared

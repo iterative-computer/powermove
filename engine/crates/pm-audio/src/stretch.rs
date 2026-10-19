@@ -460,7 +460,11 @@ impl StretchRun {
         // The latest run start in [k0, ka]; a run already going at k0
         // starts there.
         let mut start = None;
-        for k in k0..=ka {
+        crate::realtime::checkpoint_phase("stretch-fresh");
+        for (step, k) in (k0..=ka).enumerate() {
+            if step.is_multiple_of(32) {
+                crate::realtime::checkpoint_dsp_step();
+            }
             let class = self.class(k, map)?;
             match class {
                 Class::Silent => start = None,

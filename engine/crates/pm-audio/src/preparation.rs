@@ -61,6 +61,8 @@ enum JobOutcome {
 struct ClaimStamp {
     host_us: u64,
     at: Instant,
+    worker: usize,
+    inline: bool,
     wake_drop_us: u64,
     queue_lock_us: u64,
     wake_claim_us: u64,
@@ -71,6 +73,10 @@ struct JobTrace {
     queued_at: Option<Instant>,
     enqueue_host_us: u64,
     first_claim_host_us: u64,
+    first_worker: usize,
+    last_worker: usize,
+    worker_handoffs: u64,
+    inline_continuations: u64,
     first_queue_us: u64,
     queue_total_us: u64,
     last_slice_end: Option<Instant>,
@@ -83,7 +89,8 @@ struct JobTrace {
     control_yields: u64,
     control_wait_us: u64,
     slices: u64,
-    requeues: u64,
+    /// Number of CPU yields. An inline continuation is not a queue requeue.
+    cpu_yields: u64,
     profile: crate::profile::Profile,
 }
 impl JobTrace {
@@ -97,6 +104,10 @@ impl JobTrace {
                 0
             },
             first_claim_host_us: 0,
+            first_worker: 0,
+            last_worker: 0,
+            worker_handoffs: 0,
+            inline_continuations: 0,
             first_queue_us: 0,
             queue_total_us: 0,
             last_slice_end: None,
@@ -109,7 +120,7 @@ impl JobTrace {
             control_yields: 0,
             control_wait_us: 0,
             slices: 0,
-            requeues: 0,
+            cpu_yields: 0,
             profile: Default::default(),
         }
     }
@@ -124,9 +135,14 @@ impl JobTrace {
         self.queue_total_us = self.queue_total_us.saturating_add(wait_us);
         if self.first_claim_host_us == 0 {
             self.first_claim_host_us = stamp.host_us;
+            self.first_worker = stamp.worker;
             self.first_queue_us = wait_us;
             self.wake_stats = (stamp.wake_drop_us, stamp.queue_lock_us, stamp.wake_claim_us);
+        } else if self.last_worker != stamp.worker {
+            self.worker_handoffs += 1;
         }
+        self.last_worker = stamp.worker;
+        self.inline_continuations += u64::from(stamp.inline);
     }
     fn slice(
         &mut self,
@@ -157,12 +173,16 @@ impl JobTrace {
         }
         let host_end_us = crate::clock::host_now_us();
         crate::profile::worker_event(format!(
-            "pm-audio-prepare generation={generation} start={start} voice={voice} enqueue_host_us={} host_start_us={} host_claim_us={} host_end_us={host_end_us} queue_us={} queue_total_us={} wake_drop_us={} queue_lock_us={} wake_claim_us={} enter_us={} work_us={} cpu_us={} max_slice_cpu_us={} throttle_us={} control_yields={} control_wait_us={} slices={} requeues={} ready={} result={result} profile={:?}",
+            "pm-audio-prepare generation={generation} start={start} voice={voice} enqueue_host_us={} host_start_us={} host_claim_us={} host_end_us={host_end_us} queue_us={} queue_total_us={} first_worker={} last_worker={} worker_handoffs={} inline_continuations={} wake_drop_us={} queue_lock_us={} wake_claim_us={} enter_us={} work_us={} cpu_us={} max_slice_cpu_us={} throttle_us={} control_yields={} control_wait_us={} slices={} cpu_yields={} requeues={} ready={} result={result} profile={:?}",
             self.enqueue_host_us,
             self.first_claim_host_us,
             self.first_claim_host_us,
             self.first_queue_us,
             self.queue_total_us,
+            self.first_worker,
+            self.last_worker,
+            self.worker_handoffs,
+            self.inline_continuations,
             self.wake_stats.0,
             self.wake_stats.1,
             self.wake_stats.2,
@@ -174,7 +194,8 @@ impl JobTrace {
             self.control_yields,
             self.control_wait_us,
             self.slices,
-            self.requeues,
+            self.cpu_yields,
+            self.cpu_yields.saturating_sub(self.inline_continuations),
             result == "ready",
             self.profile,
         ));
@@ -194,6 +215,16 @@ impl Queue {
                 ((priority == 0 || self.background == 0) && (j.ready)()).then_some((i, priority))
             })
             .min_by_key(|(_, priority)| *priority)
+    }
+
+    /// A sole runnable foreground voice may keep its exclusive task on the
+    /// current worker for one more slice. Every other ready P0 goes first by
+    /// FIFO; the caller checks the queue again before each later slice.
+    fn may_inline(&self, job: &Job, background: bool) -> bool {
+        !background
+            && job_priority(job) == 0
+            && (job.ready)()
+            && !matches!(self.ready_index(), Some((_, 0)))
     }
 }
 fn job_priority(job: &Job) -> usize {
@@ -495,6 +526,8 @@ struct Executor {
     joins: Mutex<Vec<std::thread::JoinHandle<()>>>,
     #[cfg(test)]
     empty_scan_hook: Mutex<Option<EmptyScanHook>>,
+    #[cfg(test)]
+    inline_scan_hook: Mutex<Option<EmptyScanHook>>,
 }
 
 #[derive(Clone)]
@@ -738,6 +771,8 @@ impl Executor {
             joins: Mutex::new(Vec::with_capacity(count)),
             #[cfg(test)]
             empty_scan_hook: Mutex::new(None),
+            #[cfg(test)]
+            inline_scan_hook: Mutex::new(None),
         });
         #[cfg(test)]
         let mut handles = Vec::with_capacity(count);
@@ -775,6 +810,9 @@ impl Executor {
                         crate::realtime::AudioSchedule,
                     )> = None;
                     let mut wake_profile: Option<(Instant, u64)> = None;
+                    // At most one native DSP step is retained locally; the
+                    // ordinary queue is rechecked before every continuation.
+                    let mut local_job: Option<Job> = None;
                     loop {
                         #[cfg(test)]
                         if p.stop.load(Ordering::Acquire) {
@@ -787,15 +825,33 @@ impl Executor {
                         let lock_at = crate::profile::enabled().then(Instant::now);
                         let mut queue = p.jobs.lock().unwrap_or_else(|e| e.into_inner());
                         let lock_wait_ns = lock_at.map_or(0, elapsed_ns);
-                        if let Some((at, priority)) = queue.ready_index() {
+                        let mut selected = None;
+                        if let Some(job) = local_job.take() {
+                            if queue.may_inline(&job, false) {
+                                selected = Some((job, false, true));
+                            } else {
+                                // A newly arrived equal P0 precedes the
+                                // retained voice. Put it at the FIFO tail.
+                                queue.jobs.push(job);
+                                p.idle_stats.job_requeues.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        if selected.is_none()
+                            && let Some((at, priority)) = queue.ready_index()
+                        {
                             let background = priority != 0;
-                            let mut job = queue.jobs.remove(at);
+                            let job = queue.jobs.remove(at);
                             if background {
                                 queue.background += 1;
                             }
+                            selected = Some((job, background, false));
+                        }
+                        if let Some((mut job, background, inline)) = selected {
                             let claimed_at = crate::profile::enabled().then(|| {
                                 let claimed = Instant::now();
-                                let (wake_claim_us, wake_drop_us) =
+                                let (wake_claim_us, wake_drop_us) = if inline {
+                                    (0, 0)
+                                } else {
                                     wake_profile.take().map_or((0, 0), |(woken, drop_ns)| {
                                         (
                                             claimed
@@ -805,7 +861,8 @@ impl Executor {
                                                 as u64,
                                             drop_ns / 1_000,
                                         )
-                                    });
+                                    })
+                                };
                                 let wake_claim_ns = wake_claim_us.saturating_mul(1_000);
                                 p.idle_stats
                                     .wake_to_claim_ns
@@ -813,6 +870,8 @@ impl Executor {
                                 ClaimStamp {
                                     host_us: crate::clock::host_now_us(),
                                     at: claimed,
+                                    worker: i,
+                                    inline,
                                     wake_drop_us,
                                     queue_lock_us: lock_wait_ns / 1_000,
                                     wake_claim_us,
@@ -822,6 +881,17 @@ impl Executor {
                                 .queue_lock_wait_ns
                                 .fetch_max(lock_wait_ns, Ordering::Relaxed);
                             drop(queue);
+                            #[cfg(test)]
+                            if inline
+                                && let Some(hook) = p
+                                    .inline_scan_hook
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .take()
+                            {
+                                let _ = hook.reached.send(());
+                                let _ = hook.release.recv_timeout(Duration::from_secs(5));
+                            }
                             p.idle_stats.job_claims.fetch_add(1, Ordering::Relaxed);
                             // Playhead preparation is latency-sensitive even at
                             // edit time, before Play arrives. Boundary refill
@@ -829,15 +899,20 @@ impl Executor {
                             // real-time CPU scheduling and restores the worker's
                             // effective Mach priority before it waits again.
                             let outcome = (job.step)(claimed_at);
-                            // The job closure has released its real-time guard
-                            // before returning PendingCpu. Move its exclusive
-                            // state to the FIFO tail only under an ordinary
-                            // queue lock; the thread's CPU ledger is retained.
+                            // The closure released its real-time guard before
+                            // returning PendingCpu. Keep a sole ready P0 on
+                            // this worker for one more slice; otherwise put
+                            // it at the FIFO tail under the ordinary lock.
+                            // The thread's physical CPU debt is retained.
                             let mut queue = p.jobs.lock().unwrap_or_else(|e| e.into_inner());
                             if background {
                                 queue.background -= 1;
                             }
-                            if outcome == JobOutcome::PendingCpu {
+                            let keep_local = outcome == JobOutcome::PendingCpu
+                                && queue.may_inline(&job, background);
+                            if keep_local {
+                                local_job = Some(job);
+                            } else if outcome == JobOutcome::PendingCpu {
                                 queue.jobs.push(job);
                             }
                             // A finished representative may have made its
@@ -847,7 +922,9 @@ impl Executor {
                             let has_ready = queue.ready_index().is_some();
                             drop(queue);
                             if outcome == JobOutcome::PendingCpu {
-                                p.idle_stats.job_requeues.fetch_add(1, Ordering::Relaxed);
+                                if !keep_local {
+                                    p.idle_stats.job_requeues.fetch_add(1, Ordering::Relaxed);
+                                }
                                 if has_ready {
                                     p.unpark_one();
                                 }
@@ -1280,7 +1357,7 @@ impl Preparation {
                         );
                         match outcome {
                             Ok(crate::mixer::PrepareStep::Yielded) if !cancelled() => {
-                                trace.requeues += 1;
+                                trace.cpu_yields += 1;
                                 JobOutcome::PendingCpu
                             }
                             Ok(crate::mixer::PrepareStep::Yielded) => {
@@ -1582,6 +1659,7 @@ mod queue_tests {
             stop: AtomicBool::new(false),
             joins: Mutex::new(Vec::new()),
             empty_scan_hook: Mutex::new(None),
+            inline_scan_hook: Mutex::new(None),
         })
     }
 
@@ -1689,8 +1767,126 @@ mod queue_tests {
         assert_eq!(events, [(0, 1), (1, 1), (0, 2), (0, 3)]);
         let stats = pool.idle_stats.snapshot();
         assert_eq!(stats.job_claims, 4);
-        assert_eq!(stats.job_requeues, 2);
+        assert_eq!(stats.job_requeues, 1, "only the contested slice requeues");
         assert_eq!(stats.job_completions, 2);
+    }
+
+    #[test]
+    fn a_sole_ready_head_continues_on_one_worker_without_requeue() {
+        let pool = Executor::spawn(2);
+        let (tx, rx) = channel();
+        let mut slices = 0;
+        pool.submit_batch(vec![Job {
+            priority: 0,
+            critical: Arc::new(AtomicBool::new(false)),
+            ready: Box::new(|| true),
+            step: Box::new(move |_| {
+                slices += 1;
+                tx.send((std::thread::current().id(), slices)).unwrap();
+                if slices == 5 {
+                    JobOutcome::Terminal
+                } else {
+                    JobOutcome::PendingCpu
+                }
+            }),
+        }]);
+        let events: Vec<_> = (0..5)
+            .map(|_| rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .collect();
+        pool.stop_and_join();
+        assert_eq!(
+            events.iter().map(|(_, slice)| *slice).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(events.iter().all(|(worker, _)| *worker == events[0].0));
+        let stats = pool.idle_stats.snapshot();
+        assert_eq!(stats.job_claims, 5);
+        assert_eq!(stats.job_requeues, 0);
+        assert_eq!(stats.job_completions, 1);
+    }
+
+    #[test]
+    fn a_new_equal_priority_job_waits_at_most_one_inline_slice() {
+        let pool = Executor::spawn(1);
+        let (at_inline_tx, at_inline_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        *pool.inline_scan_hook.lock().unwrap() = Some(EmptyScanHook {
+            reached: at_inline_tx,
+            release: release_rx,
+        });
+        let (events_tx, events_rx) = channel();
+        let first_tx = events_tx.clone();
+        let mut slices = 0;
+        pool.submit_batch(vec![Job {
+            priority: 0,
+            critical: Arc::new(AtomicBool::new(false)),
+            ready: Box::new(|| true),
+            step: Box::new(move |_| {
+                slices += 1;
+                first_tx.send((0, slices)).unwrap();
+                if slices == 3 {
+                    JobOutcome::Terminal
+                } else {
+                    JobOutcome::PendingCpu
+                }
+            }),
+        }]);
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 1)
+        );
+        at_inline_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        pool.submit_batch(vec![Job {
+            priority: 0,
+            critical: Arc::new(AtomicBool::new(false)),
+            ready: Box::new(|| true),
+            step: Box::new(move |_| {
+                events_tx.send((1, 1)).unwrap();
+                JobOutcome::Terminal
+            }),
+        }]);
+        release_tx.send(()).unwrap();
+        let rest: Vec<_> = (0..3)
+            .map(|_| events_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .collect();
+        pool.stop_and_join();
+        assert_eq!(rest, [(0, 2), (1, 1), (0, 3)]);
+        assert_eq!(pool.idle_stats.snapshot().job_requeues, 1);
+    }
+
+    #[test]
+    fn a_retired_local_continuation_stops_after_its_next_check() {
+        let pool = Executor::spawn(1);
+        let (at_inline_tx, at_inline_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        *pool.inline_scan_hook.lock().unwrap() = Some(EmptyScanHook {
+            reached: at_inline_tx,
+            release: release_rx,
+        });
+        let retired = Arc::new(AtomicBool::new(false));
+        let worker_retired = retired.clone();
+        let (tx, rx) = channel();
+        pool.submit_batch(vec![Job {
+            priority: 0,
+            critical: Arc::new(AtomicBool::new(false)),
+            ready: Box::new(|| true),
+            step: Box::new(move |_| {
+                if worker_retired.load(Ordering::Acquire) {
+                    tx.send("retired").unwrap();
+                    JobOutcome::Terminal
+                } else {
+                    tx.send("yielded").unwrap();
+                    JobOutcome::PendingCpu
+                }
+            }),
+        }]);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), "yielded");
+        at_inline_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        retired.store(true, Ordering::Release);
+        release_tx.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), "retired");
+        pool.stop_and_join();
+        assert_eq!(pool.idle_stats.snapshot().job_completions, 1);
     }
 
     #[test]

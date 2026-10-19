@@ -17,7 +17,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicI32, AtomicU64, Ordering},
+        atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -137,6 +137,271 @@ mod worker_control_tests {
     }
 }
 
+/// The first observed computation-budget overrun in one playback schedule.
+/// All CPU values come from the offending thread's CPU clock. The preceding
+/// phase names the indivisible work unit completed at the checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputationOverrun {
+    pub host_us: u64,
+    pub role: &'static str,
+    pub phase: &'static str,
+    pub unit_cpu_ns: u64,
+    pub prior_period_cpu_ns: u64,
+    pub period_cpu_ns: u64,
+    pub wall_elapsed_ns: u64,
+    pub period_ns: u64,
+    pub computation_ns: u64,
+    pub constraint_ns: u64,
+}
+
+// Stable IDs avoid storing pointers or formatting phase names on an audio
+// thread. Unknown call sites remain visible rather than borrowing a stale
+// label from an unrelated task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum RealtimePhase {
+    Unknown,
+    PrepareJob,
+    PrepareResolve,
+    PrepareMap,
+    PreparePrefetch,
+    PrepareScratch,
+    StretchFresh,
+    StretchMap,
+    StretchInit,
+    StretchRead,
+    StretchOutputSeek,
+    StretchProcess,
+    ShuttleMap,
+    ShuttleRead,
+    ShuttleReset,
+    ShuttleOutputSeek,
+    ShuttleProcess,
+    ReadLinearGrid,
+    ReadLinearFree,
+}
+
+impl RealtimePhase {
+    #[cfg(any(target_os = "macos", test))]
+    fn from_label(label: &'static str) -> Self {
+        match label {
+            "prepare-job" => Self::PrepareJob,
+            "prepare-resolve" => Self::PrepareResolve,
+            "prepare-map" => Self::PrepareMap,
+            "prepare-prefetch" => Self::PreparePrefetch,
+            "prepare-scratch" => Self::PrepareScratch,
+            "stretch-fresh" => Self::StretchFresh,
+            "stretch-map" => Self::StretchMap,
+            "stretch-init" => Self::StretchInit,
+            "stretch-read" => Self::StretchRead,
+            "stretch-output-seek" => Self::StretchOutputSeek,
+            "stretch-process" => Self::StretchProcess,
+            "shuttle-map" => Self::ShuttleMap,
+            "shuttle-read" => Self::ShuttleRead,
+            "shuttle-reset" => Self::ShuttleReset,
+            "shuttle-output-seek" => Self::ShuttleOutputSeek,
+            "shuttle-process" => Self::ShuttleProcess,
+            "read-linear-grid" => Self::ReadLinearGrid,
+            "read-linear-free" => Self::ReadLinearFree,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn from_id(id: u8) -> Self {
+        match id {
+            1 => Self::PrepareJob,
+            2 => Self::PrepareResolve,
+            3 => Self::PrepareMap,
+            4 => Self::PreparePrefetch,
+            5 => Self::PrepareScratch,
+            6 => Self::StretchFresh,
+            7 => Self::StretchMap,
+            8 => Self::StretchInit,
+            9 => Self::StretchRead,
+            10 => Self::StretchOutputSeek,
+            11 => Self::StretchProcess,
+            12 => Self::ShuttleMap,
+            13 => Self::ShuttleRead,
+            14 => Self::ShuttleReset,
+            15 => Self::ShuttleOutputSeek,
+            16 => Self::ShuttleProcess,
+            17 => Self::ReadLinearGrid,
+            18 => Self::ReadLinearFree,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::PrepareJob => "prepare-job",
+            Self::PrepareResolve => "prepare-resolve",
+            Self::PrepareMap => "prepare-map",
+            Self::PreparePrefetch => "prepare-prefetch",
+            Self::PrepareScratch => "prepare-scratch",
+            Self::StretchFresh => "stretch-fresh",
+            Self::StretchMap => "stretch-map",
+            Self::StretchInit => "stretch-init",
+            Self::StretchRead => "stretch-read",
+            Self::StretchOutputSeek => "stretch-output-seek",
+            Self::StretchProcess => "stretch-process",
+            Self::ShuttleMap => "shuttle-map",
+            Self::ShuttleRead => "shuttle-read",
+            Self::ShuttleReset => "shuttle-reset",
+            Self::ShuttleOutputSeek => "shuttle-output-seek",
+            Self::ShuttleProcess => "shuttle-process",
+            Self::ReadLinearGrid => "read-linear-grid",
+            Self::ReadLinearFree => "read-linear-free",
+        }
+    }
+}
+
+/// A single immutable record, published only after every field has been
+/// written. Its snapshot is coherent even while another thread is writing.
+#[derive(Default)]
+struct FirstComputationOverrun {
+    state: AtomicU8, // 0 empty, 1 writing, 2 published
+    host_us: AtomicU64,
+    role: AtomicU8,
+    phase: AtomicU8,
+    unit_cpu_ns: AtomicU64,
+    prior_period_cpu_ns: AtomicU64,
+    period_cpu_ns: AtomicU64,
+    wall_elapsed_ns: AtomicU64,
+    period_ns: AtomicU64,
+    computation_ns: AtomicU64,
+    constraint_ns: AtomicU64,
+}
+
+impl FirstComputationOverrun {
+    #[cfg(any(target_os = "macos", test))]
+    fn record(&self, value: ComputationOverrun) {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        self.host_us.store(value.host_us, Ordering::Relaxed);
+        self.role
+            .store(u8::from(value.role == "producer"), Ordering::Relaxed);
+        self.phase.store(
+            RealtimePhase::from_label(value.phase) as u8,
+            Ordering::Relaxed,
+        );
+        self.unit_cpu_ns.store(value.unit_cpu_ns, Ordering::Relaxed);
+        self.prior_period_cpu_ns
+            .store(value.prior_period_cpu_ns, Ordering::Relaxed);
+        self.period_cpu_ns
+            .store(value.period_cpu_ns, Ordering::Relaxed);
+        self.wall_elapsed_ns
+            .store(value.wall_elapsed_ns, Ordering::Relaxed);
+        self.period_ns.store(value.period_ns, Ordering::Relaxed);
+        self.computation_ns
+            .store(value.computation_ns, Ordering::Relaxed);
+        self.constraint_ns
+            .store(value.constraint_ns, Ordering::Relaxed);
+        self.state.store(2, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> Option<ComputationOverrun> {
+        (self.state.load(Ordering::Acquire) == 2).then(|| ComputationOverrun {
+            host_us: self.host_us.load(Ordering::Relaxed),
+            role: if self.role.load(Ordering::Relaxed) == 1 {
+                "producer"
+            } else {
+                "worker"
+            },
+            phase: RealtimePhase::from_id(self.phase.load(Ordering::Relaxed)).label(),
+            unit_cpu_ns: self.unit_cpu_ns.load(Ordering::Relaxed),
+            prior_period_cpu_ns: self.prior_period_cpu_ns.load(Ordering::Relaxed),
+            period_cpu_ns: self.period_cpu_ns.load(Ordering::Relaxed),
+            wall_elapsed_ns: self.wall_elapsed_ns.load(Ordering::Relaxed),
+            period_ns: self.period_ns.load(Ordering::Relaxed),
+            computation_ns: self.computation_ns.load(Ordering::Relaxed),
+            constraint_ns: self.constraint_ns.load(Ordering::Relaxed),
+        })
+    }
+}
+
+#[cfg(test)]
+mod first_overrun_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_first_writer_publishes_one_coherent_record() {
+        let pending = FirstComputationOverrun::default();
+        pending.state.store(1, Ordering::Release);
+        pending.host_us.store(42, Ordering::Relaxed);
+        assert!(
+            pending.snapshot().is_none(),
+            "a partial record must stay hidden"
+        );
+
+        let first = Arc::new(FirstComputationOverrun::default());
+        std::thread::scope(|scope| {
+            for seed in 1..=8 {
+                let first = first.clone();
+                scope.spawn(move || {
+                    first.record(ComputationOverrun {
+                        host_us: seed,
+                        role: if seed.is_multiple_of(2) {
+                            "producer"
+                        } else {
+                            "worker"
+                        },
+                        phase: if seed.is_multiple_of(2) {
+                            "stretch-fresh"
+                        } else {
+                            "read-linear-grid"
+                        },
+                        unit_cpu_ns: seed * 10,
+                        prior_period_cpu_ns: seed * 20,
+                        period_cpu_ns: seed * 30,
+                        wall_elapsed_ns: seed * 40,
+                        period_ns: seed * 50,
+                        computation_ns: seed * 60,
+                        constraint_ns: seed * 70,
+                    });
+                });
+            }
+        });
+        let record = first.snapshot().unwrap();
+        let seed = record.host_us;
+        assert!((1..=8).contains(&seed));
+        assert_eq!(
+            record.role,
+            if seed.is_multiple_of(2) {
+                "producer"
+            } else {
+                "worker"
+            }
+        );
+        assert_eq!(
+            record.phase,
+            if seed.is_multiple_of(2) {
+                "stretch-fresh"
+            } else {
+                "read-linear-grid"
+            }
+        );
+        assert_eq!(record.unit_cpu_ns, seed * 10);
+        assert_eq!(record.prior_period_cpu_ns, seed * 20);
+        assert_eq!(record.period_cpu_ns, seed * 30);
+        assert_eq!(record.wall_elapsed_ns, seed * 40);
+        assert_eq!(record.period_ns, seed * 50);
+        assert_eq!(record.computation_ns, seed * 60);
+        assert_eq!(record.constraint_ns, seed * 70);
+        first.record(ComputationOverrun {
+            host_us: 99,
+            ..record
+        });
+        assert_eq!(first.snapshot(), Some(record));
+    }
+}
+
 /// Observed work between cooperative checkpoints, across all threads in one
 /// playback schedule. CPU maxima use the calling thread's CPU clock; the
 /// constraint count records CPU service beyond the calling role's actual
@@ -146,6 +411,7 @@ pub struct RealtimeMetrics {
     pub max_unit_ns: u64,
     pub max_period_cpu_ns: u64,
     pub computation_overruns: u64,
+    pub first_computation_overrun: Option<ComputationOverrun>,
     pub constraint_overruns: u64,
     pub throttle_sleeps: u64,
     pub total_sleep_ns: u64,
@@ -190,6 +456,7 @@ struct MetricCounters {
     max_unit_ns: AtomicU64,
     max_period_cpu_ns: AtomicU64,
     computation_overruns: AtomicU64,
+    first_computation_overrun: FirstComputationOverrun,
     constraint_overruns: AtomicU64,
     throttle_sleeps: AtomicU64,
     total_sleep_ns: AtomicU64,
@@ -221,6 +488,7 @@ impl MetricCounters {
             max_unit_ns: self.max_unit_ns.load(Ordering::Relaxed),
             max_period_cpu_ns: self.max_period_cpu_ns.load(Ordering::Relaxed),
             computation_overruns: self.computation_overruns.load(Ordering::Relaxed),
+            first_computation_overrun: self.first_computation_overrun.snapshot(),
             constraint_overruns: self.constraint_overruns.load(Ordering::Relaxed),
             throttle_sleeps: self.throttle_sleeps.load(Ordering::Relaxed),
             total_sleep_ns: self.total_sleep_ns.load(Ordering::Relaxed),
@@ -801,29 +1069,23 @@ pub fn checkpoint() {
     #[cfg(target_os = "macos")]
     mac::checkpoint_current();
     #[cfg(not(target_os = "macos"))]
-    yield_to_pending_control();
-}
-
-/// Admit a known CPU work unit against the current callback computation
-/// budget before it begins. The requested reservation is capped at that
-/// budget; an indivisible unit larger than the callback budget can still
-/// overrun and is reported by the normal runtime counters.
-#[inline]
-pub(crate) fn checkpoint_reserve(unit_ns: u64) {
-    #[cfg(target_os = "macos")]
-    mac::checkpoint_current_reserve(unit_ns);
-    #[cfg(not(target_os = "macos"))]
     {
-        let _ = unit_ns;
         yield_to_pending_control();
+        if crate::profile::enabled() {
+            crate::profile::phase("");
+        }
     }
 }
 
 /// Attribute CPU before this boundary to the previous opt-in profile phase,
 /// then label the work that follows it. The checkpoint remains active in
-/// normal playback; phase bookkeeping is strictly opt-in.
+/// normal playback; the small static phase ID is retained even when detailed
+/// profiling is disabled, so a rare overrun still identifies its work unit.
 #[inline]
 pub(crate) fn checkpoint_phase(label: &'static str) {
+    #[cfg(target_os = "macos")]
+    mac::checkpoint_current_phase(RealtimePhase::from_label(label));
+    #[cfg(not(target_os = "macos"))]
     checkpoint();
     if crate::profile::enabled() {
         crate::profile::phase(label);
@@ -834,7 +1096,13 @@ pub(crate) fn checkpoint_phase(label: &'static str) {
 /// unit before it starts. Profiling stays opt-in; admission is always active.
 #[inline]
 pub(crate) fn checkpoint_phase_reserve(label: &'static str, unit_ns: u64) {
-    checkpoint_reserve(unit_ns);
+    #[cfg(target_os = "macos")]
+    mac::checkpoint_current_phase_reserve(RealtimePhase::from_label(label), unit_ns);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = unit_ns;
+        yield_to_pending_control();
+    }
     if crate::profile::enabled() {
         crate::profile::phase(label);
     }
@@ -1803,6 +2071,7 @@ mod mac {
         constraint_ns: u64,
         computation_reported: bool,
         constraint_reported: bool,
+        phase: super::RealtimePhase,
         metrics: Arc<MetricCounters>,
     }
     thread_local! { static BUDGET: RefCell<Option<Budget>> = const { RefCell::new(None) }; }
@@ -1827,7 +2096,7 @@ mod mac {
                 .then_some(budget.id)
         });
         if let Some(id) = id {
-            checkpoint(id);
+            checkpoint_with_reserve(id, None, None);
         }
     }
 
@@ -1956,6 +2225,7 @@ mod mac {
                     constraint_ns,
                     computation_reported: false,
                     constraint_reported: false,
+                    phase: super::RealtimePhase::Unknown,
                     metrics,
                 });
             }
@@ -1989,6 +2259,7 @@ mod mac {
         b.computation_ns = computation_ns;
         b.constraint_ns = constraint_ns;
         b.metrics = metrics;
+        b.phase = super::RealtimePhase::Unknown;
         // The reservation window owns these flags, not its diagnostic
         // context. Re-entering the same policy must not count an earlier
         // job's overrun again when an idle guard inherits its CPU debt.
@@ -2021,6 +2292,30 @@ mod mac {
             .max_period_cpu_ns
             .fetch_max(period_cpu, Ordering::Relaxed);
         if period_cpu > b.computation_ns && !b.computation_reported {
+            // This branch runs once per offending reservation. The winner
+            // writes a fixed atomic record; there is no RT allocation, lock,
+            // log, or string formatting on this path.
+            b.metrics
+                .first_computation_overrun
+                .record(super::ComputationOverrun {
+                    host_us: crate::clock::host_now_us(),
+                    role: if b.constraint_ns < b.period_ns {
+                        "producer"
+                    } else {
+                        "worker"
+                    },
+                    phase: b.phase.label(),
+                    unit_cpu_ns: unit,
+                    prior_period_cpu_ns: b.last_checkpoint_cpu_ns.saturating_sub(b.cpu_start_ns),
+                    period_cpu_ns: period_cpu,
+                    wall_elapsed_ns: now
+                        .duration_since(b.wall_start)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64,
+                    period_ns: b.period_ns,
+                    computation_ns: b.computation_ns,
+                    constraint_ns: b.constraint_ns,
+                });
             b.metrics
                 .computation_overruns
                 .fetch_add(1, Ordering::Relaxed);
@@ -2065,10 +2360,19 @@ mod mac {
     }
 
     pub(super) fn checkpoint(id: u64) {
-        checkpoint_with_reserve(id, None);
+        checkpoint_with_reserve(id, None, Some(super::RealtimePhase::Unknown));
+        // The sampled work belongs to the preceding profile phase. Clear it
+        // only after sampling, so following unlabelled work cannot inherit it.
+        if crate::profile::enabled() {
+            crate::profile::phase("");
+        }
     }
 
-    fn checkpoint_with_reserve(id: u64, requested_reserve_ns: Option<u64>) {
+    fn checkpoint_with_reserve(
+        id: u64,
+        requested_reserve_ns: Option<u64>,
+        next_phase: Option<super::RealtimePhase>,
+    ) {
         // Never hold the thread-local budget borrow while yielding to a
         // pending producer control. DSP wall-gated hooks reach this only
         // after their existing short-step interval.
@@ -2100,6 +2404,9 @@ mod mac {
             } else if elapsed >= Duration::from_nanos(b.period_ns) {
                 reset_period(b);
             }
+            if let Some(phase) = next_phase {
+                b.phase = phase;
+            }
         });
     }
     pub(super) fn checkpoint_current() {
@@ -2111,11 +2418,20 @@ mod mac {
         });
     }
 
-    pub(super) fn checkpoint_current_reserve(unit_ns: u64) {
+    pub(super) fn checkpoint_current_phase(phase: super::RealtimePhase) {
         BUDGET.with(|slot| {
             let id = slot.borrow().as_ref().map(|b| b.id);
             if let Some(id) = id {
-                checkpoint_with_reserve(id, Some(unit_ns));
+                checkpoint_with_reserve(id, None, Some(phase));
+            }
+        });
+    }
+
+    pub(super) fn checkpoint_current_phase_reserve(phase: super::RealtimePhase, unit_ns: u64) {
+        BUDGET.with(|slot| {
+            let id = slot.borrow().as_ref().map(|b| b.id);
+            if let Some(id) = id {
+                checkpoint_with_reserve(id, Some(unit_ns), Some(phase));
             }
         });
     }
@@ -2124,6 +2440,129 @@ mod mac {
     mod tests {
         use super::*;
         use crate::realtime::{AudioSchedule, ScheduleMethod};
+
+        #[test]
+        fn sampled_first_overrun_reports_actual_role_and_preceding_phase() {
+            let metrics = Arc::new(MetricCounters::default());
+            let now = Instant::now();
+            let mut budget = Budget {
+                id: 1,
+                depth: 1,
+                wall_start: now,
+                cpu_start_ns: 1_000_000,
+                last_checkpoint_cpu_ns: 1_500_000,
+                last_checkpoint_wall: now,
+                exit_cpu_ns: 1_500_000,
+                period_ns: 1_333_333,
+                computation_ns: 1_066_666,
+                constraint_ns: 1_133_333,
+                computation_reported: false,
+                constraint_reported: false,
+                phase: super::super::RealtimePhase::StretchFresh,
+                metrics: metrics.clone(),
+            };
+            sample(&mut budget, now, 2_100_000);
+            let record = metrics.snapshot().first_computation_overrun.unwrap();
+            assert_eq!(record.role, "producer");
+            assert_eq!(record.phase, "stretch-fresh");
+            assert_eq!(record.unit_cpu_ns, 600_000);
+            assert_eq!(record.prior_period_cpu_ns, 500_000);
+            assert_eq!(record.period_cpu_ns, 1_100_000);
+            assert_eq!(record.constraint_ns, 1_133_333);
+            assert_eq!(metrics.snapshot().computation_overruns, 1);
+            assert_eq!(metrics.snapshot().constraint_overruns, 0);
+        }
+
+        #[test]
+        fn labelled_and_plain_checkpoints_attribute_then_clear_the_preceding_phase() {
+            std::thread::spawn(|| {
+                const ID: u64 = u64::MAX - 90;
+                let first = Arc::new(MetricCounters::default());
+                let now = Instant::now();
+                let cpu = thread_cpu_ns();
+                BUDGET.with(|slot| {
+                    *slot.borrow_mut() = Some(Budget {
+                        id: ID,
+                        depth: 1,
+                        wall_start: now - Duration::from_millis(60),
+                        cpu_start_ns: cpu.saturating_sub(10_000),
+                        last_checkpoint_cpu_ns: cpu,
+                        last_checkpoint_wall: now - Duration::from_millis(1),
+                        exit_cpu_ns: cpu,
+                        period_ns: 50_000_000,
+                        computation_ns: 1,
+                        constraint_ns: 50_000_000,
+                        computation_reported: false,
+                        constraint_reported: false,
+                        phase: crate::realtime::RealtimePhase::StretchMap,
+                        metrics: first.clone(),
+                    });
+                });
+
+                // A label takes effect after its checkpoint samples the
+                // previous unit; the expired synthetic wall window avoids
+                // sleeping or changing any real Mach policy in this test.
+                crate::realtime::checkpoint_phase("stretch-read");
+                assert_eq!(
+                    first.snapshot().first_computation_overrun.unwrap().phase,
+                    "stretch-map"
+                );
+                assert_eq!(
+                    BUDGET.with(|slot| slot.borrow().as_ref().unwrap().phase),
+                    crate::realtime::RealtimePhase::StretchRead
+                );
+
+                let rearm = |metrics: Arc<MetricCounters>| {
+                    BUDGET.with(|slot| {
+                        let mut slot = slot.borrow_mut();
+                        let b = slot.as_mut().unwrap();
+                        let cpu = thread_cpu_ns();
+                        b.wall_start = Instant::now() - Duration::from_millis(60);
+                        b.cpu_start_ns = cpu.saturating_sub(10_000);
+                        b.last_checkpoint_cpu_ns = cpu;
+                        b.last_checkpoint_wall = Instant::now() - Duration::from_millis(1);
+                        b.computation_reported = false;
+                        b.constraint_reported = false;
+                        b.metrics = metrics;
+                    });
+                };
+
+                let dsp = Arc::new(MetricCounters::default());
+                rearm(dsp.clone());
+                crate::realtime::checkpoint_dsp_step();
+                assert_eq!(
+                    dsp.snapshot().first_computation_overrun.unwrap().phase,
+                    "stretch-read"
+                );
+                assert_eq!(
+                    BUDGET.with(|slot| slot.borrow().as_ref().unwrap().phase),
+                    crate::realtime::RealtimePhase::StretchRead
+                );
+
+                let plain = Arc::new(MetricCounters::default());
+                rearm(plain.clone());
+                crate::realtime::checkpoint();
+                assert_eq!(
+                    plain.snapshot().first_computation_overrun.unwrap().phase,
+                    "stretch-read"
+                );
+                assert_eq!(
+                    BUDGET.with(|slot| slot.borrow().as_ref().unwrap().phase),
+                    crate::realtime::RealtimePhase::Unknown
+                );
+
+                let next = Arc::new(MetricCounters::default());
+                rearm(next.clone());
+                crate::realtime::checkpoint();
+                assert_eq!(
+                    next.snapshot().first_computation_overrun.unwrap().phase,
+                    "unknown"
+                );
+                BUDGET.with(|slot| *slot.borrow_mut() = None);
+            })
+            .join()
+            .unwrap();
+        }
 
         #[test]
         fn unknown_callback_size_uses_headless_512_frame_period() {
@@ -2558,6 +2997,7 @@ mod mac {
                     constraint_ns: 50_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: metrics.clone(),
                 })
             });
@@ -2586,6 +3026,7 @@ mod mac {
                     constraint_ns: 50_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: metrics.clone(),
                 })
             });
@@ -2620,6 +3061,7 @@ mod mac {
                 constraint_ns: 5_000_000,
                 computation_reported: true,
                 constraint_reported: true,
+                phase: crate::realtime::RealtimePhase::Unknown,
                 metrics: old_metrics.clone(),
             };
             resume_budget(
@@ -2686,6 +3128,7 @@ mod mac {
                     constraint_ns: 12_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: old_metrics,
                 });
             });
@@ -2726,6 +3169,7 @@ mod mac {
                     constraint_ns: 5_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: Arc::new(MetricCounters::default()),
                 });
             });
@@ -2782,6 +3226,7 @@ mod mac {
                 constraint_ns: 20_000_000,
                 computation_reported: false,
                 constraint_reported: false,
+                phase: crate::realtime::RealtimePhase::Unknown,
                 metrics: metrics.clone(),
             };
             resume_budget(
