@@ -75,13 +75,23 @@ const BEYOND: View[] = [{ zoom: 8, pan: 'right', resolution: '1' }];
 /** Cases with a known visible difference, and why. Each must fail the
  *  bound named (`stage`: the whole stage; `outside`: also outside the video). */
 const VIDEO_COPY = 'video editing copy at Auto or quality below 1 (Phase 4a proxies; issues.md)';
+const SUBPIXEL = 'crop origin rounded to the nearest output pixel (F4, issues.md; bridge.md "Today\'s viewer canvas")';
 const KNOWN: Record<string, { why: string; fails: 'stage' | 'outside' }> = {
   '25% Auto': { why: VIDEO_COPY, fails: 'stage' },
   '25% Half': { why: VIDEO_COPY, fails: 'stage' },
   '50% Half': { why: VIDEO_COPY, fails: 'stage' },
   '61% Half': { why: VIDEO_COPY, fails: 'stage' },
   '100% Half': { why: VIDEO_COPY, fails: 'stage' },
-  '800% right edge Full': { why: 'crop past the largest output, drawn below today\'s resolution (bridge.md "Beyond the largest output")', fails: 'outside' },
+  // A cropped canvas's grid starts at the nearest output pixel, today's at
+  // the crop's fractional origin: every hard edge moves by up to half a
+  // device pixel (F4 in issues.md; pm-render has no output origin).
+  '237% Auto': { why: SUBPIXEL, fails: 'outside' },
+  '237% panned Auto': { why: SUBPIXEL, fails: 'outside' },
+  '237% Full': { why: SUBPIXEL, fails: 'outside' },
+  '237% panned Full': { why: SUBPIXEL, fails: 'outside' },
+  '237% Half': { why: SUBPIXEL, fails: 'outside' },
+  '237% panned Half': { why: SUBPIXEL, fails: 'outside' },
+  '800% right edge Full': { why: `crop past the largest output, drawn below today's resolution (bridge.md "Beyond the largest output"), and ${SUBPIXEL}`, fails: 'outside' },
 };
 
 const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90">
