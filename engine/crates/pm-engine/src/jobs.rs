@@ -40,6 +40,12 @@ pub struct JobDocument {
     pub session: SessionId,
     pub revision: Revision,
     pub document: Arc<pm_model::Document>,
+    /// The session's definitions (contract 10) when the host pushed any: the
+    /// winning effect, transition, and layer registrations the job renders
+    /// with, frozen with the document (a later push never reaches a job
+    /// already submitted). `None`: the host sent none, so effects,
+    /// transitions, and extension layers cannot be drawn.
+    pub definitions: Option<Arc<pm_protocol::definitions::DefinitionSetSnapshot>>,
 }
 
 /// A host services call the service wants made, answered through
@@ -132,6 +138,23 @@ pub trait JobService: Send {
 
     /// Takes everything waiting to be sent.
     fn drain(&mut self) -> Drained;
+
+    /// A definitions update the engine applied to a job `session` (contract
+    /// 10). A service that compiles it answers `id` on `port` itself, with
+    /// `Response::DefinitionsApplied` carrying every upserted definition's
+    /// compile failure, through its outbox, and returns true; the engine
+    /// then sends no answer. The default (false): the engine acknowledges at
+    /// once, without failures.
+    fn definitions_pushed(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        session: SessionId,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> bool {
+        let _ = (port, id, session, update);
+        false
+    }
 
     /// A session closed: work on it that has not started is dropped.
     fn session_closed(&mut self, session: SessionId);

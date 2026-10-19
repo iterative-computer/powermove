@@ -176,7 +176,8 @@ export const RESPONSE_FOR: Readonly<Record<Request['type'], Response['type'] | r
   toolCall: 'toolResult',
   probeMedia: 'mediaFacts',
   snapshot: 'snapshot',
-  compatFrame: 'compatFrame'
+  compatFrame: 'compatFrame',
+  shaderFallback: 'ack'
 };
 
 type Pending = { expects: readonly Response['type'][]; resolve: (response: Response) => void; reject: (error: Error) => void };

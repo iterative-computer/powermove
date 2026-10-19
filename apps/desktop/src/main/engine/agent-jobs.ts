@@ -18,6 +18,14 @@
  * (read-your-writes). They run in the job engine, sliced while the
  * interactive engine plays, so they never pause or drop the user's playback.
  *
+ * Definitions (contract 10): every job session main opens receives the
+ * owning window's winning effect, transition, and layer registrations
+ * (main's relay, `definitions.ts`) and the job engine acknowledges them
+ * before the job or batch is submitted, so the job renders that window's
+ * effects, forks and overrides by id included. A window's frame session
+ * gets the current set again before a batch whenever the window pushed
+ * since. Render queue jobs carry the set captured when they were queued.
+ *
  * Capability routing (section 26, Phase 2): a project the engine cannot
  * render yet (`unsupported`), or whose media the host media store cannot
  * hand it (`mediaOffline`), comes back as `routed`, and the caller runs the
@@ -50,6 +58,8 @@ import type {
   AgentFrameOutcome,
   CompatFrameRequest,
   CompatSource,
+  DefinitionsApplied,
+  DefinitionsUpdate,
   EngineError,
   EngineProcess,
   ExportSettings,
@@ -61,6 +71,7 @@ import type {
 } from '../../shared/engine-protocol';
 import { type SheetExportOptions, validSheetExportOptions } from '../../shared/engine-ipc';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../shared/frame-rate';
+import type { WindowDefinitions } from './definitions';
 import { RemoteError } from './protocol';
 
 /** What the agent jobs need from the engine host (NativeEngine). */
@@ -357,7 +368,11 @@ type JobRecord = {
   project?: Project;
 };
 
-type FrameSession = { session: number; revision: number; hash: string; generation: number };
+type FrameSession = {
+  session: number; revision: number; hash: string; generation: number;
+  /** The relay version of the window's set the session holds, and its definitions generation. */
+  definitions: { version: number; generation: number } | null;
+};
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
@@ -374,6 +389,8 @@ export type AgentJobsOptions = {
   queueBoundMs?: number;
   now?: () => number;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /** A window's current definition set (main's relay); null when it pushed none. */
+  definitions?(owner: number): WindowDefinitions | null;
 };
 
 export class AgentJobs {
@@ -381,6 +398,18 @@ export class AgentJobs {
   private readonly finished: string[] = [];
   /** One live-following job session per window for its agent frames. */
   private readonly frameSessions = new Map<number, Promise<FrameSession>>();
+  /** The window each agent frame session works for (by job engine session). */
+  private readonly frameOwners = new Map<number, number>();
+
+  /**
+   * The window a job engine session works for: an export's or an agent
+   * frame batch's (the render queue's own jobs: `QUEUE_OWNER`); `null` when
+   * no job or frame session of this launch has it.
+   */
+  ownerOf(session: number): number | null {
+    for (const record of this.jobs.values()) if (record.session === session) return record.owner;
+    return this.frameOwners.get(session) ?? null;
+  }
   /** Bumped when the job engine restarts: every session it had is gone. */
   private generation = 0;
   private readonly unlisten: () => void;
@@ -434,7 +463,7 @@ export class AgentJobs {
     // engine asks for a folder destination by the format.
     const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
-    const session = await this.openSnapshot(project, `agent-export-${jobId}`);
+    const session = await this.openSnapshot(project, `agent-export-${jobId}`, this.windowUpdates(owner));
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
@@ -600,23 +629,28 @@ export class AgentJobs {
    *  an `unsupported` or `mediaOffline` failure arrives as `routed`, and the
    *  window runs the current exporter to the same file. */
   async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, extra: { draft?: boolean } = {}): Promise<{ jobId: string; frames: number }> {
-    return this.submitUser(owner, projectValue, { ...options, ...(extra.draft ? { draft: true } : {}) }, destination, 'replace', false);
+    return this.submitUser(owner, projectValue, { ...options, ...(extra.draft ? { draft: true } : {}) }, destination, 'replace', false, this.windowUpdates(owner));
+  }
+
+  /** The window's set as the updates a fresh job session starts with (generation 1). */
+  private windowUpdates(owner: number): DefinitionsUpdate[] {
+    return this.options.definitions?.(owner)?.updates(1) ?? [];
   }
 
   /** Starts a render queue job (unattended, from its stored snapshot) to its
    *  destination under its overwrite policy. Statuses go to `onQueueStatus`. */
-  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }> {
-    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true);
+  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions: DefinitionsUpdate[] = []): Promise<{ jobId: string; frames: number }> {
+    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true, definitions);
   }
 
-  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean): Promise<{ jobId: string; frames: number }> {
+  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean, definitions: DefinitionsUpdate[]): Promise<{ jobId: string; frames: number }> {
     const project = asProject(projectValue);
     const format = migrateFormat(options.format);
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
-    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`);
+    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`, definitions);
     const record: JobRecord = {
       jobId, owner, run: '', session, ...(queue ? { queue: true } : { user: true }),
       status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null, preview: null },
@@ -719,20 +753,77 @@ export class AgentJobs {
     const previous = this.frameSessions.get(owner);
     const next = (async (): Promise<FrameSession> => {
       const current = await previous?.catch(() => null);
-      if (current && current.generation === this.generation && current.hash === hash) return current;
+      if (current && current.generation === this.generation && current.hash === hash) return this.currentDefinitions(owner, current);
       if (current && current.generation === this.generation) {
         const revision = current.revision + 1;
         await this.resync(current.session, `agent-frames-${owner}`, canonical, hash, revision);
-        return { ...current, revision, hash };
+        return this.currentDefinitions(owner, { ...current, revision, hash });
       }
       const generation = this.generation;
       const session = await this.openSession(`agent-frames-${owner}`, 'job');
+      this.frameOwners.set(session, owner);
       await this.resync(session, `agent-frames-${owner}`, canonical, hash, 1);
-      return { session, revision: 1, hash, generation };
+      return this.currentDefinitions(owner, { session, revision: 1, hash, generation, definitions: null });
     })();
     this.frameSessions.set(owner, next);
     next.catch(() => { if (this.frameSessions.get(owner) === next) this.frameSessions.delete(owner); });
     return next;
+  }
+
+  /**
+   * Brings a frame session to the window's current definitions: when the
+   * window pushed since the session last got them (a registration, a
+   * publication, a dispose, a reload), the whole set again at the next
+   * generation, acknowledged before the batch is asked for. Runs in the
+   * window's frame-session chain, so pushes never race.
+   */
+  private async currentDefinitions(owner: number, frames: FrameSession): Promise<FrameSession> {
+    const window = this.options.definitions?.(owner);
+    if (!window || frames.definitions?.version === window.version) return frames;
+    const from = (frames.definitions?.generation ?? 0) + 1;
+    const updates = window.updates(from);
+    await this.pushDefinitions(frames.session, updates);
+    return { ...frames, definitions: { version: window.version, generation: updates.at(-1)!.generation } };
+  }
+
+  /** Sends `updates` to a job session in order; each is acknowledged
+   *  (`definitionsApplied`) before the next, and before the caller goes on. */
+  private async pushDefinitions(session: number, updates: DefinitionsUpdate[]): Promise<void> {
+    for (const update of updates) {
+      let answer: Response;
+      try {
+        answer = await this.options.engine.request('job', { type: 'pushDefinitions', ...update }, session);
+      } catch (error) {
+        const e = remote(error);
+        throw new AgentJobError(`The job engine refused the window's definitions: ${e?.message ?? (error instanceof Error ? error.message : String(error))}`, e?.code ?? 'internal');
+      }
+      if (answer.type !== 'definitionsApplied' || answer.generation !== update.generation) {
+        throw new AgentJobError('The job engine did not acknowledge the definitions.');
+      }
+    }
+  }
+
+  /**
+   * Compiles definitions through the job engine's GLSL pipeline (and their
+   * GPU pipelines) without registering them anywhere: a scratch session
+   * receives them and its acknowledgment carries their failures
+   * (`validate_effect`).
+   */
+  async compileDefinitions(snapshots: DefinitionsUpdate['upserts']): Promise<DefinitionsApplied['failures']> {
+    const session = await this.openSession(`validate-${randomUUID()}`, 'job');
+    try {
+      let answer: Response;
+      try {
+        answer = await this.options.engine.request('job', { type: 'pushDefinitions', generation: 1, full: true, upserts: snapshots, removals: [] }, session);
+      } catch (error) {
+        const e = remote(error);
+        throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
+      }
+      if (answer.type !== 'definitionsApplied') throw new AgentJobError('The job engine did not compile the definition.');
+      return answer.failures;
+    } finally {
+      await this.closeSession(session);
+    }
   }
 
   /** The window closed: its frame session goes. */
@@ -752,13 +843,14 @@ export class AgentJobs {
     return opened.session;
   }
 
-  /** A frozen snapshot of the project for one export. */
-  private async openSnapshot(project: Project, document: string): Promise<number> {
+  /** A frozen snapshot of the project for one export, with the definitions it renders with. */
+  private async openSnapshot(project: Project, document: string, definitions: DefinitionsUpdate[]): Promise<number> {
     const canonical = canonicalProject(project);
     const session = await this.openSession(document, 'jobSnapshot');
     try {
       await this.options.bindMediaSession?.(session, project);
       await this.resync(session, document, canonical, canonicalHash(canonical), 1);
+      await this.pushDefinitions(session, definitions);
     } catch (error) {
       await this.closeSession(session);
       throw error;

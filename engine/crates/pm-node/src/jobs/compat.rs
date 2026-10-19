@@ -469,7 +469,6 @@ mod tests {
     #[test]
     fn a_compat_context_draws_over_export_frames_as_today_s_canvas() {
         use pm_export::WorkingEncoding;
-        use pm_export::render::FramePost;
         let host = Arc::new(Host {
             calls: Mutex::new(Vec::new()),
             answer: Box::new(|r: &CompatFrameRequest| {

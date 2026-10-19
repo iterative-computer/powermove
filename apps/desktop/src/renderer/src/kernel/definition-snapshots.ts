@@ -238,6 +238,10 @@ export class SessionDefinitions {
   private generation = 0;
   private needsFull = true;
   private off: (() => void) | null;
+  /** The generation of the latest update that upserted or removed each definition (`kind\0id`). */
+  private changed = new Map<string, number>();
+  /** The generation of the latest full update (it changes every definition). */
+  private fullAt = 0;
 
   constructor(private readonly publisher: DefinitionPublisher, private readonly send: (update: DefinitionsUpdate) => boolean | void, private onDispose: (() => void) | null = null) {
     this.off = publisher.subscribe((change) => this.delta(change));
@@ -248,6 +252,17 @@ export class SessionDefinitions {
   full(): void {
     this.needsFull = false;
     this.deliver({ generation: ++this.generation, full: true, upserts: this.publisher.all(), removals: [] });
+  }
+
+  /** The generation of the latest update sent that changed this definition. */
+  changedAt(kind: string, id: string): number | undefined {
+    const at = Math.max(this.changed.get(keyOf(kind as DefinitionKind, id)) ?? 0, this.fullAt);
+    return at || undefined;
+  }
+
+  /** The generation of the latest update sent. */
+  get latest(): number {
+    return this.generation;
   }
 
   /** The receiver lost track (refusals it stopped retrying): the next change sends the whole set. */
@@ -269,6 +284,8 @@ export class SessionDefinitions {
   }
 
   private deliver(update: DefinitionsUpdate): void {
+    if (update.full) this.fullAt = update.generation;
+    for (const d of [...update.upserts, ...update.removals]) this.changed.set(keyOf(d.kind, d.id), update.generation);
     let ok: boolean | void = true;
     try { ok = this.send(update); } catch { ok = false; }
     if (ok === false) this.needsFull = true;

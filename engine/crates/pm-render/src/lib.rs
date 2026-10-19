@@ -33,6 +33,7 @@ mod exec;
 pub mod expr;
 pub mod footage;
 mod frame_prefix;
+pub mod glsl;
 pub mod js;
 pub mod media;
 pub mod motion;
@@ -54,14 +55,14 @@ pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{
-    Feature, Unsupported, unsupported, unsupported_with_definitions, unsupported_with_fonts,
-    unsupported_with_media,
+    Feature, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
+    unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{
-    CommandBracket, Frame, LayerPixels, LayerQuad, LayerRaster, PassThrough, Rendered, Renderer,
-    SvgWaiting, TextRaster,
+    CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster, PassThrough,
+    Rendered, Renderer, SvgWaiting, TextRaster,
 };
 pub use request::{RenderRequest, VideoEnd};
 pub use shader_layers::all_builtin_definitions;

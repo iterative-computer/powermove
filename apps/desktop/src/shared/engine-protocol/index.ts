@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-556adc1fa36ea9ee";
+export const PROTOCOL_BUILD = "protocol-243ac2c6ec3d6e99";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -123,6 +123,7 @@ export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
 export type { HostMicros } from "./HostMicros";
+export type { HostShaderFallback } from "./HostShaderFallback";
 export type { HostSnapshot } from "./HostSnapshot";
 export type { ImagePayload } from "./ImagePayload";
 export type { InFlight } from "./InFlight";
@@ -226,9 +227,11 @@ export type { SessionId } from "./SessionId";
 export type { SessionRole } from "./SessionRole";
 export type { ShaderDiagnostic } from "./ShaderDiagnostic";
 export type { ShaderFallbackCall } from "./ShaderFallbackCall";
+export type { ShaderFallbackInput } from "./ShaderFallbackInput";
 export type { ShaderFallbackMessage } from "./ShaderFallbackMessage";
 export type { ShaderFallbackPixels } from "./ShaderFallbackPixels";
 export type { ShaderFallbackRequest } from "./ShaderFallbackRequest";
+export type { ShaderFallbackUnit } from "./ShaderFallbackUnit";
 export type { Shading3d } from "./Shading3d";
 export type { Shutter } from "./Shutter";
 export type { ShutterSample } from "./ShutterSample";

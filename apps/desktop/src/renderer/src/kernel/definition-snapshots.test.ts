@@ -12,7 +12,7 @@ import {
   DefinitionPublisher, SessionDefinitions, effectSnapshot, layerSnapshot, normalizedColor, originOf, paramSpec,
   transitionSnapshot, wrappedGlsl, type Preambles
 } from './definition-snapshots';
-import { EngineShaderMeta, describe as describeError, hashStr, shaderLayerKey } from './engine-definitions';
+import { EngineShaderMeta, createEngineDefinitions, describe as describeError, hashStr, shaderLayerKey } from './engine-definitions';
 
 /** UIState's shader meta store (legacy/core/ui-state.ts), recording each patch. */
 function uiState(meta: any[]) {
@@ -195,7 +195,7 @@ describe('engine shader meta', () => {
   it('fills compile errors and layer meta from engine reports', () => {
     const meta: any[] = [];
     const layers = [{ id: 'L1', type: 'extension', d: { definition: 'gen.glow' } }, { id: 'L2', type: 'shader', d: {} }];
-    const PM: any = { proj: { layers, comps: {} }, UIState: uiState(meta) };
+    const PM: any = { proj: { layers, comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
     const m = new EngineShaderMeta(PM);
     m.applied({ generation: 2, failures: [{ code: 'shaderCompile', scope: { kind: 'definition', definition: 'gen.glow' }, message: 'The shader of gen.glow does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics }] });
     expect(m.compileError('fx:gen.glow')).toBe("The shader of gen.glow does not compile.\nline 3: 'nope' : undeclared identifier\n(generated code): in the preamble");
@@ -244,7 +244,7 @@ describe('engine shader meta', () => {
   it('holds layer reports for their revision and clears the ones a later frame did not repeat', () => {
     const meta: any[] = [];
     const layers = [{ id: 'S', type: 'shader', d: {} }, { id: 'X', type: 'extension', d: { definition: 'gen.orb' } }, { id: 'Y', type: 'extension', d: { definition: 'gen.bars' } }];
-    const PM: any = { proj: { layers, comps: {} }, UIState: uiState(meta) };
+    const PM: any = { proj: { layers, comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
     const m = new EngineShaderMeta(PM);
     const compile = (revision: number) => m.failure({ revision, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostics } });
     const missing = (revision: number, layer: string) => m.failure({ revision, error: { code: 'definitionMissing', scope: { kind: 'layer', layer }, message: `Extension layer ${layer} is missing.`, retry: { kind: 'never' }, detail: null } });
@@ -279,7 +279,7 @@ describe('engine shader meta', () => {
 
   it('shows a shader layer the fallback runner draws as not headless-renderable until a frame stops repeating it', () => {
     const meta: any[] = [];
-    const PM: any = { proj: { layers: [{ id: 'C', type: 'shader', d: {} }], comps: {} }, UIState: uiState(meta) };
+    const PM: any = { proj: { layers: [{ id: 'C', type: 'shader', d: {} }], comps: {} }, UIState: { setShaderMeta: (layer: any, patch: any) => meta.push([layer.id, patch]) } };
     const m = new EngineShaderMeta(PM);
     const message = 'Shader layer C is drawn by the WebGL fallback, so headless exports cannot render it (the native pipeline stops at bind: samplerCube uEnv is not a float sampler2D).';
     m.failure({ revision: 2, error: { code: 'notHeadlessRenderable', scope: { kind: 'layer', layer: 'C' }, message, retry: { kind: 'afterUserAction' }, detail: { kind: 'shaderCompile', diagnostics: [] } } });
@@ -289,5 +289,146 @@ describe('engine shader meta', () => {
     // The code changed and the native pipeline draws it: not repeated.
     m.frame(3);
     expect(m.compileError('engine:C')).toBeNull();
+  });
+
+  it('owns its programs\' compile errors: a successful compile is never answered by a stale legacy error', () => {
+    const legacyErrors = new Map([['fx:wave', 'legacy: line 1: old error'], ['sh:S:abc123', 'legacy: S broke'], ['other:key', 'legacy only']]);
+    const PM: any = { proj: { layers: [{ id: 'S', type: 'shader', d: { code: 'x' } }], comps: {} }, UIState: {} };
+    const m = new EngineShaderMeta(PM);
+    const compileError = (key: string) => (m.owns(key) ? m.compileError(key) : legacyErrors.get(key) ?? null);
+    m.setRoute('engine');
+    // The engine compiled `wave` (no failure): no error, not the legacy one.
+    m.pushed({ generation: 1, full: true, upserts: [{ id: 'wave', kind: 'effect' } as any], removals: [] });
+    expect(compileError('fx:wave')).toBeNull();
+    // A shader layer's legacy key reads that layer's engine report.
+    expect(compileError('sh:S:abc123')).toBeNull();
+    m.failure({ revision: 4, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: null } });
+    expect(compileError('sh:S:abc123')).toBe('Shader layer S does not compile.');
+    expect(compileError('engine:S')).toBe('Shader layer S does not compile.');
+    m.frame(5);
+    expect(compileError('sh:S:abc123')).toBeNull();
+    // Keys the engine never draws keep the legacy answer.
+    expect(compileError('other:key')).toBe('legacy only');
+  });
+
+  it('gives the legacy compositor its keys while it draws the composition', () => {
+    const legacyErrors = new Map([['fx:wave', 'legacy: line 1: broken'], ['sh:S:abc123', 'legacy: S broke']]);
+    const PM: any = { proj: { layers: [{ id: 'S', type: 'shader', d: { code: 'x' } }], comps: {} }, UIState: {} };
+    const m = new EngineShaderMeta(PM);
+    const compileError = (key: string) => (m.owns(key) ? m.compileError(key) : legacyErrors.get(key) ?? null);
+    // No viewer session yet: the legacy compositor draws and its compile
+    // records answer (a shader layer with broken GLSL shows its error).
+    expect(compileError('sh:S:abc123')).toBe('legacy: S broke');
+    expect(compileError('fx:wave')).toBe('legacy: line 1: broken');
+    // The engine presents: its reports alone.
+    m.setRoute('engine');
+    expect(compileError('sh:S:abc123')).toBeNull();
+    expect(compileError('fx:wave')).toBeNull();
+    // The engine routed the composition to the legacy viewer (or the
+    // session closed: `pending`): the legacy compositor's record again.
+    m.setRoute('legacy');
+    expect(compileError('sh:S:abc123')).toBe('legacy: S broke');
+    m.setRoute('engine');
+    m.setRoute('pending');
+    expect(compileError('fx:wave')).toBe('legacy: line 1: broken');
+    // `engine:` keys exist only in engine reports, whoever draws.
+    m.failure({ revision: 4, error: { code: 'shaderCompile', scope: { kind: 'layer', layer: 'S' }, message: 'Shader layer S does not compile.', retry: { kind: 'afterUserAction' }, detail: null } });
+    expect(m.owns('engine:S')).toBe(true);
+    expect(compileError('engine:S')).toBe('Shader layer S does not compile.');
+  });
+
+  it('ignores a definition failure from a set the session already replaced', () => {
+    const PM: any = { proj: { layers: [], comps: {} }, UIState: {} };
+    const m = new EngineShaderMeta(PM);
+    const changed = new Map<string, number>();
+    const stream = { changedAt: (kind: string, id: string) => changed.get(`${kind}:${id}`) };
+    const failure = (generation: number) => m.failure({ revision: generation, error: { code: 'shaderCompile', scope: { kind: 'definition', definition: 'acme.glow' }, message: `broken at ${generation}`, retry: { kind: 'afterUserAction' }, detail: null } }, stream);
+    // Generation 5 broke it; generation 6 fixed it and cleared the error.
+    changed.set('effect:acme.glow', 6);
+    m.pushed({ generation: 6, full: false, upserts: [{ id: 'acme.glow', kind: 'effect' } as any], removals: [] });
+    // The translation of generation 5 reports late: stale, ignored.
+    failure(5);
+    expect(m.compileError('fx:acme.glow')).toBeNull();
+    // A failure of the current generation applies.
+    failure(6);
+    expect(m.compileError('fx:acme.glow')).toBe('broken at 6');
+    // Watchdog reports are not translations: never judged by generation.
+    m.failure({ revision: 1, error: { code: 'watchdogTimeout', scope: { kind: 'definition', definition: 'acme.wipe' }, message: 'acme.wipe took 300 ms.', retry: { kind: 'afterUserAction' }, detail: null } }, stream);
+    expect(m.compileError('tr:acme.wipe')).toBe('acme.wipe took 300 ms.');
+  });
+
+  it('shows a shader layer the watchdog turned off until its code changes', () => {
+    const layer = { id: 'S', type: 'shader', d: { code: 'void main(){ for(;;){} }' } };
+    const meta: any[] = [];
+    const PM: any = { proj: { layers: [layer], comps: {} }, UIState: { setShaderMeta: (l: any, patch: any) => meta.push([l.id, patch]) } };
+    const m = new EngineShaderMeta(PM);
+    m.failure({ revision: 3, error: { code: 'watchdogTimeout', scope: { kind: 'layer', layer: 'S' }, message: 'The shader of layer S did not finish.', retry: { kind: 'afterUserAction' }, detail: null } });
+    expect(meta.at(-1)).toEqual(['S', { shaderKey: 'engine:S', missing: false }]);
+    // Not repeated per revision, and still in force.
+    m.frame(4);
+    m.frame(5);
+    expect(m.compileError('engine:S')).toBe('The shader of layer S did not finish.');
+    // Edited code is another program.
+    layer.d.code = 'void main(){ fragColor = vec4(1.0); }';
+    m.frame(6);
+    expect(m.compileError('engine:S')).toBeNull();
+  });
+
+  it('keeps the shader meta the legacy compositor set for layers the engine draws without a report', () => {
+    const store = new Map<string, any>();
+    const definition = { id: 'gen.orb', version: 1, renderer: { kind: 'fragment', fragment: 'void main(){}' }, params: [] };
+    const layers = [
+      { id: 'S', type: 'shader', d: { code: 'x' } },
+      { id: 'X', type: 'extension', d: { definition: 'gen.orb' } },
+      { id: 'G', type: 'extension', d: { definition: 'gone' } },
+      { id: 'O', type: 'extension', d: { definition: 'powermove.3d.object' } }
+    ];
+    let sets = 0;
+    const PM: any = {
+      proj: { layers, comps: {} },
+      Kernel: { layerTypes: { get: (id: string) => (id === 'gen.orb' ? definition : id === 'powermove.3d.object' ? { id, renderer: { kind: 'layer3d', role: 'object' } } : undefined) } },
+      UIState: {
+        getShaderMeta: (l: any) => store.get(l.id) ?? { udefs: [], shaderKey: null },
+        setShaderMeta: (l: any, patch: any) => { sets++; store.set(l.id, { ...(store.get(l.id) ?? { udefs: [], shaderKey: null }), ...patch }); }
+      }
+    };
+    const m = new EngineShaderMeta(PM);
+    m.frame(1);
+    // Today's program key for a shader layer (legacy/gl/compositor.ts).
+    expect(store.get('S')).toMatchObject({ shaderKey: shaderLayerKey(layers[0]!) });
+    expect(shaderLayerKey(layers[0]!)).toBe(`sh:S:${hashStr('x')}`);
+    expect(store.get('X')).toMatchObject({ shaderKey: 'extension:gen.orb', definition, missing: false, missingAsset: null });
+    expect(store.get('G')).toMatchObject({ shaderKey: 'extension:gone', definition: null, missing: true });
+    expect(store.has('O'), '3D roles keep their own meta').toBe(false);
+    // Nothing changed: no writes (each write bumps the timeline version).
+    const before = sets;
+    m.frame(2);
+    m.frame(2);
+    expect(sets).toBe(before);
+  });
+});
+
+describe('settling before a render', () => {
+  it('lets queued reloads finish and sends pending registry changes at once', async () => {
+    const kernel: any = createKernel();
+    let idle!: () => void;
+    const reload = new Promise<void>((resolve) => { idle = resolve; });
+    kernel.loader = { whenIdle: () => reload };
+    const PM: any = { Kernel: kernel, GLSL_PRE: PRE.effect, TRANSITION_PRE: PRE.transition, SHADER_HEADER: PRE.layer, proj: { layers: [], comps: {} } };
+    const definitions = createEngineDefinitions(PM, kernel);
+    const sent: DefinitionsUpdate[] = [];
+    definitions.session((u) => { sent.push(u); });
+    expect(sent).toHaveLength(1);
+    let settled = false;
+    const settling = definitions.settle().then(() => { settled = true; });
+    // A publication's reload registers the effect, then the loader idles.
+    kernel.registerEffect('agent', effect({ id: 'acme.new' }));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    idle();
+    await settling;
+    // Sent before settle resolved (not left for a later microtask).
+    expect(sent.at(-1)).toMatchObject({ full: false, upserts: [{ id: 'acme.new' }] });
+    definitions.dispose();
   });
 });

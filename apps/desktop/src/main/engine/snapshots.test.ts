@@ -4,6 +4,7 @@ import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { FallbackInputs } from './fallback-inputs';
 
 const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Partial<EngineSnapshotRequest> = {}): EngineSnapshotRequest => ({
   generation: 2,
@@ -139,6 +140,24 @@ describe('SnapshotService', () => {
     expect(await service.snapshot(9, request())).toMatchObject({ status: 'failed', code: 'unsupported', message: 'The new engine cannot draw this frame: x.' });
     answer = new Error('the interactive engine is not connected');
     expect(await service.snapshot(9, request())).toMatchObject({ status: 'failed', code: 'unavailable' });
+  });
+
+  it('hands an effect request its textures, which the engine sent ahead of the answer', async () => {
+    const inputs = new FallbackInputs();
+    const effect = { key: 'f'.repeat(64), layer: 'L1', vertex: 'v', fragment: 'f', width: 2, height: 1, calls: [], stage: 'bind', message: '', textures: 1, units: [], morePasses: [] };
+    const layer = { ...effect, key: '0'.repeat(64), textures: 0 };
+    const e = {
+      ...engine(async () => {
+        // Bands arrive on main's port before the answer they belong to.
+        inputs.receive({ type: 'shaderFallback', fallback: 'input', key: effect.key, texture: 0, width: 2, height: 1, row: 0, rows: 1, rgba16f: new Uint8Array(16).fill(9) });
+        return { type: 'snapshot', outcome: 'needsRenderer', revision: 41, fallback: [effect, layer], compat: [] } as unknown as Response;
+      }),
+      fallbackTextures: (key: string, count: number, width: number, height: number) => inputs.take(key, count, width, height)
+    };
+    const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
+    const reply = await service.snapshot(9, request());
+    expect(reply).toMatchObject({ status: 'needsRenderer', fallback: [effect, layer], fallbackTextures: [{ key: effect.key, textures: [new Uint8Array(16).fill(9)] }] });
+    expect(inputs.held).toBe(0);
   });
 
   it('bounds the wait and frees a late segment', async () => {

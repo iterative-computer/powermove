@@ -5,8 +5,13 @@
 //! definition's program and its watchdog record, so an effect the watchdog
 //! turned off stays off; another view drawing in between does not reset it.
 //! A definition registered again (a delta's upsert) starts over.
+//!
+//! The budget records only in production (today's compositor never turns a
+//! program off, amendment 22) and never applies to built-ins: this test
+//! enforces it on view A for a user override of `blur` by id.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use pm_node::present::compose::Composer;
@@ -15,6 +20,7 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{Seq, Size, Ticks};
 use pm_protocol::definitions::{DefinitionKind, DefinitionSetSnapshot, DefinitionSnapshot};
 use pm_protocol::error::ErrorCode;
+use pm_render::effects::watchdog::{FnTiming, Span, Subject, TimingSource};
 use pm_render::{RenderRequest, Renderer};
 use serde_json::{Value, json};
 
@@ -87,22 +93,43 @@ fn with_extra(set: &DefinitionSetSnapshot, generation: u64) -> DefinitionSetSnap
     next
 }
 
+/// The watchdog's test hook (issue A2): the blur takes `blur_ms` of GPU
+/// time per frame; frames take 16 ms. Every frame is judged at its
+/// completion, on any device and under any load, so this test does not
+/// depend on Metal writing every timestamp sample.
+fn blur_takes(ms: Arc<AtomicU64>) -> Arc<dyn TimingSource> {
+    Arc::new(FnTiming(
+        move |span: &Span| {
+            Some(match &span.subject {
+                Subject::Definition { id, .. } if id.as_str() == "blur" => {
+                    Duration::from_millis(ms.load(Ordering::Relaxed))
+                }
+                _ => Duration::from_millis(1),
+            })
+        },
+        |_: &[Span]| Duration::from_millis(16),
+    ))
+}
+
 #[test]
 fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     let headless = Renderer::headless().unwrap();
-    if !headless
-        .device()
-        .features()
-        .contains(wgpu::Features::TIMESTAMP_QUERY)
-    {
-        eprintln!("no TIMESTAMP_QUERY on this device; the watchdog times nothing");
-        return;
-    }
     let mut composer = Composer::new(headless.device(), headless.queue());
-    let builtins = Arc::new(pm_render::builtin_definitions());
+    let blur_ms = Arc::new(AtomicU64::new(300));
+    let builtins = Arc::new({
+        let mut set = pm_render::builtin_definitions();
+        for d in set
+            .definitions
+            .iter_mut()
+            .filter(|d| d.id.as_str() == "blur")
+        {
+            d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+        }
+        set
+    });
     let doc = blurred();
     let plain = document(json!([]));
-    // View A draws the blur; a 1 ns budget makes it overrun.
+    // View A draws the blur; an enforced 250 ms budget makes it overrun.
     let a = 1u64;
     let b = 2u64;
     composer.use_definitions(a, Some(&(builtins.clone(), 1)), &[]);
@@ -111,17 +138,15 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         .renderer()
         .effects_mut()
         .watchdog
-        .set_budget(Duration::from_nanos(1));
-    let mut first = Vec::new();
-    let mut reports = Vec::new();
-    // A frame whose timestamps Metal left unwritten is not judged.
-    for _ in 0..20 {
-        first = render(&mut composer, &doc);
-        reports = composer.renderer().watchdog_reports(true);
-        if !reports.is_empty() {
-            break;
-        }
-    }
+        .set_timing_source(Some(blur_takes(blur_ms.clone())));
+    composer
+        .renderer()
+        .effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
+    // Judged at the first frame's completion: 300 ms against 250.
+    let first = render(&mut composer, &doc);
+    let reports = composer.renderer().watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::WatchdogTimeout);
     assert!(max_diff(&first, &base) > 0.05, "the blur drew");
@@ -155,8 +180,15 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     assert!(composer.renderer().watchdog_reports(true).is_empty());
 
     // View B on the same device draws the blur with its own set; A's state
-    // survives the swaps both ways.
+    // survives the swaps both ways. (Each view's set has its own watchdog;
+    // B's draws within budget.)
     composer.use_definitions(b, Some(&(builtins.clone(), 1)), &[]);
+    blur_ms.store(5, Ordering::Relaxed);
+    composer
+        .renderer()
+        .effects_mut()
+        .watchdog
+        .set_timing_source(Some(blur_takes(blur_ms.clone())));
     assert!(
         !composer
             .renderer()
@@ -189,11 +221,6 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
 
     // The blur registered again with the same source (a kernel delta's
     // upsert: a register or hot reload of that id) re-enables it.
-    composer
-        .renderer()
-        .effects_mut()
-        .watchdog
-        .set_budget(Duration::from_secs(5));
     let same = Arc::new(with_extra(&builtins, 3));
     composer.use_definitions(
         a,
@@ -205,21 +232,15 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         max_diff(&registered, &first) <= 1.0 / 1024.0,
         "re-enabled by the registration"
     );
-    // Off again for the rest (a fresh overrun).
-    composer
-        .renderer()
-        .effects_mut()
-        .watchdog
-        .set_budget(Duration::from_nanos(1));
-    let mut overran = false;
-    for _ in 0..20 {
-        render(&mut composer, &doc);
-        if !composer.renderer().watchdog_reports(true).is_empty() {
-            overran = true;
-            break;
-        }
-    }
-    assert!(overran);
+    assert!(composer.renderer().watchdog_reports(true).is_empty());
+    // Off again for the rest (a fresh overrun, judged at once).
+    blur_ms.store(300, Ordering::Relaxed);
+    render(&mut composer, &doc);
+    assert_eq!(
+        composer.renderer().watchdog_reports(true).len(),
+        1,
+        "overran again"
+    );
     assert!(max_diff(&render(&mut composer, &doc), &base) <= 1.0 / 1024.0);
 
     // A hot reload that changes the blur's source re-enables it.
@@ -235,11 +256,7 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
         .unwrap()
         .source
         .push_str("\n// reloaded\n");
-    composer
-        .renderer()
-        .effects_mut()
-        .watchdog
-        .set_budget(Duration::from_secs(5));
+    blur_ms.store(5, Ordering::Relaxed);
     composer.use_definitions(a, Some(&(Arc::new(reloaded), 4)), &[]);
     let again = render(&mut composer, &doc);
     assert!(max_diff(&again, &first) <= 1.0 / 1024.0, "re-enabled");

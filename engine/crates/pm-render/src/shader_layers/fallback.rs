@@ -31,8 +31,9 @@ use std::sync::Arc;
 use crate::effects::program::Call;
 
 pub use pm_protocol::shader_fallback::{
-    ShaderFallbackCall as FallbackCall, ShaderFallbackPixels as FallbackBand,
-    ShaderFallbackRequest as FallbackRequest,
+    ShaderFallbackCall as FallbackCall, ShaderFallbackInput as FallbackInputBand,
+    ShaderFallbackPixels as FallbackBand, ShaderFallbackRequest as FallbackRequest,
+    ShaderFallbackUnit as FallbackUnit,
 };
 
 /// The runner's form of one uniform call (the shader corpus's format,
@@ -46,10 +47,17 @@ pub fn call(name: &str, call: &Call) -> FallbackCall {
         Call::I(i) => ("1i", vec![f64::from(*i)]),
         Call::M3(m) => ("m3", m.iter().map(|x| f64::from(*x)).collect()),
     };
+    // `name|alias`: a parameter bound by name when that uniform is active,
+    // else through its positional alias (`effects::exec::param_calls`).
+    let (name, alias) = match name.split_once('|') {
+        Some((n, a)) => (n, Some(a.to_owned())),
+        None => (name, None),
+    };
     FallbackCall {
         function: function.into(),
         name: name.into(),
         v,
+        alias,
     }
 }
 
@@ -88,7 +96,226 @@ pub fn request(
         calls: calls.iter().map(|(n, c)| self::call(n, c)).collect(),
         stage: failure.stage.name().into(),
         message: failure.message.lines().next().unwrap_or_default().into(),
+        textures: 0,
+        units: Vec::new(),
+        more_passes: Vec::new(),
     }
+}
+
+/// Binary16 values as little-endian bytes (the wire and file format), in
+/// one pass without per-value allocation.
+pub fn half_bytes(values: &[u16]) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() * 2];
+    for (dst, v) in out.chunks_exact_mut(2).zip(values) {
+        dst.copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Little-endian bytes as binary16 values (a trailing odd byte is ignored).
+pub fn halves(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+/// Feeds binary16 values to a hash as their little-endian bytes, a block at
+/// a time (the digest of feeding them one by one).
+fn hash_halves(h: &mut blake3::Hasher, values: &[u16]) {
+    let mut block = [0u8; 64 * 1024];
+    for chunk in values.chunks(block.len() / 2) {
+        let bytes = &mut block[..chunk.len() * 2];
+        for (dst, v) in bytes.chunks_exact_mut(2).zip(chunk) {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+        h.update(&*bytes);
+    }
+}
+
+/// Values per part hashed on a thread of its own (a full-HD texture is
+/// four parts).
+const PART: usize = 2 << 20;
+
+/// A texture's digest: its values in parts of [`PART`] hashed side by side
+/// (at most four threads), and the parts' digests hashed in order.
+fn texture_digest(values: &[u16]) -> [u8; 32] {
+    let parts: Vec<&[u16]> = values.chunks(PART).collect();
+    let digests: Vec<[u8; 32]> = if parts.len() <= 1 {
+        parts
+            .iter()
+            .map(|p| {
+                let mut h = blake3::Hasher::new();
+                hash_halves(&mut h, p);
+                *h.finalize().as_bytes()
+            })
+            .collect()
+    } else {
+        let mut out = vec![[0u8; 32]; parts.len()];
+        for (group, slots) in parts.chunks(4).zip(out.chunks_mut(4)) {
+            std::thread::scope(|scope| {
+                for (part, slot) in group.iter().zip(slots.iter_mut()) {
+                    scope.spawn(move || {
+                        let mut h = blake3::Hasher::new();
+                        hash_halves(&mut h, part);
+                        *slot = *h.finalize().as_bytes();
+                    });
+                }
+            });
+        }
+        out
+    };
+    let mut h = blake3::Hasher::new();
+    h.update(&(values.len() as u64).to_le_bytes());
+    for d in &digests {
+        h.update(d);
+    }
+    *h.finalize().as_bytes()
+}
+
+/// The request for an effect's or a transition's program: one entry of
+/// `passes` per pass (its calls), `units` naming which of `textures` each
+/// texture unit samples, the textures the target's size. The key covers
+/// the textures' pixels, so the same program on other pixels is another
+/// request.
+#[allow(clippy::too_many_arguments)]
+pub fn request_with_textures(
+    layer: String,
+    fragment: String,
+    width: u32,
+    height: u32,
+    passes: &[Vec<(String, Call)>],
+    units: Vec<FallbackUnit>,
+    textures: &[&FallbackPixels],
+    failure: &pm_glsl::Failure,
+) -> FallbackRequest {
+    // BLAKE3 in parts on up to four threads: the key covers every texel of
+    // every texture (two full-HD textures are 33 MB), hashed twice for
+    // every frame of an animated step (asked for, then drawn); SHA-256 one
+    // value at a time took 58 ms per request at full HD.
+    let vertex = pm_glsl::VERTEX.to_owned();
+    let mut h = blake3::Hasher::new();
+    h.update(b"pm-render shader fallback with textures 3\0");
+    h.update(vertex.as_bytes());
+    h.update(&[0]);
+    h.update(fragment.as_bytes());
+    h.update(&[0]);
+    h.update(&width.to_le_bytes());
+    h.update(&height.to_le_bytes());
+    for calls in passes {
+        h.update(&(calls.len() as u32).to_le_bytes());
+        h.update(&super::plan::calls_bytes(calls));
+    }
+    for u in &units {
+        h.update(&u.unit.to_le_bytes());
+        h.update(&u.texture.to_le_bytes());
+        h.update(&[u8::from(u.chain)]);
+    }
+    for t in textures {
+        h.update(&t.width.to_le_bytes());
+        h.update(&t.height.to_le_bytes());
+        h.update(&texture_digest(&t.rgba16f));
+    }
+    let key = h
+        .finalize()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let mut passes = passes.iter().map(|calls| {
+        calls
+            .iter()
+            .map(|(n, c)| self::call(n, c))
+            .collect::<Vec<_>>()
+    });
+    FallbackRequest {
+        key,
+        layer,
+        vertex,
+        fragment,
+        width,
+        height,
+        calls: passes.next().unwrap_or_default(),
+        stage: failure.stage.name().into(),
+        message: failure.message.lines().next().unwrap_or_default().into(),
+        textures: textures.len() as u32,
+        units,
+        more_passes: passes.collect(),
+    }
+}
+
+/// A program's identity for the runner's failures (its vertex and
+/// fragment source): a program the runner could not draw is not asked for
+/// again until its source changes.
+pub fn program_id(request: &FallbackRequest) -> String {
+    crate::effects::fallback::program_id_of(&request.vertex, &request.fragment)
+}
+
+/// Splits pixels into row bands that fit a message, at most `max_bytes`
+/// each: `(row, rows, bytes)`.
+pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8>)> {
+    let row_bytes = pixels.width as usize * 8;
+    let per = (max_bytes / row_bytes.max(1)).max(1) as u32;
+    let mut out = Vec::new();
+    let mut row = 0;
+    while row < pixels.height {
+        let rows = per.min(pixels.height - row);
+        let start = row as usize * pixels.width as usize * 4;
+        let end = (row + rows) as usize * pixels.width as usize * 4;
+        out.push((row, rows, half_bytes(&pixels.rgba16f[start..end])));
+        row += rows;
+    }
+    out
+}
+
+/// Why the runner could not draw a request (`ShaderFallbackMessage::Failed`,
+/// or the host's error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackFailure {
+    /// `compile`, `deadline`, `contextLost`, `unavailable`, `size`,
+    /// `tooLarge`, or `watchdog`.
+    pub reason: String,
+    pub message: String,
+}
+
+impl FallbackFailure {
+    /// Whether the failure is deterministic, so it is not asked for again
+    /// until the program's source changes: WebGL refused it (`compile`),
+    /// its draw passed the runner's deadline (`watchdog`), or its target
+    /// is larger than the GPU's WebGL texture limit (`tooLarge`; kept for
+    /// the program at that size only, [`FallbackFailure::sized`]).
+    /// Anything else (`contextLost`, the compile `deadline`, `unavailable`,
+    /// `size`) is transient and retried.
+    pub fn is_final(&self) -> bool {
+        matches!(self.reason.as_str(), "compile" | "watchdog" | "tooLarge")
+    }
+
+    /// Whether the failure holds only for the request's size (`tooLarge`):
+    /// the same program at a smaller size (a lower preview resolution, a
+    /// smaller export) is asked for.
+    pub fn sized(&self) -> bool {
+        self.reason == "tooLarge"
+    }
+}
+
+/// The key a size-bound failure ([`FallbackFailure::sized`]) is kept under.
+pub(crate) fn sized_program_id(program: &str, width: u32, height: u32) -> String {
+    format!("{program}@{width}x{height}")
+}
+
+/// A request with the textures it samples, for a host that runs it
+/// synchronously ([`FallbackHost`]).
+#[derive(Debug, Clone)]
+pub struct FallbackJob {
+    pub request: FallbackRequest,
+    pub textures: Vec<Arc<FallbackPixels>>,
+}
+
+/// A runner a renderer can wait on (the job engine's: the host runs the
+/// request in a window's runner, contract 14). The interactive engine's
+/// runner is asynchronous instead (`RenderError::ShaderFallbackPending`).
+pub trait FallbackHost: Send + Sync {
+    fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure>;
 }
 
 /// Collects a request's row bands (`ShaderFallbackMessage::Pixels`) into
@@ -192,6 +419,11 @@ pub struct FallbackStore {
     bytes: u64,
     budget: u64,
     tick: u64,
+    /// Keys kept past the budget until [`FallbackStore::unpin`]: a job's
+    /// frame keeps every result it was answered until it is delivered, so
+    /// a chain of large steps (two 8K steps are past the budget) never
+    /// drops one result for the next and asks for it again.
+    pinned: Option<std::collections::HashSet<String>>,
 }
 
 impl Default for FallbackStore {
@@ -208,23 +440,55 @@ impl FallbackStore {
             bytes: 0,
             budget,
             tick: 0,
+            pinned: None,
         }
+    }
+
+    /// From now on, results inserted are kept past the budget (and are not
+    /// dropped for later ones) until [`FallbackStore::unpin`].
+    pub fn pin(&mut self) {
+        self.pinned.get_or_insert_with(Default::default);
+    }
+
+    /// Ends [`FallbackStore::pin`]: the budget applies to every result
+    /// again.
+    pub fn unpin(&mut self) {
+        self.pinned = None;
+        self.trim(None);
     }
 
     pub fn insert(&mut self, key: String, pixels: FallbackPixels) {
         self.tick += 1;
         let size = pixels.bytes();
-        if let Some((old, _)) = self.entries.insert(key, (Arc::new(pixels), self.tick)) {
+        if let Some(pinned) = &mut self.pinned {
+            pinned.insert(key.clone());
+        }
+        if let Some((old, _)) = self
+            .entries
+            .insert(key.clone(), (Arc::new(pixels), self.tick))
+        {
             self.bytes -= old.bytes();
         }
         self.bytes += size;
-        while self.bytes > self.budget && self.entries.len() > 1 {
-            let oldest = self
+        self.trim(Some(&key));
+    }
+
+    /// Drops the least recently used results past the budget, never a
+    /// pinned one or `keep` (the result just inserted).
+    fn trim(&mut self, keep: Option<&str>) {
+        while self.bytes > self.budget {
+            let pinned = self.pinned.as_ref();
+            let Some(oldest) = self
                 .entries
                 .iter()
+                .filter(|(k, _)| {
+                    Some(k.as_str()) != keep && !pinned.is_some_and(|p| p.contains(k.as_str()))
+                })
                 .min_by_key(|(_, (_, t))| *t)
                 .map(|(k, _)| k.clone())
-                .expect("not empty");
+            else {
+                break;
+            };
             if let Some((p, _)) = self.entries.remove(&oldest) {
                 self.bytes -= p.bytes();
             }
@@ -266,6 +530,39 @@ impl FallbackStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn halves_are_hashed_and_converted_as_value_by_value() {
+        let values: Vec<u16> = (0..200_003u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 16) as u16)
+            .collect();
+        let mut one = blake3::Hasher::new();
+        for v in &values {
+            one.update(&v.to_le_bytes());
+        }
+        let mut block = blake3::Hasher::new();
+        hash_halves(&mut block, &values);
+        assert_eq!(one.finalize(), block.finalize());
+        let bytes = half_bytes(&values);
+        assert_eq!(
+            bytes,
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>()
+        );
+        assert_eq!(halves(&bytes), values);
+        // In parts: one value changed anywhere changes the digest.
+        let big: Vec<u16> = (0..(PART * 5 + 7) as u32).map(|i| i as u16).collect();
+        let d = texture_digest(&big);
+        assert_eq!(d, texture_digest(&big), "deterministic");
+        for at in [0, PART - 1, PART, PART * 4 + 3, big.len() - 1] {
+            let mut other = big.clone();
+            other[at] ^= 1;
+            assert_ne!(texture_digest(&other), d, "{at}");
+        }
+        assert_ne!(texture_digest(&big[..big.len() - 1]), d);
+    }
+
     fn pixels(n: u32) -> FallbackPixels {
         FallbackPixels {
             width: n,
@@ -283,6 +580,34 @@ mod tests {
         store.insert("c".into(), pixels(4));
         assert!(store.contains("a") && store.contains("c") && !store.contains("b"));
         assert_eq!(store.bytes(), 64);
+    }
+
+    #[test]
+    fn a_pinned_frame_keeps_every_result_past_the_budget_until_unpinned() {
+        // Two results larger than the budget each (two 8K steps against
+        // 512 MB): without pinning the second drops the first.
+        let mut store = FallbackStore::with_budget(40);
+        store.insert("old".into(), pixels(2));
+        store.pin();
+        store.insert("a".into(), pixels(4));
+        store.insert("b".into(), pixels(4));
+        assert!(store.contains("a") && store.contains("b"), "both kept");
+        assert!(!store.contains("old"), "unpinned results still go first");
+        store.unpin();
+        assert!(store.contains("b") && !store.contains("a"));
+        assert_eq!(store.bytes(), 32);
+    }
+
+    #[test]
+    fn size_bound_failures_are_final_and_keyed_by_size() {
+        let f = |reason: &str| FallbackFailure {
+            reason: reason.into(),
+            message: String::new(),
+        };
+        assert!(f("tooLarge").is_final() && f("tooLarge").sized());
+        assert!(f("compile").is_final() && !f("compile").sized());
+        assert!(!f("size").is_final() && !f("contextLost").is_final());
+        assert_eq!(sized_program_id("p", 8193, 4320), "p@8193x4320");
     }
 
     #[test]
