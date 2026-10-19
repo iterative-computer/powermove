@@ -50,12 +50,20 @@ const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 const MAX_OUTPUT_BYTES_PER_SURFACE = 8192 * 8192 * 8 + 16 * 1024 * 1024;
 const ASSET_EXTENSIONS = new Set(['.blend', '.glb', '.gltf', '.obj', '.png', '.jpg', '.jpeg', '.webp', '.exr', '.hdr']);
 
+/** OBJ statements a model file starts with (after blank and `#` lines). */
+const OBJ_STATEMENT = /^(?:v|vt|vn|vp|f|l|p|o|g|s|mtllib|usemtl|cstype|deg|curv|curv2|surf|parm|trim|hole|scrv|sp|end|con|bmat|step|mg|lod|usemap|maplib|shadow_obj|trace_obj|ctech|stech|bevel|c_interp|d_interp)\s/;
+const SNIFF_BYTES = 64 * 1024;
+
 /**
  * The extension a Blender asset is copied in with. Media-store files are
- * content-addressed and may have none: the format is then read from the
- * file's first bytes, as today's renderer named them from the stored blob's
- * type (`<id>.png|jpg|webp`) or by the asset's own format. Null when it is
- * not a format the worker loads.
+ * content-addressed and have none, so it is read from the file: today's
+ * renderer named image files from the stored blob's type (`<id>.png|jpg|webp`;
+ * the engine converts every other image to PNG before it gets here, as today
+ * draws them through a canvas) and model files by the asset's name
+ * (`chair.obj`, `scene.gltf`, `model.glb`, `source.blend`), whose formats
+ * are known by their first bytes: binary signatures, glTF JSON (an object
+ * with an `asset` member), and OBJ text (its first statement). Null when it
+ * is not a format the worker loads.
  */
 export async function assetExtension(file: string): Promise<string | null> {
   const own = path.extname(file).toLowerCase();
@@ -63,8 +71,8 @@ export async function assetExtension(file: string): Promise<string | null> {
   const handle = await open(file, 'r').catch(() => null);
   if (!handle) return null;
   try {
-    const head = Buffer.alloc(16);
-    const { bytesRead } = await handle.read(head, 0, 16, 0);
+    const head = Buffer.alloc(SNIFF_BYTES);
+    const { bytesRead } = await handle.read(head, 0, SNIFF_BYTES, 0);
     const at = (offset: number, bytes: number[] | string) => {
       const want = typeof bytes === 'string' ? Buffer.from(bytes, 'latin1') : Buffer.from(bytes);
       return bytesRead >= offset + want.length && head.subarray(offset, offset + want.length).equals(want);
@@ -74,8 +82,17 @@ export async function assetExtension(file: string): Promise<string | null> {
     if (at(0, 'RIFF') && at(8, 'WEBP')) return '.webp';
     if (at(0, 'glTF')) return '.glb';
     if (at(0, 'BLENDER')) return '.blend';
-    if (at(0, [0x76, 0x2f, 0x31, 0x01])) return '.exr';
-    if (at(0, '#?RADIANCE') || at(0, '#?RGBE')) return '.hdr';
+    // Text models: UTF-8, an optional byte order mark.
+    let text = head.subarray(0, bytesRead).toString('utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    if (text.includes('\u0000')) return null;
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith('{')) return /"asset"\s*:/.test(trimmed) ? '.gltf' : null;
+    for (const raw of text.split(/\r\n|\r|\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      return OBJ_STATEMENT.test(line + ' ') ? '.obj' : null;
+    }
     return null;
   } finally {
     await handle.close();

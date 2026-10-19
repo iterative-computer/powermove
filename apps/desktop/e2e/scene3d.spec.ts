@@ -25,11 +25,14 @@ async function shownSum(session:LaunchedApp,width:number,height:number):Promise<
 }
 /** The engine's frame at `t` (a JPEG data URL of its pixels), or null with the engine off. */
 const engineFrame=(session:LaunchedApp,t=0)=>session.page.evaluate(t=>(window as any).PM.EngineCaptures?(window as any).PM.Export.snapshotAsync(t,160):null,t);
-/** The engine's frame once two captures 250 ms apart agree (media just imported has arrived). */
-async function settledEngineFrame(session:LaunchedApp,t=0):Promise<string|null> {
-  let last=await engineFrame(session,t);if(last===null)return null;
-  for(let i=0;i<20;i++){await session.page.waitForTimeout(250);const next=await engineFrame(session,t);if(next===last)return next;last=next;}
-  throw new Error('the engine frame did not settle');
+/** The engine's frame, checked stable: a capture 250 ms later is the same. Media imported just
+ *  before is drawn at once, as today; a frame that changes (a model first drawn as the missing
+ *  box) fails here rather than being waited out. */
+async function stableEngineFrame(session:LaunchedApp,t=0):Promise<string|null> {
+  const first=await engineFrame(session,t);if(first===null)return null;
+  await session.page.waitForTimeout(250);
+  expect(await engineFrame(session,t),'the engine frame changed after the import').toEqual(first);
+  return first;
 }
 
 test('3D groups rotate with one gizmo and preserve their members and Undo',async({session})=>{
@@ -45,7 +48,7 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   });
   expect(initial.groupedPixels).toEqual(initial.pixels);
   // The engine's frame of the grouped scene, compared after the gesture's Undo.
-  const engineGrouped=await settledEngineFrame(session);
+  const engineGrouped=await stableEngineFrame(session);
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
   await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const handle=await page.evaluate(()=>{
@@ -196,7 +199,7 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
     const target=imported.data.result.id;PM.selectLayers([target]);PM.invalidate();return {target,count:PM.hist.list().length};
   });
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
-  const engineBefore=await settledEngineFrame(session),documentBefore=await page.evaluate(()=>JSON.stringify((window as any).PM.proj.layers));
+  const engineBefore=await stableEngineFrame(session),documentBefore=await page.evaluate(()=>JSON.stringify((window as any).PM.proj.layers));
   await page.getByRole('radio',{name:'Move',exact:true}).click();
   const findHandle=(axis:string)=>page.evaluate((axis)=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),stage=document.querySelector('#stage')!,rect=stage.getBoundingClientRect();

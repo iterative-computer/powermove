@@ -114,7 +114,7 @@ describe('asset extensions', () => {
     try {
       const write = async (name: string, bytes: number[] | string) => {
         const file = path.join(dir, name);
-        await writeFile(file, typeof bytes === 'string' ? Buffer.from(bytes, 'latin1') : Buffer.from(bytes));
+        await writeFile(file, typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : Buffer.from(bytes));
         return file;
       };
       expect(await assetExtension(await write('a.PNG', [0]))).toBe('.png');
@@ -123,8 +123,20 @@ describe('asset extensions', () => {
       expect(await assetExtension(await write('webp', 'RIFF\0\0\0\0WEBPVP8 '))).toBe('.webp');
       expect(await assetExtension(await write('glb', 'glTF\x02\0\0\0'))).toBe('.glb');
       expect(await assetExtension(await write('blend', 'BLENDER-v405'))).toBe('.blend');
-      expect(await assetExtension(await write('exr', [0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]))).toBe('.exr');
-      expect(await assetExtension(await write('hdr', '#?RADIANCE\n'))).toBe('.hdr');
+      // Images other than PNG, JPEG and WebP reach the worker converted to PNG by the engine
+      // (today's canvas); an EXR or HDR file without its extension is not passed through.
+      expect(await assetExtension(await write('exr', [0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]))).toBeNull();
+      expect(await assetExtension(await write('hdr', '#?RADIANCE\n'))).toBeNull();
+      expect(await assetExtension(await write('linked.exr', [0]))).toBe('.exr');
+      // Text models, named by the asset's name today (`chair.obj`, `scene.gltf`).
+      expect(await assetExtension(await write('obj', '# Blender export\n\nmtllib chair.mtl\no Chair\nv 0 0 0\n'))).toBe('.obj');
+      expect(await assetExtension(await write('obj-crlf', '\ufeff\r\n#c\r\nv 1 2 3\r\nf 1 1 1\r\n'))).toBe('.obj');
+      expect(await assetExtension(await write('obj-group', 'g part\nv 0 0 0\n'))).toBe('.obj');
+      expect(await assetExtension(await write('gltf', '{\n  "asset": { "version": "2.0" },\n  "scenes": []\n}'))).toBe('.gltf');
+      expect(await assetExtension(await write('gltf-bom', '\ufeff  {"scene":0,"asset":{"version":"2.0"}}'))).toBe('.gltf');
+      expect(await assetExtension(await write('json', '{"name":"not a model"}'))).toBeNull();
+      expect(await assetExtension(await write('text', 'hello world\n'))).toBeNull();
+      expect(await assetExtension(await write('binary', [0x00, 0x01, 0x76, 0x20]))).toBeNull();
       expect(await assetExtension(await write('tiff', [0x4d, 0x4d, 0, 0x2a]))).toBeNull();
       expect(await assetExtension(path.join(dir, 'absent'))).toBeNull();
     } finally {
