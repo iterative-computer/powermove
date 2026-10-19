@@ -326,11 +326,21 @@ impl<'c> Gpu<'c> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
         let device = self.device;
-        let probe = self
+        let source = self
             .effects
-            .parity_source(DefinitionKind::Effect, &step.definition)
-            .map(|source| self.effects.parity.verdict(&source));
-        if probe == Some(super::parity::Verdict::Runner) {
+            .parity_source(DefinitionKind::Effect, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+        {
             let mut result = self.runner_effect(
                 layer,
                 step,
@@ -439,7 +449,7 @@ impl<'c> Gpu<'c> {
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
-        if probe == Some(super::parity::Verdict::Unknown) {
+        if probe == Some(super::parity::Verdict::Unknown) || present {
             let answer = self.runner_effect(
                 layer,
                 step,
@@ -482,11 +492,21 @@ impl<'c> Gpu<'c> {
         let format = before.format();
         let (w, h) = (before.width(), before.height());
         let device = self.device;
-        let probe = self
+        let source = self
             .effects
-            .parity_source(DefinitionKind::Transition, &step.definition)
-            .map(|source| self.effects.parity.verdict(&source));
-        if probe == Some(super::parity::Verdict::Runner) {
+            .parity_source(DefinitionKind::Transition, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+        {
             return self.runner_transition(
                 layer,
                 step,
@@ -557,7 +577,7 @@ impl<'c> Gpu<'c> {
         if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &out.view, e);
         }
-        if probe == Some(super::parity::Verdict::Unknown) {
+        if probe == Some(super::parity::Verdict::Unknown) || present {
             let answer = self.runner_transition(
                 layer,
                 step,
@@ -811,27 +831,37 @@ impl<'c> Gpu<'c> {
             &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
             &failure,
         );
-        if let Some(result) = self.effects.fallback.result(&request.key)
-            && result.width == w
-            && result.height == h
-        {
-            if let Some(native) = native {
+        if let Some(native) = native {
+            if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
+                if probed_frame != request.key {
+                    // The caller returns the native target to the pool;
+                    // keep a distinct lease for the chain's output.
+                    return Some(self.copy_of(native));
+                }
+            } else if self.effects.parity.verdict(&request.fragment)
+                == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&request.fragment)
+            {
                 match read_half(device, queue, native) {
                     Ok(pixels) => {
                         self.effects
                             .parity
-                            .judge(&request.fragment, &pixels, &result);
+                            .start(&request.key, &request.fragment, pixels)
                     }
-                    Err(error) => {
-                        // Do not verify on an unreadable comparison; ANGLE still presents.
-                        self.effects.watchdog.report(EngineError::new(
-                            ErrorCode::Internal,
-                            span_scope(&span),
-                            format!("{id}: shader parity readback failed ({error})"),
-                        ));
-                    }
+                    Err(error) => self.effects.watchdog.report(EngineError::new(
+                        ErrorCode::Internal,
+                        span_scope(&span),
+                        format!("{id}: shader parity readback failed ({error})"),
+                    )),
                 }
             }
+        }
+        if let Some(result) = self.effects.fallback.result(&request.key)
+            && result.width == w
+            && result.height == h
+        {
+            self.effects.parity.answer(&request.key, &result);
+            self.effects.parity.take_present(&request.fragment);
             let out = self.take(w, h);
             write_half(queue, &out, &result);
             return Some(out);

@@ -441,9 +441,6 @@ impl crate::exec::Exec<'_> {
         };
         let probe = probe_code.as_ref().and_then(|code| {
             let verdict = self.effects.parity.verdict(code);
-            if verdict == crate::effects::parity::Verdict::NativeVerified {
-                return None;
-            }
             let request = Arc::new(super::fallback::request(
                 source.layer.clone(),
                 code.clone(),
@@ -452,15 +449,17 @@ impl crate::exec::Exec<'_> {
                 &source.calls,
                 &crate::effects::exec::parity_failure(),
             ));
+            if verdict == crate::effects::parity::Verdict::NativeVerified {
+                if self.effects.parity.take_present(code).as_deref() == Some(request.key.as_str()) {
+                    return Some((verdict, request));
+                }
+                return None;
+            }
             Some((verdict, request))
         });
         if let Some((verdict, request)) = &probe
-            && (*verdict == crate::effects::parity::Verdict::Runner
-                || self
-                    .shaders
-                    .fallback
-                    .get(&request.key)
-                    .is_none_or(|p| !p.fits(request)))
+            && (*verdict != crate::effects::parity::Verdict::Unknown
+                || self.effects.parity.pending(&request.fragment))
         {
             let mut fallback = source.clone();
             fallback.program = ProgramRef::Fallback(request.clone());
@@ -581,30 +580,33 @@ impl crate::exec::Exec<'_> {
                 }),
             );
             queue.submit([done.finish()]);
-            let angle = self
+            match crate::effects::exec::read_half(device, queue, &out) {
+                Ok(native) => self
+                    .effects
+                    .parity
+                    .start(&request.key, &request.fragment, native),
+                Err(error) => self
+                    .effects
+                    .watchdog
+                    .report(pm_protocol::error::EngineError::new(
+                        pm_protocol::error::ErrorCode::Internal,
+                        pm_protocol::error::ErrorScope::Layer {
+                            layer: source.layer.as_str().into(),
+                        },
+                        format!("shader parity readback failed ({error})"),
+                    )),
+            }
+            self.pool.give(out);
+            let Some(angle) = self
                 .shaders
                 .fallback
                 .get(&request.key)
-                .expect("checked above");
-            match crate::effects::exec::read_half(device, queue, &out) {
-                Ok(native) => {
-                    self.effects
-                        .parity
-                        .judge(&request.fragment, &native, &angle);
-                }
-                Err(error) => {
-                    self.effects
-                        .watchdog
-                        .report(pm_protocol::error::EngineError::new(
-                            pm_protocol::error::ErrorCode::Internal,
-                            pm_protocol::error::ErrorScope::Layer {
-                                layer: source.layer.as_str().into(),
-                            },
-                            format!("shader parity readback failed ({error})"),
-                        ));
-                }
-            }
-            self.pool.give(out);
+                .filter(|p| p.fits(&request))
+            else {
+                return Err(Missed::Pending(request));
+            };
+            self.effects.parity.answer(&request.key, &angle);
+            self.effects.parity.take_present(&request.fragment);
             let target = self
                 .shaders
                 .fallback_target(device, queue, &request)

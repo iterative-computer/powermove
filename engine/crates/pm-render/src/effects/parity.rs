@@ -3,7 +3,7 @@
 //! Decisions are immutable, content-addressed files, so independent viewer
 //! and job processes cannot overwrite each other's pins. A damaged entry is
 //! unknown and is probed again. Unknown programs always present ANGLE's frame.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use crate::shader_layers::FallbackPixels;
@@ -20,6 +20,11 @@ pub struct Parity {
     environment: Option<String>,
     directory: Option<PathBuf>,
     decisions: HashMap<String, Verdict>,
+    /// Native first-frame results stay paired with their request even if
+    /// playback advances before ANGLE replies. Same bound as the transport.
+    pending: HashMap<String, (String, FallbackPixels)>,
+    pending_order: VecDeque<String>,
+    present: HashMap<String, String>,
 }
 
 impl Parity {
@@ -29,6 +34,9 @@ impl Parity {
         self.environment = environment;
         self.directory = directory;
         self.decisions.clear();
+        self.pending.clear();
+        self.pending_order.clear();
+        self.present.clear();
     }
 
     pub fn environment(&self) -> Option<&str> {
@@ -58,6 +66,18 @@ impl Parity {
             return Verdict::NativeVerified;
         }
         let key = self.key(source);
+        // Another renderer/process may have pinned a concurrent first use.
+        // A cached native verification must never conceal that pin.
+        if self.decisions.get(&key) == Some(&Verdict::NativeVerified)
+            && self.directory.as_ref().is_some_and(|dir| {
+                std::fs::read(dir.join(format!("{key}.runner")))
+                    .ok()
+                    .as_deref()
+                    == Some(b"runner\n")
+            })
+        {
+            self.decisions.insert(key.clone(), Verdict::Runner);
+        }
         *self.decisions.entry(key.clone()).or_insert_with(|| {
             self.directory
                 .as_ref()
@@ -87,7 +107,52 @@ impl Parity {
     pub fn recheck(&mut self, source: &str) {
         if self.verdict(source) == Verdict::NativeVerified {
             let key = self.key(source);
+            self.present.remove(&key);
             self.decisions.insert(key, Verdict::Unknown);
+        }
+    }
+
+    pub fn pending(&self, source: &str) -> bool {
+        self.pending.values().any(|(code, _)| code == source)
+    }
+
+    pub fn has_present(&self, source: &str) -> bool {
+        self.present.contains_key(&self.key(source))
+    }
+
+    /// The probed frame still presents ANGLE even after its answer verified
+    /// the native program. A newer frame may use the verification directly.
+    pub fn take_present(&mut self, source: &str) -> Option<String> {
+        self.present.remove(&self.key(source))
+    }
+
+    pub fn start(&mut self, request: &str, source: &str, native: FallbackPixels) {
+        if self.pending(source) {
+            return;
+        }
+        while self.pending.len() >= 32 {
+            if let Some(old) = self.pending_order.pop_front() {
+                self.pending.remove(&old);
+            }
+        }
+        self.pending_order.push_back(request.to_owned());
+        self.pending
+            .insert(request.to_owned(), (source.to_owned(), native));
+    }
+
+    pub fn forget(&mut self, request: &str) {
+        self.pending.remove(request);
+        self.pending_order.retain(|key| key != request);
+    }
+
+    /// Judge the actual first frame when its answer lands, rather than
+    /// waiting for playback to request that exact time/input a second time.
+    pub fn answer(&mut self, request: &str, angle: &FallbackPixels) {
+        if let Some((source, native)) = self.pending.remove(request) {
+            self.pending_order.retain(|key| key != request);
+            if self.judge(&source, &native, angle) == Verdict::NativeVerified {
+                self.present.insert(self.key(&source), request.to_owned());
+            }
         }
     }
 
@@ -170,6 +235,26 @@ mod tests {
     }
 
     #[test]
+    fn an_async_answer_judges_its_original_frame_and_keeps_its_angle_presentation() {
+        let mut p = Parity::default();
+        p.configure(Some("async".into()), None);
+        p.start("frame-at-t0", "stable", pixels(0.5));
+        assert!(p.pending("stable"));
+        p.answer("frame-at-t0", &pixels(0.501));
+        assert!(!p.pending("stable"));
+        assert_eq!(p.verdict("stable"), Verdict::NativeVerified);
+        assert_eq!(p.take_present("stable").as_deref(), Some("frame-at-t0"));
+        assert_eq!(p.take_present("stable"), None);
+        p.start("frame-at-t1", "unstable", pixels(0.5));
+        p.answer("frame-at-t1", &pixels(0.8));
+        assert_eq!(p.verdict("unstable"), Verdict::Runner);
+        p.start("failed", "retry", pixels(0.5));
+        p.forget("failed");
+        assert!(!p.pending("retry"));
+        assert_eq!(p.verdict("retry"), Verdict::Unknown);
+    }
+
+    #[test]
     fn every_channel_is_judged_without_a_pixel_budget() {
         assert!(matches(&pixels(0.5), &pixels(0.503)));
         assert!(!matches(&pixels(0.5), &pixels(0.505)));
@@ -205,6 +290,12 @@ mod tests {
         restarted.configure(p.environment.clone(), Some(dir.clone()));
         assert_eq!(restarted.verdict("unstable"), Verdict::Runner);
         assert_eq!(restarted.verdict("stable"), Verdict::NativeVerified);
+        restarted.judge("stable", &pixels(0.5), &pixels(0.8));
+        assert_eq!(
+            p.verdict("stable"),
+            Verdict::Runner,
+            "a cached verification observes a pin from another renderer/process"
+        );
         // Different inputs probed concurrently cannot demote a pin on disk.
         p.judge("unstable", &pixels(0.5), &pixels(0.5));
         restarted.configure(p.environment.clone(), Some(dir.clone()));

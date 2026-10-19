@@ -1003,6 +1003,11 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
     let first = pending(&mut r);
     let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
     r.put_fallback_pixels(first.key.clone(), pixels);
+    assert_eq!(
+        r.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified,
+        "the reply is judged immediately, before a paused redraw or a later playback frame"
+    );
     let angle_frame = render(&mut r, &doc).unwrap();
     assert_eq!(
         r.effects_mut().parity.verdict(&code),
@@ -1015,6 +1020,28 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut restarted, &doc).unwrap(), angle_frame);
+    // Playback can advance while the first ANGLE request is outstanding.
+    // Its reply must verify without requesting that old time/input again.
+    let mut advancing = make("playing");
+    let first = pending(&mut advancing);
+    let pixels = advancing.fallback_textures(&first.key).unwrap()[0]
+        .as_ref()
+        .clone();
+    advancing.put_fallback_pixels(first.key, pixels);
+    let frame = advancing
+        .render(
+            &doc,
+            "P-root",
+            Ticks::new(pm_time::TICKS_PER_SECOND / 30).unwrap(),
+            &request(),
+            &MapResolver::default(),
+        )
+        .unwrap();
+    assert_eq!(advancing.read_rgba(&frame).unwrap(), angle_frame);
+    assert_eq!(
+        advancing.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
     // An independent driver/browser generation must be probed again.
     let mut r = make("version B");
     let request = pending(&mut r);

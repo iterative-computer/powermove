@@ -494,6 +494,7 @@ impl Renderer {
         key: String,
         pixels: crate::shader_layers::FallbackPixels,
     ) {
+        self.effects.parity.answer(&key, &pixels);
         if self.effects.fallback.expects(&key) {
             self.effects.fallback.put_pixels(key, pixels);
         } else {
@@ -524,6 +525,7 @@ impl Renderer {
         failure: crate::shader_layers::FallbackFailure,
     ) -> Option<std::time::Duration> {
         let now = self.effects.watchdog.now();
+        self.effects.parity.forget(key);
         if self.effects.fallback.expects(key) {
             self.effects.fallback.put_failure(key, failure, now)
         } else if let Some(program) = self.shaders.waiting.remove(key) {
