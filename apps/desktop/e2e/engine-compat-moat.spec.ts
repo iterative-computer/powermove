@@ -236,6 +236,12 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       const view = await zoomViewer(page, ZOOM, 200, 120, TIME);
       const frame = await viewerPixels(page, engine);
       const crops = await page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 4));
+      const state = await page.evaluate(() => {
+        const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
+        const all = (window as any).__crops as Array<{ layer: string; scale: number; crop: unknown }>;
+        return { zoom: V.zoom, fit: V.fit, shown: V.shown, viewport: PM.GL?.previewViewport ?? null, quality: PM.quality, scales: [...new Set(all.map((c) => `${c.layer}@${c.scale}${c.crop ? '+crop' : ''}`))], time: PM.time, presenting: !!V.enginePresentation?.presenting };
+      });
+      console.log(JSON.stringify({ engine, state }));
       const errors = await page.evaluate(() => (window as any).PM.EngineRender?.compatStats ?? null);
       return { view, frame, crops, errors };
     };

@@ -237,6 +237,58 @@ next frame; `render.renderFrameTo` never includes it.
   equal to the export sheet's engine export of the queued state at frames 0,
   45 and 89 (max 0), 180 asks.
 
+### Measured (2026-10-19, round three, e2e under the Electron lock, flag on)
+
+After merging `feat/native-engine` at 4bbb3e12 and `feat/ne-bridge` at
+f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
+
+- WebM export with a `render.gl.context` drawing (`engine-compat-moat`,
+  fixture `context-watermark`, 320 × 180, 30 frames): the engine asked the
+  window for all 30 frames, and the red mark is in the first and last frame
+  (mean 232, 32, 42). The MP4 export asked 0 times and has no mark; neither
+  does today's MP4. This branch's flag-off WebM has no mark (unreleased
+  aad31a41 `exporting: true`), while the shipped app's does. Both are
+  reported, and the gate asserts the shipped reference.
+  `drawImage(context.canvas)` right after drawing reads the mark
+  (232, 32, 42) and the frame's center (51, 204, 102) on the engine,
+  exactly as on today's app.
+- `PM.raster` assigned through `host.pm` (`legacy-raster-assign`): the
+  assignment is the producer's chain (12 needs, 8 rasters answered), and the
+  red ellipse and the plain rectangle equal today's exactly (max 0). The
+  shifted text is at today's place. Its glyph edges differ by up to 86 code
+  values (1665 of 144,000 values over 1): text rasterization, the
+  text-render lane's gap. Side by side:
+  `/tmp/ne-extcompat-evidence/legacy-raster-assign-engine-left-today-right.png`.
+  Before this round's stride fix the same text was streaked.
+- The rebased shipped viewer fork reloads healthy, keeps the user's change,
+  no longer reads `render.gl.context`, and presents the engine's frames.
+  The update had been rolled back by the sandbox check until the fix in
+  `shell/update-fork.ts`.
+- API probe (v1, v2, v3 trusted, v3 full-access Store): every member
+  passes except `renderFrameTo` over the whole frame. Its title rows differ
+  by up to 30 code values (911 of 28,800 values over 1): text-render lane.
+  The rows above and below are within section 25 (max 0 and 2). The
+  stronger checks pass: the shader layers' `sh:` keys and compile errors, the
+  waveform's peaks (max difference 7.6e-6) and pixels (max 0), the
+  expression message (today's evaluator gives the same text), the fonts
+  registry, the viewer and shaderHooks services, the scene3d round trips,
+  and `render.raster`'s shape pixels with the text ink at today's place.
+- Playback with a shape override, measured alone twice: 91 frames, longest
+  gap 42 and 43 ms (today 90 frames, 35 and 41 ms); within the bound
+  (today's gap plus one frame). In the full suite run, under load average
+  about 9, it measured 88 frames and 79 ms against today's 91 and 42, and
+  failed the bound.
+- The zoomed typewriter gate does not reach a zoomed viewer in the hidden
+  test window in either app. After `setZoom`, `zoom` and `shown` are 8, but
+  today's compositor has no preview viewport and its `#gl` canvas stays
+  480 × 270. Neither app called the raster at a zoomed density, so the
+  crop windows are verified only by the Rust tests against the legacy
+  functions' own outputs (`compat_crop`, `compat_rasters`). In that state the
+  engine's viewer still showed the time-0 frame (the cursor alone) 1.3 s
+  after `setTime(1.2)`, where today's showed `Hello el`. The cause was not
+  found. Paths: `/tmp/ne-extcompat-evidence/typewriter-zoom16-engine.png`
+  and `typewriter-zoom16-today.png`.
+
 ### The corpus
 
 `e2e/engine-customization-corpus.spec.ts`:
@@ -329,6 +381,12 @@ apiVersion 4 (not loadable yet: `EXTENSION_API_VERSION` is 3) is to read the
 new ids through a typed accessor; none is added in this lane.
 
 ## What remains (blockers under amendments 22 to 24)
+
+- **The zoomed crop path end to end** (above): the e2e harness does not put
+  either app's viewer into a zoomed preview viewport. The engine viewer's
+  stale frame in that state is unexplained.
+- **The occlusion-culling crop regions and 3D plane windows** are not ported
+  (see "Crop"). A crop-sensitive wrapper could differ there.
 
 - **Text exports with a raster override** go to the current exporter: the
   job engine has no render fonts on this branch, so `pm_render::unsupported`
