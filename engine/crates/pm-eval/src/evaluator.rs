@@ -496,6 +496,69 @@ impl Evaluator {
         self.stats
     }
 
+    /// After an applied patch, proven unaffected layer-local plans validated
+    /// at its exact base need no address/context revalidation. Older slots still
+    /// take the ordinary path: they may predate another edit.
+    pub fn document_patched(&mut self, doc: &Document, base: u64, ops: &[pm_model::ops::Op]) {
+        if ops.is_empty() {
+            return;
+        }
+        fn key(part: Option<&pm_model::PathPart>) -> Option<&str> {
+            match part? {
+                pm_model::PathPart::Key(key) => key.as_str(),
+                _ => None,
+            }
+        }
+        let preserves = |op: &pm_model::ops::Op, address: &PropAddress, state: &SlotState| {
+            let path = op.path();
+            if matches!(key(path.first()), Some("params" | "edits" | "revision")) {
+                return true;
+            }
+            // Only a leaf inside another layer can bypass validation. Whole
+            // layers, ordering, IDs and unknown composition paths stay slow:
+            // even another layer's ID can change the first-ID resolution.
+            if !matches!(op, pm_model::ops::Op::Leaf(_)) {
+                return false;
+            }
+            let offset = if state.at_root && key(path.first()) == Some("layers") {
+                1
+            } else if !state.at_root
+                && key(path.first()) == Some("comps")
+                && key(path.get(1))
+                    == address
+                        .comp
+                        .as_str()
+                        .map(|id| id.strip_prefix(crate::comp::ROOT_VIEW).unwrap_or(id))
+                && key(path.get(2)) == Some("layers")
+            {
+                3
+            } else {
+                return false;
+            };
+            path.len() > offset + 1
+                && key(path.get(offset + 1)) != Some("id")
+                && matches!(path.get(offset), Some(pm_model::PathPart::Index(index))
+                    if *index != state.position as f64)
+        };
+        self.observe(doc);
+        let revision = doc.revision();
+        for slot in &mut self.slots {
+            if let Some(state) = &mut slot.state
+                && state.validated == base
+                && let Plan::Expression(plan) = &state.plan
+                && plan.bound
+                && plan
+                    .compiled
+                    .as_ref()
+                    .is_some_and(|c| c.binding_is_layer_local())
+                && ops.iter().all(|op| preserves(op, &slot.address, state))
+            {
+                state.validated = revision;
+                self.stats.reused += 1;
+            }
+        }
+    }
+
     /// The spring tables built so far.
     pub fn springs(&mut self) -> &mut SpringTables {
         &mut self.springs

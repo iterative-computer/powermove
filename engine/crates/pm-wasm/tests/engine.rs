@@ -512,6 +512,39 @@ fn bound_scalar_plans_keep_revision_type_and_error_guards() {
 }
 
 #[test]
+fn parameter_patch_does_not_advance_a_slot_that_predates_a_layer_edit() {
+    let mut engine = Engine::new();
+    let mut before = parse(r#"{"id":"P","compId":"C","params":{"amp":{"value":7}},"comps":{"C":{"id":"C","layers":[{"id":"L","from":0,"p":{"a":{"v":5,"kf":[],"expr":"value + time"}}}]}}}"#).unwrap();
+    engine
+        .resync(
+            pm_model::json::write::to_canonical_string(&before).as_bytes(),
+            1,
+        )
+        .unwrap();
+    let id = engine
+        .intern(&parse(r#"{"comp":"C","layer":"L","key":"a","via":"channel"}"#).unwrap())
+        .unwrap()
+        .index();
+    let mut values = [0.0];
+    let mut kinds = [0];
+    engine.ev_batch(&[id], 1.0, &mut values, &mut kinds);
+    assert_eq!(values, [6.0]);
+    for text in [
+        r#"{"id":"P","compId":"C","params":{"amp":{"value":7}},"comps":{"C":{"id":"C","layers":[{"id":"L","from":0,"p":{"a":{"v":19,"kf":[],"expr":"value + time"}}}]}}}"#,
+        r#"{"id":"P","compId":"C","params":{"amp":{"value":9}},"comps":{"C":{"id":"C","layers":[{"id":"L","from":0,"p":{"a":{"v":19,"kf":[],"expr":"value + time"}}}]}}}"#,
+    ] {
+        let after = parse(text).unwrap();
+        let body = binary::encode(&ops::diff_ops(Some(&before), Some(&after))).unwrap();
+        let base = engine.revision();
+        engine.apply(&body, base, base + 1).unwrap();
+        before = after;
+    }
+    engine.ev_batch(&[id], 1.0, &mut values, &mut kinds);
+    assert_eq!(values, [20.0]);
+    assert_eq!(kinds, [0]);
+}
+
+#[test]
 fn edits_rebind_only_changed_fixed_inputs_and_keep_layer_local_plans() {
     let project = |amp: i32, fps: i32, opacity: i32, extra: bool, source: &str| {
         parse(&format!(r#"{{"id":"P","compId":"C","params":{{"amp":{{"value":{amp}}}}},"comps":{{"C":{{"id":"C","fps":{fps},"layers":[{}{{"id":"L","from":0,"p":{{"opacity":{{"v":{opacity},"kf":[]}},"a":{{"v":5,"kf":[],"expr":"{source}"}},"b":{{"v":5,"kf":[],"expr":"layer.p.opacity.v + t"}},"c":{{"v":5,"kf":[],"expr":"idx + value"}},"d":{{"v":5,"kf":[],"expr":"fps + value"}},"e":{{"v":5,"kf":[],"expr":"param(\"amp\") + value"}},"f":{{"v":5,"kf":[],"expr":"comp.layers.length + value"}}}}}}]}}}}}}"#,
@@ -611,4 +644,33 @@ fn edits_rebind_only_changed_fixed_inputs_and_keep_layer_local_plans() {
         assert_eq!(engine.evaluation_cache_stats().plans - plans, changed);
         before = after;
     }
+}
+
+#[test]
+fn another_layers_id_edit_cannot_advance_a_local_binding() {
+    let project = |first_id: &str| {
+        parse(&format!(r#"{{"id":"P","compId":"C","comps":{{"C":{{"id":"C","layers":[{{"id":"{first_id}","from":0,"p":{{"a":{{"v":100,"kf":[],"expr":"value + time"}}}}}},{{"id":"A","from":0,"p":{{"a":{{"v":5,"kf":[],"expr":"value + time"}}}}}}]}}}}}}"#)).unwrap()
+    };
+    let before = project("B");
+    let mut engine = Engine::new();
+    engine
+        .resync(
+            pm_model::json::write::to_canonical_string(&before).as_bytes(),
+            1,
+        )
+        .unwrap();
+    let id = engine
+        .intern(&parse(r#"{"comp":"C","layer":"A","key":"a","via":"channel"}"#).unwrap())
+        .unwrap()
+        .index();
+    let mut values = [0.0];
+    let mut kinds = [0];
+    engine.ev_batch(&[id], 1.0, &mut values, &mut kinds);
+    assert_eq!(values, [6.0]);
+    let after = project("A");
+    let body = binary::encode(&ops::diff_ops(Some(&before), Some(&after))).unwrap();
+    engine.apply(&body, 1, 2).unwrap();
+    engine.ev_batch(&[id], 1.0, &mut values, &mut kinds);
+    assert_eq!(values, [101.0]);
+    assert_eq!(kinds, [0]);
 }

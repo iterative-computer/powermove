@@ -190,6 +190,13 @@ export function liveMemberOrder(L: any, entries: any[]): any[] {
 
 /** The value at a path of own members (null when missing). */
 export function at(root: any, path: readonly PathPart[]): any {
+  // Resident transform/content properties use two own members. Unroll that
+  // revision check without weakening the missing/inherited-member guards.
+  if (path.length === 2) {
+    if (!root || typeof root !== 'object' || !Object.hasOwn(root, path[0]!)) return undefined;
+    const owner = root[path[0]!];
+    return owner && typeof owner === 'object' && Object.hasOwn(owner, path[1]!) ? owner[path[1]!] : undefined;
+  }
   let node = root;
   for (const part of path) {
     if (!node || typeof node !== 'object' || !Object.prototype.hasOwnProperty.call(node, part)) return undefined;

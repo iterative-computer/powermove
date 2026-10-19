@@ -432,6 +432,7 @@ impl Engine {
         self.doc
             .apply_ops_at(&ops, revision)
             .map_err(|e| ApplyError::Mismatch(e.to_string()))?;
+        self.ev.document_patched(&self.doc, base, &ops);
         self.stats.batches += 1;
         self.stats.ops += ops.len() as u64;
         Ok(ops.len())
