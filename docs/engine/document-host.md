@@ -624,3 +624,47 @@ Compatibility APIs such as `PM.ev` and `api.anim.evP` retain synchronous return
 types. Arbitrary third-party synchronous install code outside these async
 boundaries must still respect readiness; the patch does not claim those direct
 calls can await a promise. Extension activation already waits through its loader.
+
+### Round 4: awaits only while pending, Retry/revival queuing
+
+An unconditional `await waitForDocumentReady(PM)` yields a microtask even when
+the engine is ready or off. A project switch in the same tick as an assistant
+submit then cancelled or rebound the request (the spatial-assistant test
+"keeps the request bound to its original project when switching during send"
+failed). Every entry point now awaits only while `documentPending(PM)` holds
+(engine enabled and not ready): `openProjectFile`, `openFiles`, the New project
+dialog, `openProjectHere`, `newBlankProject`, `pm-open-project`, the first
+scheduled frame, live agent tools (`answerLiveAgentTool`), project thread
+commands, assistant requests (`sendRequest`), script preparation and native
+menu commands. A ready or disabled engine runs them in their original tick, as
+before B3.
+
+`waitForDocumentReady` now waits for `EngineDoc.settled()`: the load attempt in
+flight, whether the boot load, a `retry()` or a revival after a trap. Before,
+it awaited `whenReady`, which had already resolved `false` after a failed boot
+load, so a request arriving during a Retry failed as `pm-wasm-unavailable`
+instead of queuing. Outside strict mode (development modes where the module's
+own fallback answers) a failed load lets the request proceed; with "Use New
+Engine" (strict) it keeps the named failure. `readiness.test.ts` covers the
+pending, failed, Retry-in-flight, non-strict, ready and disabled cases.
+
+The disk-space guard (`requireEngineDiskSpace`) is limited to the opt-in
+measurement tests again; the ordinary boot tests (extension activation, agent
+at launch) no longer fail on a machine with less than 40 GiB free.
+
+What remains:
+
+- Direct synchronous compatibility calls outside these async boundaries
+  (third-party install code calling `PM.ev` before readiness) still need a
+  ready host; their signatures stay synchronous.
+- Two agent-context reads still call legacy `PM.evP` with the setting on:
+  the `get_3d_scene` channel digest (`legacy/assistant/harness.ts`) and the
+  spatial assistant's control-type probe (`legacy/assistant/spatial.ts`,
+  `properties.*` paths). `propertyDigest` already reads through
+  `PM.EngineDoc.api`. Routing these two needs strict-mode coverage for 3D and
+  modeling layers' channels (a strict fallback throws instead of answering),
+  so this lane records them for the derouter lane rather than changing them
+  untested.
+- The final-code boot e2e (agent at launch, evaluation at once) and the five
+  alternating time-to-UI/editor-open pairs run under pm-electron-lock in the
+  orchestrator's measurement window; see `perf.md`.

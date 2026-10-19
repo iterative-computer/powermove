@@ -268,3 +268,67 @@ one immutable composition view, including the layer/index/fps inputs it reads.
 The parity suite checks fixed-input shape matching alongside every bound case.
 Parameter/source/add/remove edit measurements and cache counters are in
 `perf.md`; the scalar one-off difference is explicitly accepted by the owner.
+
+### Round 4: every expression style off the per-frame bytecode path
+
+The numeric plan covered arithmetic, member reads, `param()`, `Math` and `idx`
+only; ternaries, comparisons and the helpers fell back to the bytecode
+evaluator on every frame, and so did every source with a string or a dynamic
+index. Three changes close that:
+
+- **The typed plan** (`src/numeric.rs`) now compiles comparisons (`<`, `<=`,
+  `>`, `>=`, `==`, `!=`, and `===`/`!==` between operands of one static type),
+  `!`, `&&`/`||`, the conditional operator, `Math` constants (`Math.PI`, …) and
+  every numeric helper (`clamp`, `lerp`, `linear`, `ease`, `random`, `wiggle`,
+  `bounce`, `loop`, `pingpong`). Booleans are carried as 0/1 under static
+  types (number, boolean, either), so the encoding is observable only where
+  JavaScript converts the same way: `Number(true)` is 1, `-false` is `-0`,
+  `true == 1`, truthiness. A plan whose result may be a boolean, or a `===`
+  across types, is not compiled. Helpers share one implementation
+  (`eval::apply_helper`) with the bytecode evaluator; a helper answering
+  `undefined` (`clamp()`, `loop(0)`) declines at run time. `&&`, `||` and the
+  conditional evaluate only the operands JavaScript evaluates. Every node keeps
+  its children in one array, so the fixed-leaf traversals that decide binding
+  identity see every leaf, including those in untaken branches.
+- **The general binding** (`src/general.rs`) covers sources the typed plan
+  does not. A subexpression that reads none of `time`, `T`, `t`, `value`, `ch`,
+  the native `frame` or `wiggle`'s implicit local time has one answer per
+  document revision. Binding evaluates each maximal such subexpression once
+  with the complete bytecode evaluator and substitutes its primitive answer as
+  a literal (`undefined` as the unknown name `undefined`). A leaf that throws
+  or yields an object stays in place, so its errors and identities occur where
+  they did. A conditional, `&&` or `||` whose deciding operand became a
+  literal keeps only the operand JavaScript evaluates. The bound tree compiles
+  again, often to a scalar numeric plan (`comp.layers[0].p.x.v + time`,
+  `layer.name == "Title" ? value + time : value`). Validation re-evaluates the
+  substituted leaves and compares primitives (numbers by bits); kept leaves
+  need no check. Leaves that read only `layer` and `idx` are layer-local and
+  fast-forward over other layers' leaf edits like numeric bindings. pm-wasm
+  binds per slot (no pool), checks the bound index, and never uses a bound
+  expression for tracked evaluation.
+- **The bytecode evaluator** compiles literal member keys (`a.b`, `a["b"]`,
+  `a[0]`) with their conversions (`String(key)`, the forbidden-name, `length`,
+  array-index and `Math` member lookups) into one `MemberKey` op, and its
+  value stack no longer initializes every slot per run. pm-wasm converts ASCII
+  document strings with one exact allocation and matches interned literal
+  keys by identity before comparing code units.
+
+pm-eval prepares a keyed expression channel's temporal track with its plan
+(`evalKfs` rebuilt it on every evaluation), and takes the scalar plan for keyed
+bases and while other channels hold errors (clearing this channel's entry as
+`evaluate` does).
+
+Exactness: both saved Electron V8 parity directories (42,498 cases, 200 from
+the private corpus) pass with tracked/untracked, numeric, scalar and
+general-binding cross-checks added to `tests/support`'s `evaluate_case`
+(general bindings at the case's document and at other times and values).
+`tests/plans.rs` is a differential fuzz against the bytecode evaluator:
+generated sources mixing the subset with constructs it must decline (strings,
+`null`, non-numeric fields, helpers answering `undefined`), contexts with
+signed zeros, NaN, infinities, booleans, strings and objects, and other
+documents for general bindings whenever validation accepts them. It asserts
+coverage counts so a compiler that declines everything fails;
+`PM_EXPR_NUMERIC_SEEDS=n` soaks (60 seeds: 1.8 million sources). An
+incremental-engine fuzz (one pm-wasm engine kept across random edits against a
+fresh engine per revision, with conditional, helper and general sources) found
+no difference in 15,070,065 comparisons.

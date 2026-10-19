@@ -269,3 +269,19 @@ Structural operations, layer replacements, unknown composition paths and slots
 older than that base keep ordinary validation. The notification is called only
 after successful document apply. Regressions cover an unevaluated layer edit
 followed by a parameter edit and another layer becoming the first duplicate ID.
+
+### Expression plans, round 4
+
+An expression slot's plan now holds its keyed base's temporal track, prepared
+once with the plan by the same `PreparedTrack::prepare` that `evalKfs` runs on
+every call (only a numeric temporal track is kept; discrete keys and
+non-finite times still read the nodes). A keyed expression channel cost about
+186 µs per 400-channel native frame for that preparation alone; it now costs
+about 10 µs in total. `ExpressionPlan::scalar` serves static and keyed bases
+alike, and `eval_expression_plan` takes it even while other channels hold
+expression errors, clearing this channel's own entry exactly as the full
+`evaluate` does. The same-revision warm path no longer indexes the
+composition's layers by the slot's proven position unchecked: a missing layer
+takes ordinary revalidation. General bindings (pm-expr's partial evaluation,
+see `expressions.md`) plug in through the existing `CompiledExpression::bind`
+/ `binding_matches` / `binding_is_layer_local` hooks, unchanged.

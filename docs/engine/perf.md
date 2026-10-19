@@ -1614,3 +1614,100 @@ pending for a quiet orchestrator window. The attempt released its own lock.
 Its external evidence is `/tmp/ne-w5/fixups3-r3-electron/`. The own release
 addons were rebuilt against integration `92beaaa8` and speak
 `protocol-25292d6fdfffb933`; no fixups2 addon was borrowed.
+
+### Round 4: every expression style, lazy frames (2026-10-19)
+
+Review of round 3 found the warm-frame pass did not generalize: the committed
+fixtures used four sources inside the numeric subset, while ternaries,
+comparisons and the helpers (and every source with a string or a dynamic
+index) ran the bytecode evaluator per frame, measured up to 45% slower than
+today; and the frame batch evaluated every resident id at each new time, so a
+project of sequential layers paid for inactive and deleted layers (2.5x slower
+reading 10 of 100 layers). Round 4 changes (details in `expressions.md`,
+`write-path.md`, `pm-eval.md`):
+
+- pm-expr's typed plan covers comparisons, `!`, `&&`/`||`, conditionals,
+  `Math` constants and every numeric helper; other sources get a general
+  binding (subexpressions without time/value/channel inputs evaluated once per
+  revision, substituted when primitive, revalidated by re-evaluation). Literal
+  member keys compile into one op; ASCII document strings convert with one
+  allocation.
+- pm-eval prepares a keyed expression's temporal track with its plan (it was
+  rebuilt per evaluation: 186 versus 10 µs per native 400-channel frame) and
+  serves keyed bases and documents with errors elsewhere from the scalar plan.
+- The renderer evaluates expression ids in runs that frames read
+  (`pm_ev_batch_range`), sized from the last epoch's in-order streaks and
+  limited to recently read members; lone channels use the scalar call.
+
+**Methodology.** `scripts/expression-benchmark.mjs` (Node 24.18.0, V8
+13.6.233.17-node.50) now also runs a suite (`e2e/helpers/expression-suites.ts`)
+of five expression styles, each on 400 channels with static and keyframed
+bases, read either all per frame or as a 10-of-100-layer window moving one
+layer per frame; each row has nine alternating 2,000-frame pairs, an
+`Object.is` guard on eight reference times per channel and on every pair's
+sums, and must have native median and p95 at or below today. It also reports
+wasm ids evaluated per frame. **Node's V8 is not the shipping Electron 44 V8
+(15.2):** their `Math.sin` differs in the last bit for some inputs (the
+reviewer's `wiggle(2, 10) + value` at t = 17/30), while pm-expr matches
+Electron's bit for bit. The Node runner's exactness guard and "today" timings
+are therefore Node-specific; it skips the sin-based `oscillators` suite, and
+its `numeric` fixture's `Math.sin(time)` passes the guard because of its
+inputs. Electron is the authority: `engine-expression-performance.spec.ts`
+runs every suite, oscillators included, against today in Electron 44.
+
+Final unprofiled Node run, nice 0, load 5.99 before / 5.56 after, wasm
+`bdbbee04f37592b1a5aecbf19e06d07a7bd1b1fd29442f609e20ca55d3a013b5`
+(raw: `/tmp/ne-w5/fixups3-r4/node-full-run1.json`):
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 43.951 | 75.554 | 44.211 | 77.173 |
+| 400 channels, individual frame µs | 43.500 | 73.500 | 46.333 | 79.916 |
+| One-channel scalar µs/call (EXPR-1) | 0.136 | 0.108 | 0.155 | 0.110 |
+| Cold 400-channel frame µs (max 4741) | 3888.708 | 189.834 | 4741.041 | 426.667 |
+| parameterDrag + frame µs | 81.417 | 86.792 | 98.292 | 105.750 |
+| sourceEdit + frame µs (EXPR-2) | 471.625 | 411.042 | 574.917 | 492.458 |
+| layerAdd + frame µs (EXPR-2) | 4094.042 | 3575.625 | 4363.875 | 3783.875 |
+| layerRemove + frame µs (EXPR-2) | 4074.292 | 3563.417 | 4286.125 | 3821.750 |
+
+Suite, µs per frame (native median/p95 against today median/p95; ids
+evaluated per frame for the channels read):
+
+| Suite | Base | Read | Native | Today | Evaluated |
+|---|---|---|---:|---:|---:|
+| numeric | static | all 400 | 48.00 / 53.31 | 82.41 / 87.23 | 400 |
+| numeric | static | window 40 | 4.91 / 5.02 | 8.31 / 8.64 | 40.01 |
+| numeric | keyed | all 400 | 50.47 / 51.43 | 100.90 / 102.06 | 400 |
+| numeric | keyed | window 40 | 5.33 / 5.44 | 10.22 / 11.30 | 40.01 |
+| helpers | static | all 400 | 53.87 / 54.26 | 93.13 / 93.94 | 400 |
+| helpers | static | window 40 | 5.60 / 5.67 | 9.52 / 9.62 | 40.01 |
+| helpers | keyed | all 400 | 56.41 / 56.75 | 113.29 / 113.85 | 400 |
+| helpers | keyed | window 40 | 5.78 / 6.00 | 11.04 / 11.19 | 40.01 |
+| conditionals | static | all 400 | 50.46 / 50.85 | 66.27 / 67.21 | 400 |
+| conditionals | static | window 40 | 5.07 / 5.20 | 6.68 / 6.74 | 40.01 |
+| conditionals | keyed | all 400 | 53.23 / 54.60 | 84.70 / 84.91 | 400 |
+| conditionals | keyed | window 40 | 5.33 / 5.37 | 8.54 / 8.67 | 40.01 |
+| general | static | all 400 | 47.98 / 48.33 | 103.89 / 104.69 | 400 |
+| general | static | window 40 | 4.68 / 4.85 | 10.38 / 10.70 | 40.01 |
+| general | keyed | all 400 | 50.97 / 54.56 | 123.83 / 124.66 | 400 |
+| general | keyed | window 40 | 4.97 / 5.12 | 12.11 / 12.36 | 40.01 |
+
+The `helpers` and `conditionals` suites are the reviewer's two source sets
+(their round-3 measurements: 90.1 versus 85.2 and 88.0 versus 60.6 µs per
+frame); the window is the reviewer's sequential-layers read (19.96 versus
+7.92 µs). Every suite row passes median and p95; windows evaluate the 40 ids
+they read (0.01 is the first frame's short run). Warm frames, latency, drag
+and the cold bound pass; the scalar one-off and the three discrete edit rows
+remain in the owner-accepted EXPR-1/EXPR-2 categories (the runner's overall
+`pass` stays false because of those rows and is not overridden).
+
+Native Rust alone (`ev_batch` over 400 ids, no JS) for orientation: numeric
+9.4 µs, helpers 12.4 µs, general 11.7 µs (was 119.4), keyed numeric 10.3 µs
+(was 186.1) per frame.
+
+Electron 44: the suite measurement (`PM_FIXUPS3_MEASURE=1`, every suite
+including oscillators, five alternating 1,000-frame pairs per row, exact
+parity) and the five alternating time-to-UI/editor-open pairs run in the
+orchestrator's quiet measurement window under pm-electron-lock with this
+worktree's build (app bundle and release addons built from the final code;
+addons speak `protocol-25292d6fdfffb933`).

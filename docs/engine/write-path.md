@@ -39,7 +39,8 @@ docs/engine/expressions.md asks).
   Any non-zero code makes the renderer resync. `pm_hash` is the canonical hash.
 - **Fast path** (S5): `pm_intern` turns `{comp, layer, key, via}` into a numeric id;
   `pm_ev(id, t)` returns a number (NaN plus `pm_kind` for anything else);
-  `pm_ev_batch` reads ids and writes numbers and kinds through typed-array views.
+  `pm_ev_batch` reads ids and writes numbers and kinds through typed-array views;
+  `pm_ev_batch_range(start, n, t)` evaluates any run of the same buffers in place.
 - **Queries**: `pm_query` takes a small JSON request naming the composition
   (`PM.curComp()`), the open composition, the layer (an index, or a detached layer's
   JSON), and the time; the reply is `{ok}`, `{throw}` where the legacy code throws,
@@ -465,3 +466,18 @@ path, retaining unknown-write handling for customized aliases. Applied numeric
 plans validate changed fixed inputs; exact patch paths advance unaffected
 layer-local plans only from the applied batch's base revision. Source and
 structural edit costs remain separately reported in `perf.md`, round 3.
+
+Round 4 makes frame evaluation lazy again. Evaluating every resident id at each
+new time paid for inactive and deleted layers (today's evaluator pays only for
+what a frame reads). `ExpressionFrames` now orders each composition's members
+as frames read them; the first read of a member at a new time evaluates a run
+from it with `pm_ev_batch_range`, doubling (4, 8, 16, …) while reads continue
+in order and extending only over members read recently (within about two
+frames' worth of reads). Non-members use the scalar call and join the members
+at the next epoch (an epoch is one time and revision); an epoch that reads the
+members in another order reorders them; members unread for 64 epochs leave. A
+prepared batch copies its ids into the shared buffer only after another caller
+used it, and copies run results by index into its own arrays. Tests: in-order
+runs `[4, 8, 16, 32, 60]` for 120 channels, a 10-of-100-layer sliding window
+evaluating at most 1.25x the reads, deleted layers no longer evaluated, and
+motion-blur sampling at most 2x.
