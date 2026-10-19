@@ -47,7 +47,7 @@ import type { ExtensionsBridge } from '../../../shared/extensions';
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
-import { createLoader, type BuiltinFactory, type Loader } from './loader';
+import { createLoader, type BuiltinFactory, type Loader, type LoaderOptions } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
 import { records as storeRecords } from './extensions.svelte';
@@ -983,13 +983,14 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
  * kernel can be installed (and used by legacy registration) before any
  * extension code runs.
  */
-export async function bootExtensions(installed: InstalledKernel, builtins: Record<string, BuiltinFactory> = {}): Promise<Loader> {
+export async function bootExtensions(installed: InstalledKernel, builtins: Record<string, BuiltinFactory> = {}, options: Pick<LoaderOptions, 'sandboxProcess'> = {}): Promise<Loader> {
   const loader = createLoader({
     kernel: installed,
     bridge: installed.bridge,
     vars: resolveVarsBridge(),
     builtins,
-    deps: installed.deps
+    deps: installed.deps,
+    ...options
   });
   installed.loader = loader;
   const refreshLayout = (): void => {

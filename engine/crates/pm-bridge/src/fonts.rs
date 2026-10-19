@@ -166,4 +166,12 @@ impl FontRegistry {
         let bytes = self.inner.subset(&blob, index).map_err(err)?;
         Ok(Buffer::from(bytes.as_ref().clone()))
     }
+
+    /// Face `index` of blob `blob` whole, outlines included, as a
+    /// single-face font (read at index 0): for hosts that measure glyph ink
+    /// natively (the headless document host's `FontProvider.whole`).
+    #[napi]
+    pub fn whole(&mut self, blob: String, index: u32) -> Result<Buffer> {
+        Ok(Buffer::from(self.inner.whole(&blob, index).map_err(err)?))
+    }
 }

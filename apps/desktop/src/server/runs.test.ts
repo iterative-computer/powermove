@@ -108,13 +108,16 @@ describe('RunOwner', () => {
     };
     let built = make(engine, { p1: [onProject], p2: [elsewhere] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(onProject);
+    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(onProject);
     built = make(engine, { p2: [elsewhere] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
+    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(engine);
     built = make(null, { p2: [elsewhere] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBeNull();
     onProject.destroy();
     built = make(engine, { p1: [onProject] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
+    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(engine);
   });
 
   it('routes conversation controls to the real tab rather than the document engine', () => {

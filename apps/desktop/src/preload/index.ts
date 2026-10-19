@@ -78,6 +78,8 @@ let nextMediaRequest = 0;
 function engineFontsBridge(): EngineFontsBridge {
   const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<EngineFontsResult<T>>;
   return {
+    answerSync: (queries) => ipcRenderer.sendSync(ENGINE_FONTS_IPC.answerSync, String(queries)),
+    wholeSync: (blob, index) => ipcRenderer.sendSync(ENGINE_FONTS_IPC.wholeSync, String(blob), Number(index)),
     answer: (queries) => invoke(ENGINE_FONTS_IPC.answer, String(queries)),
     subset: (blob, index) => invoke(ENGINE_FONTS_IPC.subset, String(blob), Number(index)),
     manifest: (base) => invoke(ENGINE_FONTS_IPC.manifest, String(base)),
