@@ -1,0 +1,137 @@
+{
+  "run": "tracer-drag-today-500-idle-perf2e1",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "drag"
+    ],
+    "synthetic": {
+      "layers": 500,
+      "images": 2
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 30,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      7.86767578125,
+      20.5791015625,
+      18.2841796875
+    ],
+    "after": [
+      7.26806640625,
+      19.2041015625,
+      17.86328125
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 10,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 42,
+    "offsetUs": 553654441774
+  },
+  "load": null,
+  "bridge": null,
+  "latency": {
+    "drag": {
+      "events": 2401,
+      "dispatches": 2355,
+      "draws": 2355,
+      "unmatched": 0,
+      "unpresented": 13,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2388,
+        "p50": 27.36,
+        "p95": 28.29,
+        "p99": 35.33,
+        "max": 36.62
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 27.36,
+        "p95": 28.29,
+        "p99": 35.47,
+        "max": 44.11
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2388,
+          "p50": 7.77,
+          "p95": 8.78,
+          "p99": 8.89,
+          "max": 16.92
+        },
+        "handledToRaf": {
+          "n": 2388,
+          "p50": -0.5,
+          "p95": -0.4,
+          "p99": -0.4,
+          "max": -0.3
+        },
+        "rafToPresent": {
+          "n": 2388,
+          "p50": 20.05,
+          "p95": 20.87,
+          "p99": 21.01,
+          "max": 28.64
+        }
+      }
+    }
+  }
+}

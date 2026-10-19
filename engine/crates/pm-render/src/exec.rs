@@ -559,7 +559,7 @@ impl Exec<'_> {
     /// pass: cleared to the plan's background first (`clear`), or drawn
     /// over what it holds.
     #[allow(clippy::too_many_arguments)]
-    fn render_draws(
+    pub(crate) fn render_draws(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,

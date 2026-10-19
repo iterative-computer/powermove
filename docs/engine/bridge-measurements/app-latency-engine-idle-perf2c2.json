@@ -1,0 +1,205 @@
+{
+  "run": "app-latency-engine-idle-perf2c2",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "offMainThread": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      10.11669921875,
+      8.97314453125,
+      9.34423828125
+    ],
+    "after": [
+      7.19970703125,
+      8.34765625,
+      9.06298828125
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 42,
+    "offsetUs": 545722318542
+  },
+  "load": null,
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.3b43cf0ec18860e2362ccc00035b7b47",
+    "accepted": {
+      "pid": 25265,
+      "pidversion": 9669451
+    },
+    "rejections": 0,
+    "surfaces": 32,
+    "imports": 32,
+    "sends": 32,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 24,
+    "allReleased": 16,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 16,
+      "bytes": 335462400
+    },
+    "live": 8
+  },
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 4768,
+      "draws": 2400,
+      "unmatched": 0,
+      "unpresented": 0,
+      "presentation": {
+        "thread": "worker",
+        "timing": "viz",
+        "sink": "7:3"
+      },
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 26.59,
+        "p95": 27.44,
+        "p99": 34.95,
+        "max": 36.22
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 26.59,
+        "p95": 27.44,
+        "p99": 34.95,
+        "max": 36.22
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2401,
+          "p50": 3.89,
+          "p95": 4.77,
+          "p99": 5.29,
+          "max": 14.45
+        },
+        "handledToArrival": {
+          "n": 2401,
+          "p50": 1.1,
+          "p95": 1.6,
+          "p99": 7,
+          "max": 16.5
+        },
+        "arrivalToSubmit": {
+          "n": 2401,
+          "p50": 0.8,
+          "p95": 0.9,
+          "p99": 1,
+          "max": 1.1
+        },
+        "submitToReceived": {
+          "n": 2401,
+          "p50": 5.66,
+          "p95": 6.67,
+          "p99": 7.49,
+          "max": 11.59
+        },
+        "receivedToPresent": {
+          "n": 2401,
+          "p50": 14.73,
+          "p95": 15.37,
+          "p99": 17.16,
+          "max": 19.62
+        },
+        "receivedToDraw": {
+          "n": 2401,
+          "p50": 0.07,
+          "p95": 3.27,
+          "p99": 3.58,
+          "max": 4.37
+        },
+        "drawToPresent": {
+          "n": 2401,
+          "p50": 14.61,
+          "p95": 15.29,
+          "p99": 17.07,
+          "max": 19.55
+        },
+        "handledToRenderStart": {
+          "n": 2401,
+          "p50": -0.12,
+          "p95": -0.04,
+          "p99": -0.01,
+          "max": 4.93
+        },
+        "renderStartToGpuDone": {
+          "n": 2401,
+          "p50": 1.03,
+          "p95": 1.16,
+          "p99": 1.58,
+          "max": 3.56
+        },
+        "gpuDoneToSent": {
+          "n": 2401,
+          "p50": 0.01,
+          "p95": 0.01,
+          "p99": 0.01,
+          "max": 0.01
+        },
+        "sentToArrival": {
+          "n": 2401,
+          "p50": 0.13,
+          "p95": 0.32,
+          "p99": 5.1,
+          "max": 18.42
+        },
+        "composeCpu": {
+          "n": 2401,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        }
+      }
+    }
+  }
+}

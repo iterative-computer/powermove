@@ -1,0 +1,180 @@
+{
+  "run": "tracer-playback-today-23976-perf2c1",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 23.976023976023978,
+    "lead": 4,
+    "durationMs": 60000,
+    "synthetic": {
+      "layers": 500,
+      "images": 2,
+      "fpsRational": [
+        24000,
+        1001
+      ],
+      "dur": 90
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 23.976023976023978,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      6.69873046875,
+      8.27490234375,
+      9.052734375
+    ],
+    "after": [
+      6.9404296875,
+      7.998046875,
+      8.88232421875
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 23.976023976023978,
+    "dur": 90,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 109,
+    "offsetUs": 543170157760.5
+  },
+  "load": null,
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 23.976023976023978,
+      "reporterFrames": 14797
+    },
+    "presentation": {
+      "thread": "main",
+      "timing": "PipelineReporter"
+    },
+    "app": {
+      "project": {
+        "name": "Synthetic 500 layers",
+        "w": 1920,
+        "h": 1080,
+        "fps": 23.976023976023978,
+        "layers": 450
+      },
+      "stage": {
+        "width": 1228,
+        "height": 632,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 3224.399999976158,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1438,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1433,
+      "notDrawn": 0,
+      "notPresented": 0,
+      "drops": 0,
+      "presented": 1433,
+      "offSlot": 238
+    },
+    "jitterAbsMs": {
+      "n": 1433,
+      "p50": 2.355,
+      "p95": 7.939,
+      "p99": 11.684,
+      "max": 15.407
+    },
+    "intervalErrorAbsMs": {
+      "n": 1432,
+      "p50": 0.042,
+      "p95": 8.375,
+      "p99": 16.625,
+      "max": 16.709
+    },
+    "irregularIntervals": 293,
+    "rafToPresentMs": {
+      "n": 1433,
+      "p50": 10.91,
+      "p95": 19.15,
+      "p99": 19.27,
+      "max": 28.96
+    },
+    "dueToPresentMs": {
+      "n": 1433,
+      "p50": 15.76,
+      "p95": 23.7,
+      "p99": 27.44,
+      "max": 31.16
+    },
+    "rafGapMs": {
+      "n": 7199,
+      "p50": 8.3,
+      "p95": 9.9,
+      "p99": 10.3,
+      "max": 10.4
+    },
+    "rafGapsOver25Ms": 0,
+    "missing": [],
+    "pipelineDepthRefreshes": {
+      "1": 1249,
+      "2": 182,
+      "3": 2
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}

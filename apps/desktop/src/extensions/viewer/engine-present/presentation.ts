@@ -507,6 +507,11 @@ export class ViewerPresentation {
     // A popout is sized after it opens: its resizes count as layout.
     view.addEventListener?.('resize', refresh);
     this.mediaOffs.push(() => view.removeEventListener?.('resize', refresh));
+    // A live resize delays the panel's presentation: timed frames are
+    // picked for the later display while it lasts (`resizeLatencyRefreshes`).
+    const resized = (): void => this.presenter?.noteResize?.();
+    view.addEventListener?.('resize', resized);
+    this.mediaOffs.push(() => view.removeEventListener?.('resize', resized));
     for (const query of ['(dynamic-range: high)', '(color-gamut: p3)', `(resolution: ${view.devicePixelRatio || 1}dppx)`]) {
       const list = view.matchMedia?.(query);
       if (!list?.addEventListener) continue;

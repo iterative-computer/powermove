@@ -348,9 +348,12 @@ export class DocumentSession {
     }
     this.streamRevision = batch.revision;
     this.batches++;
-    this.options.connection.event(
+    // Held until the run ends, merged with the run's other batches (one
+    // render per edit; patch-coalesce.ts).
+    this.options.connection.patches(
       { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body },
-      id
+      id,
+      MAX_PATCH_BODY_BYTES
     );
   }
 

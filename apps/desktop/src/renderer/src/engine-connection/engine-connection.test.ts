@@ -143,7 +143,9 @@ describe('the engine connection', () => {
     // The viewer state waited for the session and its document.
     expect(port.events('viewer')).toHaveLength(1);
     doc.emit({ revision: 4 });
+    await flush();
     doc.emit({ revision: 5 });
+    await flush();
     const applied = port.events('applyPatches').map((e) => (e.message as { body: { baseRevision: number; revision: number } }).body);
     expect(applied.map((b) => [b.baseRevision, b.revision])).toEqual([[3, 4], [4, 5]]);
     expect(session.batches).toBe(2);
