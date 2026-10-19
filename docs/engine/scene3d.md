@@ -365,6 +365,20 @@ Plan section 8, appendix C rows C9, C10 and C14 (model groups), amendments
   group draw (they are placed by `world3D` through the group; the
   `TwoAndAHalfD` reason stays for other layer types).
 
+- **The engine viewer renders the editor view with the editor camera and
+  Local View.** `scene3d.viewport.state()` gains `engineCamera` (contract
+  2's `EditorCamera`: the editor camera's world-to-camera matrix and lens;
+  an orthographic view's half height is `3 / zoom`) and `localView`; the
+  viewer's view override carries them (`view-params.ts`), as today's
+  compositor renders `viewportCamera` and filters Local View in the editor
+  viewport. Blender previews in the editor view get the editor camera the
+  same way (docs/engine/blender.md, "The paused viewer").
+- **Blender snapshots of recipe parts** carry `generated` (the group's
+  `evaluatedRecipe` and the part name) as `renderSnapshot` does; the
+  recipe-part refusal is gone (`blender/snapshot.rs`).
+- **`doubleSided`**: `compositionScene`'s `parseScene` default (absent means
+  double-sided) is filled for 3D object layers.
+
 ### Tests and measurements
 
 Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.

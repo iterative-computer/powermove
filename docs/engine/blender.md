@@ -300,17 +300,18 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 
 ## Gaps
 
-- **Imported glTF models and recipe parts** are not built into snapshots;
-  their compositions route (the static check lists them). The comparison
-  harness lists the glTF corpus snapshots as not built.
+- **Imported glTF models** are not built into snapshots; their
+  compositions route (the static check lists them). The comparison harness
+  lists the glTF corpus snapshots as not built. Recipe parts are built since
+  Phase 3c (`generated`, docs/engine/scene3d.md).
 - **The viewport's busy and error state** (`previewState()`: the
   spinner and the error line in the 3D viewport UI) still comes from
   today's renderer-side preview; the engine's preview jobs and failures
   are in the presenter's status (`blenderPreview`) and the viewer's log,
   not in that UI.
-- **The editor camera** is not sent by the viewer yet (`view-params.ts`:
-  `camera: null` until the 3D lane exposes it), so previews in the editor
-  view use the composition camera, as the engine's native frames do.
+- **The editor camera** is sent by the viewer since Phase 3c
+  (`scene3d.viewport.state().engineCamera`, docs/engine/scene3d.md); the
+  paused-preview e2e in the editor view is not rerun yet.
 - **Agent frames** (`render_frames`) of Blender compositions route to
   today's capture (contract 12's `cachedOrPending` and `render` policies are
   not implemented in the job engine's still path).
