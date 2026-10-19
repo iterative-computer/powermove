@@ -1194,6 +1194,71 @@ checks; the three typing cases did not produce valid measurements.
 Diagnostics are in the private lane report. This pass adds no new typing
 latency qualification; the round 8 values above remain historical.
 
+### Textexact round 2: review fixes
+
+Four further line-for-line corrections against the same pinned source:
+
+- Black COLR layers. `SkBlitter::Choose` (SkBlitter.cpp:750-756) gives an
+  `SK_ColorBLACK` paint `SkARGB32_Black_Blitter`, whose `blitAntiH2`
+  (SkBlitter_ARGB32.cpp:1724-1730) is `(a << 24) + SkAlphaMulQ(dst,
+  256 - a)`, not the opaque `SkFastFourByteInterp`. The two-pixel span of
+  the RLE route (glyph images wider than the 32-px mask, so most caption-size
+  COLR glyphs) now takes that branch for a paint of exactly (0, 0, 0, 255):
+  a palette `#000000FF` or foreground index `0xFFFF` with black text.
+  `blitAntiH`, `blitV` and the A8 `blitMask` (`blit_mask_d32_a8_black` on
+  NEON) already agreed with the black blitter's arithmetic, and
+  `blitAntiV2` is not reached by the analytic filler. The analytic-mask
+  fixture's `solidLayers` now draws red then translucent blue, black alone
+  and black over translucent blue; each of the eight shapes has one
+  `rgbaHashes` entry per set from the C++ oracle
+  (`pm-text/tools/skia-color-oracle-hashes.py` regenerates them). The red and
+  blue hashes are unchanged; the previous code fails the black sets
+  (`convex-quad` first).
+- Convexity. `pm-skia-path`'s classification is now
+  `SkPathPriv::ComputeConvexity` (SkPathPriv.cpp:422-648): trailing moves
+  are trimmed, every point is sign-checked and `Convexicator::addPt` keeps
+  the first vector only while `fLastVec` is still zero. A contour that
+  doubles back to its start before its first turn is now concave, as in
+  Skia; the earlier code followed the older `SkPath::computeConvexity`.
+  21 classifications come from `pm-skia-path/tests/skia-convex-oracle.cpp`.
+  The previous code fails three of them.
+- `ignoreCenter`. For stroke-and-fill (fake bold) of a convex, line-only,
+  closed path, `SkStroke::strokePath` (SkStroke.cpp:1460-1516) sets
+  `canIgnoreCenter`. Then `finishContour` (SkStroke.cpp:362-368) keeps
+  only the larger of the outer and inner offsets, and the source path is
+  not added. `framed()` previously emitted outer, reversed inner and source.
+  Coverage under winding is the same, but edge accumulation differs (for
+  example `/` in sans fonts under synthetic bold). Five path records
+  (both windings, miter, bevel and round joins, a miter limit that bevels)
+  match `pm-skia-path/tests/skia-center-oracle.cpp` bitwise.
+- One rectangle recognizer. `Path::is_rect` ports
+  `SkPathPriv::IsRectContour` with `allowPartial == false`
+  (SkPathPriv.cpp:80-253). That function is behind both `SkPath::isRect`
+  (strokeRect's closed-rectangle test) and `SkPathRaw::isRect`
+  (`try_blit_fat_anti_rect`). It replaces the two hand-rolled near-duplicates
+  in `pm-skia-path` and `pm-text`. It also accepts what they rejected: a
+  trailing move, an open three-sided contour (fat rectangles only), and the
+  rectangle given by the recognized corners. 20 results come from
+  `pm-skia-path/tests/skia-rect-contour-oracle.cpp`.
+
+The oracles were rebuilt from a fresh checkout of the pinned revision with
+the same `-ffp-contract=off` and `SK_SUPPORT_LEGACY_CONIC_CHOP` flags (CPU
+only, `skia_use_partition_alloc = false`). The rebuilt library reproduces
+every earlier rectangle, conic and N32 hash exactly.
+
+The full text gates were re-run in debug and release (release with
+`CARGO_PROFILE_RELEASE_LTO=false`). Every per-case line of `text_raster`,
+`text_corpus`, Canvas2D and `path_masks` is identical to the round above,
+so no captured case reaches the black blitter or the ignored center: main
+raster 495 (492 within 1 CV, 3 FONTS-R), closure 116 (115, 1), large paths
+4 (2, 2), source textures 3 (0, 3), composed 576 (572 within 2 CV, 4),
+zero failures or text refusals. Canvas2D is 529 (503 bit-identical, 22
+within 1 CV, 4 pre-existing exceptions), and `text_colors` and the 13
+ratchet contracts pass. The ratchet is unchanged: these fixes close no
+residual and raise no budget. The new synthetic oracles cover black COLR
+spans, the center-ignoring stroker and the convexity and rectangle
+classifications.
+
 ## Gaps
 
 FONTS-R now governs 13 nonzero residual checks, after ten closures above.
@@ -1220,7 +1285,9 @@ captures unchanged. The separate capture-transport fixes are described above.
   Radial/sweep paints, composite modes,
   rotations and clipping have implementation coverage but no captured
   pixel-parity evidence beyond the linear-gradient and v0 captures; do not
-  treat them as a closed parity class.
+  treat them as a closed parity class. Black solid layers (palette black or
+  black foreground) match Skia's black blitter in the synthetic N32
+  oracle, but none of the captured COLR glyphs has a black layer.
 - The real project is compared in full and in isolation. Shared Canvas2D
   pass decisions reduce its actual t16/18/24 source-texture residuals to
   6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
