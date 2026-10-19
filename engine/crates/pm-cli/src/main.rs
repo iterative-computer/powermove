@@ -77,6 +77,7 @@ const USAGE: &str = "usage:
                     renderer measures system-ui text (default 2)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
+                       [--svg-rasters DIR]
       compares engine renders with the legacy captures of the parity corpus
       (default: the newest v1-* and render-* captures). The renderer holds
       the built-in definitions as the kernel pushes them (--no-definitions:
@@ -84,7 +85,10 @@ const USAGE: &str = "usage:
       real/<slug> project with its media unpacked from FILE.pmv (the file the
       capture opened, checked by SHA-256). --determinism renders every
       sample again with the renderer's caches dropped and requires
-      bit-identical buffers
+      bit-identical buffers. Level 1 SVG images are drawn from Chromium's
+      rasters in --svg-rasters DIR (missing ones are listed in its
+      needs.json for engine/crates/pm-render/tools/svg-rasters), else by
+      resvg with an \"approximate SVG\" notice
   pm-cli parity eval [options]
       evaluation parity against the corpus (see pm-cli parity eval --help)
   pm-cli scope <project.pmv|.json> -o <dir> [options]
@@ -306,6 +310,7 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
         real: None,
         definitions: true,
         determinism: false,
+        svg_rasters: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -318,6 +323,7 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
             "--real" => o.real = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--no-definitions" => o.definitions = false,
             "--determinism" => o.determinism = true,
+            "--svg-rasters" => o.svg_rasters = Some(PathBuf::from(value(args, &mut i, a)?)),
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;

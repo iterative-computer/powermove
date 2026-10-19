@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DefinitionsUpdate, Event, Request, Response } from '../../shared/engine-protocol';
-import { INLINE_LIMIT, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
+import { INLINE_LIMIT, MAX_SVG_BAND_BYTES, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
 
 const hash = 'ab'.repeat(32);
 const json = (n = 7) => new TextEncoder().encode(JSON.stringify({ n }));
@@ -130,6 +130,23 @@ describe('main’s snapshot sessions for windows', () => {
     await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [{ key: 'k'.repeat(64), width: 2, height: 3, rgba16f: new Uint8Array(2 * 3 * 8) }]);
     expect(f.events).toHaveLength(1);
     expect(f.events[0]).toMatchObject({ session: 40, body: { type: 'shaderFallback', fallback: 'pixels', key: 'k'.repeat(64), row: 0, rows: 3 } });
+  });
+
+  it('posts level 1 SVG rasters to the session in bands before the snapshot', async () => {
+    const f = fakeEngine();
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});
+    const width = 2048, height = 1100, rowBytes = width * 4;
+    const key = { content: 'c'.repeat(64), width, height };
+    const data = new Uint8Array(rowBytes * height);
+    data[rowBytes * 1024] = 9;
+    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], [{ key, data }]);
+    const rows = Math.floor(MAX_SVG_BAND_BYTES / rowBytes);
+    expect(f.events.map((e) => [(e.body as any).row, (e.body as any).rows])).toEqual([[0, rows], [rows, height - rows]]);
+    expect(f.events[1]).toMatchObject({ session: 40, body: { type: 'compat', compat: 'svgPixels', key } });
+    expect((f.events[1]!.body as any).data[0]).toBe(9);
+    // Pixels that do not match their size are dropped.
+    await sessions.prepare(9, { id: 'doc', revision: 1 }, [], [{ key, data: new Uint8Array(4) }]);
+    expect(f.events).toHaveLength(2);
   });
 
   it('opens a new session after an engine restart, and asks for the document again', async () => {

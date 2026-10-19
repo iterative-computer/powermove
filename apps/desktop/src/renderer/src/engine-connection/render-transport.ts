@@ -32,8 +32,8 @@
  *   context) on the session's port; `provideCompat` registers the producer
  *   the job engine's export frames are drawn by (main asks the window).
  */
-import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest } from '../../../shared/engine-protocol';
-import type { EngineBridge, EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
+import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
 /** Rounds of `needsRenderer` a snapshot goes through before it fails. */
@@ -174,7 +174,22 @@ export type RenderTransportOptions = {
   captionsHidden?: () => boolean;
   log: (level: 'info' | 'warn' | 'error', message: string) => void;
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
+  /** Level 1 SVG rasters a snapshot needs (svg-rasters.ts, decision S1). */
+  svgRasters?: () => TransportSvgRasters | null;
 };
+
+/** What draws the level 1 SVG rasters a snapshot names (SvgRasters). */
+export interface TransportSvgRasters {
+  drawSync(request: SvgRasterRequest): Uint8Array;
+  draw(request: SvgRasterRequest): Promise<Uint8Array>;
+  post(target: { post(event: Record<string, unknown> & { type: string }): boolean }, key: SvgRasterKey, data: Uint8Array): boolean;
+}
+
+/** The key a snapshot's `uploaded` names for a posted SVG raster
+ *  (pm_protocol `SvgRasterKey::upload_key`). */
+export function svgUploadKey(key: SvgRasterKey): string {
+  return `svg:${key.content}:${key.width}x${key.height}`;
+}
 
 export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number; documentSync: number };
 
@@ -264,6 +279,55 @@ export class EngineRenderTransport {
   }
 
   /**
+   * Draws the level 1 SVG rasters a `needsRenderer` answer names on this
+   * thread for main's session (`svgPixels`), and names them in `uploaded`.
+   */
+  private drawSvgFor(needs: readonly SvgRasterRequest[] | undefined, uploaded: string[]): { key: SvgRasterKey; data: Uint8Array }[] {
+    const list = needs ?? [];
+    if (!list.length) return [];
+    const rasters = this.options.svgRasters?.();
+    if (!rasters) throw new EngineSnapshotError('unavailable', 'This window draws no SVG rasters.');
+    return list.map((request) => {
+      const key = svgUploadKey(request.key);
+      if (uploaded.includes(key)) throw new EngineSnapshotError('internal', `The engine asked again for an SVG raster ${request.key.width}×${request.key.height}.`);
+      const data = rasters.drawSync(request);
+      uploaded.push(key);
+      return { key: request.key, data };
+    });
+  }
+
+  /**
+   * Draws the level 1 SVG rasters a `needsRenderer` answer names, posts
+   * them on a session of this window (the engine keeps them for every
+   * session it serves), and names them in `uploaded`. `draw` is the
+   * synchronous or the asynchronous drawing.
+   */
+  private postSvg<T>(needs: readonly SvgRasterRequest[] | undefined, uploaded: string[], draw: (rasters: TransportSvgRasters, request: SvgRasterRequest) => T): T extends Promise<unknown> ? Promise<void> : void {
+    const list = needs ?? [];
+    const finish = (results: Uint8Array[]): void => {
+      const rasters = this.options.svgRasters?.()!;
+      const session = this.options.session();
+      if (!session || session.id === null || session.closed) throw new EngineSnapshotError('unavailable', 'The window has no engine session to post SVG rasters on yet.');
+      list.forEach((request, i) => {
+        if (!rasters.post(session, request.key, results[i]!)) throw new EngineSnapshotError('unavailable', 'The window’s engine session closed while posting SVG rasters.');
+        uploaded.push(svgUploadKey(request.key));
+      });
+    };
+    if (!list.length) return undefined as never;
+    const rasters = this.options.svgRasters?.();
+    if (!rasters) throw new EngineSnapshotError('unavailable', 'This window draws no SVG rasters.');
+    for (const request of list) {
+      if (uploaded.includes(svgUploadKey(request.key))) throw new EngineSnapshotError('internal', `The engine asked again for an SVG raster ${request.key.width}×${request.key.height}.`);
+    }
+    const drawn = list.map((request) => draw(rasters, request));
+    if (drawn.some((d) => d instanceof Promise)) {
+      return Promise.all(drawn as unknown as Promise<Uint8Array>[]).then(finish) as never;
+    }
+    finish(drawn as unknown as Uint8Array[]);
+    return undefined as never;
+  }
+
+  /**
    * A snapshot the calling thread waits for. Throws `EngineSnapshotError`
    * on failure. Safe inside `raster` wrappers and WebGL callbacks: nothing
    * here waits for a task.
@@ -305,6 +369,8 @@ export class EngineRenderTransport {
         this.stats.rounds++;
         const unmet = this.compatUnmet(reply.compat);
         if (unmet) throw unmet;
+        this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.drawSync(request));
+        if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
         const session = this.options.session();
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
@@ -331,6 +397,7 @@ export class EngineRenderTransport {
     const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_ROUNDS + 1; round++) {
@@ -341,9 +408,11 @@ export class EngineRenderTransport {
         session: null,
         revision,
         document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
-        ...(fallbackPixels.length ? { fallbackPixels } : {})
+        ...(fallbackPixels.length ? { fallbackPixels } : {}),
+        ...(svgPixels.length ? { svgPixels } : {})
       });
       fallbackPixels = [];
+      svgPixels = [];
       if (reply.status === 'failed' && reply.code === 'needsDocument' && !send) {
         // Main's session lost that revision (an engine restart): send it.
         send = true;
@@ -362,6 +431,10 @@ export class EngineRenderTransport {
       this.stats.rounds++;
       const unmet = this.compatUnmet(reply.compat);
       if (unmet) throw unmet;
+      // The SVG rasters go with the next ask: main posts them on its
+      // session before asking again (this window may have no session yet).
+      svgPixels = this.drawSvgFor(reply.svg, uploaded);
+      if (!reply.fallback.length) continue;
       const runner = this.options.fallbackRunner();
       if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
       for (const r of reply.fallback) {
@@ -398,6 +471,8 @@ export class EngineRenderTransport {
         this.stats.rounds++;
         const unmet = this.compatUnmet(reply.compat);
         if (unmet) throw unmet;
+        await this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.draw(request));
+        if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
         const session = this.options.session();
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
@@ -559,9 +634,9 @@ export class EngineRenderTransport {
     const answer = this.options.native.answerCompat;
     if (!answer) return;
     const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });
-    if (ask.request.document !== this.options.document()) return no('This window has another document open.');
+    if (ask.request.document !== this.options.document()) return no(OTHER_DOCUMENT_OPEN);
     const producer = this.producers.get(ask.request.source);
-    if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
+    if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : ask.request.source === 'svgImage' ? 'SVG rasterizer' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
     try {
       const pixels = await producer(ask.request);
       if (!pixels) return no(`Layer ${ask.request.layer} has no compatibility pixels at that frame.`);

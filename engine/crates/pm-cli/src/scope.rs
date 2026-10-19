@@ -504,6 +504,7 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             &mut renderer,
             options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
         );
+        renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
         let issues = renderer.unsupported_with_media(doc, &loaded.composition, &loaded.media);
         if !issues.is_empty() {
             return Err(Failure::Unsupported(
@@ -523,6 +524,12 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                 }
                 other => Failure::Failed(other.to_string()),
             })?;
+        if renderer.svg_approximated() > 0 {
+            eprintln!(
+                "{}",
+                crate::render::approximate_svg_notice(renderer.svg_approximated())
+            );
+        }
         if !frame.failures.is_empty() {
             return Err(Failure::Failed(format!(
                 "layer failures: {:?}",
