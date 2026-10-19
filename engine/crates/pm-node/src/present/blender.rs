@@ -24,6 +24,17 @@
 //! A failure (Blender missing, a failed job) is reported to the viewer as a
 //! session failure and stops previews of that view until its shading
 //! changes, as today's `error` stops `schedulePreview` until `setShading`.
+//!
+//! **Captures.** The same worker prepares the final Blender frames of async
+//! snapshots ([`PreviewBlender::capture`]): today's `snapshotAsync` runs
+//! `prepareFrame`, which has Blender render the frame at the capture's size
+//! with the composition's own settings, and then captures it. A capture
+//! runs before any preview (no debounce), never halts previews, and answers
+//! the render thread with the surfaces ([`Notice::Captured`]) or the
+//! failure; the snapshot fails with it (never native shading in place of a
+//! Blender surface). Its surfaces join the preview map, so a later
+//! synchronous capture of the same frame draws them, as today's prepared
+//! frame is drawn by the next capture ([`PreviewBlender::prepared`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +56,7 @@ use pm_render::blender::{PreviewSurfaces, SnapshotOptions};
 use pm_render::scene3d::View3d;
 
 use super::render::{Key, Sink, Stats};
+use super::snapshot::PreparedFrame;
 use crate::jobs::blender::{HostBackend, HostLink, JobParams};
 
 /// Today's `schedulePreview` delay after a change.
@@ -116,6 +128,27 @@ struct Running {
     key: Key,
     hashes: Vec<[u8; 32]>,
     cancel: Arc<AtomicBool>,
+    /// The capture token when it prepares an async snapshot's frame.
+    capture: Option<u64>,
+}
+
+/// An async snapshot's Blender frames, waiting for the worker.
+struct Capture {
+    token: u64,
+    key: Key,
+    snapshots: Vec<Snapshot>,
+    hashes: Vec<[u8; 32]>,
+}
+
+/// What the worker tells the render thread.
+pub enum Notice {
+    /// Preview surfaces of the view arrived: draw it again when paused.
+    Ready(Key),
+    /// A capture's frames are prepared, or why not.
+    Captured {
+        token: u64,
+        result: Result<Arc<Vec<PreparedFrame>>, BlenderError>,
+    },
 }
 
 #[derive(Default)]
@@ -124,6 +157,8 @@ struct State {
     bytes: u64,
     tick: u64,
     wanted: BTreeMap<Key, Want>,
+    /// Async snapshots' frames, in arrival order (before any preview).
+    captures: std::collections::VecDeque<Capture>,
     running: Option<Running>,
     /// Views whose last job failed, with the shading it failed in.
     halted: HashMap<Key, Shading3d>,
@@ -138,7 +173,7 @@ struct Inner {
     link: Arc<HostLink>,
     sink: Sink,
     stats: Arc<Mutex<Stats>>,
-    ready: Box<dyn Fn(Key) + Send + Sync>,
+    notify: Box<dyn Fn(Notice) + Send + Sync>,
     budget: u64,
     debounce: Duration,
 }
@@ -233,22 +268,22 @@ pub struct PreviewBlender {
 }
 
 impl PreviewBlender {
-    /// Starts the worker. `ready` asks the render thread to draw a view
-    /// again (its preview surfaces arrived).
+    /// Starts the worker. `notify` asks the render thread to draw a view
+    /// again (its preview surfaces arrived) or hands it a capture's frames.
     pub(crate) fn start(
         link: Arc<HostLink>,
         sink: Sink,
         stats: Arc<Mutex<Stats>>,
-        ready: Box<dyn Fn(Key) + Send + Sync>,
+        notify: Box<dyn Fn(Notice) + Send + Sync>,
     ) -> Result<Arc<PreviewBlender>, String> {
-        Self::start_with(link, sink, stats, ready, SURFACE_BYTES, DEBOUNCE)
+        Self::start_with(link, sink, stats, notify, SURFACE_BYTES, DEBOUNCE)
     }
 
     pub(crate) fn start_with(
         link: Arc<HostLink>,
         sink: Sink,
         stats: Arc<Mutex<Stats>>,
-        ready: Box<dyn Fn(Key) + Send + Sync>,
+        notify: Box<dyn Fn(Notice) + Send + Sync>,
         budget: u64,
         debounce: Duration,
     ) -> Result<Arc<PreviewBlender>, String> {
@@ -258,7 +293,7 @@ impl PreviewBlender {
             link,
             sink,
             stats,
-            ready,
+            notify,
             budget,
             debounce,
         });
@@ -315,10 +350,9 @@ impl PreviewBlender {
             }
         };
         let hashes: Vec<[u8; 32]> = snapshots.iter().map(|s| s.hash().0).collect();
-        let cancel_running = st
-            .running
-            .as_ref()
-            .is_some_and(|r| r.key == key && !r.hashes.iter().all(|h| hashes.contains(h)));
+        let cancel_running = st.running.as_ref().is_some_and(|r| {
+            r.capture.is_none() && r.key == key && !r.hashes.iter().all(|h| hashes.contains(h))
+        });
         if cancel_running && let Some(r) = &st.running {
             r.cancel.store(true, Ordering::Relaxed);
         }
@@ -329,7 +363,7 @@ impl PreviewBlender {
             let running_same = st
                 .running
                 .as_ref()
-                .is_some_and(|r| r.key == key && r.hashes == hashes);
+                .is_some_and(|r| r.capture.is_none() && r.key == key && r.hashes == hashes);
             if running_same {
                 st.wanted.remove(&key);
             } else if !same {
@@ -349,12 +383,13 @@ impl PreviewBlender {
         self.inner.work.notify_all();
     }
 
-    /// The view or its session went away: its wanted set goes and a job it
+    /// The session went away: its wanted set and captures go, and a job it
     /// runs is cancelled.
     pub fn forget(&self, key: Key) {
         let mut st = self.inner.lock();
         st.wanted.remove(&key);
         st.halted.remove(&key);
+        st.captures.retain(|c| c.key != key);
         if let Some(r) = st.running.as_ref().filter(|r| r.key == key) {
             r.cancel.store(true, Ordering::Relaxed);
         }
@@ -362,10 +397,59 @@ impl PreviewBlender {
         self.inner.work.notify_all();
     }
 
+    /// Has Blender render the final frames `snapshots` of an async snapshot
+    /// of `key` (today's `prepareFrame` before `snapshotAsync` captures).
+    /// The answer comes as [`Notice::Captured`] with `token`, unless the
+    /// capture is cancelled first.
+    pub fn capture(&self, token: u64, key: Key, snapshots: Vec<Snapshot>) {
+        let hashes = snapshots.iter().map(|s| s.hash().0).collect();
+        self.inner.lock().captures.push_back(Capture {
+            token,
+            key,
+            snapshots,
+            hashes,
+        });
+        self.inner.work.notify_all();
+    }
+
+    /// The snapshot gave up on its capture (its bound passed): a waiting
+    /// one goes, a running one stops Blender.
+    pub fn cancel_capture(&self, token: u64) {
+        let mut st = self.inner.lock();
+        st.captures.retain(|c| c.token != token);
+        if let Some(r) = st.running.as_ref().filter(|r| r.capture == Some(token)) {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The prepared surfaces of every frame of `snapshots` when an earlier
+    /// capture rendered all of them (today's synchronous capture draws a
+    /// frame `prepareFrame` prepared); `None` when any is missing.
+    pub fn prepared(&self, snapshots: &[Snapshot]) -> Option<Vec<PreparedFrame>> {
+        let mut st = self.inner.lock();
+        st.tick += 1;
+        let tick = st.tick;
+        let mut out = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            let hash = snapshot.hash().0;
+            let rendered = st.surfaces.get_mut(&hash)?;
+            if snapshot
+                .layers()
+                .iter()
+                .any(|l| !rendered.layers.contains_key(l))
+            {
+                return None;
+            }
+            rendered.used = tick;
+            out.push((hash, snapshot.frame.lookup(), rendered.layers.clone()));
+        }
+        Some(out)
+    }
+
     /// Whether a job runs or waits (tests).
     pub fn busy(&self) -> bool {
         let st = self.inner.lock();
-        st.running.is_some() || !st.wanted.is_empty()
+        st.running.is_some() || !st.wanted.is_empty() || !st.captures.is_empty()
     }
 
     /// Stops the worker: a running job is cancelled.
@@ -461,12 +545,22 @@ fn run(inner: Arc<Inner>) {
         stage: None,
     };
     loop {
-        // The next due wanted set (oldest first).
+        // Captures first, then the next due wanted set (oldest first).
         let picked = {
             let mut st = inner.lock();
             loop {
                 if st.shutdown {
                     return;
+                }
+                if let Some(c) = st.captures.pop_front() {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    st.running = Some(Running {
+                        key: c.key,
+                        hashes: c.hashes.clone(),
+                        cancel: cancel.clone(),
+                        capture: Some(c.token),
+                    });
+                    break Job::Capture(c, cancel);
                 }
                 let now = Instant::now();
                 let due = st
@@ -482,8 +576,9 @@ fn run(inner: Arc<Inner>) {
                             key,
                             hashes: want.hashes.clone(),
                             cancel: cancel.clone(),
+                            capture: None,
                         });
-                        break (key, want, cancel);
+                        break Job::Preview(key, want, cancel);
                     }
                     Some((_, at)) => {
                         st = inner
@@ -498,8 +593,23 @@ fn run(inner: Arc<Inner>) {
                 }
             }
         };
-        let (key, want, cancel) = picked;
-        let result = render(&inner, &mut worker, key, &want, &cancel);
+        let (key, want, cancel) = match picked {
+            Job::Preview(key, want, cancel) => (key, want, cancel),
+            Job::Capture(c, cancel) => {
+                run_capture(&inner, &mut worker, c, &cancel);
+                continue;
+            }
+        };
+        let id = JobId::new(format!("preview-{}-{}", key.0.0, key.1.get()));
+        let result = render(
+            &inner,
+            &mut worker,
+            key,
+            &want.snapshots,
+            &want.hashes,
+            id,
+            &cancel,
+        );
         let mut st = inner.lock();
         st.running = None;
         match result {
@@ -508,7 +618,7 @@ fn run(inner: Arc<Inner>) {
                     inner.remember(&mut st, hash, layers);
                 }
                 drop(st);
-                (inner.ready)(key);
+                (inner.notify)(Notice::Ready(key));
             }
             Err(BlenderError::Cancelled) => {
                 drop(st);
@@ -536,19 +646,68 @@ fn run(inner: Arc<Inner>) {
     }
 }
 
+enum Job {
+    Preview(Key, Want, Arc<AtomicBool>),
+    Capture(Capture, Arc<AtomicBool>),
+}
+
+/// Prepares one capture's frames and answers the render thread. Its
+/// surfaces join the preview map (a later synchronous capture draws them);
+/// a failure answers the capture only (previews go on).
+fn run_capture(inner: &Inner, worker: &mut Worker, c: Capture, cancel: &AtomicBool) {
+    let id = JobId::new(format!("capture-{}-{}-{}", c.key.0.0, c.key.1.get(), c.token));
+    let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel);
+    let mut st = inner.lock();
+    st.running = None;
+    let result = match result {
+        Ok(frames) => {
+            let mut out = Vec::with_capacity(frames.len());
+            for ((hash, layers), snapshot) in frames.into_iter().zip(&c.snapshots) {
+                inner.remember(&mut st, hash, layers.clone());
+                out.push((hash, snapshot.frame.lookup(), layers));
+            }
+            Ok(Arc::new(out))
+        }
+        Err(error) => {
+            if matches!(error, BlenderError::Cancelled) {
+                inner.stats(|s| s.cancelled += 1);
+            } else {
+                let message = error.to_string();
+                inner.stats(|s| {
+                    s.failed += 1;
+                    s.last_error = Some(message.clone());
+                });
+                inner.log(
+                    LogLevel::Warn,
+                    format!("snapshot: the Blender frame could not be prepared: {message}"),
+                );
+            }
+            Err(error)
+        }
+    };
+    drop(st);
+    (inner.notify)(Notice::Captured {
+        token: c.token,
+        result,
+    });
+}
+
 type Frames = Vec<([u8; 32], HashMap<String, Arc<DecodedSurface>>)>;
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     inner: &Inner,
     worker: &mut Worker,
     key: Key,
-    want: &Want,
+    snapshots: &[Snapshot],
+    hashes: &[[u8; 32]],
+    id: JobId,
     cancel: &AtomicBool,
 ) -> Result<Frames, BlenderError> {
     *worker.params.lock().unwrap_or_else(|e| e.into_inner()) = JobParams {
         session: key.1,
         priority: PriorityClass::Interactive,
-        export: JobId::new(format!("preview-{}-{}", key.0.0, key.1.get())),
+        export: id,
     };
     inner.stats(|s| s.runs += 1);
     if worker.stage.is_none() {
@@ -569,7 +728,7 @@ fn render(
     }
     let stage = worker.stage.as_mut().expect("made above");
     let before = (stage.stats, stage.devices.len());
-    let result = stage.prepare(&mut worker.backend, &want.snapshots, cancel, &mut |_, _| {});
+    let result = stage.prepare(&mut worker.backend, snapshots, cancel, &mut |_, _| {});
     let after = stage.stats;
     let device = stage.devices[before.1..].last().cloned();
     inner.stats(|s| {
@@ -582,7 +741,7 @@ fn render(
     });
     let surfaces = result?;
     let mut out = Vec::new();
-    for (snapshot, hash) in want.snapshots.iter().zip(&want.hashes) {
+    for (snapshot, hash) in snapshots.iter().zip(hashes) {
         let layers = surfaces
             .get(&snapshot.frame.lookup())
             .cloned()
@@ -862,9 +1021,12 @@ mod tests {
         }
     }
 
+    type Captured = Vec<(u64, Result<Arc<Vec<PreparedFrame>>, BlenderError>)>;
+
     struct Rig {
         blender: Arc<PreviewBlender>,
         ready: Arc<Mutex<Vec<Key>>>,
+        captured: Arc<Mutex<Captured>>,
         sent: Arc<Mutex<Vec<Envelope>>>,
         stats: Arc<Mutex<Stats>>,
         host: Host,
@@ -875,7 +1037,9 @@ mod tests {
         let ready = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Mutex::new(Stats::default()));
+        let captured = Arc::new(Mutex::new(Vec::new()));
         let r = ready.clone();
+        let c = captured.clone();
         let s = sent.clone();
         let sink: Sink = Arc::new(move |actions| {
             for a in actions {
@@ -888,7 +1052,10 @@ mod tests {
             link.clone(),
             sink,
             stats.clone(),
-            Box::new(move |key| r.lock().unwrap().push(key)),
+            Box::new(move |notice| match notice {
+                Notice::Ready(key) => r.lock().unwrap().push(key),
+                Notice::Captured { token, result } => c.lock().unwrap().push((token, result)),
+            }),
             budget,
             Duration::from_millis(20),
         )
@@ -897,6 +1064,7 @@ mod tests {
         Rig {
             blender,
             ready,
+            captured,
             sent,
             stats,
             host,
@@ -1114,5 +1282,116 @@ mod tests {
         assert!(host.lookup(&frames[0], "box").is_some());
         assert!(host.lookup(&frames[1], "box").is_none());
         assert!(host.lookup(&frames[2], "box").is_some());
+    }
+
+    fn final_frame(layers: &[&str], time: f64) -> Snapshot {
+        let mut s = snapshot(layers, time);
+        s.frame.preview = false;
+        s
+    }
+
+    #[test]
+    fn a_capture_prepares_its_frame_at_once_and_a_later_sync_capture_finds_it() {
+        let r = rig(Mode::Render, None, SURFACE_BYTES);
+        let a = final_frame(&["box", "ball"], 0.0);
+        assert!(r.blender.prepared(std::slice::from_ref(&a)).is_none());
+        r.blender.capture(41, KEY, vec![a.clone()]);
+        wait("captured", || !r.captured.lock().unwrap().is_empty());
+        let (token, result) = r.captured.lock().unwrap().remove(0);
+        assert_eq!(token, 41);
+        let frames = result.expect("prepared");
+        assert_eq!(frames.len(), 1);
+        let (hash, frame, layers) = &frames[0];
+        assert_eq!(*hash, a.hash().0);
+        assert_eq!(*frame, a.frame.lookup());
+        assert_eq!(layers.len(), 2);
+        {
+            let seen = r.host.seen.lock().unwrap();
+            assert_eq!(seen.renders.len(), 1);
+            assert!(
+                seen.renders[0].0.as_str().starts_with("capture-3-7-41"),
+                "{:?}",
+                seen.renders[0].0
+            );
+        }
+        // A capture is never a preview failure, and does not ask the view to
+        // draw again.
+        assert!(r.ready.lock().unwrap().is_empty());
+        assert!(r.sent.lock().unwrap().is_empty());
+        // Today's synchronous capture draws the frame prepareFrame prepared.
+        let again = r.blender.prepared(std::slice::from_ref(&a)).expect("kept");
+        assert!(Arc::ptr_eq(&again[0].2["box"], &layers["box"]));
+        // Another frame is not prepared (surfaces are keyed by the
+        // snapshot's content: a preview snapshot differs in its samples and
+        // scale).
+        assert!(
+            r.blender
+                .prepared(&[final_frame(&["box", "ball"], 1.0)])
+                .is_none()
+        );
+        // Nor one layer short of what was asked.
+        assert!(r.blender.prepared(&[final_frame(&["box", "cone"], 0.0)]).is_none());
+        assert!(!r.blender.busy());
+    }
+
+    #[test]
+    fn a_capture_runs_before_waiting_previews_and_a_preview_never_cancels_it() {
+        let r = rig(Mode::Hold, None, SURFACE_BYTES);
+        let a = final_frame(&["box"], 0.0);
+        r.blender.capture(5, KEY, vec![a]);
+        wait("capture job", || {
+            r.host.seen.lock().unwrap().renders.len() == 1
+        });
+        // A paused frame of the same view wants something else: the capture
+        // keeps running (a preview only cancels previews).
+        paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(r.host.seen.lock().unwrap().cancels.is_empty());
+        // The snapshot gave up: Blender stops, the answer is `Cancelled`.
+        r.blender.cancel_capture(5);
+        wait("cancelled", || !r.captured.lock().unwrap().is_empty());
+        let (token, result) = r.captured.lock().unwrap().remove(0);
+        assert_eq!(token, 5);
+        assert!(matches!(result, Err(BlenderError::Cancelled)));
+        assert_eq!(r.host.seen.lock().unwrap().cancels.len(), 1);
+        // The preview then runs.
+        wait("preview job", || {
+            r.host.seen.lock().unwrap().renders.len() == 2
+        });
+        let seen = r.host.seen.lock().unwrap();
+        assert!(seen.renders[1].0.as_str().starts_with("preview-3-7"));
+    }
+
+    #[test]
+    fn a_capture_failure_answers_the_capture_and_leaves_previews_running() {
+        let r = rig(Mode::Missing, None, SURFACE_BYTES);
+        r.blender.capture(9, KEY, vec![final_frame(&["box"], 0.0)]);
+        wait("failed", || !r.captured.lock().unwrap().is_empty());
+        let (_, result) = r.captured.lock().unwrap().remove(0);
+        match result {
+            Err(BlenderError::Missing(m)) => assert_eq!(m, "Install Blender 4.5 or later."),
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("prepared without Blender"),
+        }
+        // No session failure for the viewer, and previews are not halted.
+        assert!(r.sent.lock().unwrap().is_empty());
+        *r.host.mode.lock().unwrap() = Mode::Render;
+        paint(&r, &material(), &[snapshot(&["box"], 0.0)]);
+        wait("preview", || !r.ready.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_closed_session_drops_its_waiting_captures() {
+        let r = rig(Mode::Hold, None, SURFACE_BYTES);
+        r.blender.capture(1, KEY, vec![final_frame(&["box"], 0.0)]);
+        r.blender.capture(2, KEY, vec![final_frame(&["box"], 1.0)]);
+        wait("first", || r.host.seen.lock().unwrap().renders.len() == 1);
+        r.blender.forget(KEY);
+        wait("cancelled", || !r.captured.lock().unwrap().is_empty());
+        wait("idle", || !r.blender.busy());
+        let captured = r.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "the waiting capture is dropped, not run");
+        assert!(matches!(captured[0].1, Err(BlenderError::Cancelled)));
+        assert_eq!(r.host.seen.lock().unwrap().renders.len(), 1);
     }
 }

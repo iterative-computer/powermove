@@ -121,7 +121,7 @@ describe('EnginePresenter', () => {
     await flush();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presented).toEqual([
-      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null }
+      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null, depthId: null, width: 640, height: 360 }
     ]);
   });
 
@@ -241,6 +241,28 @@ describe('EnginePresenter', () => {
     // A descriptor of the retired generation still in flight is ignored.
     presenter.receive({ type: 'frame', frame: desc(2) });
     expect(presenter.stats.staleGeneration).toBe(1);
+    expect(link.releases).toEqual([]);
+  });
+
+  it('a depth and object-id pool never replaces the frames, and tags the frames that name it', () => {
+    const { source, link, presenter, painter } = setup();
+    const presented: PresentedFrame[] = [];
+    presenter.onPresented((p) => presented.push(p));
+    presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: [], role: 'depthId' } });
+    expect(source.retired).toEqual([]);
+    source.arrive(1, 1);
+    presenter.receive({ type: 'frame', frame: desc(1, { depthId: { poolIndex: 1, seq: 1, poolGeneration: 2 } }) });
+    presenter.refresh(16.7);
+    expect(painter.draws).toHaveLength(1);
+    expect(presented[0]!.depthId).toEqual({ poolIndex: 1, seq: 1, poolGeneration: 2 });
+    // A newer depth pool retires the older one's imports, not the frames'.
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: [], role: 'depthId' } });
+    expect(source.retired).toEqual([2]);
+    // A frame naming a depth pool that is gone carries no depth.
+    source.arrive(1, 2);
+    presenter.receive({ type: 'frame', frame: desc(2, { depthId: { poolIndex: 2, seq: 2, poolGeneration: 2 } }) });
+    presenter.refresh(33.4);
+    expect(presented[1]!.depthId).toBeNull();
     expect(link.releases).toEqual([]);
   });
 

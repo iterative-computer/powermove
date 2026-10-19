@@ -69,6 +69,7 @@ fn state(resolution: PreviewResolution) -> ViewerState {
         edr: false,
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 
